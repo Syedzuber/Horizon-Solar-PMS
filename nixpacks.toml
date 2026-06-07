@@ -1,0 +1,2 @@
+[start]
+cmd = "gunicorn solarpms.wsgi --log-file -" 
