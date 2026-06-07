@@ -1,2 +1,2 @@
 [start]
-cmd = "gunicorn solarpms.wsgi --log-file -" 
+cmd = "python manage.py collectstatic --noinput && gunicorn solarpms.wsgi --log-file -"
