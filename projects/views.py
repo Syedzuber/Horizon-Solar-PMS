@@ -57,6 +57,11 @@ def dashboard_site_engineer(request):
 
 
 @login_required
+def dashboard_design(request):
+    return render(request, 'dashboard/design.html')
+
+
+@login_required
 def dashboard_finance(request):
     return render(request, 'dashboard/finance.html')
 
@@ -137,10 +142,11 @@ def user_edit(request, user_id):
             target_user.is_staff = (cd['role'] == 'Admin')
             target_user.save()
 
-            profile.role = cd['role']
-            profile.phone_number = cd['phone_number']
-            profile.is_active = cd['is_active']
-            profile.save()
+            UserProfile.objects.filter(user=target_user).update(
+                role=cd['role'],
+                phone_number=cd['phone_number'],
+                is_active=cd['is_active'],
+            )
 
             messages.success(request, f"User {target_user.username} updated successfully.")
             return redirect('user_list')

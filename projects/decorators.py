@@ -9,6 +9,7 @@ ROLE_DASHBOARD = {
     'Admin':         '/dashboard/admin/',
     'PM':            '/dashboard/pm/',
     'Site Engineer': '/dashboard/site-engineer/',
+    'Design':        '/dashboard/design/',
     'Finance':       '/dashboard/finance/',
     'SCM':           '/dashboard/scm/',
     'CEO':           '/dashboard/ceo/',

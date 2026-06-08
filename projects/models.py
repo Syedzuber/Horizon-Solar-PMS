@@ -131,6 +131,7 @@ class UserProfile(models.Model):
         ('Admin',         'Admin'),
         ('PM',            'PM'),
         ('Site Engineer', 'Site Engineer'),
+        ('Design',        'Design'),
         ('Finance',       'Finance'),
         ('SCM',           'SCM'),
         ('CEO',           'CEO'),
