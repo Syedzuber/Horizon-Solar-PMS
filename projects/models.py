@@ -123,3 +123,31 @@ class ProjectDocument(models.Model):
 
     def __str__(self):
         return f"{self.project.project_code} — {self.title}"
+
+
+class UserProfile(models.Model):
+
+    ROLE_CHOICES = [
+        ('Admin',         'Admin'),
+        ('PM',            'PM'),
+        ('Site Engineer', 'Site Engineer'),
+        ('Finance',       'Finance'),
+        ('SCM',           'SCM'),
+        ('CEO',           'CEO'),
+    ]
+
+    user         = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    role         = models.CharField(max_length=20, choices=ROLE_CHOICES, blank=True)
+    phone_number = models.CharField(max_length=10, blank=True)
+    is_active    = models.BooleanField(default=True)
+    created_at   = models.DateTimeField(auto_now_add=True)
+    created_by   = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_users',
+    )
+
+    def __str__(self):
+        return f"{self.user.username} ({self.role})"

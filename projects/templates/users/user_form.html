@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% block title %}{{ action }} User — SolarPMS{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">{{ action }} User{% if action == 'Edit' %}: {{ target_user.username }}{% endif %}</h4>
+  <a href="{% url 'user_list' %}" class="btn btn-sm btn-outline-secondary">Back to Users</a>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-4" style="max-width: 560px;">
+
+    {% if form.non_field_errors %}
+      {% for error in form.non_field_errors %}
+        <div class="alert alert-danger py-2">{{ error }}</div>
+      {% endfor %}
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <div class="row g-3 mb-3">
+        <div class="col-sm-6">
+          <label class="form-label fw-semibold">First Name <span class="text-danger">*</span></label>
+          {{ form.first_name }}
+          {% if form.first_name.errors %}
+            <div class="text-danger small mt-1">{{ form.first_name.errors.0 }}</div>
+          {% endif %}
+        </div>
+        <div class="col-sm-6">
+          <label class="form-label fw-semibold">Last Name <span class="text-danger">*</span></label>
+          {{ form.last_name }}
+          {% if form.last_name.errors %}
+            <div class="text-danger small mt-1">{{ form.last_name.errors.0 }}</div>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if action == 'Create' %}
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Username <span class="text-danger">*</span></label>
+        {{ form.username }}
+        {% if form.username.errors %}
+          <div class="text-danger small mt-1">{{ form.username.errors.0 }}</div>
+        {% endif %}
+        <div class="form-text">Lowercase letters, digits, dots and underscores only.</div>
+      </div>
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Password <span class="text-danger">*</span></label>
+        {{ form.password }}
+        {% if form.password.errors %}
+          <div class="text-danger small mt-1">{{ form.password.errors.0 }}</div>
+        {% endif %}
+        <div class="form-text">Minimum 8 characters.</div>
+      </div>
+      {% endif %}
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Email <span class="text-danger">*</span></label>
+        {{ form.email }}
+        {% if form.email.errors %}
+          <div class="text-danger small mt-1">{{ form.email.errors.0 }}</div>
+        {% endif %}
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Role <span class="text-danger">*</span></label>
+        {{ form.role }}
+        {% if form.role.errors %}
+          <div class="text-danger small mt-1">{{ form.role.errors.0 }}</div>
+        {% endif %}
+      </div>
+
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Phone Number <span class="text-danger">*</span></label>
+        {{ form.phone_number }}
+        {% if form.phone_number.errors %}
+          <div class="text-danger small mt-1">{{ form.phone_number.errors.0 }}</div>
+        {% endif %}
+        <div class="form-text">10 digits, must start with 6, 7, 8, or 9.</div>
+      </div>
+
+      <div class="mb-4 form-check">
+        {{ form.is_active }}
+        <label class="form-check-label fw-semibold">Is Active</label>
+        {% if form.is_active.errors %}
+          <div class="text-danger small mt-1">{{ form.is_active.errors.0 }}</div>
+        {% endif %}
+      </div>
+
+      <button type="submit" class="btn btn-dark">{{ action }} User</button>
+    </form>
+
+  </div>
+</div>
+
+{% endblock %}

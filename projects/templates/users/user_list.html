@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Users — SolarPMS{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">User Management</h4>
+  <a href="{% url 'user_create' %}" class="btn btn-dark btn-sm">+ New User</a>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th>Username</th>
+          <th>Full Name</th>
+          <th>Email</th>
+          <th>Role</th>
+          <th>Phone</th>
+          <th>Active</th>
+          <th>Created By</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for profile in profiles %}
+        <tr>
+          <td>{{ profile.user.username }}</td>
+          <td>{{ profile.user.get_full_name|default:"—" }}</td>
+          <td>{{ profile.user.email|default:"—" }}</td>
+          <td>{{ profile.role|default:"—" }}</td>
+          <td>{{ profile.phone_number|default:"—" }}</td>
+          <td>
+            {% if profile.is_active %}
+              <span class="badge bg-success">Active</span>
+            {% else %}
+              <span class="badge bg-secondary">Inactive</span>
+            {% endif %}
+          </td>
+          <td>{{ profile.created_by.username|default:"—" }}</td>
+          <td>
+            <a href="{% url 'user_edit' profile.user.pk %}" class="btn btn-sm btn-outline-secondary">Edit</a>
+          </td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="8" class="text-center text-muted py-4">No users found.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% endblock %}
