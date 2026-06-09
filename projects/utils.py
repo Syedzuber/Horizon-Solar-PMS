@@ -18,12 +18,15 @@ def generate_project_id(project_type):
     prefix = PREFIX_MAP[project_type]
     year = timezone.now().year
 
-    count = (
+    # select_for_update() cannot be combined with .count() (Django raises
+    # NotSupportedError). Fetch locked IDs instead and count in Python.
+    locked_ids = list(
         Project.objects
         .select_for_update()
         .filter(project_type=project_type, created_at__year=year)
-        .count()
+        .values_list('id', flat=True)
     )
+    count = len(locked_ids)
     number = count + 1
     return f"HRP-{prefix}-{year}-{number:03d}"
 
