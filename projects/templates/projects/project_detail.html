@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+{% block title %}{{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Project header ─────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+      <div>
+        <h4 class="mb-1">{{ project.project_id }}</h4>
+        <p class="text-muted mb-0">{{ project.customer_name }}</p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        {% if is_assigned_pm %}
+          {% if project.status == 'Draft' %}
+            <a href="{% url 'project_edit' project.project_id %}" class="btn btn-outline-primary btn-sm">Edit</a>
+            <form method="post" action="{% url 'project_activate' project.project_id %}"
+                  onsubmit="return confirm('Activate this project? This cannot be undone.')">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-success btn-sm">Activate Project</button>
+            </form>
+          {% elif project.status == 'Active' %}
+            <a href="{% url 'task_add' project.project_id %}" class="btn btn-primary btn-sm">+ Add Task</a>
+          {% endif %}
+        {% endif %}
+        <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Type</small>
+        <span>{{ project.project_type }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Status</small>
+        {% if project.status == 'Draft' %}
+          <span class="badge bg-secondary">Draft</span>
+        {% elif project.status == 'Active' %}
+          <span class="badge bg-success">Active</span>
+        {% elif project.status == 'In Progress' %}
+          <span class="badge bg-primary">In Progress</span>
+        {% elif project.status == 'Commissioned' %}
+          <span class="badge bg-info text-dark">Commissioned</span>
+        {% elif project.status == 'On Hold' %}
+          <span class="badge bg-warning text-dark">On Hold</span>
+        {% elif project.status == 'Cancelled' %}
+          <span class="badge bg-danger">Cancelled</span>
+        {% else %}
+          <span class="badge bg-secondary">{{ project.status }}</span>
+        {% endif %}
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Target Commissioning</small>
+        <span>{{ project.target_commissioning_date }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Capacity</small>
+        <span>{{ project.capacity_kw }} kW</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Contract Value</small>
+        <span>₹{{ project.contract_value }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Assigned PM</small>
+        <span>{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Site Engineer</small>
+        <span>{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">City / State</small>
+        <span>{{ project.city }}, {{ project.state }}</span>
+      </div>
+      <div class="col-12">
+        <small class="text-muted d-block">Site Address</small>
+        <span>{{ project.site_address }}</span>
+      </div>
+      {% if project.survey_date %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Survey Date</small>
+        <span>{{ project.survey_date }}</span>
+      </div>
+      {% endif %}
+      {% if project.zoho_crm_id %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Zoho CRM ID</small>
+        <span>{{ project.zoho_crm_id }}</span>
+      </div>
+      {% endif %}
+      {% if project.activated_at %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Activated At</small>
+        <span>{{ project.activated_at|date:"d M Y H:i" }}</span>
+      </div>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+
+{# ── Phases and tasks (shown only after activation) ───────────────────── #}
+{% if project.status == 'Draft' %}
+  <div class="alert alert-secondary">
+    Tasks will appear here after the project is activated.
+  </div>
+{% else %}
+  {% for phase in phases %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center py-2">
+      <span class="fw-semibold">Phase {{ phase.phase_order }}: {{ phase.phase_name }}</span>
+      <small class="text-muted">{{ phase.tasks.count }} task{{ phase.tasks.count|pluralize }}</small>
+    </div>
+    <div class="card-body p-0">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:2.5rem;">#</th>
+            <th>Task</th>
+            <th style="width:9rem;">Assigned Role</th>
+            <th style="width:11rem;">Status</th>
+            <th style="width:8rem;">Due Date</th>
+            <th style="width:8rem;">Completed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for task in phase.tasks.all %}
+          <tr>
+            <td class="text-muted">{{ task.task_order }}</td>
+            <td>{{ task.task_name }}</td>
+            <td>
+              <span class="badge bg-light text-dark border">{{ task.assigned_role }}</span>
+              {# TODO: inline role edit for PM (requires task_role_update view) #}
+            </td>
+            <td>
+              {% if is_assigned_pm or user_role == task.assigned_role %}
+                <form method="post"
+                      action="{% url 'task_status_update' project.project_id task.pk %}"
+                      class="d-inline">
+                  {% csrf_token %}
+                  <select name="status"
+                          onchange="this.form.submit()"
+                          class="form-select form-select-sm
+                            {% if task.status == 'Done' %}border-success text-success
+                            {% elif task.status == 'Blocked' %}border-danger text-danger
+                            {% elif task.status == 'In Progress' %}border-primary text-primary
+                            {% endif %}">
+                    {% for val, label in task_status_choices %}
+                      <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>
+                        {{ label }}
+                      </option>
+                    {% endfor %}
+                  </select>
+                </form>
+              {% else %}
+                {% if task.status == 'Done' %}
+                  <span class="badge bg-success">Done</span>
+                {% elif task.status == 'Blocked' %}
+                  <span class="badge bg-danger">Blocked</span>
+                {% elif task.status == 'In Progress' %}
+                  <span class="badge bg-primary">In Progress</span>
+                {% else %}
+                  <span class="badge bg-secondary">Not Started</span>
+                {% endif %}
+              {% endif %}
+            </td>
+            <td class="text-muted">{{ task.due_date|default:"—" }}</td>
+            <td class="text-muted">
+              {% if task.completed_at %}
+                {{ task.completed_at|date:"d M Y" }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="6" class="text-center text-muted py-2">No tasks in this phase.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% empty %}
+  <div class="alert alert-secondary">No phases found for this project.</div>
+  {% endfor %}
+{% endif %}
+
+{% endblock %}

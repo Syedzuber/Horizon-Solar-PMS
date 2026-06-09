@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}Projects — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Projects</h4>
+  {% if user.profile.role == 'PM' %}
+    <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>
+  {% endif %}
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-0">
+    <table class="table table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Project ID</th>
+          <th>Customer Name</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Target Date</th>
+          <th>Site Engineer</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for project in projects %}
+        <tr style="cursor:pointer;" onclick="window.location='{% url 'project_detail' project.project_id %}'">
+          <td><a href="{% url 'project_detail' project.project_id %}" class="fw-semibold text-decoration-none">{{ project.project_id }}</a></td>
+          <td>{{ project.customer_name }}</td>
+          <td>{{ project.project_type }}</td>
+          <td>
+            {% if project.status == 'Draft' %}
+              <span class="badge bg-secondary">Draft</span>
+            {% elif project.status == 'Active' %}
+              <span class="badge bg-success">Active</span>
+            {% elif project.status == 'In Progress' %}
+              <span class="badge bg-primary">In Progress</span>
+            {% elif project.status == 'Commissioned' %}
+              <span class="badge bg-info text-dark">Commissioned</span>
+            {% elif project.status == 'On Hold' %}
+              <span class="badge bg-warning text-dark">On Hold</span>
+            {% elif project.status == 'Cancelled' %}
+              <span class="badge bg-danger">Cancelled</span>
+            {% else %}
+              <span class="badge bg-secondary">{{ project.status }}</span>
+            {% endif %}
+          </td>
+          <td>{{ project.target_commissioning_date }}</td>
+          <td>{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}</td>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="6" class="text-center text-muted py-4">No projects found.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
