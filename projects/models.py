@@ -59,6 +59,14 @@ class Project(models.Model):
     def __str__(self):
         return f"{self.project_id} - {self.customer_name}"
 
+    def get_current_phase(self):
+        """First phase that still has an incomplete task; works with prefetched data."""
+        for phase in self.phases.all():
+            for task in phase.tasks.all():
+                if task.status != 'Done':
+                    return phase.phase_name
+        return None
+
     def save(self, *args, **kwargs):
         if not self.project_id:
             from django.db import transaction

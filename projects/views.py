@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.http import Http404, HttpResponseForbidden
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, Prefetch
 
 from .models import UserProfile, Project, ProjectPhase, Task
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm
@@ -194,14 +194,19 @@ def _pm_owns_project(request, project):
 @role_required(['PM', 'Admin', 'CEO'])
 def project_list(request):
     role = _get_user_role(request)
+    base_qs = (
+        Project.objects
+        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
+        .prefetch_related(
+            Prefetch('phases',
+                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+        )
+        .order_by('-created_at')
+    )
     if role == 'PM':
-        projects = Project.objects.filter(
-            assigned_pm__user=request.user
-        ).select_related('assigned_site_engineer__user').order_by('-created_at')
+        projects = base_qs.filter(assigned_pm__user=request.user)
     else:
-        projects = Project.objects.all().select_related(
-            'assigned_site_engineer__user'
-        ).order_by('-created_at')
+        projects = base_qs
 
     return render(request, 'projects/project_list.html', {'projects': projects})
 
@@ -222,7 +227,7 @@ def project_create(request):
             messages.success(request, f"Project {project.project_id} created successfully.")
             return redirect('project_detail', project_id=project.project_id)
     else:
-        form = ProjectCreateForm()
+        form = ProjectCreateForm(initial={'project_type': 'Residential'})
 
     return render(request, 'projects/project_form.html', {
         'form': form,
@@ -319,7 +324,7 @@ def project_activate(request, project_id):
         project.save()
 
     if project.project_type == 'Residential':
-        messages.success(request, 'Project activated. 51 tasks created across 9 phases.')
+        messages.success(request, 'Project activated. 50 tasks created across 9 phases.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 

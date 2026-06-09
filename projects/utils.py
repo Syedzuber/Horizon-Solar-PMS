@@ -142,8 +142,7 @@ def attach_residential_template(project):
                 'phase_name':  'Finance Closure',
                 'phase_order': 9,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'M1 Payment Received',        'assigned_role': Task.FINANCE},
-                    {'task_order': 2, 'task_name': '100% Payment Confirmation',  'assigned_role': Task.FINANCE},
+                    {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE},
                 ],
             },
         ]
@@ -165,4 +164,4 @@ def attach_residential_template(project):
             ])
 
         task_count = Task.objects.filter(phase__project=project).count()
-        assert task_count == 51, f"Expected 51 tasks, got {task_count}"
+        assert task_count == 50, f"Expected 50 tasks, got {task_count}"

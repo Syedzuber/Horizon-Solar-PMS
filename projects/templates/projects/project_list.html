@@ -18,8 +18,11 @@
           <th>Customer Name</th>
           <th>Type</th>
           <th>Status</th>
+          <th>Current Phase</th>
+          <th>Assigned PM</th>
+          <th>Capacity (kW)</th>
+          <th>Contract Value (₹)</th>
           <th>Target Date</th>
-          <th>Site Engineer</th>
         </tr>
       </thead>
       <tbody>
@@ -45,12 +48,19 @@
               <span class="badge bg-secondary">{{ project.status }}</span>
             {% endif %}
           </td>
+          <td class="text-muted">
+            {% with cp=project.get_current_phase %}
+              {{ cp|default:"—" }}
+            {% endwith %}
+          </td>
+          <td>{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}</td>
+          <td>{{ project.capacity_kw }}</td>
+          <td>{{ project.contract_value }}</td>
           <td>{{ project.target_commissioning_date }}</td>
-          <td>{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}</td>
         </tr>
         {% empty %}
         <tr>
-          <td colspan="6" class="text-center text-muted py-4">No projects found.</td>
+          <td colspan="9" class="text-center text-muted py-4">No projects found.</td>
         </tr>
         {% endfor %}
       </tbody>
