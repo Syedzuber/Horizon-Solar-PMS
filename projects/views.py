@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import date
 
@@ -496,12 +497,22 @@ def project_detail(request, project_id):
     is_assigned_pm = (project.assigned_pm.user == request.user)
     user_role = role
 
+    candidates_by_role = {}
+    if is_assigned_pm:
+        for role_key, _ in Task.ROLE_CHOICES:
+            qs = UserProfile.objects.filter(role=role_key, is_active=True).select_related('user')
+            candidates_by_role[role_key] = [
+                {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
+                for p in qs
+            ]
+
     return render(request, 'projects/project_detail.html', {
-        'project':       project,
-        'phases':        phases,
-        'is_assigned_pm': is_assigned_pm,
-        'user_role':     user_role,
-        'task_status_choices': Task.STATUS_CHOICES,
+        'project':              project,
+        'phases':               phases,
+        'is_assigned_pm':       is_assigned_pm,
+        'user_role':            user_role,
+        'task_status_choices':  Task.STATUS_CHOICES,
+        'candidates_by_role_json': json.dumps(candidates_by_role),
     })
 
 
@@ -564,6 +575,30 @@ def project_activate(request, project_id):
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 
+    return redirect('project_detail', project_id=project.project_id)
+
+
+@login_required
+@role_required(['PM'])
+def project_recalculate_dates(request, project_id):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    if project.status == 'Draft':
+        messages.warning(request, 'Project must be activated before calculating due dates.')
+        return redirect('project_detail', project_id=project.project_id)
+
+    if not project.activated_at:
+        messages.warning(request, 'Project has no activation date — cannot calculate due dates.')
+        return redirect('project_detail', project_id=project.project_id)
+
+    calculate_due_dates(project)
+    messages.success(request, 'Due dates recalculated from activation date.')
     return redirect('project_detail', project_id=project.project_id)
 
 
