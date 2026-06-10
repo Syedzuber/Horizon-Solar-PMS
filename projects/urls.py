@@ -28,6 +28,7 @@ urlpatterns = [
     path('projects/<str:project_id>/activate/',                views.project_activate,           name='project_activate'),
     path('projects/<str:project_id>/recalculate-dates/',       views.project_recalculate_dates,  name='project_recalculate_dates'),
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),
-    path('projects/<str:project_id>/tasks/<int:task_id>/update/', views.task_status_update, name='task_status_update'),
-    path('projects/<str:project_id>/tasks/<int:task_id>/assign/', views.task_assign,        name='task_assign'),
+    path('projects/<str:project_id>/tasks/<int:task_id>/update/',   views.task_status_update, name='task_status_update'),
+    path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),
+    path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,  name='task_set_due_date'),
 ]

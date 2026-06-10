@@ -1,5 +1,5 @@
 import logging
-from datetime import date
+from datetime import date, timedelta
 
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth import authenticate, login, logout
@@ -10,10 +10,10 @@ from django.utils import timezone
 from django.db import transaction
 from django.db.models import Max, Prefetch, Q
 
-from .models import UserProfile, Project, ProjectPhase, Task
+from .models import UserProfile, Project, ProjectPhase, Task, DueDateChangeLog
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm
 from .decorators import login_required, role_required, get_user_dashboard
-from .utils import attach_residential_template, calculate_due_dates
+from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +152,12 @@ def dashboard_pm(request):
         status__in=['Not Started', 'In Progress'],
     ).exclude(assigned_role=Task.PM).select_related('phase__project')
 
+    seven_days_ago = date.today() - timedelta(days=7)
+    due_date_changes = DueDateChangeLog.objects.filter(
+        task__phase__project__assigned_pm=pm_profile,
+        changed_at__date__gte=seven_days_ago,
+    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
+
     return render(request, 'dashboard/pm.html', {
         'summary': {
             'active_projects':  active_projects,
@@ -166,6 +172,7 @@ def dashboard_pm(request):
         'pending_approvals_list': pending_approvals_list,
         'external_pending_list':  external_pending_list,
         'team_due_today':         team_due_today,
+        'due_date_changes':       due_date_changes,
         'today':                  date.today(),
     })
 
@@ -202,14 +209,22 @@ def dashboard_site_engineer(request):
         for project in my_projects
     ]
 
+    seven_days_ago = date.today() - timedelta(days=7)
+    due_date_changes = DueDateChangeLog.objects.filter(
+        task__phase__project__in=my_projects,
+        task__assigned_role=Task.SITE_ENGINEER,
+        changed_at__date__gte=seven_days_ago,
+    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+
     return render(request, 'dashboard/site-engineer.html', {
         'summary': {
             'due_today':   due_today,
             'in_progress': in_progress,
             'overdue':     overdue,
         },
-        'tasks_by_project': tasks_by_project,
-        'today': date.today(),
+        'tasks_by_project':  tasks_by_project,
+        'due_date_changes':  due_date_changes,
+        'today':             date.today(),
     })
 
 
@@ -243,14 +258,22 @@ def dashboard_design(request):
         due_today = in_progress = pending = 0
         tasks_qs  = Task.objects.none()
 
+    seven_days_ago = date.today() - timedelta(days=7)
+    due_date_changes = DueDateChangeLog.objects.filter(
+        task__assigned_role=Task.DESIGN,
+        task__phase__project__status__in=['Active', 'In Progress'],
+        changed_at__date__gte=seven_days_ago,
+    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+
     return render(request, 'dashboard/design.html', {
         'summary': {
             'due_today':   due_today,
             'in_progress': in_progress,
             'pending':     pending,
         },
-        'tasks_qs': tasks_qs,
-        'today':    date.today(),
+        'tasks_qs':         tasks_qs,
+        'due_date_changes': due_date_changes,
+        'today':            date.today(),
     })
 
 
@@ -299,6 +322,13 @@ def dashboard_scm(request):
         'due_date', 'phase__project__project_id',
     )
 
+    seven_days_ago = date.today() - timedelta(days=7)
+    due_date_changes = DueDateChangeLog.objects.filter(
+        task__assigned_role=Task.SCM,
+        task__phase__project__status__in=['Active', 'In Progress'],
+        changed_at__date__gte=seven_days_ago,
+    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+
     return render(request, 'dashboard/scm.html', {
         'summary': {
             'pos_pending':      pos_pending,
@@ -307,6 +337,7 @@ def dashboard_scm(request):
         },
         'procurement_tasks': procurement_tasks,
         'delivery_tasks':    delivery_tasks,
+        'due_date_changes':  due_date_changes,
         'today':             date.today(),
     })
 
@@ -567,10 +598,9 @@ def project_activate(request, project_id):
 
         if project.project_type == 'Residential':
             attach_residential_template(project)
-            calculate_due_dates(project)
 
     if project.project_type == 'Residential':
-        messages.success(request, 'Project activated. 50 tasks created across 9 phases.')
+        messages.success(request, 'Project activated. 50 tasks created. Set the first task due date to calculate all dates.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 
@@ -718,3 +748,32 @@ def task_assign(request, project_id, task_id):
         'task':       task,
         'candidates': candidates,
     })
+
+
+@login_required
+@role_required(['PM'])
+def task_set_due_date(request, project_id, task_id):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    date_str = request.POST.get('due_date', '').strip()
+    if date_str:
+        try:
+            new_date = date.fromisoformat(date_str)
+            count = recalculate_from_task(project, task, new_date, user=request.user)
+            messages.success(request, f'Due date updated. {count} task(s) recalculated.')
+        except ValueError:
+            messages.error(request, 'Invalid date.')
+    else:
+        task.due_date = None
+        task.save()
+        messages.success(request, 'Due date cleared.')
+
+    return redirect('project_detail', project_id=project_id)

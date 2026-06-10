@@ -204,6 +204,20 @@ class ProjectDocument(models.Model):
         return f"{self.project.project_id} — {self.title}"
 
 
+class DueDateChangeLog(models.Model):
+    task       = models.ForeignKey('Task', on_delete=models.CASCADE, related_name='due_date_changes')
+    old_date   = models.DateField(null=True, blank=True)
+    new_date   = models.DateField(null=True, blank=True)
+    changed_by = models.ForeignKey('UserProfile', on_delete=models.SET_NULL, null=True)
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-changed_at']
+
+    def __str__(self):
+        return f"{self.task.task_name}: {self.old_date} → {self.new_date}"
+
+
 class UserProfile(models.Model):
 
     ROLE_CHOICES = [

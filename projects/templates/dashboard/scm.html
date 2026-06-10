@@ -206,4 +206,40 @@
   </div>
 </div>
 
+{# ── Due Date Change Notifications ───────────────────────────────────── #}
+{% if due_date_changes %}
+<div class="card shadow-sm mb-4 border-warning">
+  <div class="card-header fw-semibold" style="background:#fff8e1;">
+    Due Date Changes — Last 7 Days
+    <span class="badge bg-warning text-dark ms-2">{{ due_date_changes|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Task</th>
+          <th>Project</th>
+          <th style="width:7rem;">Old Date</th>
+          <th style="width:7rem;">New Date</th>
+          <th style="width:9rem;">Changed By</th>
+          <th style="width:8rem;">When</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in due_date_changes %}
+        <tr>
+          <td>{{ c.task.task_name }}</td>
+          <td><a href="{% url 'project_detail' c.task.phase.project.project_id %}" class="text-decoration-none">{{ c.task.phase.project.project_id }}</a></td>
+          <td class="text-muted">{{ c.old_date|default:"—" }}</td>
+          <td class="fw-semibold">{{ c.new_date|default:"—" }}</td>
+          <td class="text-muted small">{{ c.changed_by.user.get_full_name|default:c.changed_by.user.username }}</td>
+          <td class="text-muted small">{{ c.changed_at|timesince }} ago</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 {% endblock %}

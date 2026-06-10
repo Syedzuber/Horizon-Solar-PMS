@@ -37,6 +37,70 @@ def add_workdays(start_date, days):
     return start_date + timedelta(days=days)
 
 
+def recalculate_from_task(project, anchor_task, new_date, user=None):
+    """
+    Set anchor_task.due_date = new_date, then cascade-recalculate every task
+    that comes after it (same phase order / task order sequence).
+    Internal tasks chain sequentially; external tasks mirror the current
+    internal chain position (run in parallel).
+    Logs every changed due_date in DueDateChangeLog.
+    Returns the number of tasks whose due_date changed.
+    """
+    from .models import Task, DueDateChangeLog
+
+    tasks = list(
+        Task.objects
+        .filter(phase__project=project)
+        .order_by('phase__phase_order', 'task_order')
+    )
+
+    anchor_idx = next((i for i, t in enumerate(tasks) if t.pk == anchor_task.pk), None)
+    if anchor_idx is None:
+        return 0
+
+    changes = []
+
+    # Apply new date to anchor
+    old_anchor = tasks[anchor_idx].due_date
+    tasks[anchor_idx].due_date = new_date
+    if old_anchor != new_date:
+        changes.append((tasks[anchor_idx], old_anchor, new_date))
+
+    # Determine the internal chain position after the anchor
+    if tasks[anchor_idx].task_type == Task.INTERNAL:
+        prev_internal_due = new_date
+    else:
+        # Find the most recent internal task at or before anchor
+        prev_internal_due = new_date  # fallback
+        for t in reversed(tasks[:anchor_idx]):
+            if t.task_type == Task.INTERNAL and t.due_date:
+                prev_internal_due = t.due_date
+                break
+
+    # Recalculate all tasks after the anchor
+    for task in tasks[anchor_idx + 1:]:
+        old_d = task.due_date
+        if task.task_type == Task.EXTERNAL:
+            new_d = prev_internal_due
+        else:
+            new_d = add_workdays(prev_internal_due, task.duration_days)
+            prev_internal_due = new_d
+        task.due_date = new_d
+        if old_d != new_d:
+            changes.append((task, old_d, new_d))
+
+    Task.objects.bulk_update(tasks[anchor_idx:], ['due_date'])
+
+    if user and changes:
+        user_profile = user.profile
+        DueDateChangeLog.objects.bulk_create([
+            DueDateChangeLog(task=t, old_date=old_d, new_date=new_d, changed_by=user_profile)
+            for t, old_d, new_d in changes
+        ])
+
+    return len(changes)
+
+
 def calculate_due_dates(project):
     """
     Assign due_date to every task on project.

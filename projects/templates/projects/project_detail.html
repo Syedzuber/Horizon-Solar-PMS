@@ -23,10 +23,6 @@
             </form>
           {% else %}
             <a href="{% url 'task_add' project.project_id %}" class="btn btn-primary btn-sm">+ Add Task</a>
-            <form method="post" action="{% url 'project_recalculate_dates' project.project_id %}" class="d-inline">
-              {% csrf_token %}
-              <button type="submit" class="btn btn-outline-secondary btn-sm">Recalculate Due Dates</button>
-            </form>
           {% endif %}
         {% endif %}
         <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
@@ -128,7 +124,7 @@
             <th style="width:9rem;">Assigned Role</th>
             <th style="width:12rem;">Assigned To</th>
             <th style="width:11rem;">Status</th>
-            <th style="width:7rem;">Due Date</th>
+            <th style="width:10rem;">Due Date</th>
             <th style="width:8rem;">Completed</th>
           </tr>
         </thead>
@@ -193,7 +189,20 @@
                 {% endif %}
               {% endif %}
             </td>
-            <td class="text-muted">{{ task.due_date|default:"—" }}</td>
+            <td>
+              {% if is_assigned_pm %}
+                <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
+                  {% csrf_token %}
+                  <input type="date" name="due_date"
+                         value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
+                         class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+                         style="width:140px;"
+                         onchange="this.form.submit()">
+                </form>
+              {% else %}
+                <span class="{% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
+              {% endif %}
+            </td>
             <td class="text-muted">
               {% if task.completed_at %}
                 {{ task.completed_at|date:"d M Y" }}
