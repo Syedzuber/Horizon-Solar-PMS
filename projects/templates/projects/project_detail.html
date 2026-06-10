@@ -218,7 +218,7 @@
 
 {# ── Assign modal (PM only) ───────────────────────────────────────────── #}
 {% if is_assigned_pm %}
-{{ candidates_by_role_json|json_script:"candidates-data" }}
+{{ candidates_by_role|json_script:"candidates-data" }}
 
 <div class="modal fade" id="assignModal" tabindex="-1" aria-labelledby="assignModalLabel" aria-hidden="true">
   <div class="modal-dialog">
@@ -259,11 +259,10 @@
     var btn        = event.relatedTarget;
     var taskId     = btn.dataset.taskId;
     var taskName   = btn.dataset.taskName;
-    var role       = btn.dataset.role;
+    var role       = (btn.dataset.role || '').trim();
     var currentPk  = btn.dataset.currentPk;
     var projectId  = btn.dataset.projectId;
-
-    console.log('SolarPMS assign modal: role=' + role + ' candidates=' + JSON.stringify(candidates[role]));
+    console.log('SolarPMS assign modal: role=[' + role + '] len=' + role.length + ' keys=' + JSON.stringify(Object.keys(candidates)));
 
     document.getElementById('assignTaskName').textContent = taskName;
     document.getElementById('assignForm').action =

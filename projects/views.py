@@ -1,4 +1,3 @@
-import json
 import logging
 from datetime import date
 
@@ -507,12 +506,12 @@ def project_detail(request, project_id):
             ]
 
     return render(request, 'projects/project_detail.html', {
-        'project':              project,
-        'phases':               phases,
-        'is_assigned_pm':       is_assigned_pm,
-        'user_role':            user_role,
-        'task_status_choices':  Task.STATUS_CHOICES,
-        'candidates_by_role_json': json.dumps(candidates_by_role),
+        'project':             project,
+        'phases':              phases,
+        'is_assigned_pm':      is_assigned_pm,
+        'user_role':           user_role,
+        'task_status_choices': Task.STATUS_CHOICES,
+        'candidates_by_role':  candidates_by_role,
     })
 
 
