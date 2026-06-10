@@ -247,7 +247,13 @@
 
 <script>
 (function () {
-  var candidates = JSON.parse(document.getElementById('candidates-data').textContent);
+  var dataEl = document.getElementById('candidates-data');
+  if (!dataEl) {
+    console.warn('SolarPMS: candidates-data element not found — hard reload the page.');
+    return;
+  }
+  var candidates = JSON.parse(dataEl.textContent);
+  console.log('SolarPMS candidates loaded:', candidates);
 
   document.getElementById('assignModal').addEventListener('show.bs.modal', function (event) {
     var btn        = event.relatedTarget;
@@ -257,6 +263,8 @@
     var currentPk  = btn.dataset.currentPk;
     var projectId  = btn.dataset.projectId;
 
+    console.log('SolarPMS assign modal: role=' + role + ' candidates=' + JSON.stringify(candidates[role]));
+
     document.getElementById('assignTaskName').textContent = taskName;
     document.getElementById('assignForm').action =
       '/projects/' + projectId + '/tasks/' + taskId + '/assign/';
@@ -265,13 +273,20 @@
     select.innerHTML = '<option value="">— Unassign —</option>';
 
     var list = candidates[role] || [];
-    list.forEach(function (c) {
-      var opt = document.createElement('option');
-      opt.value = c.pk;
-      opt.textContent = c.name;
-      if (String(c.pk) === String(currentPk)) { opt.selected = true; }
-      select.appendChild(opt);
-    });
+    if (list.length === 0) {
+      var empty = document.createElement('option');
+      empty.disabled = true;
+      empty.textContent = 'No active ' + role + ' users — add one in User Management';
+      select.appendChild(empty);
+    } else {
+      list.forEach(function (c) {
+        var opt = document.createElement('option');
+        opt.value = c.pk;
+        opt.textContent = c.name;
+        if (String(c.pk) === String(currentPk)) { opt.selected = true; }
+        select.appendChild(opt);
+      });
+    }
   });
 }());
 </script>
