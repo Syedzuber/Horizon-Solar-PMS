@@ -1,4 +1,6 @@
 import logging
+from datetime import date
+
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth import authenticate, login, logout
 from django.contrib import messages
@@ -6,12 +8,12 @@ from django.contrib.auth.models import User
 from django.http import Http404, HttpResponseForbidden
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Max, Prefetch
+from django.db.models import Max, Prefetch, Q
 
 from .models import UserProfile, Project, ProjectPhase, Task
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm
 from .decorators import login_required, role_required, get_user_dashboard
-from .utils import attach_residential_template
+from .utils import attach_residential_template, calculate_due_dates
 
 logger = logging.getLogger(__name__)
 
@@ -52,18 +54,204 @@ def dashboard_admin(request):
 
 
 @login_required
+@role_required(['PM'])
 def dashboard_pm(request):
-    return render(request, 'dashboard/pm.html')
+    pm_profile = request.user.profile
+
+    active_projects = Project.objects.filter(
+        assigned_pm=pm_profile,
+        status__in=['Active', 'In Progress'],
+    ).count()
+
+    due_today = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        due_date=date.today(),
+        due_date__isnull=False,
+        task_type=Task.INTERNAL,
+        status__in=['Not Started', 'In Progress'],
+    ).count()
+
+    blocked_tasks = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        status='Blocked',
+    ).count()
+
+    pending_approvals = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        assigned_role=Task.PM,
+        status='Not Started',
+    ).count()
+
+    external_pending = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        task_type=Task.EXTERNAL,
+        status__in=['Not Started', 'In Progress'],
+    ).count()
+
+    projects_with_progress = []
+    for project in Project.objects.filter(assigned_pm=pm_profile, status__in=['Active', 'In Progress']):
+        total_tasks    = Task.objects.filter(phase__project=project).count()
+        done_tasks     = Task.objects.filter(phase__project=project, status='Done').count()
+        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
+        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').count()
+        internal_percent = int(internal_done / internal_total * 100) if internal_total else 0
+        ext_pending    = Task.objects.filter(
+            phase__project=project, task_type=Task.EXTERNAL,
+            status__in=['Not Started', 'In Progress'],
+        ).count()
+        overdue_count  = Task.objects.filter(
+            phase__project=project, task_type=Task.INTERNAL,
+            due_date__lt=date.today(), due_date__isnull=False,
+            status__in=['Not Started', 'In Progress'],
+        ).count()
+        current_phase  = (
+            project.phases
+            .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
+            .order_by('phase_order').first()
+            or project.phases.order_by('-phase_order').first()
+        )
+        projects_with_progress.append({
+            'project':          project,
+            'total_tasks':      total_tasks,
+            'done_tasks':       done_tasks,
+            'internal_total':   internal_total,
+            'internal_done':    internal_done,
+            'internal_percent': internal_percent,
+            'external_pending': ext_pending,
+            'overdue_count':    overdue_count,
+            'current_phase':    current_phase,
+        })
+
+    due_today_tasks = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        due_date=date.today(), due_date__isnull=False,
+        task_type=Task.INTERNAL,
+        status__in=['Not Started', 'In Progress'],
+    ).select_related('phase__project', 'assigned_to').order_by('phase__project__project_id')
+
+    blocked_tasks_list = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        status='Blocked',
+    ).select_related('phase__project')
+
+    pending_approvals_list = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        assigned_role=Task.PM,
+        status='Not Started',
+    ).select_related('phase__project')
+
+    external_pending_list = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        task_type=Task.EXTERNAL,
+        status__in=['Not Started', 'In Progress'],
+    ).select_related('phase__project')
+
+    team_due_today = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        due_date=date.today(), due_date__isnull=False,
+        status__in=['Not Started', 'In Progress'],
+    ).exclude(assigned_role=Task.PM).select_related('phase__project')
+
+    return render(request, 'dashboard/pm.html', {
+        'summary': {
+            'active_projects':  active_projects,
+            'due_today':        due_today,
+            'blocked_tasks':    blocked_tasks,
+            'pending_approvals': pending_approvals,
+            'external_pending': external_pending,
+        },
+        'projects_with_progress': projects_with_progress,
+        'due_today_tasks':        due_today_tasks,
+        'blocked_tasks_list':     blocked_tasks_list,
+        'pending_approvals_list': pending_approvals_list,
+        'external_pending_list':  external_pending_list,
+        'team_due_today':         team_due_today,
+        'today':                  date.today(),
+    })
 
 
 @login_required
+@role_required(['Site Engineer'])
 def dashboard_site_engineer(request):
-    return render(request, 'dashboard/site-engineer.html')
+    se_profile  = request.user.profile
+    my_projects = Project.objects.filter(
+        assigned_site_engineer=se_profile,
+        status__in=['Active', 'In Progress'],
+    )
+    se_q = Q(assigned_to=se_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SITE_ENGINEER)
+
+    due_today = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
+        due_date=date.today(), due_date__isnull=False,
+        status__in=['Not Started', 'In Progress'],
+    ).count()
+
+    in_progress = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
+        status='In Progress',
+    ).count()
+
+    overdue = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
+        due_date__lt=date.today(), due_date__isnull=False,
+        status__in=['Not Started', 'In Progress'],
+    ).count()
+
+    tasks_by_project = [
+        {
+            'project': project,
+            'tasks': Task.objects.filter(phase__project=project).filter(se_q).order_by('due_date'),
+        }
+        for project in my_projects
+    ]
+
+    return render(request, 'dashboard/site-engineer.html', {
+        'summary': {
+            'due_today':   due_today,
+            'in_progress': in_progress,
+            'overdue':     overdue,
+        },
+        'tasks_by_project': tasks_by_project,
+        'today': date.today(),
+    })
 
 
 @login_required
+@role_required(['Design'])
 def dashboard_design(request):
-    return render(request, 'dashboard/design.html')
+    design_profile = request.user.profile
+    design_q       = Q(assigned_to=design_profile) | Q(assigned_to__isnull=True, assigned_role=Task.DESIGN)
+    active_filter  = {'phase__project__status__in': ['Active', 'In Progress']}
+
+    try:
+        due_today = Task.objects.filter(**active_filter).filter(design_q).filter(
+            due_date=date.today(), due_date__isnull=False,
+            status__in=['Not Started', 'In Progress'],
+        ).count()
+
+        in_progress = Task.objects.filter(**active_filter).filter(design_q).filter(
+            status='In Progress',
+        ).count()
+
+        pending = Task.objects.filter(**active_filter).filter(design_q).filter(
+            status='Not Started',
+        ).count()
+
+        tasks_qs = Task.objects.filter(**active_filter).filter(design_q).filter(
+            due_date__isnull=False,
+        ).select_related('phase__project').order_by(
+            'phase__project__project_id', 'phase__phase_order', 'task_order',
+        )
+    except Exception:
+        due_today = in_progress = pending = 0
+        tasks_qs  = Task.objects.none()
+
+    return render(request, 'dashboard/design.html', {
+        'summary': {
+            'due_today':   due_today,
+            'in_progress': in_progress,
+            'pending':     pending,
+        },
+        'tasks_qs': tasks_qs,
+        'today':    date.today(),
+    })
 
 
 @login_required
@@ -72,8 +260,55 @@ def dashboard_finance(request):
 
 
 @login_required
+@role_required(['SCM'])
 def dashboard_scm(request):
-    return render(request, 'dashboard/scm.html')
+    scm_profile   = request.user.profile
+    scm_q         = Q(assigned_to=scm_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SCM)
+    active_filter = {'phase__project__status__in': ['Active', 'In Progress']}
+
+    pos_pending = Task.objects.filter(
+        assigned_role=Task.SCM,
+        phase__phase_name='Procurement',
+        status__in=['Not Started', 'In Progress'],
+        **active_filter,
+    ).count()
+
+    deliveries_today = Task.objects.filter(
+        assigned_role=Task.SCM,
+        phase__phase_name='Delivery',
+        due_date=date.today(), due_date__isnull=False,
+        **active_filter,
+    ).count()
+
+    overdue = Task.objects.filter(
+        assigned_role=Task.SCM,
+        due_date__lt=date.today(), due_date__isnull=False,
+        status__in=['Not Started', 'In Progress'],
+        **active_filter,
+    ).count()
+
+    procurement_tasks = Task.objects.filter(
+        phase__phase_name='Procurement', **active_filter,
+    ).filter(scm_q).select_related('phase__project').order_by(
+        'phase__project__project_id', 'task_order',
+    )
+
+    delivery_tasks = Task.objects.filter(
+        phase__phase_name='Delivery', **active_filter,
+    ).filter(scm_q).select_related('phase__project').order_by(
+        'due_date', 'phase__project__project_id',
+    )
+
+    return render(request, 'dashboard/scm.html', {
+        'summary': {
+            'pos_pending':      pos_pending,
+            'deliveries_today': deliveries_today,
+            'overdue':          overdue,
+        },
+        'procurement_tasks': procurement_tasks,
+        'delivery_tasks':    delivery_tasks,
+        'today':             date.today(),
+    })
 
 
 @login_required
@@ -316,12 +551,13 @@ def project_activate(request, project_id):
         return redirect('project_detail', project_id=project.project_id)
 
     with transaction.atomic():
-        if project.project_type == 'Residential':
-            attach_residential_template(project)
-
         project.status = 'Active'
         project.activated_at = timezone.now()
         project.save()
+
+        if project.project_type == 'Residential':
+            attach_residential_template(project)
+            calculate_due_dates(project)
 
     if project.project_type == 'Residential':
         messages.success(request, 'Project activated. 50 tasks created across 9 phases.')
@@ -413,4 +649,38 @@ def task_status_update(request, project_id, task_id):
 
     Task.objects.filter(pk=task.pk).update(**update_kwargs)
 
+    next_url = request.POST.get('next', None)
+    if next_url:
+        from urllib.parse import urlparse
+        if urlparse(next_url).netloc == '':
+            return redirect(next_url)
     return redirect('project_detail', project_id=project.project_id)
+
+
+@login_required
+@role_required(['PM'])
+def task_assign(request, project_id, task_id):
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    # Failure 9: dropdown must only show users matching task's assigned_role
+    candidates = UserProfile.objects.filter(role=task.assigned_role, is_active=True)
+
+    if request.method == 'POST':
+        assigned_to_id = request.POST.get('assigned_to', '').strip()
+        if assigned_to_id:
+            assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=task.assigned_role, is_active=True)
+            Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+        else:
+            Task.objects.filter(pk=task.pk).update(assigned_to=None)
+        return redirect('project_detail', project_id=project.project_id)
+
+    return render(request, 'projects/task_assign_form.html', {
+        'project':    project,
+        'task':       task,
+        'candidates': candidates,
+    })

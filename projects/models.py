@@ -122,11 +122,28 @@ class Task(models.Model):
         (BLOCKED,     'Blocked'),
     ]
 
+    INTERNAL = 'Internal'
+    EXTERNAL = 'External'
+
+    TYPE_CHOICES = [
+        (INTERNAL, 'Internal'),
+        (EXTERNAL, 'External'),
+    ]
+
     phase         = models.ForeignKey(ProjectPhase, related_name='tasks', on_delete=models.CASCADE)
     task_name     = models.CharField(max_length=200)
     task_order    = models.PositiveIntegerField()
     assigned_role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=PM)
+    assigned_to   = models.ForeignKey(
+        'UserProfile',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='assigned_tasks',
+    )
     status        = models.CharField(max_length=20, choices=STATUS_CHOICES, default=NOT_STARTED)
+    task_type     = models.CharField(max_length=10, choices=TYPE_CHOICES, default=INTERNAL)
+    duration_days = models.PositiveIntegerField(default=1)
     due_date      = models.DateField(blank=True, null=True)
     completed_at  = models.DateTimeField(blank=True, null=True)
     created_at    = models.DateTimeField(auto_now_add=True)
