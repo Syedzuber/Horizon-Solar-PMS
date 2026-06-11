@@ -978,26 +978,37 @@ def boq_detail(request, project_id):
                 messages.error(request, 'Enter a quantity for at least one item before submitting.')
                 return redirect('boq_detail', project_id=project_id)
 
-            is_resubmission = boq.status == 'Revision Requested'
-            new_version     = boq.version + 1 if is_resubmission else boq.version
-            reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
-            snapshot = list(boq.items.values(
-                'serial_no', 'category', 'description', 'uom',
-                'boq_quantity', 'ordered_quantity',
-                'make_preference__name', 'ordered_vendor__name',
-            ))
-            BOQRevision.objects.create(
-                boq=boq, revised_by=profile,
-                version=new_version, reason=reason, snapshot=snapshot,
-            )
-            boq.status       = 'Submitted'
-            boq.submitted_by = profile
-            boq.submitted_at = timezone.now()
-            if is_resubmission:
-                boq.version = new_version
-            boq.save()
-            messages.success(request, 'BOQ submitted to SCM for review.')
-            return redirect('boq_detail', project_id=project_id)
+            try:
+                is_resubmission = boq.status == 'Revision Requested'
+                new_version     = boq.version + 1 if is_resubmission else boq.version
+                reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
+                snapshot = list(boq.items.values(
+                    'serial_no', 'category', 'description', 'uom',
+                    'boq_quantity', 'ordered_quantity',
+                    'make_preference__name', 'ordered_vendor__name',
+                ))
+                # Convert Decimal to float so JSONField serialises cleanly
+                import decimal
+                for row in snapshot:
+                    for k, v in row.items():
+                        if isinstance(v, decimal.Decimal):
+                            row[k] = float(v)
+                BOQRevision.objects.create(
+                    boq=boq, revised_by=profile,
+                    version=new_version, reason=reason, snapshot=snapshot,
+                )
+                boq.status       = 'Submitted'
+                boq.submitted_by = profile
+                boq.submitted_at = timezone.now()
+                if is_resubmission:
+                    boq.version = new_version
+                boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
+                messages.success(request, 'BOQ submitted to SCM for review.')
+                return redirect('boq_detail', project_id=project_id)
+            except Exception as exc:
+                logger.exception('BOQ submit_design failed for %s', project_id)
+                messages.error(request, f'Submit failed: {exc}')
+                return redirect('boq_detail', project_id=project_id)
 
         elif action == 'save_scm' and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
             for item in boq.items.all():
