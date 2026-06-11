@@ -328,6 +328,4 @@ class VendorForm(forms.ModelForm):
         cleaned = super().clean()
         if cleaned.get('msme_status') and not (cleaned.get('msme_number') or '').strip():
             self.add_error('msme_number', 'MSME number is required when MSME status is checked.')
-        if not cleaned.get('categories'):
-            self.add_error('categories', 'Select at least one category.')
         return cleaned
