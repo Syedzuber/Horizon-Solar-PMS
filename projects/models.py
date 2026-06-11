@@ -416,3 +416,22 @@ class BOQRevision(models.Model):
 
     def __str__(self):
         return f"BOQ {self.boq.project.project_id} — v{self.version} by {self.revised_by}"
+
+
+class Notification(models.Model):
+
+    recipient  = models.ForeignKey(
+        'UserProfile',
+        on_delete=models.CASCADE,
+        related_name='notifications',
+    )
+    message    = models.TextField()
+    link       = models.CharField(max_length=200, blank=True)
+    is_read    = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Notification → {self.recipient} — {self.message[:60]}"

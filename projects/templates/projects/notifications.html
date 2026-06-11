@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Notifications — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Notifications</h4>
+</div>
+
+{% if not notifications %}
+  <div class="alert alert-info">No notifications yet.</div>
+{% else %}
+<div class="card shadow-sm">
+  <div class="list-group list-group-flush">
+    {% for notif in notifications %}
+    <a href="{{ notif.link|default:'#' }}"
+       class="list-group-item list-group-item-action d-flex gap-3 align-items-start py-3
+              {% if not notif.is_read %}list-group-item-light fw-semibold{% endif %}">
+      <i class="bi bi-bell{% if not notif.is_read %}-fill text-primary{% else %} text-muted{% endif %} fs-5 mt-1"></i>
+      <div class="flex-grow-1">
+        <div>{{ notif.message }}</div>
+        <div class="text-muted small mt-1">{{ notif.created_at|date:"d M Y, H:i" }}</div>
+      </div>
+      {% if not notif.is_read %}
+        <span class="badge bg-primary rounded-pill align-self-center">New</span>
+      {% endif %}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

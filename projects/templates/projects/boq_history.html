@@ -4,7 +4,7 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <div>
-    <h4 class="mb-1">BOQ Revision History — {{ project.project_id }}</h4>
+    <h4 class="mb-1">BOQ Activity Timeline — {{ project.project_id }}</h4>
     <small class="text-muted">{{ project.customer_name }} · {{ project.city }}</small>
   </div>
   <a href="{% url 'boq_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">
@@ -13,51 +13,52 @@
 </div>
 
 {% if not revisions %}
-  <div class="alert alert-info">No revision history yet.</div>
+  <div class="alert alert-info">No activity recorded yet.</div>
 {% else %}
 
-<div class="accordion" id="revisionAccordion">
+<div class="position-relative" style="padding-left: 2.5rem;">
+  {# vertical connector line #}
+  <div style="position:absolute;left:0.55rem;top:0.5rem;bottom:1rem;width:2px;background:#dee2e6;"></div>
+
   {% for revision in revisions %}
-  <div class="accordion-item mb-2 border rounded shadow-sm">
-    <h2 class="accordion-header" id="heading-{{ revision.pk }}">
-      <button class="accordion-button {% if not forloop.first %}collapsed{% endif %}"
-              type="button"
-              data-bs-toggle="collapse"
-              data-bs-target="#collapse-{{ revision.pk }}"
-              aria-expanded="{% if forloop.first %}true{% else %}false{% endif %}"
-              aria-controls="collapse-{{ revision.pk }}">
-        <div class="d-flex gap-3 align-items-center w-100 me-3">
-          <span class="badge bg-secondary">v{{ revision.version }}</span>
-          <span class="fw-semibold">{{ revision.reason }}</span>
-          <span class="text-muted small ms-auto">
-            {{ revision.revised_at|date:"d M Y, H:i" }}
-            &nbsp;·&nbsp;
-            {% if revision.revised_by %}
-              {{ revision.revised_by.user.get_full_name|default:revision.revised_by.user.username }}
-            {% else %}
-              Unknown
-            {% endif %}
-          </span>
-        </div>
-      </button>
-    </h2>
-    <div id="collapse-{{ revision.pk }}"
-         class="accordion-collapse collapse {% if forloop.first %}show{% endif %}"
-         aria-labelledby="heading-{{ revision.pk }}"
-         data-bs-parent="#revisionAccordion">
-      <div class="accordion-body p-0">
+  <div class="position-relative mb-4">
+
+    {# dot on the timeline #}
+    <div class="position-absolute rounded-circle {{ revision.dot_color }}"
+         style="left:-1.95rem;top:0.5rem;width:14px;height:14px;border:2px solid #fff;box-shadow:0 0 0 2px #dee2e6;"></div>
+
+    <div class="card shadow-sm">
+      <div class="card-header py-2 d-flex flex-wrap gap-2 align-items-center">
+        <span class="badge {{ revision.badge_class }}">{{ revision.event_label }}</span>
+        <span class="badge bg-secondary">v{{ revision.version }}</span>
+        <span class="small text-muted">{{ revision.reason }}</span>
+        <span class="text-muted small ms-auto">
+          {{ revision.revised_at|date:"d M Y, H:i" }}
+          &nbsp;·&nbsp;
+          {% if revision.revised_by %}
+            {{ revision.revised_by.user.get_full_name|default:revision.revised_by.user.username }}
+          {% else %}—{% endif %}
+        </span>
+      </div>
+
+      {% if revision.snapshot %}
+      <div class="card-body p-0">
         <div class="table-responsive">
           <table class="table table-sm table-hover mb-0">
             <thead class="table-light">
               <tr>
                 <th style="width:3rem;">#</th>
-                <th style="width:10rem;">Category</th>
+                <th style="width:9rem;">Category</th>
                 <th>Description</th>
-                <th style="width:5rem;">UOM</th>
-                <th style="width:8rem;">BOQ Qty</th>
-                <th style="width:8rem;">Ordered Qty</th>
-                <th style="width:12rem;">Make Preference</th>
-                <th style="width:12rem;">Ordered Vendor</th>
+                <th style="width:4rem;">UOM</th>
+                <th style="width:7rem;">BOQ Qty</th>
+                {% if revision.event_type == 'acknowledged' %}
+                  <th style="width:7rem;">Ordered Qty</th>
+                  <th style="width:11rem;">Make Preference</th>
+                  <th style="width:11rem;">Ordered Vendor</th>
+                {% else %}
+                  <th style="width:11rem;">Make Preference</th>
+                {% endif %}
               </tr>
             </thead>
             <tbody>
@@ -68,23 +69,27 @@
                 <td class="align-middle">{{ item.description }}</td>
                 <td class="align-middle small text-muted">{{ item.uom }}</td>
                 <td class="align-middle">{{ item.boq_quantity|default:"—" }}</td>
-                <td class="align-middle">{{ item.ordered_quantity|default:"—" }}</td>
-                <td class="align-middle small text-muted">
-                  {{ item.make_preference__name|default:"—" }}
-                </td>
-                <td class="align-middle small text-muted">
-                  {{ item.ordered_vendor__name|default:"—" }}
-                </td>
+                {% if revision.event_type == 'acknowledged' %}
+                  <td class="align-middle {% if item.boq_quantity and item.ordered_quantity %}{% if item.boq_quantity != item.ordered_quantity %}table-warning{% endif %}{% endif %}">
+                    {{ item.ordered_quantity|default:"—" }}
+                  </td>
+                  <td class="align-middle small text-muted">{{ item.make_preference__name|default:"—" }}</td>
+                  <td class="align-middle small text-muted">{{ item.ordered_vendor__name|default:"—" }}</td>
+                {% else %}
+                  <td class="align-middle small text-muted">{{ item.make_preference__name|default:"—" }}</td>
+                {% endif %}
               </tr>
               {% empty %}
               <tr>
-                <td colspan="8" class="text-center text-muted py-3">No items in this snapshot.</td>
+                <td colspan="8" class="text-center text-muted py-3">No items in snapshot.</td>
               </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       </div>
+      {% endif %}
+
     </div>
   </div>
   {% endfor %}

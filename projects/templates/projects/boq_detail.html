@@ -36,7 +36,7 @@
 {# Out-of-table forms — associated via HTML form= attribute. #}
 
 {% if role == 'Design' %}
-  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
 
   {# Form 1: save/submit Design fields — action value comes from the clicked button #}
   <form id="saveDesignForm" method="post" action="{% url 'boq_detail' project.project_id %}">
@@ -61,20 +61,20 @@
     {% endif %}
   {% endfor %}
 
-  {% endif %}{# /Draft or Revision Requested #}
+  {% endif %}{# /editable statuses #}
 {% endif %}{# /Design #}
 
 {% if role == 'SCM' %}
   {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+  {# Action value comes from whichever button is clicked (save_scm or acknowledge_scm) #}
   <form id="saveSCMForm" method="post" action="{% url 'boq_detail' project.project_id %}">
     {% csrf_token %}
-    <input type="hidden" name="action" value="save_scm">
   </form>
   {% endif %}
 {% endif %}
 
 {# ── Notes ── #}
-{% if role == 'Design' and boq.status == 'Draft' or role == 'Design' and boq.status == 'Revision Requested' %}
+{% if role == 'Design' and boq.status == 'Draft' or role == 'Design' and boq.status == 'Revision Requested' or role == 'Design' and boq.status == 'Acknowledged' %}
 <div class="mb-3">
   <label class="form-label fw-semibold">Notes</label>
   <textarea form="saveDesignForm" name="notes"
@@ -138,7 +138,7 @@
               <td class="align-middle">{{ item.description }}</td>
               <td class="align-middle small text-muted">{{ item.uom }}</td>
               <td class="align-middle">
-                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
                 <input form="saveDesignForm"
                        type="number" step="0.01" min="0"
                        name="boq_qty_{{ item.pk }}"
@@ -149,7 +149,7 @@
                 {% endif %}
               </td>
               <td class="align-middle">
-                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
                 <select form="saveDesignForm"
                         name="make_pref_{{ item.pk }}"
                         class="form-select form-select-sm vendor-select"
@@ -163,7 +163,7 @@
               </td>
               <td class="align-middle text-center">
                 {% if not item.is_standard_item %}
-                  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
                   <button type="submit" form="delForm_{{ item.pk }}"
                           class="btn btn-outline-danger btn-sm py-0 px-1"
                           title="Delete row"
@@ -225,7 +225,7 @@
           {% endfor %}
         </tbody>
         {% if role == 'Design' %}
-          {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+          {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
         <tfoot>
           <tr>
             <td colspan="6" class="py-2 ps-3">
@@ -248,28 +248,27 @@
 {# ── Bottom action buttons ── #}
 <div class="d-flex gap-2 mt-2 mb-5">
   {% if role == 'Design' %}
-    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
     <button type="submit" form="saveDesignForm" name="action" value="save_design"
             class="btn btn-secondary">Save Draft</button>
     <button type="submit" form="saveDesignForm" name="action" value="submit_design"
             class="btn btn-primary"
             onclick="return confirm('Submit this BOQ to SCM for review?')">
-      Submit to SCM
+      {% if boq.status == 'Acknowledged' %}Revise &amp; Resubmit{% else %}Submit to SCM{% endif %}
     </button>
     {% endif %}
 
   {% elif role == 'SCM' %}
     {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
-    <button type="submit" form="saveSCMForm" class="btn btn-secondary">Save</button>
+    <button type="submit" form="saveSCMForm" name="action" value="save_scm"
+            class="btn btn-secondary">Save</button>
     {% endif %}
     {% if boq.status == 'Submitted' %}
-    <form method="post" action="{% url 'boq_acknowledge' project.project_id %}" class="d-inline">
-      {% csrf_token %}
-      <button type="submit" class="btn btn-success"
-              onclick="return confirm('Acknowledge this BOQ?')">
-        Acknowledge
-      </button>
-    </form>
+    <button type="submit" form="saveSCMForm" name="action" value="acknowledge_scm"
+            class="btn btn-success"
+            onclick="return confirm('Acknowledge this BOQ? Current ordered quantities and vendors will be saved.')">
+      Acknowledge
+    </button>
     {% endif %}
 
   {% elif role == 'PM' %}
@@ -289,7 +288,7 @@
 {# ── Add Row modal ── #}
 {% if role == 'Design' %}
   {% if boq %}
-    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
 <div class="modal fade" id="addRowModal" tabindex="-1">
   <div class="modal-dialog">
     <div class="modal-content">

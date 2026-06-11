@@ -15,7 +15,7 @@ from django.db.models import Max, Prefetch, Q
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
     Vendor, VendorCategory,
-    BOQ, BOQItem, BOQRevision, get_standard_boq_items,
+    BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -914,6 +914,41 @@ def vendor_toggle_status(request, vendor_id):
 # BOQ Submission
 # ---------------------------------------------------------------------------
 
+def _boq_snapshot(boq):
+    """Return a JSON-safe snapshot of all BOQ items (Decimal → float)."""
+    import decimal as _decimal
+    rows = list(boq.items.values(
+        'serial_no', 'category', 'description', 'uom',
+        'boq_quantity', 'ordered_quantity',
+        'make_preference__name', 'ordered_vendor__name',
+    ))
+    for row in rows:
+        for k, v in row.items():
+            if isinstance(v, _decimal.Decimal):
+                row[k] = float(v)
+    return rows
+
+
+def _notify_boq_acknowledged(boq, acknowledging_profile):
+    """Create a Notification for the Design user who submitted the BOQ."""
+    items = boq.items.all()
+    has_changes = any(
+        item.ordered_quantity is not None and item.boq_quantity is not None
+        and item.ordered_quantity != item.boq_quantity
+        for item in items
+    )
+    suffix  = ' with changes to ordered quantities' if has_changes else ''
+    message = (
+        f'BOQ for {boq.project.project_id} ({boq.project.customer_name}) '
+        f'has been acknowledged by SCM{suffix}.'
+    )
+    Notification.objects.create(
+        recipient=boq.submitted_by,
+        message=message,
+        link=f'/projects/{boq.project.project_id}/boq/',
+    )
+
+
 def _build_vendors_by_category():
     """Return dict mapping category name → list of {id, name} for active vendors."""
     result = {}
@@ -956,7 +991,9 @@ def boq_detail(request, project_id):
     if request.method == 'POST':
         action = request.POST.get('action', '')
 
-        if action in ('save_design', 'submit_design') and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+        _DESIGN_EDITABLE = ('Draft', 'Revision Requested', 'Acknowledged')
+
+        if action in ('save_design', 'submit_design') and role == 'Design' and boq.status in _DESIGN_EDITABLE:
             boq.notes = request.POST.get('notes', '').strip() or None
             boq.save(update_fields=['notes'])
             for item in boq.items.all():
@@ -973,26 +1010,16 @@ def boq_detail(request, project_id):
                 messages.success(request, 'BOQ saved.')
                 return redirect('boq_detail', project_id=project_id)
 
-            # submit_design: validate then submit in one step
+            # submit_design: validate then snapshot and submit
             if not boq.items.filter(boq_quantity__gt=0).exists():
                 messages.error(request, 'Enter a quantity for at least one item before submitting.')
                 return redirect('boq_detail', project_id=project_id)
 
             try:
-                is_resubmission = boq.status == 'Revision Requested'
-                new_version     = boq.version + 1 if is_resubmission else boq.version
-                reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
-                snapshot = list(boq.items.values(
-                    'serial_no', 'category', 'description', 'uom',
-                    'boq_quantity', 'ordered_quantity',
-                    'make_preference__name', 'ordered_vendor__name',
-                ))
-                # Convert Decimal to float so JSONField serialises cleanly
-                import decimal
-                for row in snapshot:
-                    for k, v in row.items():
-                        if isinstance(v, decimal.Decimal):
-                            row[k] = float(v)
+                is_revision  = boq.status in ('Revision Requested', 'Acknowledged')
+                new_version  = boq.version + 1 if is_revision else boq.version
+                reason       = f'Revision v{new_version}' if is_revision else 'Initial submission'
+                snapshot     = _boq_snapshot(boq)
                 BOQRevision.objects.create(
                     boq=boq, revised_by=profile,
                     version=new_version, reason=reason, snapshot=snapshot,
@@ -1000,7 +1027,7 @@ def boq_detail(request, project_id):
                 boq.status       = 'Submitted'
                 boq.submitted_by = profile
                 boq.submitted_at = timezone.now()
-                if is_resubmission:
+                if is_revision:
                     boq.version = new_version
                 boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
                 messages.success(request, 'BOQ submitted to SCM for review.')
@@ -1010,7 +1037,8 @@ def boq_detail(request, project_id):
                 messages.error(request, f'Submit failed: {exc}')
                 return redirect('boq_detail', project_id=project_id)
 
-        elif action == 'save_scm' and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
+        elif action in ('save_scm', 'acknowledge_scm') and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
+            # Save ordered qty/vendor regardless of whether this is save or acknowledge
             for item in boq.items.all():
                 qty_str    = request.POST.get(f'ord_qty_{item.pk}', '').strip()
                 vendor_str = request.POST.get(f'ord_vendor_{item.pk}', '').strip()
@@ -1020,10 +1048,30 @@ def boq_detail(request, project_id):
                     item.ordered_quantity = None
                 item.ordered_vendor_id = int(vendor_str) if vendor_str.isdigit() else None
                 item.save(update_fields=['ordered_quantity', 'ordered_vendor'])
-            messages.success(request, 'Ordered details saved.')
+
+            if action == 'save_scm':
+                messages.success(request, 'Ordered details saved.')
+                return redirect('boq_detail', project_id=project_id)
+
+            # acknowledge_scm: snapshot then acknowledge
+            snapshot = _boq_snapshot(boq)
+            BOQRevision.objects.create(
+                boq=boq, revised_by=profile,
+                version=boq.version,
+                reason=f'SCM Acknowledged v{boq.version}',
+                snapshot=snapshot,
+            )
+            boq.status = 'Acknowledged'
+            boq.save(update_fields=['status'])
+
+            # Notify the Design user who submitted this BOQ
+            if boq.submitted_by:
+                _notify_boq_acknowledged(boq, profile)
+
+            messages.success(request, 'BOQ acknowledged.')
             return redirect('boq_detail', project_id=project_id)
 
-        elif action == 'add_item' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+        elif action == 'add_item' and role == 'Design' and boq.status in _DESIGN_EDITABLE:
             category    = request.POST.get('new_category', 'Other')
             description = request.POST.get('new_description', '').strip()
             uom         = request.POST.get('new_uom', 'Nos')
@@ -1037,7 +1085,7 @@ def boq_detail(request, project_id):
                 messages.success(request, 'Row added.')
             return redirect('boq_detail', project_id=project_id)
 
-        elif action == 'delete_item' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+        elif action == 'delete_item' and role == 'Design' and boq.status in _DESIGN_EDITABLE:
             item_id = request.POST.get('item_id', '')
             if item_id:
                 BOQItem.objects.filter(pk=item_id, boq=boq, is_standard_item=False).delete()
@@ -1187,11 +1235,56 @@ def boq_history(request, project_id):
     if profile.role not in ('PM', 'Design', 'SCM', 'Admin'):
         return HttpResponseForbidden()
 
-    boq       = get_object_or_404(BOQ, project=project)
-    revisions = boq.revisions.select_related('revised_by__user').order_by('-version')
+    boq = get_object_or_404(BOQ, project=project)
+    # Chronological order so the timeline reads top-to-bottom oldest-first
+    raw_revisions = boq.revisions.select_related('revised_by__user').order_by('revised_at')
+
+    def _annotate(rev):
+        r = rev.reason or ''
+        if 'SCM Acknowledged' in r:
+            rev.event_type   = 'acknowledged'
+            rev.event_label  = 'Acknowledged'
+            rev.dot_color    = 'bg-success'
+            rev.badge_class  = 'bg-success'
+        elif 'Revision requested' in r:
+            rev.event_type   = 'revision_requested'
+            rev.event_label  = 'Revision Requested'
+            rev.dot_color    = 'bg-warning'
+            rev.badge_class  = 'bg-warning text-dark'
+        elif r.startswith('Revision v'):
+            rev.event_type   = 'resubmitted'
+            rev.event_label  = 'Resubmitted'
+            rev.dot_color    = 'bg-primary'
+            rev.badge_class  = 'bg-primary'
+        else:
+            rev.event_type   = 'submitted'
+            rev.event_label  = 'Submitted'
+            rev.dot_color    = 'bg-primary'
+            rev.badge_class  = 'bg-primary'
+        return rev
+
+    revisions = [_annotate(rev) for rev in raw_revisions]
 
     return render(request, 'projects/boq_history.html', {
         'project':   project,
         'boq':       boq,
         'revisions': revisions,
+    })
+
+
+@login_required
+def notifications_view(request):
+    profile       = request.user.profile
+    notifications = profile.notifications.all()  # already ordered -created_at
+
+    if request.method == 'POST':
+        # Mark all as read
+        profile.notifications.filter(is_read=False).update(is_read=True)
+        return redirect('notifications')
+
+    # Mark all as read on GET too (visiting the page clears the badge)
+    profile.notifications.filter(is_read=False).update(is_read=True)
+
+    return render(request, 'projects/notifications.html', {
+        'notifications': notifications,
     })

@@ -38,6 +38,9 @@ urlpatterns = [
     path('vendors/<int:vendor_id>/edit/',         views.vendor_edit,          name='vendor_edit'),
     path('vendors/<int:vendor_id>/toggle-status/', views.vendor_toggle_status, name='vendor_toggle_status'),
 
+    # Notifications
+    path('notifications/', views.notifications_view, name='notifications'),
+
     # BOQ
     path('projects/<str:project_id>/boq/',                   views.boq_detail,           name='boq_detail'),
     path('projects/<str:project_id>/boq/submit/',            views.boq_submit,           name='boq_submit'),
