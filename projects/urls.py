@@ -31,4 +31,17 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',   views.task_status_update, name='task_status_update'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,  name='task_set_due_date'),
+
+    # Vendors
+    path('vendors/',                              views.vendor_list,          name='vendor_list'),
+    path('vendors/add/',                          views.vendor_add,           name='vendor_add'),
+    path('vendors/<int:vendor_id>/edit/',         views.vendor_edit,          name='vendor_edit'),
+    path('vendors/<int:vendor_id>/toggle-status/', views.vendor_toggle_status, name='vendor_toggle_status'),
+
+    # BOQ
+    path('projects/<str:project_id>/boq/',                   views.boq_detail,           name='boq_detail'),
+    path('projects/<str:project_id>/boq/submit/',            views.boq_submit,           name='boq_submit'),
+    path('projects/<str:project_id>/boq/acknowledge/',       views.boq_acknowledge,      name='boq_acknowledge'),
+    path('projects/<str:project_id>/boq/request-revision/',  views.boq_request_revision, name='boq_request_revision'),
+    path('projects/<str:project_id>/boq/history/',           views.boq_history,          name='boq_history'),
 ]

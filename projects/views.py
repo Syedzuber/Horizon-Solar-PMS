@@ -1,17 +1,23 @@
 import logging
 from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
+from itertools import groupby
 
 from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth import authenticate, login, logout
 from django.contrib import messages
 from django.contrib.auth.models import User
-from django.http import Http404, HttpResponseForbidden
+from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.utils import timezone
 from django.db import transaction
 from django.db.models import Max, Prefetch, Q
 
-from .models import UserProfile, Project, ProjectPhase, Task, DueDateChangeLog
-from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm
+from .models import (
+    UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
+    Vendor, VendorCategory,
+    BOQ, BOQItem, BOQRevision, get_standard_boq_items,
+)
+from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
@@ -310,11 +316,15 @@ def dashboard_scm(request):
         **active_filter,
     ).count()
 
-    procurement_tasks = Task.objects.filter(
+    raw_procurement = Task.objects.filter(
         phase__phase_name='Procurement', **active_filter,
     ).filter(scm_q).select_related('phase__project').order_by(
-        'phase__project__project_id', 'task_order',
+        'phase__project__id', 'task_order',
     )
+    pos_by_project = [
+        (project, list(tasks))
+        for project, tasks in groupby(raw_procurement, key=lambda t: t.phase.project)
+    ]
 
     delivery_tasks = Task.objects.filter(
         phase__phase_name='Delivery', **active_filter,
@@ -322,12 +332,25 @@ def dashboard_scm(request):
         'due_date', 'phase__project__project_id',
     )
 
-    seven_days_ago = date.today() - timedelta(days=7)
-    due_date_changes = DueDateChangeLog.objects.filter(
-        task__assigned_role=Task.SCM,
-        task__phase__project__status__in=['Active', 'In Progress'],
-        changed_at__date__gte=seven_days_ago,
-    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+    # BOQ Status card — all active projects with their BOQ state
+    boq_projects = []
+    for project in Project.objects.filter(
+        status__in=['Active', 'In Progress']
+    ).order_by('project_id'):
+        try:
+            boq         = project.boq
+            boq_status  = boq.status
+            last_updated = boq.submitted_at
+        except BOQ.DoesNotExist:
+            boq          = None
+            boq_status   = None
+            last_updated = None
+        boq_projects.append({
+            'project':      project,
+            'boq':          boq,
+            'boq_status':   boq_status,
+            'last_updated': last_updated,
+        })
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
@@ -335,10 +358,10 @@ def dashboard_scm(request):
             'deliveries_today': deliveries_today,
             'overdue':          overdue,
         },
-        'procurement_tasks': procurement_tasks,
-        'delivery_tasks':    delivery_tasks,
-        'due_date_changes':  due_date_changes,
-        'today':             date.today(),
+        'pos_by_project':  pos_by_project,
+        'delivery_tasks':  delivery_tasks,
+        'boq_projects':    boq_projects,
+        'today':           date.today(),
     })
 
 
@@ -776,4 +799,360 @@ def task_set_due_date(request, project_id, task_id):
         task.save()
         messages.success(request, 'Due date cleared.')
 
-    return redirect('project_detail', project_id=project_id)
+
+# ---------------------------------------------------------------------------
+# Vendor Master
+# ---------------------------------------------------------------------------
+
+@login_required
+def vendor_list(request):
+    profile = request.user.profile
+    if profile.role not in ('SCM', 'Admin'):
+        return HttpResponseForbidden()
+
+    vendors = Vendor.objects.prefetch_related('categories').order_by('-is_active', 'name')
+
+    category_filter = request.GET.get('category', '')
+    active_filter   = request.GET.get('active', '')
+
+    if category_filter:
+        vendors = vendors.filter(categories__id=category_filter)
+    if active_filter == '1':
+        vendors = vendors.filter(is_active=True)
+    elif active_filter == '0':
+        vendors = vendors.filter(is_active=False)
+
+    return render(request, 'vendors/vendor_list.html', {
+        'vendors':          vendors,
+        'all_categories':   VendorCategory.objects.all(),
+        'category_filter':  category_filter,
+        'active_filter':    active_filter,
+    })
+
+
+@login_required
+def vendor_add(request):
+    profile = request.user.profile
+    if profile.role not in ('SCM', 'Admin'):
+        return HttpResponseForbidden()
+
+    if request.method == 'POST':
+        form = VendorForm(request.POST)
+        if form.is_valid():
+            vendor = form.save(commit=False)
+            vendor.created_by = profile
+            vendor.save()
+            form.save_m2m()
+            duplicate_exists = Vendor.objects.filter(
+                name__iexact=vendor.name
+            ).exclude(pk=vendor.pk).exists()
+            if duplicate_exists:
+                messages.warning(
+                    request,
+                    f'A vendor named "{vendor.name}" already exists. Saved anyway.'
+                )
+            else:
+                messages.success(request, f'Vendor "{vendor.name}" added successfully.')
+            return redirect('vendor_list')
+    else:
+        form = VendorForm()
+
+    return render(request, 'vendors/vendor_form.html', {
+        'form':  form,
+        'title': 'Add Vendor',
+    })
+
+
+@login_required
+def vendor_edit(request, vendor_id):
+    profile = request.user.profile
+    if profile.role not in ('SCM', 'Admin'):
+        return HttpResponseForbidden()
+
+    vendor = get_object_or_404(Vendor, pk=vendor_id)
+
+    if request.method == 'POST':
+        form = VendorForm(request.POST, instance=vendor)
+        if form.is_valid():
+            form.save()
+            duplicate_exists = Vendor.objects.filter(
+                name__iexact=vendor.name
+            ).exclude(pk=vendor.pk).exists()
+            if duplicate_exists:
+                messages.warning(
+                    request,
+                    f'A vendor named "{vendor.name}" already exists. Saved anyway.'
+                )
+            else:
+                messages.success(request, f'Vendor "{vendor.name}" updated successfully.')
+            return redirect('vendor_list')
+    else:
+        form = VendorForm(instance=vendor)
+
+    return render(request, 'vendors/vendor_form.html', {
+        'form':   form,
+        'vendor': vendor,
+        'title':  f'Edit Vendor — {vendor.name}',
+    })
+
+
+@login_required
+def vendor_toggle_status(request, vendor_id):
+    profile = request.user.profile
+    if profile.role not in ('SCM', 'Admin'):
+        return HttpResponseForbidden()
+    if request.method != 'POST':
+        return HttpResponseForbidden()
+
+    vendor = get_object_or_404(Vendor, pk=vendor_id)
+    vendor.is_active = not vendor.is_active
+    vendor.save()
+    return JsonResponse({'is_active': vendor.is_active})
+
+
+# ---------------------------------------------------------------------------
+# BOQ Submission
+# ---------------------------------------------------------------------------
+
+def _build_vendors_by_category():
+    """Return dict mapping category name → list of {id, name} for active vendors."""
+    result = {}
+    for vendor in Vendor.objects.filter(is_active=True).prefetch_related('categories').order_by('name'):
+        for cat in vendor.categories.all():
+            result.setdefault(cat.name, []).append({'id': vendor.pk, 'name': vendor.name})
+    return result
+
+
+@login_required
+def boq_detail(request, project_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+    role    = profile.role
+
+    if role not in ('Design', 'SCM', 'PM', 'Admin'):
+        return HttpResponseForbidden()
+
+    # Get or auto-create BOQ for Design
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    if boq is None:
+        if role == 'Design':
+            boq = BOQ.objects.create(project=project)
+            BOQItem.objects.bulk_create([
+                BOQItem(boq=boq, **item_data)
+                for item_data in get_standard_boq_items()
+            ])
+        else:
+            return render(request, 'projects/boq_detail.html', {
+                'project': project,
+                'boq':     None,
+                'role':    role,
+            })
+
+    # Handle POST actions
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+
+        if action == 'save_design' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+            boq.notes = request.POST.get('notes', '').strip() or None
+            boq.save(update_fields=['notes'])
+            for item in boq.items.all():
+                qty_str    = request.POST.get(f'boq_qty_{item.pk}', '').strip()
+                vendor_str = request.POST.get(f'make_pref_{item.pk}', '').strip()
+                try:
+                    item.boq_quantity = Decimal(qty_str) if qty_str else None
+                except InvalidOperation:
+                    item.boq_quantity = None
+                item.make_preference_id = int(vendor_str) if vendor_str.isdigit() else None
+                item.save(update_fields=['boq_quantity', 'make_preference'])
+            messages.success(request, 'BOQ saved.')
+            return redirect('boq_detail', project_id=project_id)
+
+        elif action == 'save_scm' and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
+            for item in boq.items.all():
+                qty_str    = request.POST.get(f'ord_qty_{item.pk}', '').strip()
+                vendor_str = request.POST.get(f'ord_vendor_{item.pk}', '').strip()
+                try:
+                    item.ordered_quantity = Decimal(qty_str) if qty_str else None
+                except InvalidOperation:
+                    item.ordered_quantity = None
+                item.ordered_vendor_id = int(vendor_str) if vendor_str.isdigit() else None
+                item.save(update_fields=['ordered_quantity', 'ordered_vendor'])
+            messages.success(request, 'Ordered details saved.')
+            return redirect('boq_detail', project_id=project_id)
+
+        elif action == 'add_item' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+            category    = request.POST.get('new_category', 'Other')
+            description = request.POST.get('new_description', '').strip()
+            uom         = request.POST.get('new_uom', 'Nos')
+            if description:
+                last_serial = boq.items.aggregate(Max('serial_no'))['serial_no__max'] or 0
+                BOQItem.objects.create(
+                    boq=boq, serial_no=last_serial + 1,
+                    category=category, description=description,
+                    uom=uom, is_standard_item=False,
+                )
+                messages.success(request, 'Row added.')
+            return redirect('boq_detail', project_id=project_id)
+
+        elif action == 'delete_item' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+            item_id = request.POST.get('item_id', '')
+            if item_id:
+                BOQItem.objects.filter(pk=item_id, boq=boq, is_standard_item=False).delete()
+                messages.success(request, 'Row deleted.')
+            return redirect('boq_detail', project_id=project_id)
+
+        return redirect('boq_detail', project_id=project_id)
+
+    items             = boq.items.select_related('make_preference', 'ordered_vendor').order_by('serial_no')
+    items_by_category = {}
+    for item in items:
+        items_by_category.setdefault(item.category, []).append(item)
+
+    return render(request, 'projects/boq_detail.html', {
+        'project':             project,
+        'boq':                 boq,
+        'items':               items,
+        'items_by_category':   items_by_category.items(),
+        'role':                role,
+        'vendors_by_category': _build_vendors_by_category(),
+        'category_choices':    BOQItem.CATEGORY_CHOICES,
+        'uom_choices':         BOQItem.UOM_CHOICES,
+        'today':               date.today(),
+    })
+
+
+@login_required
+def boq_submit(request, project_id):
+    if request.method != 'POST':
+        return redirect('boq_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role != 'Design':
+        return HttpResponseForbidden()
+
+    boq = get_object_or_404(BOQ, project=project)
+
+    if boq.status not in ('Draft', 'Revision Requested'):
+        messages.error(request, 'BOQ cannot be submitted in its current state.')
+        return redirect('boq_detail', project_id=project_id)
+
+    if not boq.items.filter(boq_quantity__gt=0).exists():
+        messages.error(request, 'At least one item must have a BOQ quantity before submitting.')
+        return redirect('boq_detail', project_id=project_id)
+
+    is_resubmission = boq.status == 'Revision Requested'
+    new_version     = boq.version + 1 if is_resubmission else boq.version
+    reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
+
+    snapshot = list(boq.items.values(
+        'serial_no', 'category', 'description', 'uom',
+        'boq_quantity', 'ordered_quantity',
+        'make_preference__name', 'ordered_vendor__name',
+    ))
+
+    BOQRevision.objects.create(
+        boq=boq, revised_by=profile,
+        version=new_version, reason=reason, snapshot=snapshot,
+    )
+
+    boq.status       = 'Submitted'
+    boq.submitted_by = profile
+    boq.submitted_at = timezone.now()
+    if is_resubmission:
+        boq.version = new_version
+    boq.save()
+
+    messages.success(request, 'BOQ submitted to SCM for review.')
+    return redirect('boq_detail', project_id=project_id)
+
+
+@login_required
+def boq_acknowledge(request, project_id):
+    if request.method != 'POST':
+        return redirect('boq_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role != 'SCM':
+        return HttpResponseForbidden()
+
+    boq = get_object_or_404(BOQ, project=project)
+
+    if boq.status != 'Submitted':
+        messages.error(request, 'Only submitted BOQs can be acknowledged.')
+        return redirect('boq_detail', project_id=project_id)
+
+    boq.status = 'Acknowledged'
+    boq.save()
+
+    messages.success(request, 'BOQ acknowledged.')
+    return redirect('boq_detail', project_id=project_id)
+
+
+@login_required
+def boq_request_revision(request, project_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role != 'PM':
+        return HttpResponseForbidden()
+
+    boq = get_object_or_404(BOQ, project=project)
+
+    if boq.status not in ('Submitted', 'Acknowledged'):
+        messages.error(request, 'Revision can only be requested on Submitted or Acknowledged BOQs.')
+        return redirect('boq_detail', project_id=project_id)
+
+    if request.method == 'POST':
+        reason = request.POST.get('reason', '').strip()
+        if not reason:
+            messages.error(request, 'Please provide a reason for the revision request.')
+            return render(request, 'projects/boq_request_revision.html', {
+                'project': project,
+                'boq':     boq,
+            })
+
+        snapshot = list(boq.items.values(
+            'serial_no', 'category', 'description', 'uom',
+            'boq_quantity', 'ordered_quantity',
+        ))
+        BOQRevision.objects.create(
+            boq=boq, revised_by=profile,
+            version=boq.version, reason=f'Revision requested: {reason}',
+            snapshot=snapshot,
+        )
+        boq.status = 'Revision Requested'
+        boq.save()
+
+        messages.success(request, 'Revision requested. Design team will be notified.')
+        return redirect('boq_detail', project_id=project_id)
+
+    return render(request, 'projects/boq_request_revision.html', {
+        'project': project,
+        'boq':     boq,
+    })
+
+
+@login_required
+def boq_history(request, project_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role not in ('PM', 'Design', 'SCM', 'Admin'):
+        return HttpResponseForbidden()
+
+    boq       = get_object_or_404(BOQ, project=project)
+    revisions = boq.revisions.select_related('revised_by__user').order_by('-version')
+
+    return render(request, 'projects/boq_history.html', {
+        'project':   project,
+        'boq':       boq,
+        'revisions': revisions,
+    })

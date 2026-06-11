@@ -1,7 +1,7 @@
 import re
 from django import forms
 from django.contrib.auth.models import User
-from .models import UserProfile, Project, ProjectPhase, Task
+from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory
 
 
 class UserCreateForm(forms.Form):
@@ -280,3 +280,53 @@ class TaskAddForm(forms.Form):
         super().__init__(*args, **kwargs)
         if project is not None:
             self.fields['phase'].queryset = ProjectPhase.objects.filter(project=project)
+
+
+# ---------------------------------------------------------------------------
+# Vendor forms
+# ---------------------------------------------------------------------------
+
+_GST_RE = re.compile(
+    r'^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
+)
+
+
+class VendorForm(forms.ModelForm):
+
+    class Meta:
+        model  = Vendor
+        fields = [
+            'name', 'contact_person', 'phone', 'email', 'address',
+            'gst_number', 'msme_status', 'msme_number', 'categories',
+        ]
+        widgets = {
+            'address':    forms.Textarea(attrs={'rows': 3, 'class': 'form-control'}),
+            'categories': forms.CheckboxSelectMultiple(),
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name, field in self.fields.items():
+            if name == 'categories':
+                continue
+            if isinstance(field.widget, forms.CheckboxInput):
+                field.widget.attrs.setdefault('class', 'form-check-input')
+            else:
+                field.widget.attrs.setdefault('class', 'form-control')
+        self.fields['categories'].queryset = VendorCategory.objects.all()
+
+    def clean_gst_number(self):
+        value = (self.cleaned_data.get('gst_number') or '').strip().upper()
+        if value and not _GST_RE.fullmatch(value):
+            raise forms.ValidationError(
+                'Enter a valid 15-character GST number (e.g. 09ABCDE1234F1Z5).'
+            )
+        return value or None
+
+    def clean(self):
+        cleaned = super().clean()
+        if cleaned.get('msme_status') and not (cleaned.get('msme_number') or '').strip():
+            self.add_error('msme_number', 'MSME number is required when MSME status is checked.')
+        if not cleaned.get('categories'):
+            self.add_error('categories', 'Select at least one category.')
+        return cleaned

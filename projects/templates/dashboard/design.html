@@ -4,7 +4,7 @@
 {% block content %}
 <h4 class="mb-4">Design Dashboard</h4>
 
-{# ── Row 1: Summary cards ─────────────────────────────────────────────── #}
+{# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
 <div class="row g-3 mb-4">
   <div class="col-md-4">
     <div class="card text-center shadow-sm h-100">
@@ -32,129 +32,93 @@
   </div>
 </div>
 
-{# ── Row 2: Tasks grouped by project ─────────────────────────────────── #}
+{# ── Row 2+: Tasks grouped by project, two cards per row ─────────────── #}
 {% if tasks_qs %}
   {% regroup tasks_qs by phase.project as project_groups %}
-  {% for group in project_groups %}
-  <div class="card shadow-sm mb-3">
-    <div class="card-header">
-      <span class="fw-bold">{{ group.grouper.project_id }}</span>
-      <span class="text-muted ms-2">{{ group.grouper.customer_name }}</span>
-      <a href="{% url 'project_detail' group.grouper.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
-    </div>
-    <div class="card-body p-0">
-      <table class="table table-sm table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Task</th>
-            <th style="width:7rem;">Type</th>
-            <th>Phase</th>
-            <th style="width:7rem;">Due Date</th>
-            <th style="width:8rem;">Status</th>
-            <th style="width:10rem;">Update</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for task in group.list %}
-          <tr>
-            <td>{{ task.task_name }}</td>
-            <td>
-              {% if task.task_type == 'Internal' %}
-                <span class="badge bg-primary">Internal</span>
-              {% else %}
-                <span class="badge bg-warning text-dark">External</span>
-              {% endif %}
-            </td>
-            <td class="text-muted small">{{ task.phase.phase_name }}</td>
-            <td>
-              {% if task.task_type == 'Internal' and task.due_date < today and task.status != 'Done' %}
-                <span class="text-danger fw-semibold">{{ task.due_date }}</span>
-              {% else %}
-                {{ task.due_date }}
-              {% endif %}
-            </td>
-            <td>
-              {% if task.status == 'Done' %}
-                <span class="badge bg-success">Done</span>
-              {% elif task.status == 'Blocked' %}
-                <span class="badge bg-danger">Blocked</span>
-              {% elif task.status == 'In Progress' %}
-                <span class="badge bg-primary">In Progress</span>
-              {% else %}
-                <span class="badge bg-secondary">Not Started</span>
-              {% endif %}
-            </td>
-            <td>
-              {% if task.status != 'Done' %}
-              <form method="post" action="{% url 'task_status_update' group.grouper.project_id task.pk %}" class="d-inline">
-                {% csrf_token %}
-                <input type="hidden" name="next" value="{{ request.path }}">
-                <select name="status" onchange="this.form.submit()" class="form-select form-select-sm" style="width:auto;">
-                  {% if task.status == 'Not Started' %}
-                    <option value="Not Started" selected>Not Started</option>
-                    <option value="In Progress">In Progress</option>
-                    <option value="Blocked">Blocked</option>
-                  {% elif task.status == 'In Progress' %}
-                    <option value="In Progress" selected>In Progress</option>
-                    <option value="Done">Done</option>
-                    <option value="Blocked">Blocked</option>
-                  {% elif task.status == 'Blocked' %}
-                    <option value="Blocked" selected>Blocked</option>
-                    <option value="In Progress">In Progress</option>
+  <div class="row g-3 mb-4">
+    {% for group in project_groups %}
+    <div class="col-12 col-md-6 mb-4">
+      <div class="card h-100">
+        <div class="card-header">
+          <span class="fw-bold">{{ group.grouper.project_id }}</span>
+          <span class="text-muted ms-2">{{ group.grouper.customer_name }}</span>
+          <a href="{% url 'project_detail' group.grouper.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
+        </div>
+        <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Task</th>
+                <th>Phase</th>
+                <th style="width:7rem;">Due Date</th>
+                <th style="width:8rem;">Status</th>
+                <th style="width:10rem;">Update</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for task in group.list %}
+              <tr>
+                <td>{{ task.task_name }}</td>
+                <td class="text-muted small">{{ task.phase.phase_name }}</td>
+                <td>
+                  {% if task.due_date %}
+                    {% if task.task_type == 'Internal' and task.due_date < today and task.status != 'Done' %}
+                      <span class="text-danger fw-semibold">{{ task.due_date }}</span>
+                    {% else %}
+                      {{ task.due_date }}
+                    {% endif %}
+                  {% else %}
+                    <span class="text-muted">—</span>
                   {% endif %}
-                </select>
-              </form>
-              {% else %}
-                <span class="text-muted small">Completed</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+                </td>
+                <td>
+                  {% if task.status == 'Done' %}
+                    <span class="badge bg-success">Done</span>
+                  {% elif task.status == 'Blocked' %}
+                    <span class="badge bg-danger">Blocked</span>
+                  {% elif task.status == 'In Progress' %}
+                    <span class="badge bg-primary">In Progress</span>
+                  {% else %}
+                    <span class="badge bg-secondary">Not Started</span>
+                  {% endif %}
+                </td>
+                <td>
+                  {% if task.status != 'Done' %}
+                  <form method="post" action="{% url 'task_status_update' group.grouper.project_id task.pk %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="next" value="{{ request.path }}">
+                    <select name="status" onchange="this.form.submit()" class="form-select form-select-sm" style="width:auto;">
+                      {% if task.status == 'Not Started' %}
+                        <option value="Not Started" selected>Not Started</option>
+                        <option value="In Progress">In Progress</option>
+                        <option value="Blocked">Blocked</option>
+                      {% elif task.status == 'In Progress' %}
+                        <option value="In Progress" selected>In Progress</option>
+                        <option value="Done">Done</option>
+                        <option value="Blocked">Blocked</option>
+                      {% elif task.status == 'Blocked' %}
+                        <option value="Blocked" selected>Blocked</option>
+                        <option value="In Progress">In Progress</option>
+                      {% endif %}
+                    </select>
+                  </form>
+                  {% else %}
+                    <span class="text-muted small">Completed</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
+    {% endfor %}
   </div>
-  {% endfor %}
 {% else %}
 <div class="card shadow-sm">
   <div class="card-body text-center py-5 text-muted">
     No design tasks assigned to you on active projects.
-  </div>
-</div>
-{% endif %}
-
-{# ── Due Date Change Notifications ───────────────────────────────────── #}
-{% if due_date_changes %}
-<div class="card shadow-sm mb-4 border-warning">
-  <div class="card-header fw-semibold" style="background:#fff8e1;">
-    Due Date Changes — Last 7 Days
-    <span class="badge bg-warning text-dark ms-2">{{ due_date_changes|length }}</span>
-  </div>
-  <div class="card-body p-0">
-    <table class="table table-sm mb-0">
-      <thead class="table-light">
-        <tr>
-          <th>Task</th>
-          <th>Project</th>
-          <th style="width:7rem;">Old Date</th>
-          <th style="width:7rem;">New Date</th>
-          <th style="width:9rem;">Changed By</th>
-          <th style="width:8rem;">When</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for c in due_date_changes %}
-        <tr>
-          <td>{{ c.task.task_name }}</td>
-          <td><a href="{% url 'project_detail' c.task.phase.project.project_id %}" class="text-decoration-none">{{ c.task.phase.project.project_id }}</a></td>
-          <td class="text-muted">{{ c.old_date|default:"—" }}</td>
-          <td class="fw-semibold">{{ c.new_date|default:"—" }}</td>
-          <td class="text-muted small">{{ c.changed_by.user.get_full_name|default:c.changed_by.user.username }}</td>
-          <td class="text-muted small">{{ c.changed_at|timesince }} ago</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
   </div>
 </div>
 {% endif %}

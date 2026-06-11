@@ -1,0 +1,97 @@
+DATE: 08-June-2026
+DAY: 1 of 24
+
+COMPLETED TODAY:
+- Login system with role-based redirect (all 7 roles)
+- UserProfile model with role choices
+- User management UI (create, edit, deactivate)
+- role_required and login_required decorators
+- Placeholder dashboards for all 7 roles
+- Data migration for superuser UserProfile
+- Deployed and tested on Railway
+
+CURRENT STATE:
+- All 7 role logins working on production URL
+- User creation, edit, deactivation working
+- All 7 dashboard placeholders loading correctly
+- Migrations applied to Railway PostgreSQL
+
+KNOWN ISSUES / INCOMPLETE:
+- User edit was not working , but corrected in one attempt
+
+NEXT SESSION GOAL:
+Project Creation (manual form)
+
+TASK TEMPLATE — LOCKED DECISIONS:
+- 51 tasks, 9 phases, Residential only
+- Project ID format: HRP-RES-2026-001
+- Capacity field name: capacity_kw
+- Design is a valid assigned_role on Task model
+- O&M deferred to Phase 2
+- OPEX/CAPEX: tasks added manually post-activation
+- Payment milestones embedded at tasks 2, 28, 51
+- Board demo trigger: Task 'Plant Commissioning'
+  Phase 8, assigned to Site Engineer
+
+PHASE 2 BACKLOG:
+- Task dependencies (TaskDependency model,
+  predecessor validation on status update,
+  blocked state auto-assignment)
+  Trigger: after board demo, informed by
+  pilot project data from champion PM
+
+
+DATE: 09-June-2026
+DAY: 2 of 24
+
+COMPLETED TODAY:
+- Project model with capacity_kw, project_type,
+  all fields deployed to Railway PostgreSQL
+- ProjectPhase model (9 phases)
+- Task model with 6 role choices including Design
+- Project creation form (PM only)
+- Project detail view with phase/task grouping
+- Project list view (role-filtered)
+- Activate Project with 51-task residential template
+- Manual task-add for OPEX/CAPEX
+- Task status update with role-based permission
+- Project ID format: HRP-RES-2026-001
+- All 7 views deployed and tested on production
+
+VERIFIED ON PRODUCTION:
+- Role distribution: BD/Sales=1, Design=6,
+  Finance=3, PM=14, SCM=12, Site Engineer=15
+- Task count assertion passing at 51
+- HRP prefix confirmed in project IDs
+- PM isolation working (404 on other PM projects)
+- OPEX/CAPEX manual task add working
+
+KNOWN ISSUES / INCOMPLETE:
+everything working fine, Procfile and old model for project created issue, but resolved and both updated
+
+DAY 3 READY TO BUILD:
+- Prompt saved at: day3_claude_code_prompt.txt
+- Task model needs: duration_days, task_type
+- 39 internal tasks, 12 external tasks
+- PM, SE, Design, SCM dashboards
+- Full prompt ready, start fresh thread
+
+DATE: 10-June-2026
+DAY: 3 of 24
+COMPLETED TODAY:
+- duration_days, task_type fields on Task model
+- assigned_to ForeignKey (PM/SE pre-assigned on activation)
+- add_workdays() — calendar days, no weekend skip
+- calculate_due_dates() — chain from activation date
+- Recalculate Due Dates button (backfills existing projects)
+- PM dashboard — 4 summary cards, internal/external split
+- Site Engineer dashboard — assigned tasks view
+- Design dashboard — role-filtered tasks
+- SCM dashboard — role-filtered tasks
+- Assign modal — inline, dropdown filtered by role
+VERIFIED:
+- Due dates calculating correctly from activation date
+- Assign modal populates by role
+- All 4 dashboards loading
+NEXT SESSION GOAL:
+- Day 4: Issues & Comments module + Finance dashboard

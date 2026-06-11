@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Request Revision — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">Request BOQ Revision — {{ project.project_id }}</h4>
+</div>
+
+{% if messages %}
+  {% for msg in messages %}
+  <div class="alert alert-danger alert-dismissible fade show" role="alert">
+    {{ msg }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endfor %}
+{% endif %}
+
+<div class="row">
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          Project: <strong>{{ project.project_id }}</strong> —
+          {{ project.customer_name }}<br>
+          Current BOQ status:
+          {% if boq.status == 'Submitted' %}
+            <span class="badge bg-primary">Submitted</span>
+          {% elif boq.status == 'Acknowledged' %}
+            <span class="badge bg-success">Acknowledged</span>
+          {% endif %}
+          v{{ boq.version }}
+        </p>
+
+        <form method="post">
+          {% csrf_token %}
+          <div class="mb-3">
+            <label class="form-label fw-semibold">
+              Reason for Revision <span class="text-danger">*</span>
+            </label>
+            <textarea name="reason" class="form-control" rows="4" required
+                      placeholder="Describe what needs to be changed…"></textarea>
+          </div>
+          <div class="d-flex gap-2">
+            <button type="submit" class="btn btn-warning">Request Revision</button>
+            <a href="{% url 'boq_detail' project.project_id %}"
+               class="btn btn-outline-secondary">Cancel</a>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

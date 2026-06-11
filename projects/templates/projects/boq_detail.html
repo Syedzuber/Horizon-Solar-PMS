@@ -1,0 +1,384 @@
+{% extends "base.html" %}
+{% block title %}BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Page header ── #}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h4 class="mb-1">Bill of Quantities — {{ project.project_id }}</h4>
+    <small class="text-muted">{{ project.customer_name }} · {{ project.city }}</small>
+  </div>
+  <div class="d-flex gap-2 align-items-center">
+    {% if boq %}
+      {% if boq.status == 'Draft' %}
+        <span class="badge bg-secondary fs-6 fw-normal">Draft</span>
+      {% elif boq.status == 'Submitted' %}
+        <span class="badge bg-primary fs-6 fw-normal">Submitted</span>
+      {% elif boq.status == 'Acknowledged' %}
+        <span class="badge bg-success fs-6 fw-normal">Acknowledged</span>
+      {% elif boq.status == 'Revision Requested' %}
+        <span class="badge bg-warning text-dark fs-6 fw-normal">Revision Requested</span>
+      {% endif %}
+      <span class="text-muted small">v{{ boq.version }}</span>
+      <a href="{% url 'boq_history' project.project_id %}" class="btn btn-outline-secondary btn-sm">History</a>
+    {% endif %}
+    <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
+  </div>
+</div>
+
+{% if messages %}
+  {% for msg in messages %}
+  <div class="alert alert-dismissible fade show
+    {% if msg.tags == 'error' %}alert-danger
+    {% elif msg.tags == 'warning' %}alert-warning
+    {% else %}alert-success{% endif %}" role="alert">
+    {{ msg }}
+    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+  </div>
+  {% endfor %}
+{% endif %}
+
+{# ── No BOQ yet (non-Design roles) ── #}
+{% if not boq %}
+  <div class="alert alert-info">BOQ not yet created by the Design team.</div>
+
+{% else %}
+
+{# ════════════════════════════════════════════════════════
+   Out-of-table forms — associated via the HTML `form`
+   attribute so they can live outside the <table> DOM.
+   ════════════════════════════════════════════════════════ #}
+
+{% if role == 'Design' %}
+  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+
+  {# Form 1: save Design fields (qty + make preference) #}
+  <form id="saveDesignForm" method="post" action="{% url 'boq_detail' project.project_id %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="save_design">
+  </form>
+
+  {# Form 2: add non-standard row (modal submits this) #}
+  <form id="addRowForm" method="post" action="{% url 'boq_detail' project.project_id %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="add_item">
+    <input type="hidden" id="addRowCategory" name="new_category" value="">
+  </form>
+
+  {# One delete form per non-standard item #}
+  {% for item in items %}
+    {% if not item.is_standard_item %}
+    <form id="delForm_{{ item.pk }}" method="post" action="{% url 'boq_detail' project.project_id %}">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="delete_item">
+      <input type="hidden" name="item_id" value="{{ item.pk }}">
+    </form>
+    {% endif %}
+  {% endfor %}
+
+  {% endif %}{# /Draft or Revision Requested #}
+{% endif %}{# /Design #}
+
+{% if role == 'SCM' %}
+  {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+  <form id="saveSCMForm" method="post" action="{% url 'boq_detail' project.project_id %}">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="save_scm">
+  </form>
+  {% endif %}
+{% endif %}
+
+{# ── Notes ── #}
+{% if role == 'Design' and boq.status == 'Draft' or role == 'Design' and boq.status == 'Revision Requested' %}
+<div class="mb-3">
+  <label class="form-label fw-semibold">Notes</label>
+  <textarea form="saveDesignForm" name="notes"
+            class="form-control" rows="2"
+            placeholder="Optional notes for SCM…">{{ boq.notes|default:'' }}</textarea>
+</div>
+{% elif boq.notes %}
+<div class="border rounded p-2 bg-light small mb-3">
+  <span class="fw-semibold text-muted">Notes:</span> {{ boq.notes }}
+</div>
+{% endif %}
+
+{# ── SCM submitted_by / submitted_at info ── #}
+{% if boq.submitted_at %}
+<p class="text-muted small mb-3">
+  Submitted by {{ boq.submitted_by.user.get_full_name|default:boq.submitted_by.user.username }}
+  on {{ boq.submitted_at|date:"d M Y, H:i" }}
+</p>
+{% endif %}
+
+{# ── Items grouped by category ── #}
+{% for category_name, category_items in items_by_category %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header fw-semibold py-2 d-flex justify-content-between align-items-center">
+    <span>{{ category_name }}</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:3rem;">#</th>
+            {% if role == 'Design' %}
+              <th>Description</th>
+              <th style="width:5rem;">UOM</th>
+              <th style="width:9rem;">Quantity</th>
+              <th style="width:16rem;">Make Preference</th>
+              <th style="width:3rem;"></th>
+            {% elif role == 'SCM' %}
+              <th>Description</th>
+              <th style="width:5rem;">UOM</th>
+              <th style="width:8rem;">BOQ Qty</th>
+              <th style="width:9rem;">Ordered Qty</th>
+              <th style="width:13rem;">Make Preference</th>
+              <th style="width:16rem;">Ordered Vendor</th>
+            {% else %}
+              <th>Description</th>
+              <th style="width:5rem;">UOM</th>
+              <th style="width:8rem;">BOQ Qty</th>
+              <th style="width:8rem;">Ordered Qty</th>
+              <th style="width:8rem;">Variance</th>
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in category_items %}
+          <tr>
+            <td class="text-muted small align-middle">{{ item.serial_no }}</td>
+
+            {% if role == 'Design' %}
+              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle small text-muted">{{ item.uom }}</td>
+              <td class="align-middle">
+                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                <input form="saveDesignForm"
+                       type="number" step="0.01" min="0"
+                       name="boq_qty_{{ item.pk }}"
+                       value="{{ item.boq_quantity|default:'' }}"
+                       class="form-control form-control-sm">
+                {% else %}
+                  {{ item.boq_quantity|default:"—" }}
+                {% endif %}
+              </td>
+              <td class="align-middle">
+                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                <select form="saveDesignForm"
+                        name="make_pref_{{ item.pk }}"
+                        class="form-select form-select-sm vendor-select"
+                        data-category="{{ item.category }}"
+                        data-selected="{{ item.make_preference_id|default:'' }}">
+                  <option value="">— None —</option>
+                </select>
+                {% else %}
+                  {{ item.make_preference.name|default:"—" }}
+                {% endif %}
+              </td>
+              <td class="align-middle text-center">
+                {% if not item.is_standard_item %}
+                  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+                  <button type="submit" form="delForm_{{ item.pk }}"
+                          class="btn btn-outline-danger btn-sm py-0 px-1"
+                          title="Delete row"
+                          onclick="return confirm('Delete this row?')">×</button>
+                  {% endif %}
+                {% endif %}
+              </td>
+
+            {% elif role == 'SCM' %}
+              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle small text-muted">{{ item.uom }}</td>
+              <td class="align-middle text-muted">{{ item.boq_quantity|default:"—" }}</td>
+              <td class="align-middle">
+                {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+                <input form="saveSCMForm"
+                       type="number" step="0.01" min="0"
+                       name="ord_qty_{{ item.pk }}"
+                       value="{{ item.ordered_quantity|default:'' }}"
+                       class="form-control form-control-sm">
+                {% else %}
+                  {{ item.ordered_quantity|default:"—" }}
+                {% endif %}
+              </td>
+              <td class="align-middle small text-muted">{{ item.make_preference.name|default:"—" }}</td>
+              <td class="align-middle">
+                {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+                <select form="saveSCMForm"
+                        name="ord_vendor_{{ item.pk }}"
+                        class="form-select form-select-sm vendor-select"
+                        data-category="{{ item.category }}"
+                        data-selected="{{ item.ordered_vendor_id|default:'' }}">
+                  <option value="">— None —</option>
+                </select>
+                {% else %}
+                  {{ item.ordered_vendor.name|default:"—" }}
+                {% endif %}
+              </td>
+
+            {% else %}{# PM / Admin — read-only #}
+              <td class="align-middle">{{ item.description }}</td>
+              <td class="align-middle small text-muted">{{ item.uom }}</td>
+              <td class="align-middle">{{ item.boq_quantity|default:"—" }}</td>
+              <td class="align-middle">{{ item.ordered_quantity|default:"—" }}</td>
+              <td class="align-middle
+                {% if item.boq_quantity and item.ordered_quantity %}
+                  {% if item.boq_quantity != item.ordered_quantity %}table-warning{% endif %}
+                {% endif %}">
+                {% if item.boq_quantity and item.ordered_quantity %}
+                  {% if item.boq_quantity != item.ordered_quantity %}
+                    &#9651; {{ item.ordered_quantity|floatformat:2 }}
+                  {% else %}
+                    <span class="text-success">&#10003;</span>
+                  {% endif %}
+                {% else %}—{% endif %}
+              </td>
+            {% endif %}
+
+          </tr>
+          {% endfor %}
+        </tbody>
+        {% if role == 'Design' %}
+          {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+        <tfoot>
+          <tr>
+            <td colspan="6" class="py-2 ps-3">
+              <button type="button"
+                      class="btn btn-outline-primary btn-sm"
+                      onclick="openAddRowModal('{{ category_name }}')">
+                + Add Row
+              </button>
+            </td>
+          </tr>
+        </tfoot>
+          {% endif %}
+        {% endif %}
+      </table>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{# ── Bottom action buttons ── #}
+<div class="d-flex gap-2 mt-2 mb-5">
+  {% if role == 'Design' %}
+    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+    <button type="submit" form="saveDesignForm" class="btn btn-secondary">Save Draft</button>
+    <form method="post" action="{% url 'boq_submit' project.project_id %}" class="d-inline">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-primary"
+              onclick="return confirm('Submit this BOQ to SCM for review?')">
+        Submit to SCM
+      </button>
+    </form>
+    {% endif %}
+
+  {% elif role == 'SCM' %}
+    {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+    <button type="submit" form="saveSCMForm" class="btn btn-secondary">Save</button>
+    {% endif %}
+    {% if boq.status == 'Submitted' %}
+    <form method="post" action="{% url 'boq_acknowledge' project.project_id %}" class="d-inline">
+      {% csrf_token %}
+      <button type="submit" class="btn btn-success"
+              onclick="return confirm('Acknowledge this BOQ?')">
+        Acknowledge
+      </button>
+    </form>
+    {% endif %}
+
+  {% elif role == 'PM' %}
+    {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+    <a href="{% url 'boq_request_revision' project.project_id %}" class="btn btn-warning">
+      Request Revision
+    </a>
+    {% endif %}
+  {% endif %}
+</div>
+
+{% endif %}{# /if boq #}
+
+{# ── Vendor data for JS dropdown filtering ── #}
+{{ vendors_by_category|json_script:"vendors-by-category" }}
+
+{# ── Add Row modal ── #}
+{% if role == 'Design' %}
+  {% if boq %}
+    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
+<div class="modal fade" id="addRowModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title">Add Row — <span id="addRowCategoryLabel"></span></h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Description <span class="text-danger">*</span></label>
+          <input form="addRowForm" type="text" name="new_description"
+                 id="addRowDescription" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">UOM</label>
+          <select form="addRowForm" name="new_uom" class="form-select">
+            {% for val, label in uom_choices %}
+            <option value="{{ val }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="submit" form="addRowForm" class="btn btn-primary">Add Row</button>
+      </div>
+    </div>
+  </div>
+</div>
+    {% endif %}
+  {% endif %}
+{% endif %}
+
+<script>
+// Populate each vendor <select> with vendors matching that row's category.
+// Vendor data is embedded as JSON by the json_script tag above.
+(function () {
+  const dataEl = document.getElementById('vendors-by-category');
+  if (!dataEl) return;
+  const vendorsByCat = JSON.parse(dataEl.textContent);
+
+  function populateVendorSelect(sel) {
+    const category   = sel.dataset.category;
+    const selectedId = sel.dataset.selected;
+    const vendors    = vendorsByCat[category] || [];
+
+    sel.innerHTML = '<option value="">— None —</option>';
+    vendors.forEach(function (v) {
+      const opt    = document.createElement('option');
+      opt.value    = v.id;
+      opt.textContent = v.name;
+      if (String(v.id) === String(selectedId)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  // Filter all vendor dropdowns on page load.
+  document.querySelectorAll('select.vendor-select').forEach(populateVendorSelect);
+}());
+
+// Open the Add Row modal and pre-set the hidden category field.
+var addRowModalEl = document.getElementById('addRowModal');
+var addRowBsModal = addRowModalEl ? new bootstrap.Modal(addRowModalEl) : null;
+
+function openAddRowModal(category) {
+  document.getElementById('addRowCategory').value = category;
+  document.getElementById('addRowCategoryLabel').textContent = category;
+  // Clear previous description input so the modal is fresh.
+  var desc = document.getElementById('addRowDescription');
+  if (desc) desc.value = '';
+  if (addRowBsModal) addRowBsModal.show();
+}
+</script>
+
+{% endblock %}

@@ -245,3 +245,174 @@ class UserProfile(models.Model):
 
     def __str__(self):
         return f"{self.user.username} ({self.role})"
+
+
+class VendorCategory(models.Model):
+    name = models.CharField(max_length=50, unique=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name_plural = 'Vendor Categories'
+
+    def __str__(self):
+        return self.name
+
+
+class Vendor(models.Model):
+    name           = models.CharField(max_length=200)
+    contact_person = models.CharField(max_length=100)
+    phone          = models.CharField(max_length=15)
+    email          = models.EmailField(null=True, blank=True)
+    gst_number     = models.CharField(max_length=15, null=True, blank=True)
+    msme_status    = models.BooleanField(default=False)
+    msme_number    = models.CharField(max_length=50, null=True, blank=True)
+    address        = models.TextField(null=True, blank=True)
+    categories     = models.ManyToManyField(VendorCategory, related_name='vendors')
+    is_active      = models.BooleanField(default=True)
+    created_by     = models.ForeignKey(
+        'UserProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+    )
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-is_active', 'name']
+
+    def __str__(self):
+        return self.name
+
+
+def get_standard_boq_items():
+    return [
+        {'serial_no':  1, 'category': 'Solar Modules', 'description': '595Wp Solar modules DCR',                                                                           'uom': 'Nos'},
+        {'serial_no':  2, 'category': 'Solar Modules', 'description': 'Module Transport',                                                                                  'uom': 'Nos'},
+        {'serial_no':  3, 'category': 'Structure',     'description': 'Module Mounting Structure with STAAD report HDGI/GI',                                               'uom': 'LOT'},
+        {'serial_no':  4, 'category': 'Structure',     'description': 'Module Mounting Structures transport',                                                              'uom': 'LOT'},
+        {'serial_no':  5, 'category': 'Inverter',      'description': '10 kW Grid-Tie Inverter Single Phase',                                                              'uom': 'Nos'},
+        {'serial_no':  6, 'category': 'Inverter',      'description': 'Data Logger if required',                                                                           'uom': 'Nos'},
+        {'serial_no':  7, 'category': 'Inverter',      'description': 'Inverter Transport',                                                                                'uom': 'Nos'},
+        {'serial_no':  8, 'category': 'BOS',           'description': '1CX4sqmm XLPE Tin Cu string cables RED',                                                           'uom': 'Mtr'},
+        {'serial_no':  9, 'category': 'BOS',           'description': '1CX4sqmm XLPE Tin Cu string cables Black',                                                         'uom': 'Mtr'},
+        {'serial_no': 10, 'category': 'BOS',           'description': '4C X 6mm2 XLPE Tin Cu cables',                                                                     'uom': 'Mtr'},
+        {'serial_no': 11, 'category': 'BOS',           'description': '1CX6mm2 Earthing cable Green',                                                                     'uom': 'Mtr'},
+        {'serial_no': 12, 'category': 'BOS',           'description': 'MC4 Connectors Male and Female',                                                                   'uom': 'Nos'},
+        {'serial_no': 13, 'category': 'BOS',           'description': 'PVC Conduit 25MM',                                                                                 'uom': 'Mtr'},
+        {'serial_no': 14, 'category': 'BOS',           'description': 'Flexible Conduit 25MM GI/PVC',                                                                     'uom': 'Mtr'},
+        {'serial_no': 15, 'category': 'BOS',           'description': 'PVC Elbow 25MM',                                                                                   'uom': 'Nos'},
+        {'serial_no': 16, 'category': 'BOS',           'description': 'PVC Tee 25MM',                                                                                     'uom': 'Nos'},
+        {'serial_no': 17, 'category': 'BOS',           'description': 'PVC Nail Clip 25MM 150PCS',                                                                        'uom': 'Pkt'},
+        {'serial_no': 18, 'category': 'BOS',           'description': 'CU Pin LUG 4 SQMM',                                                                               'uom': 'Nos'},
+        {'serial_no': 19, 'category': 'BOS',           'description': 'CU Ring LUG 4 SQMM',                                                                              'uom': 'Nos'},
+        {'serial_no': 20, 'category': 'BOS',           'description': 'CU Pin LUG 6 SQMM',                                                                               'uom': 'Nos'},
+        {'serial_no': 21, 'category': 'BOS',           'description': 'CU Ring LUG 6 SQMM',                                                                              'uom': 'Nos'},
+        {'serial_no': 22, 'category': 'BOS',           'description': 'Cable Tie 300MM UV resistant',                                                                     'uom': 'Pkt'},
+        {'serial_no': 23, 'category': 'BOS',           'description': 'PVC Tape Red Blue Black Yellow Green',                                                             'uom': 'Nos'},
+        {'serial_no': 24, 'category': 'BOS',           'description': 'Silver Spray Paint',                                                                               'uom': 'Nos'},
+        {'serial_no': 25, 'category': 'BOS',           'description': 'Lockfix for fixing fastener in RCC roof 500ML',                                                    'uom': 'Nos'},
+        {'serial_no': 26, 'category': 'BOS',           'description': 'HSV Hilti M12 Mechanical Wedge Anchors L-100MM',                                                   'uom': 'Nos'},
+        {'serial_no': 27, 'category': 'BOS',           'description': 'Fasteners Inverter Mounting',                                                                      'uom': 'Nos'},
+        {'serial_no': 28, 'category': 'BOS',           'description': 'ACDB-10KW 3P MCB4P 16 AMPS',                                                                      'uom': 'Nos'},
+        {'serial_no': 29, 'category': 'BOS',           'description': 'Copper Bonded Earthing Rod 1MTR chemical earthing',                                                'uom': 'Nos'},
+        {'serial_no': 30, 'category': 'BOS',           'description': 'Earthing Compound bag 25KG ECOSOLX',                                                               'uom': 'Nos'},
+        {'serial_no': 31, 'category': 'BOS',           'description': 'Heavy duty synthetic circular chamber',                                                            'uom': 'Nos'},
+        {'serial_no': 32, 'category': 'BOS',           'description': 'Conventional Lightning Arrestor 1Mtr IEC62305',                                                    'uom': 'Nos'},
+        {'serial_no': 33, 'category': 'BOS',           'description': 'PU Foam Sealant Spray 750ml for joint filling',                                                    'uom': 'Nos'},
+        {'serial_no': 34, 'category': 'BOS',           'description': 'Module Cleaning System without motor',                                                             'uom': 'Nos'},
+        {'serial_no': 35, 'category': 'BOS',           'description': 'Site Installation charges including civil work',                                                    'uom': 'Nos'},
+        {'serial_no': 36, 'category': 'BOS',           'description': 'Miscellaneous net metering transportation rubber mat fire extinguisher warning boards',             'uom': 'Nos'},
+        {'serial_no': 37, 'category': 'BOS',           'description': 'Contingency',                                                                                      'uom': 'LS'},
+    ]
+
+
+class BOQ(models.Model):
+
+    STATUS_CHOICES = [
+        ('Draft',              'Draft'),
+        ('Submitted',          'Submitted'),
+        ('Acknowledged',       'Acknowledged'),
+        ('Revision Requested', 'Revision Requested'),
+    ]
+
+    project      = models.OneToOneField(Project, on_delete=models.CASCADE, related_name='boq')
+    submitted_by = models.ForeignKey(
+        'UserProfile',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='submitted_boqs',
+    )
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    status       = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
+    version      = models.IntegerField(default=1)
+    notes        = models.TextField(null=True, blank=True)
+
+    def __str__(self):
+        return f"BOQ — {self.project.project_id} (v{self.version})"
+
+
+class BOQItem(models.Model):
+
+    CATEGORY_CHOICES = [
+        ('Solar Modules', 'Solar Modules'),
+        ('Structure',     'Structure'),
+        ('Inverter',      'Inverter'),
+        ('BOS',           'BOS'),
+        ('Other',         'Other'),
+    ]
+
+    UOM_CHOICES = [
+        ('Nos',  'Nos'),
+        ('LOT',  'LOT'),
+        ('Mtr',  'Mtr'),
+        ('Pkt',  'Pkt'),
+        ('LS',   'LS'),
+        ('Sets', 'Sets'),
+        ('Kg',   'Kg'),
+    ]
+
+    boq              = models.ForeignKey(BOQ, on_delete=models.CASCADE, related_name='items')
+    serial_no        = models.IntegerField()
+    category         = models.CharField(max_length=20, choices=CATEGORY_CHOICES)
+    description      = models.TextField()
+    make_preference  = models.ForeignKey(
+        Vendor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='preferred_items',
+    )
+    uom              = models.CharField(max_length=10, choices=UOM_CHOICES)
+    boq_quantity     = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    ordered_quantity = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    ordered_vendor   = models.ForeignKey(
+        Vendor,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ordered_items',
+    )
+    is_standard_item = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['serial_no']
+
+    def __str__(self):
+        return f"{self.boq.project.project_id} — Item {self.serial_no}: {self.description[:50]}"
+
+
+class BOQRevision(models.Model):
+
+    boq        = models.ForeignKey(BOQ, on_delete=models.CASCADE, related_name='revisions')
+    revised_by = models.ForeignKey('UserProfile', on_delete=models.SET_NULL, null=True)
+    revised_at = models.DateTimeField(auto_now_add=True)
+    version    = models.IntegerField()
+    reason     = models.TextField()
+    snapshot   = models.JSONField()
+
+    class Meta:
+        ordering = ['-version']
+
+    def __str__(self):
+        return f"BOQ {self.boq.project.project_id} — v{self.version} by {self.revised_by}"
