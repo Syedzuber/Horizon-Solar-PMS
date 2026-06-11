@@ -956,7 +956,7 @@ def boq_detail(request, project_id):
     if request.method == 'POST':
         action = request.POST.get('action', '')
 
-        if action == 'save_design' and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
+        if action in ('save_design', 'submit_design') and role == 'Design' and boq.status in ('Draft', 'Revision Requested'):
             boq.notes = request.POST.get('notes', '').strip() or None
             boq.save(update_fields=['notes'])
             for item in boq.items.all():
@@ -968,7 +968,35 @@ def boq_detail(request, project_id):
                     item.boq_quantity = None
                 item.make_preference_id = int(vendor_str) if vendor_str.isdigit() else None
                 item.save(update_fields=['boq_quantity', 'make_preference'])
-            messages.success(request, 'BOQ saved.')
+
+            if action == 'save_design':
+                messages.success(request, 'BOQ saved.')
+                return redirect('boq_detail', project_id=project_id)
+
+            # submit_design: validate then submit in one step
+            if not boq.items.filter(boq_quantity__gt=0).exists():
+                messages.error(request, 'Enter a quantity for at least one item before submitting.')
+                return redirect('boq_detail', project_id=project_id)
+
+            is_resubmission = boq.status == 'Revision Requested'
+            new_version     = boq.version + 1 if is_resubmission else boq.version
+            reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
+            snapshot = list(boq.items.values(
+                'serial_no', 'category', 'description', 'uom',
+                'boq_quantity', 'ordered_quantity',
+                'make_preference__name', 'ordered_vendor__name',
+            ))
+            BOQRevision.objects.create(
+                boq=boq, revised_by=profile,
+                version=new_version, reason=reason, snapshot=snapshot,
+            )
+            boq.status       = 'Submitted'
+            boq.submitted_by = profile
+            boq.submitted_at = timezone.now()
+            if is_resubmission:
+                boq.version = new_version
+            boq.save()
+            messages.success(request, 'BOQ submitted to SCM for review.')
             return redirect('boq_detail', project_id=project_id)
 
         elif action == 'save_scm' and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):

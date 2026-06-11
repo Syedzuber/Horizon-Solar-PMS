@@ -38,10 +38,9 @@
 {% if role == 'Design' %}
   {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
 
-  {# Form 1: save Design fields (qty + make preference) #}
+  {# Form 1: save/submit Design fields — action value comes from the clicked button #}
   <form id="saveDesignForm" method="post" action="{% url 'boq_detail' project.project_id %}">
     {% csrf_token %}
-    <input type="hidden" name="action" value="save_design">
   </form>
 
   {# Form 2: add non-standard row (modal submits this) #}
@@ -250,14 +249,13 @@
 <div class="d-flex gap-2 mt-2 mb-5">
   {% if role == 'Design' %}
     {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
-    <button type="submit" form="saveDesignForm" class="btn btn-secondary">Save Draft</button>
-    <form method="post" action="{% url 'boq_submit' project.project_id %}" class="d-inline">
-      {% csrf_token %}
-      <button type="submit" class="btn btn-primary"
-              onclick="return confirm('Submit this BOQ to SCM for review?')">
-        Submit to SCM
-      </button>
-    </form>
+    <button type="submit" form="saveDesignForm" name="action" value="save_design"
+            class="btn btn-secondary">Save Draft</button>
+    <button type="submit" form="saveDesignForm" name="action" value="submit_design"
+            class="btn btn-primary"
+            onclick="return confirm('Submit this BOQ to SCM for review?')">
+      Submit to SCM
+    </button>
     {% endif %}
 
   {% elif role == 'SCM' %}
