@@ -109,11 +109,12 @@
 <script>
 // Toggle vendor active/inactive status via AJAX POST.
 // Shows a confirmation modal before sending the request.
-const toggleModal    = new bootstrap.Modal(document.getElementById('toggleModal'));
-const modalTitle     = document.getElementById('toggleModalTitle');
-const modalBody      = document.getElementById('toggleModalBody');
-const modalConfirm   = document.getElementById('toggleModalConfirm');
-let   pendingBtn     = null;
+// Bootstrap is initialized lazily (at click time) because the
+// Bootstrap JS bundle loads after this script tag in base.html.
+const modalTitle   = document.getElementById('toggleModalTitle');
+const modalBody    = document.getElementById('toggleModalBody');
+const modalConfirm = document.getElementById('toggleModalConfirm');
+let   pendingBtn   = null;
 
 function toggleVendor(btn) {
   const name     = btn.dataset.vendorName;
@@ -121,22 +122,22 @@ function toggleVendor(btn) {
   pendingBtn = btn;
 
   if (isActive) {
-    modalTitle.textContent = 'Deactivate Vendor';
-    modalBody.textContent  = `Deactivate "${name}"? They will not appear in new BOQs.`;
-    modalConfirm.className = 'btn btn-danger btn-sm';
+    modalTitle.textContent   = 'Deactivate Vendor';
+    modalBody.textContent    = `Deactivate "${name}"? They will not appear in new BOQs.`;
+    modalConfirm.className   = 'btn btn-danger btn-sm';
     modalConfirm.textContent = 'Deactivate';
   } else {
-    modalTitle.textContent = 'Activate Vendor';
-    modalBody.textContent  = `Re-activate "${name}"?`;
-    modalConfirm.className = 'btn btn-success btn-sm';
+    modalTitle.textContent   = 'Activate Vendor';
+    modalBody.textContent    = `Re-activate "${name}"?`;
+    modalConfirm.className   = 'btn btn-success btn-sm';
     modalConfirm.textContent = 'Activate';
   }
-  toggleModal.show();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('toggleModal')).show();
 }
 
 modalConfirm.addEventListener('click', function () {
   if (!pendingBtn) return;
-  const vendorId = pendingBtn.dataset.vendorId;
+  const vendorId  = pendingBtn.dataset.vendorId;
   const csrfToken = '{{ csrf_token }}';
 
   fetch(`/vendors/${vendorId}/toggle-status/`, {
@@ -144,9 +145,8 @@ modalConfirm.addEventListener('click', function () {
     headers: { 'X-CSRFToken': csrfToken, 'Content-Type': 'application/json' },
   })
   .then(r => r.json())
-  .then(data => {
-    toggleModal.hide();
-    // Reload so the row badge and button text refresh correctly.
+  .then(function () {
+    bootstrap.Modal.getInstance(document.getElementById('toggleModal')).hide();
     window.location.reload();
   });
 });

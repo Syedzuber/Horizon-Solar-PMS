@@ -27,28 +27,13 @@
   </div>
 </div>
 
-{% if messages %}
-  {% for msg in messages %}
-  <div class="alert alert-dismissible fade show
-    {% if msg.tags == 'error' %}alert-danger
-    {% elif msg.tags == 'warning' %}alert-warning
-    {% else %}alert-success{% endif %}" role="alert">
-    {{ msg }}
-    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-  </div>
-  {% endfor %}
-{% endif %}
-
 {# ── No BOQ yet (non-Design roles) ── #}
 {% if not boq %}
   <div class="alert alert-info">BOQ not yet created by the Design team.</div>
 
 {% else %}
 
-{# ════════════════════════════════════════════════════════
-   Out-of-table forms — associated via the HTML `form`
-   attribute so they can live outside the <table> DOM.
-   ════════════════════════════════════════════════════════ #}
+{# Out-of-table forms — associated via HTML form= attribute. #}
 
 {% if role == 'Design' %}
   {% if boq.status == 'Draft' or boq.status == 'Revision Requested' %}
@@ -368,16 +353,15 @@
 }());
 
 // Open the Add Row modal and pre-set the hidden category field.
-var addRowModalEl = document.getElementById('addRowModal');
-var addRowBsModal = addRowModalEl ? new bootstrap.Modal(addRowModalEl) : null;
-
+// Bootstrap is initialized lazily here (at click time) because the
+// Bootstrap JS bundle loads after this script tag in base.html.
 function openAddRowModal(category) {
   document.getElementById('addRowCategory').value = category;
   document.getElementById('addRowCategoryLabel').textContent = category;
-  // Clear previous description input so the modal is fresh.
   var desc = document.getElementById('addRowDescription');
   if (desc) desc.value = '';
-  if (addRowBsModal) addRowBsModal.show();
+  var modalEl = document.getElementById('addRowModal');
+  if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).show();
 }
 </script>
 

@@ -314,6 +314,7 @@ class VendorForm(forms.ModelForm):
             else:
                 field.widget.attrs.setdefault('class', 'form-control')
         self.fields['categories'].queryset = VendorCategory.objects.all()
+        self.fields['categories'].error_messages['required'] = 'Select at least one category.'
 
     def clean_gst_number(self):
         value = (self.cleaned_data.get('gst_number') or '').strip().upper()
