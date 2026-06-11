@@ -67,6 +67,7 @@
               <th>Ext.</th>
               <th>OD</th>
               <th>Status</th>
+              <th>BOQ</th>
             </tr>
           </thead>
           <tbody>
@@ -113,10 +114,27 @@
                   <span class="badge bg-secondary">{{ row.project.status }}</span>
                 {% endif %}
               </td>
+              <td>
+                {% if row.project.boq_status %}
+                  <a href="{{ row.project.boq_url }}" class="text-decoration-none">
+                    {% if row.project.boq_status == 'Draft' %}
+                      <span class="badge bg-secondary">Draft</span>
+                    {% elif row.project.boq_status == 'Submitted' %}
+                      <span class="badge bg-primary">Submitted</span>
+                    {% elif row.project.boq_status == 'Acknowledged' %}
+                      <span class="badge bg-success">Acknowledged</span>
+                    {% elif row.project.boq_status == 'Revision Requested' %}
+                      <span class="badge bg-warning text-dark">Revision Requested</span>
+                    {% endif %}
+                  </a>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
             </tr>
             {% empty %}
             <tr>
-              <td colspan="7" class="text-center text-muted py-4">No active projects.</td>
+              <td colspan="8" class="text-center text-muted py-4">No active projects.</td>
             </tr>
             {% endfor %}
           </tbody>

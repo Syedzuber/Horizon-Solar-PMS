@@ -6,7 +6,7 @@
 
 {# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
 <div class="row g-3 mb-4">
-  <div class="col-md-4">
+  <div class="col-6 col-md-3">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold {% if summary.due_today > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.due_today }}</div>
@@ -14,7 +14,7 @@
       </div>
     </div>
   </div>
-  <div class="col-md-4">
+  <div class="col-6 col-md-3">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold text-primary">{{ summary.in_progress }}</div>
@@ -22,11 +22,19 @@
       </div>
     </div>
   </div>
-  <div class="col-md-4">
+  <div class="col-6 col-md-3">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold {% if summary.pending > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.pending }}</div>
         <div class="small text-muted">Pending</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold {% if summary.boq_revision_requested > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.boq_revision_requested }}</div>
+        <div class="small text-muted">Revision Requested</div>
       </div>
     </div>
   </div>
@@ -116,11 +124,64 @@
     {% endfor %}
   </div>
 {% else %}
-<div class="card shadow-sm">
+<div class="card shadow-sm mb-4">
   <div class="card-body text-center py-5 text-muted">
-    No design tasks assigned to you on active projects.
+    No projects assigned to you yet.
   </div>
 </div>
 {% endif %}
+
+{# ── BOQ Status section ───────────────────────────────────────────────── #}
+<div class="row g-3 mb-4">
+  <div class="col-12">
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold">BOQ Status</div>
+      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
+        <table class="table table-sm table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th>Project ID</th>
+              <th>Customer</th>
+              <th style="width:12rem;">BOQ Status</th>
+              <th style="width:8rem;">View</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for proj in assigned_projects %}
+            <tr>
+              <td class="fw-semibold align-middle">{{ proj.project_id }}</td>
+              <td class="text-muted small align-middle">{{ proj.customer_name }}</td>
+              <td class="align-middle">
+                {% if proj.boq_status == 'Draft' %}
+                  <span class="badge bg-secondary">Draft</span>
+                {% elif proj.boq_status == 'Submitted' %}
+                  <span class="badge bg-primary">Submitted</span>
+                {% elif proj.boq_status == 'Acknowledged' %}
+                  <span class="badge bg-success">Acknowledged</span>
+                {% elif proj.boq_status == 'Revision Requested' %}
+                  <span class="badge bg-warning text-dark">Revision Requested</span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td class="align-middle">
+                {% if proj.boq_url %}
+                  <a href="{{ proj.boq_url }}" class="text-decoration-none">View BOQ →</a>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="4" class="text-center text-muted py-3">No projects assigned to you yet.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
 
 {% endblock %}

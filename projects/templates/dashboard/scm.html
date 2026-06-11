@@ -9,8 +9,8 @@
   <div class="col-md-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.pos_pending > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.pos_pending }}</div>
-        <div class="small text-muted">POs Pending</div>
+        <div class="fs-2 fw-bold {% if summary.boq_awaiting > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.boq_awaiting }}</div>
+        <div class="small text-muted">BOQ Awaiting Action</div>
       </div>
     </div>
   </div>
@@ -156,51 +156,44 @@
     <div class="card shadow-sm">
       <div class="card-header fw-semibold">BOQ Status</div>
       <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if boq_projects %}
         <table class="table table-sm table-hover mb-0">
           <thead class="table-light">
             <tr>
               <th>Project ID</th>
-              <th>Project Name</th>
+              <th>Customer</th>
               <th style="width:12rem;">BOQ Status</th>
-              <th style="width:12rem;">Last Updated</th>
-              <th style="width:7rem;">Action</th>
+              <th style="width:8rem;">View</th>
             </tr>
           </thead>
           <tbody>
-            {% for row in boq_projects %}
+            {% for boq in boqs %}
             <tr>
-              <td class="fw-semibold align-middle">{{ row.project.project_id }}</td>
-              <td class="text-muted small align-middle">{{ row.project.customer_name }}</td>
+              <td class="fw-semibold align-middle">
+                <a href="/projects/{{ boq.project.project_id }}/boq/" class="text-decoration-none">{{ boq.project.project_id }}</a>
+              </td>
+              <td class="text-muted small align-middle">{{ boq.project.customer_name }}</td>
               <td class="align-middle">
-                {% if row.boq_status == None %}
-                  <span class="badge bg-secondary">Awaiting</span>
-                {% elif row.boq_status == 'Draft' %}
+                {% if boq.status == 'Draft' %}
                   <span class="badge bg-secondary">Draft</span>
-                {% elif row.boq_status == 'Submitted' %}
-                  <span class="badge bg-primary">Review Pending</span>
-                {% elif row.boq_status == 'Acknowledged' %}
+                {% elif boq.status == 'Submitted' %}
+                  <span class="badge bg-primary">Submitted</span>
+                {% elif boq.status == 'Acknowledged' %}
                   <span class="badge bg-success">Acknowledged</span>
-                {% elif row.boq_status == 'Revision Requested' %}
-                  <span class="badge bg-warning text-dark">Revision</span>
+                {% elif boq.status == 'Revision Requested' %}
+                  <span class="badge bg-warning text-dark">Revision Requested</span>
                 {% endif %}
               </td>
-              <td class="text-muted small align-middle">
-                {% if row.last_updated %}
-                  {{ row.last_updated|date:"d M Y" }}
-                {% else %}—{% endif %}
-              </td>
               <td class="align-middle">
-                <a href="{% url 'boq_detail' row.project.project_id %}"
-                   class="btn btn-sm btn-outline-primary py-0">Review</a>
+                <a href="/projects/{{ boq.project.project_id }}/boq/" class="text-decoration-none">View BOQ →</a>
               </td>
+            </tr>
+            {% empty %}
+            <tr>
+              <td colspan="4" class="text-center text-muted py-3">No active BOQs</td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">No active projects.</p>
-        {% endif %}
       </div>
     </div>
   </div>

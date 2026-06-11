@@ -96,6 +96,13 @@ def dashboard_pm(request):
 
     projects_with_progress = []
     for project in Project.objects.filter(assigned_pm=pm_profile, status__in=['Active', 'In Progress']):
+        try:
+            project.boq_status = project.boq.status
+            project.boq_url    = f'/projects/{project.project_id}/boq/'
+        except Exception:
+            project.boq_status = None
+            project.boq_url    = None
+
         total_tasks    = Task.objects.filter(phase__project=project).count()
         done_tasks     = Task.objects.filter(phase__project=project, status='Done').count()
         internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
@@ -237,49 +244,76 @@ def dashboard_site_engineer(request):
 @login_required
 @role_required(['Design'])
 def dashboard_design(request):
-    design_profile = request.user.profile
-    design_q       = Q(assigned_to=design_profile) | Q(assigned_to__isnull=True, assigned_role=Task.DESIGN)
-    active_filter  = {'phase__project__status__in': ['Active', 'In Progress']}
+    design_profile  = request.user.profile
+    project_filter  = {
+        'assigned_role': Task.DESIGN,
+        'phase__project__assigned_design': design_profile,
+        'phase__project__status__in': ['Active', 'In Progress'],
+    }
 
     try:
-        due_today = Task.objects.filter(**active_filter).filter(design_q).filter(
+        due_today = Task.objects.filter(**project_filter).filter(
             due_date=date.today(), due_date__isnull=False,
             status__in=['Not Started', 'In Progress'],
         ).count()
 
-        in_progress = Task.objects.filter(**active_filter).filter(design_q).filter(
+        in_progress = Task.objects.filter(**project_filter).filter(
             status='In Progress',
         ).count()
 
-        pending = Task.objects.filter(**active_filter).filter(design_q).filter(
+        pending = Task.objects.filter(**project_filter).filter(
             status='Not Started',
         ).count()
 
-        tasks_qs = Task.objects.filter(**active_filter).filter(design_q).filter(
+        tasks_qs = Task.objects.filter(**project_filter).filter(
             due_date__isnull=False,
         ).select_related('phase__project').order_by(
             'phase__project__project_id', 'phase__phase_order', 'task_order',
         )
+
+        boq_revision_requested = BOQ.objects.filter(
+            status='Revision Requested',
+            project__assigned_design=design_profile,
+        ).count()
+
+        assigned_projects = list(
+            Project.objects.filter(
+                assigned_design=design_profile,
+                status__in=['Active', 'In Progress'],
+            ).order_by('project_id')
+        )
+        for proj in assigned_projects:
+            try:
+                proj.boq_status = proj.boq.status
+                proj.boq_url    = f'/projects/{proj.project_id}/boq/'
+            except Exception:
+                proj.boq_status = None
+                proj.boq_url    = None
+
     except Exception:
-        due_today = in_progress = pending = 0
-        tasks_qs  = Task.objects.none()
+        due_today = in_progress = pending = boq_revision_requested = 0
+        tasks_qs          = Task.objects.none()
+        assigned_projects = []
 
     seven_days_ago = date.today() - timedelta(days=7)
     due_date_changes = DueDateChangeLog.objects.filter(
         task__assigned_role=Task.DESIGN,
+        task__phase__project__assigned_design=design_profile,
         task__phase__project__status__in=['Active', 'In Progress'],
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
 
     return render(request, 'dashboard/design.html', {
         'summary': {
-            'due_today':   due_today,
-            'in_progress': in_progress,
-            'pending':     pending,
+            'due_today':              due_today,
+            'in_progress':            in_progress,
+            'pending':                pending,
+            'boq_revision_requested': boq_revision_requested,
         },
-        'tasks_qs':         tasks_qs,
-        'due_date_changes': due_date_changes,
-        'today':            date.today(),
+        'tasks_qs':          tasks_qs,
+        'assigned_projects': assigned_projects,
+        'due_date_changes':  due_date_changes,
+        'today':             date.today(),
     })
 
 
@@ -295,12 +329,7 @@ def dashboard_scm(request):
     scm_q         = Q(assigned_to=scm_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SCM)
     active_filter = {'phase__project__status__in': ['Active', 'In Progress']}
 
-    pos_pending = Task.objects.filter(
-        assigned_role=Task.SCM,
-        phase__phase_name='Procurement',
-        status__in=['Not Started', 'In Progress'],
-        **active_filter,
-    ).count()
+    boq_awaiting = BOQ.objects.filter(status='Submitted').count()
 
     deliveries_today = Task.objects.filter(
         assigned_role=Task.SCM,
@@ -332,36 +361,20 @@ def dashboard_scm(request):
         'due_date', 'phase__project__project_id',
     )
 
-    # BOQ Status card — all active projects with their BOQ state
-    boq_projects = []
-    for project in Project.objects.filter(
-        status__in=['Active', 'In Progress']
-    ).order_by('project_id'):
-        try:
-            boq         = project.boq
-            boq_status  = boq.status
-            last_updated = boq.submitted_at
-        except BOQ.DoesNotExist:
-            boq          = None
-            boq_status   = None
-            last_updated = None
-        boq_projects.append({
-            'project':      project,
-            'boq':          boq,
-            'boq_status':   boq_status,
-            'last_updated': last_updated,
-        })
+    boqs = BOQ.objects.filter(
+        project__status__in=['Active', 'In Progress']
+    ).select_related('project').order_by('project__project_id')
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
-            'pos_pending':      pos_pending,
+            'boq_awaiting':     boq_awaiting,
             'deliveries_today': deliveries_today,
             'overdue':          overdue,
         },
-        'pos_by_project':  pos_by_project,
-        'delivery_tasks':  delivery_tasks,
-        'boq_projects':    boq_projects,
-        'today':           date.today(),
+        'pos_by_project': pos_by_project,
+        'delivery_tasks': delivery_tasks,
+        'boqs':           boqs,
+        'today':          date.today(),
     })
 
 
@@ -530,7 +543,8 @@ def project_create(request):
 def project_detail(request, project_id):
     project = get_object_or_404(
         Project.objects.select_related(
-            'assigned_pm__user', 'assigned_site_engineer__user', 'created_by'
+            'assigned_pm__user', 'assigned_site_engineer__user',
+            'assigned_design__user', 'created_by',
         ),
         project_id=project_id,
     )
@@ -538,6 +552,37 @@ def project_detail(request, project_id):
     role = _get_user_role(request)
     if role == 'PM' and not _pm_owns_project(request, project):
         raise Http404
+
+    is_assigned_pm     = (project.assigned_pm.user == request.user)
+    can_assign_design  = is_assigned_pm and project.status in ('Active', 'In Progress')
+
+    # Handle Design Member assignment
+    if request.method == 'POST' and is_assigned_pm:
+        if request.POST.get('action') == 'assign_design' and can_assign_design:
+            design_id = request.POST.get('assigned_design', '').strip()
+            if design_id:
+                try:
+                    design_user = UserProfile.objects.get(pk=design_id, role='Design', is_active=True)
+                except UserProfile.DoesNotExist:
+                    messages.error(request, 'Invalid design user selected.')
+                    return redirect('project_detail', project_id=project.project_id)
+                project.assigned_design = design_user
+                project.save(update_fields=['assigned_design'])
+                Task.objects.filter(
+                    phase__project=project,
+                    assigned_role=Task.DESIGN,
+                    status__in=['Not Started', 'In Progress'],
+                ).update(assigned_to=design_user)
+            else:
+                project.assigned_design = None
+                project.save(update_fields=['assigned_design'])
+                Task.objects.filter(
+                    phase__project=project,
+                    assigned_role=Task.DESIGN,
+                    status__in=['Not Started', 'In Progress'],
+                ).update(assigned_to=None)
+            messages.success(request, 'Design member updated.')
+            return redirect('project_detail', project_id=project.project_id)
 
     phases = []
     if project.status != 'Draft':
@@ -547,10 +592,10 @@ def project_detail(request, project_id):
             .order_by('phase_order')
         )
 
-    is_assigned_pm = (project.assigned_pm.user == request.user)
     user_role = role
 
     candidates_by_role = {}
+    design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
         for role_key, _ in Task.ROLE_CHOICES:
             qs = UserProfile.objects.filter(role=role_key, is_active=True).select_related('user')
@@ -558,11 +603,14 @@ def project_detail(request, project_id):
                 {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
                 for p in qs
             ]
+        design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
 
     return render(request, 'projects/project_detail.html', {
         'project':             project,
         'phases':              phases,
         'is_assigned_pm':      is_assigned_pm,
+        'can_assign_design':   can_assign_design,
+        'design_candidates':   design_candidates,
         'user_role':           user_role,
         'task_status_choices': Task.STATUS_CHOICES,
         'candidates_by_role':  candidates_by_role,

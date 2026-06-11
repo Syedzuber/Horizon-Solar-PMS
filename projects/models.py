@@ -41,6 +41,14 @@ class Project(models.Model):
         related_name='se_projects',
         on_delete=models.PROTECT,
     )
+    assigned_design           = models.ForeignKey(
+        'UserProfile',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='design_projects',
+        limit_choices_to={'role': 'Design'},
+    )
     survey_date               = models.DateField(blank=True, null=True)
     target_commissioning_date = models.DateField()
     status                    = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')

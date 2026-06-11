@@ -73,6 +73,37 @@
         <span>{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}</span>
       </div>
       <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Design Member</small>
+        {% if can_assign_design %}
+          <form method="post" class="d-flex gap-1 align-items-center mt-1">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="assign_design">
+            {% if design_candidates %}
+              <select name="assigned_design" class="form-select form-select-sm" style="max-width:160px;">
+                <option value="">— Unassign —</option>
+                {% for candidate in design_candidates %}
+                  <option value="{{ candidate.pk }}"
+                    {% if project.assigned_design.pk == candidate.pk %}selected{% endif %}>
+                    {{ candidate.user.get_full_name|default:candidate.user.username }}
+                  </option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="btn btn-sm btn-primary py-0">Save</button>
+            {% else %}
+              <select class="form-select form-select-sm" disabled style="max-width:200px;">
+                <option>No Design users available</option>
+              </select>
+            {% endif %}
+          </form>
+        {% else %}
+          {% if project.assigned_design %}
+            <span>{{ project.assigned_design.user.get_full_name|default:project.assigned_design.user.username }}</span>
+          {% else %}
+            <span class="text-muted">Not assigned</span>
+          {% endif %}
+        {% endif %}
+      </div>
+      <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">City / State</small>
         <span>{{ project.city }}, {{ project.state }}</span>
       </div>
