@@ -1206,20 +1206,21 @@ def boq_request_revision(request, project_id):
                 'boq':     boq,
             })
 
-        snapshot = list(boq.items.values(
-            'serial_no', 'category', 'description', 'uom',
-            'boq_quantity', 'ordered_quantity',
-        ))
-        BOQRevision.objects.create(
-            boq=boq, revised_by=profile,
-            version=boq.version, reason=f'Revision requested: {reason}',
-            snapshot=snapshot,
-        )
-        boq.status = 'Revision Requested'
-        boq.save()
-
-        messages.success(request, 'Revision requested. Design team will be notified.')
-        return redirect('boq_detail', project_id=project_id)
+        try:
+            snapshot = _boq_snapshot(boq)
+            BOQRevision.objects.create(
+                boq=boq, revised_by=profile,
+                version=boq.version, reason=f'Revision requested: {reason}',
+                snapshot=snapshot,
+            )
+            boq.status = 'Revision Requested'
+            boq.save(update_fields=['status'])
+            messages.success(request, 'Revision requested. Design team will be notified.')
+            return redirect('boq_detail', project_id=project_id)
+        except Exception as exc:
+            logger.exception('boq_request_revision failed for %s', project_id)
+            messages.error(request, f'Request failed: {exc}')
+            return redirect('boq_detail', project_id=project_id)
 
     return render(request, 'projects/boq_request_revision.html', {
         'project': project,
