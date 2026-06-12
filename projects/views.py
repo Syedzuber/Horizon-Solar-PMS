@@ -546,7 +546,7 @@ def _get_user_role(request):
 
 def _pm_owns_project(request, project):
     """Return True if the request user is the assigned PM on this project."""
-    return project.assigned_pm.user == request.user
+    return project.assigned_pm is not None and project.assigned_pm.user == request.user
 
 
 @login_required
@@ -610,7 +610,7 @@ def project_detail(request, project_id):
     if role == 'PM' and not _pm_owns_project(request, project):
         raise Http404
 
-    is_assigned_pm     = (project.assigned_pm.user == request.user)
+    is_assigned_pm     = project.assigned_pm is not None and project.assigned_pm.user == request.user
     can_assign_design  = is_assigned_pm and project.status in ('Active', 'In Progress')
 
     # Handle POST actions (PM only)
@@ -1716,8 +1716,6 @@ def zoho_deal_closed_webhook(request):
     except (json.JSONDecodeError, ValueError):
         return HttpResponse(status=400)
 
-    logger.info(request.body)  # REMOVE AFTER FIRST TEST — confirm payload structure
-
     # Zoho payload structure varies: flat root, or wrapped in data[]/data[0].Deal
     data_wrapper = payload.get('data')
     if data_wrapper is not None:
@@ -1733,11 +1731,9 @@ def zoho_deal_closed_webhook(request):
 
     record_id = str(deal.get('id', '') or deal.get('Record_Id', '') or deal.get('zoho_deal_id', '')).strip()
 
-    logger.info('Webhook: stage=%r record_id=%r', stage, record_id)  # REMOVE AFTER DEBUG
-
     # Duplicate guard
     if record_id and Project.objects.filter(zoho_deal_id=record_id).exists():
-        logger.info('Webhook: duplicate deal %s — skipped', record_id)  # REMOVE AFTER DEBUG
+        logger.info('Webhook: duplicate deal %s — skipped', record_id)
         return HttpResponse(status=200)
 
     # Field mapping
@@ -1768,6 +1764,11 @@ def zoho_deal_closed_webhook(request):
         profile_match = UserProfile.objects.filter(user__email__iexact=pm_email).first()
         if profile_match:
             assigned_pm = profile_match
+    # Fall back to default PM if Zoho field is empty or email not matched
+    if assigned_pm is None:
+        assigned_pm = UserProfile.objects.filter(
+            user__email__iexact='chetan@horizonrenewablepower.com'
+        ).first()
 
     # Create project
     try:
@@ -1793,10 +1794,12 @@ def zoho_deal_closed_webhook(request):
         logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
         return HttpResponse(status=200)
 
-    logger.info('Webhook: project %s created for deal %s', project.project_id, record_id)  # REMOVE AFTER DEBUG
+    logger.info('Webhook: project %s created for deal %s (pm=%s)',
+                project.project_id, record_id,
+                project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
 
-    # Notify Admin if PM was not resolved
-    if assigned_pm is None:
+    # Notify Admin only if PM fallback also failed (chetan@horizonrenewablepower.com not found)
+    if project.assigned_pm is None:
         try:
             admin_profile = UserProfile.objects.filter(role='Admin').first()
             if admin_profile:
@@ -1804,7 +1807,7 @@ def zoho_deal_closed_webhook(request):
                     recipient=admin_profile,
                     message=(
                         f'New Draft project {project.project_id} created from Zoho CRM '
-                        f'(deal {record_id}) — no PM assigned. Please assign a PM.'
+                        f'(deal {record_id}) — PM could not be assigned. Please assign a PM.'
                     ),
                     link=f'/projects/{project.project_id}/',
                 )
