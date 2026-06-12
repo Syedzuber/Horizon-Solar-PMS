@@ -1733,8 +1733,11 @@ def zoho_deal_closed_webhook(request):
 
     record_id = str(deal.get('id', '') or deal.get('Record_Id', '') or deal.get('zoho_deal_id', '')).strip()
 
+    logger.info('Webhook: stage=%r record_id=%r', stage, record_id)  # REMOVE AFTER DEBUG
+
     # Duplicate guard
     if record_id and Project.objects.filter(zoho_deal_id=record_id).exists():
+        logger.info('Webhook: duplicate deal %s — skipped', record_id)  # REMOVE AFTER DEBUG
         return HttpResponse(status=200)
 
     # Field mapping
@@ -1789,6 +1792,8 @@ def zoho_deal_closed_webhook(request):
     except Exception as exc:
         logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
         return HttpResponse(status=200)
+
+    logger.info('Webhook: project %s created for deal %s', project.project_id, record_id)  # REMOVE AFTER DEBUG
 
     # Notify Admin if PM was not resolved
     if assigned_pm is None:
