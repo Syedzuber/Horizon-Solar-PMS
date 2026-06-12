@@ -56,4 +56,7 @@ urlpatterns = [
 
     # Project overview
     path('projects/<str:project_id>/overview/', views.project_overview, name='project_overview'),
+
+    # Webhooks
+    path('webhooks/zoho/deal-closed/', views.zoho_deal_closed_webhook, name='zoho_webhook'),
 ]

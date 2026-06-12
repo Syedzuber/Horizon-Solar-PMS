@@ -1,16 +1,20 @@
+import json
 import logging
-from datetime import date, timedelta
+import re
+from datetime import date, timedelta, datetime
 from decimal import Decimal, InvalidOperation
 from itertools import groupby
 
-from django.shortcuts import render, redirect, get_object_or_404
-from django.contrib.auth import authenticate, login, logout
+from django.conf import settings
 from django.contrib import messages
+from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.http import Http404, HttpResponseForbidden, JsonResponse
-from django.utils import timezone
 from django.db import transaction
 from django.db.models import Max, Prefetch, Q, Sum
+from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
+from django.shortcuts import render, redirect, get_object_or_404
+from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
@@ -1674,3 +1678,125 @@ def project_overview(request, project_id):
         'recent_activity':  recent_activity,
         'role':             profile.role,
     })
+
+
+# ---------------------------------------------------------------------------
+# Zoho CRM Webhook
+# ---------------------------------------------------------------------------
+
+def _safe_decimal(value):
+    if not value:
+        return None
+    cleaned = re.sub(r'[^\d.]', '', str(value))
+    try:
+        return Decimal(cleaned)
+    except Exception:
+        return None
+
+
+@csrf_exempt
+def zoho_deal_closed_webhook(request):
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+
+    # Token validation
+    token = request.headers.get('X-Webhook-Token', '') or request.GET.get('token', '')
+    expected = settings.ZOHO_WEBHOOK_SECRET
+    if not expected or token != expected:
+        ip = request.META.get('REMOTE_ADDR', 'unknown')
+        logger.warning('Webhook rejected: invalid token from IP %s', ip)
+        return HttpResponse(status=403)
+
+    try:
+        payload = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return HttpResponse(status=400)
+
+    logger.info(request.body)  # REMOVE AFTER FIRST TEST — confirm payload structure
+
+    # Defensive nesting: Zoho wraps data differently depending on webhook config
+    data = payload.get('data', [{}])
+    if isinstance(data, list):
+        data = data[0] if data else {}
+    deal = data.get('Deal', data)
+
+    stage = deal.get('Stage', '')
+    if stage != 'Closed Won':
+        return HttpResponse(status=200)
+
+    record_id = str(deal.get('id', '') or deal.get('Record_Id', '') or deal.get('zoho_deal_id', '')).strip()
+
+    # Duplicate guard
+    if record_id and Project.objects.filter(zoho_deal_id=record_id).exists():
+        return HttpResponse(status=200)
+
+    # Field mapping
+    account_name = (deal.get('Account_Name', '') or '').strip()
+    contact_name = (deal.get('Contact_Name', '') or '').strip()
+    if account_name:
+        customer_name = account_name
+        customer_contact_person = contact_name
+    else:
+        customer_name = contact_name
+        customer_contact_person = ''
+
+    raw_phone = str(deal.get('Mobile', '') or '').strip()
+    digits_only = re.sub(r'\D', '', raw_phone)
+    customer_phone = digits_only[-10:] if len(digits_only) >= 10 else digits_only
+
+    raw_date = (deal.get('Closing_Date', '') or '').strip()
+    target_commissioning_date = None
+    if raw_date:
+        try:
+            target_commissioning_date = datetime.strptime(raw_date, '%Y-%m-%d').date()
+        except ValueError:
+            pass
+
+    pm_email = (deal.get('Assign_PM', '') or '').strip()
+    assigned_pm = None
+    if pm_email:
+        profile_match = UserProfile.objects.filter(user__email__iexact=pm_email).first()
+        if profile_match:
+            assigned_pm = profile_match
+
+    # Create project
+    try:
+        project = Project.objects.create(
+            customer_name=customer_name or 'Unknown',
+            customer_contact_person=customer_contact_person,
+            customer_phone=customer_phone,
+            customer_email=(deal.get('Customer_Email', '') or '').strip() or None,
+            site_address='',
+            city=(deal.get('City', '') or '').strip(),
+            state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
+            project_type='Residential',
+            capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
+            contract_value=_safe_decimal(deal.get('Amount')),
+            assigned_pm=assigned_pm,
+            assigned_site_engineer=None,
+            target_commissioning_date=target_commissioning_date,
+            status='Draft',
+            zoho_deal_id=record_id,
+            created_by=None,
+        )
+    except Exception as exc:
+        logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
+        return HttpResponse(status=200)
+
+    # Notify Admin if PM was not resolved
+    if assigned_pm is None:
+        try:
+            admin_profile = UserProfile.objects.filter(role='Admin').first()
+            if admin_profile:
+                Notification.objects.create(
+                    recipient=admin_profile,
+                    message=(
+                        f'New Draft project {project.project_id} created from Zoho CRM '
+                        f'(deal {record_id}) — no PM assigned. Please assign a PM.'
+                    ),
+                    link=f'/projects/{project.project_id}/',
+                )
+        except Exception as exc:
+            logger.error('Webhook: notification creation failed for project %s — %s', project.project_id, exc)
+
+    return HttpResponse(status=200)

@@ -27,19 +27,23 @@ class Project(models.Model):
     city                      = models.CharField(max_length=50)
     state                     = models.CharField(max_length=50, default='Uttar Pradesh')
     project_type              = models.CharField(max_length=20, choices=PROJECT_TYPE_CHOICES)
-    capacity_kw               = models.DecimalField(max_digits=6, decimal_places=2)
-    contract_value            = models.DecimalField(max_digits=12, decimal_places=2)
+    capacity_kw               = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    contract_value            = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     assigned_pm               = models.ForeignKey(
         'UserProfile',
         limit_choices_to={'role': 'PM'},
         related_name='pm_projects',
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
     )
     assigned_site_engineer    = models.ForeignKey(
         'UserProfile',
         limit_choices_to={'role': 'Site Engineer', 'is_active': True},
         related_name='se_projects',
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
     )
     assigned_design           = models.ForeignKey(
         'UserProfile',
@@ -50,14 +54,18 @@ class Project(models.Model):
         limit_choices_to={'role': 'Design'},
     )
     survey_date               = models.DateField(blank=True, null=True)
-    target_commissioning_date = models.DateField()
+    target_commissioning_date = models.DateField(blank=True, null=True)
     status                    = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     zoho_crm_id               = models.CharField(max_length=50, blank=True, null=True)
+    zoho_deal_id              = models.CharField(max_length=100, blank=True, default='')
+    customer_contact_person   = models.CharField(max_length=255, blank=True, default='')
     created_at                = models.DateTimeField(auto_now_add=True)
     created_by                = models.ForeignKey(
         User,
         related_name='created_projects',
         on_delete=models.PROTECT,
+        null=True,
+        blank=True,
     )
     activated_at              = models.DateTimeField(blank=True, null=True)
     commissioned_at           = models.DateField(null=True, blank=True)

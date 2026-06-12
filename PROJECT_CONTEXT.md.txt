@@ -95,3 +95,221 @@ VERIFIED:
 - All 4 dashboards loading
 NEXT SESSION GOAL:
 - Day 4: Issues & Comments module + Finance dashboard
+
+
+DATE: 11-June-2026
+DAY: 4 of 24
+
+COMPLETED DAYS 1-3:
+- Login, roles, user management (Day 1)
+- Project creation, 51-task residential
+  template, task tracking, project IDs (Day 2)
+- duration_days, task_type, assigned_to
+  on Task model (Day 3)
+- Calendar-day due date calculation,
+  no weekend skip (Day 3)
+- Due date calendar picker — PM sets
+  start date, chain calculates from that (Day 3)
+- Due date editing — PM edits any task,
+  following tasks recalculate using
+  Option B (absolute from new date) (Day 3)
+- Recalculate Due Dates backfill button (Day 3)
+- PM, SE, Design, SCM dashboards live (Day 3)
+- Assign modal — inline, filtered by role (Day 3)
+
+VERIFIED ON PRODUCTION:
+- Assign modal populates correctly by role
+- Due dates calculating from activation date
+- All 4 dashboards loading
+- Calendar days, no weekend skip confirmed
+
+DAY 4 GOAL:
+Build in this exact order:
+1. Dashboard fixes (do these first)
+2. Vendor Master
+3. BOQ Submission
+
+DASHBOARD FIXES REQUIRED:
+- All cards: col-md-6, side by side,
+  max-height 350px with scroll
+- Remove Task Type column from all
+  4 dashboard task tables
+- Replace due date inline alerts with
+  static bell icon in navbar (placeholder)
+  Notification model deferred to Day 5
+- SCM PO list: group by project,
+  chronological within each group
+- SCM BOQ card: overall % progress bar
+  + category pills (Done/Pending)
+  for Solar Modules, Structure,
+  Inverter, BOS
+
+NEW MODELS TO BUILD DAY 4:
+- VendorCategory (pre-populated:
+  Solar Modules, Structure, Inverter,
+  BOS, Services, Other)
+- Vendor (name, contact_person, phone,
+  email, gst_number, msme_status,
+  msme_number, address, categories M2M,
+  is_active, created_by)
+- BOQ (OneToOne to Project, status,
+  version, submitted_by, submitted_at,
+  notes)
+- BOQItem (boq FK, serial_no, category,
+  description, make_preference vendor FK,
+  uom, boq_quantity, ordered_quantity,
+  ordered_vendor FK, is_standard_item)
+- BOQRevision (boq FK, version, reason,
+  snapshot JSONField, revised_by,
+  revised_at)
+
+KEY DECISIONS LOCKED:
+- Vendor categories: Solar Modules,
+  Structure, Inverter, BOS, Services,
+  Other
+- One vendor can have multiple categories
+- Vendors have Active/Inactive toggle
+- No vendor delete — only deactivate
+- BOQ pre-populated with 37 standard
+  items from real company BOQ file
+- Standard items cannot be deleted
+  from BOQ — only quantity left blank
+- make_preference = vendor FK
+  (not free text)
+- Vendor dropdown filtering by category
+  uses vanilla JS with json_script tag
+- Category change re-filters dropdowns
+  (Option B — applies to all rows)
+- BOQ revision history via JSONField
+  snapshot on every submission
+- SCM fills ordered_quantity and
+  ordered_vendor progressively
+- Variance highlighted amber if
+  ordered_qty differs from boq_qty
+- PM can request revision with reason
+
+WHATSAPP:
+- Interakt account already active
+  (replaces Twilio in all future prompts)
+- Create commissioning notification
+  template in Interakt before Week 3
+
+INTEGRATIONS STATUS:
+- Railway PostgreSQL: active
+- SendGrid: pending (Week 3)
+- Interakt WhatsApp: account active,
+  template creation pending
+- Zoho CRM: Day 5
+- Supabase file storage: Days 6-8
+
+PROMPT FILES SAVED LOCALLY:
+- day4_claude_code_prompt.txt ← USE THIS
+
+NEXT SESSION GOAL:
+Day 5 — Strengthning of Onformation low among the roles 
+		Better info display and actionable items on 
+		PM, Design and SCM dashboards
+
+
+DATE: 11-June-2026
+DAY: 5 of 24
+
+COMPLETED TODAY:
+- assigned_design ForeignKey on Project model
+  (nullable, limit_choices_to role=Design,
+  SET_NULL on delete, related_name=
+  design_projects)
+- Migration 0012: assigned_design field
+- PM can assign Design member from project
+  detail page (dropdown, active Design users
+  only, editable when project Active/In Progress)
+- On assigned_design save: bulk update
+  assigned_to on all incomplete Design-role
+  tasks for that project in one .update() call
+- On assigned_design cleared: assigned_to
+  set to None on same tasks
+- Design dashboard now filters by
+  phase__project__assigned_design=current_user
+  (was: all active projects with Design tasks)
+- Design dashboard empty state: "No projects
+  assigned to you yet." when no projects assigned
+- PM dashboard: BOQ status column added to
+  project list table — coloured badge per project
+  with direct link to /projects/<id>/boq/
+  Badge colours: Draft=gray, Submitted=blue,
+  Acknowledged=green, Revision Requested=amber,
+  No BOQ=plain dash
+- pm_dashboard view annotates boq_status and
+  boq_url on each project via try/except
+  (never accesses project.boq in template)
+- SCM dashboard: "POs Pending" card replaced
+  with "BOQ awaiting action" (count of
+  Submitted BOQs)
+- SCM dashboard: BOQ status list section —
+  queries BOQ objects directly with
+  select_related('project'), shows Project ID,
+  Customer, status badge, "View BOQ →" link
+- Design dashboard: "Revision Requested"
+  summary card (filtered to current user's
+  assigned projects only)
+- Design dashboard: BOQ status list section —
+  shows all assigned projects with BOQ status
+  badge and "View BOQ →" link, including
+  projects with no BOQ (not started)
+
+MIGRATIONS APPLIED:
+- 0012: assigned_design FK on Project
+
+LOCKED DECISIONS:
+- Design assignment is project-level FK,
+  set by PM post-activation, optional
+- SCM remains a team entity — no project-level
+  assignment, all SCM users see all active
+  projects (correct behaviour)
+- Design Head (Phase 2): will take over
+  assigned_design from PM. New 8th role.
+  Dashboard: all projects, assigns by
+  availability and complexity
+- BOQ URL always uses project.project_id
+  (string e.g. HRP-RES-2026-001), never
+  project.pk
+
+KNOWN GOTCHAS (new, carry forward):
+- project.boq raises RelatedObjectDoesNotExist —
+  always annotate in view, never in template
+- For SCM BOQ list: query BOQ objects directly
+  (not projects) to avoid RelatedObjectDoesNotExist
+- For Design BOQ list: query projects then
+  annotate (Design must see projects with no BOQ)
+- assigned_design form: use explicit
+  ModelChoiceField queryset, do not rely on
+  limit_choices_to alone for form rendering
+- Bulk task update: use .update() not loop
+  of .save() calls
+
+BACKLOG NOTES (do not build yet):
+- PM dashboard: append delivery status
+  (materials arrived/pending) to project list
+  alongside BOQ badge when SCM delivery
+  tracker is built
+- CEO dashboard action items: spec in Week 3
+  when Finance and Issues modules exist.
+  Candidate actions: contract value approval,
+  milestone payment release, On Hold resumption,
+  high-value procurement sign-off
+
+INTEGRATIONS STATUS:
+- Railway PostgreSQL: active
+- SendGrid: pending (Week 3)
+- Interakt WhatsApp: account active,
+  template creation pending — DO THIS NOW,
+  2-5 day verification window
+- Zoho CRM: deferred (not demo-blocking)
+- Supabase file storage: Days 6-8
+
+PROMPT FILES SAVED LOCALLY:
+- day5_claude_code_prompt.md ← USE THIS
+
+NEXT SESSION GOAL:
+Day 6 — Finance dashboard (M1/M2/M3 milestones)
+		Individual Project Dashboard
