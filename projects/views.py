@@ -1699,8 +1699,12 @@ def zoho_deal_closed_webhook(request):
     if request.method != 'POST':
         return HttpResponse(status=405)
 
-    # Token validation
-    token = request.headers.get('X-Webhook-Token', '') or request.GET.get('token', '')
+    # Token validation — accept header, ?token=, or ?secret= (Zoho default param name)
+    token = (
+        request.headers.get('X-Webhook-Token', '')
+        or request.GET.get('token', '')
+        or request.GET.get('secret', '')
+    )
     expected = settings.ZOHO_WEBHOOK_SECRET
     if not expected or token != expected:
         ip = request.META.get('REMOTE_ADDR', 'unknown')
