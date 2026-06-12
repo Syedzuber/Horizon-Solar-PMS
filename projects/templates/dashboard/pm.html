@@ -68,6 +68,7 @@
               <th>OD</th>
               <th>Status</th>
               <th>BOQ</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -130,6 +131,13 @@
                 {% else %}
                   <span class="text-muted">—</span>
                 {% endif %}
+              </td>
+              <td>
+                <a href="{% url 'project_overview' row.project.project_id %}"
+                   class="btn btn-outline-info btn-sm py-0"
+                   onclick="event.stopPropagation()">
+                  Overview
+                </a>
               </td>
             </tr>
             {% empty %}

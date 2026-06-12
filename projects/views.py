@@ -10,12 +10,13 @@ from django.contrib.auth.models import User
 from django.http import Http404, HttpResponseForbidden, JsonResponse
 from django.utils import timezone
 from django.db import transaction
-from django.db.models import Max, Prefetch, Q
+from django.db.models import Max, Prefetch, Q, Sum
 
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
     Vendor, VendorCategory,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
+    PaymentMilestone,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -318,8 +319,60 @@ def dashboard_design(request):
 
 
 @login_required
+@role_required(['Finance'])
 def dashboard_finance(request):
-    return render(request, 'dashboard/finance.html')
+    today = timezone.now().date()
+
+    total_pending = PaymentMilestone.objects.filter(
+        status='Pending'
+    ).aggregate(s=Sum('amount'))['s'] or 0
+
+    total_invoiced = PaymentMilestone.objects.filter(
+        status='Invoiced'
+    ).aggregate(s=Sum('amount'))['s'] or 0
+
+    total_received = PaymentMilestone.objects.filter(
+        status='Received'
+    ).aggregate(s=Sum('amount_received'))['s'] or 0
+
+    overdue_count = PaymentMilestone.objects.filter(
+        status='Pending',
+        due_date__lt=today,
+        due_date__isnull=False,
+    ).count()
+
+    projects = (
+        Project.objects.filter(status__in=['Active', 'In Progress'])
+        .prefetch_related('milestones')
+        .select_related('assigned_pm__user')
+        .order_by('project_id')
+    )
+
+    projects_with_milestones = []
+    for project in projects:
+        milestone_map = {'M1': None, 'M2': None, 'M3': None}
+        for m in project.milestones.all():
+            if m.milestone_name in milestone_map:
+                if m.amount is not None and m.amount_received is not None:
+                    m.variance = m.amount - m.amount_received
+                else:
+                    m.variance = None
+                milestone_map[m.milestone_name] = m
+        projects_with_milestones.append({
+            'project': project,
+            'M1': milestone_map['M1'],
+            'M2': milestone_map['M2'],
+            'M3': milestone_map['M3'],
+        })
+
+    return render(request, 'dashboard/finance.html', {
+        'total_pending':            total_pending,
+        'total_invoiced':           total_invoiced,
+        'total_received':           total_received,
+        'overdue_count':            overdue_count,
+        'projects_with_milestones': projects_with_milestones,
+        'today':                    today,
+    })
 
 
 @login_required
@@ -556,9 +609,33 @@ def project_detail(request, project_id):
     is_assigned_pm     = (project.assigned_pm.user == request.user)
     can_assign_design  = is_assigned_pm and project.status in ('Active', 'In Progress')
 
-    # Handle Design Member assignment
+    # Handle POST actions (PM only)
     if request.method == 'POST' and is_assigned_pm:
-        if request.POST.get('action') == 'assign_design' and can_assign_design:
+        action = request.POST.get('action', '')
+
+        if action == 'update_milestone':
+            milestone_pk = request.POST.get('milestone_pk', '').strip()
+            if milestone_pk:
+                try:
+                    milestone = project.milestones.get(pk=milestone_pk)
+                    milestone.milestone_description = request.POST.get('milestone_description', '').strip()
+                    amount_str   = request.POST.get('amount', '').strip()
+                    due_date_str = request.POST.get('due_date', '').strip()
+                    try:
+                        milestone.amount = Decimal(amount_str) if amount_str else None
+                    except InvalidOperation:
+                        milestone.amount = None
+                    try:
+                        milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
+                    except ValueError:
+                        milestone.due_date = None
+                    milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
+                    messages.success(request, f'{milestone.milestone_name} updated.')
+                except PaymentMilestone.DoesNotExist:
+                    messages.error(request, 'Milestone not found.')
+            return redirect('project_detail', project_id=project.project_id)
+
+        if action == 'assign_design' and can_assign_design:
             design_id = request.POST.get('assigned_design', '').strip()
             if design_id:
                 try:
@@ -592,6 +669,15 @@ def project_detail(request, project_id):
             .order_by('phase_order')
         )
 
+    milestones = []
+    if project.status != 'Draft':
+        for m in project.milestones.all():
+            if m.amount is not None and m.amount_received is not None:
+                m.variance = m.amount - m.amount_received
+            else:
+                m.variance = None
+            milestones.append(m)
+
     user_role = role
 
     candidates_by_role = {}
@@ -608,6 +694,7 @@ def project_detail(request, project_id):
     return render(request, 'projects/project_detail.html', {
         'project':             project,
         'phases':              phases,
+        'milestones':          milestones,
         'is_assigned_pm':      is_assigned_pm,
         'can_assign_design':   can_assign_design,
         'design_candidates':   design_candidates,
@@ -669,6 +756,19 @@ def project_activate(request, project_id):
 
         if project.project_type == 'Residential':
             attach_residential_template(project)
+
+        milestone_defaults = [
+            ('M1', 'On Survey Completion'),
+            ('M2', 'On Material Supply'),
+            ('M3', 'On Commissioning'),
+        ]
+        for name, desc in milestone_defaults:
+            PaymentMilestone.objects.create(
+                project=project,
+                milestone_name=name,
+                milestone_description=desc,
+                created_by=request.user.profile,
+            )
 
     if project.project_type == 'Residential':
         messages.success(request, 'Project activated. 50 tasks created. Set the first task due date to calculate all dates.')
@@ -1336,4 +1436,241 @@ def notifications_view(request):
 
     return render(request, 'projects/notifications.html', {
         'notifications': notifications,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Finance milestone actions
+# ---------------------------------------------------------------------------
+
+@login_required
+@role_required(['Finance'])
+def milestone_invoice(request, project_id, milestone_pk):
+    if request.method != 'POST':
+        return redirect('dashboard_finance')
+
+    milestone = get_object_or_404(
+        PaymentMilestone, pk=milestone_pk, project__project_id=project_id
+    )
+    if milestone.status != 'Pending':
+        messages.error(request, 'Only Pending milestones can be marked as Invoiced.')
+        return redirect('dashboard_finance')
+
+    milestone.status       = 'Invoiced'
+    milestone.invoice_date = date.today()
+    milestone.save(update_fields=['status', 'invoice_date'])
+    messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
+    return redirect('dashboard_finance')
+
+
+@login_required
+@role_required(['Finance'])
+def milestone_receive(request, project_id, milestone_pk):
+    if request.method != 'POST':
+        return redirect('dashboard_finance')
+
+    milestone = get_object_or_404(
+        PaymentMilestone, pk=milestone_pk, project__project_id=project_id
+    )
+    if milestone.status != 'Invoiced':
+        messages.error(request, 'Only Invoiced milestones can be marked as Received.')
+        return redirect('dashboard_finance')
+
+    amount_received_str = request.POST.get('amount_received', '').strip()
+    if not amount_received_str:
+        messages.error(request, 'Amount received is required.')
+        return redirect('dashboard_finance')
+
+    try:
+        amount_received = Decimal(amount_received_str)
+    except InvalidOperation:
+        messages.error(request, 'Invalid amount value.')
+        return redirect('dashboard_finance')
+
+    variance_reason = request.POST.get('variance_reason', '').strip()
+    if milestone.amount and amount_received > milestone.amount and not variance_reason:
+        variance_reason = 'Overpayment'
+
+    milestone.status          = 'Received'
+    milestone.received_date   = date.today()
+    milestone.amount_received = amount_received
+    milestone.variance_reason = variance_reason
+    milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+    messages.success(request, f'{milestone.milestone_name} marked as Received.')
+    return redirect('dashboard_finance')
+
+
+@login_required
+@role_required(['PM'])
+def milestone_create(request, project_id):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    if not project.milestones.exists():
+        milestone_defaults = [
+            ('M1', 'On Survey Completion'),
+            ('M2', 'On Material Supply'),
+            ('M3', 'On Commissioning'),
+        ]
+        for name, desc in milestone_defaults:
+            PaymentMilestone.objects.create(
+                project=project,
+                milestone_name=name,
+                milestone_description=desc,
+                created_by=request.user.profile,
+            )
+        messages.success(request, 'Payment milestones created.')
+    else:
+        messages.info(request, 'Milestones already exist for this project.')
+    return redirect('project_detail', project_id=project_id)
+
+
+# ---------------------------------------------------------------------------
+# BD dashboard
+# ---------------------------------------------------------------------------
+
+@login_required
+@role_required(['BD'])
+def dashboard_bd(request):
+    today = timezone.now().date()
+
+    active_qs = Project.objects.filter(status__in=['Active', 'In Progress'])
+
+    commissioned_this_month = Project.objects.filter(
+        status='Commissioned',
+        commissioned_at__isnull=False,
+        commissioned_at__month=today.month,
+        commissioned_at__year=today.year,
+    ).count()
+
+    total_contracted = active_qs.aggregate(s=Sum('contract_value'))['s'] or 0
+
+    pending_payments = PaymentMilestone.objects.filter(
+        status__in=['Pending', 'Invoiced']
+    ).count()
+
+    projects_list = (
+        active_qs
+        .prefetch_related('milestones')
+        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
+        .prefetch_related(
+            Prefetch('phases',
+                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+        )
+        .order_by('project_id')
+    )
+
+    projects_with_data = []
+    for project in projects_list:
+        milestone_map = {'M1': None, 'M2': None, 'M3': None}
+        for m in project.milestones.all():
+            if m.milestone_name in milestone_map:
+                milestone_map[m.milestone_name] = m
+
+        current_phase = (
+            project.phases
+            .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
+            .order_by('phase_order').first()
+            or project.phases.order_by('-phase_order').first()
+        )
+
+        projects_with_data.append({
+            'project':       project,
+            'M1':            milestone_map['M1'],
+            'M2':            milestone_map['M2'],
+            'M3':            milestone_map['M3'],
+            'current_phase': current_phase,
+        })
+
+    return render(request, 'dashboard/bd.html', {
+        'summary': {
+            'active_projects':         active_qs.count(),
+            'commissioned_this_month': commissioned_this_month,
+            'total_contracted':        total_contracted,
+            'pending_payments':        pending_payments,
+        },
+        'projects_with_data': projects_with_data,
+        'today':              today,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Individual project overview
+# ---------------------------------------------------------------------------
+
+@login_required
+def project_overview(request, project_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    try:
+        project.boq_status    = project.boq.status
+        project.boq_last_event = project.boq.revisions.order_by('-revised_at').first()
+        project.boq_url       = f'/projects/{project.project_id}/boq/'
+    except Exception:
+        project.boq_status     = None
+        project.boq_last_event = None
+        project.boq_url        = None
+
+    milestones = list(project.milestones.all())
+    for m in milestones:
+        if m.amount is not None and m.amount_received is not None:
+            m.variance = m.amount - m.amount_received
+        else:
+            m.variance = None
+
+    phases = list(project.phases.prefetch_related('tasks').order_by('phase_order'))
+    phase_data_json = []
+    for phase in phases:
+        tasks = list(phase.tasks.all())
+        if not tasks:
+            continue
+        internal = [t for t in tasks if t.task_type == 'Internal']
+        internal_done = sum(1 for t in internal if t.status == 'Done')
+        internal_total = len(internal)
+        pct = int(internal_done / internal_total * 100) if internal_total else 0
+        ext_pending = sum(1 for t in tasks if t.task_type == 'External' and t.status != 'Done')
+        phase_data_json.append({
+            'pk':            phase.pk,
+            'pct':           pct,
+            'internal_done': internal_done,
+            'internal_total': internal_total,
+            'ext_pending':   ext_pending,
+        })
+
+    due_changes = list(
+        DueDateChangeLog.objects.filter(task__phase__project=project)
+        .select_related('task', 'changed_by__user')
+        .order_by('-changed_at')[:10]
+    )
+    boq_events = list(
+        BOQRevision.objects.filter(boq__project=project)
+        .select_related('revised_by__user')
+        .order_by('-revised_at')[:10]
+    )
+    for e in due_changes:
+        e.event_type = 'due_date'
+        e.event_date = e.changed_at
+    for e in boq_events:
+        e.event_type = 'boq'
+        e.event_date = e.revised_at
+    recent_activity = sorted(
+        due_changes + boq_events, key=lambda x: x.event_date, reverse=True
+    )[:5]
+
+    import json
+    return render(request, 'projects/project_overview.html', {
+        'project':          project,
+        'milestones':       milestones,
+        'phases':           phases,
+        'phase_data_json':  json.dumps(phase_data_json),
+        'recent_activity':  recent_activity,
+        'role':             profile.role,
     })

@@ -1,0 +1,31 @@
+{% if not m %}
+  <span class="text-muted">—</span>
+{% elif m.status == 'Pending' %}
+  <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}" class="d-inline">
+    {% csrf_token %}
+    <button type="submit" class="badge bg-secondary border-0 text-white"
+            style="cursor:pointer;"
+            onclick="return confirm('Mark {{ m.milestone_name }} as Invoiced?')">
+      Pending
+    </button>
+  </form>
+{% elif m.status == 'Invoiced' %}
+  <button type="button"
+          class="badge bg-primary border-0 text-white"
+          style="cursor:pointer;"
+          data-bs-toggle="modal" data-bs-target="#receiveModal"
+          data-project-id="{{ project.project_id }}"
+          data-milestone-pk="{{ m.pk }}"
+          data-milestone-name="{{ m.milestone_name }}"
+          data-amount="{{ m.amount|default:'' }}">
+    Invoiced
+  </button>
+{% elif m.status == 'Received' %}
+  <span class="badge bg-success">
+    Received
+    {% if m.variance is not None and m.variance != 0 %}
+      <i class="bi bi-exclamation-triangle-fill text-warning ms-1"
+         title="Received ₹{{ m.amount_received }} against ₹{{ m.amount }} agreed"></i>
+    {% endif %}
+  </span>
+{% endif %}

@@ -13,6 +13,7 @@ ROLE_DASHBOARD = {
     'Finance':       '/dashboard/finance/',
     'SCM':           '/dashboard/scm/',
     'CEO':           '/dashboard/ceo/',
+    'BD':            '/dashboard/bd/',
 }
 
 

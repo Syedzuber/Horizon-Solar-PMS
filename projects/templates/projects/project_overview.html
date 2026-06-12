@@ -1,0 +1,335 @@
+{% extends "base.html" %}
+{% block title %}{{ project.project_id }} Overview — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Panel 1: Project header (all roles) ─────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+      <div>
+        <h4 class="mb-1">{{ project.project_id }} — Overview</h4>
+        <p class="text-muted mb-0">{{ project.customer_name }}</p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-primary btn-sm">
+          Detail View
+        </a>
+        <a href="javascript:history.back()" class="btn btn-outline-secondary btn-sm">← Back</a>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Status</small>
+        {% if project.status == 'Active' %}
+          <span class="badge bg-success">Active</span>
+        {% elif project.status == 'In Progress' %}
+          <span class="badge bg-primary">In Progress</span>
+        {% elif project.status == 'Commissioned' %}
+          <span class="badge bg-info text-dark">Commissioned</span>
+        {% elif project.status == 'On Hold' %}
+          <span class="badge bg-warning text-dark">On Hold</span>
+        {% elif project.status == 'Cancelled' %}
+          <span class="badge bg-danger">Cancelled</span>
+        {% else %}
+          <span class="badge bg-secondary">{{ project.status }}</span>
+        {% endif %}
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Type</small>
+        <span>{{ project.project_type }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Capacity</small>
+        <span>{{ project.capacity_kw }} kWp</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Contract Value</small>
+        <span>₹{{ project.contract_value }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">City / State</small>
+        <span>{{ project.city }}, {{ project.state }}</span>
+      </div>
+      <div class="col-12 col-md-6">
+        <small class="text-muted d-block">Site Address</small>
+        <span>{{ project.site_address }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Target Commissioning</small>
+        <span>{{ project.target_commissioning_date }}</span>
+      </div>
+      {% if project.activated_at %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Activated</small>
+        <span>{{ project.activated_at|date:"d M Y" }}</span>
+      </div>
+      {% endif %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Assigned PM</small>
+        <span>{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Site Engineer</small>
+        <span>{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Design Member</small>
+        {% if project.assigned_design %}
+          <span>{{ project.assigned_design.user.get_full_name|default:project.assigned_design.user.username }}</span>
+        {% else %}
+          <span class="text-muted">Not assigned</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Panel 2: Task progress (PM, SE, Admin only) ─────────────────────────── #}
+{% if role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Task Progress by Phase</div>
+  <div class="card-body" id="phaseProgressPanel">
+    {% for phase in phases %}
+      {% if phase.tasks.count > 0 %}
+      <div class="mb-3">
+        <div class="d-flex justify-content-between align-items-center mb-1">
+          <span class="fw-semibold small">{{ phase.phase_name }}</span>
+          <span class="text-muted small" id="phase-stat-{{ phase.pk }}"></span>
+        </div>
+        <div class="progress" style="height:10px;">
+          <div class="progress-bar bg-primary" style="width:0%;" id="phase-bar-{{ phase.pk }}"></div>
+        </div>
+      </div>
+      {% endif %}
+    {% empty %}
+      <p class="text-muted mb-0">No phases found.</p>
+    {% endfor %}
+  </div>
+</div>
+
+<script>
+(function () {
+  var phaseData = {{ phase_data_json }};
+  phaseData.forEach(function (ph) {
+    var bar  = document.getElementById('phase-bar-'  + ph.pk);
+    var stat = document.getElementById('phase-stat-' + ph.pk);
+    if (bar) {
+      bar.style.width = ph.pct + '%';
+      if (ph.pct === 100) bar.classList.replace('bg-primary', 'bg-success');
+      else if (ph.pct >= 50) bar.classList.add('bg-primary');
+      else bar.classList.replace('bg-primary', 'bg-warning');
+    }
+    if (stat) {
+      stat.textContent = ph.internal_done + '/' + ph.internal_total + ' done' +
+        (ph.ext_pending ? ' · ' + ph.ext_pending + ' external pending' : '');
+    }
+  });
+}());
+</script>
+{% endif %}
+
+{# ── Panel 3: BOQ status (PM, SCM, Design, Admin) ───────────────────────── #}
+{% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">BOQ Status</div>
+  <div class="card-body">
+    {% if project.boq_status %}
+      <div class="d-flex align-items-center gap-3 flex-wrap">
+        {% if project.boq_status == 'Draft' %}
+          <span class="badge bg-secondary fs-6">Draft</span>
+        {% elif project.boq_status == 'Submitted' %}
+          <span class="badge bg-primary fs-6">Submitted</span>
+        {% elif project.boq_status == 'Acknowledged' %}
+          <span class="badge bg-success fs-6">Acknowledged</span>
+        {% elif project.boq_status == 'Revision Requested' %}
+          <span class="badge bg-warning text-dark fs-6">Revision Requested</span>
+        {% endif %}
+        {% if project.boq_last_event %}
+          <span class="text-muted small">
+            Last: {{ project.boq_last_event.reason }} —
+            {{ project.boq_last_event.revised_at|date:"d M Y" }}
+            {% if project.boq_last_event.revised_by %}
+              by {{ project.boq_last_event.revised_by.user.get_full_name|default:project.boq_last_event.revised_by.user.username }}
+            {% endif %}
+          </span>
+        {% endif %}
+        <a href="{{ project.boq_url }}" class="btn btn-outline-primary btn-sm ms-auto">View full BOQ →</a>
+      </div>
+    {% else %}
+      <p class="text-muted mb-0">BOQ not yet created for this project.</p>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Panel 4: Finance milestones (PM, Finance, CEO, Admin) ──────────────── #}
+{% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Payment Milestones</div>
+  <div class="card-body p-0">
+    {% if milestones %}
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Milestone</th>
+            <th>Description</th>
+            <th>Amount (₹)</th>
+            <th>Due Date</th>
+            <th>Status</th>
+            <th>Invoice Date</th>
+            <th>Received Date</th>
+            <th>Amt Received (₹)</th>
+            <th>Variance</th>
+            {% if role == 'Finance' %}<th></th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in milestones %}
+          <tr>
+            <td class="fw-semibold">{{ m.milestone_name }}</td>
+            <td class="text-muted small">{{ m.milestone_description|default:"—" }}</td>
+            <td>{% if m.amount %}₹{{ m.amount|floatformat:0 }}{% else %}—{% endif %}</td>
+            <td>{{ m.due_date|default:"—" }}</td>
+            <td>
+              {% if m.status == 'Pending' %}
+                <span class="badge bg-secondary">Pending</span>
+              {% elif m.status == 'Invoiced' %}
+                <span class="badge bg-primary">Invoiced</span>
+              {% elif m.status == 'Received' %}
+                <span class="badge bg-success">Received</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ m.invoice_date|default:"—" }}</td>
+            <td class="text-muted small">{{ m.received_date|default:"—" }}</td>
+            <td>{% if m.amount_received is not None %}₹{{ m.amount_received|floatformat:0 }}{% else %}—{% endif %}</td>
+            <td>
+              {% if m.variance is not None and m.variance != 0 %}
+                <span class="text-warning fw-semibold">₹{{ m.variance|floatformat:0 }}</span>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            {% if role == 'Finance' %}
+            <td>
+              {% if m.status == 'Pending' %}
+                <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}" class="d-inline">
+                  {% csrf_token %}
+                  <button type="submit" class="btn btn-outline-secondary btn-sm py-0">Mark Invoiced</button>
+                </form>
+              {% elif m.status == 'Invoiced' %}
+                <button type="button" class="btn btn-outline-primary btn-sm py-0"
+                        data-bs-toggle="modal" data-bs-target="#receiveModal"
+                        data-project-id="{{ project.project_id }}"
+                        data-milestone-pk="{{ m.pk }}"
+                        data-milestone-name="{{ m.milestone_name }}"
+                        data-amount="{{ m.amount|default:'' }}">
+                  Mark Received
+                </button>
+              {% endif %}
+            </td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-3 text-muted">
+      Milestones not set yet —
+      {% if role == 'PM' %}
+        <a href="{% url 'project_detail' project.project_id %}">set from project detail page</a>.
+      {% else %}
+        PM can set from the project detail page.
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Panel 5: Recent activity (all roles) ────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Recent Activity</div>
+  <div class="card-body p-0">
+    {% if recent_activity %}
+    <ul class="list-group list-group-flush">
+      {% for event in recent_activity %}
+      <li class="list-group-item py-2">
+        {% if event.event_type == 'due_date' %}
+          <i class="bi bi-calendar-event text-primary me-1"></i>
+          <strong>{{ event.task.task_name }}</strong>
+          due date changed{% if event.old_date %} from {{ event.old_date }}{% endif %} → {{ event.new_date|default:"cleared" }}
+          {% if event.changed_by %}
+            <span class="text-muted small ms-1">by {{ event.changed_by.user.get_full_name|default:event.changed_by.user.username }}</span>
+          {% endif %}
+        {% elif event.event_type == 'boq' %}
+          <i class="bi bi-file-earmark-text text-warning me-1"></i>
+          <strong>BOQ</strong> {{ event.reason }}
+          {% if event.revised_by %}
+            <span class="text-muted small ms-1">by {{ event.revised_by.user.get_full_name|default:event.revised_by.user.username }}</span>
+          {% endif %}
+        {% endif %}
+        <span class="text-muted small float-end">{{ event.event_date|date:"d M Y H:i" }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="text-muted text-center py-3 mb-0">No recent activity recorded.</p>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Receive modal (Finance role) ────────────────────────────────────────── #}
+{% if role == 'Finance' %}
+<div class="modal fade" id="receiveModal" tabindex="-1" aria-labelledby="receiveModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="receiveModalLabel">Mark as Received</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="receiveForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p id="receiveModalInfo" class="text-muted small mb-3"></p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Amount Received (₹) <span class="text-danger">*</span></label>
+            <input type="number" name="amount_received" id="amountReceivedInput"
+                   class="form-control" step="0.01" min="0" required>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Variance Reason <span class="text-muted">(optional)</span></label>
+            <input type="text" name="variance_reason" class="form-control"
+                   placeholder="e.g. customer paid partial amount">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-success">Mark as Received</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+document.getElementById('receiveModal').addEventListener('show.bs.modal', function (event) {
+  var btn         = event.relatedTarget;
+  var projectId   = btn.dataset.projectId;
+  var milestoneId = btn.dataset.milestonePk;
+  var name        = btn.dataset.milestoneName;
+  var amount      = btn.dataset.amount;
+
+  document.getElementById('receiveForm').action =
+    '/projects/' + projectId + '/milestone/' + milestoneId + '/receive/';
+  document.getElementById('receiveModalInfo').textContent =
+    name + ' — Agreed amount: ₹' + (amount ? parseFloat(amount).toLocaleString('en-IN') : 'not set');
+  document.getElementById('amountReceivedInput').value = '';
+});
+</script>
+{% endif %}
+
+{% endblock %}

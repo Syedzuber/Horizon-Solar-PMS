@@ -1,0 +1,9 @@
+{% if not m %}
+  <span class="text-muted">—</span>
+{% elif m.status == 'Pending' %}
+  <span class="badge bg-secondary">Pending</span>
+{% elif m.status == 'Invoiced' %}
+  <span class="badge bg-primary">Invoiced</span>
+{% elif m.status == 'Received' %}
+  <span class="badge bg-success">Received</span>
+{% endif %}

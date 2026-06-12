@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}BD Dashboard — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">BD Dashboard</h4>
+</div>
+
+{# ── Summary cards ───────────────────────────────────────────────────────── #}
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold text-primary">{{ summary.active_projects }}</div>
+        <div class="small text-muted">Active Projects</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold text-success">{{ summary.commissioned_this_month }}</div>
+        <div class="small text-muted">Commissioned This Month</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <div class="fs-4 fw-bold text-info">₹{{ summary.total_contracted|floatformat:0 }}</div>
+        <div class="small text-muted">Total Contracted Value</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <div class="fs-2 fw-bold {% if summary.pending_payments > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ summary.pending_payments }}
+        </div>
+        <div class="small text-muted">Pending Payments</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Project list table ──────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Active Projects</div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Project ID</th>
+            <th>Customer</th>
+            <th>Capacity (kWp)</th>
+            <th>Current Phase</th>
+            <th style="width:7rem;">M1</th>
+            <th style="width:7rem;">M2</th>
+            <th style="width:7rem;">M3</th>
+            <th>Target Date</th>
+            <th>PM</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in projects_with_data %}
+          <tr style="cursor:pointer;" onclick="window.location='{% url 'project_overview' row.project.project_id %}'">
+            <td class="fw-semibold">{{ row.project.project_id }}</td>
+            <td>{{ row.project.customer_name }}</td>
+            <td>{{ row.project.capacity_kw }}</td>
+            <td>
+              {% if row.current_phase %}
+                <span class="text-muted small">{{ row.current_phase.phase_name }}</span>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M1 %}</td>
+            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M2 %}</td>
+            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M3 %}</td>
+            <td class="text-muted small">{{ row.project.target_commissioning_date }}</td>
+            <td class="text-muted small">
+              {{ row.project.assigned_pm.user.get_full_name|default:row.project.assigned_pm.user.username }}
+            </td>
+          </tr>
+          {% empty %}
+          <tr>
+            <td colspan="9" class="text-center text-muted py-4">No active projects found.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{# ── Document upload placeholder ─────────────────────────────────────────── #}
+<div class="card shadow-sm">
+  <div class="card-body text-center text-muted py-4">
+    <i class="bi bi-folder2-open fs-3 mb-2 d-block"></i>
+    <strong>Document upload — coming soon.</strong><br>
+    Integration planned for Phase 2.
+  </div>
+</div>
+
+{% endblock %}

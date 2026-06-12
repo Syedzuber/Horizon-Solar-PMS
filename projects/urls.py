@@ -14,6 +14,7 @@ urlpatterns = [
     path('dashboard/finance/',       views.dashboard_finance,       name='dashboard_finance'),
     path('dashboard/scm/',           views.dashboard_scm,           name='dashboard_scm'),
     path('dashboard/ceo/',           views.dashboard_ceo,           name='dashboard_ceo'),
+    path('dashboard/bd/',            views.dashboard_bd,            name='dashboard_bd'),
 
     # User management
     path('users/',                    views.user_list,   name='user_list'),
@@ -47,4 +48,12 @@ urlpatterns = [
     path('projects/<str:project_id>/boq/acknowledge/',       views.boq_acknowledge,      name='boq_acknowledge'),
     path('projects/<str:project_id>/boq/request-revision/',  views.boq_request_revision, name='boq_request_revision'),
     path('projects/<str:project_id>/boq/history/',           views.boq_history,          name='boq_history'),
+
+    # Payment milestones
+    path('projects/<str:project_id>/milestone/<int:milestone_pk>/invoice/', views.milestone_invoice, name='milestone_invoice'),
+    path('projects/<str:project_id>/milestone/<int:milestone_pk>/receive/', views.milestone_receive, name='milestone_receive'),
+    path('projects/<str:project_id>/milestones/create/',                    views.milestone_create,  name='milestone_create'),
+
+    # Project overview
+    path('projects/<str:project_id>/overview/', views.project_overview, name='project_overview'),
 ]

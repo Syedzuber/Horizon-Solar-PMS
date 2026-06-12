@@ -60,6 +60,7 @@ class Project(models.Model):
         on_delete=models.PROTECT,
     )
     activated_at              = models.DateTimeField(blank=True, null=True)
+    commissioned_at           = models.DateField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -172,7 +173,7 @@ class Milestone(models.Model):
         ('delayed',     'Delayed'),
     ]
 
-    project        = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='milestones')
+    project        = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='old_milestones')
     title          = models.CharField(max_length=200)
     description    = models.TextField(blank=True)
     due_date       = models.DateField(null=True, blank=True)
@@ -236,6 +237,7 @@ class UserProfile(models.Model):
         ('Finance',       'Finance'),
         ('SCM',           'SCM'),
         ('CEO',           'CEO'),
+        ('BD',            'BD'),
     ]
 
     user         = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
@@ -443,3 +445,34 @@ class Notification(models.Model):
 
     def __str__(self):
         return f"Notification → {self.recipient} — {self.message[:60]}"
+
+
+class PaymentMilestone(models.Model):
+    PENDING  = 'Pending'
+    INVOICED = 'Invoiced'
+    RECEIVED = 'Received'
+    STATUS_CHOICES = [
+        (PENDING,  'Pending'),
+        (INVOICED, 'Invoiced'),
+        (RECEIVED, 'Received'),
+    ]
+    M1 = 'M1'; M2 = 'M2'; M3 = 'M3'
+    NAME_CHOICES = [(M1, 'M1'), (M2, 'M2'), (M3, 'M3')]
+
+    project              = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='milestones')
+    milestone_name       = models.CharField(max_length=10, choices=NAME_CHOICES)
+    milestone_description = models.CharField(max_length=100, default='')
+    amount               = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    amount_received      = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    variance_reason      = models.CharField(max_length=255, blank=True, default='')
+    due_date             = models.DateField(null=True, blank=True)
+    invoice_date         = models.DateField(null=True, blank=True)
+    received_date        = models.DateField(null=True, blank=True)
+    status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+    created_by           = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ['milestone_name']
+
+    def __str__(self):
+        return f"{self.project.project_id} — {self.milestone_name}"
