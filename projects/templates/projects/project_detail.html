@@ -67,7 +67,7 @@
       </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Assigned PM</small>
-        <span>{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}</span>
+        <span>{% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}—{% endif %}</span>
       </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Site Engineer</small>

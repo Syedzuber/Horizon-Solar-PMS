@@ -81,7 +81,7 @@
             <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M3 %}</td>
             <td class="text-muted small">{{ row.project.target_commissioning_date }}</td>
             <td class="text-muted small">
-              {{ row.project.assigned_pm.user.get_full_name|default:row.project.assigned_pm.user.username }}
+              {% if row.project.assigned_pm %}{{ row.project.assigned_pm.user.get_full_name|default:row.project.assigned_pm.user.username }}{% else %}—{% endif %}
             </td>
           </tr>
           {% empty %}

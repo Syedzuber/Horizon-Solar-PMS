@@ -53,7 +53,7 @@
               {{ cp|default:"—" }}
             {% endwith %}
           </td>
-          <td>{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}</td>
+          <td>{% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}—{% endif %}</td>
           <td>{{ project.capacity_kw }}</td>
           <td>{{ project.contract_value }}</td>
           <td>{{ project.target_commissioning_date }}</td>
