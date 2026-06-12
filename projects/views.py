@@ -1718,11 +1718,14 @@ def zoho_deal_closed_webhook(request):
 
     logger.info(request.body)  # REMOVE AFTER FIRST TEST — confirm payload structure
 
-    # Defensive nesting: Zoho wraps data differently depending on webhook config
-    data = payload.get('data', [{}])
-    if isinstance(data, list):
-        data = data[0] if data else {}
-    deal = data.get('Deal', data)
+    # Zoho payload structure varies: flat root, or wrapped in data[]/data[0].Deal
+    data_wrapper = payload.get('data')
+    if data_wrapper is not None:
+        if isinstance(data_wrapper, list):
+            data_wrapper = data_wrapper[0] if data_wrapper else {}
+        deal = data_wrapper.get('Deal', data_wrapper)
+    else:
+        deal = payload  # flat root — fields are at the top level
 
     stage = deal.get('Stage', '')
     if stage != 'Closed Won':
