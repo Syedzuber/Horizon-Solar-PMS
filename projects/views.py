@@ -1851,11 +1851,6 @@ def zoho_deal_closed_webhook(request):
 # File upload helpers
 # ---------------------------------------------------------------------------
 
-def _safe_redirect(next_url, fallback):
-    if next_url and not _urlparse(next_url).netloc:
-        return redirect(next_url)
-    return redirect(fallback)
-
 
 def _validate_and_upload(file, supabase_client, bucket, supabase_path):
     """Validate one file and upload to Supabase. Raises ValueError on validation failure."""
@@ -1920,14 +1915,14 @@ def upload_project_document(request, project_id):
     files = request.FILES.getlist('files')
     if not files:
         messages.error(request, 'No files selected.')
-        return _safe_redirect(request.POST.get('next', ''), 'project_detail')
+        return redirect('project_detail', project_id=project_id)
 
     try:
         from .supabase_storage import get_supabase_client
         client = get_supabase_client()
     except ValueError as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
-        return _safe_redirect(request.POST.get('next', ''), 'project_detail')
+        return redirect('project_detail', project_id=project_id)
 
     bucket     = settings.SUPABASE_BUCKET
     successes  = []
@@ -2030,20 +2025,14 @@ def upload_task_attachment(request, project_id, task_id):
     files = request.FILES.getlist('files')
     if not files:
         messages.error(request, 'No files selected.')
-        return _safe_redirect(
-            request.POST.get('next', ''),
-            redirect('task_detail', project_id=project_id, task_id=task_id),
-        )
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     try:
         from .supabase_storage import get_supabase_client
         client = get_supabase_client()
     except ValueError as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
-        return _safe_redirect(
-            request.POST.get('next', ''),
-            redirect('task_detail', project_id=project_id, task_id=task_id),
-        )
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     bucket    = settings.SUPABASE_BUCKET
     successes = []
