@@ -1920,7 +1920,7 @@ def upload_project_document(request, project_id):
     try:
         from .supabase_storage import get_supabase_client
         client = get_supabase_client()
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
         return redirect('project_detail', project_id=project_id)
 
@@ -2030,7 +2030,7 @@ def upload_task_attachment(request, project_id, task_id):
     try:
         from .supabase_storage import get_supabase_client
         client = get_supabase_client()
-    except ValueError as exc:
+    except (ValueError, ImportError) as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
