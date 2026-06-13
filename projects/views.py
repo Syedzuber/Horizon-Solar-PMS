@@ -1,9 +1,11 @@
 import json
 import logging
 import re
+import uuid as _uuid
 from datetime import date, timedelta, datetime
 from decimal import Decimal, InvalidOperation
 from itertools import groupby
+from urllib.parse import urlparse as _urlparse
 
 from django.conf import settings
 from django.contrib import messages
@@ -20,13 +22,33 @@ from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
     Vendor, VendorCategory,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
-    PaymentMilestone,
+    PaymentMilestone, ProjectDocument, TaskAttachment,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# File upload constants
+# ---------------------------------------------------------------------------
+
+ALLOWED_DOCUMENT_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx']
+ALLOWED_PHOTO_EXTENSIONS    = ['jpg', 'jpeg', 'png']
+ALLOWED_EXTENSIONS          = ALLOWED_DOCUMENT_EXTENSIONS + ALLOWED_PHOTO_EXTENSIONS
+MAX_FILE_SIZE_BYTES         = 20 * 1024 * 1024  # 20 MB
+
+MIME_TYPE_MAP = {
+    'pdf':  'application/pdf',
+    'doc':  'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls':  'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'jpg':  'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png':  'image/png',
+}
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +717,8 @@ def project_detail(request, project_id):
             ]
         design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
 
+    documents = project.documents.filter(is_deleted=False) if project.status != 'Draft' else []
+
     return render(request, 'projects/project_detail.html', {
         'project':             project,
         'phases':              phases,
@@ -703,8 +727,10 @@ def project_detail(request, project_id):
         'can_assign_design':   can_assign_design,
         'design_candidates':   design_candidates,
         'user_role':           user_role,
+        'user_profile':        role and request.user.profile,
         'task_status_choices': Task.STATUS_CHOICES,
         'candidates_by_role':  candidates_by_role,
+        'documents':           documents,
     })
 
 
@@ -1669,6 +1695,8 @@ def project_overview(request, project_id):
         due_changes + boq_events, key=lambda x: x.event_date, reverse=True
     )[:5]
 
+    documents = project.documents.filter(is_deleted=False)
+
     import json
     return render(request, 'projects/project_overview.html', {
         'project':          project,
@@ -1677,6 +1705,8 @@ def project_overview(request, project_id):
         'phase_data_json':  json.dumps(phase_data_json),
         'recent_activity':  recent_activity,
         'role':             profile.role,
+        'user_profile':     profile,
+        'documents':        documents,
     })
 
 
@@ -1815,3 +1845,279 @@ def zoho_deal_closed_webhook(request):
             logger.error('Webhook: notification creation failed for project %s — %s', project.project_id, exc)
 
     return HttpResponse(status=200)
+
+
+# ---------------------------------------------------------------------------
+# File upload helpers
+# ---------------------------------------------------------------------------
+
+def _safe_redirect(next_url, fallback):
+    if next_url and not _urlparse(next_url).netloc:
+        return redirect(next_url)
+    return redirect(fallback)
+
+
+def _validate_and_upload(file, supabase_client, bucket, supabase_path):
+    """Validate one file and upload to Supabase. Raises ValueError on validation failure."""
+    ext = file.name.rsplit('.', 1)[-1].lower() if '.' in file.name else ''
+    if ext not in ALLOWED_EXTENSIONS:
+        raise ValueError(f"unsupported type (.{ext})")
+    if file.size > MAX_FILE_SIZE_BYTES:
+        raise ValueError("exceeds 20 MB limit")
+
+    expected_mime = MIME_TYPE_MAP.get(ext, '')
+    actual_mime   = (file.content_type or '').split(';')[0].strip()
+    if expected_mime and actual_mime and actual_mime not in (expected_mime, 'application/octet-stream'):
+        raise ValueError("MIME type does not match extension")
+
+    file.seek(0)
+    supabase_client.storage.from_(bucket).upload(
+        path=supabase_path,
+        file=file.read(),
+        file_options={"content-type": MIME_TYPE_MAP.get(ext, 'application/octet-stream')},
+    )
+    return ext
+
+
+# ---------------------------------------------------------------------------
+# Task detail
+# ---------------------------------------------------------------------------
+
+@login_required
+def task_detail(request, project_id, task_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    task        = get_object_or_404(Task, pk=task_id, phase__project=project)
+    attachments = task.attachments.filter(is_deleted=False)
+
+    return render(request, 'projects/task_detail.html', {
+        'project':     project,
+        'task':        task,
+        'attachments': attachments,
+        'user_profile': profile,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Project document upload / delete
+# ---------------------------------------------------------------------------
+
+@login_required
+def upload_project_document(request, project_id):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    files = request.FILES.getlist('files')
+    if not files:
+        messages.error(request, 'No files selected.')
+        return _safe_redirect(request.POST.get('next', ''), 'project_detail')
+
+    try:
+        from .supabase_storage import get_supabase_client
+        client = get_supabase_client()
+    except ValueError as exc:
+        messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
+        return _safe_redirect(request.POST.get('next', ''), 'project_detail')
+
+    bucket     = settings.SUPABASE_BUCKET
+    successes  = []
+    failures   = []
+
+    for file in files:
+        supabase_path = (
+            f"project-documents/{project.project_id}/"
+            f"{_uuid.uuid4()}_{file.name}"
+        )
+        try:
+            ext       = _validate_and_upload(file, client, bucket, supabase_path)
+            file_type = 'Photo' if ext in ALLOWED_PHOTO_EXTENSIONS else 'Document'
+            file_url  = (
+                f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+                f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+            )
+            ProjectDocument.objects.create(
+                project=project,
+                uploaded_by=profile,
+                file_name=file.name,
+                file_url=file_url,
+                supabase_path=supabase_path,
+                file_type=file_type,
+                file_size_kb=max(1, file.size // 1024),
+            )
+            successes.append(file.name)
+        except ValueError as exc:
+            failures.append(f"{file.name} ({exc})")
+        except Exception as exc:
+            logger.error('Supabase upload failed for %s: %s', file.name, exc)
+            failures.append(f"{file.name} (upload error)")
+
+    if successes and failures:
+        messages.warning(
+            request,
+            f"{len(successes)} of {len(successes) + len(failures)} files uploaded. "
+            f"Failed: {', '.join(failures)}"
+        )
+    elif successes:
+        messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
+    else:
+        messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
+
+    next_url = request.POST.get('next', '')
+    if next_url and not _urlparse(next_url).netloc:
+        return redirect(next_url)
+    return redirect('project_detail', project_id=project_id)
+
+
+@login_required
+def delete_project_document(request, project_id, doc_pk):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    doc = get_object_or_404(ProjectDocument, pk=doc_pk, project=project, is_deleted=False)
+
+    if doc.uploaded_by != profile and profile.role != 'Admin':
+        return HttpResponseForbidden()
+
+    doc.is_deleted  = True
+    doc.deleted_at  = timezone.now()
+    doc.deleted_by  = profile
+    doc.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
+
+    messages.success(request, f'"{doc.file_name}" deleted.')
+    next_url = request.POST.get('next', '')
+    if next_url and not _urlparse(next_url).netloc:
+        return redirect(next_url)
+    return redirect('project_detail', project_id=project_id)
+
+
+# ---------------------------------------------------------------------------
+# Task attachment upload / delete
+# ---------------------------------------------------------------------------
+
+@login_required
+def upload_task_attachment(request, project_id, task_id):
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    # Cross-project guard
+    if task.phase.project.project_id != project_id:
+        return HttpResponseForbidden()
+
+    files = request.FILES.getlist('files')
+    if not files:
+        messages.error(request, 'No files selected.')
+        return _safe_redirect(
+            request.POST.get('next', ''),
+            redirect('task_detail', project_id=project_id, task_id=task_id),
+        )
+
+    try:
+        from .supabase_storage import get_supabase_client
+        client = get_supabase_client()
+    except ValueError as exc:
+        messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
+        return _safe_redirect(
+            request.POST.get('next', ''),
+            redirect('task_detail', project_id=project_id, task_id=task_id),
+        )
+
+    bucket    = settings.SUPABASE_BUCKET
+    successes = []
+    failures  = []
+
+    for file in files:
+        supabase_path = (
+            f"task-attachments/{project.project_id}/{task.pk}/"
+            f"{_uuid.uuid4()}_{file.name}"
+        )
+        try:
+            ext       = _validate_and_upload(file, client, bucket, supabase_path)
+            file_type = 'Photo' if ext in ALLOWED_PHOTO_EXTENSIONS else 'Document'
+            file_url  = (
+                f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+                f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+            )
+            TaskAttachment.objects.create(
+                task=task,
+                uploaded_by=profile,
+                file_name=file.name,
+                file_url=file_url,
+                supabase_path=supabase_path,
+                file_type=file_type,
+                file_size_kb=max(1, file.size // 1024),
+            )
+            successes.append(file.name)
+        except ValueError as exc:
+            failures.append(f"{file.name} ({exc})")
+        except Exception as exc:
+            logger.error('Supabase upload failed for %s: %s', file.name, exc)
+            failures.append(f"{file.name} (upload error)")
+
+    if successes and failures:
+        messages.warning(
+            request,
+            f"{len(successes)} of {len(successes) + len(failures)} files uploaded. "
+            f"Failed: {', '.join(failures)}"
+        )
+    elif successes:
+        messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
+    else:
+        messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
+
+    next_url = request.POST.get('next', '')
+    if next_url and not _urlparse(next_url).netloc:
+        return redirect(next_url)
+    return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+@login_required
+def delete_task_attachment(request, project_id, task_id, attach_pk):
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    task   = get_object_or_404(Task, pk=task_id, phase__project=project)
+    attach = get_object_or_404(TaskAttachment, pk=attach_pk, task=task, is_deleted=False)
+
+    if attach.uploaded_by != profile and profile.role != 'Admin':
+        return HttpResponseForbidden()
+
+    attach.is_deleted = True
+    attach.deleted_at = timezone.now()
+    attach.deleted_by = profile
+    attach.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
+
+    messages.success(request, f'"{attach.file_name}" deleted.')
+    next_url = request.POST.get('next', '')
+    if next_url and not _urlparse(next_url).netloc:
+        return redirect(next_url)
+    return redirect('task_detail', project_id=project_id, task_id=task_id)

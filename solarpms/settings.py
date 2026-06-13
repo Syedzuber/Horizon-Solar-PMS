@@ -9,6 +9,14 @@ DEBUG = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv())
 ZOHO_WEBHOOK_SECRET = config('ZOHO_WEBHOOK_SECRET', default='')
 
+SUPABASE_URL    = config('SUPABASE_URL', default='')
+SUPABASE_KEY    = config('SUPABASE_KEY', default='')
+SUPABASE_BUCKET = config('SUPABASE_BUCKET', default='solarpms-files')
+
+FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
+
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='http://localhost').split(',')
 
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')

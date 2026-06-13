@@ -171,6 +171,13 @@ class Task(models.Model):
     def __str__(self):
         return self.task_name
 
+    @property
+    def active_attachment_count(self):
+        try:
+            return self.attachments.filter(is_deleted=False).count()
+        except Exception:
+            return 0
+
 
 class Milestone(models.Model):
 
@@ -199,26 +206,33 @@ class Milestone(models.Model):
 
 class ProjectDocument(models.Model):
 
-    DOC_TYPE_CHOICES = [
-        ('contract',  'Contract'),
-        ('drawing',   'Drawing / Layout'),
-        ('approval',  'Government Approval'),
-        ('subsidy',   'Subsidy Document'),
-        ('invoice',   'Invoice'),
-        ('photo',     'Site Photo'),
-        ('other',     'Other'),
-    ]
+    DOCUMENT = 'Document'
+    PHOTO    = 'Photo'
+    FILE_TYPE_CHOICES = [(DOCUMENT, 'Document'), (PHOTO, 'Photo')]
 
-    project     = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='documents')
-    doc_type    = models.CharField(max_length=20, choices=DOC_TYPE_CHOICES)
-    title       = models.CharField(max_length=200)
-    file        = models.FileField(upload_to='project_docs/%Y/%m/')
-    uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
-    uploaded_at = models.DateTimeField(auto_now_add=True)
-    notes       = models.TextField(blank=True)
+    project      = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='documents')
+    uploaded_by  = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_documents',
+    )
+    file_name    = models.CharField(max_length=255)
+    file_url     = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type    = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at  = models.DateTimeField(auto_now_add=True)
+    is_deleted   = models.BooleanField(default=False)
+    deleted_at   = models.DateTimeField(null=True, blank=True)
+    deleted_by   = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_project_documents',
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
 
     def __str__(self):
-        return f"{self.project.project_id} — {self.title}"
+        return f"{self.project.project_id} — {self.file_name}"
 
 
 class DueDateChangeLog(models.Model):
@@ -484,3 +498,33 @@ class PaymentMilestone(models.Model):
 
     def __str__(self):
         return f"{self.project.project_id} — {self.milestone_name}"
+
+class TaskAttachment(models.Model):
+
+    DOCUMENT = 'Document'
+    PHOTO    = 'Photo'
+    FILE_TYPE_CHOICES = [(DOCUMENT, 'Document'), (PHOTO, 'Photo')]
+
+    task         = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='attachments')
+    uploaded_by  = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='task_attachments',
+    )
+    file_name    = models.CharField(max_length=255)
+    file_url     = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type    = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at  = models.DateTimeField(auto_now_add=True)
+    is_deleted   = models.BooleanField(default=False)
+    deleted_at   = models.DateTimeField(null=True, blank=True)
+    deleted_by   = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_task_attachments',
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+    def __str__(self):
+        return f"Task {self.task_id} — {self.file_name}"

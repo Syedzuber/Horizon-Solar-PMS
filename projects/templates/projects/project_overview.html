@@ -250,7 +250,90 @@
 </div>
 {% endif %}
 
-{# ── Panel 5: Recent activity (all roles) ────────────────────────────────── #}
+{# ── Panel 5: Project Documents (all roles) ──────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">Project Documents</span>
+    <button type="button" class="btn btn-primary btn-sm" id="ovDocUploadTrigger">
+      Upload Files
+    </button>
+  </div>
+
+  <form method="post" enctype="multipart/form-data"
+        action="{% url 'upload_project_document' project.project_id %}"
+        id="ovDocUploadForm">
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
+    <input type="file" id="ovDocFileInput" name="files" multiple
+           accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+           class="d-none">
+  </form>
+
+  <div id="ovDocErrorBox" class="alert alert-danger mx-3 mt-3 d-none" role="alert"></div>
+
+  <div class="card-body p-0">
+    {% if documents %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>File Name</th>
+            <th style="width:7rem;">Type</th>
+            <th style="width:6rem;">Size</th>
+            <th style="width:11rem;">Uploaded By</th>
+            <th style="width:10rem;">Uploaded At</th>
+            <th style="width:4rem;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for doc in documents %}
+          <tr>
+            <td>
+              <a href="{{ doc.file_url }}" target="_blank" rel="noopener">{{ doc.file_name }}</a>
+            </td>
+            <td>
+              {% if doc.file_type == 'Photo' %}
+                <span class="badge bg-info text-dark">Photo</span>
+              {% else %}
+                <span class="badge bg-secondary">Document</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ doc.file_size_kb }} KB</td>
+            <td class="text-muted small">
+              {% if doc.uploaded_by %}
+                {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}
+              {% else %}—{% endif %}
+            </td>
+            <td class="text-muted small">{{ doc.uploaded_at|date:"d M Y H:i" }}</td>
+            <td>
+              {% if doc.uploaded_by == user_profile or user_profile.role == 'Admin' %}
+              <form method="post"
+                    action="{% url 'delete_project_document' project.project_id doc.pk %}"
+                    class="d-inline"
+                    onsubmit="return confirm('Delete this file? It can be recovered within 90 days.')">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
+                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1" title="Delete">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4">
+      <i class="bi bi-file-earmark fs-3 d-block mb-2"></i>
+      No files uploaded yet.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Panel 6: Recent activity (all roles) ────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header fw-semibold">Recent Activity</div>
   <div class="card-body p-0">
@@ -331,5 +414,36 @@ document.getElementById('receiveModal').addEventListener('show.bs.modal', functi
 });
 </script>
 {% endif %}
+
+<script>
+(function () {
+  var ALLOWED  = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
+  var MAX_SIZE = 20 * 1024 * 1024;
+  var trigger  = document.getElementById('ovDocUploadTrigger');
+  var input    = document.getElementById('ovDocFileInput');
+  var form     = document.getElementById('ovDocUploadForm');
+  var errBox   = document.getElementById('ovDocErrorBox');
+
+  if (!trigger) return;
+  trigger.addEventListener('click', function () { input.click(); });
+  input.addEventListener('change', function () {
+    var files  = Array.from(this.files);
+    var errors = [];
+    files.forEach(function (f) {
+      var ext = f.name.split('.').pop().toLowerCase();
+      if (ALLOWED.indexOf(ext) === -1) errors.push(f.name + ': unsupported type');
+      else if (f.size > MAX_SIZE) errors.push(f.name + ': exceeds 20 MB');
+    });
+    if (errors.length > 0) {
+      errBox.textContent = errors.join(' | ');
+      errBox.classList.remove('d-none');
+      input.value = '';
+      return;
+    }
+    errBox.classList.add('d-none');
+    if (files.length > 0) form.submit();
+  });
+}());
+</script>
 
 {% endblock %}

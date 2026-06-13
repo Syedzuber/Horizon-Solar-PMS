@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}{{ task.task_name }} — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+
+{# ── Task header ─────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+      <div>
+        <small class="text-muted">
+          {{ project.project_id }} — {{ task.phase.phase_name }}
+        </small>
+        <h4 class="mb-1 mt-1">{{ task.task_name }}</h4>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project Detail</a>
+        <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-info btn-sm">Overview</a>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Status</small>
+        {% if task.status == 'Done' %}
+          <span class="badge bg-success">Done</span>
+        {% elif task.status == 'In Progress' %}
+          <span class="badge bg-primary">In Progress</span>
+        {% elif task.status == 'Blocked' %}
+          <span class="badge bg-danger">Blocked</span>
+        {% else %}
+          <span class="badge bg-secondary">Not Started</span>
+        {% endif %}
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Assigned Role</small>
+        <span class="badge bg-light text-dark border">{{ task.assigned_role }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Assigned To</small>
+        <span>{% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}{% else %}—{% endif %}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Due Date</small>
+        <span>{{ task.due_date|default:"—" }}</span>
+      </div>
+      {% if task.completed_at %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Completed</small>
+        <span>{{ task.completed_at|date:"d M Y" }}</span>
+      </div>
+      {% endif %}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Type</small>
+        <span>{{ task.task_type }}</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Attachments section ──────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      Attachments
+      {% if attachments %}
+        <span class="badge bg-secondary ms-1">{{ attachments|length }}</span>
+      {% endif %}
+    </span>
+    <button type="button" class="btn btn-primary btn-sm" id="attachTriggerBtn">
+      Attach Files
+    </button>
+  </div>
+
+  {# Hidden upload form #}
+  <form method="post" enctype="multipart/form-data"
+        action="{% url 'upload_task_attachment' project.project_id task.pk %}"
+        id="attachUploadForm">
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
+    <input type="file" id="attachFileInput" name="files" multiple
+           accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+           class="d-none">
+  </form>
+
+  {# Validation errors display #}
+  <div id="attachErrorBox" class="alert alert-danger mx-3 mt-3 d-none" role="alert"></div>
+
+  <div class="card-body p-0">
+    {% if attachments %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>File</th>
+            <th style="width:7rem;">Type</th>
+            <th style="width:6rem;">Size</th>
+            <th style="width:11rem;">Uploaded By</th>
+            <th style="width:10rem;">Uploaded At</th>
+            <th style="width:4rem;"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for attach in attachments %}
+          <tr>
+            <td>
+              {% if attach.file_type == 'Photo' %}
+                <img src="{{ attach.file_url }}" alt="{{ attach.file_name }}"
+                     class="me-2 rounded" style="max-height:60px;max-width:80px;object-fit:cover;">
+              {% endif %}
+              <a href="{{ attach.file_url }}" target="_blank" rel="noopener">{{ attach.file_name }}</a>
+            </td>
+            <td>
+              {% if attach.file_type == 'Photo' %}
+                <span class="badge bg-info text-dark">Photo</span>
+              {% else %}
+                <span class="badge bg-secondary">Document</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ attach.file_size_kb }} KB</td>
+            <td class="text-muted small">
+              {% if attach.uploaded_by %}
+                {{ attach.uploaded_by.user.get_full_name|default:attach.uploaded_by.user.username }}
+              {% else %}—{% endif %}
+            </td>
+            <td class="text-muted small">{{ attach.uploaded_at|date:"d M Y H:i" }}</td>
+            <td>
+              {% if attach.uploaded_by == user_profile or user_profile.role == 'Admin' %}
+              <form method="post"
+                    action="{% url 'delete_task_attachment' project.project_id task.pk attach.pk %}"
+                    class="d-inline"
+                    onsubmit="return confirm('Delete this file? It can be recovered within 90 days.')">
+                {% csrf_token %}
+                <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
+                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1"
+                        title="Delete">
+                  <i class="bi bi-trash"></i>
+                </button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4">
+      <i class="bi bi-paperclip fs-3 d-block mb-2"></i>
+      No attachments yet.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<script>
+(function () {
+  var ALLOWED = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
+  var MAX_SIZE = 20 * 1024 * 1024;
+
+  var triggerBtn  = document.getElementById('attachTriggerBtn');
+  var fileInput   = document.getElementById('attachFileInput');
+  var uploadForm  = document.getElementById('attachUploadForm');
+  var errorBox    = document.getElementById('attachErrorBox');
+
+  triggerBtn.addEventListener('click', function () {
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', function () {
+    var files  = Array.from(this.files);
+    var errors = [];
+
+    files.forEach(function (f) {
+      var ext = f.name.split('.').pop().toLowerCase();
+      if (ALLOWED.indexOf(ext) === -1) {
+        errors.push(f.name + ': unsupported file type');
+      } else if (f.size > MAX_SIZE) {
+        errors.push(f.name + ': exceeds 20 MB limit');
+      }
+    });
+
+    if (errors.length > 0) {
+      errorBox.textContent = errors.join(' | ');
+      errorBox.classList.remove('d-none');
+      fileInput.value = '';
+      return;
+    }
+
+    errorBox.classList.add('d-none');
+    if (files.length > 0) {
+      uploadForm.submit();
+    }
+  });
+}());
+</script>
+
+{% endblock %}

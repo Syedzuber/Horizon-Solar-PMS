@@ -59,4 +59,20 @@ urlpatterns = [
 
     # Webhooks
     path('webhooks/zoho/deal-closed/', views.zoho_deal_closed_webhook, name='zoho_webhook'),
+
+    # Task detail
+    path('projects/<str:project_id>/tasks/<int:task_id>/',
+         views.task_detail, name='task_detail'),
+
+    # File uploads — project documents
+    path('projects/<str:project_id>/documents/upload/',
+         views.upload_project_document, name='upload_project_document'),
+    path('projects/<str:project_id>/documents/<int:doc_pk>/delete/',
+         views.delete_project_document, name='delete_project_document'),
+
+    # File uploads — task attachments
+    path('projects/<str:project_id>/tasks/<int:task_id>/attachments/upload/',
+         views.upload_task_attachment, name='upload_task_attachment'),
+    path('projects/<str:project_id>/tasks/<int:task_id>/attachments/<int:attach_pk>/delete/',
+         views.delete_task_attachment, name='delete_task_attachment'),
 ]
