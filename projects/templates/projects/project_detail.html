@@ -565,21 +565,29 @@
   /* ── Task-close upload prompt ──────────────────── */
   var pendingStatusForm = null;
   var noAttachModal     = document.getElementById('noAttachmentModal');
-  var quickInput        = document.getElementById('quickAttachInput');
-  var quickForm         = document.getElementById('quickAttachForm');
-  var bsModal;
+  var bsModal           = null;
 
-  if (noAttachModal) {
+  /* Define globally so onchange= attribute can call it before DOMContentLoaded */
+  window.handleTaskStatusChange = function (select) {
+    var newStatus = select.value;
+    var row       = select.closest('tr');
+    var count     = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
+
+    if (newStatus === 'Done' && count === 0 && bsModal) {
+      pendingStatusForm = select.form;
+      bsModal.show();
+    } else {
+      select.form.submit();
+    }
+  };
+
+  /* Bootstrap.Modal() can only be called after Bootstrap JS has loaded,
+     which happens at the bottom of </body> — after this inline script.
+     DOMContentLoaded fires after all synchronous scripts (incl. Bootstrap). */
+  document.addEventListener('DOMContentLoaded', function () {
+    if (!noAttachModal) return;
     bsModal = new bootstrap.Modal(noAttachModal);
 
-    /* Intercept status-select changes */
-    document.querySelectorAll('select[name="status"]').forEach(function (sel) {
-      sel.addEventListener('change', function (e) {
-        handleTaskStatusChange(this);
-      });
-    });
-
-    /* "Upload File" — navigate to task detail page */
     document.getElementById('noAttachUploadBtn').addEventListener('click', function () {
       bsModal.hide();
       var row       = pendingStatusForm ? pendingStatusForm.closest('tr') : null;
@@ -590,25 +598,11 @@
       }
     });
 
-    /* "Close Without Attachment" — submit original form */
     document.getElementById('noAttachCloseBtn').addEventListener('click', function () {
       bsModal.hide();
       if (pendingStatusForm) pendingStatusForm.submit();
     });
-  }
-
-  window.handleTaskStatusChange = function (select) {
-    var newStatus = select.value;
-    var row       = select.closest('tr');
-    var count     = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
-
-    if (newStatus === 'Done' && count === 0 && noAttachModal) {
-      pendingStatusForm = select.form;
-      bsModal.show();
-    } else {
-      select.form.submit();
-    }
-  };
+  });
 }());
 </script>
 
