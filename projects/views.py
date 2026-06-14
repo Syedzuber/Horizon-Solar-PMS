@@ -921,7 +921,38 @@ def task_status_update(request, project_id, task_id):
     if new_status == Task.DONE:
         update_kwargs['completed_at'] = timezone.now()
 
-    Task.objects.filter(pk=task.pk).update(**update_kwargs)
+    # Blocked requires a stated blocking issue (fresh transition only)
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        block_issue_title = request.POST.get('block_issue_title', '').strip()
+        if not block_issue_title:
+            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            next_url = request.POST.get('next', '')
+            if next_url and not _urlparse(next_url).netloc:
+                return redirect(next_url)
+            return redirect('project_detail', project_id=project.project_id)
+
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+
+        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
+        if block_severity not in dict(Issue.SEVERITY_CHOICES):
+            block_severity = Issue.HIGH
+        issue = Issue.objects.create(
+            project=project,
+            task=task,
+            title=block_issue_title,
+            description=request.POST.get('block_issue_description', '').strip(),
+            severity=block_severity,
+            status=Issue.OPEN,
+            raised_by=request.user.profile,
+        )
+        log_activity(
+            project, request.user.profile,
+            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
+            entity_type='Issue', entity_id=issue.pk,
+        )
+        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
+    else:
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
 
     next_url = request.POST.get('next', None)
     if next_url:

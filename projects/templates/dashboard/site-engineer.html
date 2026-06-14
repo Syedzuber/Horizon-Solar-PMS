@@ -58,7 +58,10 @@
           <tbody>
             {% for task in row.tasks %}
             <tr>
-              <td>{{ task.task_name }}</td>
+              <td>
+                <a href="{% url 'task_detail' row.project.project_id task.pk %}"
+                   class="text-decoration-none">{{ task.task_name }}</a>
+              </td>
               <td class="text-muted small">{{ task.phase.phase_name }}</td>
               <td>
                 {% if task.due_date %}
@@ -87,7 +90,7 @@
                 <form method="post" action="{% url 'task_status_update' row.project.project_id task.pk %}" class="d-inline">
                   {% csrf_token %}
                   <input type="hidden" name="next" value="{{ request.path }}">
-                  <select name="status" onchange="this.form.submit()" class="form-select form-select-sm" style="width:auto;">
+                  <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
                     {% if task.status == 'Not Started' %}
                       <option value="Not Started" selected>Not Started</option>
                       <option value="In Progress">In Progress</option>

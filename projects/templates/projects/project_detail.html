@@ -703,8 +703,14 @@
   /* Define globally so onchange= attribute can call it before DOMContentLoaded */
   window.handleTaskStatusChange = function (select) {
     var newStatus = select.value;
-    var row       = select.closest('tr');
-    var count     = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
+
+    /* Blocked: delegate to shared solarInterceptBlock (base.html) */
+    if (newStatus === 'Blocked' && window.solarInterceptBlock) {
+      if (window.solarInterceptBlock(select)) return;
+    }
+
+    var row   = select.closest('tr');
+    var count = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
 
     if (newStatus === 'Done' && count === 0 && bsModal) {
       pendingStatusForm = select.form;

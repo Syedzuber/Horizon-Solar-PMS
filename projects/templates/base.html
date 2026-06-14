@@ -49,5 +49,114 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+{# ── Shared: Block Task modal (used by all dashboards + project_detail) ─── #}
+<div class="modal fade" id="blockTaskModal" tabindex="-1" aria-labelledby="blockTaskModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form id="blockTaskModalForm" method="post" action="">
+        {% csrf_token %}
+        <input type="hidden" name="status" value="Blocked">
+        <input type="hidden" id="blockTaskNextInput" name="next" value="">
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title" id="blockTaskModalLabel">Block Task — State the Issue</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            A task cannot be marked Blocked without stating the issue that is blocking it.
+            An issue will be automatically created and linked to the task.
+          </p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">
+              What is blocking this task? <span class="text-danger">*</span>
+            </label>
+            <input type="text" name="block_issue_title" id="blockIssueTitleInput"
+                   class="form-control" required maxlength="200"
+                   placeholder="e.g. Waiting for material delivery, Permit not received…">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Details</label>
+            <textarea name="block_issue_description" class="form-control" rows="2"
+                      placeholder="Optional — add context, vendor name, ref number…"></textarea>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Severity</label>
+            <select name="block_issue_severity" class="form-select">
+              <option value="Low">Low</option>
+              <option value="Medium">Medium</option>
+              <option value="High" selected>High</option>
+              <option value="Critical">Critical</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal" id="blockTaskCancelBtn">Cancel</button>
+          <button type="submit" class="btn btn-danger btn-sm">
+            Mark Blocked &amp; Create Issue
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var modalEl = document.getElementById('blockTaskModal');
+  if (!modalEl) return;
+
+  var bsBlockModal      = null;
+  var pendingSelect     = null;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    bsBlockModal = new bootstrap.Modal(modalEl);
+
+    /* Restore the select if the modal is dismissed without submitting */
+    modalEl.addEventListener('hide.bs.modal', function () {
+      if (pendingSelect) {
+        pendingSelect.value = pendingSelect.dataset.prevVal || '';
+        pendingSelect = null;
+      }
+    });
+  });
+
+  /* Track previous value whenever a status select gains focus */
+  document.addEventListener('focusin', function (e) {
+    if (e.target && e.target.name === 'status') {
+      e.target.dataset.prevVal = e.target.value;
+    }
+  });
+
+  /*
+   * Called from onchange handlers in dashboards and project_detail.
+   * Returns true if the event was intercepted (caller should NOT submit).
+   * Returns false for all non-Blocked selections.
+   */
+  window.solarInterceptBlock = function (select) {
+    if (select.value !== 'Blocked') return false;
+
+    /* Only intercept a fresh Blocked transition, not re-selecting Blocked */
+    if ((select.dataset.prevVal || '') === 'Blocked') return false;
+
+    var form = select.closest('form');
+    if (!form) return false;
+
+    /* Populate the modal form */
+    document.getElementById('blockTaskModalForm').action = form.action;
+    var nextInput = form.querySelector('input[name="next"]');
+    document.getElementById('blockTaskNextInput').value = nextInput ? nextInput.value : '';
+    document.getElementById('blockIssueTitleInput').value = '';
+
+    /* Restore select visually while modal is open */
+    pendingSelect = select;
+    select.value  = select.dataset.prevVal || select.options[0].value;
+
+    if (bsBlockModal) bsBlockModal.show();
+    return true;
+  };
+}());
+</script>
 </body>
 </html>
