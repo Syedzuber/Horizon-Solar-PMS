@@ -551,6 +551,7 @@
           <tr>
             <th>Severity</th>
             <th>Title</th>
+            <th>Task</th>
             <th>Status</th>
             <th style="width:12rem;">Assigned To</th>
             <th style="width:8rem;">Due Date</th>
@@ -572,6 +573,13 @@
               {% endif %}
             </td>
             <td><a href="{% url 'issue_detail' issue.pk %}">{{ issue.title }}</a></td>
+            <td class="small text-muted">
+              {% if issue.task %}
+                <a href="{% url 'task_detail' project.project_id issue.task.pk %}" class="text-decoration-none">{{ issue.task.task_name }}</a>
+              {% else %}
+                <span class="badge bg-light text-dark border">Project-level</span>
+              {% endif %}
+            </td>
             <td>
               {% if issue.status == 'Open' %}
                 <span class="badge bg-secondary">Open</span>

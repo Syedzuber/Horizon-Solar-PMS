@@ -80,13 +80,24 @@
             <textarea name="block_issue_description" class="form-control" rows="2"
                       placeholder="Optional — add context, vendor name, ref number…"></textarea>
           </div>
-          <div class="mb-0">
+          <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
             <select name="block_issue_severity" class="form-select">
               <option value="Low">Low</option>
               <option value="Medium">Medium</option>
               <option value="High" selected>High</option>
               <option value="Critical">Critical</option>
+            </select>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Assign To</label>
+            <select name="block_issue_assigned_to" class="form-select">
+              <option value="">— Unassigned —</option>
+              {% for p in all_profiles %}
+              <option value="{{ p.pk }}">
+                {{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})
+              </option>
+              {% endfor %}
             </select>
           </div>
         </div>

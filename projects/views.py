@@ -215,6 +215,7 @@ def dashboard_pm(request):
         'team_due_today':         team_due_today,
         'due_date_changes':       due_date_changes,
         'today':                  date.today(),
+        'all_profiles':           UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -266,6 +267,7 @@ def dashboard_site_engineer(request):
         'tasks_by_project':  tasks_by_project,
         'due_date_changes':  due_date_changes,
         'today':             date.today(),
+        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -342,6 +344,7 @@ def dashboard_design(request):
         'assigned_projects': assigned_projects,
         'due_date_changes':  due_date_changes,
         'today':             date.today(),
+        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -455,6 +458,7 @@ def dashboard_scm(request):
         'delivery_tasks': delivery_tasks,
         'boqs':           boqs,
         'today':          date.today(),
+        'all_profiles':   UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -721,8 +725,8 @@ def project_detail(request, project_id):
     documents = project.documents.filter(is_deleted=False) if project.status != 'Draft' else []
 
     project_issues = (
-        Issue.objects.filter(project=project, task__isnull=True)
-        .select_related('raised_by__user', 'assigned_to__user')
+        Issue.objects.filter(project=project)
+        .select_related('raised_by__user', 'assigned_to__user', 'task')
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
@@ -936,6 +940,13 @@ def task_status_update(request, project_id, task_id):
         block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
         if block_severity not in dict(Issue.SEVERITY_CHOICES):
             block_severity = Issue.HIGH
+        block_assignee = None
+        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
+        if block_assignee_id:
+            try:
+                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
+            except UserProfile.DoesNotExist:
+                pass
         issue = Issue.objects.create(
             project=project,
             task=task,
@@ -944,6 +955,7 @@ def task_status_update(request, project_id, task_id):
             severity=block_severity,
             status=Issue.OPEN,
             raised_by=request.user.profile,
+            assigned_to=block_assignee,
         )
         log_activity(
             project, request.user.profile,
@@ -1738,8 +1750,8 @@ def project_overview(request, project_id):
     documents = project.documents.filter(is_deleted=False)
 
     project_issues = (
-        Issue.objects.filter(project=project, task__isnull=True)
-        .select_related('raised_by__user', 'assigned_to__user')
+        Issue.objects.filter(project=project)
+        .select_related('raised_by__user', 'assigned_to__user', 'task')
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
