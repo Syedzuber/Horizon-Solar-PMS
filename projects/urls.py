@@ -107,7 +107,7 @@ urlpatterns = [
     # Project activity timeline — all roles, PM isolation applies
     path('projects/<str:project_id>/timeline/',
          views.project_timeline, name='project_timeline'),
-    # Portal-wide activity log — Admin only
-    path('admin/activity-log/',
+    # Portal-wide activity log — Admin only (avoid /admin/ prefix, claimed by Django admin)
+    path('portal/activity-log/',
          views.portal_activity_log, name='portal_activity_log'),
 ]
