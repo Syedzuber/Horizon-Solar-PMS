@@ -528,3 +528,87 @@ class TaskAttachment(models.Model):
 
     def __str__(self):
         return f"Task {self.task_id} — {self.file_name}"
+
+
+class Issue(models.Model):
+
+    LOW      = 'Low'
+    MEDIUM   = 'Medium'
+    HIGH     = 'High'
+    CRITICAL = 'Critical'
+    SEVERITY_CHOICES = [
+        (LOW,      'Low'),
+        (MEDIUM,   'Medium'),
+        (HIGH,     'High'),
+        (CRITICAL, 'Critical'),
+    ]
+
+    OPEN        = 'Open'
+    IN_PROGRESS = 'In Progress'
+    RESOLVED    = 'Resolved'
+    CLOSED      = 'Closed'
+    STATUS_CHOICES = [
+        (OPEN,        'Open'),
+        (IN_PROGRESS, 'In Progress'),
+        (RESOLVED,    'Resolved'),
+        (CLOSED,      'Closed'),
+    ]
+
+    project         = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='issues')
+    task            = models.ForeignKey(Task, on_delete=models.SET_NULL, null=True, blank=True, related_name='issues')
+    title           = models.CharField(max_length=200)
+    description     = models.TextField(blank=True, default='')
+    severity        = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default=MEDIUM)
+    status          = models.CharField(max_length=20, choices=STATUS_CHOICES, default=OPEN)
+    raised_by       = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True, related_name='raised_issues',
+    )
+    assigned_to     = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True, related_name='assigned_issues',
+    )
+    raised_at       = models.DateTimeField(auto_now_add=True)
+    due_date        = models.DateField(null=True, blank=True)
+    resolved_at     = models.DateTimeField(null=True, blank=True)
+    closed_at       = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-raised_at']
+
+    def __str__(self):
+        return f"{self.project.project_id} — {self.title}"
+
+
+class ActivityLog(models.Model):
+
+    project     = models.ForeignKey(
+        Project, on_delete=models.CASCADE, null=True, blank=True, related_name='activity_logs',
+    )
+    actor       = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
+    )
+    action      = models.CharField(max_length=255)
+    entity_type = models.CharField(max_length=50, blank=True, default='')
+    entity_id   = models.PositiveIntegerField(null=True, blank=True)
+    timestamp   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+
+    def __str__(self):
+        return f"{self.timestamp:%Y-%m-%d %H:%M} — {self.action}"
+
+
+def log_activity(project, actor, action, entity_type='', entity_id=None):
+    try:
+        from projects.models import ActivityLog
+        ActivityLog.objects.create(
+            project=project,
+            actor=actor,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"ActivityLog failed: {e}")

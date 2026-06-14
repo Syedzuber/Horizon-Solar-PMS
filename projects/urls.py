@@ -75,4 +75,22 @@ urlpatterns = [
          views.upload_task_attachment, name='upload_task_attachment'),
     path('projects/<str:project_id>/tasks/<int:task_id>/attachments/<int:attach_pk>/delete/',
          views.delete_task_attachment, name='delete_task_attachment'),
+
+    # Issues
+    path('projects/<str:project_id>/issues/create/',
+         views.create_project_issue, name='create_project_issue'),
+    path('projects/<str:project_id>/tasks/<int:task_id>/issues/create/',
+         views.create_task_issue, name='create_task_issue'),
+    path('issues/<int:issue_id>/',
+         views.issue_detail, name='issue_detail'),
+    path('issues/<int:issue_id>/update-status/',
+         views.update_issue_status, name='update_issue_status'),
+    path('issues/<int:issue_id>/resolve/',
+         views.resolve_issue, name='resolve_issue'),
+    path('issues/<int:issue_id>/close/',
+         views.close_issue, name='close_issue'),
+    path('issues/<int:issue_id>/reopen/',
+         views.reopen_issue, name='reopen_issue'),
+    path('issues/<int:issue_id>/assign/',
+         views.assign_issue, name='assign_issue'),
 ]

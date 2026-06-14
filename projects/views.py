@@ -23,6 +23,7 @@ from .models import (
     Vendor, VendorCategory,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
+    Issue, log_activity,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -719,6 +720,12 @@ def project_detail(request, project_id):
 
     documents = project.documents.filter(is_deleted=False) if project.status != 'Draft' else []
 
+    project_issues = (
+        Issue.objects.filter(project=project, task__isnull=True)
+        .select_related('raised_by__user', 'assigned_to__user')
+    )
+    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
+
     return render(request, 'projects/project_detail.html', {
         'project':             project,
         'phases':              phases,
@@ -731,6 +738,8 @@ def project_detail(request, project_id):
         'task_status_choices': Task.STATUS_CHOICES,
         'candidates_by_role':  candidates_by_role,
         'documents':           documents,
+        'project_issues':      project_issues,
+        'all_profiles':        all_profiles,
     })
 
 
@@ -1697,6 +1706,12 @@ def project_overview(request, project_id):
 
     documents = project.documents.filter(is_deleted=False)
 
+    project_issues = (
+        Issue.objects.filter(project=project, task__isnull=True)
+        .select_related('raised_by__user', 'assigned_to__user')
+    )
+    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
+
     import json
     return render(request, 'projects/project_overview.html', {
         'project':          project,
@@ -1707,6 +1722,8 @@ def project_overview(request, project_id):
         'role':             profile.role,
         'user_profile':     profile,
         'documents':        documents,
+        'project_issues':   project_issues,
+        'all_profiles':     all_profiles,
     })
 
 
@@ -1888,12 +1905,19 @@ def task_detail(request, project_id, task_id):
 
     task        = get_object_or_404(Task, pk=task_id, phase__project=project)
     attachments = task.attachments.filter(is_deleted=False)
+    task_issues = (
+        Issue.objects.filter(task=task)
+        .select_related('raised_by__user', 'assigned_to__user', 'task')
+    )
+    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
     return render(request, 'projects/task_detail.html', {
-        'project':     project,
-        'task':        task,
-        'attachments': attachments,
+        'project':      project,
+        'task':         task,
+        'attachments':  attachments,
         'user_profile': profile,
+        'task_issues':  task_issues,
+        'all_profiles': all_profiles,
     })
 
 
@@ -2110,3 +2134,313 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     if next_url and not _urlparse(next_url).netloc:
         return redirect(next_url)
     return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
+# Issues
+# ---------------------------------------------------------------------------
+
+def _issue_base_qs():
+    return Issue.objects.select_related('raised_by__user', 'assigned_to__user', 'task')
+
+
+def _is_project_pm(profile, project):
+    return profile.role == 'PM' and project.assigned_pm == profile
+
+
+@login_required
+def create_project_issue(request, project_id):
+    if request.method != 'POST':
+        return redirect('project_detail', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    title       = request.POST.get('title', '').strip()
+    description = request.POST.get('description', '').strip()
+    severity    = request.POST.get('severity', Issue.MEDIUM)
+    due_date_s  = request.POST.get('due_date', '').strip()
+    assignee_id = request.POST.get('assigned_to', '').strip()
+
+    if not title:
+        messages.error(request, 'Issue title is required.')
+        return redirect('project_detail', project_id=project_id)
+
+    if severity not in dict(Issue.SEVERITY_CHOICES):
+        severity = Issue.MEDIUM
+
+    due_date = None
+    if due_date_s:
+        try:
+            due_date = date.fromisoformat(due_date_s)
+        except ValueError:
+            pass
+
+    assigned_to = None
+    if assignee_id:
+        try:
+            assigned_to = UserProfile.objects.get(pk=assignee_id)
+        except UserProfile.DoesNotExist:
+            pass
+
+    issue = Issue.objects.create(
+        project=project,
+        task=None,
+        title=title,
+        description=description,
+        severity=severity,
+        status=Issue.OPEN,
+        raised_by=profile,
+        assigned_to=assigned_to,
+        due_date=due_date,
+    )
+    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    messages.success(request, f'Issue "{title}" raised.')
+    return redirect('project_detail', project_id=project_id)
+
+
+@login_required
+def create_task_issue(request, project_id, task_id):
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    title       = request.POST.get('title', '').strip()
+    description = request.POST.get('description', '').strip()
+    severity    = request.POST.get('severity', Issue.MEDIUM)
+    due_date_s  = request.POST.get('due_date', '').strip()
+    assignee_id = request.POST.get('assigned_to', '').strip()
+
+    if not title:
+        messages.error(request, 'Issue title is required.')
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    if severity not in dict(Issue.SEVERITY_CHOICES):
+        severity = Issue.MEDIUM
+
+    due_date = None
+    if due_date_s:
+        try:
+            due_date = date.fromisoformat(due_date_s)
+        except ValueError:
+            pass
+
+    assigned_to = None
+    if assignee_id:
+        try:
+            assigned_to = UserProfile.objects.get(pk=assignee_id)
+        except UserProfile.DoesNotExist:
+            pass
+
+    issue = Issue.objects.create(
+        project=project,
+        task=task,
+        title=title,
+        description=description,
+        severity=severity,
+        status=Issue.OPEN,
+        raised_by=profile,
+        assigned_to=assigned_to,
+        due_date=due_date,
+    )
+    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    messages.success(request, f'Issue "{title}" raised.')
+    return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+@login_required
+def issue_detail(request, issue_id):
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
+    is_pm        = _is_project_pm(profile, project)
+
+    return render(request, 'projects/issue_detail.html', {
+        'issue':        issue,
+        'project':      project,
+        'user_profile': profile,
+        'all_profiles': all_profiles,
+        'is_pm':        is_pm,
+    })
+
+
+@login_required
+def update_issue_status(request, issue_id):
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    if issue.status == Issue.CLOSED:
+        return HttpResponseForbidden('Issue is closed.')
+
+    if issue.status != Issue.OPEN:
+        messages.warning(request, 'Issue is not in Open status.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    if issue.assigned_to is None:
+        messages.warning(request, 'Please assign this issue before starting work.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
+    if updated == 0:
+        messages.warning(request, 'Issue status was already updated.')
+    else:
+        log_activity(project, profile, f"Moved issue to In Progress: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        messages.success(request, 'Issue moved to In Progress.')
+    return redirect('issue_detail', issue_id=issue_id)
+
+
+@login_required
+def resolve_issue(request, issue_id):
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    if issue.status == Issue.CLOSED:
+        return HttpResponseForbidden('Issue is closed.')
+
+    if issue.status != Issue.IN_PROGRESS:
+        messages.warning(request, 'Issue must be In Progress to resolve.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    is_pm = _is_project_pm(profile, project)
+    can_resolve = (issue.assigned_to == profile) or (is_pm and issue.assigned_to is None)
+    if not can_resolve:
+        return HttpResponseForbidden('Only the assigned user (or PM if unassigned) can resolve this issue.')
+
+    resolution_note = request.POST.get('resolution_note', '').strip()
+    if not resolution_note:
+        messages.error(request, 'Resolution note is required.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    updated = Issue.objects.filter(pk=issue.pk, status=Issue.IN_PROGRESS).update(
+        status=Issue.RESOLVED,
+        resolved_at=timezone.now(),
+        resolution_note=resolution_note,
+    )
+    if updated == 0:
+        messages.warning(request, 'Issue status was already updated.')
+    else:
+        log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        messages.success(request, 'Issue marked as Resolved.')
+    return redirect('issue_detail', issue_id=issue_id)
+
+
+@login_required
+def close_issue(request, issue_id):
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if not _is_project_pm(profile, project):
+        return HttpResponseForbidden('Only the project PM can close issues.')
+
+    if issue.status != Issue.RESOLVED:
+        messages.warning(request, 'Issue must be Resolved before it can be closed.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+        status=Issue.CLOSED,
+        closed_at=timezone.now(),
+    )
+    if updated == 0:
+        messages.warning(request, 'Issue status was already updated.')
+    else:
+        log_activity(project, profile, f"PM closed issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        messages.success(request, 'Issue closed.')
+    return redirect('issue_detail', issue_id=issue_id)
+
+
+@login_required
+def reopen_issue(request, issue_id):
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if not _is_project_pm(profile, project):
+        return HttpResponseForbidden('Only the project PM can reopen issues.')
+
+    if issue.status != Issue.RESOLVED:
+        messages.warning(request, 'Only Resolved issues can be reopened.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+        status=Issue.OPEN,
+        resolved_at=None,
+        resolution_note='',
+    )
+    if updated == 0:
+        messages.warning(request, 'Issue status was already updated.')
+    else:
+        log_activity(project, profile, f"PM reopened issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        messages.success(request, 'Issue reopened.')
+    return redirect('issue_detail', issue_id=issue_id)
+
+
+@login_required
+def assign_issue(request, issue_id):
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    if issue.status == Issue.CLOSED:
+        return HttpResponseForbidden('Cannot reassign a closed issue.')
+
+    assignee_id = request.POST.get('assigned_to', '').strip()
+    if assignee_id:
+        try:
+            new_assignee = UserProfile.objects.get(pk=assignee_id)
+        except UserProfile.DoesNotExist:
+            messages.error(request, 'Invalid user selected.')
+            return redirect('issue_detail', issue_id=issue_id)
+        Issue.objects.filter(pk=issue.pk).update(assigned_to=new_assignee)
+        log_activity(
+            project, profile,
+            f"Assigned issue to {new_assignee.user.get_full_name() or new_assignee.user.username}",
+            entity_type='Issue', entity_id=issue.pk,
+        )
+        messages.success(request, 'Issue assigned.')
+    else:
+        Issue.objects.filter(pk=issue.pk).update(assigned_to=None)
+        log_activity(project, profile, f"Unassigned issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        messages.success(request, 'Issue unassigned.')
+    return redirect('issue_detail', issue_id=issue_id)
