@@ -2330,11 +2330,6 @@ def resolve_issue(request, issue_id):
         messages.warning(request, 'Issue must be In Progress to resolve.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    is_pm = _is_project_pm(profile, project)
-    can_resolve = (issue.assigned_to == profile) or (is_pm and issue.assigned_to is None)
-    if not can_resolve:
-        return HttpResponseForbidden('Only the assigned user (or PM if unassigned) can resolve this issue.')
-
     resolution_note = request.POST.get('resolution_note', '').strip()
     if not resolution_note:
         messages.error(request, 'Resolution note is required.')
@@ -2349,7 +2344,17 @@ def resolve_issue(request, issue_id):
         messages.warning(request, 'Issue status was already updated.')
     else:
         log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
-        messages.success(request, 'Issue marked as Resolved.')
+        if project.assigned_pm and project.assigned_pm != profile:
+            resolver_name = profile.user.get_full_name() or profile.user.username
+            Notification.objects.create(
+                recipient=project.assigned_pm,
+                message=(
+                    f'{resolver_name} resolved issue "{issue.title}" on {project.project_id}. '
+                    f'Please review and close.'
+                ),
+                link=f'/issues/{issue.pk}/',
+            )
+        messages.success(request, 'Issue marked as Resolved. PM has been notified.')
     return redirect('issue_detail', issue_id=issue_id)
 
 

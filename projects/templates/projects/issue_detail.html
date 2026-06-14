@@ -145,14 +145,12 @@
       </form>
     {% endif %}
 
-    {# In Progress → Resolved #}
+    {# In Progress → Resolved (anyone can resolve) #}
     {% if issue.status == 'In Progress' %}
-      {% if issue.assigned_to == user_profile or is_pm and issue.assigned_to == None %}
       <button type="button" class="btn btn-success btn-sm"
               data-bs-toggle="modal" data-bs-target="#resolveModal">
         Mark Resolved
       </button>
-      {% endif %}
     {% endif %}
 
     {# Resolved → Closed (PM only) #}
