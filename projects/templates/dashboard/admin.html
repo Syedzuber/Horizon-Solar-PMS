@@ -6,7 +6,10 @@
     <h4 class="mb-1">Welcome, {{ user.username }}</h4>
     <p class="text-muted mb-3">Role: Admin</p>
     <div class="alert alert-warning mb-3">Dashboard under construction</div>
-    <a href="{% url 'user_list' %}" class="btn btn-dark btn-sm">Manage Users</a>
+    <div class="d-flex gap-2 flex-wrap">
+      <a href="{% url 'user_list' %}" class="btn btn-dark btn-sm">Manage Users</a>
+      <a href="{% url 'portal_activity_log' %}" class="btn btn-outline-dark btn-sm">Activity Log</a>
+    </div>
   </div>
 </div>
 {% endblock %}

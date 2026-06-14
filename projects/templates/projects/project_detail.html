@@ -26,6 +26,7 @@
           {% endif %}
         {% endif %}
         <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-info btn-sm">Project Overview</a>
+        <a href="{% url 'project_timeline' project.project_id %}" class="btn btn-outline-dark btn-sm">Timeline</a>
         <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
       </div>
     </div>

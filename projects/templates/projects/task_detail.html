@@ -274,6 +274,184 @@
   </div>
 </div>
 
+{# ── Comments section ─────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      Comments
+      {% if task_comments %}
+        <span class="badge bg-secondary ms-1">{{ task_comments|length }}</span>
+      {% endif %}
+    </span>
+  </div>
+  <div class="card-body">
+
+    {# Thread: top-level comments with indented replies below each #}
+    {% if task_comments %}
+      {% for comment in task_comments %}
+      <div class="mb-3" id="comment-{{ comment.pk }}">
+
+        {# ── Parent comment ─────────────────────────────────────────────── #}
+        <div class="d-flex gap-3">
+          {# Avatar initial circle, color keyed by role #}
+          {% if comment.author %}
+            <div class="rounded-circle d-flex align-items-center justify-content-center text-white fw-bold flex-shrink-0"
+                 style="width:36px;height:36px;font-size:0.85rem;
+                 {% if comment.author.role == 'Admin' %}background:#dc3545;
+                 {% elif comment.author.role == 'PM' %}background:#343a40;
+                 {% elif comment.author.role == 'Site Engineer' %}background:#0d6efd;
+                 {% elif comment.author.role == 'Design' %}background:#198754;
+                 {% elif comment.author.role == 'Finance' %}background:#0dcaf0;color:#000;
+                 {% elif comment.author.role == 'SCM' %}background:#ffc107;color:#000;
+                 {% else %}background:#6c757d;{% endif %}">
+              {{ comment.author.user.get_full_name|default:comment.author.user.username|slice:":1"|upper }}
+            </div>
+          {% else %}
+            <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary text-white fw-bold flex-shrink-0"
+                 style="width:36px;height:36px;font-size:0.85rem;">?</div>
+          {% endif %}
+
+          <div class="flex-grow-1">
+            {% if comment.is_deleted %}
+              <p class="text-muted fst-italic mb-1">This comment was deleted.</p>
+            {% else %}
+              <div class="d-flex justify-content-between align-items-start gap-2 mb-1 flex-wrap">
+                <div>
+                  {% if comment.author %}
+                    <span class="fw-semibold small">
+                      {{ comment.author.user.get_full_name|default:comment.author.user.username }}
+                    </span>
+                    <span class="badge bg-secondary ms-1" style="font-size:0.65rem;">{{ comment.author.role }}</span>
+                  {% else %}
+                    <span class="fw-semibold small text-muted">Unknown</span>
+                  {% endif %}
+                  <span class="text-muted small ms-2">{{ comment.created_at|date:"d M Y H:i" }}</span>
+                </div>
+                <div class="d-flex gap-2 align-items-center">
+                  {# Delete icon — author or Admin only #}
+                  {% if user_profile == comment.author or user_profile.role == 'Admin' %}
+                  <form method="post" action="{% url 'delete_comment' comment.pk %}"
+                        onsubmit="return confirm('Delete this comment?')">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-link btn-sm text-danger p-0" title="Delete comment">
+                      <i class="bi bi-trash"></i>
+                    </button>
+                  </form>
+                  {% endif %}
+                </div>
+              </div>
+              <p class="mb-1" style="white-space:pre-wrap;">{{ comment.body }}</p>
+              {# Reply link — only on parent comments (not on replies) #}
+              <a href="#" class="small text-muted"
+                 onclick="toggleReplyBox({{ comment.pk }}); return false;">Reply</a>
+
+              {# Inline reply form — hidden by default, shown on Reply click #}
+              <div id="reply-box-{{ comment.pk }}" class="d-none mt-2">
+                <form method="post" action="{% url 'create_task_comment' project.project_id task.pk %}">
+                  {% csrf_token %}
+                  <input type="hidden" name="parent" value="{{ comment.pk }}">
+                  <textarea name="body" class="form-control form-control-sm mb-2" rows="2"
+                            placeholder="Write a reply…"></textarea>
+                  <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary btn-sm">Reply</button>
+                    <button type="button" class="btn btn-outline-secondary btn-sm"
+                            onclick="toggleReplyBox({{ comment.pk }})">Cancel</button>
+                  </div>
+                </form>
+              </div>
+            {% endif %}
+
+            {# ── Replies indented under parent ──────────────────────────── #}
+            {% for reply in comment.replies.all %}
+            <div class="d-flex gap-3 mt-3 ms-2 ps-3 border-start">
+              {% if reply.author %}
+                <div class="rounded-circle d-flex align-items-center justify-content-center text-white fw-bold flex-shrink-0"
+                     style="width:30px;height:30px;font-size:0.75rem;
+                     {% if reply.author.role == 'Admin' %}background:#dc3545;
+                     {% elif reply.author.role == 'PM' %}background:#343a40;
+                     {% elif reply.author.role == 'Site Engineer' %}background:#0d6efd;
+                     {% elif reply.author.role == 'Design' %}background:#198754;
+                     {% elif reply.author.role == 'Finance' %}background:#0dcaf0;color:#000;
+                     {% elif reply.author.role == 'SCM' %}background:#ffc107;color:#000;
+                     {% else %}background:#6c757d;{% endif %}">
+                  {{ reply.author.user.get_full_name|default:reply.author.user.username|slice:":1"|upper }}
+                </div>
+              {% else %}
+                <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary text-white fw-bold flex-shrink-0"
+                     style="width:30px;height:30px;font-size:0.75rem;">?</div>
+              {% endif %}
+              <div class="flex-grow-1">
+                {% if reply.is_deleted %}
+                  <p class="text-muted fst-italic mb-0">This comment was deleted.</p>
+                {% else %}
+                  <div class="d-flex justify-content-between align-items-start gap-2 mb-1 flex-wrap">
+                    <div>
+                      {% if reply.author %}
+                        <span class="fw-semibold small">
+                          {{ reply.author.user.get_full_name|default:reply.author.user.username }}
+                        </span>
+                        <span class="badge bg-secondary ms-1" style="font-size:0.65rem;">{{ reply.author.role }}</span>
+                      {% else %}
+                        <span class="fw-semibold small text-muted">Unknown</span>
+                      {% endif %}
+                      <span class="text-muted small ms-2">{{ reply.created_at|date:"d M Y H:i" }}</span>
+                    </div>
+                    {% if user_profile == reply.author or user_profile.role == 'Admin' %}
+                    <form method="post" action="{% url 'delete_comment' reply.pk %}"
+                          onsubmit="return confirm('Delete this comment?')">
+                      {% csrf_token %}
+                      <button type="submit" class="btn btn-link btn-sm text-danger p-0" title="Delete reply">
+                        <i class="bi bi-trash"></i>
+                      </button>
+                    </form>
+                    {% endif %}
+                  </div>
+                  <p class="mb-0" style="white-space:pre-wrap;">{{ reply.body }}</p>
+                {% endif %}
+              </div>
+            </div>
+            {% endfor %}
+
+          </div>
+        </div>
+
+        {% if not forloop.last %}<hr class="my-3">{% endif %}
+      </div>
+      {% endfor %}
+    {% else %}
+      <p class="text-muted text-center py-3 mb-3">
+        <i class="bi bi-chat-dots fs-3 d-block mb-2"></i>
+        No comments yet.
+      </p>
+    {% endif %}
+
+    {# ── New top-level comment form ───────────────────────────────────────── #}
+    <hr>
+    <form method="post" action="{% url 'create_task_comment' project.project_id task.pk %}">
+      {% csrf_token %}
+      <div class="mb-2">
+        <textarea name="body" class="form-control" rows="3"
+                  placeholder="Write a comment…" required></textarea>
+      </div>
+      <button type="submit" class="btn btn-primary btn-sm">Post Comment</button>
+    </form>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  window.toggleReplyBox = function (commentId) {
+    var box = document.getElementById('reply-box-' + commentId);
+    if (box) {
+      box.classList.toggle('d-none');
+      if (!box.classList.contains('d-none')) {
+        box.querySelector('textarea').focus();
+      }
+    }
+  };
+});
+</script>
+
 {# ── Raise Issue modal ────────────────────────────────────────────────────── #}
 <div class="modal fade" id="raiseIssueModal" tabindex="-1" aria-labelledby="raiseIssueModalLabel" aria-hidden="true">
   <div class="modal-dialog">

@@ -23,7 +23,7 @@ from .models import (
     Vendor, VendorCategory,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
-    Issue, log_activity,
+    Issue, ActivityLog, Comment, log_activity,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -813,6 +813,9 @@ def project_activate(request, project_id):
                 created_by=request.user.profile,
             )
 
+    # Log project activation after the transaction commits
+    log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='', entity_id=None)
+
     if project.project_type == 'Residential':
         messages.success(request, 'Project activated. 50 tasks created. Set the first task due date to calculate all dates.')
     else:
@@ -965,6 +968,8 @@ def task_status_update(request, project_id, task_id):
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
     else:
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        # Log status changes for all non-blocked transitions (blocked has its own log above)
+        log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
 
     next_url = request.POST.get('next', None)
     if next_url:
@@ -1022,12 +1027,17 @@ def task_set_due_date(request, project_id, task_id):
             new_date = date.fromisoformat(date_str)
             count = recalculate_from_task(project, task, new_date, user=request.user)
             messages.success(request, f'Due date updated. {count} task(s) recalculated.')
+            # Log the due date update on successful recalculation
+            log_activity(project, request.user.profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
         except ValueError:
             messages.error(request, 'Invalid date.')
     else:
         task.due_date = None
         task.save()
         messages.success(request, 'Due date cleared.')
+        # Log the due date clear
+        log_activity(project, request.user.profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+    return redirect('project_detail', project_id=project.project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1385,6 +1395,8 @@ def boq_submit(request, project_id):
         boq.version = new_version
     boq.save()
 
+    # Log BOQ submission event
+    log_activity(project, profile, f"Submitted BOQ for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
     messages.success(request, 'BOQ submitted to SCM for review.')
     return redirect('boq_detail', project_id=project_id)
 
@@ -1409,6 +1421,8 @@ def boq_acknowledge(request, project_id):
     boq.status = 'Acknowledged'
     boq.save()
 
+    # Log BOQ acknowledgment event
+    log_activity(project, profile, f"BOQ Acknowledged for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
     messages.success(request, 'BOQ acknowledged.')
     return redirect('boq_detail', project_id=project_id)
 
@@ -1445,6 +1459,8 @@ def boq_request_revision(request, project_id):
             )
             boq.status = 'Revision Requested'
             boq.save(update_fields=['status'])
+            # Log BOQ revision request event
+            log_activity(project, profile, f"BOQ Revision Requested for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
             messages.success(request, 'Revision requested. Design team will be notified.')
             return redirect('boq_detail', project_id=project_id)
         except Exception as exc:
@@ -1541,6 +1557,8 @@ def milestone_invoice(request, project_id, milestone_pk):
     milestone.status       = 'Invoiced'
     milestone.invoice_date = date.today()
     milestone.save(update_fields=['status', 'invoice_date'])
+    # Log milestone invoiced — project accessed via FK to avoid extra query
+    log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Invoiced", entity_type='Milestone', entity_id=milestone.pk)
     messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
     return redirect('dashboard_finance')
 
@@ -1578,6 +1596,8 @@ def milestone_receive(request, project_id, milestone_pk):
     milestone.amount_received = amount_received
     milestone.variance_reason = variance_reason
     milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+    # Log milestone received — project accessed via FK to avoid extra query
+    log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
     messages.success(request, f'{milestone.milestone_name} marked as Received.')
     return redirect('dashboard_finance')
 
@@ -1954,13 +1974,23 @@ def task_detail(request, project_id, task_id):
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
+    # Prefetch replies to avoid N+1 — template iterates comment.replies.all()
+    task_comments = (
+        Comment.objects.filter(task=task, parent=None)
+        .select_related('author__user')
+        .prefetch_related(
+            Prefetch('replies', queryset=Comment.objects.select_related('author__user'))
+        )
+    )
+
     return render(request, 'projects/task_detail.html', {
-        'project':      project,
-        'task':         task,
-        'attachments':  attachments,
-        'user_profile': profile,
-        'task_issues':  task_issues,
-        'all_profiles': all_profiles,
+        'project':       project,
+        'task':          task,
+        'attachments':   attachments,
+        'user_profile':  profile,
+        'task_issues':   task_issues,
+        'all_profiles':  all_profiles,
+        'task_comments': task_comments,
     })
 
 
@@ -2029,8 +2059,12 @@ def upload_project_document(request, project_id):
             f"{len(successes)} of {len(successes) + len(failures)} files uploaded. "
             f"Failed: {', '.join(failures)}"
         )
+        # Log partial upload — at least some files were stored
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project", entity_type='File', entity_id=None)
     elif successes:
         messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
+        # Log successful upload
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project", entity_type='File', entity_id=None)
     else:
         messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
 
@@ -2061,6 +2095,8 @@ def delete_project_document(request, project_id, doc_pk):
     doc.deleted_by  = profile
     doc.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
+    # Log the project document deletion
+    log_activity(project, profile, f"Deleted file: {doc.file_name}", entity_type='File', entity_id=doc.pk)
     messages.success(request, f'"{doc.file_name}" deleted.')
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
@@ -2139,8 +2175,12 @@ def upload_task_attachment(request, project_id, task_id):
             f"{len(successes)} of {len(successes) + len(failures)} files uploaded. "
             f"Failed: {', '.join(failures)}"
         )
+        # Log partial upload — at least some files were stored
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk)
     elif successes:
         messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
+        # Log successful task attachment upload
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to task: {task.task_name}", entity_type='File', entity_id=task.pk)
     else:
         messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
 
@@ -2172,6 +2212,8 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     attach.deleted_by = profile
     attach.save(update_fields=['is_deleted', 'deleted_at', 'deleted_by'])
 
+    # Log the task attachment deletion
+    log_activity(project, profile, f"Deleted file: {attach.file_name}", entity_type='File', entity_id=attach.pk)
     messages.success(request, f'"{attach.file_name}" deleted.')
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
@@ -2313,12 +2355,22 @@ def issue_detail(request, issue_id):
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
     is_pm        = _is_project_pm(profile, project)
 
+    # Prefetch replies to avoid N+1 — template iterates comment.replies.all()
+    issue_comments = (
+        Comment.objects.filter(issue=issue, parent=None)
+        .select_related('author__user')
+        .prefetch_related(
+            Prefetch('replies', queryset=Comment.objects.select_related('author__user'))
+        )
+    )
+
     return render(request, 'projects/issue_detail.html', {
-        'issue':        issue,
-        'project':      project,
-        'user_profile': profile,
-        'all_profiles': all_profiles,
-        'is_pm':        is_pm,
+        'issue':          issue,
+        'project':        project,
+        'user_profile':   profile,
+        'all_profiles':   all_profiles,
+        'is_pm':          is_pm,
+        'issue_comments': issue_comments,
     })
 
 
@@ -2492,3 +2544,240 @@ def assign_issue(request, issue_id):
         log_activity(project, profile, f"Unassigned issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
         messages.success(request, 'Issue unassigned.')
     return redirect('issue_detail', issue_id=issue_id)
+
+
+# ---------------------------------------------------------------------------
+# Comments
+# ---------------------------------------------------------------------------
+
+@login_required
+def create_task_comment(request, project_id, task_id):
+    """Create a top-level comment or reply on a task. All roles. POST only."""
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    task    = get_object_or_404(Task, pk=task_id, phase__project=project)
+    profile = request.user.profile
+
+    # PM isolation: PM can only access their own projects
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    body = request.POST.get('body', '').strip()
+    if not body:
+        messages.error(request, 'Comment body is required.')
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    parent_pk      = request.POST.get('parent', '').strip()
+    parent_comment = None
+
+    if parent_pk:
+        parent_comment = get_object_or_404(Comment, pk=parent_pk)
+        # Reject replies to replies — only one level of nesting supported
+        if parent_comment.parent is not None:
+            return HttpResponse("Replies to replies are not supported.", status=400)
+        # Parent must belong to this same task, not another
+        if parent_comment.task != task:
+            return HttpResponse("Parent comment mismatch.", status=400)
+
+    Comment.objects.create(
+        project=project,
+        task=task,
+        issue=None,
+        parent=parent_comment,
+        author=profile,
+        body=body,
+    )
+
+    # log_activity() is wrapped in try/except internally —
+    # a failed log must never block the primary action
+    if parent_comment:
+        log_activity(project, profile, f"Replied to comment on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
+    else:
+        log_activity(project, profile, f"Commented on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
+
+    return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+@login_required
+def create_issue_comment(request, issue_id):
+    """Create a top-level comment or reply on an issue. All roles. POST only."""
+    if request.method != 'POST':
+        return redirect('issue_detail', issue_id=issue_id)
+
+    issue   = get_object_or_404(Issue, pk=issue_id)
+    project = issue.project
+    profile = request.user.profile
+
+    # PM isolation: PM can only access their own projects
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    body = request.POST.get('body', '').strip()
+    if not body:
+        messages.error(request, 'Comment body is required.')
+        return redirect('issue_detail', issue_id=issue_id)
+
+    parent_pk      = request.POST.get('parent', '').strip()
+    parent_comment = None
+
+    if parent_pk:
+        parent_comment = get_object_or_404(Comment, pk=parent_pk)
+        # Reject replies to replies — only one level of nesting supported
+        if parent_comment.parent is not None:
+            return HttpResponse("Replies to replies are not supported.", status=400)
+        # Parent must belong to this same issue, not another
+        if parent_comment.issue != issue:
+            return HttpResponse("Parent comment mismatch.", status=400)
+
+    Comment.objects.create(
+        project=project,
+        task=None,
+        issue=issue,
+        parent=parent_comment,
+        author=profile,
+        body=body,
+    )
+
+    # log_activity() is wrapped in try/except internally —
+    # a failed log must never block the primary action
+    if parent_comment:
+        log_activity(project, profile, f"Replied to comment on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk)
+    else:
+        log_activity(project, profile, f"Commented on issue: {issue.title}", entity_type='Comment', entity_id=issue.pk)
+
+    return redirect('issue_detail', issue_id=issue_id)
+
+
+@login_required
+def delete_comment(request, comment_id):
+    """Soft-delete a comment. Author or Admin only. POST only."""
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+
+    comment = get_object_or_404(Comment, pk=comment_id)
+    profile = request.user.profile
+
+    # Only author or Admin can delete — other roles get 403
+    if comment.author != profile and profile.role != 'Admin':
+        return HttpResponse(status=403)
+
+    comment.is_deleted = True
+    comment.deleted_at = timezone.now()
+    comment.save(update_fields=['is_deleted', 'deleted_at'])
+
+    # Log then redirect to the originating detail page
+    if comment.task:
+        log_activity(
+            comment.project, profile,
+            f"Deleted comment on task: {comment.task.task_name}",
+            entity_type='Comment', entity_id=comment.task.pk,
+        )
+        return redirect('task_detail', project_id=comment.project.project_id, task_id=comment.task.pk)
+    else:
+        log_activity(
+            comment.project, profile,
+            f"Deleted comment on issue: {comment.issue.title}",
+            entity_type='Comment', entity_id=comment.issue.pk,
+        )
+        return redirect('issue_detail', issue_id=comment.issue.pk)
+
+
+# ---------------------------------------------------------------------------
+# Activity log views
+# ---------------------------------------------------------------------------
+
+@login_required
+def project_timeline(request, project_id):
+    """Project activity timeline. All roles — PM isolation applies."""
+    from django.core.paginator import Paginator
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    # PM isolation: PM can only view their own projects
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    # All activity logs for this project, newest first, with actor data
+    logs = (
+        project.activity_logs
+        .select_related('actor__user')
+        .order_by('-timestamp')
+    )
+
+    paginator   = Paginator(logs, 20)
+    page_number = request.GET.get('page')
+    page_obj    = paginator.get_page(page_number)
+
+    return render(request, 'projects/project_timeline.html', {
+        'project':  project,
+        'page_obj': page_obj,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def portal_activity_log(request):
+    """Cross-project activity log with filters. Admin only."""
+    from django.core.paginator import Paginator
+
+    # All logs across all projects, newest first
+    logs = ActivityLog.objects.select_related(
+        'project', 'actor__user'
+    ).order_by('-timestamp')
+
+    # Conditional filter values — all optional, empty = show all
+    project_id  = request.GET.get('project_id',  '').strip()
+    actor_id    = request.GET.get('actor_id',    '').strip()
+    entity_type = request.GET.get('entity_type', '').strip()
+    date_from   = request.GET.get('date_from',   '').strip()
+    date_to     = request.GET.get('date_to',     '').strip()
+
+    if project_id:
+        logs = logs.filter(project__project_id=project_id)
+    if actor_id:
+        logs = logs.filter(actor__pk=actor_id)
+    if entity_type:
+        logs = logs.filter(entity_type=entity_type)
+    if date_from:
+        try:
+            logs = logs.filter(timestamp__date__gte=date.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            logs = logs.filter(timestamp__date__lte=date.fromisoformat(date_to))
+        except ValueError:
+            pass
+
+    paginator   = Paginator(logs, 50)
+    page_number = request.GET.get('page')
+    page_obj    = paginator.get_page(page_number)
+
+    # Actor dropdown: only users who have actually logged actions
+    actors = (
+        UserProfile.objects
+        .filter(activity_logs__isnull=False)
+        .distinct()
+        .select_related('user')
+        .order_by('user__first_name')
+    )
+    all_projects = Project.objects.order_by('project_id')
+    # Hardcoded entity type list matches what views log
+    entity_types = ['Issue', 'Comment', 'Task', 'BOQ', 'Milestone', 'File']
+
+    return render(request, 'projects/portal_activity_log.html', {
+        'page_obj':     page_obj,
+        'all_projects': all_projects,
+        'actors':       actors,
+        'entity_types': entity_types,
+        'filters': {
+            'project_id':  project_id,
+            'actor_id':    actor_id,
+            'entity_type': entity_type,
+            'date_from':   date_from,
+            'date_to':     date_to,
+        },
+    })

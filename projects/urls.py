@@ -93,4 +93,21 @@ urlpatterns = [
          views.reopen_issue, name='reopen_issue'),
     path('issues/<int:issue_id>/assign/',
          views.assign_issue, name='assign_issue'),
+
+    # Comments — task comment (all roles)
+    path('projects/<str:project_id>/tasks/<int:task_id>/comments/create/',
+         views.create_task_comment, name='create_task_comment'),
+    # Comments — issue comment (all roles)
+    path('issues/<int:issue_id>/comments/create/',
+         views.create_issue_comment, name='create_issue_comment'),
+    # Comment soft delete — author or Admin only
+    path('comments/<int:comment_id>/delete/',
+         views.delete_comment, name='delete_comment'),
+
+    # Project activity timeline — all roles, PM isolation applies
+    path('projects/<str:project_id>/timeline/',
+         views.project_timeline, name='project_timeline'),
+    # Portal-wide activity log — Admin only
+    path('admin/activity-log/',
+         views.portal_activity_log, name='portal_activity_log'),
 ]

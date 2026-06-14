@@ -599,6 +599,40 @@ class ActivityLog(models.Model):
         return f"{self.timestamp:%Y-%m-%d %H:%M} — {self.action}"
 
 
+class Comment(models.Model):
+    """Threaded comment on a task or issue. One level deep: comment → reply only."""
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='comments'
+    )
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='comments'
+    )
+    issue = models.ForeignKey(
+        Issue, on_delete=models.CASCADE,
+        null=True, blank=True, related_name='comments'
+    )
+    parent = models.ForeignKey(
+        'self', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='replies'
+    )
+    author = models.ForeignKey(
+        UserProfile, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='comments'
+    )
+    body       = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f"Comment by {self.author} at {self.created_at:%Y-%m-%d %H:%M}"
+
+
 def log_activity(project, actor, action, entity_type='', entity_id=None):
     try:
         from projects.models import ActivityLog

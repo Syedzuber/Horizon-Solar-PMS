@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}Timeline — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+
+{# ── Header ───────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+      <div>
+        <small class="text-muted">Activity Timeline</small>
+        <h4 class="mb-0 mt-1">{{ project.project_id }} — {{ project.customer_name }}</h4>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project Detail</a>
+        <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-info btn-sm">Overview</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Activity list ─────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">
+    Activity
+    {% if page_obj.paginator.count %}
+      <span class="badge bg-secondary ms-1">{{ page_obj.paginator.count }}</span>
+    {% endif %}
+  </div>
+  <div class="card-body p-0">
+    {% if page_obj.object_list %}
+    <div class="list-group list-group-flush">
+      {% for log in page_obj %}
+      <div class="list-group-item px-4 py-3">
+        <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+          <div>
+            {# Actor role badge #}
+            {% if log.actor %}
+              {% if log.actor.role == 'Admin' %}
+                <span class="badge bg-danger me-1">{{ log.actor.role }}</span>
+              {% elif log.actor.role == 'PM' %}
+                <span class="badge bg-dark me-1">{{ log.actor.role }}</span>
+              {% elif log.actor.role == 'Site Engineer' %}
+                <span class="badge bg-primary me-1">{{ log.actor.role }}</span>
+              {% elif log.actor.role == 'Design' %}
+                <span class="badge bg-success me-1">{{ log.actor.role }}</span>
+              {% elif log.actor.role == 'Finance' %}
+                <span class="badge bg-info text-dark me-1">{{ log.actor.role }}</span>
+              {% elif log.actor.role == 'SCM' %}
+                <span class="badge bg-warning text-dark me-1">{{ log.actor.role }}</span>
+              {% else %}
+                <span class="badge bg-secondary me-1">{{ log.actor.role }}</span>
+              {% endif %}
+              <span class="fw-semibold small">
+                {{ log.actor.user.get_full_name|default:log.actor.user.username }}
+              </span>
+            {% else %}
+              <span class="text-muted small">System</span>
+            {% endif %}
+            <span class="text-muted small ms-1">—</span>
+            <span class="small ms-1">{{ log.action }}</span>
+
+            {# Entity type badge #}
+            {% if log.entity_type %}
+              {% if log.entity_type == 'Issue' %}
+                <span class="badge bg-danger ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% elif log.entity_type == 'Comment' %}
+                <span class="badge bg-info text-dark ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% elif log.entity_type == 'Task' %}
+                <span class="badge bg-primary ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% elif log.entity_type == 'BOQ' %}
+                <span class="badge bg-warning text-dark ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% elif log.entity_type == 'Milestone' %}
+                <span class="badge bg-success ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% elif log.entity_type == 'File' %}
+                <span class="badge bg-secondary ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% else %}
+                <span class="badge bg-light text-dark border ms-2" style="font-size:0.65rem;">{{ log.entity_type }}</span>
+              {% endif %}
+            {% endif %}
+          </div>
+          <small class="text-muted text-nowrap">{{ log.timestamp|date:"d M Y H:i" }}</small>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-5">
+      <i class="bi bi-clock-history fs-3 d-block mb-2"></i>
+      No activity recorded for this project yet.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Pagination ───────────────────────────────────────────────────────────── #}
+{% if page_obj.has_other_pages %}
+<nav aria-label="Timeline pagination">
+  <ul class="pagination justify-content-center">
+    {% if page_obj.has_previous %}
+    <li class="page-item">
+      <a class="page-link" href="?page={{ page_obj.previous_page_number }}">‹ Previous</a>
+    </li>
+    {% else %}
+    <li class="page-item disabled"><span class="page-link">‹ Previous</span></li>
+    {% endif %}
+
+    {% for num in page_obj.paginator.page_range %}
+      {% if page_obj.number == num %}
+        <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+      {% elif num > page_obj.number|add:"-3" and num < page_obj.number|add:"3" %}
+        <li class="page-item"><a class="page-link" href="?page={{ num }}">{{ num }}</a></li>
+      {% endif %}
+    {% endfor %}
+
+    {% if page_obj.has_next %}
+    <li class="page-item">
+      <a class="page-link" href="?page={{ page_obj.next_page_number }}">Next ›</a>
+    </li>
+    {% else %}
+    <li class="page-item disabled"><span class="page-link">Next ›</span></li>
+    {% endif %}
+  </ul>
+</nav>
+{% endif %}
+
+{% endblock %}
