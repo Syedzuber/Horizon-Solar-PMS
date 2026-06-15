@@ -42,8 +42,9 @@
       <div class="card-body p-2" style="max-height:350px; overflow-y:auto;">
         {% if pos_by_project %}
           {% for project, tasks in pos_by_project %}
-          <div class="fw-bold border-bottom py-1 px-1">
-            {{ project.project_id }} — {{ project.customer_name }}
+          <div class="fw-bold border-bottom py-1 px-1 d-flex justify-content-between align-items-center">
+            <span>{{ project.project_id }} — {{ project.customer_name }}</span>
+            <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm py-0">Overview</a>
           </div>
           {% for task in tasks %}
           <div class="ps-3 py-1 small d-flex justify-content-between align-items-center">
@@ -88,7 +89,7 @@
             <tr>
               <td>{{ task.task_name }}</td>
               <td>
-                <a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a>
+                <a href="{% url 'project_overview' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a>
                 <span class="text-muted small ms-1">{{ task.phase.project.customer_name }}</span>
               </td>
               <td>

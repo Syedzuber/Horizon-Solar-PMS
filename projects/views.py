@@ -1964,6 +1964,9 @@ def project_overview(request, project_id):
     # PM isolation: own projects only
     if profile.role == 'PM' and project.assigned_pm != profile:
         raise Http404
+    # SE isolation: only projects they are assigned to as site engineer
+    if profile.role == 'Site Engineer' and project.assigned_site_engineer != profile:
+        raise Http404
 
     try:
         project.boq_status    = project.boq.status

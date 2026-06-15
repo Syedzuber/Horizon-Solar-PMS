@@ -41,7 +41,7 @@
       <div class="card-header">
         <span class="fw-bold">{{ row.project.project_id }}</span>
         <span class="text-muted ms-2">{{ row.project.customer_name }}</span>
-        <a href="{% url 'project_detail' row.project.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
+        <a href="{% url 'project_overview' row.project.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">Overview</a>
       </div>
       <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
         {% if row.tasks %}
