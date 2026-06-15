@@ -68,6 +68,7 @@
               <th>OD</th>
               <th>Status</th>
               <th>BOQ</th>
+              <th>Materials</th>
               <th></th>
             </tr>
           </thead>
@@ -133,6 +134,16 @@
                 {% endif %}
               </td>
               <td>
+                {# Materials badge — pre-computed in view via single annotated query (N+1 guard) #}
+                {% if row.material_summary == 'Received' %}
+                  <span class="badge bg-success">Received</span>
+                {% elif row.material_summary == 'Partial' %}
+                  <span class="badge bg-warning text-dark">Partial</span>
+                {% else %}
+                  <span class="badge bg-secondary">Pending</span>
+                {% endif %}
+              </td>
+              <td>
                 <a href="{% url 'project_overview' row.project.project_id %}"
                    class="btn btn-outline-info btn-sm py-0"
                    onclick="event.stopPropagation()">
@@ -142,7 +153,7 @@
             </tr>
             {% empty %}
             <tr>
-              <td colspan="8" class="text-center text-muted py-4">No active projects.</td>
+              <td colspan="9" class="text-center text-muted py-4">No active projects.</td>
             </tr>
             {% endfor %}
           </tbody>

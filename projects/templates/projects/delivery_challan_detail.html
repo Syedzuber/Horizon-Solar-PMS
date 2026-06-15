@@ -1,0 +1,308 @@
+{% extends "base.html" %}
+{% block title %}DC {{ challan.dc_number }} — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+
+{% if messages %}
+  {% for msg in messages %}
+    <div class="alert alert-{{ msg.tags|default:'info' }} alert-dismissible fade show" role="alert">
+      {{ msg }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  {% endfor %}
+{% endif %}
+
+{# ── DC header ───────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
+      <div>
+        <h4 class="mb-1">DC: {{ challan.dc_number }}</h4>
+        <p class="text-muted mb-0">
+          {{ project.project_id }} — {{ project.customer_name }}
+        </p>
+      </div>
+      <div class="d-flex gap-2 flex-wrap">
+        {# Edit GRN — SCM only, no status restriction (SCM may correct mistakes) #}
+        {% if role == 'SCM' %}
+          <button type="button" class="btn btn-outline-warning btn-sm"
+                  data-bs-toggle="modal" data-bs-target="#editGrnModal">
+            Edit GRN
+          </button>
+        {% endif %}
+        <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">
+          ← Project Overview
+        </a>
+      </div>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Vendor</small>
+        <span>{% if challan.vendor %}{{ challan.vendor.name }}{% else %}<span class="text-muted">—</span>{% endif %}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">PO Reference</small>
+        <span>{{ challan.po_number|default:"—" }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">DC Date</small>
+        <span>{{ challan.dc_date|date:"d M Y" }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Expected Delivery</small>
+        <span>{{ challan.expected_delivery_date|date:"d M Y"|default:"—" }}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Status</small>
+        {% if challan.status == 'Expected' %}
+          <span class="badge bg-secondary fs-6">Expected</span>
+        {% elif challan.status == 'Partially Received' %}
+          <span class="badge bg-warning text-dark fs-6">Partially Received</span>
+        {% elif challan.status == 'Received' %}
+          <span class="badge bg-success fs-6">Received</span>
+        {% elif challan.status == 'Rejected' %}
+          <span class="badge bg-danger fs-6">Rejected</span>
+        {% endif %}
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Created By</small>
+        <span>{% if challan.created_by %}{{ challan.created_by.user.get_full_name|default:challan.created_by.user.username }}{% else %}—{% endif %}</span>
+      </div>
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Created At</small>
+        <span>{{ challan.created_at|date:"d M Y H:i" }}</span>
+      </div>
+      {% if challan.notes %}
+      <div class="col-12">
+        <small class="text-muted d-block">Notes</small>
+        <span>{{ challan.notes }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── Line items table ────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Line Items</div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Category</th>
+            <th>Description</th>
+            <th class="text-end">Ordered</th>
+            <th>Unit</th>
+            <th class="text-end">Received</th>
+            <th>Condition</th>
+            <th>GRN Date</th>
+            <th>Confirmed By</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in line_items %}
+          {% with confirmed=item.received_quantity|stringformat:"s" %}
+          <tr class="{% if item.condition == 'Damaged' %}table-danger{% elif item.condition == 'Partial' %}table-warning{% endif %}">
+            <td>
+              <span class="badge bg-light text-dark border">{{ item.boq_category }}</span>
+            </td>
+            <td>{{ item.item_description }}</td>
+            <td class="text-end">{{ item.ordered_quantity }}</td>
+            <td>{{ item.unit }}</td>
+            <td class="text-end fw-semibold">
+              {% if item.received_quantity is not None %}
+                {{ item.received_quantity }}
+                {# Overshipping note #}
+                {% if item.received_quantity > item.ordered_quantity %}
+                  <span class="text-warning ms-1" title="Received quantity exceeds ordered quantity">⚠</span>
+                {% endif %}
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if item.condition == 'Good' %}
+                <span class="badge bg-success">Good</span>
+              {% elif item.condition == 'Damaged' %}
+                <span class="badge bg-danger">Damaged</span>
+              {% elif item.condition == 'Partial' %}
+                <span class="badge bg-warning text-dark">Partial</span>
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ item.grn_date|date:"d M Y"|default:"—" }}</td>
+            <td class="text-muted small">
+              {% if item.grn_confirmed_by %}
+                {{ item.grn_confirmed_by.user.get_full_name|default:item.grn_confirmed_by.user.username }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td class="text-muted small">{{ item.grn_notes|default:"—" }}</td>
+          </tr>
+          {% endwith %}
+          {% empty %}
+          <tr>
+            <td colspan="9" class="text-center text-muted py-3">No line items.</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{# ── SE GRN confirmation form — SE only, not Received status ─────────────── #}
+{% if role == 'Site Engineer' and challan.status != 'Received' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <span>Confirm Receipt (GRN)</span>
+    <span class="badge bg-primary">SE Action</span>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-3">
+      Fill received quantities and condition for each item below, then click Confirm GRN.
+      Marking an item as <strong>Damaged</strong> will record 0 usable quantity for that item.
+    </p>
+    <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}">
+      {% csrf_token %}
+      <div class="table-responsive">
+        <table class="table table-sm">
+          <thead class="table-light">
+            <tr>
+              <th>Category</th>
+              <th>Description</th>
+              <th class="text-end">Ordered</th>
+              <th style="width:11rem;">Received Qty</th>
+              <th style="width:11rem;">Condition</th>
+              <th style="width:14rem;">GRN Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in line_items %}
+            <tr>
+              <td><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
+              <td class="small">{{ item.item_description }}</td>
+              <td class="text-end text-muted">{{ item.ordered_quantity }} {{ item.unit }}</td>
+              <td>
+                <input type="number" name="received_qty_{{ item.pk }}"
+                       class="form-control form-control-sm"
+                       step="0.01" min="0"
+                       value="{{ item.received_quantity|default:'' }}"
+                       placeholder="0">
+              </td>
+              <td>
+                <select name="condition_{{ item.pk }}" class="form-select form-select-sm">
+                  <option value="">— Select —</option>
+                  {% for val, label in condition_choices %}
+                  <option value="{{ val }}"
+                    {% if item.condition == val %}selected{% endif %}>
+                    {{ label }}
+                  </option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td>
+                <input type="text" name="grn_notes_{{ item.pk }}"
+                       class="form-control form-control-sm"
+                       value="{{ item.grn_notes|default:'' }}"
+                       placeholder="Optional note">
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="d-flex justify-content-end mt-2">
+        <button type="submit" class="btn btn-success">
+          Confirm GRN
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{# ── SCM Edit GRN modal ───────────────────────────────────────────────────── #}
+{% if role == 'SCM' %}
+<div class="modal fade" id="editGrnModal" tabindex="-1"
+     aria-labelledby="editGrnModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-xl">
+    <div class="modal-content">
+      <form method="post" action="{% url 'override_grn' project.project_id challan.pk %}">
+        {% csrf_token %}
+        <div class="modal-header">
+          <h5 class="modal-title" id="editGrnModalLabel">
+            Edit GRN — DC {{ challan.dc_number }}
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            Override received quantities and conditions.
+            The original SE submitter is preserved; this action is logged as an SCM override.
+            Marking an item as <strong>Damaged</strong> forces received quantity to 0.
+          </p>
+          <div class="table-responsive">
+            <table class="table table-sm">
+              <thead class="table-light">
+                <tr>
+                  <th>Category</th>
+                  <th>Description</th>
+                  <th class="text-end">Ordered</th>
+                  <th style="width:11rem;">Received Qty</th>
+                  <th style="width:11rem;">Condition</th>
+                  <th style="width:14rem;">GRN Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for item in line_items %}
+                <tr>
+                  <td><span class="badge bg-light text-dark border">{{ item.boq_category }}</span></td>
+                  <td class="small">{{ item.item_description }}</td>
+                  <td class="text-end text-muted">{{ item.ordered_quantity }} {{ item.unit }}</td>
+                  <td>
+                    <input type="number" name="received_qty_{{ item.pk }}"
+                           class="form-control form-control-sm"
+                           step="0.01" min="0"
+                           value="{{ item.received_quantity|default:'' }}"
+                           placeholder="0">
+                  </td>
+                  <td>
+                    <select name="condition_{{ item.pk }}" class="form-select form-select-sm">
+                      <option value="">— Select —</option>
+                      {% for val, label in condition_choices %}
+                      <option value="{{ val }}"
+                        {% if item.condition == val %}selected{% endif %}>
+                        {{ label }}
+                      </option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                  <td>
+                    <input type="text" name="grn_notes_{{ item.pk }}"
+                           class="form-control form-control-sm"
+                           value="{{ item.grn_notes|default:'' }}"
+                           placeholder="Optional note">
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-warning">Save GRN Override</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

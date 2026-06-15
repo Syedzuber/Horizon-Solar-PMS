@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+{% block title %}New Delivery Challan — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h4 class="mb-0">New Delivery Challan</h4>
+    <small class="text-muted">{{ project.project_id }} — {{ project.customer_name }}</small>
+  </div>
+  <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Back</a>
+</div>
+
+{% if messages %}
+  {% for msg in messages %}
+    <div class="alert alert-{{ msg.tags|default:'info' }} alert-dismissible fade show" role="alert">
+      {{ msg }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  {% endfor %}
+{% endif %}
+
+<form method="post" action="{% url 'create_delivery_challan' project.project_id %}">
+  {% csrf_token %}
+
+  {# ── Challan header ──────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-4">
+    <div class="card-header fw-semibold">Challan Details</div>
+    <div class="card-body">
+      <div class="row g-3">
+
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">
+            Vendor <span class="text-danger">*</span>
+          </label>
+          <select name="vendor_id" class="form-select" required>
+            <option value="">— Select Vendor —</option>
+            {% for v in vendors %}
+            <option value="{{ v.pk }}">{{ v.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">PO Number <span class="text-muted">(optional)</span></label>
+          <input type="text" name="po_number" class="form-control"
+                 placeholder="External PO reference (Excel / Zoho Inventory)" maxlength="100">
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">
+            DC Number <span class="text-danger">*</span>
+          </label>
+          <input type="text" name="dc_number" class="form-control" required
+                 placeholder="Challan number on vendor document" maxlength="100">
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">
+            DC Date <span class="text-danger">*</span>
+          </label>
+          <input type="date" name="dc_date" class="form-control" required>
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label fw-semibold">Expected Delivery Date <span class="text-muted">(optional)</span></label>
+          <input type="date" name="expected_delivery_date" class="form-control">
+        </div>
+
+        <div class="col-12">
+          <label class="form-label fw-semibold">Notes <span class="text-muted">(optional)</span></label>
+          <textarea name="notes" class="form-control" rows="2"
+                    placeholder="Any delivery instructions or notes…"></textarea>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  {# ── Line items ──────────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span class="fw-semibold">Line Items <span class="text-danger">*</span></span>
+      <button type="button" class="btn btn-outline-primary btn-sm" id="addLineItemBtn">
+        + Add Another Item
+      </button>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm mb-0" id="lineItemsTable">
+          <thead class="table-light">
+            <tr>
+              <th style="width:18%;">BOQ Category</th>
+              <th>Item Description</th>
+              <th style="width:11%;">Quantity</th>
+              <th style="width:9%;">Unit</th>
+              <th style="width:4%;"></th>
+            </tr>
+          </thead>
+          <tbody id="lineItemsBody">
+            {# First row is rendered by default — JS adds subsequent rows #}
+            <tr id="line-row-0">
+              <td>
+                <select name="line_item_category_0" class="form-select form-select-sm" required>
+                  <option value="">— Category —</option>
+                  {% for val, label in category_choices %}
+                  <option value="{{ val }}">{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td>
+                <input type="text" name="line_item_description_0"
+                       class="form-control form-control-sm" required
+                       placeholder="Item description" maxlength="255">
+              </td>
+              <td>
+                <input type="number" name="line_item_qty_0"
+                       class="form-control form-control-sm" required
+                       step="0.01" min="0.01" placeholder="0">
+              </td>
+              <td>
+                <input type="text" name="line_item_unit_0"
+                       class="form-control form-control-sm"
+                       value="Nos" maxlength="20">
+              </td>
+              <td class="text-center align-middle">
+                <button type="button" class="btn btn-outline-danger btn-sm py-0 remove-row-btn"
+                        title="Remove" style="display:none;">×</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-flex gap-2 justify-content-end mb-4">
+    <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-primary">Create Delivery Challan</button>
+  </div>
+
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var rowCount = 1;
+  var body     = document.getElementById('lineItemsBody');
+  var addBtn   = document.getElementById('addLineItemBtn');
+
+  // Category options HTML — rendered once, reused for each new row
+  var categoryOptions = '<option value="">— Category —</option>';
+  {% for val, label in category_choices %}
+  categoryOptions += '<option value="{{ val }}">{{ label }}</option>';
+  {% endfor %}
+
+  function updateRemoveButtons() {
+    var btns = body.querySelectorAll('.remove-row-btn');
+    // Show remove button only when there are 2+ rows
+    btns.forEach(function (btn) {
+      btn.style.display = btns.length > 1 ? '' : 'none';
+    });
+  }
+
+  addBtn.addEventListener('click', function () {
+    var i   = rowCount;
+    var row = document.createElement('tr');
+    row.id  = 'line-row-' + i;
+    row.innerHTML =
+      '<td>' +
+        '<select name="line_item_category_' + i + '" class="form-select form-select-sm" required>' +
+          categoryOptions +
+        '</select>' +
+      '</td>' +
+      '<td>' +
+        '<input type="text" name="line_item_description_' + i + '" ' +
+               'class="form-control form-control-sm" required ' +
+               'placeholder="Item description" maxlength="255">' +
+      '</td>' +
+      '<td>' +
+        '<input type="number" name="line_item_qty_' + i + '" ' +
+               'class="form-control form-control-sm" required ' +
+               'step="0.01" min="0.01" placeholder="0">' +
+      '</td>' +
+      '<td>' +
+        '<input type="text" name="line_item_unit_' + i + '" ' +
+               'class="form-control form-control-sm" value="Nos" maxlength="20">' +
+      '</td>' +
+      '<td class="text-center align-middle">' +
+        '<button type="button" class="btn btn-outline-danger btn-sm py-0 remove-row-btn" title="Remove">×</button>' +
+      '</td>';
+    body.appendChild(row);
+    rowCount++;
+    updateRemoveButtons();
+  });
+
+  body.addEventListener('click', function (e) {
+    if (e.target.classList.contains('remove-row-btn')) {
+      e.target.closest('tr').remove();
+      updateRemoveButtons();
+    }
+  });
+
+  updateRemoveButtons();
+});
+</script>
+
+{% endblock %}

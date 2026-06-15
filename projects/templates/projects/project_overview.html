@@ -333,7 +333,148 @@
   </div>
 </div>
 
-{# ── Panel 6: Recent activity (all roles) ────────────────────────────────── #}
+{# ── Panel 6: Delivery Challans (SCM, PM, SE, Admin) ────────────────────── #}
+{% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      Delivery Challans
+      {% if delivery_challans %}
+        <span class="badge bg-secondary ms-1">{{ delivery_challans|length }}</span>
+      {% endif %}
+    </span>
+    {# Add DC button — SCM only #}
+    {% if role == 'SCM' %}
+      <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-primary btn-sm">
+        + Add Delivery Challan
+      </a>
+    {% endif %}
+  </div>
+  <div class="card-body p-0">
+    {% if delivery_challans %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>DC Number</th>
+            <th>Vendor</th>
+            <th>PO Reference</th>
+            <th>DC Date</th>
+            <th>Exp. Delivery</th>
+            <th>Status</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for dc in delivery_challans %}
+          <tr>
+            <td>
+              <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                 class="fw-semibold text-decoration-none">
+                {{ dc.dc_number }}
+              </a>
+            </td>
+            <td class="text-muted small">{{ dc.vendor.name|default:"—" }}</td>
+            <td class="text-muted small">{{ dc.po_number|default:"—" }}</td>
+            <td class="text-muted small">{{ dc.dc_date|date:"d M Y" }}</td>
+            <td class="text-muted small">{{ dc.expected_delivery_date|date:"d M Y"|default:"—" }}</td>
+            <td>
+              {% if dc.status == 'Expected' %}
+                <span class="badge bg-secondary">Expected</span>
+              {% elif dc.status == 'Partially Received' %}
+                <span class="badge bg-warning text-dark">Partially Received</span>
+              {% elif dc.status == 'Received' %}
+                <span class="badge bg-success">Received</span>
+              {% elif dc.status == 'Rejected' %}
+                <span class="badge bg-danger">Rejected</span>
+              {% endif %}
+            </td>
+            <td class="text-end">
+              <div class="d-flex gap-1 justify-content-end">
+                {# Confirm Receipt — SE only, Expected or Partially Received status only #}
+                {% if role == 'Site Engineer' and dc.status != 'Received' and dc.status != 'Rejected' %}
+                  <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                     class="btn btn-outline-success btn-sm py-0">
+                    Confirm Receipt
+                  </a>
+                {% endif %}
+                {# Edit GRN — SCM only #}
+                {% if role == 'SCM' %}
+                  <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                     class="btn btn-outline-warning btn-sm py-0">
+                    Edit GRN
+                  </a>
+                {% endif %}
+                <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                   class="btn btn-outline-secondary btn-sm py-0">
+                  View
+                </a>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4">
+      <i class="bi bi-truck fs-3 d-block mb-2"></i>
+      No delivery challans yet.
+      {% if role == 'SCM' %}
+        <div class="mt-2">
+          <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-primary btn-sm">
+            + Add First Delivery Challan
+          </a>
+        </div>
+      {% endif %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Panel 7: Material Status (PM, SCM, SE, Admin) ───────────────────────── #}
+{% if role == 'PM' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Material Status</div>
+  <div class="card-body p-0">
+    {% if delivery_challans %}
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Category</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for category, status in material_status.items %}
+          <tr>
+            <td class="fw-semibold">{{ category }}</td>
+            <td>
+              {% if status == 'Received' %}
+                <span class="text-success fw-semibold">&#10003; Received</span>
+              {% elif status == 'Partial' %}
+                <span class="text-warning fw-semibold">&#9888; Partial</span>
+              {% else %}
+                <span class="text-muted">&#10007; Pending</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4">
+      No deliveries recorded yet.
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Panel 8: Recent activity (all roles) ────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header fw-semibold">Recent Activity</div>
   <div class="card-body p-0">

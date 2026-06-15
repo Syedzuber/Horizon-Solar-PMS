@@ -12,7 +12,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Max, Prefetch, Q, Sum
+from django.db.models import Count, Max, Prefetch, Q, Sum
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.utils import timezone
@@ -24,6 +24,7 @@ from .models import (
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
+    DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -57,6 +58,10 @@ MIME_TYPE_MAP = {
 # ---------------------------------------------------------------------------
 
 def login_view(request):
+    """
+    Render login form and authenticate. Redirects already-authenticated users
+    to their role dashboard immediately. Access: public.
+    """
     if request.user.is_authenticated:
         return redirect(get_user_dashboard(request.user))
 
@@ -74,6 +79,7 @@ def login_view(request):
 
 
 def logout_view(request):
+    """Log out the current user and redirect to login page. Access: any authenticated user."""
     logout(request)
     return redirect('/login/')
 
@@ -84,14 +90,59 @@ def logout_view(request):
 
 @login_required
 def dashboard_admin(request):
+    """Admin landing page. Access: any authenticated user (no role restriction here — Admin nav is in the template)."""
     return render(request, 'dashboard/admin.html')
+
+
+def _project_material_badge(project_id, delivery_lookup):
+    """
+    Compute the PM dashboard Materials badge value from a pre-fetched delivery_lookup dict.
+    Called inside the projects_with_progress loop — lookup was built from a single query
+    before the loop to avoid N+1 (one query per project would be too expensive).
+    Returns 'Pending', 'Partial', or 'Received'.
+    """
+    project_data = delivery_lookup.get(project_id, {})
+    if not project_data:
+        return 'Pending'
+
+    categories = ['Solar Modules', 'Structure', 'Inverter', 'BOS']
+    statuses = []
+    for cat in categories:
+        cat_data = project_data.get(cat)
+        if not cat_data:
+            statuses.append('Pending')
+            continue
+        received = cat_data['total_received'] or 0
+        ordered  = cat_data['total_ordered'] or 0
+        has_damage = cat_data['has_damage']
+        if received == 0:
+            statuses.append('Pending')
+        elif received >= ordered and not has_damage:
+            statuses.append('Received')
+        else:
+            statuses.append('Partial')
+
+    if all(s == 'Pending' for s in statuses):
+        return 'Pending'
+    elif all(s == 'Received' for s in statuses):
+        return 'Received'
+    else:
+        return 'Partial'
 
 
 @login_required
 @role_required(['PM'])
 def dashboard_pm(request):
+    """
+    PM dashboard: summary cards + per-project progress + task lists.
+    All queries scoped to the PM's own projects only.
+    Access: PM only.
+    TODO: the per-project loop runs multiple queries per project — consider
+    annotating with Subquery or moving to prefetch_related before scaling.
+    """
     pm_profile = request.user.profile
 
+    # Summary card counts — each is a single COUNT query
     active_projects = Project.objects.filter(
         assigned_pm=pm_profile,
         status__in=['Active', 'In Progress'],
@@ -163,6 +214,36 @@ def dashboard_pm(request):
             'current_phase':    current_phase,
         })
 
+    # Annotate material summary badges — single query across all projects, not N+1 per project
+    # Fetch all delivery line item data in one query, then build a lookup dict
+    if projects_with_progress:
+        pm_project_ids = [row['project'].project_id for row in projects_with_progress]
+        # Aggregate ordered/received totals and damage flag per project per category
+        delivery_rows = DCLineItem.objects.filter(
+            challan__project__project_id__in=pm_project_ids
+        ).values(
+            'challan__project__project_id', 'boq_category'
+        ).annotate(
+            total_ordered=Sum('ordered_quantity'),
+            total_received=Sum('received_quantity'),
+            damage_count=Count('pk', filter=Q(condition__in=['Damaged', 'Partial'])),
+        )
+        delivery_lookup = {}
+        for row in delivery_rows:
+            pid = row['challan__project__project_id']
+            cat = row['boq_category']
+            if pid not in delivery_lookup:
+                delivery_lookup[pid] = {}
+            delivery_lookup[pid][cat] = {
+                'total_ordered':  row['total_ordered'] or 0,
+                'total_received': row['total_received'] or 0,
+                'has_damage':     row['damage_count'] > 0,
+            }
+        for row in projects_with_progress:
+            row['material_summary'] = _project_material_badge(
+                row['project'].project_id, delivery_lookup
+            )
+
     due_today_tasks = Task.objects.filter(
         phase__project__assigned_pm=pm_profile,
         due_date=date.today(), due_date__isnull=False,
@@ -222,11 +303,17 @@ def dashboard_pm(request):
 @login_required
 @role_required(['Site Engineer'])
 def dashboard_site_engineer(request):
+    """
+    Site Engineer dashboard: tasks due today, in-progress, and overdue
+    across all projects the SE is assigned to.
+    Access: Site Engineer only.
+    """
     se_profile  = request.user.profile
     my_projects = Project.objects.filter(
         assigned_site_engineer=se_profile,
         status__in=['Active', 'In Progress'],
     )
+    # Match tasks explicitly assigned to this SE, or unassigned SE-role tasks on their projects
     se_q = Q(assigned_to=se_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SITE_ENGINEER)
 
     due_today = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
@@ -274,6 +361,10 @@ def dashboard_site_engineer(request):
 @login_required
 @role_required(['Design'])
 def dashboard_design(request):
+    """
+    Design dashboard: task counts and BOQ revision requests for projects
+    where this user is assigned_design. Access: Design only.
+    """
     design_profile  = request.user.profile
     project_filter  = {
         'assigned_role': Task.DESIGN,
@@ -351,6 +442,10 @@ def dashboard_design(request):
 @login_required
 @role_required(['Finance'])
 def dashboard_finance(request):
+    """
+    Finance dashboard: aggregate payment totals and per-project M1/M2/M3 table.
+    Access: Finance only.
+    """
     today = timezone.now().date()
 
     total_pending = PaymentMilestone.objects.filter(
@@ -408,7 +503,12 @@ def dashboard_finance(request):
 @login_required
 @role_required(['SCM'])
 def dashboard_scm(request):
+    """
+    SCM dashboard: BOQs awaiting acknowledgment, procurement POs by project,
+    delivery tasks, and overdue counts. Access: SCM only.
+    """
     scm_profile   = request.user.profile
+    # Match tasks explicitly assigned to this SCM user, or unassigned SCM-role tasks
     scm_q         = Q(assigned_to=scm_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SCM)
     active_filter = {'phase__project__status__in': ['Active', 'In Progress']}
 
@@ -464,6 +564,7 @@ def dashboard_scm(request):
 
 @login_required
 def dashboard_ceo(request):
+    """CEO landing page — read-only summary view. Access: any authenticated user."""
     return render(request, 'dashboard/ceo.html')
 
 
@@ -474,6 +575,7 @@ def dashboard_ceo(request):
 @login_required
 @role_required(['Admin'])
 def user_list(request):
+    """List all user profiles with their roles. Access: Admin only."""
     profiles = UserProfile.objects.select_related('user', 'created_by').order_by('user__username')
     return render(request, 'users/user_list.html', {'profiles': profiles})
 
@@ -481,6 +583,11 @@ def user_list(request):
 @login_required
 @role_required(['Admin'])
 def user_create(request):
+    """
+    Create a new Django User + UserProfile in one step.
+    Sets is_staff=True when role is Admin so Django admin access is granted automatically.
+    Access: Admin only.
+    """
     if request.method == 'POST':
         form = UserCreateForm(request.POST)
         if form.is_valid():
@@ -494,6 +601,7 @@ def user_create(request):
                 is_active=cd['is_active'],
                 is_staff=(cd['role'] == 'Admin'),
             )
+            # UserProfile is auto-created by a post_save signal on User creation
             profile = user.profile
             profile.role = cd['role']
             profile.phone_number = cd['phone_number']
@@ -515,10 +623,16 @@ def user_create(request):
 @login_required
 @role_required(['Admin'])
 def user_edit(request, user_id):
+    """
+    Edit an existing user's name, email, role, and active status.
+    Uses filter().update() on UserProfile to avoid a second .save() round-trip.
+    Access: Admin only.
+    """
     target_user = get_object_or_404(User, pk=user_id)
     try:
         profile = target_user.profile
     except UserProfile.DoesNotExist:
+        # Safety net: create a blank profile if one somehow doesn't exist
         profile = UserProfile.objects.create(user=target_user)
 
     if request.method == 'POST':
@@ -565,6 +679,7 @@ def user_edit(request, user_id):
 # ---------------------------------------------------------------------------
 
 def _get_user_role(request):
+    """Return the role string for the request user, or None if no profile exists."""
     try:
         return request.user.profile.role
     except Exception:
@@ -579,6 +694,11 @@ def _pm_owns_project(request, project):
 @login_required
 @role_required(['PM', 'Admin', 'CEO'])
 def project_list(request):
+    """
+    List all projects. PM sees only their own; Admin and CEO see all.
+    Prefetches phases→tasks so get_current_phase() works without N+1.
+    Access: PM (own only), Admin, CEO.
+    """
     role = _get_user_role(request)
     base_qs = (
         Project.objects
@@ -600,6 +720,11 @@ def project_list(request):
 @login_required
 @role_required(['PM'])
 def project_create(request):
+    """
+    Create a new Draft project. The PM is auto-set to the current user.
+    project_id is generated inside Project.save() via generate_project_id().
+    Access: PM only.
+    """
     if request.method == 'POST':
         form = ProjectCreateForm(request.POST)
         if form.is_valid():
@@ -625,6 +750,12 @@ def project_create(request):
 @login_required
 @role_required(['PM', 'Admin', 'CEO'])
 def project_detail(request, project_id):
+    """
+    Project detail page with phases, tasks, milestones, documents, and issues.
+    Handles inline POST actions (update_milestone, assign_design) from the same page.
+    PM isolation: PM can only view/edit their own projects.
+    Access: PM (own only), Admin, CEO.
+    """
     project = get_object_or_404(
         Project.objects.select_related(
             'assigned_pm__user', 'assigned_site_engineer__user',
@@ -634,6 +765,8 @@ def project_detail(request, project_id):
     )
 
     role = _get_user_role(request)
+    # PM isolation: PMs not assigned to this project get 404, not 403,
+    # to avoid leaking that the project exists
     if role == 'PM' and not _pm_owns_project(request, project):
         raise Http404
 
@@ -750,6 +883,10 @@ def project_detail(request, project_id):
 @login_required
 @role_required(['PM'])
 def project_edit(request, project_id):
+    """
+    Edit a Draft project's fields. Active+ projects are locked — edit is blocked
+    with a warning redirect. Access: assigned PM only, Draft status only.
+    """
     project = get_object_or_404(Project, project_id=project_id)
 
     if not _pm_owns_project(request, project):
@@ -779,6 +916,12 @@ def project_edit(request, project_id):
 @login_required
 @role_required(['PM'])
 def project_activate(request, project_id):
+    """
+    Activate a Draft project: sets status=Active, stamps activated_at,
+    attaches the Residential template (phases + tasks), and creates M1/M2/M3 milestones.
+    All DB writes are wrapped in transaction.atomic() — a failure rolls back everything.
+    Access: assigned PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -787,7 +930,7 @@ def project_activate(request, project_id):
     if not _pm_owns_project(request, project):
         raise Http404
 
-    # Failure 6: status check must be first, before any DB write
+    # Status check before any DB write — avoids partial state if already active
     if project.status != 'Draft':
         messages.warning(request, 'Project is already active.')
         return redirect('project_detail', project_id=project.project_id)
@@ -827,6 +970,11 @@ def project_activate(request, project_id):
 @login_required
 @role_required(['PM'])
 def project_recalculate_dates(request, project_id):
+    """
+    Recalculate all task due dates from project.activated_at using the duration_days chain.
+    Intended as a bulk reset; PM normally sets dates task-by-task via task_set_due_date.
+    Access: assigned PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -851,6 +999,11 @@ def project_recalculate_dates(request, project_id):
 @login_required
 @role_required(['PM'])
 def task_add(request, project_id):
+    """
+    Add a single manual task to an active project. Only allowed when status=Active.
+    task_order is set to last+1 within the chosen phase.
+    Access: assigned PM only.
+    """
     project = get_object_or_404(Project, project_id=project_id)
 
     if not _pm_owns_project(request, project):
@@ -886,13 +1039,21 @@ def task_add(request, project_id):
 
 @login_required
 def task_status_update(request, project_id, task_id):
+    """
+    Update a task's status. Enforces a transition table so invalid moves are rejected.
+    The assigned role or the project PM may update. Blocking a task requires a title
+    for a new Issue — the issue is auto-created and linked to the task.
+    filter().update() used instead of .save() to prevent race condition on concurrent
+    status changes from two users.
+    Access: task's assigned_role or project PM. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # Failure 7: check permission before any DB write
+    # Permission check before any DB write
     try:
         user_role = request.user.profile.role
     except Exception:
@@ -909,6 +1070,8 @@ def task_status_update(request, project_id, task_id):
         messages.error(request, 'Invalid status value.')
         return redirect('project_detail', project_id=project.project_id)
 
+    # State machine: defines allowed next states for each current state.
+    # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
     VALID_TRANSITIONS = {
         Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED},
         Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
@@ -971,6 +1134,7 @@ def task_status_update(request, project_id, task_id):
         # Log status changes for all non-blocked transitions (blocked has its own log above)
         log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
 
+    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain)
     next_url = request.POST.get('next', None)
     if next_url:
         from urllib.parse import urlparse
@@ -982,6 +1146,12 @@ def task_status_update(request, project_id, task_id):
 @login_required
 @role_required(['PM'])
 def task_assign(request, project_id, task_id):
+    """
+    Assign (or clear) the individual user on a task. Candidate list is filtered
+    to the task's assigned_role so a PM-role task can only be given to a PM user.
+    filter().update() used to avoid overwriting other task fields via .save().
+    Access: assigned PM only.
+    """
     project = get_object_or_404(Project, project_id=project_id)
 
     if not _pm_owns_project(request, project):
@@ -989,7 +1159,7 @@ def task_assign(request, project_id, task_id):
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # Failure 9: dropdown must only show users matching task's assigned_role
+    # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task
     candidates = UserProfile.objects.filter(role=task.assigned_role, is_active=True)
 
     if request.method == 'POST':
@@ -1011,6 +1181,11 @@ def task_assign(request, project_id, task_id):
 @login_required
 @role_required(['PM'])
 def task_set_due_date(request, project_id, task_id):
+    """
+    Set the due date on a task and cascade-recalculate all subsequent task due dates.
+    Clearing the date (empty string) sets due_date=None without cascading.
+    Access: assigned PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -1046,7 +1221,13 @@ def task_set_due_date(request, project_id, task_id):
 
 @login_required
 def vendor_list(request):
+    """
+    List all vendors with optional category and active/inactive filters.
+    Access: SCM and Admin only (inline role check — not via decorator).
+    """
     profile = request.user.profile
+    # Inline role check used here (not @role_required) because vendor views
+    # are shared between SCM and Admin with identical permission logic
     if profile.role not in ('SCM', 'Admin'):
         return HttpResponseForbidden()
 
@@ -1072,6 +1253,11 @@ def vendor_list(request):
 
 @login_required
 def vendor_add(request):
+    """
+    Add a new vendor. Warns (but does not block) if a vendor with the same name
+    already exists — duplicate names are allowed to handle trading variants.
+    Access: SCM and Admin only.
+    """
     profile = request.user.profile
     if profile.role not in ('SCM', 'Admin'):
         return HttpResponseForbidden()
@@ -1105,6 +1291,7 @@ def vendor_add(request):
 
 @login_required
 def vendor_edit(request, vendor_id):
+    """Edit an existing vendor's details. Access: SCM and Admin only."""
     profile = request.user.profile
     if profile.role not in ('SCM', 'Admin'):
         return HttpResponseForbidden()
@@ -1138,6 +1325,11 @@ def vendor_edit(request, vendor_id):
 
 @login_required
 def vendor_toggle_status(request, vendor_id):
+    """
+    Toggle a vendor's active/inactive status. Returns JSON so the UI can update
+    the toggle button without a full page reload.
+    Access: SCM and Admin only. POST only.
+    """
     profile = request.user.profile
     if profile.role not in ('SCM', 'Admin'):
         return HttpResponseForbidden()
@@ -1200,6 +1392,13 @@ def _build_vendors_by_category():
 
 @login_required
 def boq_detail(request, project_id):
+    """
+    BOQ detail page. Handles all BOQ POST actions in a single view:
+      Design: save_design, submit_design, add_item, delete_item
+      SCM:    save_scm, acknowledge_scm
+    BOQ is auto-created for Design users if it doesn't exist yet.
+    Access: Design, SCM, PM, Admin.
+    """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
     role    = profile.role
@@ -1207,7 +1406,7 @@ def boq_detail(request, project_id):
     if role not in ('Design', 'SCM', 'PM', 'Admin'):
         return HttpResponseForbidden()
 
-    # Get or auto-create BOQ for Design
+    # Get or auto-create BOQ for Design users (non-Design sees 'no BOQ yet' state)
     try:
         boq = project.boq
     except BOQ.DoesNotExist:
@@ -1231,6 +1430,7 @@ def boq_detail(request, project_id):
     if request.method == 'POST':
         action = request.POST.get('action', '')
 
+        # Design can edit in these statuses; Submitted is locked until SCM acts
         _DESIGN_EDITABLE = ('Draft', 'Revision Requested', 'Acknowledged')
 
         if action in ('save_design', 'submit_design') and role == 'Design' and boq.status in _DESIGN_EDITABLE:
@@ -1354,6 +1554,12 @@ def boq_detail(request, project_id):
 
 @login_required
 def boq_submit(request, project_id):
+    """
+    Standalone BOQ submit endpoint (also handled inline in boq_detail).
+    Validates at least one item has a quantity, snapshots the BOQ, and moves
+    status to Submitted. Increments version on resubmission.
+    Access: Design only. POST only.
+    """
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
@@ -1403,6 +1609,10 @@ def boq_submit(request, project_id):
 
 @login_required
 def boq_acknowledge(request, project_id):
+    """
+    Standalone BOQ acknowledge endpoint (also handled inline in boq_detail).
+    Moves status from Submitted → Acknowledged. Access: SCM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
@@ -1429,6 +1639,12 @@ def boq_acknowledge(request, project_id):
 
 @login_required
 def boq_request_revision(request, project_id):
+    """
+    PM requests a revision on a Submitted or Acknowledged BOQ.
+    Snapshots current state before moving to 'Revision Requested'.
+    GET renders the reason form; POST processes the request.
+    Access: PM only.
+    """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
@@ -1476,6 +1692,11 @@ def boq_request_revision(request, project_id):
 
 @login_required
 def boq_history(request, project_id):
+    """
+    BOQ revision timeline. Annotates each BOQRevision with event_type and badge
+    styling based on the reason text. Ordered oldest-first for a readable timeline.
+    Access: PM, Design, SCM, Admin.
+    """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
@@ -1487,6 +1708,7 @@ def boq_history(request, project_id):
     raw_revisions = boq.revisions.select_related('revised_by__user').order_by('revised_at')
 
     def _annotate(rev):
+        """Tag a BOQRevision with display metadata (event_type, badge CSS class) based on its reason text."""
         r = rev.reason or ''
         if 'SCM Acknowledged' in r:
             rev.event_type   = 'acknowledged'
@@ -1521,6 +1743,11 @@ def boq_history(request, project_id):
 
 @login_required
 def notifications_view(request):
+    """
+    List the user's notifications and mark them all as read.
+    Both GET and POST mark notifications read — visiting the page clears the badge.
+    Access: any authenticated user (their own notifications only).
+    """
     profile       = request.user.profile
     notifications = profile.notifications.all()  # already ordered -created_at
 
@@ -1544,6 +1771,10 @@ def notifications_view(request):
 @login_required
 @role_required(['Finance'])
 def milestone_invoice(request, project_id, milestone_pk):
+    """
+    Mark a Pending milestone as Invoiced and record today as invoice_date.
+    Access: Finance only. POST only.
+    """
     if request.method != 'POST':
         return redirect('dashboard_finance')
 
@@ -1566,6 +1797,11 @@ def milestone_invoice(request, project_id, milestone_pk):
 @login_required
 @role_required(['Finance'])
 def milestone_receive(request, project_id, milestone_pk):
+    """
+    Mark an Invoiced milestone as Received. Records amount_received and variance_reason.
+    Auto-sets variance_reason='Overpayment' when amount_received > amount and no reason given.
+    Access: Finance only. POST only.
+    """
     if request.method != 'POST':
         return redirect('dashboard_finance')
 
@@ -1605,6 +1841,12 @@ def milestone_receive(request, project_id, milestone_pk):
 @login_required
 @role_required(['PM'])
 def milestone_create(request, project_id):
+    """
+    Create the standard M1/M2/M3 milestones for a project if none exist yet.
+    Milestones are normally created automatically during project_activate —
+    this view exists as a fallback for projects activated before milestones were added.
+    Access: assigned PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -1638,6 +1880,11 @@ def milestone_create(request, project_id):
 @login_required
 @role_required(['BD'])
 def dashboard_bd(request):
+    """
+    BD dashboard: high-level portfolio summary — contracted value, commissioned
+    projects this month, pending payments, and per-project milestone status.
+    Access: BD only.
+    """
     today = timezone.now().date()
 
     active_qs = Project.objects.filter(status__in=['Active', 'In Progress'])
@@ -1706,9 +1953,15 @@ def dashboard_bd(request):
 
 @login_required
 def project_overview(request, project_id):
+    """
+    Single-page project overview: BOQ status, payment milestones, phase progress
+    charts (as JSON for JS rendering), and a recent activity feed.
+    Access: all roles; PM isolation applies (PM sees own projects only).
+    """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
+    # PM isolation: own projects only
     if profile.role == 'PM' and project.assigned_pm != profile:
         raise Http404
 
@@ -1763,6 +2016,7 @@ def project_overview(request, project_id):
     for e in boq_events:
         e.event_type = 'boq'
         e.event_date = e.revised_at
+    # Merge two heterogeneous querysets into a single sorted feed (last 5 events)
     recent_activity = sorted(
         due_changes + boq_events, key=lambda x: x.event_date, reverse=True
     )[:5]
@@ -1775,18 +2029,37 @@ def project_overview(request, project_id):
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
+    # Delivery Challans — prefetch vendor + creator for the list table
+    delivery_challans = (
+        project.delivery_challans
+        .select_related('vendor', 'created_by__user')
+        .all()
+    )
+
+    # Per-category material status for the Material Status panel (single project — no N+1 risk)
+    material_status = get_material_status(project)
+
+    # Vendor list for the "Add Delivery Challan" form (SCM only, active vendors only)
+    dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if profile.role == 'SCM' else []
+
+    # import inside function to avoid circular import at module level
     import json
     return render(request, 'projects/project_overview.html', {
-        'project':          project,
-        'milestones':       milestones,
-        'phases':           phases,
-        'phase_data_json':  json.dumps(phase_data_json),
-        'recent_activity':  recent_activity,
-        'role':             profile.role,
-        'user_profile':     profile,
-        'documents':        documents,
-        'project_issues':   project_issues,
-        'all_profiles':     all_profiles,
+        'project':            project,
+        'milestones':         milestones,
+        'phases':             phases,
+        'phase_data_json':    json.dumps(phase_data_json),
+        'recent_activity':    recent_activity,
+        'role':               profile.role,
+        'user_profile':       profile,
+        'documents':          documents,
+        'project_issues':     project_issues,
+        'all_profiles':       all_profiles,
+        'delivery_challans':  delivery_challans,
+        'material_status':    material_status,
+        'dc_vendors':         dc_vendors,
+        'dc_category_choices':  DCLineItem.CATEGORY_CHOICES,
+        'dc_condition_choices': DCLineItem.CONDITION_CHOICES,
     })
 
 
@@ -1795,6 +2068,7 @@ def project_overview(request, project_id):
 # ---------------------------------------------------------------------------
 
 def _safe_decimal(value):
+    """Strip non-numeric characters and convert to Decimal. Returns None on failure or empty input."""
     if not value:
         return None
     cleaned = re.sub(r'[^\d.]', '', str(value))
@@ -1806,6 +2080,15 @@ def _safe_decimal(value):
 
 @csrf_exempt
 def zoho_deal_closed_webhook(request):
+    """
+    Receive a Zoho CRM webhook when a deal reaches 'Closed Won'.
+    Creates a Draft project from the deal fields.
+    Security: token validated from X-Webhook-Token header or ?token= / ?secret= param.
+    Duplicate guard: skips if a project with the same zoho_deal_id already exists.
+    Always returns HTTP 200 even on application errors — non-200 causes Zoho to retry
+    and would create duplicate projects.
+    Access: public (unauthenticated), token-protected.
+    """
     if request.method != 'POST':
         return HttpResponse(status=405)
 
@@ -1826,7 +2109,8 @@ def zoho_deal_closed_webhook(request):
     except (json.JSONDecodeError, ValueError):
         return HttpResponse(status=400)
 
-    # Zoho payload structure varies: flat root, or wrapped in data[]/data[0].Deal
+    # Zoho payload structure varies between webhook versions:
+    # flat root (fields at top level) or wrapped in data[]/data[0].Deal
     data_wrapper = payload.get('data')
     if data_wrapper is not None:
         if isinstance(data_wrapper, list):
@@ -1836,6 +2120,7 @@ def zoho_deal_closed_webhook(request):
         deal = payload  # flat root — fields are at the top level
 
     stage = deal.get('Stage', '')
+    # Ignore all stages except Closed Won — return 200 so Zoho doesn't retry
     if stage != 'Closed Won':
         return HttpResponse(status=200)
 
@@ -1874,7 +2159,8 @@ def zoho_deal_closed_webhook(request):
         profile_match = UserProfile.objects.filter(user__email__iexact=pm_email).first()
         if profile_match:
             assigned_pm = profile_match
-    # Fall back to default PM if Zoho field is empty or email not matched
+    # Fall back to the default PM (chetan@horizonrenewablepower.com) if the Zoho
+    # Assign_PM field is empty or the email doesn't match any active user
     if assigned_pm is None:
         assigned_pm = UserProfile.objects.filter(
             user__email__iexact='chetan@horizonrenewablepower.com'
@@ -1902,6 +2188,7 @@ def zoho_deal_closed_webhook(request):
         )
     except Exception as exc:
         logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
+        # Return 200 even on failure — non-200 would cause Zoho to retry and create duplicates
         return HttpResponse(status=200)
 
     logger.info('Webhook: project %s created for deal %s (pm=%s)',
@@ -1960,9 +2247,14 @@ def _validate_and_upload(file, supabase_client, bucket, supabase_path):
 
 @login_required
 def task_detail(request, project_id, task_id):
+    """
+    Task detail page: attachments, issues, and threaded comments for this task.
+    Access: all roles; PM isolation applies.
+    """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
+    # PM isolation: PM sees only their own projects
     if profile.role == 'PM' and project.assigned_pm != profile:
         raise Http404
 
@@ -2000,6 +2292,12 @@ def task_detail(request, project_id, task_id):
 
 @login_required
 def upload_project_document(request, project_id):
+    """
+    Upload one or more files to a project. Files are stored in Supabase under
+    project-documents/{project_id}/{uuid}_{filename}. DB record is created after
+    a successful Supabase upload. Partial success (some files uploaded) shows a warning.
+    Access: all roles with project access; PM isolation applies.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -2076,6 +2374,11 @@ def upload_project_document(request, project_id):
 
 @login_required
 def delete_project_document(request, project_id, doc_pk):
+    """
+    Soft-delete a project document (sets is_deleted=True). The Supabase file is not
+    removed here — purge_deleted_files handles hard deletion after FILE_RETENTION_DAYS.
+    Access: uploader or Admin only. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -2110,6 +2413,12 @@ def delete_project_document(request, project_id, doc_pk):
 
 @login_required
 def upload_task_attachment(request, project_id, task_id):
+    """
+    Upload one or more files to a task. Stored in Supabase under
+    task-attachments/{project_id}/{task_pk}/{uuid}_{filename}.
+    Cross-project guard prevents uploading to a task on a different project.
+    Access: all roles with project access; PM isolation applies.
+    """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -2192,6 +2501,10 @@ def upload_task_attachment(request, project_id, task_id):
 
 @login_required
 def delete_task_attachment(request, project_id, task_id, attach_pk):
+    """
+    Soft-delete a task attachment. Supabase file is purged later by purge_deleted_files.
+    Access: uploader or Admin only. POST only.
+    """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -2226,15 +2539,21 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
 # ---------------------------------------------------------------------------
 
 def _issue_base_qs():
+    """Base Issue queryset with actor relations pre-joined — used in issue detail views."""
     return Issue.objects.select_related('raised_by__user', 'assigned_to__user', 'task')
 
 
 def _is_project_pm(profile, project):
+    """Return True if profile is the PM assigned to project. Used for issue close/reopen guards."""
     return profile.role == 'PM' and project.assigned_pm == profile
 
 
 @login_required
 def create_project_issue(request, project_id):
+    """
+    Raise a project-level issue (not tied to any specific task).
+    Access: all roles with project access; PM isolation applies. POST only.
+    """
     if request.method != 'POST':
         return redirect('project_detail', project_id=project_id)
 
@@ -2289,6 +2608,10 @@ def create_project_issue(request, project_id):
 
 @login_required
 def create_task_issue(request, project_id, task_id):
+    """
+    Raise an issue linked to a specific task (task.issues relation).
+    Access: all roles with project access; PM isolation applies. POST only.
+    """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -2345,6 +2668,10 @@ def create_task_issue(request, project_id, task_id):
 
 @login_required
 def issue_detail(request, issue_id):
+    """
+    Issue detail page with comments and status/assignee controls.
+    Access: all roles; PM isolation applies.
+    """
     issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
@@ -2376,6 +2703,11 @@ def issue_detail(request, issue_id):
 
 @login_required
 def update_issue_status(request, issue_id):
+    """
+    Advance an Open issue to In Progress. Requires the issue to have an assignee.
+    filter().update() used to prevent race condition on concurrent status changes.
+    Access: all roles with project access. POST only.
+    """
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
@@ -2397,6 +2729,8 @@ def update_issue_status(request, issue_id):
         messages.warning(request, 'Please assign this issue before starting work.')
         return redirect('issue_detail', issue_id=issue_id)
 
+    # filter().update() with status condition prevents race condition — updated==0 means
+    # another request already changed the status between our read and this write
     updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
@@ -2408,6 +2742,12 @@ def update_issue_status(request, issue_id):
 
 @login_required
 def resolve_issue(request, issue_id):
+    """
+    Mark an In Progress issue as Resolved. Resolution note is required.
+    Notifies the PM (if they are not the resolver) so they can review and close.
+    filter().update() used to prevent race condition on concurrent status changes.
+    Access: any role with project access. POST only.
+    """
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
@@ -2455,6 +2795,11 @@ def resolve_issue(request, issue_id):
 
 @login_required
 def close_issue(request, issue_id):
+    """
+    Close a Resolved issue. Only the project PM can close.
+    filter().update() used to prevent race condition on concurrent status changes.
+    Access: project PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
@@ -2483,6 +2828,11 @@ def close_issue(request, issue_id):
 
 @login_required
 def reopen_issue(request, issue_id):
+    """
+    Reopen a Resolved issue back to Open (clears resolved_at and resolution_note).
+    Only the project PM can reopen. filter().update() prevents race conditions.
+    Access: project PM only. POST only.
+    """
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
@@ -2512,6 +2862,11 @@ def reopen_issue(request, issue_id):
 
 @login_required
 def assign_issue(request, issue_id):
+    """
+    Assign or unassign an issue. Closed issues cannot be reassigned.
+    filter().update() used for atomic update without loading the full object.
+    Access: all roles with project access. POST only.
+    """
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
@@ -2781,3 +3136,284 @@ def portal_activity_log(request):
             'date_to':     date_to,
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Delivery Challans (SCM Delivery Tracker — Day 9)
+# ---------------------------------------------------------------------------
+
+@login_required
+@role_required(['SCM'])
+def create_delivery_challan(request, project_id):
+    """
+    Create a new Delivery Challan for a project. Access: SCM only.
+    Dynamic line items are submitted with indexed field names (line_item_*_N).
+    Minimum 1 line item required — zero items rejected with a validation error.
+    GET renders the form; POST creates the DC + line items in one transaction.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+    vendors = Vendor.objects.filter(is_active=True).order_by('name')
+
+    if request.method != 'POST':
+        return render(request, 'projects/delivery_challan_create.html', {
+            'project':          project,
+            'vendors':          vendors,
+            'category_choices': DCLineItem.CATEGORY_CHOICES,
+        })
+
+    # Parse DC header fields
+    vendor_id              = request.POST.get('vendor_id', '').strip()
+    po_number              = request.POST.get('po_number', '').strip()
+    dc_number              = request.POST.get('dc_number', '').strip()
+    dc_date_s              = request.POST.get('dc_date', '').strip()
+    expected_delivery_s    = request.POST.get('expected_delivery_date', '').strip()
+    notes                  = request.POST.get('notes', '').strip()
+
+    if not dc_number or not dc_date_s:
+        messages.error(request, 'DC Number and DC Date are required.')
+        return render(request, 'projects/delivery_challan_create.html', {
+            'project': project, 'vendors': vendors,
+            'category_choices': DCLineItem.CATEGORY_CHOICES,
+        })
+
+    try:
+        dc_date = date.fromisoformat(dc_date_s)
+    except ValueError:
+        messages.error(request, 'Invalid DC Date format.')
+        return render(request, 'projects/delivery_challan_create.html', {
+            'project': project, 'vendors': vendors,
+            'category_choices': DCLineItem.CATEGORY_CHOICES,
+        })
+
+    expected_delivery_date = None
+    if expected_delivery_s:
+        try:
+            expected_delivery_date = date.fromisoformat(expected_delivery_s)
+        except ValueError:
+            pass
+
+    vendor = None
+    if vendor_id:
+        try:
+            vendor = Vendor.objects.get(pk=vendor_id, is_active=True)
+        except Vendor.DoesNotExist:
+            pass
+
+    # Parse dynamically indexed line item fields from POST
+    # Field names follow the pattern: line_item_category_N, line_item_description_N, etc.
+    line_items_data = []
+    i = 0
+    while f'line_item_category_{i}' in request.POST:
+        category    = request.POST.get(f'line_item_category_{i}', '').strip()
+        description = request.POST.get(f'line_item_description_{i}', '').strip()
+        qty_str     = request.POST.get(f'line_item_qty_{i}', '').strip()
+        unit        = request.POST.get(f'line_item_unit_{i}', 'Nos').strip() or 'Nos'
+        qty         = _safe_decimal(qty_str)
+        if category and description and qty:
+            line_items_data.append({
+                'boq_category':     category,
+                'item_description': description,
+                'ordered_quantity': qty,
+                'unit':             unit,
+            })
+        i += 1
+
+    # Minimum 1 line item — DC with zero items rejected
+    if not line_items_data:
+        messages.error(request, 'At least one line item is required.')
+        return render(request, 'projects/delivery_challan_create.html', {
+            'project': project, 'vendors': vendors,
+            'category_choices': DCLineItem.CATEGORY_CHOICES,
+        })
+
+    with transaction.atomic():
+        challan = DeliveryChallan.objects.create(
+            project=project,
+            vendor=vendor,
+            po_number=po_number,
+            dc_number=dc_number,
+            dc_date=dc_date,
+            expected_delivery_date=expected_delivery_date,
+            status=DeliveryChallan.EXPECTED,
+            notes=notes,
+            created_by=profile,
+        )
+        # Create line items after challan exists; recalculate_dc_status is NOT called
+        # here because all new items have no received_quantity → status stays Expected
+        for item_data in line_items_data:
+            DCLineItem.objects.create(challan=challan, **item_data)
+
+    vendor_name = vendor.name if vendor else 'Unknown Vendor'
+    log_activity(
+        project, profile,
+        f"SCM created Delivery Challan {dc_number} for {vendor_name}",
+        entity_type='DeliveryChallan', entity_id=challan.pk,
+    )
+    messages.success(request, f'Delivery Challan {dc_number} created successfully.')
+    return redirect('delivery_challan_detail', project_id=project_id, dc_id=challan.pk)
+
+
+@login_required
+def delivery_challan_detail(request, project_id, dc_id):
+    """
+    DC detail page: line items table, GRN confirmation form (SE), Edit GRN button (SCM).
+    Cross-project guard: DC must belong to the project in the URL — returns 404 on mismatch
+    to prevent cross-project data leakage via URL manipulation.
+    Access: SCM, PM, SE, Admin.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    # Only SCM, PM, SE, Admin can view DC pages
+    if profile.role not in ('SCM', 'PM', 'Site Engineer', 'Admin'):
+        return HttpResponseForbidden()
+
+    # PM isolation: PM sees only their own projects
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    # Cross-project guard: DC must belong to the project in the URL
+    challan    = get_object_or_404(DeliveryChallan, pk=dc_id)
+    if challan.project.project_id != project_id:
+        raise Http404
+
+    line_items = challan.line_items.select_related('grn_confirmed_by__user').all()
+
+    return render(request, 'projects/delivery_challan_detail.html', {
+        'project':           project,
+        'challan':           challan,
+        'line_items':        line_items,
+        'role':              profile.role,
+        'user_profile':      profile,
+        'condition_choices': DCLineItem.CONDITION_CHOICES,
+    })
+
+
+@login_required
+@role_required(['Site Engineer'])
+def confirm_grn(request, project_id, dc_id):
+    """
+    SE confirms receipt of materials at site (GRN confirmation).
+    Damaged condition forces received_quantity=0 — client-submitted value is ignored
+    to prevent recording usable quantity for items that arrived damaged.
+    recalculate_dc_status() called ONCE after all line items saved — never inside the loop.
+    Access: Site Engineer only. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    # Cross-project guard
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    if challan.project.project_id != project_id:
+        raise Http404
+
+    # SE cannot confirm an already-Received DC — button is hidden in UI but guard here too
+    if challan.status == DeliveryChallan.RECEIVED:
+        return HttpResponseForbidden()
+
+    today      = date.today()
+    line_items = challan.line_items.all()
+
+    for item in line_items:
+        qty_str   = request.POST.get(f'received_qty_{item.pk}', '').strip()
+        condition = request.POST.get(f'condition_{item.pk}', '').strip()
+        grn_notes = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+
+        if not qty_str or not condition:
+            continue
+        if condition not in dict(DCLineItem.CONDITION_CHOICES):
+            continue
+
+        received_qty = _safe_decimal(qty_str)
+        if received_qty is None:
+            continue
+
+        # Damaged items force received_quantity to 0 — nothing usable received
+        if condition == DCLineItem.DAMAGED:
+            received_qty = Decimal('0')
+
+        item.received_quantity = received_qty
+        item.condition         = condition
+        item.grn_date          = today
+        item.grn_confirmed_by  = profile
+        item.grn_notes         = grn_notes
+        item.save()
+
+    # Recalculate DC status ONCE after all line items saved — never inside the loop
+    # (calling it inside the loop causes status to oscillate incorrectly)
+    recalculate_dc_status(challan)
+    challan.refresh_from_db()
+
+    log_activity(
+        project, profile,
+        f"SE confirmed GRN for DC {challan.dc_number} — {challan.status}",
+        entity_type='DeliveryChallan', entity_id=challan.pk,
+    )
+    messages.success(request, f'GRN confirmed. DC status: {challan.status}.')
+    return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+
+@login_required
+@role_required(['SCM'])
+def override_grn(request, project_id, dc_id):
+    """
+    SCM overrides an SE-submitted GRN. grn_confirmed_by is NOT overwritten —
+    original SE submitter is preserved. ActivityLog records who made the override.
+    No status restriction: SCM can override even on Received DCs (to correct mistakes).
+    recalculate_dc_status() called ONCE after all items saved.
+    Access: SCM only. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    # Cross-project guard
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    if challan.project.project_id != project_id:
+        raise Http404
+
+    today      = date.today()
+    line_items = challan.line_items.all()
+
+    for item in line_items:
+        qty_str   = request.POST.get(f'received_qty_{item.pk}', '').strip()
+        condition = request.POST.get(f'condition_{item.pk}', '').strip()
+        grn_notes = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+
+        if not qty_str or not condition:
+            continue
+        if condition not in dict(DCLineItem.CONDITION_CHOICES):
+            continue
+
+        received_qty = _safe_decimal(qty_str)
+        if received_qty is None:
+            continue
+
+        # Damaged items force received_quantity to 0
+        if condition == DCLineItem.DAMAGED:
+            received_qty = Decimal('0')
+
+        item.received_quantity = received_qty
+        item.condition         = condition
+        item.grn_date          = today
+        item.grn_notes         = grn_notes
+        # grn_confirmed_by NOT overwritten — original SE submitter is preserved
+        item.save()
+
+    # Recalculate DC status ONCE after all line items saved
+    recalculate_dc_status(challan)
+    challan.refresh_from_db()
+
+    log_activity(
+        project, profile,
+        f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
+        entity_type='DeliveryChallan', entity_id=challan.pk,
+    )
+    messages.success(request, f'GRN overridden. DC status: {challan.status}.')
+    return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
