@@ -905,7 +905,7 @@
   var assignCandidates = {};
 
   /* ── Phase progress bars (run immediately — DOM is above this script) ─── */
-  var phaseData = {{ phase_data_json }};
+  var phaseData = {{ phase_data_json|safe }};
   phaseData.forEach(function (ph) {
     var bar  = document.getElementById('phase-bar-'  + ph.pk);
     var stat = document.getElementById('phase-stat-' + ph.pk);
