@@ -2328,7 +2328,7 @@ def upload_project_document(request, project_id):
     Access: all roles with project access; PM isolation applies.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
@@ -2339,14 +2339,14 @@ def upload_project_document(request, project_id):
     files = request.FILES.getlist('files')
     if not files:
         messages.error(request, 'No files selected.')
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     try:
         from .supabase_storage import get_supabase_client
         client = get_supabase_client()
     except (ValueError, ImportError) as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     bucket     = settings.SUPABASE_BUCKET
     successes  = []
@@ -2600,7 +2600,7 @@ def create_project_issue(request, project_id):
 
     if not title:
         messages.error(request, 'Issue title is required.')
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     if severity not in dict(Issue.SEVERITY_CHOICES):
         severity = Issue.MEDIUM
@@ -2631,8 +2631,8 @@ def create_project_issue(request, project_id):
         due_date=due_date,
     )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
-    messages.success(request, f'Issue "{title}" raised.')
-    return redirect('project_detail', project_id=project_id)
+    messages.success(request, f'Issue "{title}" raised successfully.')
+    return redirect('project_overview', project_id=project_id)
 
 
 @login_required

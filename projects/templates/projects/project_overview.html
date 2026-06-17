@@ -537,49 +537,65 @@
         <i class="bi bi-upload me-1"></i>Upload
       </label>
     </form>
+  </div>
   <div id="docErrorBox" class="alert alert-danger mx-3 mt-2 mb-0 py-2 d-none" role="alert"></div>
-  <div class="card-body p-0">
+  <div class="card-body">
     {% if documents %}
-    <div class="table-responsive">
-      <table class="table table-sm table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>File Name</th>
-            <th style="width:7rem;">Type</th>
-            <th style="width:6rem;">Size</th>
-            <th style="width:12rem;">Uploaded By</th>
-            <th style="width:10rem;">Uploaded At</th>
-            <th style="width:4rem;"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for doc in documents %}
-          <tr>
-            <td><a href="{{ doc.file_url }}" target="_blank" rel="noopener" class="small">{{ doc.file_name }}</a></td>
-            <td>{% if doc.file_type == 'Photo' %}<span class="badge bg-info text-dark">Photo</span>{% else %}<span class="badge bg-secondary">Document</span>{% endif %}</td>
-            <td class="text-muted small">{{ doc.file_size_kb }} KB</td>
-            <td class="text-muted small">{% if doc.uploaded_by %}{{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}{% else %}—{% endif %}</td>
-            <td class="text-muted small">{{ doc.uploaded_at|date:"d M Y H:i" }}</td>
-            <td>
-              {% if doc.uploaded_by == user_profile or user_profile.role == 'Admin' %}
-              <form method="post" action="{% url 'delete_project_document' project.project_id doc.pk %}"
-                    class="d-inline" onsubmit="return confirm('Delete this file?')">
-                {% csrf_token %}
-                <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
-                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1"><i class="bi bi-trash"></i></button>
-              </form>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+    <div class="d-flex flex-wrap gap-3">
+      {% for doc in documents %}
+      <div class="border rounded text-center position-relative"
+           style="width:130px; cursor:pointer;"
+           onclick="previewFile('{{ doc.file_url|escapejs }}','{{ doc.file_name|escapejs }}','{{ doc.file_type }}')">
+        <div class="p-2">
+          {% if doc.file_type == 'Photo' %}
+            <img src="{{ doc.file_url }}" alt="{{ doc.file_name }}"
+                 style="width:100%;height:72px;object-fit:cover;border-radius:4px;" loading="lazy">
+          {% elif doc.file_name|lower|slice:"-4:" == ".pdf" %}
+            <i class="bi bi-file-earmark-pdf text-danger" style="font-size:2.8rem;"></i>
+          {% elif doc.file_name|lower|slice:"-5:" == ".docx" or doc.file_name|lower|slice:"-4:" == ".doc" %}
+            <i class="bi bi-file-earmark-word text-primary" style="font-size:2.8rem;"></i>
+          {% elif doc.file_name|lower|slice:"-5:" == ".xlsx" or doc.file_name|lower|slice:"-4:" == ".xls" %}
+            <i class="bi bi-file-earmark-excel text-success" style="font-size:2.8rem;"></i>
+          {% else %}
+            <i class="bi bi-file-earmark text-secondary" style="font-size:2.8rem;"></i>
+          {% endif %}
+          <div class="small text-truncate mt-1 fw-semibold" title="{{ doc.file_name }}" style="font-size:.72rem;">{{ doc.file_name }}</div>
+          <div class="text-muted" style="font-size:.65rem;">{{ doc.file_size_kb }} KB</div>
+        </div>
+        {% if doc.uploaded_by == user_profile or user_profile.role == 'Admin' %}
+        <div onclick="event.stopPropagation()">
+          <form method="post" action="{% url 'delete_project_document' project.project_id doc.pk %}"
+                onsubmit="return confirm('Delete this file?')">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
+            <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1 w-100"
+                    style="font-size:.7rem; border-radius:0 0 4px 4px;">
+              <i class="bi bi-trash me-1"></i>Delete
+            </button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
     </div>
     {% else %}
     <div class="text-center text-muted py-4 small">
       <i class="bi bi-file-earmark fs-3 d-block mb-2"></i>No files uploaded yet.
     </div>
     {% endif %}
+  </div>
+</div>
+
+{# File preview modal #}
+<div class="modal fade" id="filePreviewModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0" id="filePreviewTitle">Preview</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0" id="filePreviewBody" style="min-height:420px;"></div>
+    </div>
   </div>
 </div>
 
@@ -636,6 +652,7 @@
                   <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <select name="status" onchange="handleTaskStatusChange(this)"
+                            data-original-status="{{ task.status }}"
                             class="form-select form-select-sm
                               {% if task.status == 'Done' %}border-success text-success
                               {% elif task.status == 'Blocked' %}border-danger text-danger
@@ -883,10 +900,11 @@
   /* ── Shared state ─────────────────────────────────────────── */
   var pendingStatusForm = null;
   var bsNoAttachModal   = null;
-  var bsAssignModal     = null;
-  var assignCandidates  = {};
 
-  /* ── Phase progress bars (run immediately) ────────────────── */
+  /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
+  var assignCandidates = {};
+
+  /* ── Phase progress bars (run immediately — DOM is above this script) ─── */
   var phaseData = {{ phase_data_json }};
   phaseData.forEach(function (ph) {
     var bar  = document.getElementById('phase-bar-'  + ph.pk);
@@ -906,36 +924,36 @@
   /* ── Task status change ───────────────────────────────────── */
   window.handleTaskStatusChange = function (select) {
     var newStatus = select.value;
+    /* originalStatus set as data attribute in the template */
+    var originalStatus = select.dataset.originalStatus || select.options[0].value;
 
-    /* 1. Blocked — requires an issue to be raised */
+    /* 1. Blocked — requires an issue */
     if (newStatus === 'Blocked' && window.solarInterceptBlock) {
       if (window.solarInterceptBlock(select)) return;
     }
 
-    /* 2. In Progress — due date must be set (PM row has the date input) */
+    /* 2. In Progress — due date must be set first */
     if (newStatus === 'In Progress') {
       var row = select.closest('tr');
-      if (row) {
-        var dateInput = row.querySelector('input[type="date"][name="due_date"]');
-        if (dateInput && !dateInput.value) {
-          select.value = select.dataset.prevVal || select.options[0].value;
-          dateInput.classList.add('is-invalid');
-          dateInput.focus();
-          var msgId = 'dueDateMsg_' + (row.dataset.taskId || 'x');
-          if (!document.getElementById(msgId)) {
-            var msg = document.createElement('div');
-            msg.id = msgId;
-            msg.className = 'text-danger mt-1';
-            msg.style.fontSize = '.7rem';
-            msg.textContent = 'Set a due date before marking In Progress.';
-            dateInput.insertAdjacentElement('afterend', msg);
-            setTimeout(function () {
-              if (msg.parentNode) msg.parentNode.removeChild(msg);
-              dateInput.classList.remove('is-invalid');
-            }, 4000);
-          }
-          return;
+      var dateInput = row ? row.querySelector('input[type="date"][name="due_date"]') : null;
+      if (dateInput && !dateInput.value.trim()) {
+        select.value = originalStatus;          /* revert select */
+        dateInput.classList.add('is-invalid');
+        dateInput.focus();
+        var msgId = 'dueDateMsg_' + (row.dataset.taskId || 'x');
+        if (!document.getElementById(msgId)) {
+          var msg = document.createElement('div');
+          msg.id = msgId;
+          msg.className = 'invalid-feedback d-block';
+          msg.style.fontSize = '.7rem';
+          msg.textContent = 'Please set a due date before marking In Progress.';
+          dateInput.parentNode.appendChild(msg);
+          setTimeout(function () {
+            if (msg.parentNode) msg.parentNode.removeChild(msg);
+            dateInput.classList.remove('is-invalid');
+          }, 5000);
         }
+        return;
       }
     }
 
@@ -950,13 +968,15 @@
     }
   };
 
-  /* ── Assign modal (imperative — works on mobile) ──────────── */
+  /* ── Assign modal (imperative — avoids relatedTarget mobile issues) ──── */
   window.openAssignModal = function (btn) {
-    if (!bsAssignModal) return;
+    var modalEl = document.getElementById('assignModal');
+    if (!modalEl) return;
+
     var taskId    = btn.dataset.taskId;
     var taskName  = btn.dataset.taskName;
     var role      = (btn.dataset.role || '').trim();
-    var currentPk = btn.dataset.currentPk;
+    var currentPk = btn.dataset.currentPk || '';
     var projId    = btn.dataset.projectId;
 
     document.getElementById('assignTaskName').textContent = taskName;
@@ -965,24 +985,62 @@
 
     var sel = document.getElementById('assignSelect');
     sel.innerHTML = '<option value="">— Unassign —</option>';
-    (assignCandidates[role] || []).forEach(function (c) {
+
+    var list = assignCandidates[role] || [];
+    if (list.length === 0) {
+      /* Fallback: try matching against UserProfile role key (BD / Sales → BD) */
+      var shortRole = role.split('/')[0].trim();
+      list = assignCandidates[shortRole] || [];
+    }
+    list.forEach(function (c) {
       var opt = document.createElement('option');
-      opt.value       = c.pk;
+      opt.value       = String(c.pk);
       opt.textContent = c.name;
       if (String(c.pk) === String(currentPk)) opt.selected = true;
       sel.appendChild(opt);
     });
-    if (!assignCandidates[role] || assignCandidates[role].length === 0) {
+    if (list.length === 0) {
       var empty = document.createElement('option');
-      empty.disabled = true;
-      empty.textContent = 'No active ' + role + ' users';
+      empty.disabled    = true;
+      empty.textContent = 'No active users for role: ' + role;
       sel.appendChild(empty);
     }
 
-    bsAssignModal.show();
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  };
+
+  /* ── File preview ──────────────────────────────────────────── */
+  window.previewFile = function (url, name, type) {
+    var titleEl = document.getElementById('filePreviewTitle');
+    var bodyEl  = document.getElementById('filePreviewBody');
+    if (!titleEl || !bodyEl) return;
+    titleEl.textContent = name;
+    bodyEl.innerHTML    = '';           /* clear previous */
+    var el;
+    if (type === 'Photo') {
+      el = document.createElement('img');
+      el.src        = url;
+      el.alt        = name;
+      el.style.cssText = 'width:100%;max-height:80vh;object-fit:contain;display:block;';
+    } else {
+      el = document.createElement('iframe');
+      el.src        = url;
+      el.title      = name;
+      el.style.cssText = 'width:100%;height:80vh;border:none;display:block;';
+    }
+    bodyEl.appendChild(el);
+    bootstrap.Modal.getOrCreateInstance(
+      document.getElementById('filePreviewModal')
+    ).show();
   };
 
   document.addEventListener('DOMContentLoaded', function () {
+    /* Load candidates dict from json_script element */
+    var dataEl = document.getElementById('candidates-data');
+    if (dataEl) {
+      try { assignCandidates = JSON.parse(dataEl.textContent); } catch (e) {}
+    }
+
     /* No-attachment modal */
     var noAttachEl = document.getElementById('noAttachmentModal');
     if (noAttachEl) {
@@ -998,16 +1056,6 @@
         if (pendingStatusForm) pendingStatusForm.submit();
       });
       noAttachEl.addEventListener('hide.bs.modal', function () { pendingStatusForm = null; });
-    }
-
-    /* Assign modal — initialise once, reuse for every row */
-    var assignModalEl = document.getElementById('assignModal');
-    if (assignModalEl) {
-      bsAssignModal = new bootstrap.Modal(assignModalEl);
-      var dataEl = document.getElementById('candidates-data');
-      if (dataEl) {
-        try { assignCandidates = JSON.parse(dataEl.textContent); } catch (e) {}
-      }
     }
 
     /* Finance receive modal */
@@ -1042,7 +1090,7 @@
       }
     }
 
-    /* Document upload — validation on file change (label triggers the input) */
+    /* Document upload — validation on file change (label triggers the picker) */
     var ALLOWED     = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
     var MAX_SIZE    = 20 * 1024 * 1024;
     var docInput    = document.getElementById('docFileInput');
@@ -1069,6 +1117,15 @@
         if (files.length && docForm) docForm.submit();
       });
     }
+
+    /* Auto-dismiss success/warning alerts after 5 seconds */
+    document.querySelectorAll('.alert-success, .alert-warning').forEach(function (el) {
+      setTimeout(function () {
+        el.style.transition = 'opacity .5s ease';
+        el.style.opacity    = '0';
+        setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+      }, 5000);
+    });
   });
 }());
 </script>
