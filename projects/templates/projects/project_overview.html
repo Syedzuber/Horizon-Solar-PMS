@@ -648,7 +648,7 @@
                 {% endif %}
               </td>
               <td>
-                {% if is_assigned_pm or user_role == task.assigned_role %}
+                {% if is_assigned_pm or user_task_role == task.assigned_role %}
                   <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <select name="status" onchange="handleTaskStatusChange(this)"
@@ -935,23 +935,24 @@
     /* 2. In Progress — due date must be set first */
     if (newStatus === 'In Progress') {
       var row = select.closest('tr');
-      var dateInput = row ? row.querySelector('input[type="date"][name="due_date"]') : null;
+      var dateInput = row ? row.querySelector('input[name="due_date"]') : null;
       if (dateInput && !dateInput.value.trim()) {
-        select.value = originalStatus;          /* revert select */
-        dateInput.classList.add('is-invalid');
+        select.value = originalStatus;
+        dateInput.style.outline = '2px solid #dc3545';
         dateInput.focus();
-        var msgId = 'dueDateMsg_' + (row.dataset.taskId || 'x');
-        if (!document.getElementById(msgId)) {
-          var msg = document.createElement('div');
-          msg.id = msgId;
-          msg.className = 'invalid-feedback d-block';
-          msg.style.fontSize = '.7rem';
-          msg.textContent = 'Please set a due date before marking In Progress.';
-          dateInput.parentNode.appendChild(msg);
-          setTimeout(function () {
-            if (msg.parentNode) msg.parentNode.removeChild(msg);
-            dateInput.classList.remove('is-invalid');
-          }, 5000);
+        setTimeout(function () { dateInput.style.outline = ''; }, 4000);
+        /* Floating banner — visible even inside a compact table */
+        var bannerId = 'inProgressBanner';
+        if (!document.getElementById(bannerId)) {
+          var banner = document.createElement('div');
+          banner.id = bannerId;
+          banner.style.cssText = 'position:fixed;top:68px;left:50%;transform:translateX(-50%);'
+            + 'z-index:9999;background:#dc3545;color:#fff;padding:.45rem 1.2rem;'
+            + 'border-radius:.4rem;font-size:.85rem;box-shadow:0 4px 14px rgba(0,0,0,.25);'
+            + 'white-space:nowrap;';
+          banner.textContent = 'Set a due date first — then mark as In Progress.';
+          document.body.appendChild(banner);
+          setTimeout(function () { if (banner.parentNode) banner.parentNode.removeChild(banner); }, 4000);
         }
         return;
       }

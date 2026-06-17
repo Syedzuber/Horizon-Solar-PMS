@@ -954,7 +954,7 @@ def task_status_update(request, project_id, task_id):
     Access: task's assigned_role or project PM. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -967,14 +967,18 @@ def task_status_update(request, project_id, task_id):
 
     is_pm = _pm_owns_project(request, project)
 
-    if user_role != task.assigned_role and not is_pm:
+    # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    normalised_user_role = _PROFILE_TO_TASK_ROLE.get(user_role, user_role)
+
+    if normalised_user_role != task.assigned_role and not is_pm:
         return HttpResponseForbidden()
 
     new_status = request.POST.get('status', '').strip()
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
     if new_status not in valid_statuses:
         messages.error(request, 'Invalid status value.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     # State machine: defines allowed next states for each current state.
     # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
@@ -991,7 +995,12 @@ def task_status_update(request, project_id, task_id):
             request,
             f"Cannot move task from '{task.status}' to '{new_status}'."
         )
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
+
+    # Server-side guard: In Progress requires a due date
+    if new_status == Task.IN_PROGRESS and not task.due_date:
+        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        return redirect('project_overview', project_id=project.project_id)
 
     update_kwargs = {'status': new_status}
     if new_status == Task.DONE:
@@ -1005,7 +1014,7 @@ def task_status_update(request, project_id, task_id):
             next_url = request.POST.get('next', '')
             if next_url and not _urlparse(next_url).netloc:
                 return redirect(next_url)
-            return redirect('project_detail', project_id=project.project_id)
+            return redirect('project_overview', project_id=project.project_id)
 
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
 
@@ -1046,7 +1055,7 @@ def task_status_update(request, project_id, task_id):
         from urllib.parse import urlparse
         if urlparse(next_url).netloc == '':
             return redirect(next_url)
-    return redirect('project_detail', project_id=project.project_id)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 @login_required
@@ -1065,17 +1074,21 @@ def task_assign(request, project_id, task_id):
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD'
+    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
+    profile_role = _TASK_TO_PROFILE_ROLE.get(task.assigned_role, task.assigned_role)
+
     # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task
-    candidates = UserProfile.objects.filter(role=task.assigned_role, is_active=True)
+    candidates = UserProfile.objects.filter(role=profile_role, is_active=True)
 
     if request.method == 'POST':
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
-            assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=task.assigned_role, is_active=True)
+            assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
             Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     return render(request, 'projects/task_assign_form.html', {
         'project':    project,
@@ -2051,11 +2064,14 @@ def project_overview(request, project_id):
         })
 
     # Design assignment candidates (PM only, for assign-design dropdown)
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD'
+    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
         for role_key, _ in Task.ROLE_CHOICES:
-            qs = UserProfile.objects.filter(role=role_key, is_active=True).select_related('user')
+            profile_role = _TASK_TO_PROFILE_ROLE.get(role_key, role_key)
+            qs = UserProfile.objects.filter(role=profile_role, is_active=True).select_related('user')
             candidates_by_role[role_key] = [
                 {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
                 for p in qs
@@ -2063,6 +2079,10 @@ def project_overview(request, project_id):
         design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
 
     dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if role == 'SCM' else []
+
+    # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
@@ -2072,6 +2092,7 @@ def project_overview(request, project_id):
         'recent_activity':             recent_activity,
         'role':                        role,
         'user_role':                   role,
+        'user_task_role':              user_task_role,
         'user_profile':                profile,
         'documents':                   documents,
         'project_issues':              project_issues,
