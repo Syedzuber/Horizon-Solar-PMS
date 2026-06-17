@@ -526,18 +526,17 @@
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span class="fw-semibold small"><i data-lucide="folder" class="lucide-icon me-1"></i>Project Documents</span>
-    <button type="button" class="btn btn-brand btn-sm" id="docUploadTrigger">
-      <i class="bi bi-upload me-1"></i>Upload
-    </button>
-  </div>
-  <form method="post" enctype="multipart/form-data"
-        action="{% url 'upload_project_document' project.project_id %}"
-        id="docUploadForm">
-    {% csrf_token %}
-    <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
-    <input type="file" id="docFileInput" name="files" multiple
-           accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" class="d-none">
-  </form>
+    <form method="post" enctype="multipart/form-data"
+          action="{% url 'upload_project_document' project.project_id %}"
+          id="docUploadForm" class="d-inline">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
+      <input type="file" id="docFileInput" name="files" multiple
+             accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" class="d-none">
+      <label for="docFileInput" class="btn btn-brand btn-sm mb-0" style="cursor:pointer;">
+        <i class="bi bi-upload me-1"></i>Upload
+      </label>
+    </form>
   <div id="docErrorBox" class="alert alert-danger mx-3 mt-2 mb-0 py-2 d-none" role="alert"></div>
   <div class="card-body p-0">
     {% if documents %}
@@ -624,7 +623,7 @@
                   <button type="button"
                           class="btn btn-outline-secondary ms-1 py-0 px-1"
                           style="font-size:.68rem;"
-                          data-bs-toggle="modal" data-bs-target="#assignModal"
+                          onclick="openAssignModal(this)"
                           data-task-id="{{ task.pk }}"
                           data-task-name="{{ task.task_name }}"
                           data-role="{{ task.assigned_role }}"
@@ -881,7 +880,13 @@
 {# ── Scripts ───────────────────────────────────────────────────────────────── #}
 <script>
 (function () {
-  /* Phase progress bars */
+  /* ── Shared state ─────────────────────────────────────────── */
+  var pendingStatusForm = null;
+  var bsNoAttachModal   = null;
+  var bsAssignModal     = null;
+  var assignCandidates  = {};
+
+  /* ── Phase progress bars (run immediately) ────────────────── */
   var phaseData = {{ phase_data_json }};
   phaseData.forEach(function (ph) {
     var bar  = document.getElementById('phase-bar-'  + ph.pk);
@@ -898,14 +903,46 @@
     }
   });
 
-  /* Task status change */
+  /* ── Task status change ───────────────────────────────────── */
   window.handleTaskStatusChange = function (select) {
-    if (select.value === 'Blocked' && window.solarInterceptBlock) {
+    var newStatus = select.value;
+
+    /* 1. Blocked — requires an issue to be raised */
+    if (newStatus === 'Blocked' && window.solarInterceptBlock) {
       if (window.solarInterceptBlock(select)) return;
     }
-    var row   = select.closest('tr');
-    var count = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
-    if (select.value === 'Done' && count === 0 && bsNoAttachModal) {
+
+    /* 2. In Progress — due date must be set (PM row has the date input) */
+    if (newStatus === 'In Progress') {
+      var row = select.closest('tr');
+      if (row) {
+        var dateInput = row.querySelector('input[type="date"][name="due_date"]');
+        if (dateInput && !dateInput.value) {
+          select.value = select.dataset.prevVal || select.options[0].value;
+          dateInput.classList.add('is-invalid');
+          dateInput.focus();
+          var msgId = 'dueDateMsg_' + (row.dataset.taskId || 'x');
+          if (!document.getElementById(msgId)) {
+            var msg = document.createElement('div');
+            msg.id = msgId;
+            msg.className = 'text-danger mt-1';
+            msg.style.fontSize = '.7rem';
+            msg.textContent = 'Set a due date before marking In Progress.';
+            dateInput.insertAdjacentElement('afterend', msg);
+            setTimeout(function () {
+              if (msg.parentNode) msg.parentNode.removeChild(msg);
+              dateInput.classList.remove('is-invalid');
+            }, 4000);
+          }
+          return;
+        }
+      }
+    }
+
+    /* 3. Done — prompt for attachment if none */
+    var tr    = select.closest('tr');
+    var count = tr ? parseInt(tr.dataset.attachmentCount || '0', 10) : 1;
+    if (newStatus === 'Done' && count === 0 && bsNoAttachModal) {
       pendingStatusForm = select.form;
       bsNoAttachModal.show();
     } else {
@@ -913,18 +950,48 @@
     }
   };
 
-  var pendingStatusForm = null;
-  var bsNoAttachModal   = null;
+  /* ── Assign modal (imperative — works on mobile) ──────────── */
+  window.openAssignModal = function (btn) {
+    if (!bsAssignModal) return;
+    var taskId    = btn.dataset.taskId;
+    var taskName  = btn.dataset.taskName;
+    var role      = (btn.dataset.role || '').trim();
+    var currentPk = btn.dataset.currentPk;
+    var projId    = btn.dataset.projectId;
+
+    document.getElementById('assignTaskName').textContent = taskName;
+    document.getElementById('assignForm').action =
+      '/projects/' + projId + '/tasks/' + taskId + '/assign/';
+
+    var sel = document.getElementById('assignSelect');
+    sel.innerHTML = '<option value="">— Unassign —</option>';
+    (assignCandidates[role] || []).forEach(function (c) {
+      var opt = document.createElement('option');
+      opt.value       = c.pk;
+      opt.textContent = c.name;
+      if (String(c.pk) === String(currentPk)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    if (!assignCandidates[role] || assignCandidates[role].length === 0) {
+      var empty = document.createElement('option');
+      empty.disabled = true;
+      empty.textContent = 'No active ' + role + ' users';
+      sel.appendChild(empty);
+    }
+
+    bsAssignModal.show();
+  };
 
   document.addEventListener('DOMContentLoaded', function () {
+    /* No-attachment modal */
     var noAttachEl = document.getElementById('noAttachmentModal');
     if (noAttachEl) {
       bsNoAttachModal = new bootstrap.Modal(noAttachEl);
       document.getElementById('noAttachUploadBtn').addEventListener('click', function () {
         bsNoAttachModal.hide();
-        var row    = pendingStatusForm ? pendingStatusForm.closest('tr') : null;
-        var taskId = row ? row.dataset.taskId : null;
-        if (taskId) window.location.href = '/projects/{{ project.project_id }}/tasks/' + taskId + '/';
+        var row = pendingStatusForm ? pendingStatusForm.closest('tr') : null;
+        var tid = row ? row.dataset.taskId : null;
+        if (tid) window.location.href = '/projects/{{ project.project_id }}/tasks/' + tid + '/';
       });
       document.getElementById('noAttachCloseBtn').addEventListener('click', function () {
         bsNoAttachModal.hide();
@@ -933,34 +1000,22 @@
       noAttachEl.addEventListener('hide.bs.modal', function () { pendingStatusForm = null; });
     }
 
+    /* Assign modal — initialise once, reuse for every row */
     var assignModalEl = document.getElementById('assignModal');
     if (assignModalEl) {
-      var dataEl     = document.getElementById('candidates-data');
-      var candidates = dataEl ? JSON.parse(dataEl.textContent) : {};
-      assignModalEl.addEventListener('show.bs.modal', function (e) {
-        var btn       = e.relatedTarget;
-        var taskId    = btn.dataset.taskId;
-        var taskName  = btn.dataset.taskName;
-        var role      = (btn.dataset.role || '').trim();
-        var currentPk = btn.dataset.currentPk;
-        var projId    = btn.dataset.projectId;
-        document.getElementById('assignTaskName').textContent = taskName;
-        document.getElementById('assignForm').action = '/projects/' + projId + '/tasks/' + taskId + '/assign/';
-        var sel = document.getElementById('assignSelect');
-        sel.innerHTML = '<option value="">— Unassign —</option>';
-        (candidates[role] || []).forEach(function (c) {
-          var opt = document.createElement('option');
-          opt.value = c.pk; opt.textContent = c.name;
-          if (String(c.pk) === String(currentPk)) opt.selected = true;
-          sel.appendChild(opt);
-        });
-      });
+      bsAssignModal = new bootstrap.Modal(assignModalEl);
+      var dataEl = document.getElementById('candidates-data');
+      if (dataEl) {
+        try { assignCandidates = JSON.parse(dataEl.textContent); } catch (e) {}
+      }
     }
 
+    /* Finance receive modal */
     var receiveModalEl = document.getElementById('receiveModal');
     if (receiveModalEl) {
       receiveModalEl.addEventListener('show.bs.modal', function (e) {
         var btn = e.relatedTarget;
+        if (!btn) return;
         document.getElementById('receiveForm').action =
           '/projects/' + btn.dataset.projectId + '/milestone/' + btn.dataset.milestonePk + '/receive/';
         document.getElementById('receiveModalInfo').textContent =
@@ -970,14 +1025,30 @@
       });
     }
 
+    /* Raise Project Issue — prevent double-submit */
+    var raiseIssueModalEl = document.getElementById('raiseProjectIssueModal');
+    if (raiseIssueModalEl) {
+      var raiseForm = raiseIssueModalEl.querySelector('form');
+      if (raiseForm) {
+        raiseForm.addEventListener('submit', function () {
+          var submitBtn = this.querySelector('[type="submit"]');
+          if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Raising…'; }
+        });
+        raiseIssueModalEl.addEventListener('hidden.bs.modal', function () {
+          raiseForm.reset();
+          var submitBtn = raiseForm.querySelector('[type="submit"]');
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Raise Issue'; }
+        });
+      }
+    }
+
+    /* Document upload — validation on file change (label triggers the input) */
     var ALLOWED     = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
     var MAX_SIZE    = 20 * 1024 * 1024;
-    var docTrigger  = document.getElementById('docUploadTrigger');
     var docInput    = document.getElementById('docFileInput');
     var docForm     = document.getElementById('docUploadForm');
     var docErrorBox = document.getElementById('docErrorBox');
-    if (docTrigger) {
-      docTrigger.addEventListener('click', function () { docInput.click(); });
+    if (docInput) {
       docInput.addEventListener('change', function () {
         var files  = Array.from(this.files);
         var errors = [];
@@ -987,13 +1058,15 @@
           else if (f.size > MAX_SIZE)      errors.push(f.name + ': exceeds 20 MB');
         });
         if (errors.length) {
-          docErrorBox.textContent = errors.join(' | ');
-          docErrorBox.classList.remove('d-none');
+          if (docErrorBox) {
+            docErrorBox.textContent = errors.join(' | ');
+            docErrorBox.classList.remove('d-none');
+          }
           docInput.value = '';
           return;
         }
-        docErrorBox.classList.add('d-none');
-        if (files.length) docForm.submit();
+        if (docErrorBox) docErrorBox.classList.add('d-none');
+        if (files.length && docForm) docForm.submit();
       });
     }
   });
