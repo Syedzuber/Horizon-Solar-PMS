@@ -1091,13 +1091,32 @@
       }
     }
 
-    /* Document upload — validation on file change (label triggers the picker) */
-    var ALLOWED     = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
-    var MAX_SIZE    = 20 * 1024 * 1024;
-    var docInput    = document.getElementById('docFileInput');
-    var docForm     = document.getElementById('docUploadForm');
-    var docErrorBox = document.getElementById('docErrorBox');
-    if (docInput) {
+    /* Document upload — AJAX with inline feedback */
+    var ALLOWED  = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
+    var MAX_SIZE = 20 * 1024 * 1024;
+    var docInput = document.getElementById('docFileInput');
+    var docForm  = document.getElementById('docUploadForm');
+
+    function showDocBanner(msg, type) {
+      var old = document.getElementById('docUploadBanner');
+      if (old) old.parentNode.removeChild(old);
+      var b = document.createElement('div');
+      b.id        = 'docUploadBanner';
+      b.className = 'alert alert-' + type + ' alert-dismissible fade show mx-3 mt-2 mb-0 py-2';
+      b.setAttribute('role', 'alert');
+      b.innerHTML = msg + ' <button type="button" class="btn-close py-2" data-bs-dismiss="alert"></button>';
+      var ref = document.getElementById('docErrorBox');
+      if (ref && ref.parentNode) ref.parentNode.insertBefore(b, ref.nextSibling);
+      if (type !== 'danger') {
+        setTimeout(function () {
+          b.style.transition = 'opacity .5s ease';
+          b.style.opacity    = '0';
+          setTimeout(function () { if (b.parentNode) b.parentNode.removeChild(b); }, 500);
+        }, 5000);
+      }
+    }
+
+    if (docInput && docForm) {
       docInput.addEventListener('change', function () {
         var files  = Array.from(this.files);
         var errors = [];
@@ -1107,15 +1126,38 @@
           else if (f.size > MAX_SIZE)      errors.push(f.name + ': exceeds 20 MB');
         });
         if (errors.length) {
-          if (docErrorBox) {
-            docErrorBox.textContent = errors.join(' | ');
-            docErrorBox.classList.remove('d-none');
-          }
+          showDocBanner(errors.join(' | '), 'danger');
           docInput.value = '';
           return;
         }
-        if (docErrorBox) docErrorBox.classList.add('d-none');
-        if (files.length && docForm) docForm.submit();
+        if (!files.length) return;
+
+        /* Show uploading state on the label */
+        var lbl = document.querySelector('label[for="docFileInput"]');
+        if (lbl) { lbl.innerHTML = '<i class="bi bi-hourglass-split me-1"></i>Uploading…'; lbl.style.pointerEvents = 'none'; }
+
+        fetch(docForm.action, {
+          method:  'POST',
+          body:    new FormData(docForm),
+          headers: { 'X-Requested-With': 'XMLHttpRequest' }
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (lbl) { lbl.innerHTML = '<i class="bi bi-upload me-1"></i>Upload'; lbl.style.pointerEvents = ''; }
+          docInput.value = '';
+          if (data.ok) {
+            showDocBanner(data.message, 'success');
+            /* Reload after 2 s so new files appear in the list */
+            setTimeout(function () { window.location.reload(); }, 2000);
+          } else {
+            showDocBanner(data.message || 'Upload failed.', 'danger');
+          }
+        })
+        .catch(function () {
+          if (lbl) { lbl.innerHTML = '<i class="bi bi-upload me-1"></i>Upload'; lbl.style.pointerEvents = ''; }
+          docInput.value = '';
+          showDocBanner('Upload failed — please try again.', 'danger');
+        });
       });
     }
 

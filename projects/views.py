@@ -2401,25 +2401,38 @@ def upload_project_document(request, project_id):
             logger.error('Supabase upload failed for %s: %s', file.name, exc)
             failures.append(f"{file.name} (upload error)")
 
+    # Build outcome summary
     if successes and failures:
-        messages.warning(
-            request,
-            f"{len(successes)} of {len(successes) + len(failures)} files uploaded. "
-            f"Failed: {', '.join(failures)}"
-        )
-        # Log partial upload — at least some files were stored
-        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project", entity_type='File', entity_id=None)
+        msg   = (f"{len(successes)} of {len(successes)+len(failures)} files uploaded. "
+                 f"Failed: {', '.join(failures)}")
+        is_ok = True
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project",
+                     entity_type='File', entity_id=None)
     elif successes:
-        messages.success(request, f"{len(successes)} file(s) uploaded successfully.")
-        # Log successful upload
-        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project", entity_type='File', entity_id=None)
+        msg   = f"{len(successes)} file(s) uploaded successfully."
+        is_ok = True
+        log_activity(project, profile, f"Uploaded {len(successes)} file(s) to project",
+                     entity_type='File', entity_id=None)
     else:
-        messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
+        msg   = f"No files uploaded. Failed: {', '.join(failures)}"
+        is_ok = False
+
+    # AJAX request — return JSON so the browser can show inline feedback
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return JsonResponse({'ok': is_ok, 'message': msg})
+
+    # Regular POST fallback — Django messages + redirect
+    if successes and failures:
+        messages.warning(request, msg)
+    elif successes:
+        messages.success(request, msg)
+    else:
+        messages.error(request, msg)
 
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
         return redirect(next_url)
-    return redirect('project_detail', project_id=project_id)
+    return redirect('project_overview', project_id=project_id)
 
 
 @login_required
