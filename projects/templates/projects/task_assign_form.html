@@ -3,7 +3,7 @@
 
 {% block content %}
 <div class="mb-3">
-  <a href="{% url 'project_detail' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+  <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
 </div>
 
 <div class="card shadow-sm" style="max-width:520px;">
@@ -44,7 +44,7 @@
       </div>
       <div class="d-flex gap-2">
         <button type="submit" class="btn btn-primary btn-sm">Save</button>
-        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">Cancel</a>
+        <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">Cancel</a>
       </div>
     </form>
   </div>

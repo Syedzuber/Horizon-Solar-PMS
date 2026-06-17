@@ -311,5 +311,237 @@ PROMPT FILES SAVED LOCALLY:
 - day5_claude_code_prompt.md ← USE THIS
 
 NEXT SESSION GOAL:
-Day 6 — Finance dashboard (M1/M2/M3 milestones)
+Day 5 — Finance dashboard (M1/M2/M3 milestones)
 		Individual Project Dashboard
+		
+		
+# PROJECT_CONTEXT.md — Day 6 Updates
+# Date: 12 June 2026
+# Paste this into your existing PROJECT_CONTEXT.md, replacing the relevant sections
+
+---
+
+## Current migration state
+**Latest migration: 0014**
+- 0013 — PaymentMilestone model + commissioned_at on Project
+- 0014 — customer_contact_person + zoho_deal_id on Project
+  (Note: 0014 had a deployment issue — migration file was missing from git commit.
+  Fixed manually. Always verify migration files are committed before pushing.)
+
+---
+
+## Completed build days
+- Day 1: Auth + role-based redirect (7 roles)
+- Day 2: Project model, auto-IDs, Draft→Activate, 51-task residential template
+- Day 3: Role dashboards (PM, SE, Design, SCM), duration fields, due date cascade (Option B)
+- Day 4: Vendor Master, BOQ submission workflow, BOQRevision history
+- Day 5: (completed in two sessions, counted as Day 5 + Day 6 in sprint)
+  Session 1: Finance dashboard, BD dashboard (basic), Individual project overview
+  Session 2: Zoho CRM webhook integration
+
+---
+
+## Models — additions from Day 6
+
+### PaymentMilestone (new — migration 0013)
+```python
+class PaymentMilestone(models.Model):
+    STATUS_CHOICES = [('Pending','Pending'), ('Invoiced','Invoiced'), ('Received','Received')]
+    NAME_CHOICES = [('M1','M1'), ('M2','M2'), ('M3','M3')]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='milestones')
+    milestone_name = models.CharField(max_length=10, choices=NAME_CHOICES)
+    milestone_description = models.CharField(max_length=100, default='')
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    amount_received = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    variance_reason = models.CharField(max_length=255, blank=True, default='')
+    due_date = models.DateField(null=True, blank=True)
+    invoice_date = models.DateField(null=True, blank=True)
+    received_date = models.DateField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    created_by = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        ordering = ['milestone_name']
+```
+
+M1/M2/M3 correspond conceptually to tasks 2, 28, 51 (survey, material supply, commissioning).
+NO task FK — execution tracking and financial tracking are intentionally separate.
+Notification engine (Week 3) will bridge these two systems.
+
+### Project model — new fields (migrations 0013 + 0014)
+```python
+commissioned_at = models.DateField(null=True, blank=True)        # migration 0013
+customer_contact_person = models.CharField(max_length=255, blank=True, default='')  # migration 0014
+zoho_deal_id = models.CharField(max_length=100, blank=True, default='')             # migration 0014
+```
+
+commissioned_at: set when project status changes to 'Commissioned'.
+zoho_deal_id: stores Zoho Record Id for duplicate webhook guard.
+customer_contact_person: individual contact name when customer is a company (Account Name used as customer_name).
+
+---
+
+## New views and URLs
+
+### Finance dashboard — /dashboard/finance/
+- @role_required(['Finance'])
+- Summary cards: Total Pending (₹), Total Invoiced (₹), Total Received (₹), Overdue count
+- Project list table with M1/M2/M3 status badges
+- Pending badge → one-click Mark as Invoiced (POST)
+- Invoiced badge → Bootstrap modal → Mark as Received (captures amount_received + variance_reason)
+- Received badges are static (no action)
+- Variance flag (amber icon) when amount_received != amount
+
+### Milestone actions
+- POST /projects/<project_id>/milestone/<milestone_pk>/invoice/ → @role_required(['Finance'])
+- POST /projects/<project_id>/milestone/<milestone_pk>/receive/ → @role_required(['Finance'])
+- POST /projects/<project_id>/milestones/create/ → @role_required(['PM']) — creates 3 default milestones for pre-Day-6 projects
+
+### BD dashboard — /dashboard/bd/
+- @role_required(['BD'])
+- Entire dashboard is READ-ONLY — no POST actions
+- Summary cards: Total Active Projects, Commissioned This Month, Total Contracted Value (₹), Pending Payments
+- Project list table: Project ID, Customer, Capacity (kWp), Current Phase, M1/M2/M3 badges (read-only), Target commissioning date, Assigned PM
+- Each row links to /projects/<project_id>/overview/
+- Document upload: placeholder card only ("coming soon — Phase 2")
+- commissioned_at field used for "Commissioned This Month" filter — null-safe
+
+### Individual project overview — /projects/<project_id>/overview/
+- @login_required + PM isolation in view (PM sees own projects only, Http404 otherwise)
+- All other roles see all projects
+- Panel 1 — Project header (all roles): status, type, capacity, customer, address, assigned PM/SE/Design, contract value, dates
+- Panel 2 — Task progress (PM, SE, Admin only): phase-wise progress bars, internal completion %, external pending count
+- Panel 3 — BOQ status (PM, SCM, Design, Admin): badge, last revision event, link to BOQ
+  CRITICAL: always try/except on project.boq — never direct access in template
+- Panel 4 — Finance milestones (PM, Finance, CEO, Admin): full milestone table with variance column
+  Finance role sees action buttons; all other roles read-only
+- Panel 5 — Recent activity (all roles): last 5 events combining DueDateChangeLog + BOQRevision, sorted by date descending
+
+Entry points:
+- PM dashboard project list → "Overview" link per row
+- BD dashboard → entire row clickable
+- Project detail page → "Project Overview" button in header
+
+### Zoho CRM webhook — /webhooks/zoho/deal-closed/
+- @csrf_exempt (no @login_required — machine-to-machine, token auth only)
+- Secret token passed as query parameter: ?secret=ZOHO_WEBHOOK_SECRET
+- Fires when Zoho deal Stage = Closed Won
+- Creates project in Draft status, project_type = Residential, hardcoded
+
+**Field mapping — Zoho → Django:**
+| Zoho Field | Django Field |
+|---|---|
+| Account Name (else Contact Name) | customer_name |
+| Contact Name (when Account Name present) | customer_contact_person |
+| Capacity(kW) | capacity_kw |
+| Amount | contract_value |
+| City | city |
+| State | state |
+| Mobile | customer_phone |
+| Customer Email | customer_email |
+| Assign PM (new Zoho field, email) | assigned_pm (UserProfile iexact lookup) |
+| Closing Date | target_commissioning_date |
+| Record Id | zoho_deal_id |
+
+**Webhook logic:**
+1. Token validation → 403 on failure
+2. Stage check → 200 + return if not Closed Won
+3. Duplicate guard → filter(zoho_deal_id=record_id).exists() → 200 + return if exists
+4. Defensive payload parsing with .get() at every level
+5. safe_decimal() applied to contract_value and capacity_kw
+6. PM lookup via UserProfile.objects.filter(user__email__iexact=pm_email).first()
+7. If PM not found → assigned_pm=None + Admin Notification created
+8. Project.objects.create() in try/except → always return 200 on valid token
+9. Notification.objects.create() in separate try/except — non-critical
+
+**Settings:**
+```python
+ZOHO_WEBHOOK_SECRET = env('ZOHO_WEBHOOK_SECRET', default='')
+```
+Must be added to Railway environment variables manually.
+
+---
+
+## Activation change (Day 6)
+After attach_residential_template(), create 3 PaymentMilestone records:
+```python
+from projects.models import PaymentMilestone  # import inside function, not module level
+milestone_defaults = [
+    ('M1', 'On Survey Completion'),
+    ('M2', 'On Material Supply'),
+    ('M3', 'On Commissioning'),
+]
+for name, desc in milestone_defaults:
+    PaymentMilestone.objects.create(
+        project=project,
+        milestone_name=name,
+        milestone_description=desc,
+        created_by=request.user.userprofile
+    )
+```
+Pre-Day-6 projects (no milestones): show empty state card with "Create milestones" button on project detail page.
+
+---
+
+## PM milestone edit (project detail page)
+PM-only section below task list on project detail page.
+Fields per row: milestone_description, amount (₹), due_date.
+POST with action='update_milestone' and milestone_pk hidden field.
+PM CANNOT touch: status, invoice_date, received_date, amount_received.
+
+---
+
+## Known bugs fixed (Day 6)
+1. Migration 0014 missing from git commit — fields existed in models.py but migration file
+   was never generated or committed. Fixed by running makemigrations explicitly and committing
+   the migration file separately. Always verify migration files appear in git status before pushing.
+2. Webhook null assigned_pm condition — unassigned project creation path had a bug when
+   PM email was absent or unmatched. Fixed in Claude Code session. Ensure Admin Notification
+   is always created in a separate try/except when assigned_pm is None.
+
+---
+
+## Known gotchas — carry forward
+- DecimalField sum with nulls: always use aggregate(s=Sum('amount'))['s'] or 0
+- project.boq access: always try/except in view, never direct in template
+- Milestone update views must be POST with CSRF — never GET links that write to DB
+- Circular import: import PaymentMilestone inside activation function body, not module level
+- Mark as Received modal: form action must POST to /projects/<id>/milestone/<pk>/receive/
+  not to current page — common mistake when multiple modals on one page
+- Variance calculation: annotate in view Python, not in template arithmetic
+- commissioned_at is null on all pre-Day-6 projects — BD dashboard "Commissioned This Month"
+  must filter commissioned_at__isnull=False before month/year filter
+- Zoho payload nesting: parse with .get() at every level, never direct key access
+  data = payload.get('data', [{}])[0]; deal = data.get('Deal', data)
+- Zoho numeric fields may arrive as Indian-formatted strings ("4,50,000") — safe_decimal()
+  helper strips non-numeric characters before Decimal conversion
+- Always return HTTP 200 on valid token webhook calls — even on application errors.
+  Non-200 causes Zoho to retry → duplicate projects
+
+---
+
+## Zoho setup — manual steps completed / pending
+- [x] ZOHO_WEBHOOK_SECRET added to Railway environment variables
+- [x] Webhook endpoint configured in Zoho CRM
+- [x] Workflow rule: Stage = Closed Won → fire webhook
+- [ ] Assign PM field added to Zoho Deal layout (email type, mandatory on Closed Won)
+- [ ] Test payload fired and payload structure confirmed in Railway Deploy Logs
+- [ ] logger.info(request.body) line removed from views.py after payload confirmed
+
+---
+
+## Next up — Day 7
+- File upload for every role
+- 
+
+---
+
+## Sprint status
+- Days completed: 6 (two sessions on final day)
+- Current migration: 0014
+- Hard deadline: 4 July 2026 (board demo)
+- Demo centerpiece: commissioning update → email + WhatsApp → CEO dashboard refresh
+- Week 3: SendGrid email + Interakt WhatsApp notifications
+- Week 3: CEO action items spec (discuss once Finance + Issues built)
+- Week 4: Live pilot on 2 real residential projects

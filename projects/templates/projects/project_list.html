@@ -27,8 +27,8 @@
       </thead>
       <tbody>
         {% for project in projects %}
-        <tr style="cursor:pointer;" onclick="window.location='{% url 'project_detail' project.project_id %}'">
-          <td><a href="{% url 'project_detail' project.project_id %}" class="fw-semibold text-decoration-none">{{ project.project_id }}</a></td>
+        <tr style="cursor:pointer;" onclick="window.location='{% url 'project_overview' project.project_id %}'">
+          <td><a href="{% url 'project_overview' project.project_id %}" class="fw-semibold text-decoration-none">{{ project.project_id }}</a></td>
           <td>{{ project.customer_name }}</td>
           <td>{{ project.project_type }}</td>
           <td>

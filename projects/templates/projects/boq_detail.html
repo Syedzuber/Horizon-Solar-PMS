@@ -23,7 +23,7 @@
       <span class="text-muted small">v{{ boq.version }}</span>
       <a href="{% url 'boq_history' project.project_id %}" class="btn btn-outline-secondary btn-sm">History</a>
     {% endif %}
-    <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
+    <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
   </div>
 </div>
 

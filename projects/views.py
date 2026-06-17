@@ -196,6 +196,28 @@ def dashboard_pm(request):
             due_date__lt=date.today(), due_date__isnull=False,
             status__in=['Not Started', 'In Progress'],
         ).count()
+        blocked_count = Task.objects.filter(
+            phase__project=project, status='Blocked',
+        ).count()
+        blocked_tasks_for_project = list(
+            Task.objects.filter(phase__project=project, status='Blocked')
+            .select_related('phase')[:5]
+        )
+        overdue_tasks_for_project = list(
+            Task.objects.filter(
+                phase__project=project, task_type=Task.INTERNAL,
+                due_date__lt=date.today(), due_date__isnull=False,
+                status__in=['Not Started', 'In Progress'],
+            ).select_related('phase')[:5]
+        )
+        is_delayed = bool(
+            project.target_commissioning_date
+            and project.target_commissioning_date < date.today()
+        )
+        delay_days = (
+            (date.today() - project.target_commissioning_date).days
+            if is_delayed else None
+        )
         current_phase  = (
             project.phases
             .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
@@ -203,16 +225,27 @@ def dashboard_pm(request):
             or project.phases.order_by('-phase_order').first()
         )
         projects_with_progress.append({
-            'project':          project,
-            'total_tasks':      total_tasks,
-            'done_tasks':       done_tasks,
-            'internal_total':   internal_total,
-            'internal_done':    internal_done,
-            'internal_percent': internal_percent,
-            'external_pending': ext_pending,
-            'overdue_count':    overdue_count,
-            'current_phase':    current_phase,
+            'project':                   project,
+            'total_tasks':               total_tasks,
+            'done_tasks':                done_tasks,
+            'internal_total':            internal_total,
+            'internal_done':             internal_done,
+            'internal_percent':          internal_percent,
+            'external_pending':          ext_pending,
+            'overdue_count':             overdue_count,
+            'current_phase':             current_phase,
+            'blocked_count':             blocked_count,
+            'blocked_tasks_for_project': blocked_tasks_for_project,
+            'overdue_tasks_for_project': overdue_tasks_for_project,
+            'is_delayed':                is_delayed,
+            'delay_days':                delay_days,
+            'urgency_count':             blocked_count + overdue_count,
         })
+
+    projects_with_progress.sort(
+        key=lambda row: (row['overdue_count'] + row['blocked_count'], row['is_delayed']),
+        reverse=True,
+    )
 
     # Annotate material summary badges — single query across all projects, not N+1 per project
     # Fetch all delivery line item data in one query, then build a lookup dict
@@ -748,136 +781,9 @@ def project_create(request):
 
 
 @login_required
-@role_required(['PM', 'Admin', 'CEO'])
 def project_detail(request, project_id):
-    """
-    Project detail page with phases, tasks, milestones, documents, and issues.
-    Handles inline POST actions (update_milestone, assign_design) from the same page.
-    PM isolation: PM can only view/edit their own projects.
-    Access: PM (own only), Admin, CEO.
-    """
-    project = get_object_or_404(
-        Project.objects.select_related(
-            'assigned_pm__user', 'assigned_site_engineer__user',
-            'assigned_design__user', 'created_by',
-        ),
-        project_id=project_id,
-    )
-
-    role = _get_user_role(request)
-    # PM isolation: PMs not assigned to this project get 404, not 403,
-    # to avoid leaking that the project exists
-    if role == 'PM' and not _pm_owns_project(request, project):
-        raise Http404
-
-    is_assigned_pm     = project.assigned_pm is not None and project.assigned_pm.user == request.user
-    can_assign_design  = is_assigned_pm and project.status in ('Active', 'In Progress')
-
-    # Handle POST actions (PM only)
-    if request.method == 'POST' and is_assigned_pm:
-        action = request.POST.get('action', '')
-
-        if action == 'update_milestone':
-            milestone_pk = request.POST.get('milestone_pk', '').strip()
-            if milestone_pk:
-                try:
-                    milestone = project.milestones.get(pk=milestone_pk)
-                    milestone.milestone_description = request.POST.get('milestone_description', '').strip()
-                    amount_str   = request.POST.get('amount', '').strip()
-                    due_date_str = request.POST.get('due_date', '').strip()
-                    try:
-                        milestone.amount = Decimal(amount_str) if amount_str else None
-                    except InvalidOperation:
-                        milestone.amount = None
-                    try:
-                        milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
-                    except ValueError:
-                        milestone.due_date = None
-                    milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
-                    messages.success(request, f'{milestone.milestone_name} updated.')
-                except PaymentMilestone.DoesNotExist:
-                    messages.error(request, 'Milestone not found.')
-            return redirect('project_detail', project_id=project.project_id)
-
-        if action == 'assign_design' and can_assign_design:
-            design_id = request.POST.get('assigned_design', '').strip()
-            if design_id:
-                try:
-                    design_user = UserProfile.objects.get(pk=design_id, role='Design', is_active=True)
-                except UserProfile.DoesNotExist:
-                    messages.error(request, 'Invalid design user selected.')
-                    return redirect('project_detail', project_id=project.project_id)
-                project.assigned_design = design_user
-                project.save(update_fields=['assigned_design'])
-                Task.objects.filter(
-                    phase__project=project,
-                    assigned_role=Task.DESIGN,
-                    status__in=['Not Started', 'In Progress'],
-                ).update(assigned_to=design_user)
-            else:
-                project.assigned_design = None
-                project.save(update_fields=['assigned_design'])
-                Task.objects.filter(
-                    phase__project=project,
-                    assigned_role=Task.DESIGN,
-                    status__in=['Not Started', 'In Progress'],
-                ).update(assigned_to=None)
-            messages.success(request, 'Design member updated.')
-            return redirect('project_detail', project_id=project.project_id)
-
-    phases = []
-    if project.status != 'Draft':
-        phases = (
-            ProjectPhase.objects.filter(project=project)
-            .prefetch_related('tasks')
-            .order_by('phase_order')
-        )
-
-    milestones = []
-    if project.status != 'Draft':
-        for m in project.milestones.all():
-            if m.amount is not None and m.amount_received is not None:
-                m.variance = m.amount - m.amount_received
-            else:
-                m.variance = None
-            milestones.append(m)
-
-    user_role = role
-
-    candidates_by_role = {}
-    design_candidates  = UserProfile.objects.none()
-    if is_assigned_pm:
-        for role_key, _ in Task.ROLE_CHOICES:
-            qs = UserProfile.objects.filter(role=role_key, is_active=True).select_related('user')
-            candidates_by_role[role_key] = [
-                {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
-                for p in qs
-            ]
-        design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
-
-    documents = project.documents.filter(is_deleted=False) if project.status != 'Draft' else []
-
-    project_issues = (
-        Issue.objects.filter(project=project)
-        .select_related('raised_by__user', 'assigned_to__user', 'task')
-    )
-    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
-
-    return render(request, 'projects/project_detail.html', {
-        'project':             project,
-        'phases':              phases,
-        'milestones':          milestones,
-        'is_assigned_pm':      is_assigned_pm,
-        'can_assign_design':   can_assign_design,
-        'design_candidates':   design_candidates,
-        'user_role':           user_role,
-        'user_profile':        role and request.user.profile,
-        'task_status_choices': Task.STATUS_CHOICES,
-        'candidates_by_role':  candidates_by_role,
-        'documents':           documents,
-        'project_issues':      project_issues,
-        'all_profiles':        all_profiles,
-    })
+    """Merged into project_overview — redirect all traffic there."""
+    return redirect('project_overview', project_id=project_id)
 
 
 @login_required
@@ -1954,29 +1860,101 @@ def dashboard_bd(request):
 @login_required
 def project_overview(request, project_id):
     """
-    Single-page project overview: BOQ status, payment milestones, phase progress
-    charts (as JSON for JS rendering), and a recent activity feed.
-    Access: all roles; PM isolation applies (PM sees own projects only).
+    Combined project page: info card, status blocks, documents, and phase/task list.
+    Merges the former project_detail (task management) and project_overview (status summary)
+    into a single URL. Access: all roles; PM and SE isolation applies.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = get_object_or_404(
+        Project.objects.select_related(
+            'assigned_pm__user', 'assigned_site_engineer__user',
+            'assigned_design__user', 'created_by',
+        ),
+        project_id=project_id,
+    )
     profile = request.user.profile
+    role    = profile.role
 
-    # PM isolation: own projects only
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    # Role isolation
+    if role == 'PM' and project.assigned_pm != profile:
         raise Http404
-    # SE isolation: only projects they are assigned to as site engineer
-    if profile.role == 'Site Engineer' and project.assigned_site_engineer != profile:
+    if role == 'Site Engineer' and project.assigned_site_engineer != profile:
         raise Http404
 
+    is_assigned_pm    = (project.assigned_pm is not None and project.assigned_pm.user == request.user)
+    can_assign_design = is_assigned_pm and project.status in ('Active', 'In Progress')
+
+    # Handle POST actions (PM only) — formerly in project_detail view
+    if request.method == 'POST' and is_assigned_pm:
+        action = request.POST.get('action', '')
+
+        if action == 'update_milestone':
+            milestone_pk = request.POST.get('milestone_pk', '').strip()
+            if milestone_pk:
+                try:
+                    milestone = project.milestones.get(pk=milestone_pk)
+                    milestone.milestone_description = request.POST.get('milestone_description', '').strip()
+                    amount_str   = request.POST.get('amount', '').strip()
+                    due_date_str = request.POST.get('due_date', '').strip()
+                    try:
+                        milestone.amount = Decimal(amount_str) if amount_str else None
+                    except InvalidOperation:
+                        milestone.amount = None
+                    try:
+                        milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
+                    except ValueError:
+                        milestone.due_date = None
+                    milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
+                    messages.success(request, f'{milestone.milestone_name} updated.')
+                except PaymentMilestone.DoesNotExist:
+                    messages.error(request, 'Milestone not found.')
+            return redirect('project_overview', project_id=project.project_id)
+
+        if action == 'assign_design' and can_assign_design:
+            design_id = request.POST.get('assigned_design', '').strip()
+            if design_id:
+                try:
+                    design_user = UserProfile.objects.get(pk=design_id, role='Design', is_active=True)
+                except UserProfile.DoesNotExist:
+                    messages.error(request, 'Invalid design user selected.')
+                    return redirect('project_overview', project_id=project.project_id)
+                project.assigned_design = design_user
+                project.save(update_fields=['assigned_design'])
+                Task.objects.filter(
+                    phase__project=project,
+                    assigned_role=Task.DESIGN,
+                    status__in=['Not Started', 'In Progress'],
+                ).update(assigned_to=design_user)
+            else:
+                project.assigned_design = None
+                project.save(update_fields=['assigned_design'])
+                Task.objects.filter(
+                    phase__project=project,
+                    assigned_role=Task.DESIGN,
+                    status__in=['Not Started', 'In Progress'],
+                ).update(assigned_to=None)
+            messages.success(request, 'Design member updated.')
+            return redirect('project_overview', project_id=project.project_id)
+
+    # BOQ status + last event
     try:
-        project.boq_status    = project.boq.status
+        project.boq_status     = project.boq.status
         project.boq_last_event = project.boq.revisions.order_by('-revised_at').first()
-        project.boq_url       = f'/projects/{project.project_id}/boq/'
+        project.boq_url        = f'/projects/{project.project_id}/boq/'
     except Exception:
         project.boq_status     = None
         project.boq_last_event = None
         project.boq_url        = None
 
+    # BOQ revision history for expanded block
+    boq_revision_history = []
+    try:
+        boq_revision_history = list(
+            project.boq.revisions.select_related('revised_by__user').order_by('-revised_at')
+        )
+    except Exception:
+        pass
+
+    # Milestones with variance
     milestones = list(project.milestones.all())
     for m in milestones:
         if m.amount is not None and m.amount_received is not None:
@@ -1984,47 +1962,40 @@ def project_overview(request, project_id):
         else:
             m.variance = None
 
-    phases = list(project.phases.prefetch_related('tasks').order_by('phase_order'))
+    # Phases + task completion percentages (empty for Draft projects)
+    phases = []
     phase_data_json = []
-    for phase in phases:
-        tasks = list(phase.tasks.all())
-        if not tasks:
-            continue
-        internal = [t for t in tasks if t.task_type == 'Internal']
-        internal_done = sum(1 for t in internal if t.status == 'Done')
-        internal_total = len(internal)
-        pct = int(internal_done / internal_total * 100) if internal_total else 0
-        ext_pending = sum(1 for t in tasks if t.task_type == 'External' and t.status != 'Done')
-        phase_data_json.append({
-            'pk':            phase.pk,
-            'pct':           pct,
-            'internal_done': internal_done,
-            'internal_total': internal_total,
-            'ext_pending':   ext_pending,
-        })
+    if project.status != 'Draft':
+        phases = list(
+            ProjectPhase.objects.filter(project=project)
+            .prefetch_related('tasks')
+            .order_by('phase_order')
+        )
+        for phase in phases:
+            tasks = list(phase.tasks.all())
+            if not tasks:
+                continue
+            internal       = [t for t in tasks if t.task_type == 'Internal']
+            internal_done  = sum(1 for t in internal if t.status == 'Done')
+            internal_total = len(internal)
+            pct            = int(internal_done / internal_total * 100) if internal_total else 0
+            ext_pending    = sum(1 for t in tasks if t.task_type == 'External' and t.status != 'Done')
+            phase_data_json.append({
+                'pk':             phase.pk,
+                'pct':            pct,
+                'internal_done':  internal_done,
+                'internal_total': internal_total,
+                'ext_pending':    ext_pending,
+            })
 
-    due_changes = list(
-        DueDateChangeLog.objects.filter(task__phase__project=project)
-        .select_related('task', 'changed_by__user')
-        .order_by('-changed_at')[:10]
+    # Recent activity from ActivityLog (authoritative audit trail)
+    recent_activity = list(
+        ActivityLog.objects.filter(project=project)
+        .select_related('actor__user')
+        .order_by('-timestamp')[:8]
     )
-    boq_events = list(
-        BOQRevision.objects.filter(boq__project=project)
-        .select_related('revised_by__user')
-        .order_by('-revised_at')[:10]
-    )
-    for e in due_changes:
-        e.event_type = 'due_date'
-        e.event_date = e.changed_at
-    for e in boq_events:
-        e.event_type = 'boq'
-        e.event_date = e.revised_at
-    # Merge two heterogeneous querysets into a single sorted feed (last 5 events)
-    recent_activity = sorted(
-        due_changes + boq_events, key=lambda x: x.event_date, reverse=True
-    )[:5]
 
-    documents = project.documents.filter(is_deleted=False)
+    documents = project.documents.filter(is_deleted=False) if project.status != 'Draft' else []
 
     project_issues = (
         Issue.objects.filter(project=project)
@@ -2032,37 +2003,92 @@ def project_overview(request, project_id):
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
-    # Delivery Challans — prefetch vendor + creator for the list table
-    delivery_challans = (
+    # Delivery challans with per-DC line-item receipt summary
+    delivery_challans = list(
         project.delivery_challans
         .select_related('vendor', 'created_by__user')
+        .prefetch_related('line_items')
         .all()
     )
+    for dc in delivery_challans:
+        li_list   = list(dc.line_items.all())
+        total     = len(li_list)
+        confirmed = sum(1 for li in li_list if li.received_quantity is not None)
+        dc.line_items_summary = (
+            f"{confirmed} of {total} item{'s' if total != 1 else ''} received"
+            if total else "No items logged"
+        )
 
-    # Per-category material status for the Material Status panel (single project — no N+1 risk)
+    # Per-category material status (summary badge + detail quantities)
     material_status = get_material_status(project)
 
-    # Vendor list for the "Add Delivery Challan" form (SCM only, active vendors only)
-    dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if profile.role == 'SCM' else []
+    cat_rows = (
+        DCLineItem.objects.filter(challan__project=project)
+        .values('boq_category')
+        .annotate(
+            total_ordered=Sum('ordered_quantity'),
+            total_received=Sum('received_quantity'),
+            damage_count=Count('pk', filter=Q(condition__in=['Damaged', 'Partial'])),
+        )
+    )
+    material_status_by_category = []
+    for row in cat_rows:
+        received   = row['total_received'] or 0
+        ordered    = row['total_ordered'] or 0
+        has_damage = row['damage_count'] > 0
+        if received == 0:
+            cat_status = 'Pending'
+        elif received >= ordered and not has_damage:
+            cat_status = 'Received'
+        else:
+            cat_status = 'Partial'
+        material_status_by_category.append({
+            'name':              row['boq_category'],
+            'status':            cat_status,
+            'received_quantity': received,
+            'ordered_quantity':  ordered,
+            'has_damage':        has_damage,
+        })
 
-    # import inside function to avoid circular import at module level
-    import json
+    # Design assignment candidates (PM only, for assign-design dropdown)
+    candidates_by_role = {}
+    design_candidates  = UserProfile.objects.none()
+    if is_assigned_pm:
+        for role_key, _ in Task.ROLE_CHOICES:
+            qs = UserProfile.objects.filter(role=role_key, is_active=True).select_related('user')
+            candidates_by_role[role_key] = [
+                {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
+                for p in qs
+            ]
+        design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
+
+    dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if role == 'SCM' else []
+
     return render(request, 'projects/project_overview.html', {
-        'project':            project,
-        'milestones':         milestones,
-        'phases':             phases,
-        'phase_data_json':    json.dumps(phase_data_json),
-        'recent_activity':    recent_activity,
-        'role':               profile.role,
-        'user_profile':       profile,
-        'documents':          documents,
-        'project_issues':     project_issues,
-        'all_profiles':       all_profiles,
-        'delivery_challans':  delivery_challans,
-        'material_status':    material_status,
-        'dc_vendors':         dc_vendors,
-        'dc_category_choices':  DCLineItem.CATEGORY_CHOICES,
-        'dc_condition_choices': DCLineItem.CONDITION_CHOICES,
+        'project':                     project,
+        'milestones':                  milestones,
+        'phases':                      phases,
+        'phase_data_json':             json.dumps(phase_data_json),
+        'recent_activity':             recent_activity,
+        'role':                        role,
+        'user_role':                   role,
+        'user_profile':                profile,
+        'documents':                   documents,
+        'project_issues':              project_issues,
+        'all_profiles':                all_profiles,
+        'delivery_challans':           delivery_challans,
+        'material_status':             material_status,
+        'material_status_by_category': material_status_by_category,
+        'dc_vendors':                  dc_vendors,
+        'dc_category_choices':         DCLineItem.CATEGORY_CHOICES,
+        'dc_condition_choices':        DCLineItem.CONDITION_CHOICES,
+        'is_assigned_pm':              is_assigned_pm,
+        'can_assign_design':           can_assign_design,
+        'design_candidates':           design_candidates,
+        'task_status_choices':         Task.STATUS_CHOICES,
+        'candidates_by_role':          candidates_by_role,
+        'boq_revision_history':        boq_revision_history,
+        'today':                       date.today(),
     })
 
 

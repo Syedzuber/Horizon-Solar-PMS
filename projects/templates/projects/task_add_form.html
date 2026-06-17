@@ -4,7 +4,7 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h4 class="mb-0">Add Task — {{ project.project_id }}</h4>
-  <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Back to Project</a>
+  <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Back to Project</a>
 </div>
 
 <div class="card shadow-sm" style="max-width:560px;">
@@ -64,7 +64,7 @@
 
       <div class="d-flex gap-2">
         <button type="submit" class="btn btn-primary">Add Task</button>
-        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
+        <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
       </div>
 
     </form>

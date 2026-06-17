@@ -1,3 +1,4 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,13 +10,18 @@
   <style>
     body { background-color: #f4f6f9; }
     .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
+    .horizon-nav { background: linear-gradient(135deg, #1a7a4a 0%, #155f3a 100%); border-bottom: 2px solid #f0a829; }
   </style>
 </head>
 <body>
 
 {% if user.is_authenticated %}
-<nav class="navbar navbar-dark bg-dark px-4">
-  <span class="navbar-brand">Horizon Solar — PMS</span>
+<nav class="navbar navbar-dark horizon-nav px-4">
+  <div class="d-flex align-items-center gap-2">
+    <img src="{% static 'images/horizon-logo.png' %}" alt="Horizon Renewable Power"
+         style="height:28px; width:auto; filter:brightness(0) invert(1); opacity:.9;">
+    <span class="navbar-brand mb-0">Horizon Solar — PMS</span>
+  </div>
   <div class="d-flex align-items-center gap-3">
     <span class="text-white-50 small">{{ user.get_full_name|default:user.username }}</span>
     <a class="nav-link position-relative me-1 text-white" href="{% url 'notifications' %}"

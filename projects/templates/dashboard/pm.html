@@ -2,353 +2,240 @@
 {% block title %}PM Dashboard — SolarPMS{% endblock %}
 
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-  <h4 class="mb-0">PM Dashboard</h4>
+<style>
+  .card-collapse-btn .collapse-icon { transition: transform .2s ease; display: inline-block; }
+  .card-collapse-btn[aria-expanded="true"] .collapse-icon { transform: rotate(180deg); }
+  .urgency-badge { min-width: 2rem; height: 2rem; font-size: .85rem; line-height: 2rem; text-align: center; border-radius: 50%; }
+</style>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0 fw-semibold">My Projects</h5>
   <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>
 </div>
 
-{# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-6 col-md">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold text-primary">{{ summary.active_projects }}</div>
-        <div class="small text-muted">Active Projects</div>
+{% if not projects_with_progress %}
+  <div class="text-center text-muted py-5">No active projects assigned to you.</div>
+{% endif %}
+
+{% for row in projects_with_progress %}
+<div class="card mb-2 shadow-sm border-0">
+
+  {# ── Collapsed header (always visible) ──────────────────────────────── #}
+  <div class="card-header bg-white border-bottom-0 p-0"
+       style="border-radius: .5rem{% if not forloop.last %};border-bottom-left-radius:0;border-bottom-right-radius:0{% endif %};">
+    <button class="card-collapse-btn btn btn-link w-100 text-start text-decoration-none text-dark py-2 px-3 d-flex align-items-center gap-3"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#card-{{ row.project.project_id }}"
+            aria-expanded="false"
+            aria-controls="card-{{ row.project.project_id }}">
+
+      {# Project name + ID #}
+      <span class="flex-grow-1 overflow-hidden">
+        <span class="fw-semibold text-truncate d-inline-block" style="max-width:100%;">
+          {{ row.project.customer_name }}
+        </span>
+        <span class="text-muted small ms-2">{{ row.project.project_id }}</span>
+      </span>
+
+      {# Urgency indicator — after project name #}
+      {% if row.urgency_count > 0 %}
+        <span class="urgency-badge bg-danger text-white flex-shrink-0 fw-bold px-2">{{ row.urgency_count }}</span>
+      {% else %}
+        <span class="flex-shrink-0 text-success" style="font-size:1.25rem; line-height:1;">
+          <i class="bi bi-check-circle-fill"></i>
+        </span>
+      {% endif %}
+
+      {# Delayed / On Time badge #}
+      {% if row.is_delayed %}
+        <span class="badge bg-danger flex-shrink-0">
+          Delayed{% if row.delay_days %}&nbsp;{{ row.delay_days }}d{% endif %}
+        </span>
+      {% else %}
+        <span class="badge bg-success flex-shrink-0">On Time</span>
+      {% endif %}
+
+      <i class="bi bi-chevron-down text-muted collapse-icon flex-shrink-0 ms-1"></i>
+    </button>
+  </div>
+
+  {# ── Expanded body ───────────────────────────────────────────────────── #}
+  <div class="collapse" id="card-{{ row.project.project_id }}">
+    <div class="card-body pt-3 pb-3 px-3 border-top">
+
+      {# — 4-column detail row — #}
+      <div class="row g-2 mb-3">
+        <div class="col-6 col-md-3">
+          <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Phase</div>
+          <div class="fw-semibold small mt-1">
+            {% if row.current_phase %}{{ row.current_phase.phase_name }}{% else %}<span class="text-muted">—</span>{% endif %}
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Site Engineer</div>
+          <div class="fw-semibold small mt-1">
+            {% if row.project.assigned_site_engineer %}
+              {{ row.project.assigned_site_engineer.user.get_full_name|default:row.project.assigned_site_engineer.user.username }}
+            {% else %}
+              <span class="text-muted">Unassigned</span>
+            {% endif %}
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Progress</div>
+          <div class="d-flex align-items-center gap-2 mt-1">
+            <div class="progress flex-grow-1" style="height:6px;">
+              <div class="progress-bar {% if row.internal_percent == 100 %}bg-success{% elif row.internal_percent >= 50 %}bg-primary{% else %}bg-warning{% endif %}"
+                   style="width:{{ row.internal_percent }}%"></div>
+            </div>
+            <span class="small text-muted" style="min-width:2.2rem;">{{ row.internal_percent }}%</span>
+          </div>
+        </div>
+        <div class="col-6 col-md-3">
+          <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">BOQ</div>
+          <div class="mt-1">
+            {% if row.project.boq_status %}
+              {% if row.project.boq_status == 'Acknowledged' %}
+                <span class="badge bg-success">Acknowledged</span>
+              {% elif row.project.boq_status == 'Submitted' %}
+                <span class="badge bg-primary">Submitted</span>
+              {% elif row.project.boq_status == 'Revision Requested' %}
+                <span class="badge bg-warning text-dark">Revision Req.</span>
+              {% else %}
+                <span class="badge bg-secondary">{{ row.project.boq_status }}</span>
+              {% endif %}
+            {% else %}
+              <span class="text-muted small">—</span>
+            {% endif %}
+          </div>
+        </div>
       </div>
+
+      {# — Materials — #}
+      <div class="mb-3 d-flex align-items-center gap-2">
+        <span class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Materials</span>
+        {% if row.material_summary == 'Received' %}
+          <span class="badge bg-success">Received</span>
+        {% elif row.material_summary == 'Partial' %}
+          <span class="badge bg-warning text-dark">Partial</span>
+        {% else %}
+          <span class="badge bg-secondary">Pending</span>
+        {% endif %}
+      </div>
+
+      {# — Needs attention — only shown when this project has blocked or overdue tasks — #}
+      {% if row.blocked_tasks_for_project or row.overdue_tasks_for_project %}
+      <div class="mb-3 p-2 rounded" style="background:rgba(220,53,69,.06); border:1px solid rgba(220,53,69,.2);">
+        <div class="text-danger small fw-semibold mb-2">
+          <i class="bi bi-exclamation-triangle-fill me-1"></i>Needs attention
+        </div>
+        {% for task in row.blocked_tasks_for_project %}
+          <div class="d-flex align-items-baseline gap-2 small mb-1">
+            <span class="badge bg-danger" style="font-size:.6rem; flex-shrink:0;">Blocked</span>
+            <span>{{ task.task_name }}</span>
+          </div>
+        {% endfor %}
+        {% for task in row.overdue_tasks_for_project %}
+          <div class="d-flex align-items-baseline gap-2 small mb-1">
+            <span class="badge bg-warning text-dark" style="font-size:.6rem; flex-shrink:0;">Overdue</span>
+            <span>{{ task.task_name }}{% if task.due_date %} <span class="text-muted">· due {{ task.due_date }}</span>{% endif %}</span>
+          </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      {# — Quick actions + link — #}
+      <div class="d-flex flex-wrap gap-2 align-items-center">
+        {% if row.project.boq_url %}
+          <a href="{{ row.project.boq_url }}" class="btn btn-outline-secondary btn-sm">
+            <i class="bi bi-file-earmark-text me-1"></i>Review BOQ
+          </a>
+        {% endif %}
+        <button type="button"
+                class="btn btn-outline-danger btn-sm js-raise-issue"
+                data-project-id="{{ row.project.project_id }}">
+          <i class="bi bi-flag me-1"></i>Raise Issue
+        </button>
+        <a href="{% url 'project_overview' row.project.project_id %}"
+           class="btn btn-outline-primary btn-sm ms-auto">
+          View full project &amp; comments <i class="bi bi-arrow-right ms-1"></i>
+        </a>
+      </div>
+
     </div>
   </div>
-  <div class="col-6 col-md">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.due_today > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.due_today }}</div>
-        <div class="small text-muted">Due Today (Internal)</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.blocked_tasks > 0 %}text-danger{% else %}text-success{% endif %}">{{ summary.blocked_tasks }}</div>
-        <div class="small text-muted">Blocked</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.pending_approvals > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.pending_approvals }}</div>
-        <div class="small text-muted">Pending Approvals</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.external_pending > 0 %}text-info{% else %}text-success{% endif %}">{{ summary.external_pending }}</div>
-        <div class="small text-muted">Awaiting Authorities</div>
-      </div>
+
+</div>
+{% endfor %}
+
+
+{# ── Raise Issue modal (shared; JS sets form action per card) ─────────── #}
+<div class="modal fade" id="raiseIssueModal" tabindex="-1"
+     aria-labelledby="raiseIssueModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form id="raiseIssueForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title" id="raiseIssueModalLabel">Raise Issue</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3" id="raiseIssueProjectLabel"></p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
+            <input type="text" name="title" class="form-control" required maxlength="200"
+                   placeholder="Brief description of the issue">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Details</label>
+            <textarea name="description" class="form-control" rows="2"
+                      placeholder="Optional context, references, next steps…"></textarea>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Severity</label>
+            <select name="severity" class="form-select">
+              <option value="Low">Low</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High">High</option>
+              <option value="Critical">Critical</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-danger btn-sm">Raise Issue</button>
+        </div>
+      </form>
     </div>
   </div>
 </div>
 
-{# ── Row 2: My Projects | Team Due Today ──────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">My Projects</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        <table class="table table-hover mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Project ID</th>
-              <th>Customer</th>
-              <th>Current Phase</th>
-              <th style="width:10rem;">Progress</th>
-              <th>Ext.</th>
-              <th>OD</th>
-              <th>Status</th>
-              <th>BOQ</th>
-              <th>Materials</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in projects_with_progress %}
-            <tr style="cursor:pointer;" onclick="window.location='{% url 'project_detail' row.project.project_id %}'">
-              <td><a href="{% url 'project_detail' row.project.project_id %}" class="fw-semibold text-decoration-none">{{ row.project.project_id }}</a></td>
-              <td>{{ row.project.customer_name }}</td>
-              <td>
-                {% if row.current_phase %}
-                  {{ row.current_phase.phase_name }}
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                <div class="d-flex align-items-center gap-2">
-                  <div class="progress flex-grow-1" style="height:8px;">
-                    <div class="progress-bar {% if row.internal_percent == 100 %}bg-success{% elif row.internal_percent >= 50 %}bg-primary{% else %}bg-warning{% endif %}"
-                         style="width:{{ row.internal_percent }}%"></div>
-                  </div>
-                  <small class="text-muted" style="min-width:2rem;">{{ row.internal_percent }}%</small>
-                </div>
-              </td>
-              <td>
-                {% if row.external_pending > 0 %}
-                  <span class="badge bg-info text-dark">{{ row.external_pending }}</span>
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if row.overdue_count > 0 %}
-                  <span class="badge bg-danger">{{ row.overdue_count }}</span>
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if row.project.status == 'Active' %}
-                  <span class="badge bg-success">Active</span>
-                {% elif row.project.status == 'In Progress' %}
-                  <span class="badge bg-primary">In Progress</span>
-                {% else %}
-                  <span class="badge bg-secondary">{{ row.project.status }}</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if row.project.boq_status %}
-                  <a href="{{ row.project.boq_url }}" class="text-decoration-none">
-                    {% if row.project.boq_status == 'Draft' %}
-                      <span class="badge bg-secondary">Draft</span>
-                    {% elif row.project.boq_status == 'Submitted' %}
-                      <span class="badge bg-primary">Submitted</span>
-                    {% elif row.project.boq_status == 'Acknowledged' %}
-                      <span class="badge bg-success">Acknowledged</span>
-                    {% elif row.project.boq_status == 'Revision Requested' %}
-                      <span class="badge bg-warning text-dark">Revision Requested</span>
-                    {% endif %}
-                  </a>
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                {# Materials badge — pre-computed in view via single annotated query (N+1 guard) #}
-                {% if row.material_summary == 'Received' %}
-                  <span class="badge bg-success">Received</span>
-                {% elif row.material_summary == 'Partial' %}
-                  <span class="badge bg-warning text-dark">Partial</span>
-                {% else %}
-                  <span class="badge bg-secondary">Pending</span>
-                {% endif %}
-              </td>
-              <td>
-                <a href="{% url 'project_overview' row.project.project_id %}"
-                   class="btn btn-outline-info btn-sm py-0"
-                   onclick="event.stopPropagation()">
-                  Overview
-                </a>
-              </td>
-            </tr>
-            {% empty %}
-            <tr>
-              <td colspan="9" class="text-center text-muted py-4">No active projects.</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
+<script>
+(function () {
+  var raiseIssueModal = null;
 
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">Team Due Today</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if team_due_today %}
-        <table class="table table-sm mb-0">
-          <thead class="table-light">
-            <tr><th>Task</th><th>Project</th><th>Role</th><th>Assigned To</th><th>Due</th></tr>
-          </thead>
-          <tbody>
-            {% for task in team_due_today %}
-            <tr>
-              <td>{{ task.task_name }}</td>
-              <td><a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a></td>
-              <td><span class="badge bg-light text-dark border">{{ task.assigned_role }}</span></td>
-              <td class="text-muted small">
-                {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}{% else %}Unassigned{% endif %}
-              </td>
-              <td>{{ task.due_date }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">All clear — no team tasks due today.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
+  document.addEventListener('DOMContentLoaded', function () {
+    raiseIssueModal = new bootstrap.Modal(document.getElementById('raiseIssueModal'));
 
-{# ── Row 3: Due Today | Blocked ───────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">Due Today — Internal Tasks</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if due_today_tasks %}
-        <table class="table table-sm mb-0">
-          <thead class="table-light">
-            <tr><th>Task</th><th>Project</th><th>Assigned To</th><th>Status</th></tr>
-          </thead>
-          <tbody>
-            {% for task in due_today_tasks %}
-            <tr>
-              <td>{{ task.task_name }}</td>
-              <td><a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a></td>
-              <td class="text-muted small">
-                {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}{% else %}Unassigned{% endif %}
-              </td>
-              <td>
-                <form method="post" action="{% url 'task_status_update' task.phase.project.project_id task.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <input type="hidden" name="next" value="{{ request.path }}">
-                  <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
-                    {% if task.status == 'Not Started' %}
-                      <option value="Not Started" selected>Not Started</option>
-                      <option value="In Progress">In Progress</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'In Progress' %}
-                      <option value="In Progress" selected>In Progress</option>
-                      <option value="Done">Done</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'Blocked' %}
-                      <option value="Blocked" selected>Blocked</option>
-                      <option value="In Progress">In Progress</option>
-                    {% endif %}
-                  </select>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">All clear — nothing due today.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold text-danger">Blocked Tasks</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if blocked_tasks_list %}
-        <table class="table table-sm mb-0">
-          <thead class="table-light">
-            <tr><th>Task</th><th>Project</th><th>Phase</th></tr>
-          </thead>
-          <tbody>
-            {% for task in blocked_tasks_list %}
-            <tr>
-              <td>{{ task.task_name }}</td>
-              <td><a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a></td>
-              <td class="text-muted">{{ task.phase.phase_name }}</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">All clear — no blocked tasks.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
-
-{# ── Row 4: Pending Approvals | Awaiting Authorities ─────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">Pending Approvals (PM Tasks)</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if pending_approvals_list %}
-        <table class="table table-sm mb-0">
-          <thead class="table-light">
-            <tr><th>Task</th><th>Project</th><th>Status</th></tr>
-          </thead>
-          <tbody>
-            {% for task in pending_approvals_list %}
-            <tr>
-              <td>{{ task.task_name }}</td>
-              <td><a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a></td>
-              <td>
-                <form method="post" action="{% url 'task_status_update' task.phase.project.project_id task.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <input type="hidden" name="next" value="{{ request.path }}">
-                  <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
-                    <option value="Not Started" selected>Not Started</option>
-                    <option value="In Progress">In Progress</option>
-                    <option value="Blocked">Blocked</option>
-                  </select>
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">All clear — no pending approvals.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold" style="color:#0dcaf0;">Awaiting Authorities</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if external_pending_list %}
-        <table class="table table-sm mb-0">
-          <thead class="table-light">
-            <tr><th>Task</th><th>Project</th><th>Expected By</th><th></th></tr>
-          </thead>
-          <tbody>
-            {% for task in external_pending_list %}
-            <tr>
-              <td>
-                {{ task.task_name }}
-                <span class="badge bg-info text-dark ms-1" style="font-size:0.65rem;">Awaiting Authority</span>
-              </td>
-              <td><a href="{% url 'project_detail' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a></td>
-              <td class="text-muted">{{ task.due_date|default:"—" }}</td>
-              <td>
-                <form method="post" action="{% url 'task_status_update' task.phase.project.project_id task.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <input type="hidden" name="next" value="{{ request.path }}">
-                  {% if task.status == 'Not Started' %}
-                    <input type="hidden" name="status" value="In Progress">
-                    <button type="submit" class="btn btn-outline-primary btn-sm py-0">Mark In Progress</button>
-                  {% elif task.status == 'In Progress' %}
-                    <input type="hidden" name="status" value="Done">
-                    <button type="submit" class="btn btn-outline-success btn-sm py-0">Mark Done</button>
-                  {% endif %}
-                </form>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">All clear — no external tasks pending.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-</div>
+    document.querySelectorAll('.js-raise-issue').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var projectId = this.dataset.projectId;
+        document.getElementById('raiseIssueForm').action =
+          '/projects/' + projectId + '/issues/create/';
+        document.getElementById('raiseIssueProjectLabel').textContent =
+          'Project: ' + projectId;
+        /* Reset fields */
+        document.getElementById('raiseIssueForm').querySelector('[name="title"]').value = '';
+        document.getElementById('raiseIssueForm').querySelector('[name="description"]').value = '';
+        document.getElementById('raiseIssueForm').querySelector('[name="severity"]').value = 'Medium';
+        raiseIssueModal.show();
+      });
+    });
+  });
+}());
+</script>
 
 {% endblock %}

@@ -4,22 +4,48 @@ import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# ---------------------------------------------------------------------------
+# Security — all sourced from environment variables via python-decouple
+# ---------------------------------------------------------------------------
+
 SECRET_KEY = config('SECRET_KEY')
 DEBUG = config('DEBUG', default=False, cast=bool)
+
+# ALLOWED_HOSTS must include the Railway public domain in production
+# e.g. ALLOWED_HOSTS=your-app.up.railway.app,localhost
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv())
+
+# Alphanumeric token checked on every incoming Zoho webhook request
 ZOHO_WEBHOOK_SECRET = config('ZOHO_WEBHOOK_SECRET', default='')
+
+# ---------------------------------------------------------------------------
+# Supabase file storage
+# ---------------------------------------------------------------------------
 
 SUPABASE_URL    = config('SUPABASE_URL', default='')
 SUPABASE_KEY    = config('SUPABASE_KEY', default='')
-SUPABASE_BUCKET = config('SUPABASE_BUCKET', default='solarpms-files')
+SUPABASE_BUCKET = config('SUPABASE_BUCKET', default='solarpms-files')  # Bucket for all project/task files
 
+# How long (days) to keep soft-deleted files before purge_deleted_files hard-deletes them
 FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)
+
+# Raised from Django default (2.5 MB) to support multi-file uploads up to 20 MB each
 DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600  # 100 MB
 
+# ---------------------------------------------------------------------------
+# CSRF — must include the Railway domain so POST forms are not rejected
+# ---------------------------------------------------------------------------
+
+# e.g. CSRF_TRUSTED_ORIGINS=https://your-app.up.railway.app,http://localhost
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='http://localhost').split(',')
 
+# Required for Railway (and most reverse-proxy setups) so Django sees HTTPS correctly
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# ---------------------------------------------------------------------------
+# Application definition
+# ---------------------------------------------------------------------------
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -27,19 +53,19 @@ INSTALLED_APPS = [
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
-    'whitenoise.runserver_nostatic',
+    'whitenoise.runserver_nostatic',  # Serves static files in development too — avoids STATIC_URL 404s
     'django.contrib.staticfiles',
     'projects',
 ]
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Must come immediately after SecurityMiddleware
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'solarpms.middleware.AdminAccessMiddleware',
+    'solarpms.middleware.AdminAccessMiddleware',  # Custom: restricts /admin/ to staff users
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -57,13 +83,17 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-                'projects.context_processors.notifications',
+                'projects.context_processors.notifications',  # Injects unread_count into every template
             ],
         },
     },
 ]
 
 WSGI_APPLICATION = 'solarpms.wsgi.application'
+
+# ---------------------------------------------------------------------------
+# Database — URL-based config; Railway injects DATABASE_URL automatically
+# ---------------------------------------------------------------------------
 
 DATABASES = {
     'default': dj_database_url.config(
@@ -79,9 +109,13 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'Asia/Kolkata'
+TIME_ZONE = 'Asia/Kolkata'  # IST — all datetimes stored as UTC, displayed as IST
 USE_I18N = True
 USE_TZ = True
+
+# ---------------------------------------------------------------------------
+# Static files — WhiteNoise serves compressed, cached static assets
+# ---------------------------------------------------------------------------
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
@@ -89,14 +123,27 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# ---------------------------------------------------------------------------
+# Auth redirects
+# ---------------------------------------------------------------------------
+
 LOGIN_URL = '/login/'
 LOGIN_REDIRECT_URL = '/dashboard/admin/'
 LOGOUT_REDIRECT_URL = '/login/'
+
+# ---------------------------------------------------------------------------
+# Messages — map Django's ERROR level to Bootstrap's 'danger' CSS class
+# ---------------------------------------------------------------------------
 
 from django.contrib.messages import constants as message_constants
 MESSAGE_TAGS = {
     message_constants.ERROR: 'danger',
 }
+
+# ---------------------------------------------------------------------------
+# Logging — explicit config required; without it Zoho webhook errors are
+# swallowed silently (discovered in production debugging)
+# ---------------------------------------------------------------------------
 
 LOGGING = {
     'version': 1,

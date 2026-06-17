@@ -10,6 +10,7 @@ def generate_project_id(project_type):
     Must be called inside transaction.atomic() — uses select_for_update()
     to prevent duplicate IDs under concurrent saves.
     """
+    # import inside function to avoid circular import at module level
     from .models import Project
 
     PREFIX_MAP = {
@@ -33,7 +34,10 @@ def generate_project_id(project_type):
 
 
 def add_workdays(start_date, days):
-    """Advance start_date by N calendar days. days=0 returns start_date unchanged."""
+    """
+    Advance start_date by N calendar days. days=0 returns start_date unchanged.
+    NOTE: uses calendar days, not business days — weekends are not skipped.
+    """
     return start_date + timedelta(days=days)
 
 
@@ -42,12 +46,14 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
     Set anchor_task.due_date = new_date, then cascade-recalculate every task
     that comes after it (same phase order / task order sequence).
     Internal tasks chain sequentially; external tasks mirror the current
-    internal chain position (run in parallel).
+    internal chain position (run in parallel, not blocking the chain).
     Logs every changed due_date in DueDateChangeLog.
     Returns the number of tasks whose due_date changed.
     """
+    # import inside function to avoid circular import at module level
     from .models import Task, DueDateChangeLog
 
+    # Load all tasks in project order so we can walk forward from anchor
     tasks = list(
         Task.objects
         .filter(phase__project=project)
@@ -66,33 +72,38 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
     if old_anchor != new_date:
         changes.append((tasks[anchor_idx], old_anchor, new_date))
 
-    # Determine the internal chain position after the anchor
+    # Determine the internal chain position after the anchor.
+    # If anchor is Internal, it becomes the new chain head.
+    # If anchor is External, find the most recent Internal task before it.
     if tasks[anchor_idx].task_type == Task.INTERNAL:
         prev_internal_due = new_date
     else:
         # Find the most recent internal task at or before anchor
-        prev_internal_due = new_date  # fallback
+        prev_internal_due = new_date  # fallback if no prior internal exists
         for t in reversed(tasks[:anchor_idx]):
             if t.task_type == Task.INTERNAL and t.due_date:
                 prev_internal_due = t.due_date
                 break
 
-    # Recalculate all tasks after the anchor
+    # Walk every task after the anchor and update its due date
     for task in tasks[anchor_idx + 1:]:
         old_d = task.due_date
         if task.task_type == Task.EXTERNAL:
+            # External tasks run in parallel with the current internal position
             new_d = prev_internal_due
         else:
             new_d = add_workdays(prev_internal_due, task.duration_days)
-            prev_internal_due = new_d
+            prev_internal_due = new_d  # advance the internal chain
         task.due_date = new_d
         if old_d != new_d:
             changes.append((task, old_d, new_d))
 
+    # Single bulk_update for all changed tasks — avoids N individual saves
     Task.objects.bulk_update(tasks[anchor_idx:], ['due_date'])
 
     if user and changes:
         user_profile = user.profile
+        # bulk_create the audit trail in one query
         DueDateChangeLog.objects.bulk_create([
             DueDateChangeLog(task=t, old_date=old_d, new_date=new_d, changed_by=user_profile)
             for t, old_d, new_d in changes
@@ -103,11 +114,13 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
 
 def calculate_due_dates(project):
     """
-    Assign due_date to every task on project.
+    Assign due_date to every task on project starting from project.activated_at.
     Internal tasks chain sequentially off the previous internal task's due date.
     External tasks get the same due date as the current internal chain position
     (they run in parallel, not blocking the chain).
+    Called on full recalculation (project_recalculate_dates view).
     """
+    # import inside function to avoid circular import at module level
     from .models import Task
 
     tasks = (
@@ -120,6 +133,7 @@ def calculate_due_dates(project):
 
     for task in tasks:
         if task.task_type == Task.EXTERNAL:
+            # External tasks shadow the current internal chain date
             task.due_date = previous_internal_due
         else:
             task.due_date = add_workdays(previous_internal_due, task.duration_days)
@@ -132,11 +146,14 @@ def attach_residential_template(project):
     Create all 9 phases and 50 tasks for a Residential project.
     Pre-assigns PM-role tasks to assigned_pm and SE-role tasks to assigned_site_engineer.
     Entire operation is atomic — any failure rolls back all phases and tasks.
+    Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
     """
+    # import inside function to avoid circular import at module level
     from .models import ProjectPhase, Task
 
     with transaction.atomic():
 
+        # Full Residential EPC template — 9 phases, 50 tasks (42 internal, 8 external)
         PHASES = [
             {
                 'phase_name':  'Sales & Documentation',
@@ -262,7 +279,8 @@ def attach_residential_template(project):
                 for t in phase_data['tasks']
             ])
 
-        # Pre-assign PM and SE tasks to the named people on this project
+        # Pre-assign PM and SE tasks to the named people on this project.
+        # filter().update() used instead of individual .save() calls for performance.
         pm_profile = project.assigned_pm
         se_profile = project.assigned_site_engineer
 
@@ -276,7 +294,8 @@ def attach_residential_template(project):
             assigned_role=Task.SITE_ENGINEER,
         ).update(assigned_to=se_profile)
 
-        # Integrity checks — roll back everything if counts are wrong
+        # Integrity checks — roll back everything if counts are wrong.
+        # These assertions run inside the atomic block so a mismatch aborts the transaction.
         task_count = Task.objects.filter(phase__project=project).count()
         assert task_count == 50, f"Expected 50 tasks, got {task_count}"
 

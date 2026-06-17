@@ -102,7 +102,7 @@
           <td class="text-muted small">{{ log.timestamp|date:"d M Y H:i" }}</td>
           <td class="small">
             {% if log.project %}
-              <a href="{% url 'project_detail' log.project.project_id %}">{{ log.project.project_id }}</a>
+              <a href="{% url 'project_overview' log.project.project_id %}">{{ log.project.project_id }}</a>
             {% else %}—{% endif %}
           </td>
           <td class="small">

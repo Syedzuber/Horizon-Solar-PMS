@@ -50,7 +50,7 @@
         <div class="card-header">
           <span class="fw-bold">{{ group.grouper.project_id }}</span>
           <span class="text-muted ms-2">{{ group.grouper.customer_name }}</span>
-          <a href="{% url 'project_detail' group.grouper.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
+          <a href="{% url 'project_overview' group.grouper.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
         </div>
         <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
           <table class="table table-sm table-hover mb-0">

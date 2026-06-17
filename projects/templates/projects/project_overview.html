@@ -1,276 +1,544 @@
 {% extends "base.html" %}
-{% block title %}{{ project.project_id }} Overview — SolarPMS{% endblock %}
+{% block title %}{{ project.project_id }} — SolarPMS{% endblock %}
 
 {% block content %}
+<style>
+  /* ── Brand colours ─────────────────────────────────────────── */
+  :root { --hz-green: #1a7a4a; --hz-dark: #155f3a; --hz-gold: #f0a829; }
+  .btn-brand          { background-color:var(--hz-green); border-color:var(--hz-green); color:#fff; }
+  .btn-brand:hover    { background-color:var(--hz-dark);  border-color:var(--hz-dark);  color:#fff; }
+  .btn-outline-brand  { border-color:var(--hz-green); color:var(--hz-green); background:transparent; }
+  .btn-outline-brand:hover { background-color:var(--hz-green); color:#fff; }
 
-{# ── Panel 1: Project header (all roles) ─────────────────────────────────── #}
-<div class="card shadow-sm mb-4">
-  <div class="card-body p-4">
-    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-3">
-      <div>
-        <h4 class="mb-1">{{ project.project_id }} — Overview</h4>
-        <p class="text-muted mb-0">{{ project.customer_name }}</p>
+  /* ── Collapse chevrons ─────────────────────────────────────── */
+  .block-toggle .collapse-chevron { transition:transform .2s ease; display:inline-block; }
+  .block-toggle[aria-expanded="true"] .collapse-chevron { transform:rotate(180deg); }
+
+  /* ── Lucide icons ─────────────────────────────────────────── */
+  .lucide-icon { width:14px; height:14px; stroke-width:2; vertical-align:text-bottom; }
+
+  /* ── Project info strip ────────────────────────────────────── */
+  .info-pill { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
+  .info-pill i { color:var(--hz-green); font-size:.85rem; }
+
+  /* ── Milestone edit collapse button ────────────────────────── */
+  .milestone-edit-btn { font-size:.7rem; padding:0 .35rem; }
+</style>
+
+{# ── 1. Compact project info card ──────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-body px-4 py-3">
+
+    {# Title row #}
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
+      <div class="d-flex align-items-center gap-2 flex-wrap">
+        <h5 class="mb-0 fw-bold">{{ project.project_id }}</h5>
+        <span class="text-muted">{{ project.customer_name }}</span>
+        {% if project.status == 'Draft' %}<span class="badge bg-secondary">Draft</span>
+        {% elif project.status == 'Active' %}<span class="badge" style="background:var(--hz-green)">Active</span>
+        {% elif project.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
+        {% elif project.status == 'Commissioned' %}<span class="badge bg-info text-dark">Commissioned</span>
+        {% elif project.status == 'On Hold' %}<span class="badge bg-warning text-dark">On Hold</span>
+        {% elif project.status == 'Cancelled' %}<span class="badge bg-danger">Cancelled</span>
+        {% else %}<span class="badge bg-secondary">{{ project.status }}</span>{% endif %}
       </div>
       <div class="d-flex gap-2 flex-wrap">
-        <a href="{% url 'project_detail' project.project_id %}" class="btn btn-outline-primary btn-sm">
-          Detail View
+        {% if is_assigned_pm %}
+          {% if project.status == 'Draft' %}
+            <a href="{% url 'project_edit' project.project_id %}" class="btn btn-outline-secondary btn-sm">Edit</a>
+            <form method="post" action="{% url 'project_activate' project.project_id %}"
+                  onsubmit="return confirm('Activate this project?')">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-brand btn-sm">Activate</button>
+            </form>
+          {% else %}
+            <a href="{% url 'task_add' project.project_id %}" class="btn btn-brand btn-sm">+ Add Task</a>
+          {% endif %}
+        {% endif %}
+        <a href="{% url 'project_timeline' project.project_id %}" class="btn btn-outline-secondary btn-sm">
+          <i class="bi bi-calendar3 me-1"></i>Timeline
         </a>
-        <a href="javascript:history.back()" class="btn btn-outline-secondary btn-sm">← Back</a>
+        <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
       </div>
     </div>
 
-    <div class="row g-3">
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Status</small>
-        {% if project.status == 'Active' %}
-          <span class="badge bg-success">Active</span>
-        {% elif project.status == 'In Progress' %}
-          <span class="badge bg-primary">In Progress</span>
-        {% elif project.status == 'Commissioned' %}
-          <span class="badge bg-info text-dark">Commissioned</span>
-        {% elif project.status == 'On Hold' %}
-          <span class="badge bg-warning text-dark">On Hold</span>
-        {% elif project.status == 'Cancelled' %}
-          <span class="badge bg-danger">Cancelled</span>
+    {# Compact stats strip #}
+    <div class="d-flex flex-wrap gap-3 border-top pt-2 small text-muted">
+      <span class="info-pill"><i class="bi bi-lightning-charge-fill"></i>{{ project.project_type }}</span>
+      {% if project.capacity_kw %}
+        <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.capacity_kw }} kWp</span>
+      {% endif %}
+      {% if project.contract_value %}
+        <span class="info-pill"><i class="bi bi-currency-rupee"></i>{{ project.contract_value }}</span>
+      {% endif %}
+      {% if project.target_commissioning_date %}
+        <span class="info-pill"><i class="bi bi-calendar-check"></i>{{ project.target_commissioning_date|date:"d M Y" }}</span>
+      {% endif %}
+      <span class="info-pill">
+        <i class="bi bi-geo-alt-fill"></i>{{ project.city }}{% if project.city and project.state %}, {% endif %}{{ project.state }}
+      </span>
+      <span class="info-pill">
+        <i class="bi bi-person-badge-fill"></i>PM:
+        {% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}<em>—</em>{% endif %}
+      </span>
+      <span class="info-pill">
+        <i class="bi bi-tools"></i>SE:
+        {% if project.assigned_site_engineer %}{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}{% else %}<em>—</em>{% endif %}
+      </span>
+      <span class="info-pill">
+        <i class="bi bi-pen-fill"></i>Design:
+        {% if can_assign_design %}
+          <form method="post" action="{% url 'project_overview' project.project_id %}"
+                class="d-flex align-items-center gap-1">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="assign_design">
+            <select name="assigned_design" class="form-select form-select-sm py-0"
+                    style="height:1.6rem; font-size:.78rem; min-width:130px;">
+              <option value="">— Unassign —</option>
+              {% for candidate in design_candidates %}
+                <option value="{{ candidate.pk }}"
+                  {% if project.assigned_design and project.assigned_design.pk == candidate.pk %}selected{% endif %}>
+                  {{ candidate.user.get_full_name|default:candidate.user.username }}
+                </option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn btn-brand btn-sm py-0" style="height:1.6rem;">Save</button>
+          </form>
+        {% elif project.assigned_design %}
+          {{ project.assigned_design.user.get_full_name|default:project.assigned_design.user.username }}
         {% else %}
-          <span class="badge bg-secondary">{{ project.status }}</span>
+          <em>—</em>
         {% endif %}
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Type</small>
-        <span>{{ project.project_type }}</span>
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Capacity</small>
-        <span>{{ project.capacity_kw }} kWp</span>
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Contract Value</small>
-        <span>₹{{ project.contract_value }}</span>
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">City / State</small>
-        <span>{{ project.city }}, {{ project.state }}</span>
-      </div>
-      <div class="col-12 col-md-6">
-        <small class="text-muted d-block">Site Address</small>
-        <span>{{ project.site_address }}</span>
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Target Commissioning</small>
-        <span>{{ project.target_commissioning_date }}</span>
-      </div>
+      </span>
+      {% if project.site_address %}
+        <span class="info-pill"><i class="bi bi-house-fill"></i>{{ project.site_address }}</span>
+      {% endif %}
       {% if project.activated_at %}
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Activated</small>
-        <span>{{ project.activated_at|date:"d M Y" }}</span>
-      </div>
+        <span class="info-pill"><i class="bi bi-check2-circle"></i>Activated {{ project.activated_at|date:"d M Y" }}</span>
       {% endif %}
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Assigned PM</small>
-        <span>{% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}—{% endif %}</span>
+    </div>
+
+  </div>
+</div>
+
+{# ── 2. Phase Progress (left 50%) + Payment Milestones (right 50%) ─────── #}
+<div class="row g-3 mb-3">
+
+  {# Phase progress bars #}
+  {% if phases %}
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header py-2 fw-semibold small">
+        <i data-lucide="bar-chart-3" class="lucide-icon me-1"></i>Task Progress by Phase
       </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Site Engineer</small>
-        <span>{% if project.assigned_site_engineer %}{{ project.assigned_site_engineer.user.get_full_name|default:project.assigned_site_engineer.user.username }}{% else %}—{% endif %}</span>
-      </div>
-      <div class="col-sm-6 col-md-3">
-        <small class="text-muted d-block">Design Member</small>
-        {% if project.assigned_design %}
-          <span>{{ project.assigned_design.user.get_full_name|default:project.assigned_design.user.username }}</span>
-        {% else %}
-          <span class="text-muted">Not assigned</span>
-        {% endif %}
+      <div class="card-body py-3 px-4">
+        {% for phase in phases %}
+          {% if phase.tasks.count > 0 %}
+          <div class="mb-3">
+            <div class="d-flex justify-content-between align-items-center mb-1">
+              <span class="small fw-semibold">{{ phase.phase_name }}</span>
+              <span class="text-muted" style="font-size:.72rem;" id="phase-stat-{{ phase.pk }}"></span>
+            </div>
+            <div class="progress" style="height:7px; border-radius:4px;">
+              <div class="progress-bar" id="phase-bar-{{ phase.pk }}"
+                   style="width:0%; border-radius:4px; background:var(--hz-green);"></div>
+            </div>
+          </div>
+          {% endif %}
+        {% empty %}
+          <p class="text-muted small mb-0">No phases found.</p>
+        {% endfor %}
       </div>
     </div>
   </div>
-</div>
+  {% endif %}
 
-{# ── Panel 2: Task progress (PM, SE, Admin only) ─────────────────────────── #}
-{% if role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Task Progress by Phase</div>
-  <div class="card-body" id="phaseProgressPanel">
-    {% for phase in phases %}
-      {% if phase.tasks.count > 0 %}
-      <div class="mb-3">
-        <div class="d-flex justify-content-between align-items-center mb-1">
-          <span class="fw-semibold small">{{ phase.phase_name }}</span>
-          <span class="text-muted small" id="phase-stat-{{ phase.pk }}"></span>
-        </div>
-        <div class="progress" style="height:10px;">
-          <div class="progress-bar bg-primary" style="width:0%;" id="phase-bar-{{ phase.pk }}"></div>
-        </div>
-      </div>
-      {% endif %}
-    {% empty %}
-      <p class="text-muted mb-0">No phases found.</p>
-    {% endfor %}
-  </div>
-</div>
-
-<script>
-(function () {
-  var phaseData = {{ phase_data_json }};
-  phaseData.forEach(function (ph) {
-    var bar  = document.getElementById('phase-bar-'  + ph.pk);
-    var stat = document.getElementById('phase-stat-' + ph.pk);
-    if (bar) {
-      bar.style.width = ph.pct + '%';
-      if (ph.pct === 100) bar.classList.replace('bg-primary', 'bg-success');
-      else if (ph.pct >= 50) bar.classList.add('bg-primary');
-      else bar.classList.replace('bg-primary', 'bg-warning');
-    }
-    if (stat) {
-      stat.textContent = ph.internal_done + '/' + ph.internal_total + ' done' +
-        (ph.ext_pending ? ' · ' + ph.ext_pending + ' external pending' : '');
-    }
-  });
-}());
-</script>
-{% endif %}
-
-{# ── Panel 3: BOQ status (PM, SCM, Design, Admin) ───────────────────────── #}
-{% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">BOQ Status</div>
-  <div class="card-body">
-    {% if project.boq_status %}
-      <div class="d-flex align-items-center gap-3 flex-wrap">
-        {% if project.boq_status == 'Draft' %}
-          <span class="badge bg-secondary fs-6">Draft</span>
-        {% elif project.boq_status == 'Submitted' %}
-          <span class="badge bg-primary fs-6">Submitted</span>
-        {% elif project.boq_status == 'Acknowledged' %}
-          <span class="badge bg-success fs-6">Acknowledged</span>
-        {% elif project.boq_status == 'Revision Requested' %}
-          <span class="badge bg-warning text-dark fs-6">Revision Requested</span>
-        {% endif %}
-        {% if project.boq_last_event %}
-          <span class="text-muted small">
-            Last: {{ project.boq_last_event.reason }} —
-            {{ project.boq_last_event.revised_at|date:"d M Y" }}
-            {% if project.boq_last_event.revised_by %}
-              by {{ project.boq_last_event.revised_by.user.get_full_name|default:project.boq_last_event.revised_by.user.username }}
-            {% endif %}
-          </span>
-        {% endif %}
-        <a href="{{ project.boq_url }}" class="btn btn-outline-primary btn-sm ms-auto">View full BOQ →</a>
-      </div>
-    {% else %}
-      <p class="text-muted mb-0">BOQ not yet created for this project.</p>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-
-{# ── Panel 4: Finance milestones (PM, Finance, CEO, Admin) ──────────────── #}
-{% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Payment Milestones</div>
-  <div class="card-body p-0">
-    {% if milestones %}
-    <div class="table-responsive">
-      <table class="table table-sm mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Milestone</th>
-            <th>Description</th>
-            <th>Amount (₹)</th>
-            <th>Due Date</th>
-            <th>Status</th>
-            <th>Invoice Date</th>
-            <th>Received Date</th>
-            <th>Amt Received (₹)</th>
-            <th>Variance</th>
-            {% if role == 'Finance' %}<th></th>{% endif %}
-          </tr>
-        </thead>
-        <tbody>
+  {# Payment milestones #}
+  {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}
+  <div class="col-12 col-md-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small">
+          <i data-lucide="coins" class="lucide-icon me-1"></i>Payment Milestones
+        </span>
+        <div class="d-flex gap-1">
           {% for m in milestones %}
-          <tr>
-            <td class="fw-semibold">{{ m.milestone_name }}</td>
-            <td class="text-muted small">{{ m.milestone_description|default:"—" }}</td>
-            <td>{% if m.amount %}₹{{ m.amount|floatformat:0 }}{% else %}—{% endif %}</td>
-            <td>{{ m.due_date|default:"—" }}</td>
-            <td>
-              {% if m.status == 'Pending' %}
-                <span class="badge bg-secondary">Pending</span>
-              {% elif m.status == 'Invoiced' %}
-                <span class="badge bg-primary">Invoiced</span>
-              {% elif m.status == 'Received' %}
-                <span class="badge bg-success">Received</span>
-              {% endif %}
-            </td>
-            <td class="text-muted small">{{ m.invoice_date|default:"—" }}</td>
-            <td class="text-muted small">{{ m.received_date|default:"—" }}</td>
-            <td>{% if m.amount_received is not None %}₹{{ m.amount_received|floatformat:0 }}{% else %}—{% endif %}</td>
-            <td>
-              {% if m.variance is not None and m.variance != 0 %}
-                <span class="text-warning fw-semibold">₹{{ m.variance|floatformat:0 }}</span>
-              {% else %}
-                —
-              {% endif %}
-            </td>
-            {% if role == 'Finance' %}
-            <td>
-              {% if m.status == 'Pending' %}
-                <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <button type="submit" class="btn btn-outline-secondary btn-sm py-0">Mark Invoiced</button>
-                </form>
-              {% elif m.status == 'Invoiced' %}
-                <button type="button" class="btn btn-outline-primary btn-sm py-0"
-                        data-bs-toggle="modal" data-bs-target="#receiveModal"
-                        data-project-id="{{ project.project_id }}"
-                        data-milestone-pk="{{ m.pk }}"
-                        data-milestone-name="{{ m.milestone_name }}"
-                        data-amount="{{ m.amount|default:'' }}">
-                  Mark Received
-                </button>
-              {% endif %}
-            </td>
+            {% if m.status == 'Received' %}
+              <span class="badge" style="background:var(--hz-green)" title="{{ m.milestone_name }} — Received">{{ m.milestone_name }}</span>
+            {% elif m.status == 'Invoiced' %}
+              <span class="badge bg-primary" title="{{ m.milestone_name }} — Invoiced">{{ m.milestone_name }}</span>
+            {% else %}
+              <span class="badge bg-secondary" title="{{ m.milestone_name }} — Pending">{{ m.milestone_name }}</span>
             {% endif %}
-          </tr>
+          {% empty %}
+            <span class="text-muted small">—</span>
           {% endfor %}
-        </tbody>
-      </table>
+        </div>
+      </div>
+      <div class="card-body p-0">
+        {% if milestones %}
+          {% for m in milestones %}
+          <div class="px-3 py-2 {% if not forloop.last %}border-bottom{% endif %}">
+            <div class="d-flex justify-content-between align-items-start">
+              <div>
+                <span class="fw-semibold small">{{ m.milestone_name }}</span>
+                {% if m.milestone_description %}
+                  <div class="text-muted" style="font-size:.75rem;">{{ m.milestone_description }}</div>
+                {% endif %}
+                <div class="small text-muted">
+                  {% if m.amount %}₹{{ m.amount|floatformat:0 }}{% else %}Amount TBD{% endif %}
+                  {% if m.due_date %} · Due {{ m.due_date|date:"d M Y" }}{% endif %}
+                </div>
+                {% if m.amount_received is not None %}
+                  <div style="font-size:.75rem;" class="text-muted">
+                    Received: ₹{{ m.amount_received|floatformat:0 }}
+                    {% if m.variance and m.variance != 0 %}
+                      <span class="{% if m.variance > 0 %}text-success{% else %}text-warning{% endif %} ms-1">Δ ₹{{ m.variance|floatformat:0 }}</span>
+                    {% endif %}
+                  </div>
+                {% endif %}
+              </div>
+              <div class="d-flex align-items-center gap-1 ms-2 flex-shrink-0">
+                {% if m.status == 'Received' %}
+                  <span class="badge" style="background:var(--hz-green)">Received</span>
+                {% elif m.status == 'Invoiced' %}
+                  <span class="badge bg-primary">Invoiced</span>
+                {% else %}
+                  <span class="badge bg-secondary">Pending</span>
+                {% endif %}
+                {% if role == 'Finance' %}
+                  {% if m.status == 'Pending' %}
+                    <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}">
+                      {% csrf_token %}
+                      <button type="submit" class="btn btn-outline-secondary btn-sm milestone-edit-btn">Invoice</button>
+                    </form>
+                  {% elif m.status == 'Invoiced' %}
+                    <button type="button" class="btn btn-outline-brand btn-sm milestone-edit-btn"
+                            data-bs-toggle="modal" data-bs-target="#receiveModal"
+                            data-project-id="{{ project.project_id }}"
+                            data-milestone-pk="{{ m.pk }}"
+                            data-milestone-name="{{ m.milestone_name }}"
+                            data-amount="{{ m.amount|default:'' }}">Receive</button>
+                  {% endif %}
+                {% endif %}
+                {% if is_assigned_pm %}
+                  <button class="btn btn-outline-secondary milestone-edit-btn"
+                          type="button"
+                          data-bs-toggle="collapse"
+                          data-bs-target="#editMilestone{{ m.pk }}"
+                          title="Edit">
+                    <i class="bi bi-pencil"></i>
+                  </button>
+                {% endif %}
+              </div>
+            </div>
+            {% if is_assigned_pm %}
+            <div class="collapse mt-2" id="editMilestone{{ m.pk }}">
+              <form method="post" action="{% url 'project_overview' project.project_id %}"
+                    class="p-2 rounded" style="background:#f8f9fa;">
+                {% csrf_token %}
+                <input type="hidden" name="action" value="update_milestone">
+                <input type="hidden" name="milestone_pk" value="{{ m.pk }}">
+                <input type="text" name="milestone_description" class="form-control form-control-sm mb-2"
+                       value="{{ m.milestone_description }}" placeholder="Description">
+                <div class="row g-2 mb-2">
+                  <div class="col">
+                    <input type="number" name="amount" step="0.01" min="0"
+                           class="form-control form-control-sm" placeholder="₹ Amount"
+                           value="{% if m.amount %}{{ m.amount }}{% endif %}">
+                  </div>
+                  <div class="col">
+                    <input type="date" name="due_date" class="form-control form-control-sm"
+                           value="{% if m.due_date %}{{ m.due_date|date:'Y-m-d' }}{% endif %}">
+                  </div>
+                </div>
+                <button type="submit" class="btn btn-brand btn-sm w-100">Save</button>
+              </form>
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="text-center text-muted py-3 small">
+            No milestones yet.
+            {% if is_assigned_pm %}
+              <form method="post" action="{% url 'milestone_create' project.project_id %}" class="mt-2">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-outline-brand btn-sm">Create M1 / M2 / M3</button>
+              </form>
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
     </div>
-    {% else %}
-    <div class="p-3 text-muted">
-      Milestones not set yet —
-      {% if role == 'PM' %}
-        <a href="{% url 'project_detail' project.project_id %}">set from project detail page</a>.
-      {% else %}
-        PM can set from the project detail page.
-      {% endif %}
-    </div>
-    {% endif %}
   </div>
-</div>
-{% endif %}
+  {% endif %}
 
-{# ── Panel 5: Project Documents (all roles) ──────────────────────────────── #}
+</div>{# end phase + milestones row #}
+
+{# ── 3. BOQ + Materials ───────────────────────────────────────────────────── #}
+<div class="row g-3 mb-3">
+
+  {% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
+  <div class="col-12 col-md-4">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small"><i data-lucide="file-text" class="lucide-icon me-1"></i>BOQ</span>
+        <div class="d-flex align-items-center gap-2">
+          {% if project.boq_status == 'Acknowledged' %}<span class="badge" style="background:var(--hz-green)">Acknowledged</span>
+          {% elif project.boq_status == 'Submitted' %}<span class="badge bg-primary">Submitted</span>
+          {% elif project.boq_status == 'Revision Requested' %}<span class="badge bg-warning text-dark">Rev. Req.</span>
+          {% elif project.boq_status == 'Draft' %}<span class="badge bg-secondary">Draft</span>
+          {% else %}<span class="text-muted small">—</span>{% endif %}
+          <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+                  type="button" data-bs-toggle="collapse"
+                  data-bs-target="#boqCollapse" aria-expanded="false">
+            <i class="bi bi-chevron-down collapse-chevron"></i>
+          </button>
+        </div>
+      </div>
+      <div class="collapse" id="boqCollapse">
+        <div class="card-body pt-2 pb-3 px-3">
+          {% if project.boq_status %}
+            {% if project.boq_last_event %}
+            <div class="text-muted small mb-2">
+              Last: {{ project.boq_last_event.reason|truncatechars:50 }}<br>
+              {{ project.boq_last_event.revised_at|date:"d M Y" }}
+              {% if project.boq_last_event.revised_by %}
+                · {{ project.boq_last_event.revised_by.user.get_full_name|default:project.boq_last_event.revised_by.user.username }}
+              {% endif %}
+            </div>
+            {% endif %}
+            {% if boq_revision_history %}
+              <div class="text-muted mb-1" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Revision History</div>
+              {% for rev in boq_revision_history %}
+              <div class="d-flex justify-content-between small border-bottom py-1">
+                <span class="text-truncate me-2" style="max-width:150px;">{{ rev.reason }}</span>
+                <span class="text-muted text-nowrap">{{ rev.revised_at|date:"d M Y" }}</span>
+              </div>
+              {% endfor %}
+            {% else %}
+              <p class="text-muted small mb-2">Version {{ project.boq.version }}. No revisions yet.</p>
+            {% endif %}
+            <a href="{{ project.boq_url }}" class="btn btn-outline-brand btn-sm w-100 mt-2">View full BOQ →</a>
+          {% else %}
+            <p class="text-muted small mb-0">BOQ not yet created.</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  {% if role == 'PM' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
+  <div class="col-12 {% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}col-md-8{% endif %}">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small"><i data-lucide="package" class="lucide-icon me-1"></i>Material Status</span>
+        <div class="d-flex align-items-center gap-1 flex-wrap">
+          {% if material_status_by_category %}
+            {% for cat in material_status_by_category %}
+              {% if cat.status == 'Received' %}
+                <span class="badge" style="background:var(--hz-green)" title="{{ cat.name }}">{{ cat.name|truncatechars:7 }}</span>
+              {% elif cat.status == 'Partial' %}
+                <span class="badge bg-warning text-dark" title="{{ cat.name }}">{{ cat.name|truncatechars:7 }}</span>
+              {% else %}
+                <span class="badge bg-danger" title="{{ cat.name }} — Not delivered">{{ cat.name|truncatechars:7 }}</span>
+              {% endif %}
+            {% endfor %}
+          {% else %}
+            {% for category, status in material_status.items %}
+              {% if status == 'Received' %}
+                <span class="badge" style="background:var(--hz-green)" title="{{ category }}">{{ category|truncatechars:7 }}</span>
+              {% elif status == 'Partial' %}
+                <span class="badge bg-warning text-dark" title="{{ category }}">{{ category|truncatechars:7 }}</span>
+              {% else %}
+                <span class="badge bg-danger" title="{{ category }} — Not delivered">{{ category|truncatechars:7 }}</span>
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          <button class="btn btn-link btn-sm p-0 text-muted block-toggle ms-1"
+                  type="button" data-bs-toggle="collapse"
+                  data-bs-target="#materialsCollapse" aria-expanded="false">
+            <i class="bi bi-chevron-down collapse-chevron"></i>
+          </button>
+        </div>
+      </div>
+      <div class="collapse" id="materialsCollapse">
+        <div class="card-body p-0">
+          {% if material_status_by_category %}
+          <div class="table-responsive">
+            <table class="table table-sm mb-0">
+              <thead class="table-light">
+                <tr>
+                  <th>Category</th>
+                  <th>Status</th>
+                  <th class="text-end">Received</th>
+                  <th class="text-end">Ordered</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for cat in material_status_by_category %}
+                <tr>
+                  <td class="fw-semibold small">{{ cat.name }}</td>
+                  <td>
+                    {% if cat.status == 'Received' %}
+                      <span class="small fw-semibold" style="color:var(--hz-green)">✓ Received</span>
+                    {% elif cat.status == 'Partial' %}
+                      <span class="text-warning small">⚠ Partial{% if cat.has_damage %} (damage){% endif %}</span>
+                    {% else %}
+                      <span class="text-danger small">✗ Pending</span>
+                    {% endif %}
+                  </td>
+                  <td class="text-end small text-muted">{{ cat.received_quantity }}</td>
+                  <td class="text-end small text-muted">{{ cat.ordered_quantity }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="text-center text-muted py-3 small">No delivery items recorded yet.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+</div>{# end BOQ + Materials row #}
+
+{# ── 4. Delivery Challans + Recent Activity ───────────────────────────────── #}
+<div class="row g-3 mb-4">
+
+  {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
+  <div class="col-12 col-md-6">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small">
+          <i data-lucide="truck" class="lucide-icon me-1"></i>Delivery Challans
+          {% if delivery_challans %}<span class="badge bg-secondary ms-1">{{ delivery_challans|length }}</span>{% endif %}
+        </span>
+        <div class="d-flex align-items-center gap-2">
+          {% if role == 'SCM' %}
+            <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm py-0">+ Add DC</a>
+          {% endif %}
+          <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+                  type="button" data-bs-toggle="collapse"
+                  data-bs-target="#dcCollapse" aria-expanded="false">
+            <i class="bi bi-chevron-down collapse-chevron"></i>
+          </button>
+        </div>
+      </div>
+      <div class="collapse" id="dcCollapse">
+        <div class="card-body p-0">
+          {% if delivery_challans %}
+          <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-light">
+                <tr><th>DC #</th><th>Vendor</th><th>Items</th><th>Status</th><th></th></tr>
+              </thead>
+              <tbody>
+                {% for dc in delivery_challans %}
+                <tr>
+                  <td>
+                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                       class="fw-semibold text-decoration-none small">{{ dc.dc_number }}</a>
+                    <div class="text-muted" style="font-size:.7rem;">{{ dc.dc_date|date:"d M Y" }}</div>
+                  </td>
+                  <td class="small text-muted">{{ dc.vendor.name|default:"—" }}</td>
+                  <td class="small text-muted">{{ dc.line_items_summary }}</td>
+                  <td>
+                    {% if dc.status == 'Expected' %}<span class="badge bg-secondary">Expected</span>
+                    {% elif dc.status == 'Partially Received' %}<span class="badge bg-warning text-dark">Partial</span>
+                    {% elif dc.status == 'Received' %}<span class="badge" style="background:var(--hz-green)">Received</span>
+                    {% elif dc.status == 'Rejected' %}<span class="badge bg-danger">Rejected</span>{% endif %}
+                  </td>
+                  <td>
+                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                       class="btn btn-outline-secondary btn-sm py-0" style="font-size:.72rem;">View</a>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="text-center text-muted py-4 small">
+            <i class="bi bi-truck fs-3 d-block mb-2"></i>No delivery challans yet.
+            {% if role == 'SCM' %}
+              <div class="mt-2">
+                <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm">+ Add First DC</a>
+              </div>
+            {% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="col-12 {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}col-md-6{% endif %}">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small"><i data-lucide="history" class="lucide-icon me-1"></i>Recent Activity</span>
+        {% if recent_activity|length > 3 %}
+        <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+                type="button" data-bs-toggle="collapse"
+                data-bs-target="#activityCollapse" aria-expanded="false">
+          <i class="bi bi-chevron-down collapse-chevron"></i>
+        </button>
+        {% endif %}
+      </div>
+      <div class="card-body p-0">
+        {% if recent_activity %}
+          {% for event in recent_activity|slice:":3" %}
+          <div class="px-3 py-2 border-bottom small">
+            <div class="d-flex justify-content-between gap-2">
+              <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
+              <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
+            </div>
+          </div>
+          {% endfor %}
+          {% if recent_activity|length > 3 %}
+          <div class="collapse" id="activityCollapse">
+            {% for event in recent_activity|slice:"3:" %}
+            <div class="px-3 py-2 border-bottom small">
+              <div class="d-flex justify-content-between gap-2">
+                <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
+                <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% else %}
+          <div class="text-center text-muted py-4 small">No activity recorded yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>{# end DC + Activity row #}
+
+{# ── 5. Project Documents ─────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
-    <span class="fw-semibold">Project Documents</span>
-    <button type="button" class="btn btn-primary btn-sm" id="ovDocUploadTrigger">
-      Upload Files
+    <span class="fw-semibold small"><i data-lucide="folder" class="lucide-icon me-1"></i>Project Documents</span>
+    <button type="button" class="btn btn-brand btn-sm" id="docUploadTrigger">
+      <i class="bi bi-upload me-1"></i>Upload
     </button>
   </div>
-
   <form method="post" enctype="multipart/form-data"
         action="{% url 'upload_project_document' project.project_id %}"
-        id="ovDocUploadForm">
+        id="docUploadForm">
     {% csrf_token %}
     <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
-    <input type="file" id="ovDocFileInput" name="files" multiple
-           accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
-           class="d-none">
+    <input type="file" id="docFileInput" name="files" multiple
+           accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" class="d-none">
   </form>
-
-  <div id="ovDocErrorBox" class="alert alert-danger mx-3 mt-3 d-none" role="alert"></div>
-
+  <div id="docErrorBox" class="alert alert-danger mx-3 mt-2 mb-0 py-2 d-none" role="alert"></div>
   <div class="card-body p-0">
     {% if documents %}
     <div class="table-responsive">
@@ -280,7 +548,7 @@
             <th>File Name</th>
             <th style="width:7rem;">Type</th>
             <th style="width:6rem;">Size</th>
-            <th style="width:11rem;">Uploaded By</th>
+            <th style="width:12rem;">Uploaded By</th>
             <th style="width:10rem;">Uploaded At</th>
             <th style="width:4rem;"></th>
           </tr>
@@ -288,34 +556,18 @@
         <tbody>
           {% for doc in documents %}
           <tr>
-            <td>
-              <a href="{{ doc.file_url }}" target="_blank" rel="noopener">{{ doc.file_name }}</a>
-            </td>
-            <td>
-              {% if doc.file_type == 'Photo' %}
-                <span class="badge bg-info text-dark">Photo</span>
-              {% else %}
-                <span class="badge bg-secondary">Document</span>
-              {% endif %}
-            </td>
+            <td><a href="{{ doc.file_url }}" target="_blank" rel="noopener" class="small">{{ doc.file_name }}</a></td>
+            <td>{% if doc.file_type == 'Photo' %}<span class="badge bg-info text-dark">Photo</span>{% else %}<span class="badge bg-secondary">Document</span>{% endif %}</td>
             <td class="text-muted small">{{ doc.file_size_kb }} KB</td>
-            <td class="text-muted small">
-              {% if doc.uploaded_by %}
-                {{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}
-              {% else %}—{% endif %}
-            </td>
+            <td class="text-muted small">{% if doc.uploaded_by %}{{ doc.uploaded_by.user.get_full_name|default:doc.uploaded_by.user.username }}{% else %}—{% endif %}</td>
             <td class="text-muted small">{{ doc.uploaded_at|date:"d M Y H:i" }}</td>
             <td>
               {% if doc.uploaded_by == user_profile or user_profile.role == 'Admin' %}
-              <form method="post"
-                    action="{% url 'delete_project_document' project.project_id doc.pk %}"
-                    class="d-inline"
-                    onsubmit="return confirm('Delete this file? It can be recovered within 90 days.')">
+              <form method="post" action="{% url 'delete_project_document' project.project_id doc.pk %}"
+                    class="d-inline" onsubmit="return confirm('Delete this file?')">
                 {% csrf_token %}
                 <input type="hidden" name="next" value="{% url 'project_overview' project.project_id %}">
-                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1" title="Delete">
-                  <i class="bi bi-trash"></i>
-                </button>
+                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1"><i class="bi bi-trash"></i></button>
               </form>
               {% endif %}
             </td>
@@ -325,249 +577,122 @@
       </table>
     </div>
     {% else %}
-    <div class="text-center text-muted py-4">
-      <i class="bi bi-file-earmark fs-3 d-block mb-2"></i>
-      No files uploaded yet.
+    <div class="text-center text-muted py-4 small">
+      <i class="bi bi-file-earmark fs-3 d-block mb-2"></i>No files uploaded yet.
     </div>
     {% endif %}
   </div>
 </div>
 
-{# ── Panel 6: Delivery Challans (SCM, PM, SE, Admin) ────────────────────── #}
-{% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <span class="fw-semibold">
-      Delivery Challans
-      {% if delivery_challans %}
-        <span class="badge bg-secondary ms-1">{{ delivery_challans|length }}</span>
-      {% endif %}
-    </span>
-    {# Add DC button — SCM only #}
-    {% if role == 'SCM' %}
-      <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-primary btn-sm">
-        + Add Delivery Challan
-      </a>
-    {% endif %}
-  </div>
-  <div class="card-body p-0">
-    {% if delivery_challans %}
-    <div class="table-responsive">
-      <table class="table table-sm table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>DC Number</th>
-            <th>Vendor</th>
-            <th>PO Reference</th>
-            <th>DC Date</th>
-            <th>Exp. Delivery</th>
-            <th>Status</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for dc in delivery_challans %}
-          <tr>
-            <td>
-              <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                 class="fw-semibold text-decoration-none">
-                {{ dc.dc_number }}
-              </a>
-            </td>
-            <td class="text-muted small">{{ dc.vendor.name|default:"—" }}</td>
-            <td class="text-muted small">{{ dc.po_number|default:"—" }}</td>
-            <td class="text-muted small">{{ dc.dc_date|date:"d M Y" }}</td>
-            <td class="text-muted small">{{ dc.expected_delivery_date|date:"d M Y"|default:"—" }}</td>
-            <td>
-              {% if dc.status == 'Expected' %}
-                <span class="badge bg-secondary">Expected</span>
-              {% elif dc.status == 'Partially Received' %}
-                <span class="badge bg-warning text-dark">Partially Received</span>
-              {% elif dc.status == 'Received' %}
-                <span class="badge bg-success">Received</span>
-              {% elif dc.status == 'Rejected' %}
-                <span class="badge bg-danger">Rejected</span>
-              {% endif %}
-            </td>
-            <td class="text-end">
-              <div class="d-flex gap-1 justify-content-end">
-                {# Confirm Receipt — SE only, Expected or Partially Received status only #}
-                {% if role == 'Site Engineer' and dc.status != 'Received' and dc.status != 'Rejected' %}
-                  <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                     class="btn btn-outline-success btn-sm py-0">
-                    Confirm Receipt
-                  </a>
+{# ── 6. Phase-wise task list ──────────────────────────────────────────────── #}
+{% if project.status == 'Draft' %}
+  <div class="alert alert-secondary small">Tasks will appear here after the project is activated.</div>
+{% else %}
+  {% for phase in phases %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center py-2">
+      <span class="fw-semibold small">Phase {{ phase.phase_order }}: {{ phase.phase_name }}</span>
+      <small class="text-muted">{{ phase.tasks.count }} task{{ phase.tasks.count|pluralize }}</small>
+    </div>
+    <div class="card-body p-0">
+      <div class="table-responsive">
+        <table class="table table-sm table-hover mb-0">
+          <thead class="table-light">
+            <tr>
+              <th style="width:2.5rem;">#</th>
+              <th>Task</th>
+              <th style="width:9rem;">Role</th>
+              <th style="width:13rem;">Assigned To</th>
+              <th style="width:12rem;">Status</th>
+              <th style="width:10rem;">Due Date</th>
+              <th style="width:8rem;">Completed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for task in phase.tasks.all %}
+            <tr data-task-id="{{ task.pk }}"
+                data-project-id="{{ project.project_id }}"
+                data-attachment-count="{{ task.active_attachment_count }}">
+              <td class="text-muted small">{{ task.task_order }}</td>
+              <td><a href="{% url 'task_detail' project.project_id task.pk %}"
+                     class="text-decoration-none text-body small">{{ task.task_name }}</a></td>
+              <td><span class="badge bg-light text-dark border" style="font-size:.72rem;">{{ task.assigned_role }}</span></td>
+              <td class="small">
+                {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
+                {% else %}<span class="text-muted">Unassigned</span>{% endif %}
+                {% if is_assigned_pm %}
+                  <button type="button"
+                          class="btn btn-outline-secondary ms-1 py-0 px-1"
+                          style="font-size:.68rem;"
+                          data-bs-toggle="modal" data-bs-target="#assignModal"
+                          data-task-id="{{ task.pk }}"
+                          data-task-name="{{ task.task_name }}"
+                          data-role="{{ task.assigned_role }}"
+                          data-current-pk="{% if task.assigned_to %}{{ task.assigned_to.pk }}{% endif %}"
+                          data-project-id="{{ project.project_id }}">Assign</button>
                 {% endif %}
-                {# Edit GRN — SCM only #}
-                {% if role == 'SCM' %}
-                  <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                     class="btn btn-outline-warning btn-sm py-0">
-                    Edit GRN
-                  </a>
+              </td>
+              <td>
+                {% if is_assigned_pm or user_role == task.assigned_role %}
+                  <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
+                    {% csrf_token %}
+                    <select name="status" onchange="handleTaskStatusChange(this)"
+                            class="form-select form-select-sm
+                              {% if task.status == 'Done' %}border-success text-success
+                              {% elif task.status == 'Blocked' %}border-danger text-danger
+                              {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}"
+                            style="font-size:.78rem;">
+                      {% for val, label in task_status_choices %}
+                        <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
+                      {% endfor %}
+                    </select>
+                  </form>
+                {% else %}
+                  {% if task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
+                  {% elif task.status == 'Blocked' %}<span class="badge bg-danger">Blocked</span>
+                  {% elif task.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
+                  {% else %}<span class="badge bg-secondary">Not Started</span>{% endif %}
                 {% endif %}
-                <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                   class="btn btn-outline-secondary btn-sm py-0">
-                  View
-                </a>
-              </div>
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <div class="text-center text-muted py-4">
-      <i class="bi bi-truck fs-3 d-block mb-2"></i>
-      No delivery challans yet.
-      {% if role == 'SCM' %}
-        <div class="mt-2">
-          <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-primary btn-sm">
-            + Add First Delivery Challan
-          </a>
-        </div>
-      {% endif %}
-    </div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-
-{# ── Panel 7: Material Status (PM, SCM, SE, Admin) ───────────────────────── #}
-{% if role == 'PM' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Material Status</div>
-  <div class="card-body p-0">
-    {% if delivery_challans %}
-    <div class="table-responsive">
-      <table class="table table-sm mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Category</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for category, status in material_status.items %}
-          <tr>
-            <td class="fw-semibold">{{ category }}</td>
-            <td>
-              {% if status == 'Received' %}
-                <span class="text-success fw-semibold">&#10003; Received</span>
-              {% elif status == 'Partial' %}
-                <span class="text-warning fw-semibold">&#9888; Partial</span>
-              {% else %}
-                <span class="text-muted">&#10007; Pending</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <div class="text-center text-muted py-4">
-      No deliveries recorded yet.
-    </div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-
-{# ── Panel 8: Recent activity (all roles) ────────────────────────────────── #}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Recent Activity</div>
-  <div class="card-body p-0">
-    {% if recent_activity %}
-    <ul class="list-group list-group-flush">
-      {% for event in recent_activity %}
-      <li class="list-group-item py-2">
-        {% if event.event_type == 'due_date' %}
-          <i class="bi bi-calendar-event text-primary me-1"></i>
-          <strong>{{ event.task.task_name }}</strong>
-          due date changed{% if event.old_date %} from {{ event.old_date }}{% endif %} → {{ event.new_date|default:"cleared" }}
-          {% if event.changed_by %}
-            <span class="text-muted small ms-1">by {{ event.changed_by.user.get_full_name|default:event.changed_by.user.username }}</span>
-          {% endif %}
-        {% elif event.event_type == 'boq' %}
-          <i class="bi bi-file-earmark-text text-warning me-1"></i>
-          <strong>BOQ</strong> {{ event.reason }}
-          {% if event.revised_by %}
-            <span class="text-muted small ms-1">by {{ event.revised_by.user.get_full_name|default:event.revised_by.user.username }}</span>
-          {% endif %}
-        {% endif %}
-        <span class="text-muted small float-end">{{ event.event_date|date:"d M Y H:i" }}</span>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="text-muted text-center py-3 mb-0">No recent activity recorded.</p>
-    {% endif %}
-  </div>
-</div>
-
-{# ── Receive modal (Finance role) ────────────────────────────────────────── #}
-{% if role == 'Finance' %}
-<div class="modal fade" id="receiveModal" tabindex="-1" aria-labelledby="receiveModalLabel" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="receiveModalLabel">Mark as Received</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+              </td>
+              <td>
+                {% if is_assigned_pm %}
+                  <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="date" name="due_date"
+                           value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
+                           class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+                           style="width:135px; font-size:.78rem;"
+                           onchange="this.form.submit()">
+                  </form>
+                {% else %}
+                  <span class="small {% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
+                {% endif %}
+              </td>
+              <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="7" class="text-center text-muted py-2 small">No tasks in this phase.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
-      <form id="receiveForm" method="post" action="">
-        {% csrf_token %}
-        <div class="modal-body">
-          <p id="receiveModalInfo" class="text-muted small mb-3"></p>
-          <div class="mb-3">
-            <label class="form-label fw-semibold">Amount Received (₹) <span class="text-danger">*</span></label>
-            <input type="number" name="amount_received" id="amountReceivedInput"
-                   class="form-control" step="0.01" min="0" required>
-          </div>
-          <div class="mb-2">
-            <label class="form-label">Variance Reason <span class="text-muted">(optional)</span></label>
-            <input type="text" name="variance_reason" class="form-control"
-                   placeholder="e.g. customer paid partial amount">
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-success">Mark as Received</button>
-        </div>
-      </form>
     </div>
   </div>
-</div>
-
-<script>
-document.getElementById('receiveModal').addEventListener('show.bs.modal', function (event) {
-  var btn         = event.relatedTarget;
-  var projectId   = btn.dataset.projectId;
-  var milestoneId = btn.dataset.milestonePk;
-  var name        = btn.dataset.milestoneName;
-  var amount      = btn.dataset.amount;
-
-  document.getElementById('receiveForm').action =
-    '/projects/' + projectId + '/milestone/' + milestoneId + '/receive/';
-  document.getElementById('receiveModalInfo').textContent =
-    name + ' — Agreed amount: ₹' + (amount ? parseFloat(amount).toLocaleString('en-IN') : 'not set');
-  document.getElementById('amountReceivedInput').value = '';
-});
-</script>
+  {% empty %}
+  <div class="alert alert-secondary small">No phases found.</div>
+  {% endfor %}
 {% endif %}
 
-{# ── Project Issues ────────────────────────────────────────────────────────── #}
+{# ── 7. Project Issues ─────────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
-    <span class="fw-semibold">
+    <span class="fw-semibold small">
       Project Issues
-      {% if project_issues %}
-        <span class="badge bg-secondary ms-1">{{ project_issues|length }}</span>
-      {% endif %}
+      {% if project_issues %}<span class="badge bg-secondary ms-1">{{ project_issues|length }}</span>{% endif %}
     </span>
     <button type="button" class="btn btn-outline-danger btn-sm"
-            data-bs-toggle="modal" data-bs-target="#raiseProjectIssueOvModal">
-      Raise Project Issue
+            data-bs-toggle="modal" data-bs-target="#raiseProjectIssueModal">
+      <i class="bi bi-flag me-1"></i>Raise Issue
     </button>
   </div>
   <div class="card-body p-0">
@@ -576,54 +701,34 @@ document.getElementById('receiveModal').addEventListener('show.bs.modal', functi
       <table class="table table-sm table-hover mb-0">
         <thead class="table-light">
           <tr>
-            <th>Severity</th>
-            <th>Title</th>
-            <th>Task</th>
-            <th>Status</th>
-            <th style="width:12rem;">Assigned To</th>
-            <th style="width:8rem;">Due Date</th>
-            <th style="width:8rem;">Raised</th>
+            <th>Severity</th><th>Title</th><th>Task</th><th>Status</th>
+            <th style="width:12rem;">Assigned To</th><th style="width:8rem;">Due</th><th style="width:8rem;">Raised</th>
           </tr>
         </thead>
         <tbody>
           {% for issue in project_issues %}
           <tr>
             <td>
-              {% if issue.severity == 'Critical' %}
-                <span class="badge bg-danger fw-bold">⚠ CRITICAL</span>
-              {% elif issue.severity == 'High' %}
-                <span class="badge bg-danger">High</span>
-              {% elif issue.severity == 'Medium' %}
-                <span class="badge bg-warning text-dark">Medium</span>
-              {% else %}
-                <span class="badge bg-secondary">Low</span>
-              {% endif %}
+              {% if issue.severity == 'Critical' %}<span class="badge bg-danger fw-bold">⚠ CRITICAL</span>
+              {% elif issue.severity == 'High' %}<span class="badge bg-danger">High</span>
+              {% elif issue.severity == 'Medium' %}<span class="badge bg-warning text-dark">Medium</span>
+              {% else %}<span class="badge bg-secondary">Low</span>{% endif %}
             </td>
-            <td><a href="{% url 'issue_detail' issue.pk %}">{{ issue.title }}</a></td>
+            <td><a href="{% url 'issue_detail' issue.pk %}" class="small">{{ issue.title }}</a></td>
             <td class="small text-muted">
               {% if issue.task %}
                 <a href="{% url 'task_detail' project.project_id issue.task.pk %}" class="text-decoration-none">{{ issue.task.task_name }}</a>
-              {% else %}
-                <span class="badge bg-light text-dark border">Project-level</span>
-              {% endif %}
+              {% else %}<span class="badge bg-light text-dark border">Project-level</span>{% endif %}
             </td>
             <td>
-              {% if issue.status == 'Open' %}
-                <span class="badge bg-secondary">Open</span>
-              {% elif issue.status == 'In Progress' %}
-                <span class="badge bg-primary">In Progress</span>
-              {% elif issue.status == 'Resolved' %}
-                <span class="badge bg-success">Resolved</span>
-              {% else %}
-                <span class="badge bg-dark">Closed</span>
-              {% endif %}
+              {% if issue.status == 'Open' %}<span class="badge bg-secondary">Open</span>
+              {% elif issue.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
+              {% elif issue.status == 'Resolved' %}<span class="badge" style="background:var(--hz-green)">Resolved</span>
+              {% else %}<span class="badge bg-dark">Closed</span>{% endif %}
             </td>
             <td class="small text-muted">
-              {% if issue.assigned_to %}
-                {{ issue.assigned_to.user.get_full_name|default:issue.assigned_to.user.username }}
-              {% else %}
-                <span class="badge bg-warning text-dark">Unassigned</span>
-              {% endif %}
+              {% if issue.assigned_to %}{{ issue.assigned_to.user.get_full_name|default:issue.assigned_to.user.username }}
+              {% else %}<span class="badge bg-warning text-dark">Unassigned</span>{% endif %}
             </td>
             <td class="small text-muted">{{ issue.due_date|default:"—" }}</td>
             <td class="small text-muted">{{ issue.raised_at|date:"d M Y" }}</td>
@@ -633,35 +738,63 @@ document.getElementById('receiveModal').addEventListener('show.bs.modal', functi
       </table>
     </div>
     {% else %}
-    <div class="text-center text-muted py-4">
-      <i class="bi bi-exclamation-circle fs-3 d-block mb-2"></i>
-      No project issues raised.
+    <div class="text-center text-muted py-4 small">
+      <i class="bi bi-exclamation-circle fs-3 d-block mb-2"></i>No project issues raised.
     </div>
     {% endif %}
   </div>
 </div>
 
-{# ── Raise Project Issue modal (overview page) ─────────────────────────────── #}
-<div class="modal fade" id="raiseProjectIssueOvModal" tabindex="-1"
-     aria-labelledby="raiseProjectIssueOvModalLabel" aria-hidden="true">
+{# ── Modals ────────────────────────────────────────────────────────────────── #}
+
+{% if role == 'Finance' %}
+<div class="modal fade" id="receiveModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Mark as Received</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="receiveForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p id="receiveModalInfo" class="text-muted small mb-3"></p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Amount Received (₹) <span class="text-danger">*</span></label>
+            <input type="number" name="amount_received" id="amountReceivedInput" class="form-control" step="0.01" min="0" required>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Variance Reason <span class="text-muted">(optional)</span></label>
+            <input type="text" name="variance_reason" class="form-control" placeholder="e.g. partial payment">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-brand">Mark Received</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="modal fade" id="raiseProjectIssueModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
       <form method="post" action="{% url 'create_project_issue' project.project_id %}">
         {% csrf_token %}
         <div class="modal-header">
-          <h5 class="modal-title" id="raiseProjectIssueOvModalLabel">Raise Project Issue</h5>
+          <h5 class="modal-title">Raise Project Issue</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
         </div>
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
-            <input type="text" name="title" class="form-control" required maxlength="200"
-                   placeholder="Brief description of the issue">
+            <input type="text" name="title" class="form-control" required maxlength="200">
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Description</label>
-            <textarea name="description" class="form-control" rows="3"
-                      placeholder="Optional detail…"></textarea>
+            <label class="form-label">Description</label>
+            <textarea name="description" class="form-control" rows="3"></textarea>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
@@ -673,18 +806,16 @@ document.getElementById('receiveModal').addEventListener('show.bs.modal', functi
             </select>
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Assign To</label>
+            <label class="form-label">Assign To</label>
             <select name="assigned_to" class="form-select">
               <option value="">— Unassigned —</option>
               {% for p in all_profiles %}
-              <option value="{{ p.pk }}">
-                {{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})
-              </option>
+              <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
               {% endfor %}
             </select>
           </div>
-          <div class="mb-3">
-            <label class="form-label fw-semibold">Due Date</label>
+          <div class="mb-1">
+            <label class="form-label">Due Date</label>
             <input type="date" name="due_date" class="form-control">
           </div>
         </div>
@@ -697,35 +828,179 @@ document.getElementById('receiveModal').addEventListener('show.bs.modal', functi
   </div>
 </div>
 
+{% if is_assigned_pm %}
+{{ candidates_by_role|json_script:"candidates-data" }}
+<div class="modal fade" id="assignModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Assign Task</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" id="assignForm">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p id="assignTaskName" class="fw-semibold mb-3"></p>
+          <label for="assignSelect" class="form-label">Assign to</label>
+          <select name="assigned_to" id="assignSelect" class="form-select">
+            <option value="">— Unassign —</option>
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-brand">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" action="" id="quickAttachForm" style="display:none;">
+  {% csrf_token %}
+  <input type="hidden" id="quickAttachNext" name="next" value="{% url 'project_overview' project.project_id %}">
+  <input type="file" id="quickAttachInput" name="files" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
+</form>
+<div class="modal fade" id="noAttachmentModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">No attachments on this task</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body small">This task has no files. Upload before closing, or close without attachment?</div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-outline-brand" id="noAttachUploadBtn">Upload File</button>
+        <button type="button" class="btn btn-brand" id="noAttachCloseBtn">Close Without Attachment</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Scripts ───────────────────────────────────────────────────────────────── #}
 <script>
 (function () {
-  var ALLOWED  = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
-  var MAX_SIZE = 20 * 1024 * 1024;
-  var trigger  = document.getElementById('ovDocUploadTrigger');
-  var input    = document.getElementById('ovDocFileInput');
-  var form     = document.getElementById('ovDocUploadForm');
-  var errBox   = document.getElementById('ovDocErrorBox');
-
-  if (!trigger) return;
-  trigger.addEventListener('click', function () { input.click(); });
-  input.addEventListener('change', function () {
-    var files  = Array.from(this.files);
-    var errors = [];
-    files.forEach(function (f) {
-      var ext = f.name.split('.').pop().toLowerCase();
-      if (ALLOWED.indexOf(ext) === -1) errors.push(f.name + ': unsupported type');
-      else if (f.size > MAX_SIZE) errors.push(f.name + ': exceeds 20 MB');
-    });
-    if (errors.length > 0) {
-      errBox.textContent = errors.join(' | ');
-      errBox.classList.remove('d-none');
-      input.value = '';
-      return;
+  /* Phase progress bars */
+  var phaseData = {{ phase_data_json }};
+  phaseData.forEach(function (ph) {
+    var bar  = document.getElementById('phase-bar-'  + ph.pk);
+    var stat = document.getElementById('phase-stat-' + ph.pk);
+    if (bar) {
+      bar.style.width = ph.pct + '%';
+      if      (ph.pct === 100) bar.style.background = 'var(--hz-green)';
+      else if (ph.pct >= 50)   bar.style.background = '#0d6efd';
+      else                     bar.style.background = '#ffc107';
     }
-    errBox.classList.add('d-none');
-    if (files.length > 0) form.submit();
+    if (stat) {
+      stat.textContent = ph.internal_done + '/' + ph.internal_total + ' done' +
+        (ph.ext_pending ? ' · ' + ph.ext_pending + ' ext. pending' : '');
+    }
+  });
+
+  /* Task status change */
+  window.handleTaskStatusChange = function (select) {
+    if (select.value === 'Blocked' && window.solarInterceptBlock) {
+      if (window.solarInterceptBlock(select)) return;
+    }
+    var row   = select.closest('tr');
+    var count = row ? parseInt(row.dataset.attachmentCount || '0', 10) : 1;
+    if (select.value === 'Done' && count === 0 && bsNoAttachModal) {
+      pendingStatusForm = select.form;
+      bsNoAttachModal.show();
+    } else {
+      select.form.submit();
+    }
+  };
+
+  var pendingStatusForm = null;
+  var bsNoAttachModal   = null;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var noAttachEl = document.getElementById('noAttachmentModal');
+    if (noAttachEl) {
+      bsNoAttachModal = new bootstrap.Modal(noAttachEl);
+      document.getElementById('noAttachUploadBtn').addEventListener('click', function () {
+        bsNoAttachModal.hide();
+        var row    = pendingStatusForm ? pendingStatusForm.closest('tr') : null;
+        var taskId = row ? row.dataset.taskId : null;
+        if (taskId) window.location.href = '/projects/{{ project.project_id }}/tasks/' + taskId + '/';
+      });
+      document.getElementById('noAttachCloseBtn').addEventListener('click', function () {
+        bsNoAttachModal.hide();
+        if (pendingStatusForm) pendingStatusForm.submit();
+      });
+      noAttachEl.addEventListener('hide.bs.modal', function () { pendingStatusForm = null; });
+    }
+
+    var assignModalEl = document.getElementById('assignModal');
+    if (assignModalEl) {
+      var dataEl     = document.getElementById('candidates-data');
+      var candidates = dataEl ? JSON.parse(dataEl.textContent) : {};
+      assignModalEl.addEventListener('show.bs.modal', function (e) {
+        var btn       = e.relatedTarget;
+        var taskId    = btn.dataset.taskId;
+        var taskName  = btn.dataset.taskName;
+        var role      = (btn.dataset.role || '').trim();
+        var currentPk = btn.dataset.currentPk;
+        var projId    = btn.dataset.projectId;
+        document.getElementById('assignTaskName').textContent = taskName;
+        document.getElementById('assignForm').action = '/projects/' + projId + '/tasks/' + taskId + '/assign/';
+        var sel = document.getElementById('assignSelect');
+        sel.innerHTML = '<option value="">— Unassign —</option>';
+        (candidates[role] || []).forEach(function (c) {
+          var opt = document.createElement('option');
+          opt.value = c.pk; opt.textContent = c.name;
+          if (String(c.pk) === String(currentPk)) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      });
+    }
+
+    var receiveModalEl = document.getElementById('receiveModal');
+    if (receiveModalEl) {
+      receiveModalEl.addEventListener('show.bs.modal', function (e) {
+        var btn = e.relatedTarget;
+        document.getElementById('receiveForm').action =
+          '/projects/' + btn.dataset.projectId + '/milestone/' + btn.dataset.milestonePk + '/receive/';
+        document.getElementById('receiveModalInfo').textContent =
+          btn.dataset.milestoneName + ' — Agreed: ₹' +
+          (btn.dataset.amount ? parseFloat(btn.dataset.amount).toLocaleString('en-IN') : 'TBD');
+        document.getElementById('amountReceivedInput').value = '';
+      });
+    }
+
+    var ALLOWED     = ['pdf','doc','docx','xls','xlsx','jpg','jpeg','png'];
+    var MAX_SIZE    = 20 * 1024 * 1024;
+    var docTrigger  = document.getElementById('docUploadTrigger');
+    var docInput    = document.getElementById('docFileInput');
+    var docForm     = document.getElementById('docUploadForm');
+    var docErrorBox = document.getElementById('docErrorBox');
+    if (docTrigger) {
+      docTrigger.addEventListener('click', function () { docInput.click(); });
+      docInput.addEventListener('change', function () {
+        var files  = Array.from(this.files);
+        var errors = [];
+        files.forEach(function (f) {
+          var ext = f.name.split('.').pop().toLowerCase();
+          if (ALLOWED.indexOf(ext) === -1) errors.push(f.name + ': unsupported type');
+          else if (f.size > MAX_SIZE)      errors.push(f.name + ': exceeds 20 MB');
+        });
+        if (errors.length) {
+          docErrorBox.textContent = errors.join(' | ');
+          docErrorBox.classList.remove('d-none');
+          docInput.value = '';
+          return;
+        }
+        docErrorBox.classList.add('d-none');
+        if (files.length) docForm.submit();
+      });
+    }
   });
 }());
 </script>
+
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script>lucide.createIcons();</script>
 
 {% endblock %}
