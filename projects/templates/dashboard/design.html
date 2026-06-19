@@ -1,187 +1,232 @@
 {% extends "base.html" %}
 {% block title %}Design Dashboard — SolarPMS{% endblock %}
 
-{% block content %}
-<h4 class="mb-4">Design Dashboard</h4>
+{% block extra_head %}
+{# Alpine.js — handles card expand/collapse local state only; no backend calls from Alpine #}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
 
-{# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.due_today > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.due_today }}</div>
-        <div class="small text-muted">Due Today</div>
+  .design-card-header { cursor: pointer; }
+  .design-card-header:hover { background: #f8f9fa !important; }
+
+  .design-chevron { transition: transform .2s ease; flex-shrink: 0; }
+
+  /* Urgency circle — mirrors SE/Finance pattern */
+  .design-urgency-circle {
+    width: 2.75rem; height: 2.75rem; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.05rem; flex-shrink: 0;
+  }
+  .design-urgency-circle.urgent { background: #dc3545; color: #fff; }
+  .design-urgency-circle.clear  { background: #1a7a4a; color: #fff; }
+
+  /* Status chips — shared across Design status, BOQ status, and the Revision flag */
+  .chip {
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .2rem .55rem; border-radius: 999px;
+    font-size: .78rem; font-weight: 600; line-height: 1.4;
+    white-space: nowrap;
+  }
+  .chip-green  { background: #d1fae5; color: #065f46; }
+  .chip-grey   { background: #e5e7eb; color: #374151; }
+  .chip-amber  { background: #fef3c7; color: #92400e; }
+  .chip-navy   { background: #dbeafe; color: #1e3a8a; }
+  .chip-red    { background: #fee2e2; color: #991b1b; }
+
+  .chip-dot {
+    width: .45rem; height: .45rem; border-radius: 50%; flex-shrink: 0;
+  }
+  .chip-dot-green  { background: #059669; }
+  .chip-dot-grey   { background: #9ca3af; }
+  .chip-dot-amber  { background: #d97706; }
+  .chip-dot-navy   { background: #1d4ed8; }
+  .chip-dot-red    { background: #dc2626; }
+
+  /* Summary strip numbers */
+  .design-stat-num { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{# ── Greeting ─────────────────────────────────────────────────────────────── #}
+<div class="mb-3">
+  <h5 class="mb-0 fw-semibold">
+    {% if design_first_name %}Welcome, {{ design_first_name }}!{% else %}Design Dashboard{% endif %}
+  </h5>
+  <p class="text-muted small mb-0">
+    {% if total_revisions == 0 %}
+      All clear — no BOQ revision requests pending.
+    {% else %}
+      {{ total_revisions }} BOQ revision request{{ total_revisions|pluralize }} need{{ total_revisions|pluralize:"s," }} your attention.
+    {% endif %}
+  </p>
+</div>
+
+{# ── Summary strip ────────────────────────────────────────────────────────── #}
+<div class="row g-2 mb-4">
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="design-stat-num {% if total_revisions > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ total_revisions }}
+        </div>
+        <div class="small text-muted mt-1">Revision Requests</div>
       </div>
     </div>
   </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold text-primary">{{ summary.in_progress }}</div>
-        <div class="small text-muted">In Progress</div>
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        {# Trigger 5: design_overdue hardcoded 0 — no SLA mechanism exists yet #}
+        <div class="design-stat-num {% if total_design_overdue > 0 %}text-warning{% else %}text-muted{% endif %}">
+          {{ total_design_overdue }}
+        </div>
+        <div class="small text-muted mt-1">Design Overdue</div>
       </div>
     </div>
   </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.pending > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.pending }}</div>
-        <div class="small text-muted">Pending</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.boq_revision_requested > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.boq_revision_requested }}</div>
-        <div class="small text-muted">Revision Requested</div>
+  <div class="col-12 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        {# Trigger 5: boq_overdue hardcoded 0 — no SLA mechanism exists yet #}
+        <div class="design-stat-num {% if total_boq_overdue > 0 %}text-warning{% else %}text-muted{% endif %}">
+          {{ total_boq_overdue }}
+        </div>
+        <div class="small text-muted mt-1">BOQ Overdue</div>
       </div>
     </div>
   </div>
 </div>
 
-{# ── Row 2+: Tasks grouped by project, two cards per row ─────────────── #}
-{% if tasks_qs %}
-  {% regroup tasks_qs by phase.project as project_groups %}
-  <div class="row g-3 mb-4">
-    {% for group in project_groups %}
-    <div class="col-12 col-md-6 mb-4">
-      <div class="card h-100">
-        <div class="card-header">
-          <span class="fw-bold">{{ group.grouper.project_id }}</span>
-          <span class="text-muted ms-2">{{ group.grouper.customer_name }}</span>
-          <a href="{% url 'project_overview' group.grouper.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">View</a>
-        </div>
-        <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-          <table class="table table-sm table-hover mb-0">
-            <thead class="table-light">
-              <tr>
-                <th>Task</th>
-                <th>Phase</th>
-                <th style="width:7rem;">Due Date</th>
-                <th style="width:8rem;">Status</th>
-                <th style="width:10rem;">Update</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for task in group.list %}
-              <tr>
-                <td>{{ task.task_name }}</td>
-                <td class="text-muted small">{{ task.phase.phase_name }}</td>
-                <td>
-                  {% if task.due_date %}
-                    {% if task.task_type == 'Internal' and task.due_date < today and task.status != 'Done' %}
-                      <span class="text-danger fw-semibold">{{ task.due_date }}</span>
-                    {% else %}
-                      {{ task.due_date }}
-                    {% endif %}
-                  {% else %}
-                    <span class="text-muted">—</span>
-                  {% endif %}
-                </td>
-                <td>
-                  {% if task.status == 'Done' %}
-                    <span class="badge bg-success">Done</span>
-                  {% elif task.status == 'Blocked' %}
-                    <span class="badge bg-danger">Blocked</span>
-                  {% elif task.status == 'In Progress' %}
-                    <span class="badge bg-primary">In Progress</span>
-                  {% else %}
-                    <span class="badge bg-secondary">Not Started</span>
-                  {% endif %}
-                </td>
-                <td>
-                  {% if task.status != 'Done' %}
-                  <form method="post" action="{% url 'task_status_update' group.grouper.project_id task.pk %}" class="d-inline">
-                    {% csrf_token %}
-                    <input type="hidden" name="next" value="{{ request.path }}">
-                    <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
-                      {% if task.status == 'Not Started' %}
-                        <option value="Not Started" selected>Not Started</option>
-                        <option value="In Progress">In Progress</option>
-                        <option value="Blocked">Blocked</option>
-                      {% elif task.status == 'In Progress' %}
-                        <option value="In Progress" selected>In Progress</option>
-                        <option value="Done">Done</option>
-                        <option value="Blocked">Blocked</option>
-                      {% elif task.status == 'Blocked' %}
-                        <option value="Blocked" selected>Blocked</option>
-                        <option value="In Progress">In Progress</option>
-                      {% endif %}
-                    </select>
-                  </form>
-                  {% else %}
-                    <span class="text-muted small">Completed</span>
-                  {% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-    {% endfor %}
-  </div>
-{% else %}
-<div class="card shadow-sm mb-4">
+{# ── Empty state ──────────────────────────────────────────────────────────── #}
+{% if not project_rows %}
+<div class="card shadow-sm border-0">
   <div class="card-body text-center py-5 text-muted">
-    No projects assigned to you yet.
+    No active projects assigned to you right now.
   </div>
 </div>
 {% endif %}
 
-{# ── BOQ Status section ───────────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-12">
-    <div class="card shadow-sm">
-      <div class="card-header fw-semibold">BOQ Status</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        <table class="table table-sm table-hover mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Project ID</th>
-              <th>Customer</th>
-              <th style="width:12rem;">BOQ Status</th>
-              <th style="width:8rem;">View</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for proj in assigned_projects %}
-            <tr>
-              <td class="fw-semibold align-middle">{{ proj.project_id }}</td>
-              <td class="text-muted small align-middle">{{ proj.customer_name }}</td>
-              <td class="align-middle">
-                {% if proj.boq_status == 'Draft' %}
-                  <span class="badge bg-secondary">Draft</span>
-                {% elif proj.boq_status == 'Submitted' %}
-                  <span class="badge bg-primary">Submitted</span>
-                {% elif proj.boq_status == 'Acknowledged' %}
-                  <span class="badge bg-success">Acknowledged</span>
-                {% elif proj.boq_status == 'Revision Requested' %}
-                  <span class="badge bg-warning text-dark">Revision Requested</span>
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td class="align-middle">
-                {% if proj.boq_url %}
-                  <a href="{{ proj.boq_url }}" class="text-decoration-none">View BOQ →</a>
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-            </tr>
-            {% empty %}
-            <tr>
-              <td colspan="4" class="text-center text-muted py-3">No projects assigned to you yet.</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+{# ── Project cards — one per active/in-progress project ──────────────────── #}
+{# Sorted most-urgent-first by view (revision_requested projects first, then all-clear) #}
+{% for p in project_rows %}
+<div x-data="{ expanded: false }" class="card mb-2 shadow-sm border-0">
+
+  {# ── Collapsed header (always visible) ──────────────────────────────────── #}
+  <div @click="expanded = !expanded"
+       class="design-card-header card-header bg-white d-flex align-items-center gap-3 py-2 px-3"
+       style="border-radius: inherit; border-bottom-color: transparent;">
+
+    {# Urgency circle: red count when attention needed, green check when all clear #}
+    {% if p.urgency_count > 0 %}
+    <div class="design-urgency-circle urgent">{{ p.urgency_count }}</div>
+    {% else %}
+    <div class="design-urgency-circle clear">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
     </div>
+    {% endif %}
+
+    {# Customer name + project ID #}
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold text-truncate">{{ p.customer_name }}</div>
+      <div class="small text-muted">{{ p.project_id }}</div>
+    </div>
+
+    {# Revision Requested badge — shown in header only when true #}
+    {% if p.revision_requested %}
+    <span class="chip chip-red d-none d-sm-inline">
+      <span class="chip-dot chip-dot-red"></span>Revision Req.
+    </span>
+    {% endif %}
+
+    {# Delayed / On-time badge #}
+    {% if p.is_delayed %}
+    <span class="badge bg-danger">Delayed {{ p.delay_days }}d</span>
+    {% else %}
+    <span class="badge bg-success">On time</span>
+    {% endif %}
+
+    {# Chevron rotates on expand #}
+    <svg class="design-chevron" :style="expanded ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
   </div>
-</div>
+
+  {# ── Expanded body ───────────────────────────────────────────────────────── #}
+  <div x-show="expanded" x-cloak class="card-body pt-2 pb-3">
+
+    {# ── Status chips ────────────────────────────────────────────────────────── #}
+    <div class="d-flex flex-wrap gap-2 mb-3">
+
+      {# Design Status chip — Trigger 2: derived from BOQ status (no dedicated field) #}
+      {% if p.design_status == 'submitted' %}
+      <span class="chip chip-green">
+        <span class="chip-dot chip-dot-green"></span>Design: Submitted
+      </span>
+      {% elif p.design_overdue %}
+      {# Trigger 5: design_overdue is always False for now — this branch reserved for when SLA lands #}
+      <span class="chip chip-amber">
+        <span class="chip-dot chip-dot-amber"></span>Design: Overdue
+      </span>
+      {% else %}
+      <span class="chip chip-grey">
+        <span class="chip-dot chip-dot-grey"></span>Design: Pending
+      </span>
+      {% endif %}
+
+      {# BOQ Status chip — Trigger 3: 4 actual values, not 3 as originally assumed #}
+      {% if p.boq_status == 'Acknowledged' %}
+      <span class="chip chip-green">
+        <span class="chip-dot chip-dot-green"></span>BOQ: Acknowledged
+      </span>
+      {% elif p.boq_status == 'Submitted' %}
+      <span class="chip chip-navy">
+        <span class="chip-dot chip-dot-navy"></span>BOQ: Submitted
+      </span>
+      {% elif p.boq_status == 'Revision Requested' %}
+      {# When revision requested, BOQ chip shows amber to signal Design's action needed #}
+      <span class="chip chip-amber">
+        <span class="chip-dot chip-dot-amber"></span>BOQ: Needs Revision
+      </span>
+      {% else %}
+      {# Draft — BOQ not yet submitted #}
+      <span class="chip chip-grey">
+        <span class="chip-dot chip-dot-grey"></span>BOQ: Draft
+      </span>
+      {% endif %}
+
+      {% if p.revision_requested %}
+      <span class="chip chip-red">
+        <span class="chip-dot chip-dot-red"></span>Revision Requested
+      </span>
+      {% endif %}
+
+    </div>{# /chips #}
+
+    {# ── View Project button ─────────────────────────────────────────────────── #}
+    <div class="d-flex gap-2">
+      <a href="{% url 'project_overview' p.project_id %}"
+         class="btn btn-sm text-white"
+         style="background-color:#1a7a4a;">
+        View Project
+      </a>
+      <a href="{% url 'boq_detail' p.project_id %}"
+         class="btn btn-sm btn-outline-secondary">
+        View BOQ
+      </a>
+    </div>
+
+  </div>{# /expanded body #}
+</div>{# /card #}
+{% endfor %}
 
 {% endblock %}
