@@ -319,9 +319,12 @@
           </a>
         </div>
         <div class="col-6 col-sm-3">
-          <a href="{{ row.finance_url }}" class="btn btn-outline-secondary btn-sm w-100">
-            <i class="bi bi-receipt me-1"></i>Remind Finance
-          </a>
+          <button type="button"
+                  class="btn btn-outline-warning btn-sm w-100 js-scm-raise-payment"
+                  data-project-id="{{ row.project.project_id }}"
+                  data-raise-url="{{ row.payment_request_url }}">
+            <i class="bi bi-receipt me-1"></i>Raise Payment Request
+          </button>
         </div>
         <div class="col-6 col-sm-3">
           <button type="button"
@@ -446,13 +449,96 @@
   </div>
 </div>
 
+{# ── Raise Payment Request modal ─────────────────────────────────────────── #}
+<div class="modal fade" id="scmRaisePaymentModal" tabindex="-1"
+     aria-labelledby="scmRaisePaymentLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <form id="scmRaisePaymentForm" method="post" action="" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div class="modal-header" style="background:#f0a829;">
+          <h5 class="modal-title fw-semibold" id="scmRaisePaymentLabel">
+            <i class="bi bi-receipt me-2"></i>Raise Payment Request
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3" id="scmRaisePaymentProjectLabel"></p>
+
+          <div class="row g-3">
+            <div class="col-12 col-md-6">
+              <label class="form-label fw-semibold">Vendor <span class="text-danger">*</span></label>
+              <select name="vendor_id" id="scmPaymentVendorSelect" class="form-select" required>
+                <option value="">— Select Vendor —</option>
+              </select>
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label fw-semibold">BOQ Item <span class="text-danger">*</span></label>
+              <select name="boq_item_id" id="scmPaymentBoqSelect" class="form-select" required>
+                <option value="">— Select BOQ Item —</option>
+              </select>
+              <div class="form-text text-muted" style="font-size:.72rem;">Grouped by category, scoped to this project.</div>
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label fw-semibold">Invoice Number <span class="text-danger">*</span></label>
+              <input type="text" name="invoice_number" class="form-control" required maxlength="100"
+                     placeholder="e.g. INV-2025-0042">
+            </div>
+            <div class="col-12 col-md-6">
+              <label class="form-label fw-semibold">Amount (₹) <span class="text-danger">*</span></label>
+              <input type="number" name="amount" class="form-control" required min="0" step="0.01"
+                     placeholder="0.00">
+            </div>
+            <div class="col-12">
+              <label class="form-label fw-semibold">
+                Invoice Document <span class="text-danger">*</span>
+                <span class="text-muted fw-normal" style="font-size:.78rem;">(PDF, Word, Excel, JPG, PNG — max 20 MB)</span>
+              </label>
+              <input type="file" name="invoice_document" class="form-control" required
+                     accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png"
+                     id="scmPaymentFileInput">
+              <div class="form-text text-danger fw-semibold" style="font-size:.75rem;">
+                Invoice copy is required to raise a payment request.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Note <span class="text-muted fw-normal">(optional)</span></label>
+              <textarea name="note" class="form-control" rows="2"
+                        placeholder="Any additional context (not linked to a delivery challan)…"></textarea>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm fw-semibold"
+                  style="background:#f0a829; border-color:#f0a829; color:#000;"
+                  id="scmPaymentSubmitBtn">
+            <i class="bi bi-send me-1"></i>Submit Request
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <script>
 (function () {
-  var modal = null;
+  var issueModal   = null;
+  var paymentModal = null;
+
+  /* BOQ items and vendor list injected as JSON by the view */
+  var boqByProject = {{ boq_items_by_project|safe }};
+  var allVendors   = {{ scm_vendors|safe }};
+
+  /* Category display order — matches the standard 37-item BOQ template */
+  var CAT_ORDER = ['Solar Modules', 'Structure', 'Inverter', 'BOS', 'Other'];
 
   document.addEventListener('DOMContentLoaded', function () {
-    modal = new bootstrap.Modal(document.getElementById('scmRaiseIssueModal'));
+    issueModal   = new bootstrap.Modal(document.getElementById('scmRaiseIssueModal'));
+    paymentModal = new bootstrap.Modal(document.getElementById('scmRaisePaymentModal'));
 
+    /* ── Raise Issue button ───────────────────────────────── */
     document.querySelectorAll('.js-scm-raise-issue').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var projectId = this.dataset.projectId;
@@ -462,8 +548,70 @@
         document.getElementById('scmRaiseIssueForm').querySelector('[name="title"]').value = '';
         document.getElementById('scmRaiseIssueForm').querySelector('[name="description"]').value = '';
         document.getElementById('scmRaiseIssueForm').querySelector('[name="severity"]').value = 'Medium';
-        modal.show();
+        issueModal.show();
       });
+    });
+
+    /* ── Raise Payment Request button ────────────────────── */
+    document.querySelectorAll('.js-scm-raise-payment').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var projectId = this.dataset.projectId;
+        var raiseUrl  = this.dataset.raiseUrl;
+
+        /* Set form action to the specific project's raise URL */
+        document.getElementById('scmRaisePaymentForm').action = raiseUrl;
+        document.getElementById('scmRaisePaymentProjectLabel').textContent = 'Project: ' + projectId;
+
+        /* Reset form fields */
+        document.getElementById('scmRaisePaymentForm').reset();
+
+        /* Populate vendor dropdown */
+        var vendorSel = document.getElementById('scmPaymentVendorSelect');
+        vendorSel.innerHTML = '<option value="">— Select Vendor —</option>';
+        allVendors.forEach(function (v) {
+          var opt       = document.createElement('option');
+          opt.value     = v.id;
+          opt.textContent = v.name;
+          vendorSel.appendChild(opt);
+        });
+
+        /* Populate BOQ item dropdown — grouped by category, scoped to this project */
+        var boqSel = document.getElementById('scmPaymentBoqSelect');
+        boqSel.innerHTML = '<option value="">— Select BOQ Item —</option>';
+        var projectItems = boqByProject[projectId] || {};
+        CAT_ORDER.forEach(function (cat) {
+          var items = projectItems[cat];
+          if (!items || !items.length) return;
+          var grp   = document.createElement('optgroup');
+          grp.label = cat;
+          items.forEach(function (item) {
+            var opt       = document.createElement('option');
+            opt.value     = item.id;
+            opt.textContent = item.serial_no + '. ' + item.description;
+            grp.appendChild(opt);
+          });
+          boqSel.appendChild(grp);
+        });
+        if (!boqSel.querySelector('optgroup')) {
+          var empty = document.createElement('option');
+          empty.disabled    = true;
+          empty.textContent = 'No BOQ items found for this project';
+          boqSel.appendChild(empty);
+        }
+
+        /* Re-enable submit button if previously disabled */
+        document.getElementById('scmPaymentSubmitBtn').disabled = false;
+        document.getElementById('scmPaymentSubmitBtn').textContent = 'Submit Request';
+
+        paymentModal.show();
+      });
+    });
+
+    /* Prevent double-submit on payment form */
+    document.getElementById('scmRaisePaymentForm').addEventListener('submit', function () {
+      var btn = document.getElementById('scmPaymentSubmitBtn');
+      btn.disabled    = true;
+      btn.textContent = 'Submitting…';
     });
   });
 }());

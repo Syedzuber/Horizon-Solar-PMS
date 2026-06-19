@@ -12,13 +12,13 @@
   <div class="d-flex gap-2 align-items-center">
     {% if boq %}
       {% if boq.status == 'Draft' %}
-        <span class="badge bg-secondary fs-6 fw-normal">Draft</span>
+        <span class="badge fw-normal fs-6" style="background:#6b7280; color:#fff;">Draft</span>
       {% elif boq.status == 'Submitted' %}
-        <span class="badge bg-primary fs-6 fw-normal">Submitted</span>
+        <span class="badge fw-normal fs-6" style="background:#243a6b; color:#fff;">Submitted</span>
       {% elif boq.status == 'Acknowledged' %}
-        <span class="badge bg-success fs-6 fw-normal">Acknowledged</span>
+        <span class="badge fw-normal fs-6" style="background:#1a7a4a; color:#fff;">Acknowledged</span>
       {% elif boq.status == 'Revision Requested' %}
-        <span class="badge bg-warning text-dark fs-6 fw-normal">Revision Requested</span>
+        <span class="badge fw-normal fs-6" style="background:#f0a829; color:#212529;">Revision Requested</span>
       {% endif %}
       <span class="text-muted small">v{{ boq.version }}</span>
       <a href="{% url 'boq_history' project.project_id %}" class="btn btn-outline-secondary btn-sm">History</a>
@@ -250,9 +250,10 @@
   {% if role == 'Design' %}
     {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
     <button type="submit" form="saveDesignForm" name="action" value="save_design"
-            class="btn btn-secondary">Save Draft</button>
+            class="btn btn-outline-secondary">Save Draft</button>
     <button type="submit" form="saveDesignForm" name="action" value="submit_design"
-            class="btn btn-primary"
+            class="btn text-white"
+            style="background:#1a7a4a;"
             onclick="return confirm('Submit this BOQ to SCM for review?')">
       {% if boq.status == 'Acknowledged' %}Revise &amp; Resubmit{% else %}Submit to SCM{% endif %}
     </button>
@@ -261,11 +262,12 @@
   {% elif role == 'SCM' %}
     {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
     <button type="submit" form="saveSCMForm" name="action" value="save_scm"
-            class="btn btn-secondary">Save</button>
+            class="btn btn-outline-secondary">Save</button>
     {% endif %}
     {% if boq.status == 'Submitted' %}
     <button type="submit" form="saveSCMForm" name="action" value="acknowledge_scm"
-            class="btn btn-success"
+            class="btn text-white"
+            style="background:#1a7a4a;"
             onclick="return confirm('Acknowledge this BOQ? Current ordered quantities and vendors will be saved.')">
       Acknowledge
     </button>
@@ -273,7 +275,9 @@
 
   {% elif role == 'PM' %}
     {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
-    <a href="{% url 'boq_request_revision' project.project_id %}" class="btn btn-warning">
+    <a href="{% url 'boq_request_revision' project.project_id %}"
+       class="btn text-dark"
+       style="background:#f0a829;">
       Request Revision
     </a>
     {% endif %}

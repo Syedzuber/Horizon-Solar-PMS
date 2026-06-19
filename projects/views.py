@@ -24,6 +24,7 @@ from .models import (
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
+    PaymentRequest,
 )
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
@@ -516,142 +517,211 @@ def dashboard_site_engineer(request):
 @login_required
 @role_required(['Design'])
 def dashboard_design(request):
-    """
-    Design dashboard: task counts and BOQ revision requests for projects
-    where this user is assigned_design. Access: Design only.
-    """
-    design_profile  = request.user.profile
-    project_filter  = {
-        'assigned_role': Task.DESIGN,
-        'phase__project__assigned_design': design_profile,
-        'phase__project__status__in': ['Active', 'In Progress'],
-    }
+    """Design dashboard. One card per assigned project, combined urgency circle. Design role only."""
+    today          = date.today()
+    design_profile = request.user.profile
 
-    try:
-        due_today = Task.objects.filter(**project_filter).filter(
-            due_date=date.today(), due_date__isnull=False,
-            status__in=['Not Started', 'In Progress'],
-        ).count()
+    # Trigger 1: assigned_design FK confirmed on Project model.
+    # Prefetch BOQ for each project — avoids N+1 when reading boq.status in loop.
+    projects_qs = (
+        Project.objects.filter(
+            assigned_design=design_profile,
+            status__in=['Active', 'In Progress'],
+        )
+        .prefetch_related('boq')
+        .order_by('project_id')
+    )
 
-        in_progress = Task.objects.filter(**project_filter).filter(
-            status='In Progress',
-        ).count()
+    # Summary totals — single query, scoped to this Design user's portfolio
+    total_revisions = BOQ.objects.filter(
+        project__assigned_design=design_profile,
+        project__status__in=['Active', 'In Progress'],
+        status='Revision Requested',
+    ).count()
 
-        pending = Task.objects.filter(**project_filter).filter(
-            status='Not Started',
-        ).count()
+    # Trigger 5: no SLA/due-date mechanism exists for Design or BOQ submission.
+    # total_design_overdue and total_boq_overdue hardcoded to 0 until Zuber
+    # defines explicit thresholds in Claude Chat (same pattern as SCM aging thresholds).
+    total_design_overdue = 0
+    total_boq_overdue    = 0
 
-        tasks_qs = Task.objects.filter(**project_filter).filter(
-            due_date__isnull=False,
-        ).select_related('phase__project').order_by(
-            'phase__project__project_id', 'phase__phase_order', 'task_order',
+    project_rows = []
+    for project in projects_qs:
+        # Trigger 4: is_delayed — same view-computed logic as PM/SE/Finance dashboards
+        is_delayed = bool(
+            project.target_commissioning_date
+            and project.target_commissioning_date < today
+        )
+        delay_days = (
+            (today - project.target_commissioning_date).days
+            if is_delayed else None
         )
 
-        boq_revision_requested = BOQ.objects.filter(
-            status='Revision Requested',
-            project__assigned_design=design_profile,
-        ).count()
+        # Trigger 3: BOQ status has 4 values — Draft / Submitted / Acknowledged /
+        # Revision Requested. No BOQ at all is treated as Draft (not yet started).
+        try:
+            boq_status = project.boq.status  # Draft/Submitted/Acknowledged/Revision Requested
+        except BOQ.DoesNotExist:
+            boq_status = 'Draft'
 
-        assigned_projects = list(
-            Project.objects.filter(
-                assigned_design=design_profile,
-                status__in=['Active', 'In Progress'],
-            ).order_by('project_id')
+        # Trigger 2: design_status derived from BOQ — 'submitted' when Design has
+        # delivered a BOQ (Submitted or Acknowledged); 'pending' otherwise.
+        design_status = 'submitted' if boq_status in ('Submitted', 'Acknowledged') else 'pending'
+
+        # Trigger 4: revision_requested is a BOQ status value, not a separate model/flag.
+        revision_requested = (boq_status == 'Revision Requested')
+
+        # Trigger 5: overdue flags hardcoded False — no SLA/due-date mechanism exists
+        # for Design or BOQ submission. Wire to real SLA logic once thresholds are
+        # defined in Claude Chat. Status chips still display correctly without this.
+        design_overdue = False  # TODO: wire to real SLA once thresholds defined
+        boq_overdue    = False  # TODO: wire to real SLA once thresholds defined
+
+        # Urgency formula: overdue items + explicit revision flag.
+        # With both overdue flags False today, only revision_requested counts.
+        urgency_count = (
+            (1 if (design_status == 'pending' and design_overdue) else 0) +
+            (1 if (boq_status not in ('Submitted', 'Acknowledged') and boq_overdue) else 0) +
+            (1 if revision_requested else 0)
         )
-        for proj in assigned_projects:
-            try:
-                proj.boq_status = proj.boq.status
-                proj.boq_url    = f'/projects/{proj.project_id}/boq/'
-            except Exception:
-                proj.boq_status = None
-                proj.boq_url    = None
 
-    except Exception:
-        due_today = in_progress = pending = boq_revision_requested = 0
-        tasks_qs          = Task.objects.none()
-        assigned_projects = []
+        project_rows.append({
+            'project':             project,
+            'customer_name':       project.customer_name,
+            'project_id':          project.project_id,
+            'is_delayed':          is_delayed,
+            'delay_days':          delay_days,
+            'design_status':       design_status,
+            'design_overdue':      design_overdue,
+            'boq_status':          boq_status,
+            'boq_overdue':         boq_overdue,
+            'revision_requested':  revision_requested,
+            'urgency_count':       urgency_count,
+        })
 
-    seven_days_ago = date.today() - timedelta(days=7)
-    due_date_changes = DueDateChangeLog.objects.filter(
-        task__assigned_role=Task.DESIGN,
-        task__phase__project__assigned_design=design_profile,
-        task__phase__project__status__in=['Active', 'In Progress'],
-        changed_at__date__gte=seven_days_ago,
-    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+    # Most-urgent-first; all-clear projects sink to bottom
+    project_rows.sort(key=lambda r: r['urgency_count'], reverse=True)
 
     return render(request, 'dashboard/design.html', {
-        'summary': {
-            'due_today':              due_today,
-            'in_progress':            in_progress,
-            'pending':                pending,
-            'boq_revision_requested': boq_revision_requested,
-        },
-        'tasks_qs':          tasks_qs,
-        'assigned_projects': assigned_projects,
-        'due_date_changes':  due_date_changes,
-        'today':             date.today(),
-        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        'design_first_name':   request.user.first_name,
+        'total_revisions':     total_revisions,
+        'total_design_overdue': total_design_overdue,
+        'total_boq_overdue':   total_boq_overdue,
+        'project_rows':        project_rows,
+        'today':               today,
     })
 
 
 @login_required
 @role_required(['Finance'])
 def dashboard_finance(request):
-    """
-    Finance dashboard: aggregate payment totals and per-project M1/M2/M3 table.
-    Access: Finance only.
-    """
-    today = timezone.now().date()
+    """Finance dashboard. One card per project, milestone + payment-request status. Finance role only."""
+    today = date.today()
 
-    total_pending = PaymentMilestone.objects.filter(
-        status='Pending'
-    ).aggregate(s=Sum('amount'))['s'] or 0
-
-    total_invoiced = PaymentMilestone.objects.filter(
-        status='Invoiced'
-    ).aggregate(s=Sum('amount'))['s'] or 0
-
-    total_received = PaymentMilestone.objects.filter(
-        status='Received'
-    ).aggregate(s=Sum('amount_received'))['s'] or 0
-
-    overdue_count = PaymentMilestone.objects.filter(
-        status='Pending',
-        due_date__lt=today,
-        due_date__isnull=False,
-    ).count()
-
-    projects = (
+    # Trigger 3: Finance is department-level — no assigned_finance field on Project.
+    # Show all active/in-progress projects across the portfolio.
+    # Trigger 1: milestones live on PaymentMilestone model (related_name='milestones').
+    # Trigger 2: PaymentRequest exists — prefetch pending requests only, with vendor name.
+    projects_qs = (
         Project.objects.filter(status__in=['Active', 'In Progress'])
-        .prefetch_related('milestones')
-        .select_related('assigned_pm__user')
+        .prefetch_related(
+            'milestones',
+            Prefetch(
+                'payment_requests',
+                queryset=PaymentRequest.objects.filter(
+                    status=PaymentRequest.PENDING,
+                ).select_related('vendor'),
+                to_attr='pending_payment_requests',
+            ),
+        )
         .order_by('project_id')
     )
 
-    projects_with_milestones = []
-    for project in projects:
-        milestone_map = {'M1': None, 'M2': None, 'M3': None}
+    # Top-level summary counts — single query each, scoped to active portfolio
+    total_milestones_awaiting = PaymentMilestone.objects.filter(
+        project__status__in=['Active', 'In Progress'],
+        status=PaymentMilestone.PENDING,
+    ).count()
+
+    # Trigger 2: PaymentRequest confirmed present — query real pending count and value
+    total_payment_requests = PaymentRequest.objects.filter(
+        project__status__in=['Active', 'In Progress'],
+        status=PaymentRequest.PENDING,
+    ).count()
+
+    total_payment_request_value = (
+        PaymentRequest.objects.filter(
+            project__status__in=['Active', 'In Progress'],
+            status=PaymentRequest.PENDING,
+        ).aggregate(s=Sum('amount'))['s'] or 0
+    )
+
+    project_rows = []
+    for project in projects_qs:
+        # Trigger 4: is_delayed — view-computed, same logic as PM/SE dashboards
+        is_delayed = bool(
+            project.target_commissioning_date
+            and project.target_commissioning_date < today
+        )
+        delay_days = (
+            (today - project.target_commissioning_date).days
+            if is_delayed else None
+        )
+
+        # Trigger 1: build milestone list from PaymentMilestone rows
+        milestones = []
+        milestones_awaiting = 0
         for m in project.milestones.all():
-            if m.milestone_name in milestone_map:
-                if m.amount is not None and m.amount_received is not None:
-                    m.variance = m.amount - m.amount_received
-                else:
-                    m.variance = None
-                milestone_map[m.milestone_name] = m
-        projects_with_milestones.append({
-            'project': project,
-            'M1': milestone_map['M1'],
-            'M2': milestone_map['M2'],
-            'M3': milestone_map['M3'],
+            # Show the most recent relevant date: received > invoiced > due
+            display_date = m.received_date or m.invoice_date or m.due_date
+            milestones.append({
+                'label':        m.milestone_name,
+                'description':  m.milestone_description,
+                'amount':       m.amount,
+                'status':       m.status,
+                'date':         display_date,
+            })
+            if m.status == PaymentMilestone.PENDING:
+                milestones_awaiting += 1
+
+        # Trigger 2: pending payment requests from prefetch (no extra query)
+        payment_requests = []
+        for pr in project.pending_payment_requests:
+            payment_requests.append({
+                'pk':             pr.pk,
+                'vendor':         pr.vendor.name if pr.vendor else '—',
+                'amount':         pr.amount,
+                'invoice_number': pr.invoice_number,
+                'requested_date': pr.requested_date,
+            })
+
+        # urgency drives card sort order: most attention needed rises to top
+        urgency = milestones_awaiting + len(payment_requests)
+
+        project_rows.append({
+            'project':                project,
+            'customer_name':          project.customer_name,
+            'project_id':             project.project_id,
+            'is_delayed':             is_delayed,
+            'delay_days':             delay_days,
+            'milestones':             milestones,
+            'milestones_total':       len(milestones),
+            'milestones_awaiting':    milestones_awaiting,
+            'payment_requests':       payment_requests,
+            'payment_requests_count': len(payment_requests),
+            'urgency':                urgency,
         })
 
+    # Most-urgent-first; all-clear projects sink to bottom
+    project_rows.sort(key=lambda r: r['urgency'], reverse=True)
+
     return render(request, 'dashboard/finance.html', {
-        'total_pending':            total_pending,
-        'total_invoiced':           total_invoiced,
-        'total_received':           total_received,
-        'overdue_count':            overdue_count,
-        'projects_with_milestones': projects_with_milestones,
-        'today':                    today,
+        'finance_first_name':          request.user.first_name,
+        'total_milestones_awaiting':   total_milestones_awaiting,
+        'total_payment_requests':      total_payment_requests,
+        'total_payment_request_value': total_payment_request_value,
+        'project_rows':                project_rows,
+        'today':                       today,
     })
 
 
@@ -874,6 +944,8 @@ def dashboard_scm(request):
         boq_url               = f'/projects/{pid}/boq/'
         schedule_delivery_url = f'/projects/{pid}/delivery-challans/create/'
         finance_url           = f'/projects/{pid}/overview/'
+        # payment_request_url: POST endpoint for SCM to raise a payment request against a vendor invoice
+        payment_request_url   = f'/projects/{pid}/payment-requests/raise/'
         # raise_issue_url: scope to the most recent pending DC if one exists
         latest_pending_dc = (pending_challans[0] if pending_challans
                              else (challans[0] if challans else None))
@@ -901,6 +973,7 @@ def dashboard_scm(request):
             'boq_url':             boq_url,
             'schedule_delivery_url': schedule_delivery_url,
             'finance_url':         finance_url,
+            'payment_request_url': payment_request_url,
             'raise_issue_url':     raise_issue_url,
         })
 
@@ -915,16 +988,43 @@ def dashboard_scm(request):
         .order_by('-raised_at')[:20]
     )
 
+    # BOQ items per project — grouped by category for the raise-payment-request dropdown.
+    # Loaded here (not per-request in the modal) so the template can render them as JSON
+    # once and the JS layer filters by project without extra round-trips.
+    # BOQItem FK chain: BOQItem.boq → BOQ (OneToOne) → Project.
+    all_boq_items = (
+        BOQItem.objects.filter(boq__project__project_id__in=active_project_ids)
+        .select_related('boq__project')
+        .order_by('boq__project__project_id', 'serial_no')
+    )
+    boq_items_by_project = {}
+    for item in all_boq_items:
+        pid = item.boq.project.project_id
+        cat = item.category
+        boq_items_by_project.setdefault(pid, {}).setdefault(cat, []).append({
+            'id':          item.pk,
+            'serial_no':   item.serial_no,
+            'description': item.description,
+        })
+
+    # All active vendors for the raise-payment-request vendor dropdown
+    scm_vendors = list(
+        Vendor.objects.filter(is_active=True).order_by('name')
+        .values('id', 'name')
+    )
+
     return render(request, 'dashboard/scm.html', {
         'summary': {
             'boq_awaiting':     boq_awaiting,
             'deliveries_today': deliveries_today,
             'overdue':          overdue,
         },
-        'project_rows':      project_rows,
-        'delivery_issues':   delivery_issues,
-        'today':             today,
-        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        'project_rows':         project_rows,
+        'delivery_issues':      delivery_issues,
+        'today':                today,
+        'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        'boq_items_by_project': json.dumps(boq_items_by_project),
+        'scm_vendors':          json.dumps(scm_vendors),
     })
 
 
@@ -2126,76 +2226,300 @@ def milestone_create(request, project_id):
 
 
 # ---------------------------------------------------------------------------
+# Payment Requests
+# ---------------------------------------------------------------------------
+
+@login_required
+def raise_payment_request(request, project_id):
+    """SCM raises a payment request against a vendor invoice. SCM role only. POST."""
+    if request.method != 'POST':
+        return redirect('dashboard_scm')
+
+    # Raising a payment request is SCM-only — other roles get 403
+    profile = request.user.profile
+    if profile.role != 'SCM':
+        return HttpResponse(status=403)
+
+    project = get_object_or_404(Project, project_id=project_id)
+
+    vendor_id      = request.POST.get('vendor_id', '').strip()
+    boq_item_id    = request.POST.get('boq_item_id', '').strip()
+    invoice_number = request.POST.get('invoice_number', '').strip()
+    amount_str     = request.POST.get('amount', '').strip()
+    note           = request.POST.get('note', '').strip()
+    invoice_file   = request.FILES.get('invoice_document')
+
+    # Server-side validation — invoice_document is mandatory (hard business rule, not a UI nicety)
+    errors = []
+    if not vendor_id:
+        errors.append('Vendor is required.')
+    if not boq_item_id:
+        errors.append('BOQ item is required.')
+    if not invoice_number:
+        errors.append('Invoice number is required.')
+    if not amount_str:
+        errors.append('Amount is required.')
+    if not invoice_file:
+        errors.append('Invoice document is required.')
+
+    if errors:
+        messages.error(request, ' '.join(errors))
+        return redirect('dashboard_scm')
+
+    try:
+        amount = Decimal(amount_str)
+    except InvalidOperation:
+        messages.error(request, 'Invalid amount.')
+        return redirect('dashboard_scm')
+
+    vendor = get_object_or_404(Vendor, pk=vendor_id, is_active=True)
+
+    # BOQ item dropdown scoped to THIS project only — never show another
+    # project's BOQ items in the raise-request form.
+    boq_item = get_object_or_404(BOQItem, pk=boq_item_id, boq__project=project)
+
+    # Upload invoice document to Supabase — reuse same pattern as ProjectDocument/TaskAttachment
+    try:
+        from .supabase_storage import get_supabase_client
+        client = get_supabase_client()
+    except (ValueError, ImportError) as exc:
+        messages.error(request, f"Upload service unavailable. ({exc})")
+        return redirect('dashboard_scm')
+
+    supabase_path = (
+        f"payment-requests/{project.project_id}/"
+        f"{_uuid.uuid4()}_{invoice_file.name}"
+    )
+    try:
+        _validate_and_upload(invoice_file, client, settings.SUPABASE_BUCKET, supabase_path)
+        invoice_document_url = (
+            f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+            f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+        )
+    except ValueError as exc:
+        messages.error(request, f"Invoice upload failed: {exc}")
+        return redirect('dashboard_scm')
+
+    pr = PaymentRequest.objects.create(
+        project=project,
+        vendor=vendor,
+        boq_item=boq_item,
+        invoice_number=invoice_number,
+        invoice_document_name=invoice_file.name,
+        invoice_document_url=invoice_document_url,
+        invoice_document_path=supabase_path,
+        amount=amount,
+        note=note,
+        requested_by=request.user,
+        status=PaymentRequest.PENDING,
+    )
+
+    # Confirm actions are state-mutating — log them so they surface in the
+    # project's Recent Activity panel for audit trail.
+    log_activity(
+        project, profile,
+        f"Raised payment request to {vendor.name}: ₹{amount} (Invoice {invoice_number})",
+        entity_type='PaymentRequest', entity_id=pr.pk,
+    )
+    messages.success(request, f'Payment request raised for ₹{amount} to {vendor.name}.')
+    return redirect('dashboard_scm')
+
+
+@login_required
+def confirm_payment_request(request, project_id, request_id):
+    """Finance confirms a vendor payment has been made. Finance role only. POST."""
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    # Confirming payment is Finance-only — SCM and PM see status read-only
+    profile = request.user.profile
+    if profile.role != 'Finance':
+        return HttpResponse(status=403)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    pr = get_object_or_404(PaymentRequest, pk=request_id, project=project, status=PaymentRequest.PENDING)
+
+    payment_date_str  = request.POST.get('payment_date', '').strip()
+    payment_reference = request.POST.get('payment_reference', '').strip()
+
+    if not payment_date_str:
+        messages.error(request, 'Payment date is required.')
+        return redirect('project_overview', project_id=project_id)
+
+    try:
+        payment_date = date.fromisoformat(payment_date_str)
+    except ValueError:
+        messages.error(request, 'Invalid payment date.')
+        return redirect('project_overview', project_id=project_id)
+
+    pr.status            = PaymentRequest.CONFIRMED
+    pr.payment_date      = payment_date
+    pr.payment_reference = payment_reference
+    pr.confirmed_by      = request.user
+    pr.save(update_fields=['status', 'payment_date', 'payment_reference', 'confirmed_by'])
+
+    # Confirm actions are state-mutating — log them so they surface in the
+    # project's Recent Activity panel for audit trail.
+    log_activity(
+        project, profile,
+        f"Confirmed payment to {pr.vendor}: ₹{pr.amount} (Ref: {payment_reference or '—'})",
+        entity_type='PaymentRequest', entity_id=pr.pk,
+    )
+    messages.success(request, f'Payment of ₹{pr.amount} to {pr.vendor} confirmed.')
+    return redirect('project_overview', project_id=project_id)
+
+
+# ---------------------------------------------------------------------------
 # BD dashboard
 # ---------------------------------------------------------------------------
 
 @login_required
-@role_required(['BD'])
+@role_required(['BD'])  # UserProfile.role = 'BD'; confirmed by Trigger 2
 def dashboard_bd(request):
-    """
-    BD dashboard: high-level portfolio summary — contracted value, commissioned
-    projects this month, pending payments, and per-project milestone status.
-    Access: BD only.
-    """
-    today = timezone.now().date()
+    """Sales & BD dashboard. One card per project, combined urgency circle. BD role only."""
+    today = date.today()
 
-    active_qs = Project.objects.filter(status__in=['Active', 'In Progress'])
-
-    commissioned_this_month = Project.objects.filter(
-        status='Commissioned',
-        commissioned_at__isnull=False,
-        commissioned_at__month=today.month,
-        commissioned_at__year=today.year,
-    ).count()
-
-    total_contracted = active_qs.aggregate(s=Sum('contract_value'))['s'] or 0
-
-    pending_payments = PaymentMilestone.objects.filter(
-        status__in=['Pending', 'Invoiced']
-    ).count()
-
-    projects_list = (
-        active_qs
-        .prefetch_related('milestones')
-        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
+    # Trigger 4: BD is department-level — no assigned_bd field on Project model confirmed.
+    # BD sees all active/in-progress projects, same as Finance and SCM dashboards.
+    #
+    # Trigger 3: milestones on PaymentMilestone (related_name='milestones') —
+    # prefetch reused exactly from Finance dashboard session; same pattern, same model.
+    #
+    # Trigger 6: annotate open issue count using Open+InProgress — same definition as
+    # PM dashboard's open_issue_count. "Blocked issue" is BD's term for the same thing;
+    # there is no separate "blocked" status on Issue.
+    projects_qs = (
+        Project.objects.filter(status__in=['Active', 'In Progress'])
         .prefetch_related(
-            Prefetch('phases',
-                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+            'milestones',
+            Prefetch(
+                'phases',
+                queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'),
+            ),
+        )
+        .select_related('assigned_pm__user')
+        .annotate(
+            open_issue_count=Count(
+                'issues',
+                filter=Q(issues__status__in=[Issue.OPEN, Issue.IN_PROGRESS]),
+                distinct=True,
+            )
         )
         .order_by('project_id')
     )
 
-    projects_with_data = []
-    for project in projects_list:
-        milestone_map = {'M1': None, 'M2': None, 'M3': None}
-        for m in project.milestones.all():
-            if m.milestone_name in milestone_map:
-                milestone_map[m.milestone_name] = m
+    # Trigger 5: No orc_status field on Project model — derived from BD task completion.
+    # Task with assigned_role='BD / Sales' in "Sales & Documentation" phase represents ORC.
+    # One batch query across all active projects avoids N+1 in the loop below.
+    orc_done_project_ids = set(
+        Task.objects.filter(
+            phase__project__status__in=['Active', 'In Progress'],
+            assigned_role=Task.BD,  # = 'BD / Sales'
+            status=Task.DONE,
+        ).values_list('phase__project_id', flat=True).distinct()
+    )
 
-        current_phase = (
-            project.phases
-            .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
-            .order_by('phase_order').first()
-            or project.phases.order_by('-phase_order').first()
+    project_rows = []
+    for project in projects_qs:
+        # is_delayed: same view-computed logic as PM/SE/Finance/Design dashboards
+        is_delayed = bool(
+            project.target_commissioning_date
+            and project.target_commissioning_date < today
+        )
+        delay_days = (
+            (today - project.target_commissioning_date).days
+            if is_delayed else None
         )
 
-        projects_with_data.append({
-            'project':       project,
-            'M1':            milestone_map['M1'],
-            'M2':            milestone_map['M2'],
-            'M3':            milestone_map['M3'],
-            'current_phase': current_phase,
+        # Current phase: first phase with an incomplete task; uses prefetched data — no extra query
+        current_phase_name = None
+        for phase in project.phases.all():
+            for task in phase.tasks.all():
+                if task.status != Task.DONE:
+                    current_phase_name = phase.phase_name
+                    break
+            if current_phase_name:
+                break
+
+        # Trigger 3: milestone summary — same prefetch as Finance dashboard session.
+        # milestones_awaiting = 'Invoiced' status: Finance has invoiced, BD nudges client for receipt.
+        # (Finance's milestones_awaiting = 'Pending'; BD's perspective is post-invoice.)
+        milestones_total    = 0
+        milestones_received = 0
+        milestones_awaiting = 0
+        for m in project.milestones.all():
+            milestones_total += 1
+            if m.status == PaymentMilestone.RECEIVED:
+                milestones_received += 1
+            elif m.status == PaymentMilestone.INVOICED:
+                # Invoice sent to client; BD follows up for payment receipt
+                milestones_awaiting += 1
+
+        # Trigger 6: annotated open_issue_count = Open or In Progress — same as PM/SE dashboards
+        blocked_issue_count = project.open_issue_count
+
+        # Trigger 5: ORC derived from BD task completion — no orc_status field on Project.
+        # orc_overdue hardcoded False — no SLA threshold defined; same pattern as Design dashboard.
+        orc_status  = 'uploaded' if project.pk in orc_done_project_ids else 'pending'
+        orc_overdue = False  # TODO: wire to real SLA once thresholds are defined in Claude Chat
+
+        # Urgency formula from spec: blocked issues + invoiced-not-received milestones + overdue ORC
+        urgency_count = (
+            blocked_issue_count
+            + milestones_awaiting
+            + (1 if orc_status == 'pending' and orc_overdue else 0)
+        )
+
+        # Precedence: Blocked > Delayed > On-time, computed server-side.
+        # Blocked overrides Delayed even when both are true — worse state wins.
+        # Confirmed in Claude Chat, 19-June session.
+        if blocked_issue_count > 0:
+            status_badge = 'blocked'
+        elif is_delayed:
+            status_badge = 'delayed'
+        else:
+            status_badge = 'on_time'
+
+        pm_name = None
+        if project.assigned_pm:
+            # Trigger 7: assigned_pm FK → UserProfile; full name with username fallback
+            pm_name = (
+                project.assigned_pm.user.get_full_name()
+                or project.assigned_pm.user.username
+            )
+
+        project_rows.append({
+            'project':             project,
+            'project_id':          project.project_id,
+            'customer_name':       project.customer_name,
+            'phase':               current_phase_name,
+            'pm_name':             pm_name,
+            'is_delayed':          is_delayed,
+            'delay_days':          delay_days,
+            'orc_status':          orc_status,
+            'orc_overdue':         orc_overdue,
+            'milestones_total':    milestones_total,
+            'milestones_received': milestones_received,
+            'milestones_awaiting': milestones_awaiting,
+            'blocked_issue_count': blocked_issue_count,
+            'urgency_count':       urgency_count,
+            'status_badge':        status_badge,
         })
 
+    # Most-urgent-first; all-clear projects sink to bottom
+    project_rows.sort(key=lambda r: r['urgency_count'], reverse=True)
+
+    # Top-level summary — derived from per-project data, no extra queries
+    total_blocked_projects    = sum(1 for r in project_rows if r['blocked_issue_count'] > 0)
+    total_orc_overdue         = sum(1 for r in project_rows if r['orc_overdue'])
+    total_milestones_awaiting = sum(r['milestones_awaiting'] for r in project_rows)
+
     return render(request, 'dashboard/bd.html', {
-        'summary': {
-            'active_projects':         active_qs.count(),
-            'commissioned_this_month': commissioned_this_month,
-            'total_contracted':        total_contracted,
-            'pending_payments':        pending_payments,
-        },
-        'projects_with_data': projects_with_data,
-        'today':              today,
+        'bd_first_name':             request.user.first_name,
+        'project_rows':              project_rows,
+        'total_blocked_projects':    total_blocked_projects,
+        'total_orc_overdue':         total_orc_overdue,
+        'total_milestones_awaiting': total_milestones_awaiting,
     })
 
 
@@ -2446,6 +2770,16 @@ def project_overview(request, project_id):
     _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
+    # Payment requests for this project — Finance sees confirm actions, PM sees read-only
+    # The queryset is shared; template role-gates control which actions are rendered.
+    payment_requests = []
+    if role in ('Finance', 'PM', 'SCM', 'Admin'):
+        payment_requests = list(
+            PaymentRequest.objects.filter(project=project)
+            .select_related('vendor', 'boq_item', 'requested_by', 'confirmed_by')
+            .order_by('-requested_date')
+        )
+
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
         'milestones':                  milestones,
@@ -2472,6 +2806,8 @@ def project_overview(request, project_id):
         'candidates_by_role':          candidates_by_role,
         'boq_revision_history':        boq_revision_history,
         'today':                       date.today(),
+        'payment_requests':            payment_requests,
+        'user_dashboard_url':          get_user_dashboard(request.user),
     })
 
 

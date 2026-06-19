@@ -58,7 +58,11 @@
         <a href="{% url 'project_timeline' project.project_id %}" class="btn btn-outline-secondary btn-sm">
           <i class="bi bi-calendar3 me-1"></i>Timeline
         </a>
+        {% if role == 'PM' or role == 'Admin' or role == 'CEO' %}
         <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
+        {% else %}
+        <a href="{{ user_dashboard_url }}" class="btn btn-outline-secondary btn-sm">← Dashboard</a>
+        {% endif %}
       </div>
     </div>
 
@@ -522,10 +526,121 @@
 
 </div>{# end DC + Activity row #}
 
+{# ── 4b. Invoice Confirmation (Finance action / PM + SCM read-only) ────────── #}
+{# Red/orange = cash out (payment requests) — distinct from green/gold milestones (cash in) #}
+{% if role == 'Finance' or role == 'PM' or role == 'SCM' or role == 'Admin' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center"
+       style="background:#fff3cd; border-bottom:2px solid #f0a829;">
+    <span class="fw-semibold small">
+      <i class="bi bi-receipt me-1" style="color:#f0a829;"></i>
+      Payment Requests
+    </span>
+    <div class="d-flex align-items-center gap-2">
+      {% with pending_count=payment_requests|length %}
+      {% if pending_count > 0 %}
+        <span class="badge" style="background:#f0a829; color:#000;">{{ pending_count }}</span>
+      {% endif %}
+      {% endwith %}
+    </div>
+  </div>
+  <div class="card-body p-0">
+    {% if payment_requests %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Vendor</th>
+            <th>BOQ Item</th>
+            <th>Invoice #</th>
+            <th class="text-end">Amount (₹)</th>
+            <th>Document</th>
+            <th style="width:8rem;">Raised</th>
+            <th style="width:9rem;">Status</th>
+            {% if role == 'Finance' %}<th style="width:7rem;">Action</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for pr in payment_requests %}
+          <tr>
+            <td class="fw-semibold small">{{ pr.vendor.name|default:"—" }}</td>
+            <td class="small text-muted" style="max-width:160px;">
+              {% if pr.boq_item %}
+                <span title="{{ pr.boq_item.description }}">
+                  {{ pr.boq_item.serial_no }}. {{ pr.boq_item.description|truncatechars:40 }}
+                </span>
+                <div style="font-size:.68rem;" class="text-muted">{{ pr.boq_item.category }}</div>
+              {% else %}—{% endif %}
+            </td>
+            <td class="small">{{ pr.invoice_number }}</td>
+            <td class="text-end fw-semibold small">₹{{ pr.amount|floatformat:0 }}</td>
+            <td class="small">
+              <a href="{{ pr.invoice_document_url }}" target="_blank" rel="noopener"
+                 class="text-decoration-none text-muted" title="{{ pr.invoice_document_name }}">
+                <i class="bi bi-file-earmark-arrow-down me-1"></i>{{ pr.invoice_document_name|truncatechars:20 }}
+              </a>
+            </td>
+            <td class="small text-muted">{{ pr.requested_date|date:"d M Y" }}</td>
+            <td>
+              {% if pr.status == 'pending' %}
+                <span class="badge" style="background:#f0a829; color:#000;">Pending</span>
+              {% else %}
+                <span class="badge" style="background:var(--hz-green)">Confirmed</span>
+                {% if pr.payment_date %}
+                  <div class="text-muted" style="font-size:.68rem;">{{ pr.payment_date|date:"d M Y" }}</div>
+                {% endif %}
+                {% if pr.payment_reference %}
+                  <div class="text-muted" style="font-size:.68rem;">Ref: {{ pr.payment_reference }}</div>
+                {% endif %}
+              {% endif %}
+            </td>
+            {% if role == 'Finance' %}
+            <td>
+              {% if pr.status == 'pending' %}
+              {# Confirm action is Finance-only — state-mutating, logged for audit trail #}
+              <button type="button"
+                      class="btn btn-sm fw-semibold js-confirm-payment"
+                      style="background:#1a7a4a; color:#fff; font-size:.72rem;"
+                      data-pr-id="{{ pr.pk }}"
+                      data-vendor="{{ pr.vendor.name|default:'' }}"
+                      data-amount="{{ pr.amount }}"
+                      data-confirm-url="{% url 'confirm_payment_request' project.project_id pr.pk %}">
+                Confirm
+              </button>
+              {% else %}
+              <span class="text-muted small">Done</span>
+              {% endif %}
+            </td>
+            {% endif %}
+          </tr>
+          {% if pr.note %}
+          <tr>
+            <td colspan="{% if role == 'Finance' %}8{% else %}7{% endif %}"
+                class="text-muted small py-1 px-3" style="background:#fffdf5; border-top:none;">
+              <i class="bi bi-chat-text me-1"></i>Note: {{ pr.note }}
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="text-center text-muted py-4 small">
+      <i class="bi bi-receipt fs-3 d-block mb-2" style="color:#f0a829;"></i>
+      No payment requests for this project.
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── 5. Project Documents ─────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
     <span class="fw-semibold small"><i data-lucide="folder" class="lucide-icon me-1"></i>Project Documents</span>
+    {# Finance sees documents read-only — upload is not part of Finance's workflow #}
+    {% if role != 'Finance' %}
     <form method="post" enctype="multipart/form-data"
           action="{% url 'upload_project_document' project.project_id %}"
           id="docUploadForm" class="d-inline">
@@ -537,6 +652,7 @@
         <i class="bi bi-upload me-1"></i>Upload
       </label>
     </form>
+    {% endif %}
   </div>
   <div id="docErrorBox" class="alert alert-danger mx-3 mt-2 mb-0 py-2 d-none" role="alert"></div>
   <div class="card-body">
@@ -648,7 +764,8 @@
                 {% endif %}
               </td>
               <td>
-                {% if is_assigned_pm or user_task_role == task.assigned_role %}
+                {# Finance sees task list read-only — no status controls on this page for Finance #}
+                {% if role != 'Finance' and is_assigned_pm or role != 'Finance' and user_task_role == task.assigned_role %}
                   <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <select name="status" onchange="handleTaskStatusChange(this)"
@@ -671,7 +788,8 @@
                 {% endif %}
               </td>
               <td>
-                {% if is_assigned_pm %}
+                {# Finance sees due dates read-only — no date editing on this page for Finance #}
+                {% if is_assigned_pm and role != 'Finance' %}
                   <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <input type="date" name="due_date"
@@ -706,10 +824,13 @@
       Project Issues
       {% if project_issues %}<span class="badge bg-secondary ms-1">{{ project_issues|length }}</span>{% endif %}
     </span>
+    {# Finance sees issues read-only — raising issues is not part of Finance's workflow here #}
+    {% if role != 'Finance' %}
     <button type="button" class="btn btn-outline-danger btn-sm"
             data-bs-toggle="modal" data-bs-target="#raiseProjectIssueModal">
       <i class="bi bi-flag me-1"></i>Raise Issue
     </button>
+    {% endif %}
   </div>
   <div class="card-body p-0">
     {% if project_issues %}
@@ -787,6 +908,46 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-brand">Mark Received</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{# Confirm Payment modal — Finance only; mirrors Receive modal pattern #}
+<div class="modal fade" id="confirmPaymentModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#fff3cd; border-bottom:2px solid #f0a829;">
+        <h5 class="modal-title fw-semibold">
+          <i class="bi bi-check-circle me-2" style="color:#1a7a4a;"></i>Confirm Payment
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="confirmPaymentForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p id="confirmPaymentInfo" class="text-muted small mb-3"></p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Payment Date <span class="text-danger">*</span></label>
+            <input type="date" name="payment_date" id="confirmPaymentDateInput"
+                   class="form-control" required>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">Payment Reference
+              <span class="text-muted fw-normal">(UTR / cheque no. — optional)</span>
+            </label>
+            <input type="text" name="payment_reference" class="form-control"
+                   placeholder="e.g. UTR-20250619-001">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm fw-semibold" id="confirmPaymentSubmitBtn"
+                  style="background:#1a7a4a; color:#fff;">
+            <i class="bi bi-check-circle me-1"></i>Confirm Payment
+          </button>
         </div>
       </form>
     </div>
@@ -1071,6 +1232,34 @@
           btn.dataset.milestoneName + ' — Agreed: ₹' +
           (btn.dataset.amount ? parseFloat(btn.dataset.amount).toLocaleString('en-IN') : 'TBD');
         document.getElementById('amountReceivedInput').value = '';
+      });
+    }
+
+    /* Finance confirm payment modal — imperative (avoids relatedTarget mobile issues) */
+    var confirmPaymentModalEl = document.getElementById('confirmPaymentModal');
+    if (confirmPaymentModalEl) {
+      document.querySelectorAll('.js-confirm-payment').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var vendor     = this.dataset.vendor;
+          var amount     = parseFloat(this.dataset.amount).toLocaleString('en-IN');
+          var confirmUrl = this.dataset.confirmUrl;
+
+          document.getElementById('confirmPaymentForm').action = confirmUrl;
+          document.getElementById('confirmPaymentInfo').textContent =
+            'Confirming payment to ' + vendor + ' — Amount: ₹' + amount;
+          document.getElementById('confirmPaymentDateInput').value = '';
+          document.getElementById('confirmPaymentForm').querySelector('[name="payment_reference"]').value = '';
+          document.getElementById('confirmPaymentSubmitBtn').disabled    = false;
+          document.getElementById('confirmPaymentSubmitBtn').textContent = 'Confirm Payment';
+
+          bootstrap.Modal.getOrCreateInstance(confirmPaymentModalEl).show();
+        });
+      });
+
+      document.getElementById('confirmPaymentForm').addEventListener('submit', function () {
+        var btn      = document.getElementById('confirmPaymentSubmitBtn');
+        btn.disabled = true;
+        btn.textContent = 'Confirming…';
       });
     }
 

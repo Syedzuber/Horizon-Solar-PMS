@@ -76,6 +76,16 @@ urlpatterns = [
     path('projects/<str:project_id>/overview/', views.project_overview, name='project_overview'),
 
     # ---------------------------------------------------------------------------
+    # Payment Requests — SCM raises, Finance confirms, PM/SCM/Finance view
+    # ---------------------------------------------------------------------------
+    # Raise payment request — SCM role only
+    path('projects/<str:project_id>/payment-requests/raise/',
+         views.raise_payment_request, name='raise_payment_request'),
+    # Confirm payment request — Finance role only
+    path('projects/<str:project_id>/payment-requests/<int:request_id>/confirm/',
+         views.confirm_payment_request, name='confirm_payment_request'),
+
+    # ---------------------------------------------------------------------------
     # Zoho CRM Webhook — unauthenticated, token-validated
     # ---------------------------------------------------------------------------
     path('webhooks/zoho/deal-closed/', views.zoho_deal_closed_webhook, name='zoho_webhook'),

@@ -913,3 +913,63 @@ def log_activity(project, actor, action, entity_type='', entity_id=None):
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"ActivityLog failed: {e}")
+
+
+class PaymentRequest(models.Model):
+    """A vendor payment request raised by SCM, confirmed by Finance, visible to PM. No edit/cancel by design."""
+
+    PENDING   = 'pending'
+    CONFIRMED = 'confirmed'
+    STATUS_CHOICES = [
+        (PENDING,   'Pending'),
+        (CONFIRMED, 'Confirmed'),
+    ]
+
+    project  = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='payment_requests')
+    vendor   = models.ForeignKey(
+        Vendor, on_delete=models.SET_NULL, null=True,
+        related_name='payment_requests',
+    )
+    # BOQItem FK: always scoped to this project via boq__project in queries.
+    # Do not display another project's BOQ items in the raise-request form.
+    boq_item = models.ForeignKey(
+        BOQItem, on_delete=models.SET_NULL, null=True,
+        related_name='payment_requests',
+    )
+
+    invoice_number = models.CharField(max_length=100)
+
+    # Supabase storage — reuse same three-field pattern as ProjectDocument/TaskAttachment.
+    # invoice_document is mandatory at creation: no edit/cancel flow exists for
+    # PaymentRequest by design (Zuber decision, 19-June session).
+    invoice_document_name = models.CharField(max_length=255)      # Original filename
+    invoice_document_url  = models.URLField(max_length=1000)      # Public Supabase URL for browser access
+    invoice_document_path = models.CharField(max_length=500)      # Supabase path for purge commands
+
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    # 'note' is optional free-text context — NOT a Delivery Challan link.
+    # Zuber explicitly decided against a DC FK (19-June session) to keep
+    # the model simple; payment requests may not always map 1:1 to a DC.
+    note = models.TextField(blank=True)
+
+    requested_by   = models.ForeignKey(
+        'auth.User', on_delete=models.PROTECT,
+        related_name='raised_payment_requests',
+    )
+    requested_date = models.DateTimeField(auto_now_add=True)
+    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+
+    # Set on confirm — null until Finance confirms
+    payment_date      = models.DateField(null=True, blank=True)
+    payment_reference = models.CharField(max_length=100, blank=True)  # UTR / cheque no., set on confirm
+    confirmed_by      = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='confirmed_payment_requests',
+    )
+
+    class Meta:
+        ordering = ['-requested_date']
+
+    def __str__(self):
+        return f"PR-{self.pk} {self.project.project_id} — {self.vendor} ₹{self.amount}"

@@ -545,3 +545,781 @@ PM CANNOT touch: status, invoice_date, received_date, amount_received.
 - Week 3: SendGrid email + Interakt WhatsApp notifications
 - Week 3: CEO action items spec (discuss once Finance + Issues built)
 - Week 4: Live pilot on 2 real residential projects
+
+# PROJECT_CONTEXT.md — Day 7 Updates
+# Date: 13 June 2026
+# Paste this into your existing PROJECT_CONTEXT.md, replacing the relevant sections
+
+---
+
+## Current migration state
+**Latest migration: 0015**
+- 0013 — PaymentMilestone model + commissioned_at on Project
+- 0014 — customer_contact_person + zoho_deal_id on Project
+- 0015 — ProjectDocument + TaskAttachment models
+
+---
+
+## Completed build days
+- Day 1: Auth + role-based redirect (7 roles)
+- Day 2: Project model, auto-IDs, Draft→Activate, 51-task residential template
+- Day 3: Role dashboards (PM, SE, Design, SCM), duration fields, due date cascade (Option B)
+- Day 4: Vendor Master, BOQ submission workflow, BOQRevision history
+- Day 5/6 Session 1: Finance dashboard, BD dashboard (basic), Individual project overview
+- Day 5/6 Session 2: Zoho CRM webhook integration
+- Day 7: File uploads and document management (project-level + task-level)
+
+---
+
+## Models — additions from Day 7
+
+### ProjectDocument (new — migration 0015)
+```python
+class ProjectDocument(models.Model):
+    FILE_TYPE_CHOICES = [('Document', 'Document'), ('Photo', 'Photo')]
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='documents'
+    )
+    uploaded_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_documents'
+    )
+    file_name = models.CharField(max_length=255)
+    file_url = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_project_documents'
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
+```
+
+### TaskAttachment (new — migration 0015)
+```python
+class TaskAttachment(models.Model):
+    FILE_TYPE_CHOICES = [('Document', 'Document'), ('Photo', 'Photo')]
+
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name='attachments'
+    )
+    uploaded_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='task_attachments'
+    )
+    file_name = models.CharField(max_length=255)
+    file_url = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_task_attachments'
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
+```
+
+---
+
+## File upload configuration
+
+### Allowed file types
+- Documents: pdf, doc, docx, xls, xlsx
+- Photos: jpg, jpeg, png
+- Max size: 20MB per file
+- Multiple files per upload: yes
+
+### Supabase path convention
+```
+project-documents/{project_id}/{uuid}_{original_filename}
+task-attachments/{project_id}/{task_id}/{uuid}_{original_filename}
+```
+UUID prefix always used — prevents filename collisions.
+
+### Supabase bucket
+- Bucket name: solarpms-files
+- Bucket type: PUBLIC (permanent URLs, no signed URLs)
+- Public URL format:
+  {SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{supabase_path}
+- supabase pinned to version 2.31.0 in requirements.txt
+
+### Settings added
+```python
+FILE_RETENTION_DAYS = env.int('FILE_RETENTION_DAYS', default=90)
+DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600   # 100MB — handles multi 20MB uploads
+FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600
+SUPABASE_URL = env('SUPABASE_URL', default='')
+SUPABASE_KEY = env('SUPABASE_KEY', default='')
+SUPABASE_BUCKET = env('SUPABASE_BUCKET', default='solarpms-files')
+```
+
+---
+
+## New views and URLs
+
+```python
+# Project-level
+path('projects/<str:project_id>/documents/upload/',
+     views.upload_project_document, name='upload_project_document'),
+path('projects/<str:project_id>/documents/<int:doc_pk>/delete/',
+     views.delete_project_document, name='delete_project_document'),
+
+# Task-level
+path('projects/<str:project_id>/tasks/<int:task_id>/attachments/upload/',
+     views.upload_task_attachment, name='upload_task_attachment'),
+path('projects/<str:project_id>/tasks/<int:task_id>/attachments/<int:attach_pk>/delete/',
+     views.delete_task_attachment, name='delete_task_attachment'),
+```
+
+### View behaviours
+- upload_project_document: multi-file, server-side extension + MIME + size
+  validation, Supabase upload, ProjectDocument record per file,
+  partial failure returns warning not error
+- delete_project_document: ownership check (uploader or Admin), soft delete
+- upload_task_attachment: cross-project guard
+  (task.phase.project.project_id == project_id), same upload flow
+- delete_task_attachment: ownership check, soft delete
+- All error paths use direct redirect('view_name', kwarg=...) —
+  no _safe_redirect helper (removed — caused NoReverseMatch)
+
+---
+
+## UI additions
+
+### Project detail page + project overview page
+- "Documents" section added below existing content
+- Card: header + "Upload Files" button + file list table
+- Columns: File Name (download link), Type badge, Size, Uploaded By,
+  Uploaded At, Delete icon (uploader/Admin only)
+- Photo files: thumbnail preview (img tag, max-height 80px)
+- Empty state: "No files uploaded yet"
+
+### Task detail page
+- "Attachments" section added
+- Same card pattern with attachment count badge
+- Photo files show thumbnail; documents show file icon + download link
+
+### Task close warning (warn but allow)
+- When user marks task as Done with zero active attachments:
+  Bootstrap modal fires before POST
+- Modal options: "Upload File" (opens file input) / "Close Without Attachment"
+  (proceeds with POST) / "Cancel" (dismisses)
+- If attachments exist: no modal, task closes normally
+- Implementation: JS data attribute `data-attachment-count` on task row,
+  checked before POST fires
+- No server-side blocking — Phase 1 is warn but allow
+- Mandatory proof enforcement deferred to Phase 2
+  (will be a flag on Task model, not a new model)
+
+---
+
+## Soft delete + purge
+
+- Soft delete: is_deleted=True, deleted_at=now(), deleted_by=profile
+- Files hidden from all queries via .filter(is_deleted=False)
+- Hard delete: management command purge_deleted_files
+  Location: projects/management/commands/purge_deleted_files.py
+  Logic: deletes from Supabase first, then DB record
+  Failure handling: logs error per file, continues — never stops full run
+- Railway cron: 0 2 * * * python manage.py purge_deleted_files (2AM daily)
+- Retention period: FILE_RETENTION_DAYS env var, default 90 days
+
+---
+
+## Known bugs fixed (Day 7)
+
+### Bug 1 — 500 on every file upload
+Symptom: 500 error on every upload attempt
+Root cause: _safe_redirect helper called with missing project_id kwarg →
+NoReverseMatch; task variant passed HttpResponseRedirect object as fallback
+Fix: Removed _safe_redirect helper entirely. All error paths use
+direct redirect('view_name', kwarg=value) — no helper abstraction.
+Carry forward rule: never use redirect helper wrappers in this codebase.
+Always use direct redirect() with explicit kwargs.
+
+### Bug 2 — ModuleNotFoundError: No module named 'supabase'
+Symptom: App crashed on Railway after deploy
+Root cause: bare 'supabase' in requirements.txt silently not installed
+by Railway's pip resolver
+Fix: Pinned to supabase==2.31.0 in requirements.txt.
+Broadened except clause to catch both ValueError and ImportError
+in get_supabase_client().
+Carry forward rule: always pin third-party packages to exact versions
+in requirements.txt. Never leave packages unpinned — Railway pip
+behaviour differs from local venv.
+
+### Bug 3 — Task-close modal did nothing on "Done"
+Symptom: Clicking "Done" on task closed it without showing modal
+Root cause: new bootstrap.Modal() in inline script ran before Bootstrap
+JS loaded → IIFE crashed → window.handleTaskStatusChange never defined
+Fix: Moved Bootstrap modal init into DOMContentLoaded event listener.
+Defined handleTaskStatusChange immediately after DOMContentLoaded.
+Carry forward rule: never initialise Bootstrap components in inline
+scripts outside DOMContentLoaded. Always wrap Bootstrap JS in
+DOMContentLoaded or place at bottom of body after Bootstrap CDN script.
+
+---
+
+## Known gotchas — carry forward (updated)
+
+- DecimalField sum with nulls: always use aggregate(s=Sum('amount'))['s'] or 0
+- project.boq access: always try/except in view, never direct in template
+- Milestone update views must be POST with CSRF — never GET links that write to DB
+- Circular import: import PaymentMilestone inside activation function body
+- Mark as Received modal: form action must POST to correct URL —
+  common mistake when multiple modals on one page
+- Variance calculation: annotate in view Python, not template arithmetic
+- commissioned_at is null on all pre-Day-6 projects — always filter
+  commissioned_at__isnull=False before month/year filter in BD dashboard
+- Zoho payload: parse with .get() at every level, never direct key access
+- Zoho numeric fields: safe_decimal() strips Indian comma formatting
+- Always return HTTP 200 on valid token webhook — non-200 causes Zoho retry
+- Supabase client: never initialise at module level — lazy init only
+- Always pin packages to exact versions in requirements.txt
+- Never use redirect helper wrappers — always direct redirect() with kwargs
+- Bootstrap JS components: always init inside DOMContentLoaded
+- File extension extraction: always rsplit('.', 1)[-1].lower() —
+  never split('.')[1], filenames can have multiple dots
+
+---
+
+## Sprint status
+- Days completed: 7
+- Current migration: 0015
+- Hard deadline: 4 July 2026 (board demo)
+- Demo centerpiece: commissioning update → email + WhatsApp → CEO dashboard refresh
+
+## Next up — Day 8
+- Issues module
+- Comments module
+
+# PROJECT_CONTEXT.md — Day 8 Updates
+# Date: 14 June 2026
+# Paste this into your existing PROJECT_CONTEXT.md, replacing the relevant sections
+
+---
+
+## Current migration state
+**Latest migration: 0017**
+- 0013 — PaymentMilestone model + commissioned_at on Project
+- 0014 — customer_contact_person + zoho_deal_id on Project
+- 0015 — ProjectDocument + TaskAttachment models
+- 0016 — Issue model + ActivityLog stub model
+- 0017 — Comment model
+
+---
+
+## Completed build days
+- Day 1: Auth + role-based redirect (7 roles)
+- Day 2: Project model, auto-IDs, Draft→Activate, 51-task residential template
+- Day 3: Role dashboards (PM, SE, Design, SCM), duration fields, due date cascade (Option B)
+- Day 4: Vendor Master, BOQ submission workflow, BOQRevision history
+- Day 5/6 Session 1: Finance dashboard, BD dashboard (basic), Individual project overview
+- Day 5/6 Session 2: Zoho CRM webhook integration
+- Day 7: File uploads and document management (project-level + task-level)
+- Day 8 Session 1: Issues module — full lifecycle, accountability, severity, ActivityLog stub
+- Day 8 Session 2: Comments module, ActivityLog wired, Project Timeline, Portal Activity Log
+- Day 8 Session 3: Retrospective code commenting pass — all existing files documented
+
+---
+
+## Data Models
+
+### Issue (migration 0016)
+```python
+class Issue(models.Model):
+    SEVERITY_CHOICES = [('Low','Low'), ('Medium','Medium'),
+                        ('High','High'), ('Critical','Critical')]
+    STATUS_CHOICES = [('Open','Open'), ('In Progress','In Progress'),
+                      ('Resolved','Resolved'), ('Closed','Closed')]
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='issues')
+    task = models.ForeignKey(Task, on_delete=models.SET_NULL,
+                             null=True, blank=True, related_name='issues')
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default='')
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default='Medium')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Open')
+    raised_by = models.ForeignKey(UserProfile, on_delete=models.SET_NULL,
+                                  null=True, blank=True, related_name='raised_issues')
+    assigned_to = models.ForeignKey(UserProfile, on_delete=models.SET_NULL,
+                                    null=True, blank=True, related_name='assigned_issues')
+    raised_at = models.DateTimeField(auto_now_add=True)
+    due_date = models.DateField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+    resolution_note = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-raised_at']
+```
+
+task FK is nullable — issues can be task-level (task set) or project-level (task=None).
+Raise Project Issue button on project detail/overview creates project-level issues.
+
+### ActivityLog (migration 0016 — stub, fully wired in Day 8 Session 2)
+```python
+class ActivityLog(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE,
+                                null=True, blank=True, related_name='activity_logs')
+    actor = models.ForeignKey(UserProfile, on_delete=models.SET_NULL,
+                              null=True, blank=True, related_name='activity_logs')
+    action = models.CharField(max_length=255)
+    entity_type = models.CharField(max_length=50, blank=True, default='')
+    entity_id = models.PositiveIntegerField(null=True, blank=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-timestamp']
+```
+
+entity_type values in use: 'Issue', 'Comment', 'Task', 'BOQ', 'Milestone', 'File'
+
+### Comment (migration 0017)
+```python
+class Comment(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='comments')
+    task = models.ForeignKey(Task, on_delete=models.CASCADE,
+                             null=True, blank=True, related_name='comments')
+    issue = models.ForeignKey(Issue, on_delete=models.CASCADE,
+                              null=True, blank=True, related_name='comments')
+    parent = models.ForeignKey('self', on_delete=models.CASCADE,
+                               null=True, blank=True, related_name='replies')
+    author = models.ForeignKey(UserProfile, on_delete=models.SET_NULL,
+                               null=True, blank=True, related_name='comments')
+    body = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at']
+```
+
+Comment constraints (enforced in views, not model):
+- Exactly one of task or issue must be set — never both, never neither
+- parent must belong to same task/issue as the reply
+- parent must have parent=None — replies to replies are not allowed (400)
+- Soft-deleted comments show "This comment was deleted" placeholder — never removed from queryset
+
+---
+
+## Features built — Day 8
+
+### Issues module (Session 1)
+- Any role can raise a task-level issue (from task detail) or project-level issue
+  (from project detail / project overview via dedicated "Raise Project Issue" button)
+- Severity: Low / Medium / High / Critical
+  Badge colours: secondary / warning / danger / danger fw-bold with ⚠ CRITICAL prefix
+- Lifecycle: Open → In Progress → Resolved → Closed
+  - Open → In Progress: anyone (assigned_to must exist first)
+  - In Progress → Resolved: assigned_to only, or PM if unassigned
+    Modal required: resolution_note (mandatory)
+  - Resolved → Closed: PM of project only (one-click)
+  - Resolved → Open: PM of project only (reopen, clears resolved_at + resolution_note)
+- Accountability: any role can assign/reassign at any time (not Closed)
+- Closed issues: fully read-only, all action buttons hidden
+- Status transitions use filter().update() not .save() — race condition guard
+- log_activity() called for all issue events
+
+### Comments module (Session 2)
+- Comments on tasks and issues — same Comment model, different FK set
+- Two-level threading: comment → reply (no replies to replies)
+- Reply textarea appears inline on "Reply" click (JS toggle, no page reload)
+- Soft delete: is_deleted=True, shows "This comment was deleted" placeholder
+  Replies remain visible under deleted parent
+- Delete icon visible to author and Admin only
+- log_activity() called for all comment events
+
+### ActivityLog — wired events (Session 2)
+Wired to all new Day 8 events plus backfilled into existing views:
+- Issue raised, assigned, In Progress, Resolved, Closed, Reopened
+- Comment posted (task + issue), reply posted, comment deleted
+- Task status changed, due date changed
+- BOQ submitted, approved, rejected
+- Milestone invoiced, received
+- File uploaded (project + task), file deleted
+- Project activated
+
+### Project Timeline (/projects/<id>/timeline/)
+- All roles, PM isolation applies
+- ActivityLog filtered by project, newest first, paginated 20/page
+- Entry: timestamp | role badge | actor name | action | entity badge
+- Entity badge colours: Issue=danger, Comment=info, Task=primary,
+  BOQ=warning, Milestone=success, File=secondary
+- Link in project detail header alongside "Project Overview" button
+
+### Portal Activity Log (/portal-admin/activity-log/)
+- Admin only (@role_required(['Admin']))
+- All ActivityLog records, all projects, newest first, paginated 50/page
+- Filters: Project, Actor, Entity Type, Date From, Date To (all optional, chainable)
+- Link from Admin dashboard
+
+---
+
+## log_activity() helper — usage rules
+
+Location: projects/views.py (or projects/utils.py — check your codebase)
+
+```python
+def log_activity(project, actor, action, entity_type='', entity_id=None):
+    try:
+        from projects.models import ActivityLog
+        ActivityLog.objects.create(
+            project=project,
+            actor=actor,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"ActivityLog failed: {e}")
+```
+
+Rules:
+- ALWAYS use log_activity() helper — never call ActivityLog.objects.create() directly in views
+- ALWAYS call log_activity() AFTER the primary save — never before
+- A failed log write must NEVER block the primary action (already handled by try/except)
+- ActivityLog import is inside the function — do NOT add top-level ActivityLog import
+  in views.py, it may cause circular import
+
+---
+
+## New URLs (Day 8)
+
+```python
+# Issues
+path('projects/<str:project_id>/issues/create/', views.create_project_issue),
+path('projects/<str:project_id>/tasks/<int:task_id>/issues/create/', views.create_task_issue),
+path('issues/<int:issue_id>/', views.issue_detail),
+path('issues/<int:issue_id>/update-status/', views.update_issue_status),
+path('issues/<int:issue_id>/resolve/', views.resolve_issue),
+path('issues/<int:issue_id>/close/', views.close_issue),
+path('issues/<int:issue_id>/reopen/', views.reopen_issue),
+path('issues/<int:issue_id>/assign/', views.assign_issue),
+
+# Comments
+path('projects/<str:project_id>/tasks/<int:task_id>/comments/create/', views.create_task_comment),
+path('issues/<int:issue_id>/comments/create/', views.create_issue_comment),
+path('comments/<int:comment_id>/delete/', views.delete_comment),
+
+# Activity
+path('projects/<str:project_id>/timeline/', views.project_timeline),
+path('portal-admin/activity-log/', views.portal_activity_log),
+```
+
+---
+
+## Code commenting standard (active from Day 8 onwards)
+
+Every Claude Code session from Day 8 onwards applies this standard to all new code:
+
+- Every view function: one-line docstring — what it does + who can access it
+- Every permission check: comment explaining the rule enforced
+- Every complex queryset: comment explaining what it fetches and why
+- Every non-obvious logic pattern: comment explaining the decision
+  (filter().update() race guard, lazy imports, always-200 webhook, etc.)
+- Every URL entry: brief comment naming view and access level
+- TODO flags for known issues — flag but do not fix in same session
+
+Retrospective commenting pass completed on Day 8 Session 3 —
+all files from Days 1–7 are now documented to this standard.
+
+---
+
+## Known gotchas — carry forward (updated Day 8)
+
+- DecimalField sum with nulls: always aggregate(s=Sum('amount'))['s'] or 0
+- project.boq access: always try/except in view, never direct in template
+- Milestone update views: POST with CSRF only — never GET links that write to DB
+- Circular import: import PaymentMilestone inside activation function body
+- Mark as Received modal: form action must POST to correct URL —
+  common mistake when multiple modals on one page
+- Variance calculation: annotate in Python view, not template arithmetic
+- commissioned_at null on pre-Day-6 projects: filter commissioned_at__isnull=False
+  before month/year filter in BD dashboard
+- Zoho payload: parse with .get() at every level, never direct key access
+- Zoho numeric fields: safe_decimal() strips Indian comma formatting
+- Always return HTTP 200 on valid token webhook — non-200 causes Zoho retry
+- Supabase client: never initialise at module level — lazy init only
+- Always pin packages to exact versions in requirements.txt
+- Never use redirect helper wrappers — always direct redirect() with explicit kwargs
+- Bootstrap JS components: always init inside DOMContentLoaded
+- File extension extraction: always rsplit('.', 1)[-1].lower()
+- Never use _safe_redirect helper — causes NoReverseMatch on missing kwargs
+
+### New gotchas from Day 8
+
+**Admin URL prefix conflict:**
+Never use /admin/ as a URL prefix for custom views.
+Django reserves /admin/ for its built-in admin interface.
+Custom admin-like views (Portal Activity Log, Admin dashboard) must use
+/portal-admin/ or similar prefix.
+Full documentation: see feedback_django_admin_url_prefix.md in project root.
+
+**log_activity() usage rule:**
+Never call ActivityLog.objects.create() directly in views.
+Always use the log_activity() helper — it handles try/except internally.
+A failed ActivityLog write must never block the primary action.
+Call log_activity() after the primary save, never before.
+
+**Comment depth enforcement:**
+Replies to replies are not supported (one level of threading only).
+Always validate in view before saving:
+if parent_comment.parent is not None → return HttpResponse(status=400)
+Also verify parent belongs to same task/issue before accepting reply.
+Never rely on frontend to enforce this — always server-side.
+
+**task_set_due_date missing redirect:**
+When adding log_activity() calls to existing views during backfill,
+verify every code path has a redirect at the end.
+The task due date update view was missing a redirect on one branch —
+caught during Day 8 Session 2 backfill. Always check all branches
+(success + error + validation failure) have explicit redirects.
+
+---
+
+## Supplementary file created (Day 8)
+feedback_django_admin_url_prefix.md — in project root
+Documents: /admin/ URL prefix conflict with Django built-in admin,
+why custom views fail silently or raise NoReverseMatch,
+and the rule to always use /portal-admin/ or /portal/ prefix
+for custom admin-like views in this codebase.
+
+---
+
+## Sprint status
+- Days completed: 8 (three sessions on Day 8)
+- Current migration: 0017
+- Hard deadline: 4 July 2026 (board demo)
+- Demo centerpiece: commissioning update → email + WhatsApp → CEO dashboard refresh
+
+## Next up — Day 9
+- SCM Delivery Tracker
+- PM dashboard update: delivery status appended to project list
+  (backlog item decided 2026-06-11)
+  
+  ## Session Update — 2026-06-17
+
+### UX-First Strategic Pivot
+
+Paused new backend feature development after recognizing pieces weren't
+connecting smoothly, especially on mobile. New approach: validate UX in
+standalone prototypes first, then retrofit into Django.
+
+**Tech stack change for all new frontend work:**
+- FROM: Bootstrap 5
+- TO: Tailwind CSS + Alpine.js (local UI state only — no fetch/backend calls
+  from Alpine) + Lucide Icons — all via CDN, no build pipeline
+
+**Brand colors** (extracted directly from the Horizon Renewable Power logo,
+not approximated):
+- Primary green: `#1a7a4a`
+- Secondary green: `#7cb847`
+- Primary gold: `#f0a829`
+- Secondary yellow: `#efc938`
+- Accent navy: `#243a6b`
+
+**8th role confirmed: Sales & BD**
+- Already built, real role — not equal to PM in project creation
+- Scope: ORC (Order Confirmation Receipt — a business document, NOT Optical
+  Character Recognition) upload, payment status updates, document management
+  on already-activated projects
+- Does NOT create projects
+- Project lifecycle: Zoho CRM creates project as Draft → PM activates →
+  Sales/BD uploads ORC and updates payment status
+
+---
+
+### Login Page — COMPLETE, tested locally, working end to end
+
+- Used Django's existing function-based view as-is
+- Hardcoded `name="username"` / `name="password"` fields (matches existing
+  view, no changes to views.py)
+- `{% for message in messages %}` for error display (not `form.errors`)
+- Decision made: adapt template to existing view (Option A) rather than
+  adding an AuthenticationForm to view context (Option B) — zero backend
+  changes required
+- Tailwind + Lucide, brand colors, light background with subtle green/gold
+  gradient accent
+
+---
+
+### PM Dashboard Redesign — IN PROGRESS (template built, integration pending)
+
+**Problem identified:** existing `dashboard_pm` view (live on Railway
+production at `/dashboard/pm/`) is information-dense with no visual
+hierarchy — 5 equal-weight stat cards (Active Projects, Due Today, Blocked,
+Pending Approvals: 54, Awaiting Authorities: 16) plus a dense project table.
+PM can't tell what's actually urgent at a glance.
+
+**New design — one card per project:**
+- Sorted most-urgent-first: highest (blocked + overdue) count first, then
+  delayed projects, then on-time projects last
+- Collapsed card shows ONLY: red circle with combined blocked+overdue count
+  (green checkmark if zero), project name, Delayed/On-time status —
+  deliberately minimal, no other badges
+- Expanded card shows: phase, site engineer, progress, BOQ status, materials
+  summary, a "needs attention" list of THAT project's blocked/overdue tasks,
+  two quick actions (Review BOQ, Raise issue), link to `project_overview`
+  for full detail and commenting
+- Reassign task / Update due date are explicitly NOT in the card — they stay
+  on the detail page only (due date triggers cascade recalculation, deserves
+  fuller context; reassign is per-task, not per-project)
+- No project-level comment quick-action — backend only supports task-level
+  and issue-level comments, so this was deliberately dropped rather than
+  building a feature with no real data target
+
+**Backend changes required in `dashboard_pm` view (NO migrations):**
+- Per-project `blocked_count` (currently only computed globally)
+- Per-project `blocked_tasks_for_project` and `overdue_tasks_for_project`
+  querysets (small lists for the "needs attention" section)
+- Sort `projects_with_progress` by `(blocked_count + overdue_count)` descending
+- `is_delayed` — must be a computed model `@property` or computed in the
+  view; explicitly NOT a new stored field
+
+---
+
+### Project Detail + Overview Page Merge — IN PROGRESS (template built, integration pending)
+
+**Decision:** combine `project_detail` (task management) and
+`project_overview` (status summary) into ONE page/URL — not tabs, not a
+full unstructured merge. Both pages are genuinely used; the problem was
+navigation friction between them, not redundancy.
+
+**New page structure (top to bottom):**
+1. Main project info card (unchanged)
+2. Full-width "Task progress by phase" block — always visible, no expand
+3. Grid of compact, click-to-expand status blocks:
+   - BOQ status (quarter width)
+   - Payment milestones (quarter width)
+   - Material status (half width)
+   - Delivery challans (half width)
+   - Recent activity (half width)
+4. Project documents (full width, no expand — already minimal)
+5. Unchanged phase-wise task list (existing `project_detail` content)
+
+**Interaction model:** each block expands independently on click (NOT
+hover-flip — rejected because no hover state exists on mobile/touch
+devices). No "expand all" option — kept simple per product owner decision.
+Lucide icons on every block header are part of the approved design, not
+decoration — must be preserved during integration.
+
+**Open data-sourcing questions flagged for Claude Code to investigate:**
+1. Does BOQ revision history exist beyond the latest single revision note
+   (possibly JSONField snapshots per earlier BOQ workflow notes)?
+2. Can `DCLineItem` model data support per-line-item detail in the Material
+   Status / Delivery Challans expanded views?
+- Recent Activity is CONFIRMED backed by an existing ActivityLog-style model
+  — no investigation needed there.
+
+**Open decision before integration:** which URL survives —
+`project_detail` or `project_overview`? Depends on what else in the app
+currently links to each; must be checked before merging.
+
+---
+
+### Documented Gotcha — Django auto-escaping breaks JSON in inline `<script>` blocks
+
+**Context:** cost 6 hours during login/PM dashboard integration. Claude Code
+could not detect this itself; found via Claude Chat + manual browser
+inspector.
+
+**Root cause:** a Python list of dicts (e.g. phase progress data with
+pk/pct/internal_done fields) was serialized server-side via `json.dumps()`
+in the view, then inserted into a `<script>` block in the template via a
+template variable. Django's auto-escaping was still active for that
+variable, converting every `"` into `&quot;`. `&quot;` is not valid
+JavaScript, so the JS parser died at the first `&` — silently breaking the
+entire `<script>` block, including unrelated functionality in the same
+block (e.g. a file upload listener), which made the symptom look unrelated
+to its actual cause.
+
+**Fix pattern — apply this any time server-rendered JSON is injected into
+an inline `<script>` tag:** mark the `json.dumps()` output as safe from
+auto-escaping, using either Django's `|safe` template filter or
+`mark_safe()` / `json_script()` in the view — applied narrowly to that
+specific JSON-producing variable. Do NOT disable autoescape broadly on the
+template.
+
+**Debugging shortcut for next time:** if JS "works in isolation but breaks
+on this page," check FIRST whether any inline `<script>` block contains a
+Django template variable carrying JSON. This single check would have found
+this bug in minutes instead of 6 hours.
+
+DATE: 19-June-2026
+DAY: ~12 of 24 (verify against your local day-counter — calendar gaps may not map 1:1 to numbered build days)
+
+COMPLETED TODAY:
+- SE dashboard designed collaboratively in Claude Chat — one-card-per-project,
+  same pattern as PM/SCM
+- se_dashboard_prototype.html built (Tailwind + Alpine + inline SVG, no build pipeline)
+- Full six-layer integration spec produced for SE dashboard
+- Complete Claude Code prompt written, including stop-and-report triggers,
+  no-migration constraint, and the full code commenting standard
+- Git push procedure discussed for PM dashboard, SCM dashboard, and
+  project_detail/project_overview merge — NOT yet confirmed executed
+
+CURRENT STATE:
+- Four redesigns from first UX-pivot wave verified working as of 18-June session:
+  login page, PM dashboard, SCM dashboard, project_detail+overview merge
+- ⚠ PUSH STATUS UNCONFIRMED: these four redesigns may still be uncommitted/unpushed
+  to GitHub main as of this session. CONFIRM PUSH BEFORE NEXT CLAUDE CODE SESSION —
+  if unpushed, Railway production does not yet reflect these changes, and the
+  board demo environment is stale.
+- Migration sequence at 0019+ (Issue.delivery_challan FK, DCLineItem.damaged_quantity).
+  Verify migration 0019 is included in whatever push happens — a push without it
+  will break SCM/PM dashboards in production (code expects the field, DB won't have it).
+- SE dashboard: prototype + spec + Claude Code prompt all ready. NOT yet built in Django.
+
+SE DASHBOARD — LOCKED DECISIONS (19-June session):
+- One card per project, urgency circle = overdue_count + blocked_count +
+  pending_grn_count + issue_count (same combined-count pattern as PM)
+- Card-level action buttons: Raise Issue + View Project ONLY (two buttons, same as PM)
+- Task status updates and GRN confirmation do NOT happen on the dashboard card —
+  both happen on project_overview, which SE shares with PM (no separate SE detail page)
+- "View Project" routes to existing project_overview page, same URL PM uses
+- Confirmed: GRN confirm button does not currently exist for SE role on
+  project_overview (shows to no one as of last check) — separate session required
+- Confirmed: SE updates assigned tasks via project_overview's phase-wise task list
+  (not yet verified whether buttons are role-gated correctly for SE — pending check)
+
+KNOWN ISSUES / INCOMPLETE (carried forward + new):
+- GRN confirm button for SE role on project_overview — does not exist yet,
+  needs its own spec session before SE can actually confirm receipt from the dashboard flow
+- Task status update buttons on project_overview — role-gate for SE not yet verified
+- Push status of last three dashboard redesigns to git/Railway — unconfirmed,
+  resolve before starting next Claude Code build session
+
+NEXT SESSION GOAL:
+Continue UX-first prototype design in Claude Chat for the next wave of dashboards —
+Finance, Design, and Sales & BD. Same process as PM/SCM/project_overview/SE:
+standalone HTML prototype (Tailwind + Alpine + Lucide) → confirm direction with
+Zuber → six-layer Django integration spec → Claude Code prompt. No Claude Code
+session planned next — this is a Chat-only design session.
+
+SE dashboard Claude Code integration (prototype + spec + prompt all ready from the
+18/19-June sessions) remains in the queue but is NOT scheduled for the next session.
+Hand it to Claude Code whenever a build session is slotted in — five stop-and-report
+checks must be answered first (SE-project link field, DC status values, is_delayed
+location, blocked-task field name, task_type values).
+
+REMAINING DASHBOARDS NOT YET REDESIGNED UNDER TAILWIND/ALPINE/LUCIDE:
+- Finance dashboard
+- Design dashboard
+- Sales & BD dashboard
+- CEO dashboard
+- Admin dashboard

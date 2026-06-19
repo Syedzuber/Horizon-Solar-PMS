@@ -1,138 +1,270 @@
 {% extends "base.html" %}
 {% block title %}Finance Dashboard — SolarPMS{% endblock %}
 
+{% block extra_head %}
+{# Alpine.js — handles card expand/collapse local state only; no backend calls from Alpine #}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+
+  .fin-card-header { cursor: pointer; }
+  .fin-card-header:hover { background: #f8f9fa !important; }
+
+  .fin-chevron { transition: transform .2s ease; flex-shrink: 0; }
+
+  /* Urgency circle — mirrors SE dashboard pattern */
+  .fin-urgency-circle {
+    width: 2.75rem; height: 2.75rem; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.05rem; flex-shrink: 0;
+  }
+  .fin-urgency-circle.urgent { background: #dc3545; color: #fff; }
+  .fin-urgency-circle.clear  { background: #1a7a4a; color: #fff; }
+
+  /* Milestone status dots */
+  .ms-dot {
+    display: inline-block; width: .65rem; height: .65rem;
+    border-radius: 50%; flex-shrink: 0; margin-top: .15rem;
+  }
+  .ms-dot-pending  { background: #dc3545; }
+  .ms-dot-invoiced { background: #f0a829; }
+  .ms-dot-received { background: #1a7a4a; }
+
+  /* Summary strip numbers */
+  .fin-stat-num { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-  <h4 class="mb-0">Finance Dashboard</h4>
+
+{# ── Greeting ─────────────────────────────────────────────────────────────── #}
+<div class="mb-3">
+  <h5 class="mb-0 fw-semibold">
+    {% if finance_first_name %}Welcome, {{ finance_first_name }}!{% else %}Finance Dashboard{% endif %}
+  </h5>
+  <p class="text-muted small mb-0">
+    {% if total_milestones_awaiting == 0 and total_payment_requests == 0 %}
+      All clear — no pending milestones or payment requests.
+    {% else %}
+      {{ total_milestones_awaiting }} milestone{{ total_milestones_awaiting|pluralize }} awaiting confirmation
+      {% if total_payment_requests > 0 %}
+        · {{ total_payment_requests }} payment request{{ total_payment_requests|pluralize }} pending
+      {% endif %}
+    {% endif %}
+  </p>
 </div>
 
-{# ── Summary cards ───────────────────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-4 fw-bold text-secondary">₹{{ total_pending|floatformat:0 }}</div>
-        <div class="small text-muted">Total Pending</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-4 fw-bold text-primary">₹{{ total_invoiced|floatformat:0 }}</div>
-        <div class="small text-muted">Total Invoiced</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-4 fw-bold text-success">₹{{ total_received|floatformat:0 }}</div>
-        <div class="small text-muted">Total Received</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-4 fw-bold {% if overdue_count > 0 %}text-danger{% else %}text-success{% endif %}">{{ overdue_count }}</div>
-        <div class="small text-muted">Overdue Milestones</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-{# ── Project milestone table ─────────────────────────────────────────────── #}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Payment Milestones by Project</div>
-  <div class="card-body p-0">
-    <div class="table-responsive">
-      <table class="table table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Project ID</th>
-            <th>Customer</th>
-            <th style="width:10rem;">M1</th>
-            <th style="width:10rem;">M2</th>
-            <th style="width:10rem;">M3</th>
-            <th>Contract Value</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in projects_with_milestones %}
-          <tr>
-            <td class="fw-semibold">
-              <a href="{% url 'project_overview' row.project.project_id %}" class="text-decoration-none">
-                {{ row.project.project_id }}
-              </a>
-            </td>
-            <td>{{ row.project.customer_name }}</td>
-
-            {# M1 #}
-            <td>{% include "dashboard/_milestone_badge.html" with m=row.M1 project=row.project %}</td>
-            {# M2 #}
-            <td>{% include "dashboard/_milestone_badge.html" with m=row.M2 project=row.project %}</td>
-            {# M3 #}
-            <td>{% include "dashboard/_milestone_badge.html" with m=row.M3 project=row.project %}</td>
-
-            <td>₹{{ row.project.contract_value|floatformat:0 }}</td>
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="6" class="text-center text-muted py-4">No active projects found.</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-{# ── Mark as Received modal (single, populated by JS) ────────────────────── #}
-<div class="modal fade" id="receiveModal" tabindex="-1" aria-labelledby="receiveModalLabel" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title" id="receiveModalLabel">Mark as Received</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <form id="receiveForm" method="post" action="">
-        {% csrf_token %}
-        <div class="modal-body">
-          <p id="receiveModalInfo" class="text-muted small mb-3"></p>
-          <div class="mb-3">
-            <label class="form-label fw-semibold">Amount Received (₹) <span class="text-danger">*</span></label>
-            <input type="number" name="amount_received" id="amountReceivedInput"
-                   class="form-control" step="0.01" min="0" required>
-          </div>
-          <div class="mb-2">
-            <label class="form-label">Variance Reason <span class="text-muted">(optional)</span></label>
-            <input type="text" name="variance_reason" class="form-control"
-                   placeholder="e.g. customer paid partial amount">
-          </div>
+{# ── Summary strip ────────────────────────────────────────────────────────── #}
+<div class="row g-2 mb-4">
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="fin-stat-num {% if total_milestones_awaiting > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ total_milestones_awaiting }}
         </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-success">Mark as Received</button>
+        <div class="small text-muted mt-1">Milestones Awaiting</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="fin-stat-num {% if total_payment_requests > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ total_payment_requests }}
         </div>
-      </form>
+        <div class="small text-muted mt-1">Payment Requests Pending</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="fin-stat-num {% if total_payment_request_value > 0 %}text-warning{% else %}text-muted{% endif %}">
+          ₹{{ total_payment_request_value|floatformat:0 }}
+        </div>
+        <div class="small text-muted mt-1">Vendor Payments Outstanding</div>
+      </div>
     </div>
   </div>
 </div>
 
-<script>
-document.getElementById('receiveModal').addEventListener('show.bs.modal', function (event) {
-  var btn         = event.relatedTarget;
-  var projectId   = btn.dataset.projectId;
-  var milestoneId = btn.dataset.milestonePk;
-  var name        = btn.dataset.milestoneName;
-  var amount      = btn.dataset.amount;
+{# ── Empty state ──────────────────────────────────────────────────────────── #}
+{% if not project_rows %}
+<div class="card shadow-sm border-0">
+  <div class="card-body text-center py-5 text-muted">
+    No active projects in the portfolio right now.
+  </div>
+</div>
+{% endif %}
 
-  document.getElementById('receiveForm').action =
-    '/projects/' + projectId + '/milestone/' + milestoneId + '/receive/';
-  document.getElementById('receiveModalInfo').textContent =
-    name + ' — Agreed amount: ₹' + (amount ? parseFloat(amount).toLocaleString('en-IN') : 'not set');
-  document.getElementById('amountReceivedInput').value = '';
-});
-</script>
+{# ── Project cards — one per active/in-progress project ──────────────────── #}
+{# Sorted most-urgent-first by view (milestones_awaiting + payment_requests_count) #}
+{% for p in project_rows %}
+<div x-data="{ expanded: false }" class="card mb-2 shadow-sm border-0">
+
+  {# ── Collapsed header (always visible) ──────────────────────────────────── #}
+  <div @click="expanded = !expanded"
+       class="fin-card-header card-header bg-white d-flex align-items-center gap-3 py-2 px-3"
+       style="border-radius: inherit; border-bottom-color: transparent;">
+
+    {# Urgency circle: red count when attention needed, green check when all clear #}
+    {% if p.urgency > 0 %}
+    <div class="fin-urgency-circle urgent">{{ p.urgency }}</div>
+    {% else %}
+    <div class="fin-urgency-circle clear">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </div>
+    {% endif %}
+
+    {# Customer name + project ID #}
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold text-truncate">{{ p.customer_name }}</div>
+      <div class="small text-muted">{{ p.project_id }}</div>
+    </div>
+
+    {# Milestone badge — e.g. "1/3 milestones" #}
+    {% if p.milestones_total > 0 %}
+    <span class="badge rounded-pill
+      {% if p.milestones_awaiting > 0 %}bg-danger{% else %}bg-success{% endif %}
+      d-none d-sm-inline">
+      {{ p.milestones_awaiting }}/{{ p.milestones_total }} milestone{{ p.milestones_total|pluralize }}
+    </span>
+    {% endif %}
+
+    {# Payment-request badge — only shown when pending requests exist #}
+    {% if p.payment_requests_count > 0 %}
+    <span class="badge rounded-pill d-none d-sm-inline"
+          style="background:#f0a829; color:#212529;">
+      {{ p.payment_requests_count }} PR{{ p.payment_requests_count|pluralize }}
+    </span>
+    {% endif %}
+
+    {# Delayed / On-time status badge #}
+    {% if p.is_delayed %}
+    <span class="badge bg-danger">Delayed {{ p.delay_days }}d</span>
+    {% else %}
+    <span class="badge bg-success">On time</span>
+    {% endif %}
+
+    {# Chevron rotates on expand #}
+    <svg class="fin-chevron" :style="expanded ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </div>
+
+  {# ── Expanded body ───────────────────────────────────────────────────────── #}
+  <div x-show="expanded" x-cloak class="card-body pt-2 pb-3">
+
+    {# Mobile: badges repeated inside expand for narrow screens where header badges hide #}
+    <div class="d-flex flex-wrap gap-2 mb-3 d-sm-none">
+      {% if p.milestones_total > 0 %}
+      <span class="badge rounded-pill
+        {% if p.milestones_awaiting > 0 %}bg-danger{% else %}bg-success{% endif %}">
+        {{ p.milestones_awaiting }}/{{ p.milestones_total }} milestone{{ p.milestones_total|pluralize }}
+      </span>
+      {% endif %}
+      {% if p.payment_requests_count > 0 %}
+      <span class="badge rounded-pill" style="background:#f0a829; color:#212529;">
+        {{ p.payment_requests_count }} PR{{ p.payment_requests_count|pluralize }}
+      </span>
+      {% endif %}
+    </div>
+
+    {# ── Milestone breakdown ─────────────────────────────────────────────── #}
+    {% if p.milestones %}
+    <div class="mb-3">
+      <div class="small fw-semibold text-muted mb-2" style="letter-spacing:.04em;">MILESTONES</div>
+      <div class="d-flex flex-column gap-2">
+        {% for m in p.milestones %}
+        <div class="d-flex align-items-start gap-2 rounded px-2 py-2"
+             style="background:#f8f9fa; border-left: 3px solid
+               {% if m.status == 'Received' %}#1a7a4a{% elif m.status == 'Invoiced' %}#f0a829{% else %}#dc3545{% endif %};">
+          {# Status dot #}
+          <span class="ms-dot mt-1
+            {% if m.status == 'Received' %}ms-dot-received
+            {% elif m.status == 'Invoiced' %}ms-dot-invoiced
+            {% else %}ms-dot-pending{% endif %}">
+          </span>
+          <div class="flex-grow-1" style="min-width:0;">
+            <div class="fw-semibold small">
+              {{ m.label }}
+              {% if m.description %}
+              <span class="text-muted fw-normal">— {{ m.description }}</span>
+              {% endif %}
+            </div>
+            <div class="d-flex flex-wrap gap-3 mt-1">
+              {% if m.amount %}
+              <span class="small text-muted">₹{{ m.amount|floatformat:0 }}</span>
+              {% endif %}
+              {% if m.date %}
+              <span class="small text-muted">{{ m.date }}</span>
+              {% endif %}
+            </div>
+          </div>
+          <span class="badge rounded-pill ms-auto
+            {% if m.status == 'Received' %}bg-success
+            {% elif m.status == 'Invoiced' %}text-dark
+            {% else %}bg-danger{% endif %}"
+            {% if m.status == 'Invoiced' %}style="background:#f0a829;"{% endif %}>
+            {{ m.status }}
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {# ── Pending vendor payment requests ──────────────────────────────────── #}
+    {% if p.payment_requests %}
+    <div class="mb-3">
+      <div class="small fw-semibold text-muted mb-2" style="letter-spacing:.04em;">PENDING PAYMENT REQUESTS</div>
+      <div class="d-flex flex-column gap-2">
+        {% for pr in p.payment_requests %}
+        <div class="d-flex align-items-center gap-2 rounded px-2 py-2"
+             style="background:#fff3cd; border-left: 3px solid #f0a829;">
+          {# Gold dot for pending vendor request #}
+          <span class="ms-dot ms-dot-invoiced"></span>
+          <div class="flex-grow-1" style="min-width:0;">
+            <div class="small fw-semibold text-truncate">{{ pr.vendor }}</div>
+            <div class="small text-muted">Inv # {{ pr.invoice_number }} · {{ pr.requested_date|date:"d M Y" }}</div>
+          </div>
+          <span class="small fw-bold">₹{{ pr.amount|floatformat:0 }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {# All-clear state — only shown when no milestones pending and no payment requests #}
+    {% if p.milestones_awaiting == 0 and p.payment_requests_count == 0 %}
+    <div class="d-flex align-items-center gap-2 mb-3 small text-success">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+      All milestones up to date. No pending payment requests.
+    </div>
+    {% endif %}
+
+    {# ── View Project button ──────────────────────────────────────────────── #}
+    <div class="d-flex">
+      <a href="{% url 'project_overview' p.project_id %}"
+         class="btn btn-sm text-white"
+         style="background-color:#1a7a4a;">
+        View Project
+      </a>
+    </div>
+
+  </div>{# /expanded body #}
+</div>{# /card #}
+{% endfor %}
+
 {% endblock %}
