@@ -1,107 +1,224 @@
 {% extends "base.html" %}
 {% block title %}BD Dashboard — SolarPMS{% endblock %}
 
+{% block extra_head %}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+
+  .bd-card-header { cursor: pointer; }
+  .bd-card-header:hover { background: #f8f9fa !important; }
+
+  .bd-chevron { transition: transform .2s ease; flex-shrink: 0; }
+
+  .bd-urgency-circle {
+    width: 2.75rem; height: 2.75rem; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.05rem; flex-shrink: 0;
+  }
+  .bd-urgency-circle.urgent { background: #dc3545; color: #fff; }
+  .bd-urgency-circle.clear  { background: #1a7a4a; color: #fff; }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .2rem .55rem; border-radius: 999px;
+    font-size: .78rem; font-weight: 600; line-height: 1.4;
+    white-space: nowrap;
+  }
+  .chip-green { background: #d1fae5; color: #065f46; }
+  .chip-grey  { background: #e5e7eb; color: #374151; }
+  .chip-amber { background: #fef3c7; color: #92400e; }
+  .chip-red   { background: #fee2e2; color: #991b1b; }
+
+  .chip-dot {
+    width: .45rem; height: .45rem; border-radius: 50%; flex-shrink: 0;
+  }
+  .chip-dot-green { background: #059669; }
+  .chip-dot-grey  { background: #9ca3af; }
+  .chip-dot-amber { background: #d97706; }
+  .chip-dot-red   { background: #dc2626; }
+
+  .bd-stat-num { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+
+  .bd-info-row {
+    font-size: .85rem; color: #6c757d;
+    display: flex; gap: .5rem; align-items: baseline;
+  }
+  .bd-info-label { font-weight: 600; color: #374151; min-width: 4.5rem; flex-shrink: 0; }
+
+  .bd-caption { font-size: .75rem; color: #6c757d; margin-top: .3rem; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-4">
-  <h4 class="mb-0">BD Dashboard</h4>
+
+<div class="mb-3">
+  <h5 class="mb-0 fw-semibold">
+    {% if bd_first_name %}Welcome, {{ bd_first_name }}!{% else %}BD Dashboard{% endif %}
+  </h5>
+  <p class="text-muted small mb-0">
+    {% if total_blocked_projects == 0 and total_milestones_awaiting == 0 %}
+      All clear — no blocked projects or milestones awaiting payment.
+    {% else %}
+      {% if total_blocked_projects > 0 %}{{ total_blocked_projects }} project{{ total_blocked_projects|pluralize }} blocked{% endif %}{% if total_blocked_projects > 0 and total_milestones_awaiting > 0 %} · {% endif %}{% if total_milestones_awaiting > 0 %}{{ total_milestones_awaiting }} milestone{{ total_milestones_awaiting|pluralize }} awaiting payment{% endif %}
+    {% endif %}
+  </p>
 </div>
 
-{# ── Summary cards ───────────────────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold text-primary">{{ summary.active_projects }}</div>
-        <div class="small text-muted">Active Projects</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold text-success">{{ summary.commissioned_this_month }}</div>
-        <div class="small text-muted">Commissioned This Month</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-4 fw-bold text-info">₹{{ summary.total_contracted|floatformat:0 }}</div>
-        <div class="small text-muted">Total Contracted Value</div>
-      </div>
-    </div>
-  </div>
-  <div class="col-6 col-md-3">
-    <div class="card text-center shadow-sm h-100">
-      <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.pending_payments > 0 %}text-warning{% else %}text-success{% endif %}">
-          {{ summary.pending_payments }}
+<div class="row g-2 mb-4">
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="bd-stat-num {% if total_blocked_projects > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ total_blocked_projects }}
         </div>
-        <div class="small text-muted">Pending Payments</div>
+        <div class="small text-muted mt-1">Blocked Projects</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="bd-stat-num {% if total_milestones_awaiting > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ total_milestones_awaiting }}
+        </div>
+        <div class="small text-muted mt-1">Milestones Awaiting Payment</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-md-4">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-body py-3 text-center">
+        <div class="bd-stat-num {% if total_orc_overdue > 0 %}text-warning{% else %}text-muted{% endif %}">
+          {{ total_orc_overdue }}
+        </div>
+        <div class="small text-muted mt-1">ORC Overdue</div>
       </div>
     </div>
   </div>
 </div>
 
-{# ── Project list table ──────────────────────────────────────────────────── #}
-<div class="card shadow-sm mb-4">
-  <div class="card-header fw-semibold">Active Projects</div>
-  <div class="card-body p-0">
-    <div class="table-responsive">
-      <table class="table table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Project ID</th>
-            <th>Customer</th>
-            <th>Capacity (kWp)</th>
-            <th>Current Phase</th>
-            <th style="width:7rem;">M1</th>
-            <th style="width:7rem;">M2</th>
-            <th style="width:7rem;">M3</th>
-            <th>Target Date</th>
-            <th>PM</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in projects_with_data %}
-          <tr style="cursor:pointer;" onclick="window.location='{% url 'project_overview' row.project.project_id %}'">
-            <td class="fw-semibold">{{ row.project.project_id }}</td>
-            <td>{{ row.project.customer_name }}</td>
-            <td>{{ row.project.capacity_kw }}</td>
-            <td>
-              {% if row.current_phase %}
-                <span class="text-muted small">{{ row.current_phase.phase_name }}</span>
-              {% else %}
-                <span class="text-muted">—</span>
-              {% endif %}
-            </td>
-            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M1 %}</td>
-            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M2 %}</td>
-            <td>{% include "dashboard/_milestone_badge_ro.html" with m=row.M3 %}</td>
-            <td class="text-muted small">{{ row.project.target_commissioning_date }}</td>
-            <td class="text-muted small">
-              {% if row.project.assigned_pm %}{{ row.project.assigned_pm.user.get_full_name|default:row.project.assigned_pm.user.username }}{% else %}—{% endif %}
-            </td>
-          </tr>
-          {% empty %}
-          <tr>
-            <td colspan="9" class="text-center text-muted py-4">No active projects found.</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+{% if not project_rows %}
+<div class="card shadow-sm border-0">
+  <div class="card-body text-center py-5 text-muted">
+    No active projects in the portfolio right now.
   </div>
 </div>
+{% endif %}
 
-{# ── Document upload placeholder ─────────────────────────────────────────── #}
-<div class="card shadow-sm">
-  <div class="card-body text-center text-muted py-4">
-    <i class="bi bi-folder2-open fs-3 mb-2 d-block"></i>
-    <strong>Document upload — coming soon.</strong><br>
-    Integration planned for Phase 2.
+{% for p in project_rows %}
+<div x-data="{ expanded: false }" class="card mb-2 shadow-sm border-0">
+
+  <div @click="expanded = !expanded"
+       class="bd-card-header card-header bg-white d-flex align-items-center gap-3 py-2 px-3"
+       style="border-radius: inherit; border-bottom-color: transparent;">
+
+    {% if p.urgency_count > 0 %}
+    <div class="bd-urgency-circle urgent">{{ p.urgency_count }}</div>
+    {% else %}
+    <div class="bd-urgency-circle clear">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </div>
+    {% endif %}
+
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold text-truncate">{{ p.customer_name }}</div>
+      <div class="small text-muted">{{ p.project_id }}</div>
+    </div>
+
+    {% if p.status_badge == 'blocked' %}
+    <span class="badge bg-danger">Blocked</span>
+    {% elif p.status_badge == 'delayed' %}
+    <span class="badge bg-warning text-dark">Delayed {{ p.delay_days }}d</span>
+    {% else %}
+    <span class="badge bg-success">On time</span>
+    {% endif %}
+
+    <svg class="bd-chevron" :style="expanded ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </div>
+
+  <div x-show="expanded" x-cloak class="card-body pt-2 pb-3">
+
+    <div class="mb-3 d-flex flex-column gap-1">
+      <div class="bd-info-row">
+        <span class="bd-info-label">Phase</span>
+        <span>{{ p.phase|default:"—" }}</span>
+      </div>
+      <div class="bd-info-row">
+        <span class="bd-info-label">PM</span>
+        <span>{{ p.pm_name|default:"—" }}</span>
+      </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mb-1">
+
+      {% if p.orc_status == 'uploaded' %}
+      <span class="chip chip-green">
+        <span class="chip-dot chip-dot-green"></span>ORC: Uploaded
+      </span>
+      {% elif p.orc_overdue %}
+      <span class="chip chip-amber">
+        <span class="chip-dot chip-dot-amber"></span>ORC: Pending
+      </span>
+      {% else %}
+      <span class="chip chip-grey">
+        <span class="chip-dot chip-dot-grey"></span>ORC: Pending
+      </span>
+      {% endif %}
+
+      {% if p.milestones_total == 0 %}
+      <span class="chip chip-grey">
+        <span class="chip-dot chip-dot-grey"></span>0/0 milestones
+      </span>
+      {% elif p.milestones_received == p.milestones_total %}
+      <span class="chip chip-green">
+        <span class="chip-dot chip-dot-green"></span>{{ p.milestones_received }}/{{ p.milestones_total }} milestones
+      </span>
+      {% elif p.milestones_received > 0 %}
+      <span class="chip chip-amber">
+        <span class="chip-dot chip-dot-amber"></span>{{ p.milestones_received }}/{{ p.milestones_total }} milestones
+      </span>
+      {% else %}
+      <span class="chip chip-grey">
+        <span class="chip-dot chip-dot-grey"></span>{{ p.milestones_received }}/{{ p.milestones_total }} milestones
+      </span>
+      {% endif %}
+
+      {% if p.blocked_issue_count > 0 %}
+      <span class="chip chip-red">
+        <span class="chip-dot chip-dot-red"></span>{{ p.blocked_issue_count }} blocked issue{{ p.blocked_issue_count|pluralize }}
+      </span>
+      {% endif %}
+
+    </div>
+
+    {% if p.milestones_awaiting > 0 %}
+    <p class="bd-caption mb-3">
+      {{ p.milestones_awaiting }} milestone{{ p.milestones_awaiting|pluralize }} awaiting payment receipt — follow up with the client directly. Nudging happens outside the system in Phase 1.
+    </p>
+    {% else %}
+    <div class="mb-3"></div>
+    {% endif %}
+
+    <div>
+      <a href="{% url 'project_overview' p.project_id %}"
+         class="btn btn-sm text-white"
+         style="background-color:#1a7a4a;">
+        View Project
+      </a>
+    </div>
+
   </div>
 </div>
+{% endfor %}
 
 {% endblock %}
