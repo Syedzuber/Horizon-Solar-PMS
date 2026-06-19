@@ -145,6 +145,35 @@
       </div>
       {% endif %}
 
+      {# — Delivery issues — open issues linked to DCs for this project — #}
+      {% if row.delivery_issues %}
+      <div class="mb-3 p-2 rounded" style="background:rgba(255,193,7,.06); border:1px solid rgba(255,193,7,.3);">
+        <div class="small fw-semibold mb-2" style="color:#856404;">
+          <i class="bi bi-truck me-1"></i>Delivery Issues
+        </div>
+        {% for issue in row.delivery_issues %}
+        <div class="d-flex align-items-baseline gap-2 small mb-1">
+          {% if issue.severity == 'Critical' %}
+            <span class="badge bg-danger" style="font-size:.6rem; flex-shrink:0;">Critical</span>
+          {% elif issue.severity == 'High' %}
+            <span class="badge bg-warning text-dark" style="font-size:.6rem; flex-shrink:0;">High</span>
+          {% elif issue.severity == 'Medium' %}
+            <span class="badge bg-primary" style="font-size:.6rem; flex-shrink:0;">Medium</span>
+          {% else %}
+            <span class="badge bg-secondary" style="font-size:.6rem; flex-shrink:0;">Low</span>
+          {% endif %}
+          <a href="{% url 'issue_detail' issue.pk %}" class="text-decoration-none text-dark">{{ issue.title }}</a>
+          {% if issue.delivery_challan %}
+            <span class="text-muted">·
+              <a href="{% url 'delivery_challan_detail' issue.project.project_id issue.delivery_challan.pk %}"
+                 class="text-decoration-none text-muted">DC-{{ issue.delivery_challan.dc_number }}</a>
+            </span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {# — Quick actions + link — #}
       <div class="d-flex flex-wrap gap-2 align-items-center">
         {% if row.project.boq_url %}
