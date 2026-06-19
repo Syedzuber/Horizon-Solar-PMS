@@ -30,6 +30,13 @@
             Edit GRN
           </button>
         {% endif %}
+        {# Raise Issue — available to SE and SCM who are actively receiving/managing this DC #}
+        {% if role == 'Site Engineer' or role == 'SCM' or role == 'PM' or role == 'Admin' %}
+          <button type="button" class="btn btn-outline-danger btn-sm"
+                  data-bs-toggle="modal" data-bs-target="#raiseDcIssueModal">
+            Raise Issue
+          </button>
+        {% endif %}
         <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">
           ← Project Overview
         </a>
@@ -96,7 +103,8 @@
             <th class="text-end">Ordered</th>
             <th>Unit</th>
             <th class="text-end">Received</th>
-            <th>Condition</th>
+            <th class="text-end">Damaged</th>
+            <th>Severity</th>
             <th>GRN Date</th>
             <th>Confirmed By</th>
             <th>Notes</th>
@@ -104,8 +112,8 @@
         </thead>
         <tbody>
           {% for item in line_items %}
-          {% with confirmed=item.received_quantity|stringformat:"s" %}
-          <tr class="{% if item.condition == 'Damaged' %}table-danger{% elif item.condition == 'Partial' %}table-warning{% endif %}">
+          {# Row colour: red for shortfall+damage stacked; amber for shortfall or damage alone #}
+          <tr class="{% if item.received_quantity is not None %}{% if item.received_quantity < item.ordered_quantity and item.damaged_quantity > 0 %}table-danger{% elif item.received_quantity < item.ordered_quantity or item.damaged_quantity > 0 %}table-warning{% endif %}{% endif %}">
             <td>
               <span class="badge bg-light text-dark border">{{ item.boq_category }}</span>
             </td>
@@ -115,7 +123,6 @@
             <td class="text-end fw-semibold">
               {% if item.received_quantity is not None %}
                 {{ item.received_quantity }}
-                {# Overshipping note #}
                 {% if item.received_quantity > item.ordered_quantity %}
                   <span class="text-warning ms-1" title="Received quantity exceeds ordered quantity">⚠</span>
                 {% endif %}
@@ -123,13 +130,28 @@
                 <span class="text-muted">—</span>
               {% endif %}
             </td>
+            <td class="text-end">
+              {% if item.received_quantity is not None %}
+                {% if item.damaged_quantity > 0 %}
+                  <span class="fw-semibold text-danger">{{ item.damaged_quantity }}</span>
+                {% else %}
+                  <span class="text-muted">0</span>
+                {% endif %}
+              {% else %}
+                <span class="text-muted">—</span>
+              {% endif %}
+            </td>
             <td>
-              {% if item.condition == 'Good' %}
-                <span class="badge bg-success">Good</span>
-              {% elif item.condition == 'Damaged' %}
-                <span class="badge bg-danger">Damaged</span>
-              {% elif item.condition == 'Partial' %}
-                <span class="badge bg-warning text-dark">Partial</span>
+              {% if item.received_quantity is not None %}
+                {% if item.received_quantity == 0 %}
+                  <span class="badge bg-danger">None received</span>
+                {% elif item.received_quantity < item.ordered_quantity and item.damaged_quantity > 0 %}
+                  <span class="badge bg-danger">Severe</span>
+                {% elif item.received_quantity < item.ordered_quantity or item.damaged_quantity > 0 %}
+                  <span class="badge bg-warning text-dark">Partial</span>
+                {% else %}
+                  <span class="badge bg-success">Good</span>
+                {% endif %}
               {% else %}
                 <span class="text-muted">—</span>
               {% endif %}
@@ -144,10 +166,9 @@
             </td>
             <td class="text-muted small">{{ item.grn_notes|default:"—" }}</td>
           </tr>
-          {% endwith %}
           {% empty %}
           <tr>
-            <td colspan="9" class="text-center text-muted py-3">No line items.</td>
+            <td colspan="10" class="text-center text-muted py-3">No line items.</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -165,8 +186,9 @@
   </div>
   <div class="card-body">
     <p class="text-muted small mb-3">
-      Fill received quantities and condition for each item below, then click Confirm GRN.
-      Marking an item as <strong>Damaged</strong> will record 0 usable quantity for that item.
+      Enter received quantities below. In the <strong>Damaged</strong> column, enter how many
+      of the received units arrived damaged (enter 0 if all are in good condition).
+      Leave a row blank to skip it.
     </p>
     <form method="post" action="{% url 'confirm_grn' project.project_id challan.pk %}">
       {% csrf_token %}
@@ -177,8 +199,8 @@
               <th>Category</th>
               <th>Description</th>
               <th class="text-end">Ordered</th>
-              <th style="width:11rem;">Received Qty</th>
-              <th style="width:11rem;">Condition</th>
+              <th style="width:10rem;">Received Qty</th>
+              <th style="width:9rem;">Damaged</th>
               <th style="width:14rem;">GRN Notes</th>
             </tr>
           </thead>
@@ -196,15 +218,12 @@
                        placeholder="0">
               </td>
               <td>
-                <select name="condition_{{ item.pk }}" class="form-select form-select-sm">
-                  <option value="">— Select —</option>
-                  {% for val, label in condition_choices %}
-                  <option value="{{ val }}"
-                    {% if item.condition == val %}selected{% endif %}>
-                    {{ label }}
-                  </option>
-                  {% endfor %}
-                </select>
+                <input type="number" name="damaged_qty_{{ item.pk }}"
+                       class="form-control form-control-sm"
+                       step="1" min="0"
+                       value="{{ item.damaged_quantity }}"
+                       placeholder="0"
+                       title="How many of the received units are damaged">
               </td>
               <td>
                 <input type="text" name="grn_notes_{{ item.pk }}"
@@ -228,6 +247,120 @@
 {% endif %}
 
 {# ── SCM Edit GRN modal ───────────────────────────────────────────────────── #}
+{# ── Issues raised against this DC ───────────────────────────────────────── #}
+{% if dc_issues %}
+<div class="card shadow-sm mb-4 border-warning">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <span>Delivery Issues</span>
+    <span class="badge bg-warning text-dark">{{ dc_issues|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Title</th>
+          <th style="width:8rem;">Severity</th>
+          <th style="width:8rem;">Status</th>
+          <th style="width:10rem;">Raised By</th>
+          <th style="width:7rem;">Date</th>
+          <th style="width:5rem;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in dc_issues %}
+        <tr>
+          <td class="fw-semibold">{{ issue.title }}</td>
+          <td>
+            {% if issue.severity == 'Critical' %}
+              <span class="badge bg-danger">Critical</span>
+            {% elif issue.severity == 'High' %}
+              <span class="badge bg-warning text-dark">High</span>
+            {% elif issue.severity == 'Medium' %}
+              <span class="badge bg-primary">Medium</span>
+            {% else %}
+              <span class="badge bg-secondary">Low</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if issue.status == 'Open' %}
+              <span class="badge bg-danger">Open</span>
+            {% elif issue.status == 'In Progress' %}
+              <span class="badge bg-primary">In Progress</span>
+            {% elif issue.status == 'Resolved' %}
+              <span class="badge bg-success">Resolved</span>
+            {% else %}
+              <span class="badge bg-secondary">Closed</span>
+            {% endif %}
+          </td>
+          <td class="small text-muted">
+            {% if issue.raised_by %}{{ issue.raised_by.user.get_full_name|default:issue.raised_by.user.username }}{% else %}—{% endif %}
+          </td>
+          <td class="small text-muted">{{ issue.raised_at|date:"d M Y" }}</td>
+          <td>
+            <a href="{% url 'issue_detail' issue.pk %}" class="btn btn-outline-secondary btn-sm py-0">View</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Raise Issue modal (DC-scoped) ────────────────────────────────────────── #}
+<div class="modal fade" id="raiseDcIssueModal" tabindex="-1"
+     aria-labelledby="raiseDcIssueModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form method="post" action="{% url 'create_delivery_issue' project.project_id challan.pk %}">
+        {% csrf_token %}
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title" id="raiseDcIssueModalLabel">Raise Delivery Issue — DC {{ challan.dc_number }}</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3">
+            This issue will be linked to DC {{ challan.dc_number }} for {{ project.project_id }}.
+            Use this for delivery problems: damaged goods, quantity shortfall, wrong items, etc.
+          </p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
+            <input type="text" name="title" class="form-control" required maxlength="200"
+                   placeholder="e.g. 2 solar panels arrived cracked">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Details</label>
+            <textarea name="description" class="form-control" rows="3"
+                      placeholder="Describe the problem, quantities affected, next steps…"></textarea>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Severity</label>
+            <select name="severity" class="form-select">
+              <option value="Low">Low</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High">High</option>
+              <option value="Critical">Critical</option>
+            </select>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Assign To</label>
+            <select name="assigned_to" class="form-select">
+              <option value="">— Unassigned —</option>
+              {% for p in all_profiles %}
+                <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-danger">Raise Issue</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 {% if role == 'SCM' %}
 <div class="modal fade" id="editGrnModal" tabindex="-1"
      aria-labelledby="editGrnModalLabel" aria-hidden="true">
@@ -243,9 +376,9 @@
         </div>
         <div class="modal-body">
           <p class="text-muted small mb-3">
-            Override received quantities and conditions.
+            Override received quantities and damage counts.
             The original SE submitter is preserved; this action is logged as an SCM override.
-            Marking an item as <strong>Damaged</strong> forces received quantity to 0.
+            Enter how many of the received units are damaged in the <strong>Damaged</strong> column.
           </p>
           <div class="table-responsive">
             <table class="table table-sm">
@@ -254,8 +387,8 @@
                   <th>Category</th>
                   <th>Description</th>
                   <th class="text-end">Ordered</th>
-                  <th style="width:11rem;">Received Qty</th>
-                  <th style="width:11rem;">Condition</th>
+                  <th style="width:10rem;">Received Qty</th>
+                  <th style="width:9rem;">Damaged</th>
                   <th style="width:14rem;">GRN Notes</th>
                 </tr>
               </thead>
@@ -273,15 +406,12 @@
                            placeholder="0">
                   </td>
                   <td>
-                    <select name="condition_{{ item.pk }}" class="form-select form-select-sm">
-                      <option value="">— Select —</option>
-                      {% for val, label in condition_choices %}
-                      <option value="{{ val }}"
-                        {% if item.condition == val %}selected{% endif %}>
-                        {{ label }}
-                      </option>
-                      {% endfor %}
-                    </select>
+                    <input type="number" name="damaged_qty_{{ item.pk }}"
+                           class="form-control form-control-sm"
+                           step="1" min="0"
+                           value="{{ item.damaged_quantity }}"
+                           placeholder="0"
+                           title="How many of the received units are damaged">
                   </td>
                   <td>
                     <input type="text" name="grn_notes_{{ item.pk }}"
