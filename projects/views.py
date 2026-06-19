@@ -4,7 +4,6 @@ import re
 import uuid as _uuid
 from datetime import date, timedelta, datetime
 from decimal import Decimal, InvalidOperation
-from itertools import groupby
 from urllib.parse import urlparse as _urlparse
 
 from django.conf import settings
@@ -12,7 +11,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Count, Max, Prefetch, Q, Sum
+from django.db.models import Count, Max, Min, Prefetch, Q, Sum
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.utils import timezone
@@ -128,6 +127,38 @@ def _project_material_badge(project_id, delivery_lookup):
         return 'Received'
     else:
         return 'Partial'
+
+
+def _build_delivery_lookup(project_ids):
+    """
+    Build a per-project per-category aggregation dict from DCLineItem data.
+    Single query across all given project IDs — avoids N+1 in multi-project dashboard loops.
+    Returns: {project_id: {category: {'total_ordered', 'total_received', 'has_damage'}}}
+    Called by both dashboard_pm and dashboard_scm — shared to prevent independent
+    implementations drifting apart (the root cause of the Q4 representation-5 drift).
+    """
+    delivery_rows = DCLineItem.objects.filter(
+        challan__project__project_id__in=project_ids
+    ).values(
+        'challan__project__project_id', 'boq_category'
+    ).annotate(
+        total_ordered=Sum('ordered_quantity'),
+        total_received=Sum('received_quantity'),
+        # Use damaged_quantity (precise numeric field) — not the coarse condition string
+        damage_count=Count('pk', filter=Q(damaged_quantity__gt=0)),
+    )
+    delivery_lookup = {}
+    for row in delivery_rows:
+        pid = row['challan__project__project_id']
+        cat = row['boq_category']
+        if pid not in delivery_lookup:
+            delivery_lookup[pid] = {}
+        delivery_lookup[pid][cat] = {
+            'total_ordered':  row['total_ordered'] or 0,
+            'total_received': row['total_received'] or 0,
+            'has_damage':     row['damage_count'] > 0,
+        }
+    return delivery_lookup
 
 
 @login_required
@@ -247,35 +278,31 @@ def dashboard_pm(request):
         reverse=True,
     )
 
-    # Annotate material summary badges — single query across all projects, not N+1 per project
-    # Fetch all delivery line item data in one query, then build a lookup dict
+    # Annotate material summary badges — one call to shared helper, not N+1 per project
     if projects_with_progress:
         pm_project_ids = [row['project'].project_id for row in projects_with_progress]
-        # Aggregate ordered/received totals and damage flag per project per category
-        delivery_rows = DCLineItem.objects.filter(
-            challan__project__project_id__in=pm_project_ids
-        ).values(
-            'challan__project__project_id', 'boq_category'
-        ).annotate(
-            total_ordered=Sum('ordered_quantity'),
-            total_received=Sum('received_quantity'),
-            damage_count=Count('pk', filter=Q(condition__in=['Damaged', 'Partial'])),
-        )
-        delivery_lookup = {}
-        for row in delivery_rows:
-            pid = row['challan__project__project_id']
-            cat = row['boq_category']
-            if pid not in delivery_lookup:
-                delivery_lookup[pid] = {}
-            delivery_lookup[pid][cat] = {
-                'total_ordered':  row['total_ordered'] or 0,
-                'total_received': row['total_received'] or 0,
-                'has_damage':     row['damage_count'] > 0,
-            }
+        delivery_lookup = _build_delivery_lookup(pm_project_ids)
         for row in projects_with_progress:
             row['material_summary'] = _project_material_badge(
                 row['project'].project_id, delivery_lookup
             )
+
+    # Delivery issues — one batch query grouped by project, attached to each row
+    if projects_with_progress:
+        _all_dc_issues = list(
+            Issue.objects.filter(
+                delivery_challan__project__assigned_pm=pm_profile,
+                status__in=[Issue.OPEN, Issue.IN_PROGRESS],
+            )
+            .select_related('project', 'delivery_challan', 'raised_by__user')
+            .order_by('-raised_at')
+        )
+        _dc_issues_by_project = {}
+        for _issue in _all_dc_issues:
+            _pid = _issue.project.project_id
+            _dc_issues_by_project.setdefault(_pid, []).append(_issue)
+        for row in projects_with_progress:
+            row['delivery_issues'] = _dc_issues_by_project.get(row['project'].project_id, [])
 
     due_today_tasks = Task.objects.filter(
         phase__project__assigned_pm=pm_profile,
@@ -336,57 +363,152 @@ def dashboard_pm(request):
 @login_required
 @role_required(['Site Engineer'])
 def dashboard_site_engineer(request):
-    """
-    Site Engineer dashboard: tasks due today, in-progress, and overdue
-    across all projects the SE is assigned to.
-    Access: Site Engineer only.
-    """
-    se_profile  = request.user.profile
-    my_projects = Project.objects.filter(
+    """SE dashboard. Renders one card per assigned project, sorted by urgency. Site Engineer role only."""
+    #
+    # Stop-and-report findings (verified against models.py 2026-06-19):
+    # 1. SE-project link: Project.assigned_site_engineer FK → UserProfile (related_name='se_projects')
+    # 2. DeliveryChallan.EXPECTED='Expected' = GRN not yet confirmed (no line items have received_quantity)
+    # 3. is_delayed: view-computed (same logic as PM dashboard) via target_commissioning_date
+    # 4. Blocked field: Task.status == 'Blocked' (string); no separate is_blocked boolean
+    # 5. task_type values: Task.INTERNAL='Internal', Task.EXTERNAL='External'
+    #
+    # SE role only — other roles are redirected at the decorator level
+    today      = date.today()
+    se_profile = request.user.profile
+
+    # Annotate each project with per-SE urgency counts in a single DB round-trip.
+    # overdue_count: internal tasks assigned to this SE, past due, not done.
+    # Excludes external/authority tasks (task_type='External') — DISCOM delays
+    # must never corrupt internal execution metrics. See Day 2 architectural decision.
+    # blocked_count: tasks assigned to SE with status='Blocked' (no is_blocked field — verified).
+    # pending_grn_count: DCs for this project with status='Expected' (no GRN confirmed yet).
+    # issue_count: open issues on this project (Open or In Progress).
+    projects = Project.objects.filter(
         assigned_site_engineer=se_profile,
         status__in=['Active', 'In Progress'],
+    ).annotate(
+        overdue_count=Count(
+            'phases__tasks',
+            filter=Q(
+                phases__tasks__task_type=Task.INTERNAL,
+                phases__tasks__assigned_to=se_profile,
+                phases__tasks__due_date__lt=today,
+                phases__tasks__due_date__isnull=False,
+                phases__tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+            ),
+            distinct=True,
+        ),
+        blocked_count=Count(
+            'phases__tasks',
+            filter=Q(
+                phases__tasks__assigned_to=se_profile,
+                phases__tasks__status=Task.BLOCKED,
+            ),
+            distinct=True,
+        ),
+        pending_grn_count=Count(
+            'delivery_challans',
+            filter=Q(delivery_challans__status=DeliveryChallan.EXPECTED),
+            distinct=True,
+        ),
+        issue_count=Count(
+            'issues',
+            filter=Q(issues__status__in=[Issue.OPEN, Issue.IN_PROGRESS]),
+            distinct=True,
+        ),
     )
-    # Match tasks explicitly assigned to this SE, or unassigned SE-role tasks on their projects
-    se_q = Q(assigned_to=se_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SITE_ENGINEER)
 
-    due_today = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
-        due_date=date.today(), due_date__isnull=False,
-        status__in=['Not Started', 'In Progress'],
-    ).count()
+    projects_data = []
+    for project in projects:
+        # Compute SE task progress: done / total for tasks explicitly assigned to this SE
+        se_tasks_qs = Task.objects.filter(phase__project=project, assigned_to=se_profile)
+        se_total    = se_tasks_qs.count()
+        se_done     = se_tasks_qs.filter(status=Task.DONE).count()
+        progress    = int(se_done / se_total * 100) if se_total else 0
 
-    in_progress = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
-        status='In Progress',
-    ).count()
+        # is_delayed: same logic as PM dashboard — uses target_commissioning_date
+        is_delayed = bool(
+            project.target_commissioning_date
+            and project.target_commissioning_date < today
+        )
+        delay_days = (today - project.target_commissioning_date).days if is_delayed else 0
 
-    overdue = Task.objects.filter(phase__project__in=my_projects).filter(se_q).filter(
-        due_date__lt=date.today(), due_date__isnull=False,
-        status__in=['Not Started', 'In Progress'],
-    ).count()
+        # Current phase: first phase with an incomplete task (same query pattern as PM dashboard)
+        current_phase_obj = (
+            project.phases
+            .filter(tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])
+            .order_by('phase_order').first()
+            or project.phases.order_by('-phase_order').first()
+        )
+        phase_name = current_phase_obj.phase_name if current_phase_obj else None
 
-    tasks_by_project = [
-        {
-            'project': project,
-            'tasks': Task.objects.filter(phase__project=project).filter(se_q).order_by('due_date'),
-        }
-        for project in my_projects
-    ]
+        # Next task: earliest not-done SE-assigned task ordered by due_date.
+        # PostgreSQL sorts NULLs last in ASC order, so tasks with dates appear first.
+        next_task_obj = (
+            Task.objects.filter(
+                phase__project=project,
+                assigned_to=se_profile,
+                status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
+            )
+            .order_by('due_date')
+            .first()
+        )
 
-    seven_days_ago = date.today() - timedelta(days=7)
-    due_date_changes = DueDateChangeLog.objects.filter(
-        task__phase__project__in=my_projects,
-        task__assigned_role=Task.SITE_ENGINEER,
-        changed_at__date__gte=seven_days_ago,
-    ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:20]
+        next_task    = None
+        next_due     = None
+        next_overdue = False
+        if next_task_obj:
+            next_task = next_task_obj.task_name
+            if next_task_obj.due_date:
+                # Use .day (no leading zero) + strftime('%b') — avoids %-d platform differences
+                next_due     = '{} {}'.format(next_task_obj.due_date.day, next_task_obj.due_date.strftime('%b'))
+                next_overdue = next_task_obj.due_date < today
+            else:
+                next_due = 'No due date set'
+
+        urgency_count = (
+            project.overdue_count
+            + project.blocked_count
+            + project.pending_grn_count
+            + project.issue_count
+        )
+
+        projects_data.append({
+            'project_id':        project.project_id,
+            'pk':                project.pk,
+            'customer_name':     project.customer_name,
+            'phase':             phase_name,
+            'progress':          progress,
+            'is_delayed':        is_delayed,
+            'delay_days':        delay_days,
+            'overdue_count':     project.overdue_count,
+            'blocked_count':     project.blocked_count,
+            'pending_grn_count': project.pending_grn_count,
+            'issue_count':       project.issue_count,
+            'urgency_count':     urgency_count,
+            'next_task':         next_task,
+            'next_due':          next_due,
+            'next_overdue':      next_overdue,
+        })
+
+    # Sort in Python after annotation — Django ORM cannot order by a computed
+    # urgency_count (sum of multiple annotations) without a subquery.
+    # With 3-5 projects per SE, a Python sort is negligible overhead.
+    projects_data.sort(key=lambda p: p['urgency_count'], reverse=True)
+
+    total_overdue     = sum(p['overdue_count'] for p in projects_data)
+    total_pending_grn = sum(p['pending_grn_count'] for p in projects_data)
+    total_issues      = sum(p['issue_count'] for p in projects_data)
+    total_urgent      = sum(p['urgency_count'] for p in projects_data)
 
     return render(request, 'dashboard/site-engineer.html', {
-        'summary': {
-            'due_today':   due_today,
-            'in_progress': in_progress,
-            'overdue':     overdue,
-        },
-        'tasks_by_project':  tasks_by_project,
-        'due_date_changes':  due_date_changes,
-        'today':             date.today(),
+        'projects':          projects_data,
+        'se_first_name':     request.user.first_name or request.user.username,
+        'total_overdue':     total_overdue,
+        'total_pending_grn': total_pending_grn,
+        'total_issues':      total_issues,
+        'total_urgent':      total_urgent,
+        'today':             today,
         'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
@@ -537,49 +659,261 @@ def dashboard_finance(request):
 @role_required(['SCM'])
 def dashboard_scm(request):
     """
-    SCM dashboard: BOQs awaiting acknowledgment, procurement POs by project,
-    delivery tasks, and overdue counts. Access: SCM only.
+    SCM dashboard: BOQs awaiting acknowledgment, per-project DC status,
+    pending deliveries, material badges, and delivery issues.
+    All delivery/procurement signals read from DeliveryChallan/DCLineItem —
+    not Task proxies — so they reflect actual receipt state. Access: SCM only.
     """
-    scm_profile   = request.user.profile
-    # Match tasks explicitly assigned to this SCM user, or unassigned SCM-role tasks
-    scm_q         = Q(assigned_to=scm_profile) | Q(assigned_to__isnull=True, assigned_role=Task.SCM)
-    active_filter = {'phase__project__status__in': ['Active', 'In Progress']}
+    today = date.today()
 
+    # BOQ awaiting SCM acknowledgment (Q3 — confirmed working, left unchanged)
     boq_awaiting = BOQ.objects.filter(status='Submitted').count()
 
-    deliveries_today = Task.objects.filter(
-        assigned_role=Task.SCM,
-        phase__phase_name='Delivery',
-        due_date=date.today(), due_date__isnull=False,
-        **active_filter,
+    # Deliveries today: DCs with expected_delivery_date=today not yet fully received
+    deliveries_today = DeliveryChallan.objects.filter(
+        project__status__in=['Active', 'In Progress'],
+        expected_delivery_date=today,
+        status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED],
     ).count()
 
-    overdue = Task.objects.filter(
-        assigned_role=Task.SCM,
-        due_date__lt=date.today(), due_date__isnull=False,
-        status__in=['Not Started', 'In Progress'],
-        **active_filter,
+    # Overdue: DCs whose expected date has passed and are still unresolved (including Rejected = severe)
+    overdue = DeliveryChallan.objects.filter(
+        project__status__in=['Active', 'In Progress'],
+        expected_delivery_date__lt=today,
+        expected_delivery_date__isnull=False,
+        status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED, DeliveryChallan.REJECTED],
     ).count()
 
-    raw_procurement = Task.objects.filter(
-        phase__phase_name='Procurement', **active_filter,
-    ).filter(scm_q).select_related('phase__project').order_by(
-        'phase__project__id', 'task_order',
+    # Active projects SCM tracks: all Active/In Progress projects
+    active_projects = list(
+        Project.objects.filter(status__in=['Active', 'In Progress'])
+        .select_related('assigned_pm__user')
+        .order_by('project_id')
     )
-    pos_by_project = [
-        (project, list(tasks))
-        for project, tasks in groupby(raw_procurement, key=lambda t: t.phase.project)
-    ]
+    active_project_ids = [p.project_id for p in active_projects]
 
-    delivery_tasks = Task.objects.filter(
-        phase__phase_name='Delivery', **active_filter,
-    ).filter(scm_q).select_related('phase__project').order_by(
-        'due_date', 'phase__project__project_id',
+    # dc_by_project: group all existing DCs by project for the Procurement section.
+    # SCM uses this to see which projects have DCs and their current receipt state.
+    # Projects with no DCs yet appear with an empty challan list.
+    raw_challans = (
+        DeliveryChallan.objects.filter(
+            project__status__in=['Active', 'In Progress'],
+        )
+        .select_related('project', 'vendor')
+        .order_by('project__project_id', '-dc_date')
+    )
+    dc_map = {p.project_id: {'project': p, 'challans': []} for p in active_projects}
+    for challan in raw_challans:
+        pid = challan.project.project_id
+        if pid in dc_map:
+            dc_map[pid]['challans'].append(challan)
+    # Return as list of (project, challans) tuples — mirrors old pos_by_project structure
+    # so the template loop shape stays the same (project header + per-challan rows)
+    dc_by_project = [(row['project'], row['challans']) for row in dc_map.values()]
+
+    # delivery_challans: unresolved DCs for the Deliveries section — includes Rejected (severe) at top
+    # Rejected DCs need urgent SCM attention alongside Expected/Partial
+    delivery_challans = (
+        DeliveryChallan.objects.filter(
+            project__status__in=['Active', 'In Progress'],
+            status__in=[
+                DeliveryChallan.EXPECTED,
+                DeliveryChallan.PARTIALLY_RECEIVED,
+                DeliveryChallan.REJECTED,
+            ],
+        )
+        .select_related('project', 'vendor')
+        .order_by('expected_delivery_date', 'project__project_id')
     )
 
-    boqs = BOQ.objects.filter(
-        project__status__in=['Active', 'In Progress']
-    ).select_related('project').order_by('project__project_id')
+    # Material badges — reuse shared helper; same aggregation as dashboard_pm, no drift risk
+    delivery_lookup = _build_delivery_lookup(active_project_ids) if active_project_ids else {}
+
+    # BOQ map: one query for all active projects (avoids N+1 in the loop below)
+    boq_map = {
+        b.project_id: b
+        for b in BOQ.objects.filter(project__project_id__in=active_project_ids)
+    }
+
+    # DC grouping per project — reuse raw_challans (already fetched, ordered -dc_date per project)
+    dc_per_project = {pid: row['challans'] for pid, row in dc_map.items()}
+
+    # Open issue counts + oldest raised_at per project — one aggregation query
+    issue_agg = (
+        Issue.objects.filter(
+            project__project_id__in=active_project_ids,
+            status__in=[Issue.OPEN, Issue.IN_PROGRESS],
+        )
+        .values('project__project_id')
+        .annotate(count=Count('pk'), oldest_at=Min('raised_at'))
+    )
+    issue_map = {}
+    for _row in issue_agg:
+        _pid = _row['project__project_id']
+        _oldest = (_row['oldest_at'].date() if _row['oldest_at'] else None)
+        issue_map[_pid] = {
+            'count':      _row['count'],
+            'oldest_age': (today - _oldest).days if _oldest else 0,
+        }
+
+    # Per-project pipeline rows with 4-stage status + stall computation
+    project_rows = []
+    for project in active_projects:
+        pid = project.project_id
+        boq          = boq_map.get(pid)
+        challans     = dc_per_project.get(pid, [])
+        material_bdg = _project_material_badge(pid, delivery_lookup)
+        issue_data   = issue_map.get(pid, {'count': 0, 'oldest_age': None})
+
+        # — BOQ stage —
+        boq_status   = boq.status if boq else None
+        boq_age_days = None
+        if boq and boq.status == 'Submitted' and boq.submitted_at:
+            boq_age_days = (today - boq.submitted_at.date()).days
+
+        # — Order/Procurement stage —
+        pending_challans = [c for c in challans if c.status in (
+            DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED, DeliveryChallan.REJECTED
+        )]
+        if not challans:
+            order_status   = 'None'
+            order_age_days = None
+        elif not pending_challans:
+            order_status   = 'Received'
+            order_age_days = None
+        else:
+            _severity_rank = {DeliveryChallan.REJECTED: 3,
+                              DeliveryChallan.PARTIALLY_RECEIVED: 2,
+                              DeliveryChallan.EXPECTED: 1}
+            worst_pending  = max(pending_challans, key=lambda c: _severity_rank.get(c.status, 0))
+            order_status   = ('Rejected' if worst_pending.status == DeliveryChallan.REJECTED else
+                              'Partial'  if worst_pending.status == DeliveryChallan.PARTIALLY_RECEIVED else
+                              'Expected')
+            oldest_dc_date = min(c.dc_date for c in pending_challans)
+            order_age_days = (today - oldest_dc_date).days
+
+        # — Delivery stage —
+        if material_bdg == 'Received':
+            delivery_status   = 'Received'
+            delivery_age_days = None
+        else:
+            overdue_challans = [
+                c for c in challans
+                if c.expected_delivery_date and c.expected_delivery_date < today
+                and c.status != DeliveryChallan.RECEIVED
+            ]
+            unscheduled_challans = [
+                c for c in challans
+                if not c.expected_delivery_date and c.status != DeliveryChallan.RECEIVED
+            ]
+            if overdue_challans:
+                delivery_status   = 'Overdue'
+                delivery_age_days = max((today - c.expected_delivery_date).days
+                                        for c in overdue_challans)
+            elif unscheduled_challans:
+                delivery_status   = 'Not Scheduled'
+                oldest_dc         = min(c.dc_date for c in unscheduled_challans)
+                delivery_age_days = (today - oldest_dc).days
+            elif challans:
+                delivery_status   = 'Scheduled'
+                delivery_age_days = None
+            else:
+                delivery_status   = 'None'
+                delivery_age_days = None
+
+        # — Issues stage —
+        open_issue_count = issue_data['count']
+        issue_age_days   = issue_data['oldest_age']
+
+        # — Stall computation — worst wins (red > amber; within same level, most days) —
+        stall_candidates = []
+
+        if boq_status == 'Submitted' and boq_age_days is not None:
+            if boq_age_days > 5:
+                stall_candidates.append(('boq', boq_age_days, 'red'))
+            elif boq_age_days > 2:
+                stall_candidates.append(('boq', boq_age_days, 'amber'))
+
+        if order_status in ('Expected', 'Partial', 'Rejected') and order_age_days is not None:
+            if order_age_days > 7:
+                stall_candidates.append(('order', order_age_days, 'red'))
+            elif order_age_days > 3:
+                stall_candidates.append(('order', order_age_days, 'amber'))
+
+        if delivery_status in ('Overdue', 'Not Scheduled') and delivery_age_days is not None:
+            if delivery_age_days > 10:
+                stall_candidates.append(('delivery', delivery_age_days, 'red'))
+            elif delivery_age_days > 5:
+                stall_candidates.append(('delivery', delivery_age_days, 'amber'))
+
+        if open_issue_count > 0:
+            _iage = issue_age_days or 0
+            if _iage > 2:
+                stall_candidates.append(('issues', _iage, 'red'))
+            else:
+                stall_candidates.append(('issues', _iage, 'amber'))
+
+        if stall_candidates:
+            _red = [(s, d, l) for (s, d, l) in stall_candidates if l == 'red']
+            if _red:
+                _worst     = max(_red, key=lambda x: x[1])
+                stall_level = 'red'
+            else:
+                _worst     = max(stall_candidates, key=lambda x: x[1])
+                stall_level = 'amber'
+            is_stalled    = True
+            stalled_stage = _worst[0]
+            days_in_stage = _worst[1]
+        else:
+            is_stalled    = False
+            stalled_stage = None
+            stall_level   = None
+            days_in_stage = None
+
+        # — Action URLs —
+        boq_url               = f'/projects/{pid}/boq/'
+        schedule_delivery_url = f'/projects/{pid}/delivery-challans/create/'
+        finance_url           = f'/projects/{pid}/overview/'
+        # raise_issue_url: scope to the most recent pending DC if one exists
+        latest_pending_dc = (pending_challans[0] if pending_challans
+                             else (challans[0] if challans else None))
+        if latest_pending_dc:
+            raise_issue_url = (f'/projects/{pid}/delivery-challans/'
+                               f'{latest_pending_dc.pk}/issues/create/')
+        else:
+            raise_issue_url = f'/projects/{pid}/issues/create/'
+
+        project_rows.append({
+            'project':             project,
+            'material_badge':      material_bdg,
+            'boq_status':          boq_status,
+            'boq_age_days':        boq_age_days,
+            'order_status':        order_status,
+            'order_age_days':      order_age_days,
+            'delivery_status':     delivery_status,
+            'delivery_age_days':   delivery_age_days,
+            'open_issue_count':    open_issue_count,
+            'issue_age_days':      issue_age_days,
+            'is_stalled':          is_stalled,
+            'stalled_stage':       stalled_stage,
+            'stall_level':         stall_level,
+            'days_in_stage':       days_in_stage,
+            'boq_url':             boq_url,
+            'schedule_delivery_url': schedule_delivery_url,
+            'finance_url':         finance_url,
+            'raise_issue_url':     raise_issue_url,
+        })
+
+    # Delivery issues: open/in-progress issues linked to DCs on active SCM-tracked projects
+    # SCM scope: all active projects (SCM is not PM-scoped; it sees all active projects)
+    delivery_issues = (
+        Issue.objects.filter(
+            delivery_challan__project__status__in=['Active', 'In Progress'],
+            status__in=[Issue.OPEN, Issue.IN_PROGRESS],
+        )
+        .select_related('project', 'delivery_challan', 'raised_by__user')
+        .order_by('-raised_at')[:20]
+    )
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
@@ -587,11 +921,10 @@ def dashboard_scm(request):
             'deliveries_today': deliveries_today,
             'overdue':          overdue,
         },
-        'pos_by_project': pos_by_project,
-        'delivery_tasks': delivery_tasks,
-        'boqs':           boqs,
-        'today':          date.today(),
-        'all_profiles':   UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        'project_rows':      project_rows,
+        'delivery_issues':   delivery_issues,
+        'today':             today,
+        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -769,7 +1102,7 @@ def project_create(request):
                 project.save()
 
             messages.success(request, f"Project {project.project_id} created successfully.")
-            return redirect('project_detail', project_id=project.project_id)
+            return redirect('project_overview', project_id=project.project_id)
     else:
         form = ProjectCreateForm(initial={'project_type': 'Residential'})
 
@@ -800,14 +1133,14 @@ def project_edit(request, project_id):
 
     if project.status != 'Draft':
         messages.warning(request, 'Active projects cannot be edited.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     if request.method == 'POST':
         form = ProjectEditForm(request.POST, instance=project)
         if form.is_valid():
             form.save()
             messages.success(request, f"Project {project.project_id} updated successfully.")
-            return redirect('project_detail', project_id=project.project_id)
+            return redirect('project_overview', project_id=project.project_id)
     else:
         form = ProjectEditForm(instance=project)
 
@@ -829,7 +1162,7 @@ def project_activate(request, project_id):
     Access: assigned PM only. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
 
@@ -839,7 +1172,7 @@ def project_activate(request, project_id):
     # Status check before any DB write — avoids partial state if already active
     if project.status != 'Draft':
         messages.warning(request, 'Project is already active.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     with transaction.atomic():
         project.status = 'Active'
@@ -870,7 +1203,7 @@ def project_activate(request, project_id):
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 
-    return redirect('project_detail', project_id=project.project_id)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 @login_required
@@ -882,7 +1215,7 @@ def project_recalculate_dates(request, project_id):
     Access: assigned PM only. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
 
@@ -891,15 +1224,15 @@ def project_recalculate_dates(request, project_id):
 
     if project.status == 'Draft':
         messages.warning(request, 'Project must be activated before calculating due dates.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     if not project.activated_at:
         messages.warning(request, 'Project has no activation date — cannot calculate due dates.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     calculate_due_dates(project)
     messages.success(request, 'Due dates recalculated from activation date.')
-    return redirect('project_detail', project_id=project.project_id)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 @login_required
@@ -917,7 +1250,7 @@ def task_add(request, project_id):
 
     if project.status != 'Active':
         messages.warning(request, 'Tasks can only be added to active projects.')
-        return redirect('project_detail', project_id=project.project_id)
+        return redirect('project_overview', project_id=project.project_id)
 
     if request.method == 'POST':
         form = TaskAddForm(request.POST, project=project)
@@ -933,7 +1266,7 @@ def task_add(request, project_id):
                 due_date=cd['due_date'],
             )
             messages.success(request, f"Task '{cd['task_name']}' added successfully.")
-            return redirect('project_detail', project_id=project.project_id)
+            return redirect('project_overview', project_id=project.project_id)
     else:
         form = TaskAddForm(project=project)
 
@@ -1106,7 +1439,7 @@ def task_set_due_date(request, project_id, task_id):
     Access: assigned PM only. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
 
@@ -1131,7 +1464,7 @@ def task_set_due_date(request, project_id, task_id):
         messages.success(request, 'Due date cleared.')
         # Log the due date clear
         log_activity(project, request.user.profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
-    return redirect('project_detail', project_id=project.project_id)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1767,7 +2100,7 @@ def milestone_create(request, project_id):
     Access: assigned PM only. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     if not _pm_owns_project(request, project):
@@ -1789,7 +2122,7 @@ def milestone_create(request, project_id):
         messages.success(request, 'Payment milestones created.')
     else:
         messages.info(request, 'Milestones already exist for this project.')
-    return redirect('project_detail', project_id=project_id)
+    return redirect('project_overview', project_id=project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2016,7 +2349,7 @@ def project_overview(request, project_id):
     )
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
 
-    # Delivery challans with per-DC line-item receipt summary
+    # Delivery challans with per-DC severity-aware summary text
     delivery_challans = list(
         project.delivery_challans
         .select_related('vendor', 'created_by__user')
@@ -2026,11 +2359,36 @@ def project_overview(request, project_id):
     for dc in delivery_challans:
         li_list   = list(dc.line_items.all())
         total     = len(li_list)
-        confirmed = sum(1 for li in li_list if li.received_quantity is not None)
-        dc.line_items_summary = (
-            f"{confirmed} of {total} item{'s' if total != 1 else ''} received"
-            if total else "No items logged"
-        )
+        confirmed = [li for li in li_list if li.received_quantity is not None]
+        n_conf    = len(confirmed)
+
+        if not total:
+            dc.line_items_summary = "No items logged"
+        elif n_conf == 0:
+            dc.line_items_summary = f"0 of {total} item{'s' if total > 1 else ''} confirmed"
+        else:
+            total_ordered  = sum(li.ordered_quantity for li in li_list)
+            total_received = sum(li.received_quantity for li in confirmed)
+            total_damaged  = sum(li.damaged_quantity for li in confirmed)
+            # Use the DC's already-computed severity status for the summary label
+            if dc.status == DeliveryChallan.RECEIVED:
+                dc.line_items_summary = f"All {n_conf} item{'s' if n_conf > 1 else ''} received"
+            elif dc.status == DeliveryChallan.REJECTED:
+                # Severe: shortfall + damage, or nothing received
+                dc.line_items_summary = (
+                    f"Severe — {total_received:.0f}/{total_ordered:.0f} units"
+                    + (f", {total_damaged} damaged" if total_damaged else "")
+                )
+            else:
+                # Partially Received (AMBER): shortfall or damage, not both stacked
+                if total_damaged:
+                    dc.line_items_summary = (
+                        f"Partial — {total_received:.0f}/{total_ordered:.0f} units, {total_damaged} damaged"
+                    )
+                else:
+                    dc.line_items_summary = (
+                        f"Partial — {total_received:.0f} of {total_ordered:.0f} units received"
+                    )
 
     # Per-category material status (summary badge + detail quantities)
     material_status = get_material_status(project)
@@ -2041,14 +2399,17 @@ def project_overview(request, project_id):
         .annotate(
             total_ordered=Sum('ordered_quantity'),
             total_received=Sum('received_quantity'),
-            damage_count=Count('pk', filter=Q(condition__in=['Damaged', 'Partial'])),
+            total_damaged=Sum('damaged_quantity'),
+            # Use damaged_quantity (precise numeric) — not the coarse condition string
+            damage_count=Count('pk', filter=Q(damaged_quantity__gt=0)),
         )
     )
     material_status_by_category = []
     for row in cat_rows:
-        received   = row['total_received'] or 0
-        ordered    = row['total_ordered'] or 0
-        has_damage = row['damage_count'] > 0
+        received      = row['total_received'] or 0
+        ordered       = row['total_ordered'] or 0
+        total_damaged = row['total_damaged'] or 0
+        has_damage    = row['damage_count'] > 0
         if received == 0:
             cat_status = 'Pending'
         elif received >= ordered and not has_damage:
@@ -2061,6 +2422,7 @@ def project_overview(request, project_id):
             'received_quantity': received,
             'ordered_quantity':  ordered,
             'has_damage':        has_damage,
+            'total_damaged':     total_damaged,
         })
 
     # Design assignment candidates (PM only, for assign-design dropdown)
@@ -2443,7 +2805,7 @@ def delete_project_document(request, project_id, doc_pk):
     Access: uploader or Admin only. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
@@ -2467,7 +2829,7 @@ def delete_project_document(request, project_id, doc_pk):
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
         return redirect(next_url)
-    return redirect('project_detail', project_id=project_id)
+    return redirect('project_overview', project_id=project_id)
 
 
 # ---------------------------------------------------------------------------
@@ -2618,7 +2980,7 @@ def create_project_issue(request, project_id):
     Access: all roles with project access; PM isolation applies. POST only.
     """
     if request.method != 'POST':
-        return redirect('project_detail', project_id=project_id)
+        return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
@@ -2727,6 +3089,76 @@ def create_task_issue(request, project_id, task_id):
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
     messages.success(request, f'Issue "{title}" raised.')
     return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+@login_required
+def create_delivery_issue(request, project_id, dc_id):
+    """
+    Raise an issue linked to a specific DeliveryChallan (delivery_challan.issues relation).
+    Follows the same pattern as create_task_issue but scoped to DC instead of Task.
+    Access: all roles with project access; PM isolation applies. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.profile
+
+    # PM isolation: PMs can only interact with their own projects
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    # Cross-project guard: DC must belong to the project in the URL
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    if challan.project.project_id != project_id:
+        raise Http404
+
+    title       = request.POST.get('title', '').strip()
+    description = request.POST.get('description', '').strip()
+    severity    = request.POST.get('severity', Issue.MEDIUM)
+    due_date_s  = request.POST.get('due_date', '').strip()
+    assignee_id = request.POST.get('assigned_to', '').strip()
+
+    if not title:
+        messages.error(request, 'Issue title is required.')
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+    if severity not in dict(Issue.SEVERITY_CHOICES):
+        severity = Issue.MEDIUM
+
+    due_date = None
+    if due_date_s:
+        try:
+            due_date = date.fromisoformat(due_date_s)
+        except ValueError:
+            pass
+
+    assigned_to = None
+    if assignee_id:
+        try:
+            assigned_to = UserProfile.objects.get(pk=assignee_id)
+        except UserProfile.DoesNotExist:
+            pass
+
+    issue = Issue.objects.create(
+        project=project,
+        delivery_challan=challan,
+        task=None,
+        title=title,
+        description=description,
+        severity=severity,
+        status=Issue.OPEN,
+        raised_by=profile,
+        assigned_to=assigned_to,
+        due_date=due_date,
+    )
+    log_activity(
+        project, profile,
+        f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
+        entity_type='Issue', entity_id=issue.pk,
+    )
+    messages.success(request, f'Issue "{title}" raised for DC {challan.dc_number}.')
+    return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
 
 @login_required
@@ -3343,13 +3775,22 @@ def delivery_challan_detail(request, project_id, dc_id):
 
     line_items = challan.line_items.select_related('grn_confirmed_by__user').all()
 
+    # Issues raised against this specific DC — shown below line items for visibility
+    dc_issues = (
+        Issue.objects.filter(delivery_challan=challan)
+        .select_related('raised_by__user', 'assigned_to__user')
+        .order_by('-raised_at')
+    )
+
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
         'challan':           challan,
         'line_items':        line_items,
+        'dc_issues':         dc_issues,
         'role':              profile.role,
         'user_profile':      profile,
         'condition_choices': DCLineItem.CONDITION_CHOICES,
+        'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
 
 
@@ -3358,8 +3799,9 @@ def delivery_challan_detail(request, project_id, dc_id):
 def confirm_grn(request, project_id, dc_id):
     """
     SE confirms receipt of materials at site (GRN confirmation).
-    Damaged condition forces received_quantity=0 — client-submitted value is ignored
-    to prevent recording usable quantity for items that arrived damaged.
+    Captures received_quantity and damaged_quantity separately — two numeric inputs
+    give precise information rather than a coarse condition dropdown.
+    condition field is derived for backward compatibility with code that reads it.
     recalculate_dc_status() called ONCE after all line items saved — never inside the loop.
     Access: Site Engineer only. POST only.
     """
@@ -3382,25 +3824,36 @@ def confirm_grn(request, project_id, dc_id):
     line_items = challan.line_items.all()
 
     for item in line_items:
-        qty_str   = request.POST.get(f'received_qty_{item.pk}', '').strip()
-        condition = request.POST.get(f'condition_{item.pk}', '').strip()
-        grn_notes = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+        qty_str        = request.POST.get(f'received_qty_{item.pk}', '').strip()
+        damaged_qty_str = request.POST.get(f'damaged_qty_{item.pk}', '0').strip()
+        grn_notes      = request.POST.get(f'grn_notes_{item.pk}', '').strip()
 
-        if not qty_str or not condition:
-            continue
-        if condition not in dict(DCLineItem.CONDITION_CHOICES):
-            continue
+        if not qty_str:
+            continue  # Skip items where SE didn't enter a received quantity
 
         received_qty = _safe_decimal(qty_str)
         if received_qty is None:
             continue
 
-        # Damaged items force received_quantity to 0 — nothing usable received
-        if condition == DCLineItem.DAMAGED:
-            received_qty = Decimal('0')
+        # Parse damaged_quantity; clamp to [0, received_qty]
+        try:
+            damaged_qty = max(0, int(float(damaged_qty_str)))
+        except (ValueError, TypeError):
+            damaged_qty = 0
+        damaged_qty = min(damaged_qty, int(received_qty))
+
+        # Derive condition for backward compatibility with code that reads this field
+        # condition string is now secondary — damaged_quantity is the precise source of truth
+        if damaged_qty == 0:
+            derived_condition = DCLineItem.GOOD
+        elif damaged_qty >= received_qty:
+            derived_condition = DCLineItem.DAMAGED
+        else:
+            derived_condition = DCLineItem.PARTIAL
 
         item.received_quantity = received_qty
-        item.condition         = condition
+        item.damaged_quantity  = damaged_qty
+        item.condition         = derived_condition
         item.grn_date          = today
         item.grn_confirmed_by  = profile
         item.grn_notes         = grn_notes
@@ -3426,7 +3879,8 @@ def override_grn(request, project_id, dc_id):
     """
     SCM overrides an SE-submitted GRN. grn_confirmed_by is NOT overwritten —
     original SE submitter is preserved. ActivityLog records who made the override.
-    No status restriction: SCM can override even on Received DCs (to correct mistakes).
+    No status restriction: SCM can override even on Received/Rejected DCs (to correct mistakes).
+    Captures received_quantity and damaged_quantity separately — mirrors confirm_grn logic.
     recalculate_dc_status() called ONCE after all items saved.
     Access: SCM only. POST only.
     """
@@ -3445,25 +3899,35 @@ def override_grn(request, project_id, dc_id):
     line_items = challan.line_items.all()
 
     for item in line_items:
-        qty_str   = request.POST.get(f'received_qty_{item.pk}', '').strip()
-        condition = request.POST.get(f'condition_{item.pk}', '').strip()
-        grn_notes = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+        qty_str        = request.POST.get(f'received_qty_{item.pk}', '').strip()
+        damaged_qty_str = request.POST.get(f'damaged_qty_{item.pk}', '0').strip()
+        grn_notes      = request.POST.get(f'grn_notes_{item.pk}', '').strip()
 
-        if not qty_str or not condition:
-            continue
-        if condition not in dict(DCLineItem.CONDITION_CHOICES):
-            continue
+        if not qty_str:
+            continue  # Skip items where SCM didn't enter a received quantity
 
         received_qty = _safe_decimal(qty_str)
         if received_qty is None:
             continue
 
-        # Damaged items force received_quantity to 0
-        if condition == DCLineItem.DAMAGED:
-            received_qty = Decimal('0')
+        # Parse damaged_quantity; clamp to [0, received_qty]
+        try:
+            damaged_qty = max(0, int(float(damaged_qty_str)))
+        except (ValueError, TypeError):
+            damaged_qty = 0
+        damaged_qty = min(damaged_qty, int(received_qty))
+
+        # Derive condition for backward compatibility
+        if damaged_qty == 0:
+            derived_condition = DCLineItem.GOOD
+        elif damaged_qty >= received_qty:
+            derived_condition = DCLineItem.DAMAGED
+        else:
+            derived_condition = DCLineItem.PARTIAL
 
         item.received_quantity = received_qty
-        item.condition         = condition
+        item.damaged_quantity  = damaged_qty
+        item.condition         = derived_condition
         item.grn_date          = today
         item.grn_notes         = grn_notes
         # grn_confirmed_by NOT overwritten — original SE submitter is preserved

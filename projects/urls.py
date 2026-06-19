@@ -162,4 +162,7 @@ urlpatterns = [
     # SCM GRN override — SCM only
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/grn/override/',
          views.override_grn, name='override_grn'),
+    # Raise issue against a specific DC — all roles with project access
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/issues/create/',
+         views.create_delivery_issue, name='create_delivery_issue'),
 ]
