@@ -1,132 +1,283 @@
 {% extends "base.html" %}
-{% block title %}Site Engineer Dashboard — SolarPMS{% endblock %}
+{% block title %}SE Dashboard — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{# Alpine.js — handles card expand/collapse only; no backend calls from Alpine #}
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+
+  .se-urgency-circle {
+    width: 2.75rem; height: 2.75rem; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 1.05rem; flex-shrink: 0;
+  }
+  .se-urgency-circle.urgent { background: #dc3545; color: #fff; }
+  .se-urgency-circle.clear  { background: #1a7a4a; color: #fff; }
+
+  .se-card-header { cursor: pointer; }
+  .se-card-header:hover { background: #f8f9fa !important; }
+
+  .se-chevron { transition: transform .2s ease; flex-shrink: 0; }
+</style>
+{% endblock %}
 
 {% block content %}
-<h4 class="mb-4">Site Engineer Dashboard</h4>
 
-{# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-md-4">
-    <div class="card text-center shadow-sm h-100">
+{# ── Greeting + summary strip ─────────────────────────────────────────────── #}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0 fw-semibold">
+      {% if se_first_name %}Welcome, {{ se_first_name }}!{% else %}SE Dashboard{% endif %}
+    </h5>
+    <p class="text-muted small mb-0">
+      {% if total_urgent == 0 %}
+        All clear today — no urgent items across your projects.
+      {% else %}
+        {{ total_urgent }} urgent item{{ total_urgent|pluralize }} across your projects.
+      {% endif %}
+    </p>
+  </div>
+</div>
+
+<div class="row g-2 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.due_today > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.due_today }}</div>
-        <div class="small text-muted">Due Today</div>
+        <div class="fs-3 fw-bold {% if total_overdue > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ total_overdue }}
+        </div>
+        <div class="small text-muted">Overdue Tasks</div>
       </div>
     </div>
   </div>
-  <div class="col-md-4">
-    <div class="card text-center shadow-sm h-100">
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold text-primary">{{ summary.in_progress }}</div>
-        <div class="small text-muted">In Progress</div>
+        <div class="fs-3 fw-bold {% if total_pending_grn > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ total_pending_grn }}
+        </div>
+        <div class="small text-muted">GRN Pending</div>
       </div>
     </div>
   </div>
-  <div class="col-md-4">
-    <div class="card text-center shadow-sm h-100">
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.overdue > 0 %}text-danger{% else %}text-success{% endif %}">{{ summary.overdue }}</div>
-        <div class="small text-muted">Overdue</div>
+        <div class="fs-3 fw-bold {% if total_issues > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ total_issues }}
+        </div>
+        <div class="small text-muted">Open Issues</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
+      <div class="card-body py-3">
+        <div class="fs-3 fw-bold {% if total_urgent > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ total_urgent }}
+        </div>
+        <div class="small text-muted">Total Urgent</div>
       </div>
     </div>
   </div>
 </div>
 
-{# ── Row 2+: Tasks grouped by project, two cards per row ─────────────── #}
-{% if tasks_by_project %}
-<div class="row g-3 mb-4">
-  {% for row in tasks_by_project %}
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header">
-        <span class="fw-bold">{{ row.project.project_id }}</span>
-        <span class="text-muted ms-2">{{ row.project.customer_name }}</span>
-        <a href="{% url 'project_overview' row.project.project_id %}" class="btn btn-outline-secondary btn-sm float-end py-0">Overview</a>
-      </div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if row.tasks %}
-        <table class="table table-sm table-hover mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Task</th>
-              <th>Phase</th>
-              <th style="width:7rem;">Due Date</th>
-              <th style="width:8rem;">Status</th>
-              <th style="width:10rem;">Update</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for task in row.tasks %}
-            <tr>
-              <td>
-                <a href="{% url 'task_detail' row.project.project_id task.pk %}"
-                   class="text-decoration-none">{{ task.task_name }}</a>
-              </td>
-              <td class="text-muted small">{{ task.phase.phase_name }}</td>
-              <td>
-                {% if task.due_date %}
-                  {% if task.task_type == 'Internal' and task.due_date < today and task.status != 'Done' %}
-                    <span class="text-danger fw-semibold">{{ task.due_date }}</span>
-                  {% else %}
-                    {{ task.due_date }}
-                  {% endif %}
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if task.status == 'Done' %}
-                  <span class="badge bg-success">Done</span>
-                {% elif task.status == 'Blocked' %}
-                  <span class="badge bg-danger">Blocked</span>
-                {% elif task.status == 'In Progress' %}
-                  <span class="badge bg-primary">In Progress</span>
-                {% else %}
-                  <span class="badge bg-secondary">Not Started</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if task.status != 'Done' %}
-                <form method="post" action="{% url 'task_status_update' row.project.project_id task.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <input type="hidden" name="next" value="{{ request.path }}">
-                  <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
-                    {% if task.status == 'Not Started' %}
-                      <option value="Not Started" selected>Not Started</option>
-                      <option value="In Progress">In Progress</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'In Progress' %}
-                      <option value="In Progress" selected>In Progress</option>
-                      <option value="Done">Done</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'Blocked' %}
-                      <option value="Blocked" selected>Blocked</option>
-                      <option value="In Progress">In Progress</option>
-                    {% endif %}
-                  </select>
-                </form>
-                {% else %}
-                  <span class="text-muted small">Completed</span>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">No tasks assigned on this project.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-  {% endfor %}
-</div>
-{% else %}
-<div class="card shadow-sm">
+{# ── Project cards ────────────────────────────────────────────────────────── #}
+{# Empty state: rendered when SE has no active projects assigned #}
+{% if not projects %}
+<div class="card shadow-sm border-0">
   <div class="card-body text-center py-5 text-muted">
-    No active projects assigned to you yet.
+    No active projects assigned to you right now.
   </div>
 </div>
 {% endif %}
+
+{% for p in projects %}
+{# One card per project. Alpine handles expand/collapse local state — no backend calls. #}
+<div x-data="{ expanded: false }" class="card mb-2 shadow-sm border-0">
+
+  {# ── Collapsed header (always visible) ──────────────────────────────────── #}
+  <div @click="expanded = !expanded"
+       class="se-card-header card-header bg-white d-flex align-items-center gap-3 py-2 px-3"
+       style="border-radius: inherit; border-bottom-color: transparent;">
+
+    {# Urgency circle: red count when urgent, green checkmark when all clear #}
+    {% if p.urgency_count > 0 %}
+    <div class="se-urgency-circle urgent">{{ p.urgency_count }}</div>
+    {% else %}
+    <div class="se-urgency-circle clear">
+      {# Checkmark icon (inline SVG — no external icon font dependency) #}
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </div>
+    {% endif %}
+
+    {# Customer name + project ID #}
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold text-truncate">{{ p.customer_name }}</div>
+      <div class="small text-muted">{{ p.project_id }}</div>
+    </div>
+
+    {# Delayed / On-time badge — always show On-time when is_delayed is False #}
+    {% if p.is_delayed %}
+    <span class="badge bg-danger">Delayed {{ p.delay_days }}d</span>
+    {% else %}
+    <span class="badge bg-success">On time</span>
+    {% endif %}
+
+    {# Chevron rotates when expanded #}
+    <svg class="se-chevron" :style="expanded ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </div>
+
+  {# ── Expanded body ───────────────────────────────────────────────────────── #}
+  <div x-show="expanded" x-cloak class="card-body pt-2">
+
+    {# Current phase #}
+    {% if p.phase %}
+    <div class="mb-2 small">
+      <span class="text-muted">Current Phase:</span>
+      <span class="fw-semibold ms-1">{{ p.phase }}</span>
+    </div>
+    {% endif %}
+
+    {# Progress bar: % of SE-assigned tasks marked Done #}
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <div class="progress flex-grow-1" style="height:8px;">
+        <div class="progress-bar" role="progressbar"
+             style="width:{{ p.progress }}%; background-color:#1a7a4a;"
+             aria-valuenow="{{ p.progress }}" aria-valuemin="0" aria-valuemax="100"></div>
+      </div>
+      <span class="small text-muted fw-semibold" style="min-width:2.5rem;">{{ p.progress }}%</span>
+    </div>
+
+    {# Urgency chips — only non-zero counts are shown #}
+    <div class="d-flex flex-wrap gap-2 mb-3">
+      {% if p.overdue_count > 0 %}
+      <span class="badge rounded-pill" style="background:#dc3545;">
+        {{ p.overdue_count }} Overdue
+      </span>
+      {% endif %}
+      {% if p.blocked_count > 0 %}
+      <span class="badge rounded-pill" style="background:#fd7e14;">
+        {{ p.blocked_count }} Blocked
+      </span>
+      {% endif %}
+      {% if p.pending_grn_count > 0 %}
+      <span class="badge rounded-pill" style="background:#f0a829; color:#212529;">
+        {{ p.pending_grn_count }} GRN Pending
+      </span>
+      {% endif %}
+      {% if p.issue_count > 0 %}
+      <span class="badge rounded-pill" style="background:#243a6b;">
+        {{ p.issue_count }} Issue{{ p.issue_count|pluralize }}
+      </span>
+      {% endif %}
+      {# All-clear chip shown only when no urgent items exist #}
+      {% if p.urgency_count == 0 %}
+      <span class="badge rounded-pill bg-success">All clear</span>
+      {% endif %}
+    </div>
+
+    {# Next task hint — row hidden entirely when no next task exists #}
+    {% if p.next_task %}
+    <div class="rounded p-2 mb-3"
+         style="background:#f8f9fa; border-left:3px solid {% if p.next_overdue %}#dc3545{% else %}#1a7a4a{% endif %};">
+      <div class="small text-muted">Next Task</div>
+      <div class="fw-semibold text-truncate">{{ p.next_task }}</div>
+      <div class="small {% if p.next_overdue %}text-danger{% else %}text-muted{% endif %}">
+        Due: {{ p.next_due }}
+      </div>
+    </div>
+    {% endif %}
+
+    {# Action buttons #}
+    <div class="d-flex gap-2">
+      {# Raise Issue — sets form action on the shared modal before showing it #}
+      <button type="button"
+              onclick="openIssueModal('{% url 'create_project_issue' p.project_id %}', '{{ p.customer_name|escapejs }}')"
+              class="btn btn-sm btn-outline-danger">
+        Raise Issue
+      </button>
+      {# View Project links to project_overview (same merged page used by PM) #}
+      <a href="{% url 'project_overview' p.project_id %}"
+         class="btn btn-sm text-white"
+         style="background-color:#1a7a4a;">
+        View Project
+      </a>
+    </div>
+  </div>
+
+</div>
+{% endfor %}
+
+{# ── Issue modal ──────────────────────────────────────────────────────────── #}
+{# Single shared modal; form action is set per-project by openIssueModal() below #}
+<div class="modal fade" id="seIssueModal" tabindex="-1"
+     aria-labelledby="seIssueModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form id="seIssueModalForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-header" style="background:#dc3545; color:#fff;">
+          <div>
+            <h5 class="modal-title mb-0" id="seIssueModalLabel">Raise Issue</h5>
+            <span id="seIssueModalProjectName" class="small opacity-75"></span>
+          </div>
+          <button type="button" class="btn-close btn-close-white ms-auto"
+                  data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label fw-semibold">
+              Title <span class="text-danger">*</span>
+            </label>
+            <input type="text" name="title" class="form-control" required maxlength="200"
+                   placeholder="Short description of the issue…">
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Severity</label>
+            <select name="severity" class="form-select">
+              <option value="Low">Low</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High">High</option>
+              <option value="Critical">Critical</option>
+            </select>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Details</label>
+            <textarea name="description" class="form-control" rows="3"
+                      placeholder="Optional — add context, location, reference…"></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-sm text-white"
+                  style="background:#dc3545;">Submit Issue</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Sets the form action and project name label before showing the shared issue modal.
+  // Called from the "Raise Issue" button in each project card.
+  function openIssueModal(url, projectName) {
+    document.getElementById('seIssueModalForm').action = url;
+    document.getElementById('seIssueModalProjectName').textContent = projectName;
+    // Bootstrap 5: getOrCreateInstance avoids duplicate modal instances on repeated opens
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('seIssueModal')).show();
+  }
+</script>
 
 {% endblock %}
