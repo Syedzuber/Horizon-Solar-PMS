@@ -2,202 +2,471 @@
 {% block title %}SCM Dashboard — SolarPMS{% endblock %}
 
 {% block content %}
-<h4 class="mb-4">SCM Dashboard</h4>
+<style>
+  /* collapse chevron rotation */
+  .card-collapse-btn .collapse-icon { transition: transform .2s ease; display: inline-block; }
+  .card-collapse-btn[aria-expanded="true"] .collapse-icon { transform: rotate(180deg); }
 
-{# ── Row 1: Summary stat tiles ────────────────────────────────────────── #}
+  /* red left-border tint for stalled projects */
+  .scm-card-stalled { border-left: 3px solid #dc3545 !important; }
+  .scm-card-stalled .card-header-inner { background: rgba(220,53,69,.04); }
+
+  /* stage badge strip */
+  .stage-badge { font-size: .72rem; padding: .18rem .45rem; border-radius: .3rem;
+                 font-weight: 600; white-space: nowrap; }
+  .stage-label { font-size: .65rem; text-transform: uppercase; letter-spacing: .04em;
+                 color: #6c757d; margin-bottom: .18rem; }
+</style>
+
+{# ── Summary stat tiles ─────────────────────────────────────────────────── #}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0 fw-semibold">SCM Dashboard</h5>
+</div>
+
 <div class="row g-3 mb-4">
-  <div class="col-md-4">
+  <div class="col-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.boq_awaiting > 0 %}text-warning{% else %}text-success{% endif %}">{{ summary.boq_awaiting }}</div>
-        <div class="small text-muted">BOQ Awaiting Action</div>
+        <div class="fs-2 fw-bold {% if summary.boq_awaiting > 0 %}text-warning{% else %}text-success{% endif %}">
+          {{ summary.boq_awaiting }}
+        </div>
+        <div class="small text-muted">BOQ Awaiting Ack.</div>
       </div>
     </div>
   </div>
-  <div class="col-md-4">
+  <div class="col-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.deliveries_today > 0 %}text-primary{% else %}text-success{% endif %}">{{ summary.deliveries_today }}</div>
+        <div class="fs-2 fw-bold {% if summary.deliveries_today > 0 %}text-primary{% else %}text-success{% endif %}">
+          {{ summary.deliveries_today }}
+        </div>
         <div class="small text-muted">Deliveries Today</div>
       </div>
     </div>
   </div>
-  <div class="col-md-4">
+  <div class="col-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
-        <div class="fs-2 fw-bold {% if summary.overdue > 0 %}text-danger{% else %}text-success{% endif %}">{{ summary.overdue }}</div>
-        <div class="small text-muted">Overdue</div>
+        <div class="fs-2 fw-bold {% if summary.overdue > 0 %}text-danger{% else %}text-success{% endif %}">
+          {{ summary.overdue }}
+        </div>
+        <div class="small text-muted">Overdue DCs</div>
       </div>
     </div>
   </div>
 </div>
 
-{# ── Row 2: Procurement | Deliveries ──────────────────────────────────── #}
-<div class="row g-3 mb-4">
+{# ── Per-project pipeline cards ──────────────────────────────────────────── #}
+{% if not project_rows %}
+  <div class="text-center text-muted py-5">No active projects.</div>
+{% endif %}
 
-  {# Procurement — grouped by project #}
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">Procurement</div>
-      <div class="card-body p-2" style="max-height:350px; overflow-y:auto;">
-        {% if pos_by_project %}
-          {% for project, tasks in pos_by_project %}
-          <div class="fw-bold border-bottom py-1 px-1 d-flex justify-content-between align-items-center">
-            <span>{{ project.project_id }} — {{ project.customer_name }}</span>
-            <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm py-0">Overview</a>
-          </div>
-          {% for task in tasks %}
-          <div class="ps-3 py-1 small d-flex justify-content-between align-items-center">
-            <span>{{ task.task_name }}</span>
-            <span class="text-muted ms-2 text-nowrap">
-              {% if task.due_date %}
-                {% if task.due_date < today and task.status != 'Done' %}
-                  <span class="text-danger fw-semibold">{{ task.due_date }}</span>
-                {% else %}
-                  {{ task.due_date }}
-                {% endif %}
-              {% else %}—{% endif %}
+{% for row in project_rows %}
+<div class="card mb-2 shadow-sm border-0{% if row.is_stalled %} scm-card-stalled{% endif %}">
+
+  {# ── Collapsed header ────────────────────────────────────────────────── #}
+  <div class="card-header p-0 border-bottom-0{% if row.is_stalled %} scm-card-stalled{% endif %}"
+       style="border-radius:.5rem;">
+    <div class="card-header-inner">
+    <button class="card-collapse-btn btn btn-link w-100 text-start text-decoration-none text-dark py-2 px-3
+                   d-flex align-items-center gap-2 flex-wrap"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#scm-card-{{ row.project.project_id }}"
+            aria-expanded="false"
+            aria-controls="scm-card-{{ row.project.project_id }}">
+
+      {# Project name + ID #}
+      <span class="flex-grow-1 overflow-hidden" style="min-width:9rem;">
+        <span class="fw-semibold text-truncate d-inline-block" style="max-width:100%;">
+          {{ row.project.customer_name }}
+        </span>
+        <span class="text-muted small ms-2">{{ row.project.project_id }}</span>
+      </span>
+
+      {# Aging badge — only shown when something is stalled #}
+      {% if row.is_stalled and row.days_in_stage is not None %}
+        <span class="badge {% if row.stall_level == 'red' %}bg-danger{% else %}bg-warning text-dark{% endif %} flex-shrink-0"
+              style="font-size:.72rem;">
+          <i class="bi bi-clock me-1"></i>{{ row.days_in_stage }}d
+        </span>
+      {% endif %}
+
+      {# 4 stage badges — always shown #}
+      <span class="d-flex gap-1 flex-shrink-0 flex-wrap">
+
+        {# BOQ badge #}
+        {% if row.boq_status == 'Acknowledged' %}
+          <span class="stage-badge bg-success text-white">BOQ <i class="bi bi-check-lg"></i></span>
+        {% elif row.boq_status == 'Submitted' %}
+          {% if row.stalled_stage == 'boq' and row.stall_level == 'red' %}
+            <span class="stage-badge bg-danger text-white">BOQ {{ row.boq_age_days }}d</span>
+          {% elif row.stalled_stage == 'boq' %}
+            <span class="stage-badge bg-warning text-dark">BOQ {{ row.boq_age_days }}d</span>
+          {% else %}
+            <span class="stage-badge bg-primary text-white">BOQ</span>
+          {% endif %}
+        {% elif row.boq_status == 'Revision Requested' %}
+          <span class="stage-badge bg-warning text-dark">BOQ Rev.</span>
+        {% elif row.boq_status == 'Draft' %}
+          <span class="stage-badge bg-secondary text-white">BOQ Draft</span>
+        {% else %}
+          <span class="stage-badge bg-secondary text-white">No BOQ</span>
+        {% endif %}
+
+        {# Order/Procurement badge #}
+        {% if row.order_status == 'Received' %}
+          <span class="stage-badge bg-success text-white">Order <i class="bi bi-check-lg"></i></span>
+        {% elif row.order_status == 'Partial' %}
+          {% if row.stalled_stage == 'order' and row.stall_level == 'red' %}
+            <span class="stage-badge bg-danger text-white">Order {{ row.order_age_days }}d</span>
+          {% elif row.stalled_stage == 'order' %}
+            <span class="stage-badge bg-warning text-dark">Order {{ row.order_age_days }}d</span>
+          {% else %}
+            <span class="stage-badge bg-warning text-dark">Order Part.</span>
+          {% endif %}
+        {% elif row.order_status == 'Expected' %}
+          {% if row.stalled_stage == 'order' and row.stall_level == 'red' %}
+            <span class="stage-badge bg-danger text-white">Order {{ row.order_age_days }}d</span>
+          {% elif row.stalled_stage == 'order' %}
+            <span class="stage-badge bg-warning text-dark">Order {{ row.order_age_days }}d</span>
+          {% else %}
+            <span class="stage-badge bg-primary text-white">Order</span>
+          {% endif %}
+        {% elif row.order_status == 'Rejected' %}
+          <span class="stage-badge bg-danger text-white">Order Rej.</span>
+        {% else %}
+          <span class="stage-badge bg-secondary text-white">No Order</span>
+        {% endif %}
+
+        {# Delivery badge #}
+        {% if row.delivery_status == 'Received' %}
+          <span class="stage-badge bg-success text-white">Deliv. <i class="bi bi-check-lg"></i></span>
+        {% elif row.delivery_status == 'Overdue' %}
+          {% if row.stalled_stage == 'delivery' and row.stall_level == 'red' %}
+            <span class="stage-badge bg-danger text-white">Overdue {{ row.delivery_age_days }}d</span>
+          {% else %}
+            <span class="stage-badge bg-warning text-dark">Overdue {{ row.delivery_age_days }}d</span>
+          {% endif %}
+        {% elif row.delivery_status == 'Not Scheduled' %}
+          {% if row.stalled_stage == 'delivery' and row.stall_level == 'red' %}
+            <span class="stage-badge bg-danger text-white">No Date {{ row.delivery_age_days }}d</span>
+          {% elif row.stalled_stage == 'delivery' %}
+            <span class="stage-badge bg-warning text-dark">No Date {{ row.delivery_age_days }}d</span>
+          {% else %}
+            <span class="stage-badge bg-warning text-dark">No Date</span>
+          {% endif %}
+        {% elif row.delivery_status == 'Scheduled' %}
+          <span class="stage-badge bg-primary text-white">Scheduled</span>
+        {% else %}
+          <span class="stage-badge bg-secondary text-white">Deliv.?</span>
+        {% endif %}
+
+        {# Material Issues badge #}
+        {% if row.open_issue_count == 0 %}
+          <span class="stage-badge bg-success text-white">Issues <i class="bi bi-check-lg"></i></span>
+        {% elif row.stalled_stage == 'issues' and row.stall_level == 'red' %}
+          <span class="stage-badge bg-danger text-white">{{ row.open_issue_count }} Issue{{ row.open_issue_count|pluralize }}</span>
+        {% else %}
+          <span class="stage-badge bg-warning text-dark">{{ row.open_issue_count }} Issue{{ row.open_issue_count|pluralize }}</span>
+        {% endif %}
+
+      </span>{# end stage badges #}
+
+      <i class="bi bi-chevron-down text-muted collapse-icon flex-shrink-0 ms-1"></i>
+    </button>
+    </div>{# card-header-inner #}
+  </div>
+
+  {# ── Expanded body ───────────────────────────────────────────────────── #}
+  <div class="collapse" id="scm-card-{{ row.project.project_id }}">
+    <div class="card-body pt-3 pb-3 px-3 border-top">
+
+      {# 4-column pipeline detail #}
+      <div class="row g-2 mb-3">
+
+        {# BOQ detail #}
+        <div class="col-6 col-md-3">
+          <div class="stage-label">BOQ</div>
+          {% if row.boq_status == 'Acknowledged' %}
+            <span class="badge bg-success">Acknowledged</span>
+          {% elif row.boq_status == 'Submitted' %}
+            <span class="badge {% if row.stalled_stage == 'boq' and row.stall_level == 'red' %}bg-danger{% elif row.stalled_stage == 'boq' %}bg-warning text-dark{% else %}bg-primary{% endif %}">
+              Submitted
             </span>
+            {% if row.boq_age_days is not None %}
+              <div class="small text-muted mt-1">
+                <i class="bi bi-clock me-1"></i>{{ row.boq_age_days }} day{{ row.boq_age_days|pluralize }} pending
+                {% if row.stalled_stage == 'boq' %}
+                  <span class="text-{% if row.stall_level == 'red' %}danger{% else %}warning{% endif %} fw-semibold ms-1">
+                    — stalled
+                  </span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% elif row.boq_status == 'Revision Requested' %}
+            <span class="badge bg-warning text-dark">Revision Req.</span>
+          {% elif row.boq_status == 'Draft' %}
+            <span class="badge bg-secondary">Draft</span>
+          {% else %}
+            <span class="text-muted small">No BOQ</span>
+          {% endif %}
+        </div>
+
+        {# Order/Procurement detail #}
+        <div class="col-6 col-md-3">
+          <div class="stage-label">Order</div>
+          {% if row.order_status == 'None' %}
+            <span class="text-muted small">No order placed</span>
+          {% elif row.order_status == 'Received' %}
+            <span class="badge bg-success">All Received</span>
+          {% elif row.order_status == 'Partial' %}
+            <span class="badge {% if row.stalled_stage == 'order' and row.stall_level == 'red' %}bg-danger{% elif row.stalled_stage == 'order' %}bg-warning text-dark{% else %}bg-warning text-dark{% endif %}">
+              Partial
+            </span>
+            {% if row.order_age_days is not None %}
+              <div class="small text-muted mt-1">
+                <i class="bi bi-clock me-1"></i>{{ row.order_age_days }} day{{ row.order_age_days|pluralize }} pending
+                {% if row.stalled_stage == 'order' %}
+                  <span class="text-{% if row.stall_level == 'red' %}danger{% else %}warning{% endif %} fw-semibold ms-1">— stalled</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% elif row.order_status == 'Rejected' %}
+            <span class="badge bg-danger">Rejected</span>
+            {% if row.order_age_days is not None %}
+              <div class="small text-muted mt-1"><i class="bi bi-clock me-1"></i>{{ row.order_age_days }}d</div>
+            {% endif %}
+          {% else %}
+            <span class="badge {% if row.stalled_stage == 'order' and row.stall_level == 'red' %}bg-danger{% elif row.stalled_stage == 'order' %}bg-warning text-dark{% else %}bg-primary{% endif %}">
+              Expected
+            </span>
+            {% if row.order_age_days is not None %}
+              <div class="small text-muted mt-1">
+                <i class="bi bi-clock me-1"></i>{{ row.order_age_days }} day{{ row.order_age_days|pluralize }} pending
+                {% if row.stalled_stage == 'order' %}
+                  <span class="text-{% if row.stall_level == 'red' %}danger{% else %}warning{% endif %} fw-semibold ms-1">— stalled</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+
+        {# Delivery detail #}
+        <div class="col-6 col-md-3">
+          <div class="stage-label">Delivery</div>
+          {% if row.delivery_status == 'Received' %}
+            <span class="badge bg-success">Delivered</span>
+          {% elif row.delivery_status == 'Overdue' %}
+            <span class="badge bg-danger">Overdue</span>
+            <div class="small text-muted mt-1">
+              <i class="bi bi-clock me-1"></i>{{ row.delivery_age_days }} day{{ row.delivery_age_days|pluralize }} overdue
+              {% if row.stalled_stage == 'delivery' %}
+                <span class="text-danger fw-semibold ms-1">— stalled</span>
+              {% endif %}
+            </div>
+          {% elif row.delivery_status == 'Not Scheduled' %}
+            <span class="badge {% if row.stalled_stage == 'delivery' and row.stall_level == 'red' %}bg-danger{% elif row.stalled_stage == 'delivery' %}bg-warning text-dark{% else %}bg-warning text-dark{% endif %}">
+              No Date Set
+            </span>
+            {% if row.delivery_age_days is not None %}
+              <div class="small text-muted mt-1">
+                <i class="bi bi-clock me-1"></i>{{ row.delivery_age_days }} day{{ row.delivery_age_days|pluralize }} unscheduled
+                {% if row.stalled_stage == 'delivery' %}
+                  <span class="text-{% if row.stall_level == 'red' %}danger{% else %}warning{% endif %} fw-semibold ms-1">— stalled</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% elif row.delivery_status == 'Scheduled' %}
+            <span class="badge bg-primary">Scheduled</span>
+          {% else %}
+            <span class="text-muted small">Not started</span>
+          {% endif %}
+        </div>
+
+        {# Material Issues detail #}
+        <div class="col-6 col-md-3">
+          <div class="stage-label">Issues</div>
+          {% if row.open_issue_count == 0 %}
+            <span class="badge bg-success">Clear</span>
+          {% else %}
+            <span class="badge {% if row.stalled_stage == 'issues' and row.stall_level == 'red' %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+              {{ row.open_issue_count }} Open
+            </span>
+            {% if row.issue_age_days is not None %}
+              <div class="small text-muted mt-1">
+                <i class="bi bi-clock me-1"></i>Oldest {{ row.issue_age_days }} day{{ row.issue_age_days|pluralize }}
+                {% if row.stalled_stage == 'issues' %}
+                  <span class="text-{% if row.stall_level == 'red' %}danger{% else %}warning{% endif %} fw-semibold ms-1">— stalled</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+
+      </div>{# end 4-col row #}
+
+      {# 4 action buttons — 2×2 grid, last two full-width on mobile #}
+      <div class="row g-2 mt-1">
+        <div class="col-6 col-sm-3">
+          <a href="{{ row.boq_url }}" class="btn btn-outline-secondary btn-sm w-100">
+            <i class="bi bi-file-earmark-text me-1"></i>View BOQ
+          </a>
+        </div>
+        <div class="col-6 col-sm-3">
+          <a href="{{ row.schedule_delivery_url }}" class="btn btn-outline-primary btn-sm w-100">
+            <i class="bi bi-truck me-1"></i>Schedule Delivery
+          </a>
+        </div>
+        <div class="col-6 col-sm-3">
+          <a href="{{ row.finance_url }}" class="btn btn-outline-secondary btn-sm w-100">
+            <i class="bi bi-receipt me-1"></i>Remind Finance
+          </a>
+        </div>
+        <div class="col-6 col-sm-3">
+          <button type="button"
+                  class="btn btn-outline-danger btn-sm w-100 js-scm-raise-issue"
+                  data-project-id="{{ row.project.project_id }}"
+                  data-issue-url="{{ row.raise_issue_url }}">
+            <i class="bi bi-flag me-1"></i>Raise Issue
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+{% endfor %}
+
+{# ── Open Delivery Issues ────────────────────────────────────────────────── #}
+{% if delivery_issues %}
+<div class="card mb-4 border-warning shadow-sm mt-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>
+    <span>Open Delivery Issues</span>
+    <span class="badge bg-warning text-dark">{{ delivery_issues|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm table-hover mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Issue</th>
+          <th>DC</th>
+          <th>Project</th>
+          <th style="width:7rem;">Severity</th>
+          <th style="width:7rem;">Status</th>
+          <th style="width:6rem;">Raised</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in delivery_issues %}
+        <tr>
+          <td>
+            <a href="{% url 'issue_detail' issue.pk %}" class="text-decoration-none fw-semibold">
+              {{ issue.title }}
+            </a>
+          </td>
+          <td class="small text-muted">
+            {% if issue.delivery_challan %}
+              <a href="{% url 'delivery_challan_detail' issue.project.project_id issue.delivery_challan.pk %}"
+                 class="text-decoration-none">
+                DC-{{ issue.delivery_challan.dc_number }}
+              </a>
+            {% else %}—{% endif %}
+          </td>
+          <td class="small">{{ issue.project.project_id }}</td>
+          <td>
+            {% if issue.severity == 'Critical' %}
+              <span class="badge bg-danger">Critical</span>
+            {% elif issue.severity == 'High' %}
+              <span class="badge bg-warning text-dark">High</span>
+            {% elif issue.severity == 'Medium' %}
+              <span class="badge bg-primary">Medium</span>
+            {% else %}
+              <span class="badge bg-secondary">Low</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if issue.status == 'Open' %}
+              <span class="badge bg-danger">Open</span>
+            {% else %}
+              <span class="badge bg-primary">In Progress</span>
+            {% endif %}
+          </td>
+          <td class="small text-muted">{{ issue.raised_at|date:"d M" }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Raise Issue modal ───────────────────────────────────────────────────── #}
+<div class="modal fade" id="scmRaiseIssueModal" tabindex="-1"
+     aria-labelledby="scmRaiseIssueLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <form id="scmRaiseIssueForm" method="post" action="">
+        {% csrf_token %}
+        <div class="modal-header bg-danger text-white">
+          <h5 class="modal-title" id="scmRaiseIssueLabel">Raise Material Issue</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <p class="text-muted small mb-3" id="scmRaiseIssueProjectLabel"></p>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
+            <input type="text" name="title" class="form-control" required maxlength="200"
+                   placeholder="Brief description of the material issue">
           </div>
-          {% endfor %}
-          {% endfor %}
-        {% else %}
-          <p class="text-muted text-center py-3 mb-0">No procurement tasks assigned to you.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-  {# Deliveries — table view #}
-  <div class="col-12 col-md-6 mb-4">
-    <div class="card h-100">
-      <div class="card-header fw-semibold">Deliveries</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        {% if delivery_tasks %}
-        <table class="table table-sm table-hover mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Task</th>
-              <th>Project</th>
-              <th style="width:7rem;">Due Date</th>
-              <th style="width:8rem;">Status</th>
-              <th style="width:10rem;">Update</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for task in delivery_tasks %}
-            <tr>
-              <td>{{ task.task_name }}</td>
-              <td>
-                <a href="{% url 'project_overview' task.phase.project.project_id %}" class="text-decoration-none">{{ task.phase.project.project_id }}</a>
-                <span class="text-muted small ms-1">{{ task.phase.project.customer_name }}</span>
-              </td>
-              <td>
-                {% if task.due_date %}
-                  {% if task.task_type == 'Internal' and task.due_date < today and task.status != 'Done' %}
-                    <span class="text-danger fw-semibold">{{ task.due_date }}</span>
-                  {% else %}
-                    {{ task.due_date }}
-                  {% endif %}
-                {% else %}
-                  <span class="text-muted">—</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if task.status == 'Done' %}
-                  <span class="badge bg-success">Done</span>
-                {% elif task.status == 'Blocked' %}
-                  <span class="badge bg-danger">Blocked</span>
-                {% elif task.status == 'In Progress' %}
-                  <span class="badge bg-primary">In Progress</span>
-                {% else %}
-                  <span class="badge bg-secondary">Not Started</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if task.status != 'Done' %}
-                <form method="post" action="{% url 'task_status_update' task.phase.project.project_id task.pk %}" class="d-inline">
-                  {% csrf_token %}
-                  <input type="hidden" name="next" value="{{ request.path }}">
-                  <select name="status" onchange="if(window.solarInterceptBlock && window.solarInterceptBlock(this)){}else{this.form.submit();}" class="form-select form-select-sm" style="width:auto;">
-                    {% if task.status == 'Not Started' %}
-                      <option value="Not Started" selected>Not Started</option>
-                      <option value="In Progress">In Progress</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'In Progress' %}
-                      <option value="In Progress" selected>In Progress</option>
-                      <option value="Done">Done</option>
-                      <option value="Blocked">Blocked</option>
-                    {% elif task.status == 'Blocked' %}
-                      <option value="Blocked" selected>Blocked</option>
-                      <option value="In Progress">In Progress</option>
-                    {% endif %}
-                  </select>
-                </form>
-                {% else %}
-                  <span class="text-muted small">Completed</span>
-                {% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        {% else %}
-        <p class="text-muted text-center py-3 mb-0">No delivery tasks assigned to you.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-</div>
-
-{# ── Row 3: BOQ Status ─────────────────────────────────────────────────── #}
-<div class="row g-3 mb-4">
-  <div class="col-12">
-    <div class="card shadow-sm">
-      <div class="card-header fw-semibold">BOQ Status</div>
-      <div class="card-body p-0" style="max-height:350px; overflow-y:auto;">
-        <table class="table table-sm table-hover mb-0">
-          <thead class="table-light">
-            <tr>
-              <th>Project ID</th>
-              <th>Customer</th>
-              <th style="width:12rem;">BOQ Status</th>
-              <th style="width:8rem;">View</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for boq in boqs %}
-            <tr>
-              <td class="fw-semibold align-middle">
-                <a href="/projects/{{ boq.project.project_id }}/boq/" class="text-decoration-none">{{ boq.project.project_id }}</a>
-              </td>
-              <td class="text-muted small align-middle">{{ boq.project.customer_name }}</td>
-              <td class="align-middle">
-                {% if boq.status == 'Draft' %}
-                  <span class="badge bg-secondary">Draft</span>
-                {% elif boq.status == 'Submitted' %}
-                  <span class="badge bg-primary">Submitted</span>
-                {% elif boq.status == 'Acknowledged' %}
-                  <span class="badge bg-success">Acknowledged</span>
-                {% elif boq.status == 'Revision Requested' %}
-                  <span class="badge bg-warning text-dark">Revision Requested</span>
-                {% endif %}
-              </td>
-              <td class="align-middle">
-                <a href="/projects/{{ boq.project.project_id }}/boq/" class="text-decoration-none">View BOQ →</a>
-              </td>
-            </tr>
-            {% empty %}
-            <tr>
-              <td colspan="4" class="text-center text-muted py-3">No active BOQs</td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Details</label>
+            <textarea name="description" class="form-control" rows="2"
+                      placeholder="Quantity short, damage, wrong item…"></textarea>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Severity</label>
+            <select name="severity" class="form-select">
+              <option value="Low">Low</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="High">High</option>
+              <option value="Critical">Critical</option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary btn-sm"
+                  data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-danger btn-sm">Raise Issue</button>
+        </div>
+      </form>
     </div>
   </div>
 </div>
+
+<script>
+(function () {
+  var modal = null;
+
+  document.addEventListener('DOMContentLoaded', function () {
+    modal = new bootstrap.Modal(document.getElementById('scmRaiseIssueModal'));
+
+    document.querySelectorAll('.js-scm-raise-issue').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var projectId = this.dataset.projectId;
+        var issueUrl  = this.dataset.issueUrl;
+        document.getElementById('scmRaiseIssueForm').action = issueUrl;
+        document.getElementById('scmRaiseIssueProjectLabel').textContent = 'Project: ' + projectId;
+        document.getElementById('scmRaiseIssueForm').querySelector('[name="title"]').value = '';
+        document.getElementById('scmRaiseIssueForm').querySelector('[name="description"]').value = '';
+        document.getElementById('scmRaiseIssueForm').querySelector('[name="severity"]').value = 'Medium';
+        modal.show();
+      });
+    });
+  });
+}());
+</script>
 
 {% endblock %}
