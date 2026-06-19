@@ -589,6 +589,10 @@ class Issue(models.Model):
 
     project         = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='issues')
     task            = models.ForeignKey(Task, on_delete=models.SET_NULL, null=True, blank=True, related_name='issues')  # Null for project-level issues not tied to a task
+    delivery_challan = models.ForeignKey(  # Null unless the issue was raised directly against a specific delivery
+        'DeliveryChallan', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='issues',
+    )
     title           = models.CharField(max_length=200)
     description     = models.TextField(blank=True, default='')
     severity        = models.CharField(max_length=20, choices=SEVERITY_CHOICES, default=MEDIUM)
@@ -755,6 +759,7 @@ class DCLineItem(models.Model):
         max_length=20, choices=CONDITION_CHOICES,
         null=True, blank=True
     )
+    damaged_quantity = models.PositiveIntegerField(default=0)  # How many of received_quantity arrived damaged — precise complement to received_quantity
     grn_date         = models.DateField(null=True, blank=True)
     grn_confirmed_by = models.ForeignKey(
         UserProfile, on_delete=models.SET_NULL,
@@ -769,30 +774,60 @@ class DCLineItem(models.Model):
         return f"{self.challan.dc_number} — {self.boq_category}: {self.item_description[:40]}"
 
 
+def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
+    """
+    Compute per-line-item severity for the DC status rollup.
+    Returns 'green', 'amber', or 'red'.
+    - green:  full quantity received, no damage
+    - amber:  shortfall only OR full quantity with some damage (equal severity — confirmed by product owner)
+    - red:    shortfall AND damage present, or nothing usable received at all
+    """
+    if received_qty is None:
+        return None  # Not yet confirmed — excluded from rollup
+    if received_qty == 0:
+        return 'red'   # Nothing arrived
+    if received_qty < ordered_qty and damaged_qty > 0:
+        return 'red'   # Two stacked problems
+    if received_qty >= ordered_qty and damaged_qty == 0:
+        return 'green'
+    return 'amber'  # Shortfall only, or full qty with some damage
+
+
 def recalculate_dc_status(challan):
     """
-    Recalculate and save DeliveryChallan status based on line item receipt state.
-    Called after every GRN confirmation to keep DC status in sync.
+    Recalculate and save DeliveryChallan.status using per-line-item severity rollup.
+    Severity per item (via _dc_item_severity): green / amber / red.
+    DC takes the WORST case across all confirmed items:
+      green  → Received
+      amber  → Partially Received
+      red    → Rejected  (repurposed: severe delivery failure — shortfall+damage or nothing received)
     Must be called ONCE after all line items are saved — never inside the save loop.
     """
-    items     = challan.line_items.all()
-    confirmed = items.filter(received_quantity__isnull=False)
+    items     = list(challan.line_items.all())
+    confirmed = [item for item in items if item.received_quantity is not None]
 
-    if confirmed.count() == 0:
-        # No items confirmed yet
+    if not confirmed:
+        # No items have GRN data yet
         challan.status = DeliveryChallan.EXPECTED
-    elif confirmed.count() < items.count():
-        # Some but not all items confirmed
+        challan.save()
+        return
+
+    worst = 'green'
+    for item in confirmed:
+        sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
+        if sev == 'red':
+            worst = 'red'
+            break          # Can't get worse; short-circuit
+        elif sev == 'amber':
+            worst = 'amber'
+
+    if worst == 'green':
+        challan.status = DeliveryChallan.RECEIVED
+    elif worst == 'amber':
         challan.status = DeliveryChallan.PARTIALLY_RECEIVED
     else:
-        # All items confirmed — check if any are damaged or partial
-        has_damage = confirmed.filter(
-            condition__in=[DCLineItem.DAMAGED, DCLineItem.PARTIAL]
-        ).exists()
-        challan.status = (
-            DeliveryChallan.PARTIALLY_RECEIVED if has_damage
-            else DeliveryChallan.RECEIVED
-        )
+        # 'red': severe delivery failure — quantity short AND damage, or nothing received
+        challan.status = DeliveryChallan.REJECTED
     challan.save()
 
 
@@ -826,9 +861,8 @@ def get_material_status(project):
             received_quantity__isnull=False
         ).aggregate(s=Sum('received_quantity'))['s'] or 0
 
-        has_damage = items.filter(
-            condition__in=['Damaged', 'Partial']
-        ).exists()
+        # Use damaged_quantity (precise numeric field) rather than condition string for damage detection
+        has_damage = items.filter(damaged_quantity__gt=0).exists()
 
         if total_received == 0:
             status[category] = 'Pending'
