@@ -171,6 +171,7 @@ class Task(models.Model):
     duration_days = models.PositiveIntegerField(default=1)  # Calendar days used in due-date chain calculation
     due_date      = models.DateField(blank=True, null=True)
     completed_at  = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
+    blocked_since = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     created_at    = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -334,6 +335,36 @@ class Vendor(models.Model):
         return self.name
 
 
+class VendorBrand(models.Model):
+    """
+    A brand/make label supplied by a vendor, optionally scoped to one supply category.
+
+    A vendor can have multiple brands for different categories — e.g. a single vendor
+    may supply "Waaree" solar modules and "Polycab" BOS cables. These appear as
+    separate entries in the BOQ Make/Preference dropdown, filtered to the item's category.
+
+    If category is null the brand appears in all categories the vendor supplies.
+    Vendors with no VendorBrand entries fall back to displaying the company name.
+    """
+
+    vendor     = models.ForeignKey(Vendor, on_delete=models.CASCADE, related_name='brands')
+    make_brand = models.CharField(max_length=200)
+    # Optional — scope this brand label to one supply category.
+    # Null means the brand shows across every category this vendor is assigned to.
+    category   = models.ForeignKey(
+        VendorCategory,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='vendor_brands',
+    )
+
+    class Meta:
+        ordering = ['make_brand']
+
+    def __str__(self):
+        return f"{self.make_brand} — {self.vendor.name}"
+
+
 def get_standard_boq_items():
     """
     Return the 37-item standard BOQ template for a Residential solar project.
@@ -375,7 +406,7 @@ def get_standard_boq_items():
         {'serial_no': 33, 'category': 'BOS',           'description': 'PU Foam Sealant Spray 750ml for joint filling',                                                    'uom': 'Nos'},
         {'serial_no': 34, 'category': 'BOS',           'description': 'Module Cleaning System without motor',                                                             'uom': 'Nos'},
         {'serial_no': 35, 'category': 'BOS',           'description': 'Site Installation charges including civil work',                                                    'uom': 'Nos'},
-        {'serial_no': 36, 'category': 'BOS',           'description': 'Miscellaneous net metering transportation rubber mat fire extinguisher warning boards',             'uom': 'Nos'},
+        {'serial_no': 36, 'category': 'BOS',           'description': 'Miscellaneous - (net metering,transportation,rubber mat,fire extinguishers,warning boards)',             'uom': 'Nos'},
         {'serial_no': 37, 'category': 'BOS',           'description': 'Contingency',                                                                                      'uom': 'LS'},
     ]
 
