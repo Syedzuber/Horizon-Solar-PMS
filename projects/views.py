@@ -11,7 +11,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Count, Max, Min, Prefetch, Q, Sum
+from django.db.models import Count, Exists, Max, Min, OuterRef, Prefetch, Q, Sum
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.utils import timezone
@@ -19,7 +19,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
-    Vendor, VendorCategory,
+    Vendor, VendorCategory, VendorBrand,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
@@ -1028,10 +1028,204 @@ def dashboard_scm(request):
     })
 
 
+def _get_ceo_dashboard_context():
+    """
+    Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
+    Query 1: Active project list with Exists annotations for blocked/at_risk classification.
+    Query 2: Full task aggregate — status counts, dept rollup (18 cells), KPI time windows,
+             blocked KPI, external-dependency KPI — all via a single .aggregate() call.
+    Query 3: Full issue aggregate — status counts and resolution time windows.
+    Returns a dict ready to be unpacked into the template context.
+    """
+    today  = date.today()
+    now_dt = timezone.now()
+
+    # -- Date-window boundaries (computed once; reused across all conditional filters) --
+    week_start       = today - timedelta(days=today.weekday())           # Monday of current ISO week
+    week_end         = week_start + timedelta(days=7)                    # Monday of next week (exclusive)
+    last_week_start  = week_start - timedelta(days=7)
+    last_week_end    = week_start                                        # == this week's Monday
+    this_month_start = today.replace(day=1)
+    if today.month == 12:
+        next_month_start = date(today.year + 1, 1, 1)
+    else:
+        next_month_start = date(today.year, today.month + 1, 1)
+    last_month_start = (this_month_start - timedelta(days=1)).replace(day=1)
+
+    # completed_at / resolved_at are DateTimeFields — boundaries must be datetimes
+    from django.utils.timezone import make_aware
+    def _to_dt(d):
+        return make_aware(datetime(d.year, d.month, d.day, 0, 0, 0))
+
+    week_start_dt       = _to_dt(week_start)
+    week_end_dt         = _to_dt(week_end)
+    last_week_start_dt  = _to_dt(last_week_start)
+    last_week_end_dt    = week_start_dt
+    this_month_start_dt = _to_dt(this_month_start)
+    next_month_start_dt = _to_dt(next_month_start)
+    last_month_start_dt = _to_dt(last_month_start)
+    aged_block_cutoff   = now_dt - timedelta(days=7)
+
+    active_statuses = ['Active', 'In Progress']
+
+    # -- QUERY 1: Active project list + Exists subquery annotations --
+    # Subquery: does this project have any task with status='Blocked'?
+    blocked_subq = Task.objects.filter(
+        phase__project=OuterRef('pk'),
+        status=Task.BLOCKED,
+    )
+    # Subquery: does this project have any overdue internal task (still future target date handled in Python)?
+    at_risk_subq = Task.objects.filter(
+        phase__project=OuterRef('pk'),
+        task_type=Task.INTERNAL,
+        due_date__lt=today,
+        due_date__isnull=False,
+        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
+    )
+    projects_qs = (
+        Project.objects
+        .filter(status__in=active_statuses)
+        .annotate(
+            has_blocked_task=Exists(blocked_subq),
+            has_at_risk_task=Exists(at_risk_subq),
+        )
+        .order_by('target_commissioning_date', 'project_id')
+    )
+
+    # Classify each project in Python (no extra DB hits)
+    # Precedence: Blocked > Delayed > At Risk > On Time (worst condition wins)
+    proj_total = proj_on_time = proj_at_risk = proj_delayed = proj_blocked = 0
+    project_cards = []
+    for p in projects_qs:
+        proj_total += 1
+        is_delayed = bool(p.target_commissioning_date and p.target_commissioning_date < today)
+
+        if p.has_blocked_task:
+            badge = 'blocked'
+            proj_blocked += 1
+        elif is_delayed:
+            badge = 'delayed'
+            proj_delayed += 1
+        elif p.has_at_risk_task and not is_delayed:
+            # At Risk = overdue internal task but target date still in the future
+            badge = 'at_risk'
+            proj_at_risk += 1
+        else:
+            badge = 'on_time'
+            proj_on_time += 1
+
+        project_cards.append({'project': p, 'badge': badge, 'is_delayed': is_delayed})
+
+    # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
+    task_agg = Task.objects.filter(
+        phase__project__status__in=active_statuses,
+    ).aggregate(
+        task_total     =Count('pk'),
+        # Status summary (portfolio-wide)
+        task_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
+        task_inprogress=Count('pk', filter=Q(status=Task.IN_PROGRESS)),
+        task_completed =Count('pk', filter=Q(status=Task.DONE)),
+        # Overdue = internal tasks only; external delays are not team overdue (SE has DISCOM tasks)
+        task_overdue   =Count('pk', filter=Q(
+            task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
+        )),
+        # Blocked KPI (two distinct numbers — see Layer 5 §3: they will not reconcile, that is expected)
+        blocked_open   =Count('pk', filter=Q(status=Task.BLOCKED)),
+        blocked_aged_7d=Count('pk', filter=Q(
+            status=Task.BLOCKED,
+            blocked_since__lte=aged_block_cutoff,
+            blocked_since__isnull=False,
+        )),
+        # External dependency KPI
+        ext_closed =Count('pk', filter=Q(task_type=Task.EXTERNAL, status=Task.DONE)),
+        ext_overdue=Count('pk', filter=Q(
+            task_type=Task.EXTERNAL, due_date__lt=today, due_date__isnull=False,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        )),
+        # KPI time windows — use completed_at (DateTimeField, set by task_status_update on Done)
+        task_done_this_week  =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=week_start_dt,       completed_at__lt=week_end_dt)),
+        task_done_last_week  =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=last_week_start_dt,  completed_at__lt=last_week_end_dt)),
+        task_done_this_month =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=this_month_start_dt, completed_at__lt=next_month_start_dt)),
+        task_done_last_month =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=last_month_start_dt, completed_at__lt=this_month_start_dt)),
+        # -- Department rollup: 6 roles × 3 columns = 18 conditional Counts --
+        # PM
+        dept_pm_assigned=Count('pk', filter=Q(assigned_role=Task.PM, assigned_to__isnull=False)),
+        dept_pm_pending =Count('pk', filter=Q(assigned_role=Task.PM, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_pm_overdue =Count('pk', filter=Q(assigned_role=Task.PM, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # Site Engineer — overdue MUST filter Internal; SE tasks include DISCOM/authority External tasks
+        dept_se_assigned=Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, assigned_to__isnull=False)),
+        dept_se_pending =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_se_overdue =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # SCM
+        dept_scm_assigned=Count('pk', filter=Q(assigned_role=Task.SCM, assigned_to__isnull=False)),
+        dept_scm_pending =Count('pk', filter=Q(assigned_role=Task.SCM, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_scm_overdue =Count('pk', filter=Q(assigned_role=Task.SCM, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # Design
+        dept_design_assigned=Count('pk', filter=Q(assigned_role=Task.DESIGN, assigned_to__isnull=False)),
+        dept_design_pending =Count('pk', filter=Q(assigned_role=Task.DESIGN, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_design_overdue =Count('pk', filter=Q(assigned_role=Task.DESIGN, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # BD / Sales — filter on assigned_role='BD / Sales' (Task.BD constant); 'BD' alone returns zero
+        dept_bd_assigned=Count('pk', filter=Q(assigned_role=Task.BD, assigned_to__isnull=False)),
+        dept_bd_pending =Count('pk', filter=Q(assigned_role=Task.BD, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_bd_overdue =Count('pk', filter=Q(assigned_role=Task.BD, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # Finance — overdue will read near-zero if finance tasks lack due dates; that is expected, not a bug
+        dept_finance_assigned=Count('pk', filter=Q(assigned_role=Task.FINANCE, assigned_to__isnull=False)),
+        dept_finance_pending =Count('pk', filter=Q(assigned_role=Task.FINANCE, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_finance_overdue =Count('pk', filter=Q(assigned_role=Task.FINANCE, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+    )
+
+    # -- QUERY 3: Issue aggregate — status counts + resolution time windows --
+    issue_agg = Issue.objects.filter(
+        project__status__in=active_statuses,
+    ).aggregate(
+        issue_total     =Count('pk'),
+        issue_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
+        issue_inprogress=Count('pk', filter=Q(status=Issue.IN_PROGRESS)),
+        # Include Closed: terminal state after Resolved; PM closes issues from the Resolved state
+        issue_resolved  =Count('pk', filter=Q(status__in=[Issue.RESOLVED, Issue.CLOSED])),
+        # Overdue uses due_date (nullable); will read low if few issues have due dates — accepted limitation
+        issue_overdue   =Count('pk', filter=Q(
+            due_date__lt=today, due_date__isnull=False,
+            status__in=[Issue.OPEN, Issue.IN_PROGRESS],
+        )),
+        # Time windows use resolved_at; Closed issues that went through Resolved will also have it set
+        issue_done_this_week  =Count('pk', filter=Q(resolved_at__isnull=False, resolved_at__gte=week_start_dt,       resolved_at__lt=week_end_dt)),
+        issue_done_last_week  =Count('pk', filter=Q(resolved_at__isnull=False, resolved_at__gte=last_week_start_dt,  resolved_at__lt=last_week_end_dt)),
+        issue_done_this_month =Count('pk', filter=Q(resolved_at__isnull=False, resolved_at__gte=this_month_start_dt, resolved_at__lt=next_month_start_dt)),
+        issue_done_last_month =Count('pk', filter=Q(resolved_at__isnull=False, resolved_at__gte=last_month_start_dt, resolved_at__lt=this_month_start_dt)),
+    )
+
+    # Build dept_rows list for clean template iteration
+    dept_rows = [
+        {'label': 'PM',        'assigned': task_agg['dept_pm_assigned'],     'pending': task_agg['dept_pm_pending'],     'overdue': task_agg['dept_pm_overdue']},
+        {'label': 'SCM',       'assigned': task_agg['dept_scm_assigned'],    'pending': task_agg['dept_scm_pending'],    'overdue': task_agg['dept_scm_overdue']},
+        {'label': 'Design',    'assigned': task_agg['dept_design_assigned'], 'pending': task_agg['dept_design_pending'], 'overdue': task_agg['dept_design_overdue']},
+        {'label': 'BD',        'assigned': task_agg['dept_bd_assigned'],     'pending': task_agg['dept_bd_pending'],     'overdue': task_agg['dept_bd_overdue']},
+        {'label': 'Execution', 'assigned': task_agg['dept_se_assigned'],     'pending': task_agg['dept_se_pending'],     'overdue': task_agg['dept_se_overdue']},
+        {'label': 'Finance',   'assigned': task_agg['dept_finance_assigned'],'pending': task_agg['dept_finance_pending'],'overdue': task_agg['dept_finance_overdue']},
+    ]
+
+    ctx = {
+        'proj_total':    proj_total,
+        'proj_on_time':  proj_on_time,
+        'proj_at_risk':  proj_at_risk,
+        'proj_delayed':  proj_delayed,
+        'proj_blocked':  proj_blocked,
+        'project_cards': project_cards,
+        'dept_rows':     dept_rows,
+    }
+    ctx.update(task_agg)
+    ctx.update(issue_agg)
+    return ctx
+
+
 @login_required
 def dashboard_ceo(request):
-    """CEO landing page — read-only summary view. Access: any authenticated user."""
-    return render(request, 'dashboard/ceo.html')
+    """CEO portfolio overview. Access: CEO role only. Renders in 3 DB queries via _get_ceo_dashboard_context."""
+    ctx = _get_ceo_dashboard_context()
+    ctx['now'] = timezone.now()
+    return render(request, 'dashboard/ceo.html', ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -1438,6 +1632,12 @@ def task_status_update(request, project_id, task_id):
     update_kwargs = {'status': new_status}
     if new_status == Task.DONE:
         update_kwargs['completed_at'] = timezone.now()
+    # Track when a task first becomes blocked so the CEO aged-KPI can measure how long it has been stuck
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        update_kwargs['blocked_since'] = timezone.now()
+    # Clear on un-block so any future re-block re-ages from zero, not from the original block date
+    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
+        update_kwargs['blocked_since'] = None
 
     # Blocked requires a stated blocking issue (fresh transition only)
     if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
@@ -1603,11 +1803,34 @@ def vendor_list(request):
     })
 
 
+def _save_vendor_brands(vendor, post_data):
+    """
+    Replace all VendorBrand entries for vendor with the brand rows from the POST data.
+    Expects parallel lists: make_brand[] and brand_category[] from the dynamic form rows.
+    Empty brand names are silently skipped.
+    """
+    brand_names = post_data.getlist('make_brand')
+    brand_cats  = post_data.getlist('brand_category')
+
+    vendor.brands.all().delete()
+    for name, cat_id in zip(brand_names, brand_cats):
+        name = name.strip()
+        if not name:
+            continue
+        VendorBrand.objects.create(
+            vendor=vendor,
+            make_brand=name,
+            category_id=int(cat_id) if cat_id else None,
+        )
+
+
 @login_required
 def vendor_add(request):
     """
     Add a new vendor. Warns (but does not block) if a vendor with the same name
     already exists — duplicate names are allowed to handle trading variants.
+    VendorBrand entries (make_brand + optional category) are saved from the
+    dynamic brand rows submitted alongside the main form.
     Access: SCM and Admin only.
     """
     profile = request.user.profile
@@ -1621,6 +1844,10 @@ def vendor_add(request):
             vendor.created_by = profile
             vendor.save()
             form.save_m2m()
+
+            # Save brand rows — each non-empty make_brand value becomes one VendorBrand entry
+            _save_vendor_brands(vendor, request.POST)
+
             duplicate_exists = Vendor.objects.filter(
                 name__iexact=vendor.name
             ).exclude(pk=vendor.pk).exists()
@@ -1636,14 +1863,20 @@ def vendor_add(request):
         form = VendorForm()
 
     return render(request, 'vendors/vendor_form.html', {
-        'form':  form,
-        'title': 'Add Vendor',
+        'form':             form,
+        'title':            'Add Vendor',
+        'vendor_brands':    [],  # no existing brands on a new vendor
+        'vendor_categories': VendorCategory.objects.all(),
     })
 
 
 @login_required
 def vendor_edit(request, vendor_id):
-    """Edit an existing vendor's details. Access: SCM and Admin only."""
+    """
+    Edit an existing vendor's details. Replaces all VendorBrand entries with
+    the brand rows submitted in the form.
+    Access: SCM and Admin only.
+    """
     profile = request.user.profile
     if profile.role not in ('SCM', 'Admin'):
         return HttpResponseForbidden()
@@ -1654,6 +1887,10 @@ def vendor_edit(request, vendor_id):
         form = VendorForm(request.POST, instance=vendor)
         if form.is_valid():
             form.save()
+
+            # Replace all brand entries with whatever was submitted in the form
+            _save_vendor_brands(vendor, request.POST)
+
             duplicate_exists = Vendor.objects.filter(
                 name__iexact=vendor.name
             ).exclude(pk=vendor.pk).exists()
@@ -1669,9 +1906,11 @@ def vendor_edit(request, vendor_id):
         form = VendorForm(instance=vendor)
 
     return render(request, 'vendors/vendor_form.html', {
-        'form':   form,
-        'vendor': vendor,
-        'title':  f'Edit Vendor — {vendor.name}',
+        'form':              form,
+        'vendor':            vendor,
+        'title':             f'Edit Vendor — {vendor.name}',
+        'vendor_brands':     list(vendor.brands.select_related('category').all()),
+        'vendor_categories': VendorCategory.objects.all(),
     })
 
 
@@ -1699,15 +1938,39 @@ def vendor_toggle_status(request, vendor_id):
 # ---------------------------------------------------------------------------
 
 def _boq_snapshot(boq):
-    """Return a JSON-safe snapshot of all BOQ items (Decimal → float)."""
+    """
+    Return a JSON-safe snapshot of all BOQ items at a workflow transition (Decimal → float).
+
+    make_brand_label is resolved from VendorBrand at snapshot time (vendor × category match)
+    and stored directly in the JSON row so the history view is self-contained and does not
+    need to re-query VendorBrand for old revisions. Falls back to the vendor company name.
+    """
     import decimal as _decimal
     rows = list(boq.items.values(
         'serial_no', 'category', 'description', 'uom',
         'boq_quantity', 'ordered_quantity',
-        'make_preference__name', 'ordered_vendor__name',
+        'make_preference_id', 'make_preference__name', 'ordered_vendor__name',
     ))
+
+    # Resolve brand labels in one query: (vendor_id, category_name) → make_brand
+    vendor_ids = {r['make_preference_id'] for r in rows if r['make_preference_id']}
+    brand_map  = {}
+    if vendor_ids:
+        for vb in VendorBrand.objects.filter(vendor_id__in=vendor_ids).select_related('category'):
+            brand_map[(vb.vendor_id, vb.category.name if vb.category else None)] = vb.make_brand
+
     for row in rows:
-        for k, v in row.items():
+        vid = row.pop('make_preference_id')  # internal FK — not needed in the stored JSON
+        if vid:
+            cat = row.get('category')
+            row['make_brand_label'] = (
+                brand_map.get((vid, cat)) or       # category-specific brand
+                brand_map.get((vid, None)) or      # unscoped brand for this vendor
+                row.get('make_preference__name')   # company name fallback
+            )
+        else:
+            row['make_brand_label'] = None
+        for k, v in list(row.items()):
             if isinstance(v, _decimal.Decimal):
                 row[k] = float(v)
     return rows
@@ -1734,11 +1997,53 @@ def _notify_boq_acknowledged(boq, acknowledging_profile):
 
 
 def _build_vendors_by_category():
-    """Return dict mapping category name → list of {id, name} for active vendors."""
+    """
+    Return dict mapping category name → list of {id, name, make_brand} for active vendors.
+
+    Vendors with VendorBrand entries appear once per brand per relevant category —
+    make_brand is shown in the BOQ dropdown; the stored value is still the vendor PK.
+    Brands with no category set appear in every supply category for that vendor.
+    Vendors with no brands at all fall back to showing the company name.
+    """
     result = {}
-    for vendor in Vendor.objects.filter(is_active=True).prefetch_related('categories').order_by('name'):
-        for cat in vendor.categories.all():
-            result.setdefault(cat.name, []).append({'id': vendor.pk, 'name': vendor.name})
+
+    # Pre-build vendor → supply categories map (from the M2M on Vendor)
+    vendor_supply_cats = {}
+    for v in Vendor.objects.filter(is_active=True).prefetch_related('categories'):
+        vendor_supply_cats[v.pk] = [cat.name for cat in v.categories.all()]
+
+    # Vendors that have at least one brand entry
+    vendors_with_brands = set()
+    for vb in (VendorBrand.objects
+               .filter(vendor__is_active=True)
+               .select_related('vendor', 'category')
+               .order_by('vendor__name', 'make_brand')):
+        vendors_with_brands.add(vb.vendor_id)
+        if vb.category:
+            cats = [vb.category.name]
+        else:
+            # Not scoped — show this brand in every category the vendor supplies
+            cats = vendor_supply_cats.get(vb.vendor_id, [])
+        for cat in cats:
+            result.setdefault(cat, []).append({
+                'id':         vb.vendor_id,
+                'name':       vb.vendor.name,
+                'make_brand': vb.make_brand,
+            })
+
+    # Fallback: vendors with no brands appear using their company name
+    for v in (Vendor.objects
+              .filter(is_active=True)
+              .exclude(pk__in=vendors_with_brands)
+              .prefetch_related('categories')
+              .order_by('name')):
+        for cat in v.categories.all():
+            result.setdefault(cat.name, []).append({
+                'id':         v.pk,
+                'name':       v.name,
+                'make_brand': '',
+            })
+
     return result
 
 
@@ -1830,16 +2135,18 @@ def boq_detail(request, project_id):
                 return redirect('boq_detail', project_id=project_id)
 
         elif action in ('save_scm', 'acknowledge_scm') and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
-            # Save ordered qty/vendor regardless of whether this is save or acknowledge
+            # Save ordered qty, make preference, and ordered vendor regardless of save vs. acknowledge
             for item in boq.items.all():
                 qty_str    = request.POST.get(f'ord_qty_{item.pk}', '').strip()
+                make_str   = request.POST.get(f'make_pref_{item.pk}', '').strip()
                 vendor_str = request.POST.get(f'ord_vendor_{item.pk}', '').strip()
                 try:
                     item.ordered_quantity = Decimal(qty_str) if qty_str else None
                 except InvalidOperation:
                     item.ordered_quantity = None
-                item.ordered_vendor_id = int(vendor_str) if vendor_str.isdigit() else None
-                item.save(update_fields=['ordered_quantity', 'ordered_vendor'])
+                item.make_preference_id = int(make_str) if make_str.isdigit() else None
+                item.ordered_vendor_id  = int(vendor_str) if vendor_str.isdigit() else None
+                item.save(update_fields=['ordered_quantity', 'make_preference', 'ordered_vendor'])
 
             if action == 'save_scm':
                 messages.success(request, 'Ordered details saved.')
@@ -1886,7 +2193,25 @@ def boq_detail(request, project_id):
 
         return redirect('boq_detail', project_id=project_id)
 
-    items             = boq.items.select_related('make_preference', 'ordered_vendor').order_by('serial_no')
+    items = list(boq.items.select_related('make_preference', 'ordered_vendor').order_by('serial_no'))
+
+    # Annotate each item with make_brand_display: the brand label shown in the static
+    # (non-editable) Make/Preference cell. Resolved from VendorBrand in one batch query.
+    _vendor_ids = {i.make_preference_id for i in items if i.make_preference_id}
+    _brand_map  = {}
+    if _vendor_ids:
+        for vb in VendorBrand.objects.filter(vendor_id__in=_vendor_ids).select_related('category'):
+            _brand_map[(vb.vendor_id, vb.category.name if vb.category else None)] = vb.make_brand
+    for item in items:
+        if item.make_preference_id:
+            item.make_brand_display = (
+                _brand_map.get((item.make_preference_id, item.category)) or
+                _brand_map.get((item.make_preference_id, None)) or
+                item.make_preference.name
+            )
+        else:
+            item.make_brand_display = None
+
     items_by_category = {}
     for item in items:
         items_by_category.setdefault(item.category, []).append(item)

@@ -73,10 +73,12 @@
                   <td class="align-middle {% if item.boq_quantity and item.ordered_quantity %}{% if item.boq_quantity != item.ordered_quantity %}table-warning{% endif %}{% endif %}">
                     {{ item.ordered_quantity|default:"—" }}
                   </td>
-                  <td class="align-middle small text-muted">{{ item.make_preference__name|default:"—" }}</td>
+                  {# make_brand_label stored in snapshot; falls back to vendor name for older snapshots #}
+                  <td class="align-middle small text-muted">{{ item.make_brand_label|default:item.make_preference__name|default:"—" }}</td>
                   <td class="align-middle small text-muted">{{ item.ordered_vendor__name|default:"—" }}</td>
                 {% else %}
-                  <td class="align-middle small text-muted">{{ item.make_preference__name|default:"—" }}</td>
+                  {# make_brand_label stored in snapshot; falls back to vendor name for older snapshots #}
+                  <td class="align-middle small text-muted">{{ item.make_brand_label|default:item.make_preference__name|default:"—" }}</td>
                 {% endif %}
               </tr>
               {% empty %}

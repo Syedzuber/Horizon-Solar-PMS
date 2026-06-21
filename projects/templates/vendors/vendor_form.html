@@ -31,6 +31,74 @@
             {% endif %}
           </div>
 
+          {# Make / Brand — multiple entries, each optionally scoped to one supply category.
+             Submitted as parallel lists: make_brand[] and brand_category[].
+             The + button clones the template row; × removes a row (keeps at least one). #}
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Make / Brand</label>
+            <div id="brand-rows">
+
+              {% for brand in vendor_brands %}
+              {# Existing brand row (edit mode) #}
+              <div class="brand-row d-flex gap-2 mb-2 align-items-center">
+                <input type="text" name="make_brand" value="{{ brand.make_brand }}"
+                       placeholder="e.g. Waaree, Havells" class="form-control form-control-sm">
+                <select name="brand_category" class="form-select form-select-sm" style="max-width:180px;">
+                  <option value="">All categories</option>
+                  {% for cat in vendor_categories %}
+                  <option value="{{ cat.pk }}"
+                          {% if brand.category_id == cat.pk %}selected{% endif %}>
+                    {{ cat.name }}
+                  </option>
+                  {% endfor %}
+                </select>
+                <button type="button" class="btn btn-outline-danger btn-sm remove-brand-row px-2"
+                        title="Remove">×</button>
+              </div>
+              {% empty %}
+              {# Default empty row for new vendors #}
+              <div class="brand-row d-flex gap-2 mb-2 align-items-center">
+                <input type="text" name="make_brand" value=""
+                       placeholder="e.g. Waaree, Havells" class="form-control form-control-sm">
+                <select name="brand_category" class="form-select form-select-sm" style="max-width:180px;">
+                  <option value="">All categories</option>
+                  {% for cat in vendor_categories %}
+                  <option value="{{ cat.pk }}">{{ cat.name }}</option>
+                  {% endfor %}
+                </select>
+                <button type="button" class="btn btn-outline-danger btn-sm remove-brand-row px-2"
+                        title="Remove">×</button>
+              </div>
+              {% endfor %}
+
+            </div>
+
+            {# Hidden template row — cloned by JS when + is clicked #}
+            <template id="brand-row-template">
+              <div class="brand-row d-flex gap-2 mb-2 align-items-center">
+                <input type="text" name="make_brand" value=""
+                       placeholder="e.g. Waaree, Havells" class="form-control form-control-sm">
+                <select name="brand_category" class="form-select form-select-sm" style="max-width:180px;">
+                  <option value="">All categories</option>
+                  {% for cat in vendor_categories %}
+                  <option value="{{ cat.pk }}">{{ cat.name }}</option>
+                  {% endfor %}
+                </select>
+                <button type="button" class="btn btn-outline-danger btn-sm remove-brand-row px-2"
+                        title="Remove">×</button>
+              </div>
+            </template>
+
+            <button type="button" id="add-brand-row" class="btn btn-outline-secondary btn-sm mt-1">
+              <i class="bi bi-plus"></i> Add Brand
+            </button>
+            <div class="form-text mt-1">
+              Brand labels shown in the BOQ Make/Preference column. Optionally scope each
+              brand to a specific supply category — leave as "All categories" to show it
+              in every category dropdown this vendor is assigned to.
+            </div>
+          </div>
+
           {# Contact Person #}
           <div class="mb-3">
             <label class="form-label fw-semibold" for="{{ form.contact_person.id_for_label }}">
@@ -142,6 +210,32 @@
 </div>
 
 <script>
+// ── Brand rows — add / remove ─────────────────────────────────────────────
+(function () {
+  const container = document.getElementById('brand-rows');
+  const template  = document.getElementById('brand-row-template');
+
+  // + button: clone the hidden template and append a fresh row
+  document.getElementById('add-brand-row').addEventListener('click', function () {
+    const clone = template.content.cloneNode(true);
+    container.appendChild(clone);
+  });
+
+  // × button (delegated): remove the row, but always keep at least one
+  container.addEventListener('click', function (e) {
+    if (!e.target.classList.contains('remove-brand-row')) return;
+    const rows = container.querySelectorAll('.brand-row');
+    if (rows.length > 1) {
+      e.target.closest('.brand-row').remove();
+    } else {
+      // Clear the last row instead of removing it
+      e.target.closest('.brand-row').querySelector('input[name="make_brand"]').value = '';
+      e.target.closest('.brand-row').querySelector('select[name="brand_category"]').selectedIndex = 0;
+    }
+  });
+}());
+
+// ── MSME number field — show/hide ────────────────────────────────────────
 // Show/hide MSME number field based on MSME checkbox state.
 const msmeCheckbox = document.getElementById('{{ form.msme_status.id_for_label }}');
 const msmeRow      = document.getElementById('msme-number-row');

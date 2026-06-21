@@ -154,11 +154,13 @@
                         name="make_pref_{{ item.pk }}"
                         class="form-select form-select-sm vendor-select"
                         data-category="{{ item.category }}"
-                        data-selected="{{ item.make_preference_id|default:'' }}">
+                        data-selected="{{ item.make_preference_id|default:'' }}"
+                        data-show-brand="1">
                   <option value="">— None —</option>
                 </select>
                 {% else %}
-                  {{ item.make_preference.name|default:"—" }}
+                  {# make_brand_display = brand label resolved in view (VendorBrand × category) #}
+                  {{ item.make_brand_display|default:"—" }}
                 {% endif %}
               </td>
               <td class="align-middle text-center">
@@ -187,7 +189,21 @@
                   {{ item.ordered_quantity|default:"—" }}
                 {% endif %}
               </td>
-              <td class="align-middle small text-muted">{{ item.make_preference.name|default:"—" }}</td>
+              {# SCM can override the Design make preference before acknowledging #}
+              <td class="align-middle">
+                {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
+                <select form="saveSCMForm"
+                        name="make_pref_{{ item.pk }}"
+                        class="form-select form-select-sm vendor-select"
+                        data-category="{{ item.category }}"
+                        data-selected="{{ item.make_preference_id|default:'' }}"
+                        data-show-brand="1">
+                  <option value="">— None —</option>
+                </select>
+                {% else %}
+                  {{ item.make_brand_display|default:"—" }}
+                {% endif %}
+              </td>
               <td class="align-middle">
                 {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
                 <select form="saveSCMForm"
@@ -268,8 +284,8 @@
     <button type="submit" form="saveSCMForm" name="action" value="acknowledge_scm"
             class="btn text-white"
             style="background:#1a7a4a;"
-            onclick="return confirm('Acknowledge this BOQ? Current ordered quantities and vendors will be saved.')">
-      Acknowledge
+            onclick="return confirm('Save and acknowledge this BOQ? Ordered quantities, make preferences, and vendors will be locked.')">
+      Save &amp; Acknowledge
     </button>
     {% endif %}
 
@@ -343,7 +359,8 @@
     vendors.forEach(function (v) {
       const opt    = document.createElement('option');
       opt.value    = v.id;
-      opt.textContent = v.name;
+      // Make Preference column: show brand label; Ordered Vendor column: always show company name
+      opt.textContent = sel.dataset.showBrand ? (v.make_brand || v.name) : v.name;
       if (String(v.id) === String(selectedId)) opt.selected = true;
       sel.appendChild(opt);
     });
