@@ -1,11 +1,531 @@
 {% extends "base.html" %}
 {% block title %}CEO Dashboard — SolarPMS{% endblock %}
+
+{% block extra_head %}
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.8/dist/cdn.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+
+  /* ── Status badge chips ── */
+  .badge-on-time  { background: #d1fae5; color: #065f46; }
+  .badge-at-risk  { background: #fef3c7; color: #92400e; }
+  .badge-delayed  { background: #fee2e2; color: #991b1b; }
+  .badge-blocked  { background: #dc2626; color: #ffffff; }
+
+  /* ── Stat label / number pairs ── */
+  .stat-row { display: flex; align-items: baseline; justify-content: space-between;
+              padding: .2rem 0; font-size: .88rem; }
+  .stat-row + .stat-row { border-top: 1px solid #f0f0f0; }
+  .stat-num  { font-weight: 700; font-size: 1rem; }
+  .stat-num.red    { color: #dc2626; }
+  .stat-num.amber  { color: #d97706; }
+  .stat-num.green  { color: #1a7a4a; }
+  .stat-num.dark   { color: #1e293b; }
+
+  /* ── KPI cards ── */
+  .kpi-period-label { font-size: .75rem; font-weight: 600; color: #6b7280;
+                      text-transform: uppercase; letter-spacing: .04em; margin-bottom: .25rem; }
+  .kpi-pair   { display: flex; gap: 1.5rem; }
+  .kpi-item   { display: flex; flex-direction: column; align-items: flex-start; }
+  .kpi-val    { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+  .kpi-sublbl { font-size: .75rem; color: #6b7280; margin-top: .1rem; }
+
+  /* ── Project cards ── */
+  .proj-card       { cursor: pointer; transition: box-shadow .15s; text-decoration: none; color: inherit; }
+  .proj-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.12) !important; }
+  .proj-badge {
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .18rem .55rem; border-radius: 999px;
+    font-size: .73rem; font-weight: 700; white-space: nowrap;
+  }
+
+  /* ── Section headers ── */
+  .section-label {
+    font-size: .7rem; font-weight: 700; color: #9ca3af;
+    text-transform: uppercase; letter-spacing: .07em;
+    margin-bottom: .6rem;
+  }
+
+  /* ── Lucide icon alignment ── */
+  .icon-sm  { width: 16px; height: 16px; flex-shrink: 0; }
+  .icon-md  { width: 20px; height: 20px; flex-shrink: 0; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="card shadow-sm">
-  <div class="card-body p-4">
-    <h4 class="mb-1">Welcome, {{ user.username }}</h4>
-    <p class="text-muted mb-3">Role: CEO</p>
-    <div class="alert alert-warning">Dashboard under construction</div>
+
+{# ── PAGE HEADER ─────────────────────────────────────────────────────────── #}
+<div class="d-flex align-items-start justify-content-between mb-4 flex-wrap gap-2">
+
+  {# Refresh control — top-left; CEO taps this during the board demo after commissioning is marked Done #}
+  <div class="d-flex align-items-center gap-2">
+    <a href="{% url 'dashboard_ceo' %}"
+       class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
+       title="Reload the dashboard to pick up the latest project data">
+      <i data-lucide="refresh-cw" class="icon-sm"></i>
+      <span>Refresh</span>
+    </a>
+    <span class="text-muted small">{{ now|date:"d M Y, H:i" }}</span>
+  </div>
+
+  <div class="text-end">
+    <h5 class="mb-0 fw-bold">Portfolio Overview</h5>
+    <p class="text-muted small mb-0">{{ proj_total }} active project{{ proj_total|pluralize }}</p>
   </div>
 </div>
+
+
+{# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
+<div class="section-label">Portfolio health</div>
+<div class="row g-3 mb-4">
+
+  {# Projects card #}
+  <div class="col-md-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="folder-kanban" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Projects</span>
+          <span class="ms-auto badge bg-secondary rounded-pill">{{ proj_total }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">On Time</span>
+          <span class="stat-num green">{{ proj_on_time }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">At Risk</span>
+          <span class="stat-num amber">{{ proj_at_risk }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Delayed</span>
+          <span class="stat-num red">{{ proj_delayed }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Blocked</span>
+          <span class="stat-num{% if proj_blocked %} red{% endif %}">{{ proj_blocked }}</span>
+        </div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          Blocked &gt; Delayed &gt; At Risk &gt; On Time — worst condition wins, projects counted once.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  {# Tasks card #}
+  <div class="col-md-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="list-checks" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Tasks</span>
+          <span class="ms-auto badge bg-secondary rounded-pill">{{ task_total }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Unassigned</span>
+          <span class="stat-num{% if task_unassigned %} amber{% endif %}">{{ task_unassigned }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">In Progress</span>
+          <span class="stat-num dark">{{ task_inprogress }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Completed</span>
+          <span class="stat-num green">{{ task_completed }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Overdue <span class="badge" style="background:#f3f4f6;color:#374151;font-size:.65rem;font-weight:600;">internal only</span></span>
+          <span class="stat-num{% if task_overdue %} red{% endif %}">{{ task_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Issues card #}
+  <div class="col-md-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="triangle-alert" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Issues</span>
+          <span class="ms-auto badge bg-secondary rounded-pill">{{ issue_total }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Unassigned</span>
+          <span class="stat-num{% if issue_unassigned %} amber{% endif %}">{{ issue_unassigned }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">In Progress</span>
+          <span class="stat-num dark">{{ issue_inprogress }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">Resolved / Closed</span>
+          <span class="stat-num green">{{ issue_resolved }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted">
+            Overdue
+            <span class="badge" style="background:#f3f4f6;color:#374151;font-size:.65rem;font-weight:600;">due-date-based</span>
+          </span>
+          <span class="stat-num{% if issue_overdue %} red{% endif %}">{{ issue_overdue }}</span>
+        </div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          Overdue counts only issues with an explicit due date — a near-zero value may not mean healthy.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>{# /row status cards #}
+
+
+{# ── SECTION 2: DEPARTMENT WORKLOAD ──────────────────────────────────────── #}
+<div class="section-label">Department workload</div>
+<div class="row g-3 mb-4">
+
+  {# PM #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="user-check" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">PM</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_pm_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_pm_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_pm_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_pm_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# SCM #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="truck" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">SCM</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_scm_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_scm_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_scm_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_scm_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Design #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="pencil-ruler" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">Design</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_design_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_design_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_design_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_design_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# BD #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="trending-up" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">BD</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_bd_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_bd_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_bd_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_bd_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Execution #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="hard-hat" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">Execution</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_se_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_se_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_se_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_se_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Finance #}
+  <div class="col-6 col-md-4 col-xl-2">
+    <div class="card shadow-sm h-100">
+      <div class="card-body py-3 px-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <i data-lucide="banknote" class="icon-sm text-muted"></i>
+          <span class="fw-semibold" style="font-size:.85rem;">Finance</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Assigned</span>
+          <span class="fw-semibold">{{ dept_finance_assigned }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Pending</span>
+          <span class="fw-semibold">{{ dept_finance_pending }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Overdue</span>
+          <span class="fw-bold {% if dept_finance_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_finance_overdue }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>{# /row dept cards #}
+
+
+{# ── SECTION 3: KPI CARDS ─────────────────────────────────────────────────── #}
+<div class="section-label">KPIs</div>
+<div class="row g-3 mb-4">
+
+  {# This Week #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="calendar" class="icon-md text-muted"></i>
+          <span class="fw-semibold">This Week</span>
+        </div>
+        <div class="kpi-pair mb-3">
+          <div class="kpi-item">
+            <span class="kpi-val">{{ task_done_this_week }}</span>
+            <span class="kpi-sublbl">Tasks done</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-val">{{ issue_done_this_week }}</span>
+            <span class="kpi-sublbl">Issues resolved</span>
+          </div>
+        </div>
+        <div class="kpi-period-label">Last week</div>
+        <div class="kpi-pair">
+          <div class="kpi-item">
+            <span class="kpi-val" style="font-size:1.15rem;color:#6b7280;">{{ task_done_last_week }}</span>
+            <span class="kpi-sublbl">Tasks done</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-val" style="font-size:1.15rem;color:#6b7280;">{{ issue_done_last_week }}</span>
+            <span class="kpi-sublbl">Issues resolved</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# This Month #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="calendar-days" class="icon-md text-muted"></i>
+          <span class="fw-semibold">This Month</span>
+        </div>
+        <div class="kpi-pair mb-3">
+          <div class="kpi-item">
+            <span class="kpi-val">{{ task_done_this_month }}</span>
+            <span class="kpi-sublbl">Tasks done</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-val">{{ issue_done_this_month }}</span>
+            <span class="kpi-sublbl">Issues resolved</span>
+          </div>
+        </div>
+        <div class="kpi-period-label">Last month</div>
+        <div class="kpi-pair">
+          <div class="kpi-item">
+            <span class="kpi-val" style="font-size:1.15rem;color:#6b7280;">{{ task_done_last_month }}</span>
+            <span class="kpi-sublbl">Tasks done</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-val" style="font-size:1.15rem;color:#6b7280;">{{ issue_done_last_month }}</span>
+            <span class="kpi-sublbl">Issues resolved</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# Blocked Tasks — three distinct numbers; they do not reconcile with each other #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="ban" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Blocked Tasks</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted" style="font-size:.85rem;">Open (individual tasks)</span>
+          <span class="stat-num{% if blocked_open %} red{% endif %}">{{ blocked_open }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted" style="font-size:.85rem;">Aged ≥7 days</span>
+          <span class="stat-num{% if blocked_aged_7d %} red{% endif %}">{{ blocked_aged_7d }}</span>
+        </div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          "Blocked projects" is the Projects card above.
+          These count individual tasks — they will not match.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  {# External Dependencies #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="link" class="icon-md text-muted"></i>
+          <span class="fw-semibold">External Dependencies</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted" style="font-size:.85rem;">Closed</span>
+          <span class="stat-num green">{{ ext_closed }}</span>
+        </div>
+        <div class="stat-row">
+          <span class="text-muted" style="font-size:.85rem;">Overdue</span>
+          <span class="stat-num{% if ext_overdue %} red{% endif %}">{{ ext_overdue }}</span>
+        </div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          DISCOM / authority / customer-dependent tasks only.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>{# /row KPI cards #}
+
+
+{# ── SECTION 4: PROJECT LIST CARDS ────────────────────────────────────────── #}
+<div class="section-label">Active projects</div>
+
+{% if not project_cards %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center py-5 text-muted">
+      <i data-lucide="inbox" style="width:40px;height:40px;" class="mb-3"></i>
+      <p class="mb-0">No active projects right now.</p>
+    </div>
+  </div>
+{% else %}
+  <div class="row g-3">
+    {% for card in project_cards %}
+    {% with p=card.project %}
+    <div class="col-md-6 col-xl-4">
+      <a href="{% url 'project_overview' p.project_id %}"
+         class="card shadow-sm proj-card d-block h-100">
+        <div class="card-body">
+
+          {# Status badge + project ID #}
+          <div class="d-flex align-items-start justify-content-between gap-2 mb-2">
+            <span class="text-muted small fw-semibold" style="font-size:.78rem;">{{ p.project_id }}</span>
+            {% if card.badge == 'blocked' %}
+              <span class="proj-badge badge-blocked">
+                <i data-lucide="ban" style="width:11px;height:11px;"></i> Blocked
+              </span>
+            {% elif card.badge == 'delayed' %}
+              <span class="proj-badge badge-delayed">
+                <i data-lucide="clock-alert" style="width:11px;height:11px;"></i> Delayed
+              </span>
+            {% elif card.badge == 'at_risk' %}
+              <span class="proj-badge badge-at-risk">
+                <i data-lucide="triangle-alert" style="width:11px;height:11px;"></i> At Risk
+              </span>
+            {% else %}
+              <span class="proj-badge badge-on-time">
+                <i data-lucide="check-circle-2" style="width:11px;height:11px;"></i> On Time
+              </span>
+            {% endif %}
+          </div>
+
+          {# Customer name #}
+          <p class="fw-semibold mb-1" style="font-size:.97rem;line-height:1.3;">{{ p.customer_name }}</p>
+
+          {# Info row: city · type · capacity #}
+          <p class="text-muted mb-2" style="font-size:.8rem;">
+            {{ p.city }}
+            &nbsp;·&nbsp;{{ p.project_type }}
+            {% if p.capacity_kw %}&nbsp;·&nbsp;{{ p.capacity_kw }} kW{% endif %}
+          </p>
+
+          {# Target date #}
+          <div class="d-flex align-items-center gap-1" style="font-size:.8rem;">
+            <i data-lucide="calendar" style="width:13px;height:13px;" class="text-muted flex-shrink-0"></i>
+            {% if p.target_commissioning_date %}
+              <span class="{% if card.is_delayed %}text-danger fw-semibold{% else %}text-muted{% endif %}">
+                Target: {{ p.target_commissioning_date|date:"d M Y" }}
+              </span>
+            {% else %}
+              <span class="text-muted fst-italic">No target date set</span>
+            {% endif %}
+          </div>
+
+        </div>
+      </a>
+    </div>
+    {% endwith %}
+    {% endfor %}
+  </div>
+{% endif %}
+
+{# ── Initialise Lucide icons ─────────────────────────────────────────────── #}
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    lucide.createIcons();
+  });
+</script>
+
 {% endblock %}
