@@ -23,6 +23,7 @@
           <th>Capacity (kW)</th>
           <th>Contract Value (₹)</th>
           <th>Target Date</th>
+          {% if user.profile.role == 'Admin' %}<th></th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -57,14 +58,60 @@
           <td>{{ project.capacity_kw }}</td>
           <td>{{ project.contract_value }}</td>
           <td>{{ project.target_commissioning_date }}</td>
+          {% if user.profile.role == 'Admin' %}
+          <td onclick="event.stopPropagation()">
+            <button type="button" class="btn btn-sm btn-outline-danger"
+                    data-bs-toggle="modal" data-bs-target="#deleteModal"
+                    data-project-id="{{ project.project_id }}"
+                    data-customer-name="{{ project.customer_name }}">
+              <i class="bi bi-trash"></i>
+            </button>
+          </td>
+          {% endif %}
         </tr>
         {% empty %}
         <tr>
-          <td colspan="9" class="text-center text-muted py-4">No projects found.</td>
+          <td colspan="{% if user.profile.role == 'Admin' %}10{% else %}9{% endif %}" class="text-center text-muted py-4">No projects found.</td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
 </div>
+
+{% if user.profile.role == 'Admin' %}
+<div class="modal fade" id="deleteModal" tabindex="-1" aria-labelledby="deleteModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title text-danger" id="deleteModalLabel">
+          <i class="bi bi-exclamation-triangle me-2"></i>Delete Project
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete <strong id="deleteProjectId"></strong> — <span id="deleteCustomerName"></span>?</p>
+        <p class="text-muted small mb-0">The project will be soft-deleted and hidden from all views. This can be undone from the Django admin panel.</p>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <form id="deleteForm" method="post" action="">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger btn-sm">Delete Project</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('deleteModal').addEventListener('show.bs.modal', function (e) {
+    var btn = e.relatedTarget;
+    document.getElementById('deleteProjectId').textContent = btn.getAttribute('data-project-id');
+    document.getElementById('deleteCustomerName').textContent = btn.getAttribute('data-customer-name');
+    document.getElementById('deleteForm').action = '/projects/' + btn.getAttribute('data-project-id') + '/delete/';
+  });
+});
+</script>
+{% endif %}
 {% endblock %}

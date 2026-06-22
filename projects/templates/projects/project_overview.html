@@ -58,6 +58,12 @@
         <a href="{% url 'project_timeline' project.project_id %}" class="btn btn-outline-secondary btn-sm">
           <i class="bi bi-calendar3 me-1"></i>Timeline
         </a>
+        {% if role == 'Admin' %}
+        <button type="button" class="btn btn-outline-danger btn-sm"
+                data-bs-toggle="modal" data-bs-target="#deleteProjectModal">
+          <i class="bi bi-trash me-1"></i>Delete
+        </button>
+        {% endif %}
         {% if role == 'PM' or role == 'Admin' or role == 'CEO' %}
         <a href="{% url 'project_list' %}" class="btn btn-outline-secondary btn-sm">← Projects</a>
         {% else %}
@@ -1364,5 +1370,31 @@
 
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script>lucide.createIcons();</script>
+
+{% if role == 'Admin' %}
+<div class="modal fade" id="deleteProjectModal" tabindex="-1" aria-labelledby="deleteProjectModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title text-danger" id="deleteProjectModalLabel">
+          <i class="bi bi-exclamation-triangle me-2"></i>Delete Project
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete <strong>{{ project.project_id }}</strong> — {{ project.customer_name }}?</p>
+        <p class="text-muted small mb-0">The project will be soft-deleted and hidden from all views. This can be undone from the Django admin panel.</p>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <form method="post" action="{% url 'project_delete' project.project_id %}">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-danger btn-sm">Delete Project</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
 
 {% endblock %}

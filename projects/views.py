@@ -24,8 +24,9 @@ from .models import (
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
-    PaymentRequest,
+    PaymentRequest, NotificationLog, SystemSettings,
 )
+from .notifications import send_notification
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
@@ -1362,6 +1363,7 @@ def project_list(request):
     role = _get_user_role(request)
     base_qs = (
         Project.objects
+        .filter(is_deleted=False)
         .select_related('assigned_pm__user', 'assigned_site_engineer__user')
         .prefetch_related(
             Prefetch('phases',
@@ -1411,6 +1413,20 @@ def project_create(request):
 def project_detail(request, project_id):
     """Merged into project_overview — redirect all traffic there."""
     return redirect('project_overview', project_id=project_id)
+
+
+@login_required
+@role_required(['Admin'])
+def project_delete(request, project_id):
+    """Soft-delete a project. Admin only, POST only."""
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+    project = get_object_or_404(Project, project_id=project_id, is_deleted=False)
+    project.is_deleted = True
+    project.deleted_at = timezone.now()
+    project.save(update_fields=['is_deleted', 'deleted_at'])
+    messages.success(request, f"Project {project.project_id} ({project.customer_name}) has been deleted.")
+    return redirect('project_list')
 
 
 @login_required
@@ -1682,6 +1698,28 @@ def task_status_update(request, project_id, task_id):
         # Log status changes for all non-blocked transitions (blocked has its own log above)
         log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
 
+        # Payment milestone notification: task.is_payment_milestone is read from the pre-update
+        # object — the flag never changes during a status update, so this is safe.
+        if new_status == Task.DONE and task.is_payment_milestone:
+            finance_users = UserProfile.objects.filter(role='Finance', is_active=True)
+            for finance_user in finance_users:
+                send_notification(
+                    recipient=finance_user,
+                    message=(
+                        f'Payment milestone reached: "{task.task_name}" completed on '
+                        f'{project.project_id} — {project.customer_name}.'
+                    ),
+                    channels=['in_app', 'whatsapp', 'email'],
+                    link=f'/projects/{project.project_id}/',
+                    subject=f'Payment Milestone — {project.project_id}',
+                    template='payment_notification',
+                    # CONFIRM param order in Interakt console; verify wording fits a
+                    # commissioning trigger before the first live send (see Layer 2 note).
+                    template_params=[project.project_id, project.customer_name, task.task_name],
+                    related_project=project,
+                    actor=request.user.profile,
+                )
+
     # Honour the ?next= redirect if it's a local URL (netloc empty = same domain)
     next_url = request.POST.get('next', None)
     if next_url:
@@ -1719,6 +1757,20 @@ def task_assign(request, project_id, task_id):
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
             Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            send_notification(
+                recipient=assignee,
+                message=(
+                    f'You have been assigned task "{task.task_name}" '
+                    f'on project {project.project_id} — {project.customer_name}.'
+                ),
+                channels=['in_app', 'whatsapp'],
+                link=f'/projects/{project.project_id}/',
+                template='assign_task',
+                # CONFIRM param order in Interakt console before first live send.
+                template_params=[task.task_name, project.project_id, project.customer_name],
+                related_project=project,
+                actor=request.user.profile,
+            )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
         return redirect('project_overview', project_id=project.project_id)
@@ -1977,7 +2029,7 @@ def _boq_snapshot(boq):
 
 
 def _notify_boq_acknowledged(boq, acknowledging_profile):
-    """Create a Notification for the Design user who submitted the BOQ."""
+    """Notify the Design user who submitted the BOQ that SCM has acknowledged it."""
     items = boq.items.all()
     has_changes = any(
         item.ordered_quantity is not None and item.boq_quantity is not None
@@ -1989,10 +2041,17 @@ def _notify_boq_acknowledged(boq, acknowledging_profile):
         f'BOQ for {boq.project.project_id} ({boq.project.customer_name}) '
         f'has been acknowledged by SCM{suffix}.'
     )
-    Notification.objects.create(
+    scm_name = acknowledging_profile.user.get_full_name() or acknowledging_profile.user.username
+    send_notification(
         recipient=boq.submitted_by,
         message=message,
+        channels=['in_app', 'whatsapp'],
         link=f'/projects/{boq.project.project_id}/boq/',
+        template='boq_acknowledged',
+        # CONFIRM param order in Interakt console before first live send.
+        template_params=[boq.project.project_id, boq.project.customer_name, scm_name],
+        related_project=boq.project,
+        actor=acknowledging_profile,
     )
 
 
@@ -3268,21 +3327,41 @@ def zoho_deal_closed_webhook(request):
                 project.project_id, record_id,
                 project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
 
-    # Notify Admin only if PM fallback also failed (chetan@horizonrenewablepower.com not found)
     if project.assigned_pm is None:
+        # Notify Admin: PM could not be assigned (fallback user not found either)
         try:
             admin_profile = UserProfile.objects.filter(role='Admin').first()
             if admin_profile:
-                Notification.objects.create(
+                send_notification(
                     recipient=admin_profile,
                     message=(
                         f'New Draft project {project.project_id} created from Zoho CRM '
                         f'(deal {record_id}) — PM could not be assigned. Please assign a PM.'
                     ),
+                    channels=['in_app'],
                     link=f'/projects/{project.project_id}/',
+                    related_project=project,
                 )
         except Exception as exc:
-            logger.error('Webhook: notification creation failed for project %s — %s', project.project_id, exc)
+            logger.error('Webhook: notification failed for project %s — %s', project.project_id, exc)
+    else:
+        # Notify the assigned PM about their new project
+        try:
+            send_notification(
+                recipient=project.assigned_pm,
+                message=(
+                    f'You have been assigned a new project {project.project_id} '
+                    f'— {project.customer_name} ({project.city}).'
+                ),
+                channels=['in_app', 'whatsapp'],
+                link=f'/projects/{project.project_id}/',
+                template='assign_project',
+                # CONFIRM param order in Interakt console before first live send.
+                template_params=[project.project_id, project.customer_name, project.city],
+                related_project=project,
+            )
+        except Exception as exc:
+            logger.error('Webhook: PM notification failed for project %s — %s', project.project_id, exc)
 
     return HttpResponse(status=200)
 
@@ -3688,6 +3767,19 @@ def create_project_issue(request, project_id):
         due_date=due_date,
     )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    if assigned_to and assigned_to != profile:
+        raiser_name = profile.user.get_full_name() or profile.user.username
+        send_notification(
+            recipient=assigned_to,
+            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
+            channels=['in_app', 'whatsapp'],
+            link=f'/issues/{issue.pk}/',
+            template='issue_created',
+            # CONFIRM param order in Interakt console before first live send.
+            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
     messages.success(request, f'Issue "{title}" raised successfully.')
     return redirect('project_overview', project_id=project_id)
 
@@ -3748,6 +3840,19 @@ def create_task_issue(request, project_id, task_id):
         due_date=due_date,
     )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    if assigned_to and assigned_to != profile:
+        raiser_name = profile.user.get_full_name() or profile.user.username
+        send_notification(
+            recipient=assigned_to,
+            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
+            channels=['in_app', 'whatsapp'],
+            link=f'/issues/{issue.pk}/',
+            template='issue_created',
+            # CONFIRM param order in Interakt console before first live send.
+            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
     messages.success(request, f'Issue "{title}" raised.')
     return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -3818,6 +3923,19 @@ def create_delivery_issue(request, project_id, dc_id):
         f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
         entity_type='Issue', entity_id=issue.pk,
     )
+    if assigned_to and assigned_to != profile:
+        raiser_name = profile.user.get_full_name() or profile.user.username
+        send_notification(
+            recipient=assigned_to,
+            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
+            channels=['in_app', 'whatsapp'],
+            link=f'/issues/{issue.pk}/',
+            template='issue_created',
+            # CONFIRM param order in Interakt console before first live send.
+            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
     messages.success(request, f'Issue "{title}" raised for DC {challan.dc_number}.')
     return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
@@ -3937,13 +4055,19 @@ def resolve_issue(request, issue_id):
         log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
         if project.assigned_pm and project.assigned_pm != profile:
             resolver_name = profile.user.get_full_name() or profile.user.username
-            Notification.objects.create(
+            send_notification(
                 recipient=project.assigned_pm,
                 message=(
                     f'{resolver_name} resolved issue "{issue.title}" on {project.project_id}. '
                     f'Please review and close.'
                 ),
+                channels=['in_app', 'whatsapp'],
                 link=f'/issues/{issue.pk}/',
+                template='issue_resolved',
+                # CONFIRM param order in Interakt console before first live send.
+                template_params=[resolver_name, issue.title, project.project_id],
+                related_project=project,
+                actor=profile,
             )
         messages.success(request, 'Issue marked as Resolved. PM has been notified.')
     return redirect('issue_detail', issue_id=issue_id)

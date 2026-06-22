@@ -33,6 +33,7 @@ urlpatterns = [
     path('projects/',                                          views.project_list,          name='project_list'),
     path('projects/create/',                                   views.project_create,        name='project_create'),       # PM only
     path('projects/<str:project_id>/',                         views.project_detail,        name='project_detail'),
+    path('projects/<str:project_id>/delete/',                  views.project_delete,        name='project_delete'),        # Admin only, POST only
     path('projects/<str:project_id>/edit/',                    views.project_edit,          name='project_edit'),          # PM only, Draft status only
     path('projects/<str:project_id>/activate/',                views.project_activate,           name='project_activate'),           # PM only, POST only — creates phases/tasks/milestones
     path('projects/<str:project_id>/recalculate-dates/',       views.project_recalculate_dates,  name='project_recalculate_dates'),  # PM only, POST only

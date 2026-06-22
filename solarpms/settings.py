@@ -124,6 +124,22 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ---------------------------------------------------------------------------
+# Notification channels
+# ---------------------------------------------------------------------------
+
+# Interakt (WhatsApp via Meta Business API)
+# Set in Railway env vars; leave blank locally — send_notification() logs 'failed' gracefully.
+INTERAKT_API_KEY = config('INTERAKT_API_KEY', default='')
+
+# ZeptoMail (transactional email — Zoho)
+# Domain verification (SPF + DKIM) must complete before any email will send.
+ZEPTOMAIL_API_KEY    = config('ZEPTOMAIL_API_KEY', default='')
+ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonrenewablepower.com')
+
+# SendGrid fallback — uncomment in notifications.py _send_email() if ZeptoMail stalls
+# SENDGRID_API_KEY = config('SENDGRID_API_KEY', default='')
+
+# ---------------------------------------------------------------------------
 # Auth redirects
 # ---------------------------------------------------------------------------
 

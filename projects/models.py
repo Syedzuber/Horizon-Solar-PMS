@@ -71,6 +71,8 @@ class Project(models.Model):
     )
     activated_at              = models.DateTimeField(blank=True, null=True)  # Set when PM activates; used as due-date chain anchor
     commissioned_at           = models.DateField(null=True, blank=True)  # Set when project status changes to Commissioned
+    is_deleted                = models.BooleanField(default=False)
+    deleted_at                = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-created_at']
@@ -155,24 +157,25 @@ class Task(models.Model):
         (EXTERNAL, 'External'),
     ]
 
-    phase         = models.ForeignKey(ProjectPhase, related_name='tasks', on_delete=models.CASCADE)
-    task_name     = models.CharField(max_length=200)
-    task_order    = models.PositiveIntegerField()  # Ascending within phase; drives due-date chain
-    assigned_role = models.CharField(max_length=20, choices=ROLE_CHOICES, default=PM)
-    assigned_to   = models.ForeignKey(
+    phase                = models.ForeignKey(ProjectPhase, related_name='tasks', on_delete=models.CASCADE)
+    task_name            = models.CharField(max_length=200)
+    task_order           = models.PositiveIntegerField()  # Ascending within phase; drives due-date chain
+    assigned_role        = models.CharField(max_length=20, choices=ROLE_CHOICES, default=PM)
+    assigned_to          = models.ForeignKey(
         'UserProfile',
         null=True,
         blank=True,
         on_delete=models.SET_NULL,  # Reassign rather than block when a user is removed
         related_name='assigned_tasks',
     )
-    status        = models.CharField(max_length=20, choices=STATUS_CHOICES, default=NOT_STARTED)
-    task_type     = models.CharField(max_length=10, choices=TYPE_CHOICES, default=INTERNAL)
-    duration_days = models.PositiveIntegerField(default=1)  # Calendar days used in due-date chain calculation
-    due_date      = models.DateField(blank=True, null=True)
-    completed_at  = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
-    blocked_since = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
-    created_at    = models.DateTimeField(auto_now_add=True)
+    status               = models.CharField(max_length=20, choices=STATUS_CHOICES, default=NOT_STARTED)
+    task_type            = models.CharField(max_length=10, choices=TYPE_CHOICES, default=INTERNAL)
+    duration_days        = models.PositiveIntegerField(default=1)  # Calendar days used in due-date chain calculation
+    due_date             = models.DateField(blank=True, null=True)
+    completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
+    blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
+    is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance
+    created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['task_order']
@@ -277,12 +280,14 @@ class UserProfile(models.Model):
         ('BD',            'BD'),
     ]
 
-    user         = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
-    role         = models.CharField(max_length=20, choices=ROLE_CHOICES, blank=True)
-    phone_number = models.CharField(max_length=10, blank=True)
-    is_active    = models.BooleanField(default=True)  # Soft deactivation — keeps history without deleting the user
-    created_at   = models.DateTimeField(auto_now_add=True)
-    created_by   = models.ForeignKey(
+    user                    = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
+    role                    = models.CharField(max_length=20, choices=ROLE_CHOICES, blank=True)
+    phone_number            = models.CharField(max_length=10, blank=True)
+    is_active               = models.BooleanField(default=True)  # Soft deactivation — keeps history without deleting the user
+    email_notifications     = models.BooleanField(default=True)
+    whatsapp_notifications  = models.BooleanField(default=True)
+    created_at              = models.DateTimeField(auto_now_add=True)
+    created_by              = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
         null=True,
@@ -944,6 +949,63 @@ def log_activity(project, actor, action, entity_type='', entity_id=None):
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"ActivityLog failed: {e}")
+
+
+class NotificationLog(models.Model):
+    """Audit trail of every notification attempt — sent, failed, or skipped by preference/switch."""
+
+    CHANNEL_CHOICES = [
+        ('in_app',   'In App'),
+        ('whatsapp', 'WhatsApp'),
+        ('email',    'Email'),
+    ]
+    STATUS_CHOICES = [
+        ('sent',    'Sent'),
+        ('failed',  'Failed'),
+        ('skipped', 'Skipped'),
+    ]
+
+    recipient       = models.ForeignKey(
+        'UserProfile', on_delete=models.CASCADE, related_name='notification_logs',
+    )
+    channel         = models.CharField(max_length=10, choices=CHANNEL_CHOICES)
+    status          = models.CharField(max_length=10, choices=STATUS_CHOICES)
+    message         = models.TextField()
+    template_name   = models.CharField(max_length=100, blank=True)
+    related_project = models.ForeignKey(
+        'Project', null=True, blank=True, on_delete=models.SET_NULL,
+    )
+    actor           = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='notifications_triggered',
+    )
+    error_detail    = models.TextField(blank=True)
+    created_at      = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.channel}/{self.status} → {self.recipient} at {self.created_at:%Y-%m-%d %H:%M}"
+
+
+class SystemSettings(models.Model):
+    """Single-row global settings. Use SystemSettings.get() — never instantiate directly."""
+
+    whatsapp_enabled = models.BooleanField(default=False)
+    email_enabled    = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name        = 'System Settings'
+        verbose_name_plural = 'System Settings'
+
+    def __str__(self):
+        return 'System Settings'
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
 
 
 class PaymentRequest(models.Model):

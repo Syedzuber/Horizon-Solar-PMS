@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile
+from django.utils import timezone
+from .models import Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile, NotificationLog, SystemSettings
 
 
 class MilestoneInline(admin.TabularInline):
@@ -25,11 +26,12 @@ class PhaseInline(admin.TabularInline):
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
     list_display    = ['project_id', 'customer_name', 'project_type', 'status',
-                       'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'assigned_site_engineer']
-    list_filter     = ['project_type', 'status', 'city', 'state']
+                       'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'assigned_site_engineer', 'is_deleted']
+    list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
-    readonly_fields = ['project_id', 'created_at', 'activated_at']
+    readonly_fields = ['project_id', 'created_at', 'activated_at', 'deleted_at']
     inlines         = [PhaseInline, MilestoneInline, DocumentInline]
+    actions         = ['soft_delete_selected', 'restore_selected']
 
     fieldsets = (
         ('Project Info', {
@@ -49,7 +51,47 @@ class ProjectAdmin(admin.ModelAdmin):
             'fields': ('zoho_crm_id',),
             'classes': ('collapse',),
         }),
+        ('Deletion', {
+            'fields': ('is_deleted', 'deleted_at'),
+            'classes': ('collapse',),
+        }),
     )
+
+    def get_queryset(self, request):
+        # Show only active projects by default; admin can filter by is_deleted to see deleted ones
+        qs = super().get_queryset(request)
+        if not request.GET.get('is_deleted__exact'):
+            return qs.filter(is_deleted=False)
+        return qs
+
+    def get_actions(self, request):
+        # Remove the built-in "Delete selected" action — its cascade-warning page is misleading
+        # for a soft delete; use the explicit actions below instead.
+        actions = super().get_actions(request)
+        actions.pop('delete_selected', None)
+        return actions
+
+    def delete_model(self, request, obj):
+        # Called when admin clicks "Delete" on the change form — soft-delete instead of hard
+        obj.is_deleted = True
+        obj.deleted_at = timezone.now()
+        obj.save(update_fields=['is_deleted', 'deleted_at'])
+
+    @admin.action(description='Soft delete selected projects')
+    def soft_delete_selected(self, request, queryset):
+        updated = queryset.filter(is_deleted=False).update(
+            is_deleted=True,
+            deleted_at=timezone.now(),
+        )
+        self.message_user(request, f'{updated} project(s) soft-deleted.')
+
+    @admin.action(description='Restore selected projects')
+    def restore_selected(self, request, queryset):
+        updated = queryset.filter(is_deleted=True).update(
+            is_deleted=False,
+            deleted_at=None,
+        )
+        self.message_user(request, f'{updated} project(s) restored.')
 
 
 @admin.register(ProjectPhase)
@@ -73,6 +115,34 @@ class MilestoneAdmin(admin.ModelAdmin):
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ['user', 'role', 'phone_number', 'is_active', 'created_by']
-    list_filter  = ['role', 'is_active']
+    list_display  = ['user', 'role', 'phone_number', 'is_active', 'whatsapp_notifications', 'email_notifications', 'created_by']
+    list_filter   = ['role', 'is_active']
     search_fields = ['user__username', 'user__first_name', 'user__last_name']
+
+
+@admin.register(NotificationLog)
+class NotificationLogAdmin(admin.ModelAdmin):
+    list_display  = ['created_at', 'recipient', 'channel', 'status', 'template_name', 'related_project', 'actor']
+    list_filter   = ['channel', 'status']
+    search_fields = ['recipient__user__username', 'template_name', 'message']
+    readonly_fields = ['recipient', 'channel', 'status', 'message', 'template_name',
+                       'related_project', 'actor', 'error_detail', 'created_at']
+    ordering      = ['-created_at']
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(SystemSettings)
+class SystemSettingsAdmin(admin.ModelAdmin):
+    list_display = ['whatsapp_enabled', 'email_enabled']
+
+    def has_add_permission(self, request):
+        # Only allow one row via get_or_create; block direct admin creation
+        return not SystemSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False

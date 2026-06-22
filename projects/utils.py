@@ -168,7 +168,7 @@ def attach_residential_template(project):
                 'phase_order': 2,
                 'tasks': [
                     {'task_order': 1, 'task_name': 'DEV Schedule',          'assigned_role': Task.PM,            'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER,  'duration_days': 2, 'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER,  'duration_days': 2, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: On Survey Completion
                     {'task_order': 3, 'task_name': 'DEV Data to Design',    'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 4, 'task_name': 'DEV Inputs Validation', 'assigned_role': Task.DESIGN,         'duration_days': 1, 'task_type': Task.INTERNAL},
                 ],
@@ -219,7 +219,7 @@ def attach_residential_template(project):
                     {'task_order': 1, 'task_name': 'Delivery Schedule',             'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 2, 'task_name': 'Delivery of MMS',               'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 3, 'task_name': 'Delivery of B & C Class Items', 'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: On Material Supply
                     {'task_order': 5, 'task_name': 'Delivery of Inverter',          'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                 ],
             },
@@ -246,7 +246,7 @@ def attach_residential_template(project):
                     {'task_order': 3, 'task_name': 'SCO Release',                       'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
                     {'task_order': 4, 'task_name': 'Meter Installation by DISCOM',      'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
                     {'task_order': 5, 'task_name': 'RMS Configuration',                 'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: On Commissioning
                     {'task_order': 7, 'task_name': 'Commissioning Report Prepared',     'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 8, 'task_name': 'Commissioning Report Approved',     'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
                     {'task_order': 9, 'task_name': 'Customer Handover',                 'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
@@ -275,6 +275,7 @@ def attach_residential_template(project):
                     assigned_role=t['assigned_role'],
                     duration_days=t['duration_days'],
                     task_type=t['task_type'],
+                    is_payment_milestone=t.get('is_payment_milestone', False),
                 )
                 for t in phase_data['tasks']
             ])
