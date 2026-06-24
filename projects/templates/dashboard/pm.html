@@ -8,6 +8,46 @@
   .urgency-badge { min-width: 2rem; height: 2rem; font-size: .85rem; line-height: 2rem; text-align: center; border-radius: 50%; }
 </style>
 
+{# ── Task due-date stat blocks ────────────────────────────────────────────── #}
+<div class="row g-3 mb-4">
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_today' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_due_today > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ summary.tasks_due_today }}
+          </div>
+        </a>
+        <div class="small text-muted">Due Today</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_soon' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_due_soon > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ summary.tasks_due_soon }}
+          </div>
+        </a>
+        <div class="small text-muted">Due in 7 Days</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_overdue' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_overdue > 0 %}text-danger{% else %}text-success{% endif %}">
+            {{ summary.tasks_overdue }}
+          </div>
+        </a>
+        <div class="small text-muted">Overdue</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h5 class="mb-0 fw-semibold">My Projects</h5>
   <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>
@@ -54,6 +94,13 @@
         </span>
       {% else %}
         <span class="badge bg-success flex-shrink-0">On Time</span>
+      {% endif %}
+
+      {# Due Today badge — only shown when tasks are due today for this project #}
+      {% if row.due_today_count > 0 %}
+        <span class="badge flex-shrink-0" style="background:#f0a829; color:#fff;">
+          Today: {{ row.due_today_count }}
+        </span>
       {% endif %}
 
       <i class="bi bi-chevron-down text-muted collapse-icon flex-shrink-0 ms-1"></i>
@@ -222,7 +269,7 @@
             <textarea name="description" class="form-control" rows="2"
                       placeholder="Optional context, references, next steps…"></textarea>
           </div>
-          <div class="mb-0">
+          <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
             <select name="severity" class="form-select">
               <option value="Low">Low</option>
@@ -230,6 +277,21 @@
               <option value="High">High</option>
               <option value="Critical">Critical</option>
             </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
+            <select name="assigned_to" class="form-select">
+              <option value="">— Select —</option>
+              {% for p in all_profiles %}
+              <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
+              {% endfor %}
+            </select>
+            <div class="text-danger small mt-1" id="pmIssueAssignError"></div>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
+            <input type="date" name="due_date" class="form-control">
+            <div class="text-danger small mt-1" id="pmIssueDateError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -260,8 +322,25 @@
         document.getElementById('raiseIssueForm').querySelector('[name="title"]').value = '';
         document.getElementById('raiseIssueForm').querySelector('[name="description"]').value = '';
         document.getElementById('raiseIssueForm').querySelector('[name="severity"]').value = 'Medium';
+        document.getElementById('raiseIssueForm').querySelector('[name="assigned_to"]').value = '';
+        document.getElementById('raiseIssueForm').querySelector('[name="due_date"]').value = '';
+        document.getElementById('pmIssueAssignError').textContent = '';
+        document.getElementById('pmIssueDateError').textContent = '';
         raiseIssueModal.show();
       });
+    });
+
+    document.getElementById('raiseIssueForm').addEventListener('submit', function (e) {
+      var valid = true;
+      var assignSel = this.querySelector('[name="assigned_to"]');
+      var assignErr = document.getElementById('pmIssueAssignError');
+      if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; valid = false; }
+      else { assignErr.textContent = ''; }
+      var dateSel = this.querySelector('[name="due_date"]');
+      var dateErr = document.getElementById('pmIssueDateError');
+      if (!dateSel.value) { dateErr.textContent = 'Please set a due date.'; valid = false; }
+      else { dateErr.textContent = ''; }
+      if (!valid) e.preventDefault();
     });
   });
 }());

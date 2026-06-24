@@ -159,6 +159,13 @@ urlpatterns = [
          views.portal_activity_log, name='portal_activity_log'),
 
     # ---------------------------------------------------------------------------
+    # Task drill-down — due-date filters for PM, Design, SCM dashboards
+    # ---------------------------------------------------------------------------
+    path('tasks/due-today/', views.tasks_drill_down, {'filter_type': 'due-today'}, name='tasks_due_today'),
+    path('tasks/due-soon/',  views.tasks_drill_down, {'filter_type': 'due-soon'},  name='tasks_due_soon'),
+    path('tasks/overdue/',   views.tasks_drill_down, {'filter_type': 'overdue'},   name='tasks_overdue'),
+
+    # ---------------------------------------------------------------------------
     # Delivery Challans — SCM Delivery Tracker (Day 9)
     # ---------------------------------------------------------------------------
     # Create DC — SCM only

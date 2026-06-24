@@ -213,7 +213,7 @@
               <td>
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
-                       step="0.01" min="0"
+                       step="1" min="0"
                        value="{{ item.received_quantity|default:'' }}"
                        placeholder="0">
               </td>
@@ -343,13 +343,14 @@
             </select>
           </div>
           <div class="mb-0">
-            <label class="form-label fw-semibold">Assign To</label>
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
             <select name="assigned_to" class="form-select">
               <option value="">— Unassigned —</option>
               {% for p in all_profiles %}
                 <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
               {% endfor %}
             </select>
+            <div class="text-danger small mt-1" id="dcIssueAssignError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -360,6 +361,23 @@
     </div>
   </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var dcIssueForm = document.querySelector('#raiseDcIssueModal form');
+  if (dcIssueForm) {
+    dcIssueForm.addEventListener('submit', function (e) {
+      var assignSel = this.querySelector('[name="assigned_to"]');
+      var assignErr = document.getElementById('dcIssueAssignError');
+      if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; e.preventDefault(); }
+      else { assignErr.textContent = ''; }
+    });
+    document.getElementById('raiseDcIssueModal').addEventListener('hidden.bs.modal', function () {
+      document.getElementById('dcIssueAssignError').textContent = '';
+    });
+  }
+});
+</script>
 
 {% if role == 'SCM' %}
 <div class="modal fade" id="editGrnModal" tabindex="-1"

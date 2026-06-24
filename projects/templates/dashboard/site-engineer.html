@@ -81,6 +81,42 @@
       </div>
     </div>
   </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_today' %}" class="text-decoration-none">
+          <div class="fs-3 fw-bold {% if tasks_due_today > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ tasks_due_today }}
+          </div>
+        </a>
+        <div class="small text-muted">Due Today</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_soon' %}" class="text-decoration-none">
+          <div class="fs-3 fw-bold {% if tasks_due_soon > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ tasks_due_soon }}
+          </div>
+        </a>
+        <div class="small text-muted">Due in 7 Days</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center shadow-sm border-0 h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_overdue' %}" class="text-decoration-none">
+          <div class="fs-3 fw-bold {% if tasks_overdue > 0 %}text-danger{% else %}text-success{% endif %}">
+            {{ tasks_overdue }}
+          </div>
+        </a>
+        <div class="small text-muted">Overdue</div>
+      </div>
+    </div>
+  </div>
 </div>
 
 {# ── Project cards ────────────────────────────────────────────────────────── #}
@@ -252,10 +288,25 @@
               <option value="Critical">Critical</option>
             </select>
           </div>
-          <div class="mb-0">
+          <div class="mb-3">
             <label class="form-label fw-semibold">Details</label>
             <textarea name="description" class="form-control" rows="3"
                       placeholder="Optional — add context, location, reference…"></textarea>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
+            <select name="assigned_to" class="form-select">
+              <option value="">— Select —</option>
+              {% for p in all_profiles %}
+              <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
+              {% endfor %}
+            </select>
+            <div class="text-danger small mt-1" id="seIssueAssignError"></div>
+          </div>
+          <div class="mb-0">
+            <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
+            <input type="date" name="due_date" class="form-control">
+            <div class="text-danger small mt-1" id="seIssueDateError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -270,14 +321,34 @@
 </div>
 
 <script>
-  // Sets the form action and project name label before showing the shared issue modal.
-  // Called from the "Raise Issue" button in each project card.
   function openIssueModal(url, projectName) {
-    document.getElementById('seIssueModalForm').action = url;
+    var form = document.getElementById('seIssueModalForm');
+    form.action = url;
     document.getElementById('seIssueModalProjectName').textContent = projectName;
-    // Bootstrap 5: getOrCreateInstance avoids duplicate modal instances on repeated opens
+    form.querySelector('[name="title"]').value = '';
+    form.querySelector('[name="description"]').value = '';
+    form.querySelector('[name="severity"]').value = 'Medium';
+    form.querySelector('[name="assigned_to"]').value = '';
+    form.querySelector('[name="due_date"]').value = '';
+    document.getElementById('seIssueAssignError').textContent = '';
+    document.getElementById('seIssueDateError').textContent = '';
     bootstrap.Modal.getOrCreateInstance(document.getElementById('seIssueModal')).show();
   }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    document.getElementById('seIssueModalForm').addEventListener('submit', function (e) {
+      var valid = true;
+      var assignSel = this.querySelector('[name="assigned_to"]');
+      var assignErr = document.getElementById('seIssueAssignError');
+      if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; valid = false; }
+      else { assignErr.textContent = ''; }
+      var dateSel = this.querySelector('[name="due_date"]');
+      var dateErr = document.getElementById('seIssueDateError');
+      if (!dateSel.value) { dateErr.textContent = 'Please set a due date.'; valid = false; }
+      else { dateErr.textContent = ''; }
+      if (!valid) e.preventDefault();
+    });
+  });
 </script>
 
 {% endblock %}

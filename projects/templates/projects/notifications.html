@@ -4,6 +4,9 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-4">
   <h4 class="mb-0">Notifications</h4>
+  <a href="{{ user_dashboard_url }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-left me-1"></i>Dashboard
+  </a>
 </div>
 
 {% if not notifications %}

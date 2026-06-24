@@ -7,9 +7,11 @@
   .card-collapse-btn .collapse-icon { transition: transform .2s ease; display: inline-block; }
   .card-collapse-btn[aria-expanded="true"] .collapse-icon { transform: rotate(180deg); }
 
-  /* red left-border tint for stalled projects */
+  /* left-border tint: red = overdue/critical stall, amber = minor stall */
   .scm-card-stalled { border-left: 3px solid #dc3545 !important; }
   .scm-card-stalled .card-header-inner { background: rgba(220,53,69,.04); }
+  .scm-card-amber   { border-left: 3px solid #ffc107 !important; }
+  .scm-card-amber   .card-header-inner { background: rgba(255,193,7,.04); }
 
   /* stage badge strip */
   .stage-badge { font-size: .72rem; padding: .18rem .45rem; border-radius: .3rem;
@@ -26,7 +28,7 @@
 </div>
 
 <div class="row g-3 mb-4">
-  <div class="col-4">
+  <div class="col-12 col-sm-6 col-lg-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold {% if summary.boq_awaiting > 0 %}text-warning{% else %}text-success{% endif %}">
@@ -36,7 +38,7 @@
       </div>
     </div>
   </div>
-  <div class="col-4">
+  <div class="col-12 col-sm-6 col-lg-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold {% if summary.deliveries_today > 0 %}text-primary{% else %}text-success{% endif %}">
@@ -46,13 +48,49 @@
       </div>
     </div>
   </div>
-  <div class="col-4">
+  <div class="col-12 col-sm-6 col-lg-4">
     <div class="card text-center shadow-sm h-100">
       <div class="card-body py-3">
         <div class="fs-2 fw-bold {% if summary.overdue > 0 %}text-danger{% else %}text-success{% endif %}">
           {{ summary.overdue }}
         </div>
         <div class="small text-muted">Overdue DCs</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_today' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_due_today > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ summary.tasks_due_today }}
+          </div>
+        </a>
+        <div class="small text-muted">Tasks Due Today</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_due_soon' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_due_soon > 0 %}text-warning{% else %}text-success{% endif %}">
+            {{ summary.tasks_due_soon }}
+          </div>
+        </a>
+        <div class="small text-muted">Tasks Due in 7 Days</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-sm-6 col-lg-4">
+    <div class="card text-center shadow-sm h-100">
+      <div class="card-body py-3">
+        <a href="{% url 'tasks_overdue' %}" class="text-decoration-none">
+          <div class="fs-2 fw-bold {% if summary.tasks_overdue > 0 %}text-danger{% else %}text-success{% endif %}">
+            {{ summary.tasks_overdue }}
+          </div>
+        </a>
+        <div class="small text-muted">Tasks Overdue</div>
       </div>
     </div>
   </div>
@@ -64,13 +102,13 @@
 {% endif %}
 
 {% for row in project_rows %}
-<div class="card mb-2 shadow-sm border-0{% if row.is_stalled %} scm-card-stalled{% endif %}">
+<div class="card mb-2 shadow-sm border-0{% if row.is_stalled %}{% if row.stall_level == 'red' %} scm-card-stalled{% else %} scm-card-amber{% endif %}{% endif %}">
 
   {# ── Collapsed header ────────────────────────────────────────────────── #}
-  <div class="card-header p-0 border-bottom-0{% if row.is_stalled %} scm-card-stalled{% endif %}"
+  <div class="card-header p-0 border-bottom-0{% if row.is_stalled %}{% if row.stall_level == 'red' %} scm-card-stalled{% else %} scm-card-amber{% endif %}{% endif %}"
        style="border-radius:.5rem;">
-    <div class="card-header-inner">
-    <button class="card-collapse-btn btn btn-link w-100 text-start text-decoration-none text-dark py-2 px-3
+    <div class="card-header-inner d-flex align-items-center">
+    <button class="card-collapse-btn btn btn-link flex-grow-1 min-w-0 text-start text-decoration-none text-dark py-2 px-3
                    d-flex align-items-center gap-2 flex-wrap"
             type="button"
             data-bs-toggle="collapse"
@@ -177,6 +215,9 @@
 
       <i class="bi bi-chevron-down text-muted collapse-icon flex-shrink-0 ms-1"></i>
     </button>
+    <a href="{% url 'project_overview' row.project.project_id %}"
+       class="btn btn-sm btn-outline-secondary flex-shrink-0 me-2 py-1"
+       style="font-size:.72rem;">Overview</a>
     </div>{# card-header-inner #}
   </div>
 
@@ -431,7 +472,7 @@
             <textarea name="description" class="form-control" rows="2"
                       placeholder="Quantity short, damage, wrong item…"></textarea>
           </div>
-          <div class="mb-0">
+          <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
             <select name="severity" class="form-select">
               <option value="Low">Low</option>
@@ -439,6 +480,21 @@
               <option value="High">High</option>
               <option value="Critical">Critical</option>
             </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
+            <select name="assigned_to" class="form-select">
+              <option value="">— Unassigned —</option>
+              {% for p in all_profiles %}
+              <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
+              {% endfor %}
+            </select>
+            <div class="text-danger small mt-1" id="scmIssueAssignError"></div>
+          </div>
+          <div class="mb-1">
+            <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
+            <input type="date" name="due_date" class="form-control">
+            <div class="text-danger small mt-1" id="scmIssueDateError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -550,8 +606,25 @@
         document.getElementById('scmRaiseIssueForm').querySelector('[name="title"]').value = '';
         document.getElementById('scmRaiseIssueForm').querySelector('[name="description"]').value = '';
         document.getElementById('scmRaiseIssueForm').querySelector('[name="severity"]').value = 'Medium';
+        document.getElementById('scmRaiseIssueForm').querySelector('[name="assigned_to"]').value = '';
+        document.getElementById('scmRaiseIssueForm').querySelector('[name="due_date"]').value = '';
+        var ae = document.getElementById('scmIssueAssignError'); if (ae) ae.textContent = '';
+        var de = document.getElementById('scmIssueDateError');  if (de) de.textContent = '';
         issueModal.show();
       });
+    });
+
+    document.getElementById('scmRaiseIssueForm').addEventListener('submit', function (e) {
+      var valid = true;
+      var assignSel = this.querySelector('[name="assigned_to"]');
+      var assignErr = document.getElementById('scmIssueAssignError');
+      if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; valid = false; }
+      else { assignErr.textContent = ''; }
+      var dateSel = this.querySelector('[name="due_date"]');
+      var dateErr = document.getElementById('scmIssueDateError');
+      if (!dateSel.value) { dateErr.textContent = 'Please set a due date.'; valid = false; }
+      else { dateErr.textContent = ''; }
+      if (!valid) e.preventDefault();
     });
 
     /* ── Raise Payment Request button ────────────────────── */

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ page_title }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+{% endblock %}
+
+{% block content %}
+
+{# ── Header row ──────────────────────────────────────────────────────────── #}
+<div class="d-flex align-items-center gap-3 mb-4">
+  <a href="{{ back_url }}" class="btn btn-outline-secondary btn-sm d-inline-flex align-items-center gap-1">
+    <i data-lucide="arrow-left" style="width:14px;height:14px;"></i>
+    Back to Dashboard
+  </a>
+  <h5 class="mb-0 fw-semibold">{{ page_title }}</h5>
+</div>
+
+{# ── Summary line ─────────────────────────────────────────────────────────── #}
+{% if total_count > 0 %}
+<p class="text-muted small mb-4">
+  {{ total_count }} task{{ total_count|pluralize }} across {{ project_count }} project{{ project_count|pluralize }}
+</p>
+{% endif %}
+
+{# ── Task list grouped by project ─────────────────────────────────────────── #}
+{% if not groups %}
+  <div class="card shadow-sm border-0">
+    <div class="card-body text-center py-5 text-muted">
+      {% if filter_type == 'due-today' %}
+        No tasks due today.
+      {% elif filter_type == 'due-soon' %}
+        No tasks due in the next 7 days.
+      {% else %}
+        No overdue tasks.
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  {% for group in groups %}
+  <div class="mb-4">
+    {# Project heading #}
+    <div class="d-flex align-items-baseline gap-2 mb-2">
+      <span class="fw-bold" style="color:#1a7a4a;">{{ group.project.customer_name }}</span>
+      <span class="text-muted small">{{ group.project.project_id }}</span>
+    </div>
+
+    {# Task rows #}
+    <div class="card shadow-sm border-0">
+      <div class="list-group list-group-flush">
+        {% for task in group.tasks %}
+        <div class="list-group-item px-3 py-2 d-flex align-items-center justify-content-between">
+          <a href="{% url 'task_detail' group.project.project_id task.pk %}"
+             class="small fw-medium text-decoration-none text-dark">
+            {{ task.task_name }}
+          </a>
+          <span class="small text-muted flex-shrink-0 ms-3">
+            {% if task.due_date %}
+              {{ task.due_date|date:"j M Y" }}
+            {% endif %}
+          </span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+{% endif %}
+
+<script>
+  document.addEventListener('DOMContentLoaded', function () {
+    lucide.createIcons();
+  });
+</script>
+{% endblock %}

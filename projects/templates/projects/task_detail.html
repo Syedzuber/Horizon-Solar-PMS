@@ -482,7 +482,7 @@ document.addEventListener('DOMContentLoaded', function () {
             </select>
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Assign To</label>
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
             <select name="assigned_to" class="form-select">
               <option value="">— Unassigned —</option>
               {% for p in all_profiles %}
@@ -491,10 +491,12 @@ document.addEventListener('DOMContentLoaded', function () {
               </option>
               {% endfor %}
             </select>
+            <div class="text-danger small mt-1" id="taskIssueAssignError"></div>
           </div>
           <div class="mb-3">
-            <label class="form-label fw-semibold">Due Date</label>
+            <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
             <input type="date" name="due_date" class="form-control">
+            <div class="text-danger small mt-1" id="taskIssueDateError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -505,5 +507,25 @@ document.addEventListener('DOMContentLoaded', function () {
     </div>
   </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var taskIssueForm = document.querySelector('#raiseIssueModal form');
+  if (taskIssueForm) {
+    taskIssueForm.addEventListener('submit', function (e) {
+      var valid = true;
+      var assignSel = this.querySelector('[name="assigned_to"]');
+      var assignErr = document.getElementById('taskIssueAssignError');
+      if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; valid = false; }
+      else { assignErr.textContent = ''; }
+      var dateSel = this.querySelector('[name="due_date"]');
+      var dateErr = document.getElementById('taskIssueDateError');
+      if (!dateSel.value) { dateErr.textContent = 'Please set a due date.'; valid = false; }
+      else { dateErr.textContent = ''; }
+      if (!valid) e.preventDefault();
+    });
+  }
+});
+</script>
 
 {% endblock %}

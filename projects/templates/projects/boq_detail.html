@@ -140,7 +140,7 @@
               <td class="align-middle">
                 {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
                 <input form="saveDesignForm"
-                       type="number" step="0.01" min="0"
+                       type="number" step="1" min="0"
                        name="boq_qty_{{ item.pk }}"
                        value="{{ item.boq_quantity|default:'' }}"
                        class="form-control form-control-sm">
@@ -181,7 +181,7 @@
               <td class="align-middle">
                 {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
                 <input form="saveSCMForm"
-                       type="number" step="0.01" min="0"
+                       type="number" step="1" min="0"
                        name="ord_qty_{{ item.pk }}"
                        value="{{ item.ordered_quantity|default:'' }}"
                        class="form-control form-control-sm">

@@ -136,7 +136,7 @@
 
   {# Phase progress bars #}
   {% if phases %}
-  <div class="col-12 col-md-6">
+  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 fw-semibold small">
         <i data-lucide="bar-chart-3" class="lucide-icon me-1"></i>Task Progress by Phase
@@ -165,7 +165,7 @@
 
   {# Payment milestones #}
   {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}
-  <div class="col-12 col-md-6">
+  <div class="col-12 col-md-4">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
         <span class="fw-semibold small">
@@ -216,22 +216,7 @@
                 {% else %}
                   <span class="badge bg-secondary">Pending</span>
                 {% endif %}
-                {% if role == 'Finance' %}
-                  {% if m.status == 'Pending' %}
-                    <form method="post" action="{% url 'milestone_invoice' project.project_id m.pk %}">
-                      {% csrf_token %}
-                      <button type="submit" class="btn btn-outline-secondary btn-sm milestone-edit-btn">Invoice</button>
-                    </form>
-                  {% elif m.status == 'Invoiced' %}
-                    <button type="button" class="btn btn-outline-brand btn-sm milestone-edit-btn"
-                            data-bs-toggle="modal" data-bs-target="#receiveModal"
-                            data-project-id="{{ project.project_id }}"
-                            data-milestone-pk="{{ m.pk }}"
-                            data-milestone-name="{{ m.milestone_name }}"
-                            data-amount="{{ m.amount|default:'' }}">Receive</button>
-                  {% endif %}
-                {% endif %}
-                {% if is_assigned_pm %}
+                {% if is_assigned_pm or role == 'Finance' %}
                   <button class="btn btn-outline-secondary milestone-edit-btn"
                           type="button"
                           data-bs-toggle="collapse"
@@ -242,7 +227,7 @@
                 {% endif %}
               </div>
             </div>
-            {% if is_assigned_pm %}
+            {% if is_assigned_pm or role == 'Finance' %}
             <div class="collapse mt-2" id="editMilestone{{ m.pk }}">
               <form method="post" action="{% url 'project_overview' project.project_id %}"
                     class="p-2 rounded" style="background:#f8f9fa;">
@@ -250,7 +235,16 @@
                 <input type="hidden" name="action" value="update_milestone">
                 <input type="hidden" name="milestone_pk" value="{{ m.pk }}">
                 <input type="text" name="milestone_description" class="form-control form-control-sm mb-2"
-                       value="{{ m.milestone_description }}" placeholder="Description">
+                       value="{{ m.milestone_description }}" placeholder="Description / Note">
+                {% if role == 'Finance' %}
+                <div class="mb-2">
+                  <input type="number" name="amount_received" step="0.01" min="0"
+                         class="form-control form-control-sm"
+                         placeholder="₹ Amount Received"
+                         value="{% if m.amount_received %}{{ m.amount_received }}{% endif %}">
+                  <div class="text-muted mt-1" style="font-size:.7rem;">Saving an amount marks this milestone as Received</div>
+                </div>
+                {% else %}
                 <div class="row g-2 mb-2">
                   <div class="col">
                     <input type="number" name="amount" step="0.01" min="0"
@@ -262,6 +256,7 @@
                            value="{% if m.due_date %}{{ m.due_date|date:'Y-m-d' }}{% endif %}">
                   </div>
                 </div>
+                {% endif %}
                 <button type="submit" class="btn btn-brand btn-sm w-100">Save</button>
               </form>
             </div>
@@ -284,10 +279,51 @@
   </div>
   {% endif %}
 
-</div>{# end phase + milestones row #}
+  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}col-md-4{% else %}col-md-6{% endif %}">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small"><i data-lucide="history" class="lucide-icon me-1"></i>Recent Activity</span>
+        {% if recent_activity|length > 3 %}
+        <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+                type="button" data-bs-toggle="collapse"
+                data-bs-target="#activityCollapse" aria-expanded="true">
+          <i class="bi bi-chevron-down collapse-chevron"></i>
+        </button>
+        {% endif %}
+      </div>
+      <div class="card-body p-0">
+        {% if recent_activity %}
+          {% for event in recent_activity|slice:":3" %}
+          <div class="px-3 py-2 border-bottom small">
+            <div class="d-flex justify-content-between gap-2">
+              <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
+              <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
+            </div>
+          </div>
+          {% endfor %}
+          {% if recent_activity|length > 3 %}
+          <div class="collapse show" id="activityCollapse">
+            {% for event in recent_activity|slice:"3:" %}
+            <div class="px-3 py-2 border-bottom small">
+              <div class="d-flex justify-content-between gap-2">
+                <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
+                <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+          {% endif %}
+        {% else %}
+          <div class="text-center text-muted py-4 small">No activity recorded yet.</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
 
-{# ── 3. BOQ + Materials ───────────────────────────────────────────────────── #}
-<div class="row g-3 mb-3">
+</div>{# end phase + milestones + activity row #}
+
+{# ── 3. BOQ + Delivery Challans + Material Status ──────────────────────────── #}
+<div class="row g-3 mb-4">
 
   {% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
   <div class="col-12 col-md-4">
@@ -302,12 +338,12 @@
           {% else %}<span class="text-muted small">—</span>{% endif %}
           <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
                   type="button" data-bs-toggle="collapse"
-                  data-bs-target="#boqCollapse" aria-expanded="false">
+                  data-bs-target="#boqCollapse" aria-expanded="true">
             <i class="bi bi-chevron-down collapse-chevron"></i>
           </button>
         </div>
       </div>
-      <div class="collapse" id="boqCollapse">
+      <div class="collapse show" id="boqCollapse">
         <div class="card-body pt-2 pb-3 px-3">
           {% if project.boq_status %}
             {% if project.boq_last_event %}
@@ -340,8 +376,81 @@
   </div>
   {% endif %}
 
+
+
+  {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
+  <div class="col-12 col-md-4">
+    <div class="card h-100 shadow-sm">
+      <div class="card-header py-2 d-flex justify-content-between align-items-center">
+        <span class="fw-semibold small">
+          <i data-lucide="truck" class="lucide-icon me-1"></i>Delivery Challans
+          {% if delivery_challans %}<span class="badge bg-secondary ms-1">{{ delivery_challans|length }}</span>{% endif %}
+        </span>
+        <div class="d-flex align-items-center gap-2">
+          {% if role == 'SCM' %}
+            <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm py-0">+ Add DC</a>
+          {% endif %}
+          <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+                  type="button" data-bs-toggle="collapse"
+                  data-bs-target="#dcCollapse" aria-expanded="true">
+            <i class="bi bi-chevron-down collapse-chevron"></i>
+          </button>
+        </div>
+      </div>
+      <div class="collapse show" id="dcCollapse">
+        <div class="card-body p-0">
+          {% if delivery_challans %}
+          <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0">
+              <thead class="table-light">
+                <tr><th>DC #</th><th>Vendor</th><th>Items</th><th>Status</th><th></th></tr>
+              </thead>
+              <tbody>
+                {% for dc in delivery_challans %}
+                <tr>
+                  <td>
+                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                       class="fw-semibold text-decoration-none small"
+                       style="color:{% if dc.status == 'Received' %}#1a7a4a{% elif dc.status == 'Partially Received' %}#f0a829{% else %}#dc3545{% endif %};">
+                      {{ dc.dc_number }}
+                    </a>
+                    <div class="text-muted" style="font-size:.7rem;">{{ dc.dc_date|date:"d M Y" }}</div>
+                  </td>
+                  <td class="small text-muted">{{ dc.vendor.name|default:"—" }}</td>
+                  <td class="small text-muted">{{ dc.line_items_summary }}</td>
+                  <td>
+                    {% if dc.status == 'Expected' %}<span class="badge bg-secondary">Expected</span>
+                    {% elif dc.status == 'Partially Received' %}<span class="badge bg-warning text-dark">Partial</span>
+                    {% elif dc.status == 'Received' %}<span class="badge" style="background:var(--hz-green)">Received</span>
+                    {% elif dc.status == 'Rejected' %}<span class="badge bg-danger">Rejected</span>{% endif %}
+                  </td>
+                  <td>
+                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
+                       class="btn btn-outline-secondary btn-sm py-0" style="font-size:.72rem;">View</a>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% else %}
+          <div class="text-center text-muted py-4 small">
+            <i class="bi bi-truck fs-3 d-block mb-2"></i>No delivery challans yet.
+            {% if role == 'SCM' %}
+              <div class="mt-2">
+                <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm">+ Add First DC</a>
+              </div>
+            {% endif %}
+          </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   {% if role == 'PM' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
-  <div class="col-12 {% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}col-md-8{% endif %}">
+  <div class="col-12 col-md-4">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
         <span class="fw-semibold small"><i data-lucide="package" class="lucide-icon me-1"></i>Material Status</span>
@@ -369,12 +478,12 @@
           {% endif %}
           <button class="btn btn-link btn-sm p-0 text-muted block-toggle ms-1"
                   type="button" data-bs-toggle="collapse"
-                  data-bs-target="#materialsCollapse" aria-expanded="false">
+                  data-bs-target="#materialsCollapse" aria-expanded="true">
             <i class="bi bi-chevron-down collapse-chevron"></i>
           </button>
         </div>
       </div>
-      <div class="collapse" id="materialsCollapse">
+      <div class="collapse show" id="materialsCollapse">
         <div class="card-body p-0">
           {% if material_status_by_category %}
           <div class="table-responsive">
@@ -416,121 +525,8 @@
   </div>
   {% endif %}
 
-</div>{# end BOQ + Materials row #}
 
-{# ── 4. Delivery Challans + Recent Activity ───────────────────────────────── #}
-<div class="row g-3 mb-4">
-
-  {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
-  <div class="col-12 col-md-6">
-    <div class="card h-100 shadow-sm">
-      <div class="card-header py-2 d-flex justify-content-between align-items-center">
-        <span class="fw-semibold small">
-          <i data-lucide="truck" class="lucide-icon me-1"></i>Delivery Challans
-          {% if delivery_challans %}<span class="badge bg-secondary ms-1">{{ delivery_challans|length }}</span>{% endif %}
-        </span>
-        <div class="d-flex align-items-center gap-2">
-          {% if role == 'SCM' %}
-            <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm py-0">+ Add DC</a>
-          {% endif %}
-          <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
-                  type="button" data-bs-toggle="collapse"
-                  data-bs-target="#dcCollapse" aria-expanded="false">
-            <i class="bi bi-chevron-down collapse-chevron"></i>
-          </button>
-        </div>
-      </div>
-      <div class="collapse" id="dcCollapse">
-        <div class="card-body p-0">
-          {% if delivery_challans %}
-          <div class="table-responsive">
-            <table class="table table-sm table-hover mb-0">
-              <thead class="table-light">
-                <tr><th>DC #</th><th>Vendor</th><th>Items</th><th>Status</th><th></th></tr>
-              </thead>
-              <tbody>
-                {% for dc in delivery_challans %}
-                <tr>
-                  <td>
-                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                       class="fw-semibold text-decoration-none small">{{ dc.dc_number }}</a>
-                    <div class="text-muted" style="font-size:.7rem;">{{ dc.dc_date|date:"d M Y" }}</div>
-                  </td>
-                  <td class="small text-muted">{{ dc.vendor.name|default:"—" }}</td>
-                  <td class="small text-muted">{{ dc.line_items_summary }}</td>
-                  <td>
-                    {% if dc.status == 'Expected' %}<span class="badge bg-secondary">Expected</span>
-                    {% elif dc.status == 'Partially Received' %}<span class="badge bg-warning text-dark">Partial</span>
-                    {% elif dc.status == 'Received' %}<span class="badge" style="background:var(--hz-green)">Received</span>
-                    {% elif dc.status == 'Rejected' %}<span class="badge bg-danger">Rejected</span>{% endif %}
-                  </td>
-                  <td>
-                    <a href="{% url 'delivery_challan_detail' project.project_id dc.pk %}"
-                       class="btn btn-outline-secondary btn-sm py-0" style="font-size:.72rem;">View</a>
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-          {% else %}
-          <div class="text-center text-muted py-4 small">
-            <i class="bi bi-truck fs-3 d-block mb-2"></i>No delivery challans yet.
-            {% if role == 'SCM' %}
-              <div class="mt-2">
-                <a href="{% url 'create_delivery_challan' project.project_id %}" class="btn btn-brand btn-sm">+ Add First DC</a>
-              </div>
-            {% endif %}
-          </div>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </div>
-  {% endif %}
-
-  <div class="col-12 {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}col-md-6{% endif %}">
-    <div class="card h-100 shadow-sm">
-      <div class="card-header py-2 d-flex justify-content-between align-items-center">
-        <span class="fw-semibold small"><i data-lucide="history" class="lucide-icon me-1"></i>Recent Activity</span>
-        {% if recent_activity|length > 3 %}
-        <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
-                type="button" data-bs-toggle="collapse"
-                data-bs-target="#activityCollapse" aria-expanded="false">
-          <i class="bi bi-chevron-down collapse-chevron"></i>
-        </button>
-        {% endif %}
-      </div>
-      <div class="card-body p-0">
-        {% if recent_activity %}
-          {% for event in recent_activity|slice:":3" %}
-          <div class="px-3 py-2 border-bottom small">
-            <div class="d-flex justify-content-between gap-2">
-              <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
-              <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
-            </div>
-          </div>
-          {% endfor %}
-          {% if recent_activity|length > 3 %}
-          <div class="collapse" id="activityCollapse">
-            {% for event in recent_activity|slice:"3:" %}
-            <div class="px-3 py-2 border-bottom small">
-              <div class="d-flex justify-content-between gap-2">
-                <span>{% if event.actor %}<span class="fw-semibold">{{ event.actor.user.get_full_name|default:event.actor.user.username }}</span> — {% endif %}{{ event.action }}</span>
-                <span class="text-muted text-nowrap" style="font-size:.7rem;">{{ event.timestamp|date:"d M" }}</span>
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-          {% endif %}
-        {% else %}
-          <div class="text-center text-muted py-4 small">No activity recorded yet.</div>
-        {% endif %}
-      </div>
-    </div>
-  </div>
-
-</div>{# end DC + Activity row #}
+</div>{# end BOQ + DC + Materials row #}
 
 {# ── 4b. Invoice Confirmation (Finance action / PM + SCM read-only) ────────── #}
 {# Red/orange = cash out (payment requests) — distinct from green/gold milestones (cash in) #}
@@ -738,7 +734,6 @@
             <tr>
               <th style="width:2.5rem;">#</th>
               <th>Task</th>
-              <th style="width:9rem;">Role</th>
               <th style="width:13rem;">Assigned To</th>
               <th style="width:12rem;">Status</th>
               <th style="width:10rem;">Due Date</th>
@@ -753,7 +748,6 @@
               <td class="text-muted small">{{ task.task_order }}</td>
               <td><a href="{% url 'task_detail' project.project_id task.pk %}"
                      class="text-decoration-none text-body small">{{ task.task_name }}</a></td>
-              <td><span class="badge bg-light text-dark border" style="font-size:.72rem;">{{ task.assigned_role }}</span></td>
               <td class="small">
                 {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
                 {% else %}<span class="text-muted">Unassigned</span>{% endif %}
@@ -770,12 +764,12 @@
                 {% endif %}
               </td>
               <td>
-                {# Finance sees task list read-only — no status controls on this page for Finance #}
-                {% if role != 'Finance' and is_assigned_pm or role != 'Finance' and user_task_role == task.assigned_role %}
+                {% if is_assigned_pm or user_task_role == task.assigned_role %}
                   <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <select name="status" onchange="handleTaskStatusChange(this)"
                             data-original-status="{{ task.status }}"
+                            data-task-name="{{ task.task_name }}"
                             class="form-select form-select-sm
                               {% if task.status == 'Done' %}border-success text-success
                               {% elif task.status == 'Blocked' %}border-danger text-danger
@@ -785,6 +779,12 @@
                         <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
                       {% endfor %}
                     </select>
+                    {% if not is_assigned_pm and not task.due_date %}
+                    <input type="date" name="due_date"
+                           class="form-control form-control-sm mt-1"
+                           style="display:none; width:130px; font-size:.75rem;"
+                           onchange="var sel=this.form.querySelector('select[name=status]'); if(sel) sel.value='In Progress'; this.form.submit();">
+                    {% endif %}
                   </form>
                 {% else %}
                   {% if task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
@@ -811,7 +811,7 @@
               <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>
             </tr>
             {% empty %}
-            <tr><td colspan="7" class="text-center text-muted py-2 small">No tasks in this phase.</td></tr>
+            <tr><td colspan="6" class="text-center text-muted py-2 small">No tasks in this phase.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -830,13 +830,10 @@
       Project Issues
       {% if project_issues %}<span class="badge bg-secondary ms-1">{{ project_issues|length }}</span>{% endif %}
     </span>
-    {# Finance sees issues read-only — raising issues is not part of Finance's workflow here #}
-    {% if role != 'Finance' %}
     <button type="button" class="btn btn-outline-danger btn-sm"
             data-bs-toggle="modal" data-bs-target="#raiseProjectIssueModal">
       <i class="bi bi-flag me-1"></i>Raise Issue
     </button>
-    {% endif %}
   </div>
   <div class="card-body p-0">
     {% if project_issues %}
@@ -959,6 +956,39 @@
     </div>
   </div>
 </div>
+
+{# Payment capture modal — records payment info when Finance marks a confirmation task Done from the task list #}
+<div class="modal fade" id="paymentCaptureModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-semibold">Record Payment</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="paymentCaptureForm" method="post" action="">
+        {% csrf_token %}
+        <input type="hidden" name="status" value="Done">
+        <div class="modal-body">
+          <p class="small text-muted mb-3" id="paymentCaptureTaskLabel"></p>
+          <div class="mb-2">
+            <label class="form-label small fw-semibold mb-1">Amount Received (₹)</label>
+            <input type="number" id="paymentCaptureAmount" name="amount_received"
+                   step="0.01" min="0" class="form-control form-control-sm" placeholder="e.g. 50000">
+          </div>
+          <div class="mb-1">
+            <label class="form-label small mb-1">Note <span class="text-muted">(optional)</span></label>
+            <input type="text" name="variance_reason" class="form-control form-control-sm"
+                   placeholder="Partial payment, overpayment, etc.">
+          </div>
+        </div>
+        <div class="modal-footer py-2 gap-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="paymentCaptureSkipBtn">Skip</button>
+          <button type="submit" class="btn btn-brand btn-sm flex-grow-1">Save &amp; Mark Done</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
 {% endif %}
 
 <div class="modal fade" id="raiseProjectIssueModal" tabindex="-1" aria-hidden="true">
@@ -989,17 +1019,19 @@
             </select>
           </div>
           <div class="mb-3">
-            <label class="form-label">Assign To</label>
+            <label class="form-label fw-semibold">Assign To <span class="text-danger">*</span></label>
             <select name="assigned_to" class="form-select">
               <option value="">— Unassigned —</option>
               {% for p in all_profiles %}
               <option value="{{ p.pk }}">{{ p.user.get_full_name|default:p.user.username }} ({{ p.role }})</option>
               {% endfor %}
             </select>
+            <div class="text-danger small mt-1" id="projIssueAssignError"></div>
           </div>
           <div class="mb-1">
-            <label class="form-label">Due Date</label>
+            <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
             <input type="date" name="due_date" class="form-control">
+            <div class="text-danger small mt-1" id="projIssueDateError"></div>
           </div>
         </div>
         <div class="modal-footer">
@@ -1065,8 +1097,11 @@
 <script>
 (function () {
   /* ── Shared state ─────────────────────────────────────────── */
-  var pendingStatusForm = null;
-  var bsNoAttachModal   = null;
+  var pendingStatusForm     = null;
+  var bsNoAttachModal       = null;
+  var bsPaymentModal        = null;
+  var _paymentPendingSelect = null;
+  var _FINANCE_CONF_TASKS   = ['Advance Payment Confirmation', 'Finance Confirmation', '100% Payment Confirmation'];
 
   /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
   var assignCandidates = {};
@@ -1105,6 +1140,7 @@
       var dateInput = row ? row.querySelector('input[name="due_date"]') : null;
       if (dateInput && !dateInput.value.trim()) {
         select.value = originalStatus;
+        dateInput.style.display = '';  /* reveal Finance inline picker */
         dateInput.style.outline = '2px solid #dc3545';
         dateInput.focus();
         setTimeout(function () { dateInput.style.outline = ''; }, 4000);
@@ -1123,6 +1159,17 @@
         }
         return;
       }
+    }
+
+    /* 2.5 Finance confirmation tasks — capture payment info before marking Done */
+    if (newStatus === 'Done' && _FINANCE_CONF_TASKS.indexOf(select.dataset.taskName || '') !== -1 && bsPaymentModal) {
+      _paymentPendingSelect = select;
+      select.value = originalStatus;
+      document.getElementById('paymentCaptureTaskLabel').textContent = (select.dataset.taskName || '') + ' — enter payment details';
+      document.getElementById('paymentCaptureForm').action = select.form.action;
+      document.getElementById('paymentCaptureAmount').value = '';
+      bsPaymentModal.show();
+      return;
     }
 
     /* 3. Done — prompt for attachment if none */
@@ -1214,16 +1261,32 @@
     if (noAttachEl) {
       bsNoAttachModal = new bootstrap.Modal(noAttachEl);
       document.getElementById('noAttachUploadBtn').addEventListener('click', function () {
-        bsNoAttachModal.hide();
         var row = pendingStatusForm ? pendingStatusForm.closest('tr') : null;
         var tid = row ? row.dataset.taskId : null;
+        bsNoAttachModal.hide();
         if (tid) window.location.href = '/projects/{{ project.project_id }}/tasks/' + tid + '/';
       });
       document.getElementById('noAttachCloseBtn').addEventListener('click', function () {
+        var formToSubmit = pendingStatusForm;
         bsNoAttachModal.hide();
-        if (pendingStatusForm) pendingStatusForm.submit();
+        if (formToSubmit) formToSubmit.submit();
       });
       noAttachEl.addEventListener('hide.bs.modal', function () { pendingStatusForm = null; });
+    }
+
+    /* Payment capture modal */
+    var paymentCaptureEl = document.getElementById('paymentCaptureModal');
+    if (paymentCaptureEl) {
+      bsPaymentModal = new bootstrap.Modal(paymentCaptureEl);
+      document.getElementById('paymentCaptureSkipBtn').addEventListener('click', function () {
+        var sel = _paymentPendingSelect;
+        bsPaymentModal.hide();
+        paymentCaptureEl.addEventListener('hidden.bs.modal', function onHide() {
+          paymentCaptureEl.removeEventListener('hidden.bs.modal', onHide);
+          if (sel) { sel.value = 'Done'; sel.form.submit(); }
+        });
+      });
+      paymentCaptureEl.addEventListener('hidden.bs.modal', function () { _paymentPendingSelect = null; });
     }
 
     /* Finance receive modal */
@@ -1269,17 +1332,29 @@
       });
     }
 
-    /* Raise Project Issue — prevent double-submit */
+    /* Raise Project Issue — validate then prevent double-submit */
     var raiseIssueModalEl = document.getElementById('raiseProjectIssueModal');
     if (raiseIssueModalEl) {
       var raiseForm = raiseIssueModalEl.querySelector('form');
       if (raiseForm) {
-        raiseForm.addEventListener('submit', function () {
+        raiseForm.addEventListener('submit', function (e) {
+          var valid = true;
+          var assignSel = this.querySelector('[name="assigned_to"]');
+          var assignErr = document.getElementById('projIssueAssignError');
+          if (!assignSel.value) { assignErr.textContent = 'Please assign this issue to someone.'; valid = false; }
+          else { assignErr.textContent = ''; }
+          var dateSel = this.querySelector('[name="due_date"]');
+          var dateErr = document.getElementById('projIssueDateError');
+          if (!dateSel.value) { dateErr.textContent = 'Please set a due date.'; valid = false; }
+          else { dateErr.textContent = ''; }
+          if (!valid) { e.preventDefault(); return; }
           var submitBtn = this.querySelector('[type="submit"]');
           if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Raising…'; }
         });
         raiseIssueModalEl.addEventListener('hidden.bs.modal', function () {
           raiseForm.reset();
+          document.getElementById('projIssueAssignError').textContent = '';
+          document.getElementById('projIssueDateError').textContent = '';
           var submitBtn = raiseForm.querySelector('[type="submit"]');
           if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Raise Issue'; }
         });

@@ -14,6 +14,7 @@ from django.db import transaction
 from django.db.models import Count, Exists, Max, Min, OuterRef, Prefetch, Q, Sum
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
+from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
@@ -163,6 +164,83 @@ def _build_delivery_lookup(project_ids):
     return delivery_lookup
 
 
+_ROLE_DASHBOARD = {
+    'PM':           'dashboard_pm',
+    'Design':       'dashboard_design',
+    'SCM':          'dashboard_scm',
+    'Site Engineer': 'dashboard_site_engineer',
+    'Finance':       'dashboard_finance',
+    'BD / Sales':    'dashboard_bd',
+    'CEO':           'dashboard_ceo',
+}
+
+_FILTER_TITLES = {
+    'due-today': 'Tasks Due Today',
+    'due-soon':  'Tasks Due in Next 7 Days',
+    'overdue':   'Overdue Tasks',
+}
+
+
+@login_required
+def tasks_drill_down(request, filter_type):
+    """Read-only list of tasks grouped by project, filtered by due-date window.
+    Scoping mirrors the logged-in user's dashboard (PM/Design/SCM/SE/etc.)."""
+    if filter_type not in _FILTER_TITLES:
+        raise Http404
+
+    today   = date.today()
+    profile = request.user.profile
+    role    = profile.role
+
+    base_qs = Task.objects.filter(
+        phase__project__is_deleted=False,
+        phase__project__status__in=['Active', 'In Progress'],
+        due_date__isnull=False,
+    ).select_related('phase__project')
+
+    if role == 'PM':
+        base_qs = base_qs.filter(phase__project__assigned_pm=profile)
+    elif role == 'Design':
+        base_qs = base_qs.filter(phase__project__assigned_design=profile)
+    elif role == 'Site Engineer':
+        base_qs = base_qs.filter(phase__project__assigned_site_engineer=profile)
+    # SCM and others: all active non-deleted projects
+
+    active_statuses = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
+
+    if filter_type == 'due-today':
+        tasks_qs = base_qs.filter(due_date=today, status__in=active_statuses)
+    elif filter_type == 'due-soon':
+        tasks_qs = base_qs.filter(
+            due_date__gt=today,
+            due_date__lte=today + timedelta(days=7),
+            status__in=active_statuses,
+        )
+    else:  # overdue
+        tasks_qs = base_qs.filter(due_date__lt=today).exclude(status=Task.DONE)
+
+    project_map = {}
+    for task in tasks_qs.order_by('phase__project__project_id', 'due_date'):
+        proj = task.phase.project
+        if proj.project_id not in project_map:
+            project_map[proj.project_id] = {'project': proj, 'tasks': []}
+        project_map[proj.project_id]['tasks'].append(task)
+
+    groups       = list(project_map.values())
+    total_count  = sum(len(g['tasks']) for g in groups)
+    back_url     = reverse(_ROLE_DASHBOARD.get(role, 'dashboard_pm'))
+
+    return render(request, 'tasks/task_drill_down.html', {
+        'page_title':    _FILTER_TITLES[filter_type],
+        'filter_type':   filter_type,
+        'groups':        groups,
+        'total_count':   total_count,
+        'project_count': len(groups),
+        'today':         today,
+        'back_url':      back_url,
+    })
+
+
 @login_required
 @role_required(['PM'])
 def dashboard_pm(request):
@@ -257,6 +335,12 @@ def dashboard_pm(request):
             .order_by('phase_order').first()
             or project.phases.order_by('-phase_order').first()
         )
+        due_today_for_project = Task.objects.filter(
+            phase__project=project,
+            due_date=date.today(), due_date__isnull=False,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        ).count()
+
         projects_with_progress.append({
             'project':                   project,
             'total_tasks':               total_tasks,
@@ -273,6 +357,7 @@ def dashboard_pm(request):
             'is_delayed':                is_delayed,
             'delay_days':                delay_days,
             'urgency_count':             blocked_count + overdue_count,
+            'due_today_count':           due_today_for_project,
         })
 
     projects_with_progress.sort(
@@ -342,13 +427,28 @@ def dashboard_pm(request):
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
 
+    _pm_task_base = Task.objects.filter(
+        phase__project__assigned_pm=pm_profile,
+        phase__project__is_deleted=False,
+        phase__project__status__in=['Active', 'In Progress'],
+        due_date__isnull=False,
+    )
+    _active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
+    _soon   = date.today() + timedelta(days=7)
+    tasks_due_today_count = _pm_task_base.filter(due_date=date.today(), status__in=_active).count()
+    tasks_due_soon_count  = _pm_task_base.filter(due_date__gt=date.today(), due_date__lte=_soon, status__in=_active).count()
+    tasks_overdue_count   = _pm_task_base.filter(due_date__lt=date.today()).exclude(status=Task.DONE).count()
+
     return render(request, 'dashboard/pm.html', {
         'summary': {
-            'active_projects':  active_projects,
-            'due_today':        due_today,
-            'blocked_tasks':    blocked_tasks,
+            'active_projects':   active_projects,
+            'due_today':         due_today,
+            'blocked_tasks':     blocked_tasks,
             'pending_approvals': pending_approvals,
-            'external_pending': external_pending,
+            'external_pending':  external_pending,
+            'tasks_due_today':   tasks_due_today_count,
+            'tasks_due_soon':    tasks_due_soon_count,
+            'tasks_overdue':     tasks_overdue_count,
         },
         'projects_with_progress': projects_with_progress,
         'due_today_tasks':        due_today_tasks,
@@ -386,6 +486,7 @@ def dashboard_site_engineer(request):
     # pending_grn_count: DCs for this project with status='Expected' (no GRN confirmed yet).
     # issue_count: open issues on this project (Open or In Progress).
     projects = Project.objects.filter(
+        is_deleted=False,
         assigned_site_engineer=se_profile,
         status__in=['Active', 'In Progress'],
     ).annotate(
@@ -503,6 +604,18 @@ def dashboard_site_engineer(request):
     total_issues      = sum(p['issue_count'] for p in projects_data)
     total_urgent      = sum(p['urgency_count'] for p in projects_data)
 
+    _se_task_base = Task.objects.filter(
+        phase__project__assigned_site_engineer=se_profile,
+        phase__project__is_deleted=False,
+        phase__project__status__in=['Active', 'In Progress'],
+        due_date__isnull=False,
+    )
+    _se_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
+    _se_soon   = today + timedelta(days=7)
+    se_tasks_due_today = _se_task_base.filter(due_date=today, status__in=_se_active).count()
+    se_tasks_due_soon  = _se_task_base.filter(due_date__gt=today, due_date__lte=_se_soon, status__in=_se_active).count()
+    se_tasks_overdue   = _se_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+
     return render(request, 'dashboard/site-engineer.html', {
         'projects':          projects_data,
         'se_first_name':     request.user.first_name or request.user.username,
@@ -510,6 +623,9 @@ def dashboard_site_engineer(request):
         'total_pending_grn': total_pending_grn,
         'total_issues':      total_issues,
         'total_urgent':      total_urgent,
+        'tasks_due_today':   se_tasks_due_today,
+        'tasks_due_soon':    se_tasks_due_soon,
+        'tasks_overdue':     se_tasks_overdue,
         'today':             today,
         'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
@@ -526,6 +642,7 @@ def dashboard_design(request):
     # Prefetch BOQ for each project — avoids N+1 when reading boq.status in loop.
     projects_qs = (
         Project.objects.filter(
+            is_deleted=False,
             assigned_design=design_profile,
             status__in=['Active', 'In Progress'],
         )
@@ -603,13 +720,28 @@ def dashboard_design(request):
     # Most-urgent-first; all-clear projects sink to bottom
     project_rows.sort(key=lambda r: r['urgency_count'], reverse=True)
 
+    _design_task_base = Task.objects.filter(
+        phase__project__assigned_design=design_profile,
+        phase__project__is_deleted=False,
+        phase__project__status__in=['Active', 'In Progress'],
+        due_date__isnull=False,
+    )
+    _d_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
+    _d_soon   = today + timedelta(days=7)
+    design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
+    design_tasks_due_soon  = _design_task_base.filter(due_date__gt=today, due_date__lte=_d_soon, status__in=_d_active).count()
+    design_tasks_overdue   = _design_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+
     return render(request, 'dashboard/design.html', {
-        'design_first_name':   request.user.first_name,
-        'total_revisions':     total_revisions,
+        'design_first_name':    request.user.first_name,
+        'total_revisions':      total_revisions,
         'total_design_overdue': total_design_overdue,
-        'total_boq_overdue':   total_boq_overdue,
-        'project_rows':        project_rows,
-        'today':               today,
+        'total_boq_overdue':    total_boq_overdue,
+        'project_rows':         project_rows,
+        'today':                today,
+        'tasks_due_today':      design_tasks_due_today,
+        'tasks_due_soon':       design_tasks_due_soon,
+        'tasks_overdue':        design_tasks_overdue,
     })
 
 
@@ -624,7 +756,7 @@ def dashboard_finance(request):
     # Trigger 1: milestones live on PaymentMilestone model (related_name='milestones').
     # Trigger 2: PaymentRequest exists — prefetch pending requests only, with vendor name.
     projects_qs = (
-        Project.objects.filter(status__in=['Active', 'In Progress'])
+        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
         .prefetch_related(
             'milestones',
             Prefetch(
@@ -655,6 +787,13 @@ def dashboard_finance(request):
             project__status__in=['Active', 'In Progress'],
             status=PaymentRequest.PENDING,
         ).aggregate(s=Sum('amount'))['s'] or 0
+    )
+
+    total_client_contract_value = (
+        Project.objects.filter(
+            is_deleted=False,
+            status__in=['Active', 'In Progress'],
+        ).aggregate(s=Sum('contract_value'))['s'] or 0
     )
 
     project_rows = []
@@ -717,12 +856,13 @@ def dashboard_finance(request):
     project_rows.sort(key=lambda r: r['urgency'], reverse=True)
 
     return render(request, 'dashboard/finance.html', {
-        'finance_first_name':          request.user.first_name,
-        'total_milestones_awaiting':   total_milestones_awaiting,
-        'total_payment_requests':      total_payment_requests,
-        'total_payment_request_value': total_payment_request_value,
-        'project_rows':                project_rows,
-        'today':                       today,
+        'finance_first_name':           request.user.first_name,
+        'total_milestones_awaiting':    total_milestones_awaiting,
+        'total_payment_requests':       total_payment_requests,
+        'total_payment_request_value':  total_payment_request_value,
+        'total_client_contract_value':  total_client_contract_value,
+        'project_rows':                 project_rows,
+        'today':                        today,
     })
 
 
@@ -755,9 +895,9 @@ def dashboard_scm(request):
         status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED, DeliveryChallan.REJECTED],
     ).count()
 
-    # Active projects SCM tracks: all Active/In Progress projects
+    # Active projects SCM tracks: all Active/In Progress non-deleted projects
     active_projects = list(
-        Project.objects.filter(status__in=['Active', 'In Progress'])
+        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
         .select_related('assigned_pm__user')
         .order_by('project_id')
     )
@@ -800,10 +940,13 @@ def dashboard_scm(request):
     # Material badges — reuse shared helper; same aggregation as dashboard_pm, no drift risk
     delivery_lookup = _build_delivery_lookup(active_project_ids) if active_project_ids else {}
 
-    # BOQ map: one query for all active projects (avoids N+1 in the loop below)
+    # BOQ map: one query for all active projects (avoids N+1 in the loop below).
+    # Key by b.project.project_id (string e.g. 'HRP-RES-2026-001'), NOT b.project_id
+    # which is the integer auto-PK — mismatches the string pid used in the loop.
     boq_map = {
-        b.project_id: b
+        b.project.project_id: b
         for b in BOQ.objects.filter(project__project_id__in=active_project_ids)
+                             .select_related('project')
     }
 
     # DC grouping per project — reuse raw_challans (already fetched, ordered -dc_date per project)
@@ -1014,11 +1157,25 @@ def dashboard_scm(request):
         .values('id', 'name')
     )
 
+    _scm_task_base = Task.objects.filter(
+        phase__project__is_deleted=False,
+        phase__project__status__in=['Active', 'In Progress'],
+        due_date__isnull=False,
+    )
+    _s_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
+    _s_soon   = today + timedelta(days=7)
+    scm_tasks_due_today = _scm_task_base.filter(due_date=today, status__in=_s_active).count()
+    scm_tasks_due_soon  = _scm_task_base.filter(due_date__gt=today, due_date__lte=_s_soon, status__in=_s_active).count()
+    scm_tasks_overdue   = _scm_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+
     return render(request, 'dashboard/scm.html', {
         'summary': {
             'boq_awaiting':     boq_awaiting,
             'deliveries_today': deliveries_today,
             'overdue':          overdue,
+            'tasks_due_today':  scm_tasks_due_today,
+            'tasks_due_soon':   scm_tasks_due_soon,
+            'tasks_overdue':    scm_tasks_overdue,
         },
         'project_rows':         project_rows,
         'delivery_issues':      delivery_issues,
@@ -1626,7 +1783,7 @@ def task_status_update(request, project_id, task_id):
     # State machine: defines allowed next states for each current state.
     # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
     VALID_TRANSITIONS = {
-        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED},
+        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
         Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
         Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
         Task.DONE:        {Task.BLOCKED},
@@ -1639,6 +1796,16 @@ def task_status_update(request, project_id, task_id):
             f"Cannot move task from '{task.status}' to '{new_status}'."
         )
         return redirect('project_overview', project_id=project.project_id)
+
+    # Finance can supply due_date inline when switching to In Progress — save before the guard
+    _due_date_str = request.POST.get('due_date', '').strip()
+    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
+        try:
+            _parsed_due = date.fromisoformat(_due_date_str)
+            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
+            task.due_date = _parsed_due
+        except ValueError:
+            pass
 
     # Server-side guard: In Progress requires a due date
     if new_status == Task.IN_PROGRESS and not task.due_date:
@@ -1698,13 +1865,48 @@ def task_status_update(request, project_id, task_id):
         # Log status changes for all non-blocked transitions (blocked has its own log above)
         log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
 
+        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
+        # Mapping by task name — names are fixed in the residential template.
+        _FINANCE_TASK_TO_MILESTONE = {
+            'Advance Payment Confirmation': 'M1',
+            'Finance Confirmation':         'M2',
+            '100% Payment Confirmation':    'M3',
+        }
+        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
+            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
+            _ms_update = {'status': 'Received', 'received_date': date.today()}
+            _ar_str    = request.POST.get('amount_received', '').strip()
+            _vr_str    = request.POST.get('variance_reason', '').strip()
+            if _ar_str:
+                try:
+                    _ms_update['amount_received'] = Decimal(_ar_str)
+                except InvalidOperation:
+                    pass
+            if _vr_str:
+                _ms_update['variance_reason'] = _vr_str
+            try:
+                PaymentMilestone.objects.filter(
+                    project=project,
+                    milestone_name=_ms_label,
+                    status__in=['Pending', 'Invoiced'],
+                ).update(**_ms_update)
+            except Exception:
+                pass  # Non-critical — never block the task update
+
         # Payment milestone notification: task.is_payment_milestone is read from the pre-update
         # object — the flag never changes during a status update, so this is safe.
         if new_status == Task.DONE and task.is_payment_milestone:
-            finance_users = UserProfile.objects.filter(role='Finance', is_active=True)
-            for finance_user in finance_users:
+            seen_pks = set()
+            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
+            if project.assigned_pm:
+                milestone_recipients.append(project.assigned_pm)
+            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
+            for recipient in milestone_recipients:
+                if recipient.pk in seen_pks:
+                    continue
+                seen_pks.add(recipient.pk)
                 send_notification(
-                    recipient=finance_user,
+                    recipient=recipient,
                     message=(
                         f'Payment milestone reached: "{task.task_name}" completed on '
                         f'{project.project_id} — {project.customer_name}.'
@@ -1713,9 +1915,7 @@ def task_status_update(request, project_id, task_id):
                     link=f'/projects/{project.project_id}/',
                     subject=f'Payment Milestone — {project.project_id}',
                     template='payment_notification',
-                    # CONFIRM param order in Interakt console; verify wording fits a
-                    # commissioning trigger before the first live send (see Layer 2 note).
-                    template_params=[project.project_id, project.customer_name, task.task_name],
+                    template_params=[project.customer_name, task.task_name, project.customer_name],
                     related_project=project,
                     actor=request.user.profile,
                 )
@@ -1757,6 +1957,9 @@ def task_assign(request, project_id, task_id):
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
             Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            recipient_name = assignee.user.get_full_name() or assignee.user.username
+            task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
+            task_url_abs = request.build_absolute_uri(task_url)
             send_notification(
                 recipient=assignee,
                 message=(
@@ -1764,10 +1967,9 @@ def task_assign(request, project_id, task_id):
                     f'on project {project.project_id} — {project.customer_name}.'
                 ),
                 channels=['in_app', 'whatsapp'],
-                link=f'/projects/{project.project_id}/',
+                link=task_url,
                 template='assign_task',
-                # CONFIRM param order in Interakt console before first live send.
-                template_params=[task.task_name, project.project_id, project.customer_name],
+                template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
                 related_project=project,
                 actor=request.user.profile,
             )
@@ -2028,8 +2230,8 @@ def _boq_snapshot(boq):
     return rows
 
 
-def _notify_boq_acknowledged(boq, acknowledging_profile):
-    """Notify the Design user who submitted the BOQ that SCM has acknowledged it."""
+def _notify_boq_acknowledged(boq, acknowledging_profile, request):
+    """Notify PM and the acknowledging SCM user that the BOQ has been acknowledged."""
     items = boq.items.all()
     has_changes = any(
         item.ordered_quantity is not None and item.boq_quantity is not None
@@ -2041,18 +2243,25 @@ def _notify_boq_acknowledged(boq, acknowledging_profile):
         f'BOQ for {boq.project.project_id} ({boq.project.customer_name}) '
         f'has been acknowledged by SCM{suffix}.'
     )
-    scm_name = acknowledging_profile.user.get_full_name() or acknowledging_profile.user.username
-    send_notification(
-        recipient=boq.submitted_by,
-        message=message,
-        channels=['in_app', 'whatsapp'],
-        link=f'/projects/{boq.project.project_id}/boq/',
-        template='boq_acknowledged',
-        # CONFIRM param order in Interakt console before first live send.
-        template_params=[boq.project.project_id, boq.project.customer_name, scm_name],
-        related_project=boq.project,
-        actor=acknowledging_profile,
-    )
+    design_user_name = boq.submitted_by.user.get_full_name() or boq.submitted_by.user.username
+    boq_link = f'/projects/{boq.project.project_id}/boq/'
+    boq_link_abs = request.build_absolute_uri(boq_link)
+    recipients = []
+    if boq.project.assigned_pm:
+        recipients.append(boq.project.assigned_pm)
+    if acknowledging_profile not in recipients:
+        recipients.append(acknowledging_profile)
+    for recipient in recipients:
+        send_notification(
+            recipient=recipient,
+            message=message,
+            channels=['in_app', 'whatsapp'],
+            link=boq_link,
+            template='boq_acknowledged',
+            template_params=[boq.project.customer_name, design_user_name, boq_link_abs],
+            related_project=boq.project,
+            actor=acknowledging_profile,
+        )
 
 
 def _build_vendors_by_category():
@@ -2224,7 +2433,7 @@ def boq_detail(request, project_id):
 
             # Notify the Design user who submitted this BOQ
             if boq.submitted_by:
-                _notify_boq_acknowledged(boq, profile)
+                _notify_boq_acknowledged(boq, profile, request)
 
             messages.success(request, 'BOQ acknowledged.')
             return redirect('boq_detail', project_id=project_id)
@@ -2496,7 +2705,8 @@ def notifications_view(request):
     profile.notifications.filter(is_read=False).update(is_read=True)
 
     return render(request, 'projects/notifications.html', {
-        'notifications': notifications,
+        'notifications':      notifications,
+        'user_dashboard_url': get_user_dashboard(request.user),
     })
 
 
@@ -2544,8 +2754,8 @@ def milestone_receive(request, project_id, milestone_pk):
     milestone = get_object_or_404(
         PaymentMilestone, pk=milestone_pk, project__project_id=project_id
     )
-    if milestone.status != 'Invoiced':
-        messages.error(request, 'Only Invoiced milestones can be marked as Received.')
+    if milestone.status == 'Received':
+        messages.error(request, 'Milestone is already marked as Received.')
         return redirect('dashboard_finance')
 
     amount_received_str = request.POST.get('amount_received', '').strip()
@@ -2570,6 +2780,24 @@ def milestone_receive(request, project_id, milestone_pk):
     milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
     # Log milestone received — project accessed via FK to avoid extra query
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
+
+    # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done.
+    _MILESTONE_TO_FINANCE_TASK = {
+        'M1': 'Advance Payment Confirmation',
+        'M2': 'Finance Confirmation',
+        'M3': '100% Payment Confirmation',
+    }
+    _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+    if _sync_task_name:
+        try:
+            Task.objects.filter(
+                phase__project=milestone.project,
+                task_name=_sync_task_name,
+                status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+            ).update(status=Task.DONE, completed_at=timezone.now())
+        except Exception:
+            pass  # Non-critical — never block the milestone update
+
     messages.success(request, f'{milestone.milestone_name} marked as Received.')
     return redirect('dashboard_finance')
 
@@ -2721,7 +2949,10 @@ def confirm_payment_request(request, project_id, request_id):
         return HttpResponse(status=403)
 
     project = get_object_or_404(Project, project_id=project_id)
-    pr = get_object_or_404(PaymentRequest, pk=request_id, project=project, status=PaymentRequest.PENDING)
+    pr = get_object_or_404(
+        PaymentRequest.objects.select_related('vendor', 'boq_item'),
+        pk=request_id, project=project, status=PaymentRequest.PENDING,
+    )
 
     payment_date_str  = request.POST.get('payment_date', '').strip()
     payment_reference = request.POST.get('payment_reference', '').strip()
@@ -2749,6 +2980,31 @@ def confirm_payment_request(request, project_id, request_id):
         f"Confirmed payment to {pr.vendor}: ₹{pr.amount} (Ref: {payment_reference or '—'})",
         entity_type='PaymentRequest', entity_id=pr.pk,
     )
+
+    boq_desc = pr.boq_item.description if pr.boq_item else '(item)'
+    seen_pks = set()
+    invoice_recipients = list(UserProfile.objects.filter(role='SCM', is_active=True))
+    if project.assigned_pm:
+        invoice_recipients.append(project.assigned_pm)
+    invoice_recipients += list(UserProfile.objects.filter(role='CEO', is_active=True))
+    for recipient in invoice_recipients:
+        if recipient.pk in seen_pks:
+            continue
+        seen_pks.add(recipient.pk)
+        send_notification(
+            recipient=recipient,
+            message=(
+                f'Invoice {pr.invoice_number} paid: ₹{pr.amount} to {pr.vendor.name} '
+                f'for {boq_desc} on {project.project_id}.'
+            ),
+            channels=['in_app', 'whatsapp'],
+            link=f'/projects/{project.project_id}/overview/',
+            template='invoice_paid',
+            template_params=[project.customer_name, boq_desc, pr.invoice_number, str(pr.amount), pr.vendor.name],
+            related_project=project,
+            actor=profile,
+        )
+
     messages.success(request, f'Payment of ₹{pr.amount} to {pr.vendor} confirmed.')
     return redirect('project_overview', project_id=project_id)
 
@@ -2773,7 +3029,7 @@ def dashboard_bd(request):
     # PM dashboard's open_issue_count. "Blocked issue" is BD's term for the same thing;
     # there is no separate "blocked" status on Issue.
     projects_qs = (
-        Project.objects.filter(status__in=['Active', 'In Progress'])
+        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
         .prefetch_related(
             'milestones',
             Prefetch(
@@ -2937,8 +3193,8 @@ def project_overview(request, project_id):
     is_assigned_pm    = (project.assigned_pm is not None and project.assigned_pm.user == request.user)
     can_assign_design = is_assigned_pm and project.status in ('Active', 'In Progress')
 
-    # Handle POST actions (PM only) — formerly in project_detail view
-    if request.method == 'POST' and is_assigned_pm:
+    # Handle POST actions — PM for all actions; Finance limited to update_milestone
+    if request.method == 'POST' and (is_assigned_pm or (role == 'Finance' and request.POST.get('action') == 'update_milestone')):
         action = request.POST.get('action', '')
 
         if action == 'update_milestone':
@@ -2946,18 +3202,51 @@ def project_overview(request, project_id):
             if milestone_pk:
                 try:
                     milestone = project.milestones.get(pk=milestone_pk)
-                    milestone.milestone_description = request.POST.get('milestone_description', '').strip()
-                    amount_str   = request.POST.get('amount', '').strip()
-                    due_date_str = request.POST.get('due_date', '').strip()
-                    try:
-                        milestone.amount = Decimal(amount_str) if amount_str else None
-                    except InvalidOperation:
-                        milestone.amount = None
-                    try:
-                        milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
-                    except ValueError:
-                        milestone.due_date = None
-                    milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
+                    _actor_role = getattr(getattr(request.user, 'profile', None), 'role', None)
+
+                    if _actor_role == 'Finance':
+                        milestone.milestone_description = request.POST.get('milestone_description', '').strip()
+                        _save_fields = ['milestone_description']
+                        _amount_received_str = request.POST.get('amount_received', '').strip()
+                        if _amount_received_str and milestone.status != 'Received':
+                            try:
+                                milestone.amount_received = Decimal(_amount_received_str)
+                                milestone.status        = 'Received'
+                                milestone.received_date = date.today()
+                                _save_fields += ['amount_received', 'status', 'received_date']
+                            except InvalidOperation:
+                                pass
+                        milestone.save(update_fields=_save_fields)
+                        log_activity(project, request.user.profile, f"Updated {milestone.milestone_name}", entity_type='Milestone', entity_id=milestone.pk)
+                        if 'status' in _save_fields:
+                            _MILESTONE_TO_FINANCE_TASK = {
+                                'M1': 'Advance Payment Confirmation',
+                                'M2': 'Finance Confirmation',
+                                'M3': '100% Payment Confirmation',
+                            }
+                            _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
+                            if _sync_task_name:
+                                try:
+                                    Task.objects.filter(
+                                        phase__project=project,
+                                        task_name=_sync_task_name,
+                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+                                    ).update(status=Task.DONE, completed_at=timezone.now())
+                                except Exception:
+                                    pass
+                    else:
+                        milestone.milestone_description = request.POST.get('milestone_description', '').strip()
+                        amount_str   = request.POST.get('amount', '').strip()
+                        due_date_str = request.POST.get('due_date', '').strip()
+                        try:
+                            milestone.amount = Decimal(amount_str) if amount_str else None
+                        except InvalidOperation:
+                            milestone.amount = None
+                        try:
+                            milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
+                        except ValueError:
+                            milestone.due_date = None
+                        milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
                     messages.success(request, f'{milestone.milestone_name} updated.')
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
@@ -3347,6 +3636,7 @@ def zoho_deal_closed_webhook(request):
     else:
         # Notify the assigned PM about their new project
         try:
+            pm_display_name = project.assigned_pm.user.get_full_name() or project.assigned_pm.user.username
             send_notification(
                 recipient=project.assigned_pm,
                 message=(
@@ -3356,8 +3646,7 @@ def zoho_deal_closed_webhook(request):
                 channels=['in_app', 'whatsapp'],
                 link=f'/projects/{project.project_id}/',
                 template='assign_project',
-                # CONFIRM param order in Interakt console before first live send.
-                template_params=[project.project_id, project.customer_name, project.city],
+                template_params=[project.customer_name, project.customer_name, project.city, pm_display_name],
                 related_project=project,
             )
         except Exception as exc:
@@ -3769,14 +4058,23 @@ def create_project_issue(request, project_id):
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
+        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         send_notification(
             recipient=assigned_to,
             message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
             channels=['in_app', 'whatsapp'],
             link=f'/issues/{issue.pk}/',
             template='issue_created',
-            # CONFIRM param order in Interakt console before first live send.
-            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
+    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
+        send_notification(
+            recipient=project.assigned_pm,
+            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+            channels=['in_app'],
+            link=f'/issues/{issue.pk}/',
             related_project=project,
             actor=profile,
         )
@@ -3842,14 +4140,23 @@ def create_task_issue(request, project_id, task_id):
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
+        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         send_notification(
             recipient=assigned_to,
             message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
             channels=['in_app', 'whatsapp'],
             link=f'/issues/{issue.pk}/',
             template='issue_created',
-            # CONFIRM param order in Interakt console before first live send.
-            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
+    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
+        send_notification(
+            recipient=project.assigned_pm,
+            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+            channels=['in_app'],
+            link=f'/issues/{issue.pk}/',
             related_project=project,
             actor=profile,
         )
@@ -3925,14 +4232,23 @@ def create_delivery_issue(request, project_id, dc_id):
     )
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
+        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         send_notification(
             recipient=assigned_to,
             message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
             channels=['in_app', 'whatsapp'],
             link=f'/issues/{issue.pk}/',
             template='issue_created',
-            # CONFIRM param order in Interakt console before first live send.
-            template_params=[title, project.project_id, project.customer_name, raiser_name],
+            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
+            related_project=project,
+            actor=profile,
+        )
+    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
+        send_notification(
+            recipient=project.assigned_pm,
+            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+            channels=['in_app'],
+            link=f'/issues/{issue.pk}/',
             related_project=project,
             actor=profile,
         )
@@ -4053,22 +4369,28 @@ def resolve_issue(request, issue_id):
         messages.warning(request, 'Issue status was already updated.')
     else:
         log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
-        if project.assigned_pm and project.assigned_pm != profile:
-            resolver_name = profile.user.get_full_name() or profile.user.username
-            send_notification(
-                recipient=project.assigned_pm,
-                message=(
-                    f'{resolver_name} resolved issue "{issue.title}" on {project.project_id}. '
-                    f'Please review and close.'
-                ),
-                channels=['in_app', 'whatsapp'],
-                link=f'/issues/{issue.pk}/',
-                template='issue_resolved',
-                # CONFIRM param order in Interakt console before first live send.
-                template_params=[resolver_name, issue.title, project.project_id],
-                related_project=project,
-                actor=profile,
-            )
+        resolver_name = profile.user.get_full_name() or profile.user.username
+        issue_link = f'/issues/{issue.pk}/'
+        issue_link_abs = request.build_absolute_uri(issue_link)
+        resolved_params = [project.customer_name, issue.title, project.customer_name, resolver_name, issue_link_abs]
+        resolved_message = (
+            f'{resolver_name} resolved issue "{issue.title}" on {project.project_id}. '
+            f'Please review and close.'
+        )
+        notified_pks = {profile.pk}
+        for notify_recipient in [project.assigned_pm, issue.assigned_to, issue.raised_by]:
+            if notify_recipient and notify_recipient.pk not in notified_pks:
+                notified_pks.add(notify_recipient.pk)
+                send_notification(
+                    recipient=notify_recipient,
+                    message=resolved_message,
+                    channels=['in_app', 'whatsapp'],
+                    link=issue_link,
+                    template='issue_resolved',
+                    template_params=resolved_params,
+                    related_project=project,
+                    actor=profile,
+                )
         messages.success(request, 'Issue marked as Resolved. PM has been notified.')
     return redirect('issue_detail', issue_id=issue_id)
 
