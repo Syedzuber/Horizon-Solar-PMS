@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+{% block title %}WhatsApp Message Log — SolarPMS{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+<style>
+  [x-cloak] { display: none !important; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+{# ── Page header ──────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div class="d-flex align-items-center gap-2">
+        <i data-lucide="message-circle" style="width:24px;height:24px;color:#1a7a4a;"></i>
+        <div>
+          <h4 class="mb-0 fw-bold">WhatsApp Message Log</h4>
+          <p class="text-muted mb-0 small">Interakt API status and delivery tracking</p>
+        </div>
+      </div>
+      <a href="{% url 'dashboard_admin' %}" class="btn btn-outline-secondary btn-sm">← Dashboard</a>
+    </div>
+  </div>
+</div>
+
+{# ── API Status summary bar ───────────────────────────────────────────────── #}
+<div class="d-flex flex-wrap gap-2 mb-3">
+  <span class="badge rounded-pill px-3 py-2 fs-6"
+        style="background-color:#1a7a4a;color:#fff;">
+    {{ sent_count }} Sent
+  </span>
+  <span class="badge rounded-pill px-3 py-2 fs-6 bg-danger text-white">
+    {{ failed_count }} Failed
+  </span>
+  <span class="badge rounded-pill px-3 py-2 fs-6 bg-secondary text-white">
+    {{ skipped_count }} Skipped
+  </span>
+</div>
+
+{# ── Delivery Status summary bar ──────────────────────────────────────────── #}
+<p class="text-muted small mb-1 fw-semibold">Interakt Delivery Status</p>
+<div class="d-flex flex-wrap gap-2 mb-4">
+  <span class="badge rounded-pill px-3 py-2 fs-6"
+        style="background-color:#7cb847;color:#fff;">
+    {{ delivered_count }} Delivered
+  </span>
+  <span class="badge rounded-pill px-3 py-2 fs-6"
+        style="background-color:#243a6b;color:#fff;">
+    {{ read_count }} Read
+  </span>
+  <span class="badge rounded-pill px-3 py-2 fs-6 bg-danger text-white">
+    {{ delivery_failed_count }} Delivery Failed
+  </span>
+  <span class="badge rounded-pill px-3 py-2 fs-6"
+        style="background-color:#f0a829;color:#fff;">
+    {{ pending_count }} Pending
+  </span>
+</div>
+
+{# ── Filter bar ───────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Filters</div>
+  <div class="card-body">
+    <form method="get" class="row g-3 align-items-end">
+
+      <div class="col-sm-6 col-md-2">
+        <label class="form-label small text-muted mb-1">Status</label>
+        <select name="status" class="form-select form-select-sm">
+          <option value="" {% if not current_filters.status %}selected{% endif %}>All Statuses</option>
+          <option value="sent"    {% if current_filters.status == 'sent'    %}selected{% endif %}>Sent</option>
+          <option value="failed"  {% if current_filters.status == 'failed'  %}selected{% endif %}>Failed</option>
+          <option value="skipped" {% if current_filters.status == 'skipped' %}selected{% endif %}>Skipped</option>
+        </select>
+      </div>
+
+      <div class="col-sm-6 col-md-3">
+        <label class="form-label small text-muted mb-1">Project</label>
+        <select name="project_id" class="form-select form-select-sm">
+          <option value="">All Projects</option>
+          {% for p in project_list %}
+          <option value="{{ p.pk }}"
+            {% if current_filters.project_id == p.pk|stringformat:"s" %}selected{% endif %}>
+            {{ p.project_id }} — {{ p.customer_name }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+
+      <div class="col-sm-6 col-md-2">
+        <label class="form-label small text-muted mb-1">Date From</label>
+        <input type="date" name="date_from" class="form-control form-control-sm"
+               value="{{ current_filters.date_from }}">
+      </div>
+
+      <div class="col-sm-6 col-md-2">
+        <label class="form-label small text-muted mb-1">Date To</label>
+        <input type="date" name="date_to" class="form-control form-control-sm"
+               value="{{ current_filters.date_to }}">
+      </div>
+
+      <div class="col-auto">
+        <button type="submit" class="btn btn-sm text-white"
+                style="background-color:#1a7a4a;">Apply Filters</button>
+      </div>
+
+      <div class="col-auto">
+        <a href="{% url 'admin_whatsapp_log' %}"
+           class="btn btn-outline-secondary btn-sm">Clear</a>
+      </div>
+
+    </form>
+  </div>
+</div>
+
+{# ── Results table ────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">Results</span>
+    <span class="text-muted small">
+      {{ page_obj.paginator.count }} entr{{ page_obj.paginator.count|pluralize:"y,ies" }}
+    </span>
+  </div>
+
+  {% if page_obj.object_list %}
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th style="width:11rem;">Timestamp</th>
+          <th style="width:12rem;">Recipient</th>
+          <th style="width:10rem;">Template</th>
+          <th style="width:10rem;">Project</th>
+          <th style="width:10rem;">Triggered By</th>
+          <th style="width:7rem;">API Status</th>
+          <th style="width:9rem;">Delivery Status</th>
+          <th>Error</th>
+        </tr>
+      </thead>
+
+      {% for log in page_obj %}
+      {# One <tbody> per row so Alpine x-data scopes the data row + error row together #}
+      <tbody x-data="{ showError: false }">
+
+        <tr>
+          {# Timestamp #}
+          <td class="text-muted small">{{ log.created_at|date:"d M Y, H:i" }}</td>
+
+          {# Recipient #}
+          <td class="small">
+            {% if log.recipient %}
+              <div>{{ log.recipient.user.get_full_name|default:log.recipient.user.username }}</div>
+              {% if log.recipient.phone_number %}
+                <div class="text-muted" style="font-size:0.78rem;">{{ log.recipient.phone_number }}</div>
+              {% else %}
+                <div class="text-muted fst-italic" style="font-size:0.78rem;">No phone</div>
+              {% endif %}
+            {% else %}—{% endif %}
+          </td>
+
+          {# Template #}
+          <td class="small">
+            {% if log.template_name %}
+              {{ log.template_name }}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+
+          {# Project #}
+          <td class="small">
+            {% if log.related_project %}
+              {{ log.related_project.customer_name }}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+
+          {# Triggered By #}
+          <td class="small">
+            {% if log.actor %}
+              {{ log.actor.user.get_full_name|default:log.actor.user.username }}
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+
+          {# API Status badge #}
+          <td>
+            {% if log.status == 'sent' %}
+              <span class="badge rounded-pill text-white"
+                    style="background-color:#1a7a4a;">Sent</span>
+            {% elif log.status == 'failed' %}
+              <span class="badge rounded-pill bg-danger text-white">Failed</span>
+            {% elif log.status == 'skipped' %}
+              <span class="badge rounded-pill bg-secondary text-white">Skipped</span>
+            {% else %}
+              <span class="badge rounded-pill bg-light text-dark border">{{ log.status }}</span>
+            {% endif %}
+          </td>
+
+          {# Delivery Status badge #}
+          <td>
+            {% if log.delivery_status == 'message_api_sent' %}
+              <span class="badge rounded-pill bg-primary text-white">Queued</span>
+            {% elif log.delivery_status == 'message_api_delivered' %}
+              <span class="badge rounded-pill text-white"
+                    style="background-color:#7cb847;">Delivered</span>
+            {% elif log.delivery_status == 'message_api_read' %}
+              <span class="badge rounded-pill text-white"
+                    style="background-color:#243a6b;">Read</span>
+            {% elif log.delivery_status == 'message_api_failed' %}
+              <span class="badge rounded-pill bg-danger text-white">Delivery Failed</span>
+            {% elif log.status == 'sent' %}
+              <span class="badge rounded-pill text-white"
+                    style="background-color:#f0a829;">Pending</span>
+            {% else %}
+              <span class="text-muted">—</span>
+            {% endif %}
+          </td>
+
+          {# Error toggle #}
+          <td>
+            {% if log.error_detail %}
+            <button class="btn btn-outline-danger btn-sm py-0 px-2"
+                    @click="showError = !showError"
+                    x-text="showError ? 'Hide' : 'View'">
+            </button>
+            {% endif %}
+          </td>
+        </tr>
+
+        {# Error detail expand row — shares x-data scope via parent <tbody> #}
+        {% if log.error_detail %}
+        <tr x-show="showError" x-cloak>
+          <td colspan="8" class="bg-light border-top-0">
+            <pre class="mb-0 small text-danger p-2"
+                 style="white-space:pre-wrap;word-break:break-word;">{{ log.error_detail|escape }}</pre>
+          </td>
+        </tr>
+        {% endif %}
+
+      </tbody>
+      {% endfor %}
+
+    </table>
+  </div>
+
+  {% else %}
+  <div class="card-body text-center text-muted py-5">
+    <i data-lucide="message-circle-x"
+       style="width:40px;height:40px;display:block;margin:0 auto 0.75rem;color:#aaa;"></i>
+    No WhatsApp messages found for the selected filters.
+  </div>
+  {% endif %}
+</div>
+
+{# ── Pagination ───────────────────────────────────────────────────────────── #}
+{% if page_obj.has_other_pages %}
+{% with f=current_filters %}
+<nav aria-label="WhatsApp log pagination">
+  <ul class="pagination justify-content-center">
+
+    {% if page_obj.has_previous %}
+    <li class="page-item">
+      <a class="page-link"
+         href="?status={{ f.status }}&project_id={{ f.project_id }}&date_from={{ f.date_from }}&date_to={{ f.date_to }}&page={{ page_obj.previous_page_number }}">
+        ‹ Previous
+      </a>
+    </li>
+    {% else %}
+    <li class="page-item disabled"><span class="page-link">‹ Previous</span></li>
+    {% endif %}
+
+    {% for num in page_obj.paginator.page_range %}
+      {% if page_obj.number == num %}
+        <li class="page-item active"><span class="page-link">{{ num }}</span></li>
+      {% elif num > page_obj.number|add:"-3" and num < page_obj.number|add:"3" %}
+        <li class="page-item">
+          <a class="page-link"
+             href="?status={{ f.status }}&project_id={{ f.project_id }}&date_from={{ f.date_from }}&date_to={{ f.date_to }}&page={{ num }}">
+            {{ num }}
+          </a>
+        </li>
+      {% endif %}
+    {% endfor %}
+
+    {% if page_obj.has_next %}
+    <li class="page-item">
+      <a class="page-link"
+         href="?status={{ f.status }}&project_id={{ f.project_id }}&date_from={{ f.date_from }}&date_to={{ f.date_to }}&page={{ page_obj.next_page_number }}">
+        Next ›
+      </a>
+    </li>
+    {% else %}
+    <li class="page-item disabled"><span class="page-link">Next ›</span></li>
+    {% endif %}
+
+  </ul>
+</nav>
+{% endwith %}
+{% endif %}
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (window.lucide) lucide.createIcons();
+});
+</script>
+
+{% endblock %}

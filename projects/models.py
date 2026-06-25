@@ -979,8 +979,20 @@ class NotificationLog(models.Model):
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='notifications_triggered',
     )
-    error_detail    = models.TextField(blank=True)
-    created_at      = models.DateTimeField(auto_now_add=True)
+    error_detail         = models.TextField(blank=True)
+    delivery_status      = models.CharField(
+        max_length=30,
+        blank=True,
+        default='',
+        choices=[
+            ('message_api_sent',      'Sent by Interakt'),
+            ('message_api_delivered', 'Delivered to Phone'),
+            ('message_api_read',      'Read'),
+            ('message_api_failed',    'Failed at Delivery'),
+        ]
+    )
+    interakt_message_id  = models.CharField(max_length=100, blank=True, default='')
+    created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-created_at']

@@ -161,7 +161,12 @@ def _send_whatsapp(recipient, template, template_params, base):
         )
         body = resp.text[:500]
         if 200 <= resp.status_code < 300:
-            _log(base, 'whatsapp', 'sent')
+            try:
+                resp_data = resp.json()
+                msg_id = resp_data.get('id', '')
+            except Exception:
+                msg_id = ''
+            _log(base, 'whatsapp', 'sent', interakt_message_id=msg_id)
             return
         _log(base, 'whatsapp', 'failed', f'HTTP {resp.status_code}: {body}')
     except Exception as e:
@@ -226,7 +231,7 @@ def _send_email(recipient, subject, message, base):
     #     _log(base, 'email', 'failed', f'HTTP {resp.status_code}: {resp.body}')
 
 
-def _log(base, channel, status, error_detail=''):
+def _log(base, channel, status, error_detail='', interakt_message_id=''):
     from .models import NotificationLog
     try:
         NotificationLog.objects.create(
@@ -234,6 +239,7 @@ def _log(base, channel, status, error_detail=''):
             channel=channel,
             status=status,
             error_detail=error_detail,
+            interakt_message_id=interakt_message_id,
         )
     except Exception as e:
         logger.error('_log: NotificationLog.create failed — %s', e)

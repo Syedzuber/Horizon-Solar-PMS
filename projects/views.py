@@ -2251,6 +2251,7 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
         recipients.append(boq.project.assigned_pm)
     if acknowledging_profile not in recipients:
         recipients.append(acknowledging_profile)
+    scm_name = request.user.get_full_name() or request.user.username
     for recipient in recipients:
         send_notification(
             recipient=recipient,
@@ -2258,7 +2259,11 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
             channels=['in_app', 'whatsapp'],
             link=boq_link,
             template='boq_acknowledged',
-            template_params=[boq.project.customer_name, design_user_name, boq_link_abs],
+            template_params=[
+                boq.project.customer_name,   # [0] header
+                boq.project.customer_name,   # [1] body[0] — project_name repeated
+                scm_name,                    # [2] body[1] — scm_name
+            ],
             related_project=boq.project,
             actor=acknowledging_profile,
         )
@@ -3637,6 +3642,8 @@ def zoho_deal_closed_webhook(request):
         # Notify the assigned PM about their new project
         try:
             pm_display_name = project.assigned_pm.user.get_full_name() or project.assigned_pm.user.username
+            project_link = reverse('project_overview', args=[project.pk])
+            project_url_abs = request.build_absolute_uri(project_link)
             send_notification(
                 recipient=project.assigned_pm,
                 message=(
@@ -3646,7 +3653,12 @@ def zoho_deal_closed_webhook(request):
                 channels=['in_app', 'whatsapp'],
                 link=f'/projects/{project.project_id}/',
                 template='assign_project',
-                template_params=[project.customer_name, project.customer_name, project.city, pm_display_name],
+                template_params=[
+                    project.customer_name,    # [0] header
+                    project.customer_name,    # [1] body[0] — project_name
+                    pm_display_name,          # [2] body[1] — user_name
+                    project_url_abs,          # [3] body[2] — project_url
+                ],
                 related_project=project,
             )
         except Exception as exc:
@@ -4740,6 +4752,75 @@ def portal_activity_log(request):
     })
 
 
+@login_required
+@role_required(['Admin'])
+def admin_whatsapp_log(request):
+    """WhatsApp diagnostic log — API send status + Interakt delivery status. Admin only."""
+    from django.core.paginator import Paginator
+
+    status_param     = request.GET.get('status',     '').strip()
+    project_id_param = request.GET.get('project_id', '').strip()
+    date_from_param  = request.GET.get('date_from',  '').strip()
+    date_to_param    = request.GET.get('date_to',    '').strip()
+
+    default_date_from = (timezone.now().date() - timedelta(days=7)).isoformat()
+    date_from = date_from_param or default_date_from
+
+    qs = (
+        NotificationLog.objects
+        .filter(channel='whatsapp')
+        .select_related('recipient__user', 'related_project', 'actor__user')
+        .order_by('-created_at')
+    )
+
+    if status_param:
+        qs = qs.filter(status=status_param)
+    if project_id_param:
+        qs = qs.filter(related_project_id=project_id_param)
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to_param:
+        try:
+            qs = qs.filter(created_at__date__lte=date.fromisoformat(date_to_param))
+        except ValueError:
+            pass
+
+    sent_count            = qs.filter(status='sent').count()
+    failed_count          = qs.filter(status='failed').count()
+    skipped_count         = qs.filter(status='skipped').count()
+    delivered_count       = qs.filter(delivery_status='message_api_delivered').count()
+    read_count            = qs.filter(delivery_status='message_api_read').count()
+    delivery_failed_count = qs.filter(delivery_status='message_api_failed').count()
+    pending_count         = qs.filter(status='sent', delivery_status='').count()
+
+    project_list = Project.objects.filter(is_deleted=False).order_by('name')
+
+    paginator   = Paginator(qs, 50)
+    page_number = request.GET.get('page')
+    page_obj    = paginator.get_page(page_number)
+
+    return render(request, 'projects/admin_whatsapp_log.html', {
+        'page_obj':             page_obj,
+        'sent_count':           sent_count,
+        'failed_count':         failed_count,
+        'skipped_count':        skipped_count,
+        'delivered_count':      delivered_count,
+        'read_count':           read_count,
+        'delivery_failed_count': delivery_failed_count,
+        'pending_count':        pending_count,
+        'project_list':         project_list,
+        'current_filters': {
+            'status':     status_param,
+            'project_id': project_id_param,
+            'date_from':  date_from,
+            'date_to':    date_to_param,
+        },
+    })
+
+
 # ---------------------------------------------------------------------------
 # Delivery Challans (SCM Delivery Tracker — Day 9)
 # ---------------------------------------------------------------------------
@@ -5051,3 +5132,66 @@ def override_grn(request, project_id, dc_id):
     )
     messages.success(request, f'GRN overridden. DC status: {challan.status}.')
     return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+
+
+# ---------------------------------------------------------------------------
+# Interakt Delivery Webhook — publicly reachable, no auth required
+# ---------------------------------------------------------------------------
+
+INTERAKT_DELIVERY_PRIORITY = {
+    'message_api_read':      4,
+    'message_api_delivered': 3,
+    'message_api_sent':      2,
+    'message_api_failed':    1,
+    '':                      0,
+}
+
+INTERAKT_VALID_DELIVERY_TYPES = frozenset(INTERAKT_DELIVERY_PRIORITY) - {''}
+
+
+@csrf_exempt
+def interakt_webhook(request):
+    import hmac as _hmac
+    import hashlib
+    import os
+
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+
+    secret = os.environ.get('INTERAKT_WEBHOOK_SECRET', '')
+    if secret:
+        signature = request.headers.get('Interakt-Signature', '')
+        expected = _hmac.new(
+            secret.encode('utf-8'),
+            request.body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not _hmac.compare_digest(signature, expected):
+            logger.warning(
+                'Interakt webhook signature mismatch. Got: %s', signature
+            )
+            return HttpResponse(status=200)
+
+    try:
+        payload = json.loads(request.body)
+    except Exception:
+        return HttpResponse(status=200)
+
+    event_type = payload.get('type', '')
+    message_id = payload.get('data', {}).get('message', {}).get('id', '')
+
+    if event_type not in INTERAKT_VALID_DELIVERY_TYPES or not message_id:
+        return HttpResponse(status=200)
+
+    try:
+        log = NotificationLog.objects.filter(interakt_message_id=message_id).first()
+        if log:
+            current_priority = INTERAKT_DELIVERY_PRIORITY.get(log.delivery_status, 0)
+            new_priority      = INTERAKT_DELIVERY_PRIORITY.get(event_type, 0)
+            if new_priority > current_priority:
+                log.delivery_status = event_type
+                log.save(update_fields=['delivery_status'])
+    except Exception as e:
+        logger.error('Interakt webhook DB update failed: %s', e)
+
+    return HttpResponse(status=200)

@@ -87,9 +87,10 @@ urlpatterns = [
          views.confirm_payment_request, name='confirm_payment_request'),
 
     # ---------------------------------------------------------------------------
-    # Zoho CRM Webhook — unauthenticated, token-validated
+    # Webhooks — unauthenticated, no login required
     # ---------------------------------------------------------------------------
-    path('webhooks/zoho/deal-closed/', views.zoho_deal_closed_webhook, name='zoho_webhook'),
+    path('webhooks/zoho/deal-closed/',        views.zoho_deal_closed_webhook, name='zoho_webhook'),
+    path('webhooks/interakt/delivery/',        views.interakt_webhook,         name='interakt_webhook'),
 
     # ---------------------------------------------------------------------------
     # Task detail — all roles with access to the project
@@ -157,6 +158,8 @@ urlpatterns = [
     # intercepts all /admin/* URLs before the projects URLconf can match them
     path('portal/activity-log/',
          views.portal_activity_log, name='portal_activity_log'),
+    path('portal/whatsapp-log/',
+         views.admin_whatsapp_log, name='admin_whatsapp_log'),
 
     # ---------------------------------------------------------------------------
     # Task drill-down — due-date filters for PM, Design, SCM dashboards
