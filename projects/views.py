@@ -4796,7 +4796,7 @@ def admin_whatsapp_log(request):
     delivery_failed_count = qs.filter(delivery_status='message_api_failed').count()
     pending_count         = qs.filter(status='sent', delivery_status='').count()
 
-    project_list = Project.objects.filter(is_deleted=False).order_by('name')
+    project_list = Project.objects.filter(is_deleted=False).order_by('customer_name')
 
     paginator   = Paginator(qs, 50)
     page_number = request.GET.get('page')
