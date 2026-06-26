@@ -5161,7 +5161,7 @@ def interakt_webhook(request):
     secret = os.environ.get('INTERAKT_WEBHOOK_SECRET', '')
     if secret:
         signature = request.headers.get('Interakt-Signature', '')
-        expected = _hmac.new(
+        expected = 'sha256=' + _hmac.new(
             secret.encode('utf-8'),
             request.body,
             hashlib.sha256,
