@@ -65,11 +65,12 @@ urlpatterns = [
     path('projects/<str:project_id>/boq/history/',           views.boq_history,          name='boq_history'),           # PM, Design, SCM, Admin
 
     # ---------------------------------------------------------------------------
-    # Payment milestones — Finance (invoice/receive), PM (create)
+    # Payment milestones — Finance (invoice/receive), PM (create), BD/PM (set amounts)
     # ---------------------------------------------------------------------------
-    path('projects/<str:project_id>/milestone/<int:milestone_pk>/invoice/', views.milestone_invoice, name='milestone_invoice'),  # Finance only
-    path('projects/<str:project_id>/milestone/<int:milestone_pk>/receive/', views.milestone_receive, name='milestone_receive'),  # Finance only
-    path('projects/<str:project_id>/milestones/create/',                    views.milestone_create,  name='milestone_create'),   # PM only
+    path('projects/<str:project_id>/milestone/<int:milestone_pk>/invoice/', views.milestone_invoice,     name='milestone_invoice'),     # Finance only
+    path('projects/<str:project_id>/milestone/<int:milestone_pk>/receive/', views.milestone_receive,     name='milestone_receive'),     # Finance only
+    path('projects/<str:project_id>/milestones/create/',                    views.milestone_create,      name='milestone_create'),      # PM only
+    path('projects/<str:project_id>/milestones/set-amounts/',               views.set_milestone_amounts, name='set_milestone_amounts'), # BD + PM
 
     # ---------------------------------------------------------------------------
     # Project overview — all roles with access to the project
@@ -164,6 +165,14 @@ urlpatterns = [
     # ---------------------------------------------------------------------------
     # Task drill-down — due-date filters for PM, Design, SCM dashboards
     # ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # My Documents — personal record-keeping sub-page
+    # ---------------------------------------------------------------------------
+    path('profile/documents/', views.my_documents, name='my_documents'),
+    path('design-submissions/<int:pk>/', views.design_submission_detail, name='design_submission_detail'),
+    path('projects/<str:project_id>/payment-requests/<int:request_id>/',
+         views.payment_request_detail, name='payment_request_detail'),
+
     path('tasks/due-today/', views.tasks_drill_down, {'filter_type': 'due-today'}, name='tasks_due_today'),
     path('tasks/due-soon/',  views.tasks_drill_down, {'filter_type': 'due-soon'},  name='tasks_due_soon'),
     path('tasks/overdue/',   views.tasks_drill_down, {'filter_type': 'overdue'},   name='tasks_overdue'),

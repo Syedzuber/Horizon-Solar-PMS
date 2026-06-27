@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Payment Request — {{ pr.invoice_number }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Back navigation ───────────────────────────────────────────────────────── #}
+<div class="mb-3">
+  <a href="{% url 'my_documents' %}" class="btn btn-outline-secondary btn-sm">
+    ← Back to My Documents
+  </a>
+</div>
+
+{# ── Header card ──────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+      <div>
+        <h5 class="mb-1" style="color:#1a7a4a;">Invoice {{ pr.invoice_number }}</h5>
+        <p class="text-muted mb-0 small">
+          <a href="{% url 'project_detail' project.project_id %}" class="text-decoration-none">
+            {{ project.project_id }} — {{ project.customer_name }}
+          </a>
+        </p>
+      </div>
+      <div>
+        {% if pr.status == 'confirmed' %}
+          <span class="badge fs-6 px-3 py-2" style="background:#1a7a4a;">Confirmed</span>
+        {% else %}
+          <span class="badge fs-6 px-3 py-2 bg-warning text-dark">Pending</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  {# ── Request details ─────────────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold">Request Details</div>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-4 text-muted fw-normal">Invoice Number</dt>
+          <dd class="col-sm-8 fw-semibold">{{ pr.invoice_number }}</dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Vendor</dt>
+          <dd class="col-sm-8">{{ pr.vendor.name|default:"—" }}</dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Amount</dt>
+          <dd class="col-sm-8 fw-semibold fs-5" style="color:#1a7a4a;">₹{{ pr.amount|floatformat:2 }}</dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Raised By</dt>
+          <dd class="col-sm-8">{{ pr.requested_by.get_full_name|default:pr.requested_by.username }}</dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Raised On</dt>
+          <dd class="col-sm-8">{{ pr.requested_date|date:"d M Y, H:i" }}</dd>
+
+          {% if pr.note %}
+          <dt class="col-sm-4 text-muted fw-normal">Note</dt>
+          <dd class="col-sm-8">{{ pr.note }}</dd>
+          {% endif %}
+        </dl>
+
+        <div class="mt-3 pt-3 border-top">
+          <p class="fw-semibold mb-2 small text-muted text-uppercase" style="letter-spacing:.05em;">Invoice Document</p>
+          <a href="{{ pr.invoice_document_url }}" target="_blank" rel="noopener"
+             class="btn btn-sm"
+             style="background:#1a7a4a; color:#fff;">
+            <i class="bi bi-download me-1"></i>
+            {{ pr.invoice_document_name }}
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── Payment confirmation panel ───────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card shadow-sm">
+      <div class="card-header fw-semibold">Payment</div>
+      <div class="card-body">
+        {% if pr.status == 'confirmed' %}
+        <dl class="row mb-0">
+          <dt class="col-sm-6 text-muted fw-normal">Payment Date</dt>
+          <dd class="col-sm-6">
+            {% if pr.payment_date %}{{ pr.payment_date|date:"d M Y" }}{% else %}—{% endif %}
+          </dd>
+
+          <dt class="col-sm-6 text-muted fw-normal">Reference</dt>
+          <dd class="col-sm-6">{{ pr.payment_reference|default:"—" }}</dd>
+
+          <dt class="col-sm-6 text-muted fw-normal">Confirmed By</dt>
+          <dd class="col-sm-6">
+            {% if pr.confirmed_by %}
+              {{ pr.confirmed_by.get_full_name|default:pr.confirmed_by.username }}
+            {% else %}—{% endif %}
+          </dd>
+        </dl>
+        {% else %}
+        <div class="text-center text-muted py-3">
+          <i class="bi bi-hourglass-split fs-4 d-block mb-1 opacity-50"></i>
+          <span class="small">Awaiting Finance confirmation</span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

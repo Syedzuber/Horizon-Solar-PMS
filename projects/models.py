@@ -1078,3 +1078,45 @@ class PaymentRequest(models.Model):
 
     def __str__(self):
         return f"PR-{self.pk} {self.project.project_id} — {self.vendor} ₹{self.amount}"
+
+
+class DesignSubmission(models.Model):
+    """Design document or drawing submitted by a Design user for a project."""
+
+    PENDING  = 'Pending'
+    APPROVED = 'Approved'
+    REJECTED = 'Rejected'
+    STATUS_CHOICES = [
+        (PENDING,  'Pending'),
+        (APPROVED, 'Approved'),
+        (REJECTED, 'Rejected'),
+    ]
+
+    project      = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='design_submissions')
+    submitted_by = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='design_submissions',
+    )
+    title        = models.CharField(max_length=200)
+    description  = models.TextField(blank=True, default='')
+
+    # Supabase storage — same three-field pattern as ProjectDocument / TaskAttachment
+    file_name     = models.CharField(max_length=255, blank=True, default='')
+    file_url      = models.URLField(max_length=1000, blank=True, default='')
+    supabase_path = models.CharField(max_length=500, blank=True, default='')
+
+    status       = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    reviewed_by  = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='reviewed_design_submissions',
+    )
+    reviewed_at  = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-submitted_at']
+
+    def __str__(self):
+        return f"{self.project.project_id} — {self.title}"

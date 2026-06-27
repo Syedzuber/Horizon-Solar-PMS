@@ -1,0 +1,349 @@
+{% extends "base.html" %}
+{% block title %}My Documents — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Header ───────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+      <div>
+        <h4 class="mb-0" style="color:#1a7a4a;">My Documents</h4>
+        <p class="text-muted mb-0 small">Your uploads and submissions across all projects</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Section A — Uploaded Files (all roles) ───────────────────────────────── #}
+{% with total_files=task_attachments|length|add:project_docs|length %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-paperclip" style="color:#1a7a4a;"></i>
+    Uploaded Files
+    <span class="text-muted fw-normal">· {{ total_files }}</span>
+  </div>
+  <div class="card-body p-0">
+    {% if task_attachments or project_docs %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">File Name</th>
+            <th>Uploaded On</th>
+            <th>Project</th>
+            <th>Context</th>
+            <th class="pe-3">Download</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for att in task_attachments %}
+          <tr>
+            <td class="ps-3">
+              <span title="{{ att.file_name }}">
+                {{ att.file_name|truncatechars:45 }}
+              </span>
+              <span class="badge bg-secondary ms-1 fw-normal" style="font-size:.7rem;">{{ att.file_type }}</span>
+            </td>
+            <td class="text-muted small">{{ att.uploaded_at|date:"d M Y" }}</td>
+            <td>
+              <a href="{% url 'project_detail' att.task.phase.project.project_id %}" class="text-decoration-none small">
+                {{ att.task.phase.project.project_id }}
+              </a>
+            </td>
+            <td class="small text-muted">Task: {{ att.task.task_name|truncatechars:40 }}</td>
+            <td class="pe-3">
+              <a href="{{ att.file_url }}" target="_blank" rel="noopener"
+                 class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-download"></i>
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+          {% for doc in project_docs %}
+          <tr>
+            <td class="ps-3">
+              <span title="{{ doc.file_name }}">
+                {{ doc.file_name|truncatechars:45 }}
+              </span>
+              <span class="badge bg-secondary ms-1 fw-normal" style="font-size:.7rem;">{{ doc.file_type }}</span>
+            </td>
+            <td class="text-muted small">{{ doc.uploaded_at|date:"d M Y" }}</td>
+            <td>
+              <a href="{% url 'project_detail' doc.project.project_id %}" class="text-decoration-none small">
+                {{ doc.project.project_id }}
+              </a>
+            </td>
+            <td class="small text-muted">Project Document</td>
+            <td class="pe-3">
+              <a href="{{ doc.file_url }}" target="_blank" rel="noopener"
+                 class="btn btn-outline-secondary btn-sm">
+                <i class="bi bi-download"></i>
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      <i class="bi bi-folder2-open fs-4 d-block mb-1 opacity-50"></i>
+      <span class="small">No files uploaded yet</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endwith %}
+
+{# ── Section B — BOQ Submissions (Design only) ────────────────────────────── #}
+{% if role == 'Design' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-clipboard-data" style="color:#1a7a4a;"></i>
+    BOQ Submissions
+    <span class="text-muted fw-normal">· {{ boq_list|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    {% if boq_list %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Project</th>
+            <th>Submitted On</th>
+            <th>Version</th>
+            <th>Status</th>
+            <th class="pe-3">View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for boq in boq_list %}
+          <tr>
+            <td class="ps-3">
+              <a href="{% url 'project_detail' boq.project.project_id %}" class="text-decoration-none small fw-semibold">
+                {{ boq.project.project_id }}
+              </a>
+              <div class="text-muted small">{{ boq.project.customer_name }}</div>
+            </td>
+            <td class="text-muted small">
+              {% if boq.submitted_at %}{{ boq.submitted_at|date:"d M Y" }}{% else %}—{% endif %}
+            </td>
+            <td class="small text-muted">v{{ boq.version }}</td>
+            <td>
+              {% if boq.status == 'Acknowledged' %}
+                <span class="badge" style="background:#1a7a4a;">{{ boq.status }}</span>
+              {% elif boq.status == 'Revision Requested' %}
+                <span class="badge bg-danger">{{ boq.status }}</span>
+              {% elif boq.status == 'Submitted' %}
+                <span class="badge bg-warning text-dark">{{ boq.status }}</span>
+              {% else %}
+                <span class="badge bg-secondary">{{ boq.status }}</span>
+              {% endif %}
+            </td>
+            <td class="pe-3">
+              <a href="{% url 'boq_detail' boq.project.project_id %}" class="btn btn-outline-secondary btn-sm">
+                View
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      <i class="bi bi-clipboard-x fs-4 d-block mb-1 opacity-50"></i>
+      <span class="small">No BOQ submissions yet</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Section C — Design Submissions (Design only) ─────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-pencil-square" style="color:#1a7a4a;"></i>
+    Design Submissions
+    <span class="text-muted fw-normal">· {{ design_list|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    {% if design_list %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Project</th>
+            <th>Title</th>
+            <th>Submitted On</th>
+            <th>Status</th>
+            <th class="pe-3">View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ds in design_list %}
+          <tr>
+            <td class="ps-3">
+              <a href="{% url 'project_detail' ds.project.project_id %}" class="text-decoration-none small fw-semibold">
+                {{ ds.project.project_id }}
+              </a>
+              <div class="text-muted small">{{ ds.project.customer_name }}</div>
+            </td>
+            <td>
+              <span title="{{ ds.title }}" class="small">{{ ds.title|truncatechars:45 }}</span>
+            </td>
+            <td class="text-muted small">{{ ds.submitted_at|date:"d M Y" }}</td>
+            <td>
+              {% if ds.status == 'Approved' %}
+                <span class="badge" style="background:#1a7a4a;">{{ ds.status }}</span>
+              {% elif ds.status == 'Rejected' %}
+                <span class="badge bg-danger">{{ ds.status }}</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">{{ ds.status }}</span>
+              {% endif %}
+            </td>
+            <td class="pe-3">
+              <a href="{% url 'design_submission_detail' ds.pk %}" class="btn btn-outline-secondary btn-sm">
+                View
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      <i class="bi bi-pencil-square fs-4 d-block mb-1 opacity-50"></i>
+      <span class="small">No design submissions yet</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── Section D — Delivery Challans (SCM only) ─────────────────────────────── #}
+{% if role == 'SCM' %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-truck" style="color:#1a7a4a;"></i>
+    Delivery Challans
+    <span class="text-muted fw-normal">· {{ dc_list|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    {% if dc_list %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">DC No.</th>
+            <th>Project</th>
+            <th>Created On</th>
+            <th>Status</th>
+            <th class="pe-3">View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for dc in dc_list %}
+          <tr>
+            <td class="ps-3 fw-semibold small">DC-{{ dc.dc_number }}</td>
+            <td>
+              <a href="{% url 'project_detail' dc.project.project_id %}" class="text-decoration-none small fw-semibold">
+                {{ dc.project.project_id }}
+              </a>
+              <div class="text-muted small">{{ dc.project.customer_name }}</div>
+            </td>
+            <td class="text-muted small">{{ dc.created_at|date:"d M Y" }}</td>
+            <td>
+              {% if dc.status == 'Received' %}
+                <span class="badge" style="background:#1a7a4a;">{{ dc.status }}</span>
+              {% elif dc.status == 'Rejected' %}
+                <span class="badge bg-danger">{{ dc.status }}</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">{{ dc.status }}</span>
+              {% endif %}
+            </td>
+            <td class="pe-3">
+              <a href="{% url 'delivery_challan_detail' dc.project.project_id dc.pk %}"
+                 class="btn btn-outline-secondary btn-sm">
+                View
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      <i class="bi bi-truck fs-4 d-block mb-1 opacity-50"></i>
+      <span class="small">No delivery challans created yet</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Section E — Payment Requests (SCM only) ──────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-receipt" style="color:#1a7a4a;"></i>
+    Payment Requests
+    <span class="text-muted fw-normal">· {{ pr_list|length }}</span>
+  </div>
+  <div class="card-body p-0">
+    {% if pr_list %}
+    <div class="table-responsive">
+      <table class="table table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th class="ps-3">Invoice No.</th>
+            <th>Project</th>
+            <th>Vendor</th>
+            <th>Amount</th>
+            <th>Raised On</th>
+            <th>Status</th>
+            <th class="pe-3">View</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pr in pr_list %}
+          <tr>
+            <td class="ps-3 fw-semibold small">{{ pr.invoice_number }}</td>
+            <td>
+              <a href="{% url 'project_detail' pr.project.project_id %}" class="text-decoration-none small fw-semibold">
+                {{ pr.project.project_id }}
+              </a>
+              <div class="text-muted small">{{ pr.project.customer_name }}</div>
+            </td>
+            <td class="small">{{ pr.vendor.name|default:"—" }}</td>
+            <td class="small fw-semibold">₹{{ pr.amount|floatformat:0 }}</td>
+            <td class="text-muted small">{{ pr.requested_date|date:"d M Y" }}</td>
+            <td>
+              {% if pr.status == 'confirmed' %}
+                <span class="badge" style="background:#1a7a4a;">Confirmed</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">Pending</span>
+              {% endif %}
+            </td>
+            <td class="pe-3">
+              <a href="{% url 'payment_request_detail' pr.project.project_id pr.pk %}"
+                 class="btn btn-outline-secondary btn-sm">
+                View
+              </a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="p-4 text-center text-muted">
+      <i class="bi bi-receipt fs-4 d-block mb-1 opacity-50"></i>
+      <span class="small">No payment requests raised yet</span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

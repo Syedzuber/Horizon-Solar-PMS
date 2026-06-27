@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Design Submission — {{ submission.title }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+{# ── Back navigation ───────────────────────────────────────────────────────── #}
+<div class="mb-3">
+  <a href="{% url 'my_documents' %}" class="btn btn-outline-secondary btn-sm">
+    ← Back to My Documents
+  </a>
+</div>
+
+{# ── Header card ──────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-body p-4">
+    <div class="d-flex justify-content-between align-items-start flex-wrap gap-3">
+      <div>
+        <h5 class="mb-1" style="color:#1a7a4a;">{{ submission.title }}</h5>
+        <p class="text-muted mb-0 small">
+          <a href="{% url 'project_detail' submission.project.project_id %}" class="text-decoration-none">
+            {{ submission.project.project_id }} — {{ submission.project.customer_name }}
+          </a>
+        </p>
+      </div>
+      <div>
+        {% if submission.status == 'Approved' %}
+          <span class="badge fs-6 px-3 py-2" style="background:#1a7a4a;">Approved</span>
+        {% elif submission.status == 'Rejected' %}
+          <span class="badge fs-6 px-3 py-2 bg-danger">Rejected</span>
+        {% else %}
+          <span class="badge fs-6 px-3 py-2 bg-warning text-dark">Pending</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row g-4">
+  {# ── Submission details ──────────────────────────────────────────────────── #}
+  <div class="col-lg-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-semibold">Submission Details</div>
+      <div class="card-body">
+        <dl class="row mb-0">
+          <dt class="col-sm-4 text-muted fw-normal">Submitted By</dt>
+          <dd class="col-sm-8">
+            {{ submission.submitted_by.user.get_full_name|default:submission.submitted_by.user.username }}
+          </dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Submitted On</dt>
+          <dd class="col-sm-8">{{ submission.submitted_at|date:"d M Y, H:i" }}</dd>
+
+          <dt class="col-sm-4 text-muted fw-normal">Project</dt>
+          <dd class="col-sm-8">
+            <a href="{% url 'project_detail' submission.project.project_id %}" class="text-decoration-none">
+              {{ submission.project.project_id }} — {{ submission.project.customer_name }}
+            </a>
+          </dd>
+
+          {% if submission.description %}
+          <dt class="col-sm-4 text-muted fw-normal">Description</dt>
+          <dd class="col-sm-8">{{ submission.description }}</dd>
+          {% endif %}
+        </dl>
+
+        {% if submission.file_url %}
+        <div class="mt-3 pt-3 border-top">
+          <p class="fw-semibold mb-2 small text-muted text-uppercase" style="letter-spacing:.05em;">Document</p>
+          <a href="{{ submission.file_url }}" target="_blank" rel="noopener"
+             class="btn btn-sm"
+             style="background:#1a7a4a; color:#fff;">
+            <i class="bi bi-download me-1"></i>
+            {{ submission.file_name|default:"Download" }}
+          </a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  {# ── Review panel ────────────────────────────────────────────────────────── #}
+  <div class="col-lg-4">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-semibold">Review</div>
+      <div class="card-body">
+        {% if submission.reviewed_by %}
+        <dl class="row mb-0">
+          <dt class="col-sm-5 text-muted fw-normal">Reviewed By</dt>
+          <dd class="col-sm-7">
+            {{ submission.reviewed_by.user.get_full_name|default:submission.reviewed_by.user.username }}
+          </dd>
+
+          <dt class="col-sm-5 text-muted fw-normal">Reviewed On</dt>
+          <dd class="col-sm-7">
+            {% if submission.reviewed_at %}{{ submission.reviewed_at|date:"d M Y" }}{% else %}—{% endif %}
+          </dd>
+        </dl>
+        {% if submission.review_notes %}
+        <div class="mt-3 p-3 rounded" style="background:#f4f6f9;">
+          <p class="small text-muted mb-1 fw-semibold">Notes</p>
+          <p class="mb-0 small">{{ submission.review_notes }}</p>
+        </div>
+        {% endif %}
+        {% else %}
+        <div class="text-center text-muted py-3">
+          <i class="bi bi-hourglass-split fs-4 d-block mb-1 opacity-50"></i>
+          <span class="small">Awaiting review</span>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

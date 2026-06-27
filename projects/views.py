@@ -25,7 +25,7 @@ from .models import (
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
-    PaymentRequest, NotificationLog, SystemSettings,
+    PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
 )
 from .notifications import send_notification
 from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
@@ -5387,3 +5387,91 @@ def interakt_webhook(request):
         logger.error('Interakt webhook DB update failed: %s', e)
 
     return HttpResponse(status=200)
+
+
+# ---------------------------------------------------------------------------
+# My Documents — personal record-keeping page
+# ---------------------------------------------------------------------------
+
+@login_required
+def my_documents(request):
+    """Personal document archive for the logged-in user. Role-aware sections."""
+    profile = request.user.profile
+    role    = profile.role
+
+    # Section A — Uploaded Files (all roles)
+    task_attachments = TaskAttachment.objects.filter(
+        uploaded_by=profile,
+        is_deleted=False,
+    ).select_related('task', 'task__phase', 'task__phase__project').order_by('-uploaded_at')[:50]
+
+    project_docs = ProjectDocument.objects.filter(
+        uploaded_by=profile,
+        is_deleted=False,
+    ).select_related('project').order_by('-uploaded_at')[:50]
+
+    # Section B — BOQ Submissions (Design only)
+    boq_list = []
+    if role == 'Design':
+        boq_list = BOQ.objects.filter(
+            submitted_by=profile,
+        ).select_related('project').order_by('-submitted_at')[:50]
+
+    # Section C — Design Submissions (Design only)
+    design_list = []
+    if role == 'Design':
+        design_list = DesignSubmission.objects.filter(
+            submitted_by=profile,
+        ).select_related('project').order_by('-submitted_at')[:50]
+
+    # Section D — Delivery Challans (SCM only)
+    dc_list = []
+    if role == 'SCM':
+        dc_list = DeliveryChallan.objects.filter(
+            created_by=profile,
+        ).select_related('project').order_by('-created_at')[:50]
+
+    # Section E — Payment Requests (SCM only)
+    # requested_by is FK to auth.User (not UserProfile)
+    pr_list = []
+    if role == 'SCM':
+        pr_list = PaymentRequest.objects.filter(
+            requested_by=request.user,
+        ).select_related('project', 'vendor').order_by('-requested_date')[:50]
+
+    context = {
+        'task_attachments': task_attachments,
+        'project_docs':     project_docs,
+        'boq_list':         boq_list,
+        'design_list':      design_list,
+        'dc_list':          dc_list,
+        'pr_list':          pr_list,
+        'role':             role,
+    }
+    return render(request, 'projects/my_documents.html', context)
+
+
+@login_required
+def design_submission_detail(request, pk):
+    """Read-only detail view for a DesignSubmission. Submitter, PM, or Admin only."""
+    submission = get_object_or_404(DesignSubmission, pk=pk)
+    profile    = request.user.profile
+    if profile != submission.submitted_by and profile.role not in ('PM', 'Admin'):
+        messages.error(request, "You don't have access to this submission.")
+        return redirect('my_documents')
+    return render(request, 'projects/design_submission_detail.html', {'submission': submission})
+
+
+@login_required
+def payment_request_detail(request, project_id, request_id):
+    """Read-only detail view for a PaymentRequest. SCM, Finance, PM, or Admin only."""
+    project = get_object_or_404(Project, project_id=project_id)
+    pr      = get_object_or_404(PaymentRequest, pk=request_id, project=project)
+    profile = request.user.profile
+    if profile.role not in ('SCM', 'Finance', 'PM', 'Admin'):
+        messages.error(request, "You don't have access to this payment request.")
+        return redirect('my_documents')
+    return render(request, 'projects/payment_request_detail.html', {
+        'pr':      pr,
+        'project': project,
+    })

@@ -11,6 +11,30 @@
     body { background-color: #f4f6f9; }
     .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
     .horizon-nav { background: linear-gradient(135deg, #1a7a4a 0%, #155f3a 100%); border-bottom: 2px solid #f0a829; }
+
+    /* Username click-dropdown */
+    #user-hover-menu { display: inline-block; cursor: pointer; }
+    #user-hover-dropdown {
+      display: none;
+      position: absolute;
+      top: calc(100% + 8px);
+      right: 0;
+      min-width: 160px;
+      background: #fff;
+      border-radius: 6px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.15);
+      padding: 4px;
+      z-index: 1050;
+    }
+    #user-hover-dropdown.open { display: block; }
+    #user-hover-dropdown .dropdown-item {
+      color: #1a7a4a;
+      font-size: .85rem;
+      padding: 6px 12px;
+    }
+    #user-hover-dropdown .dropdown-item:hover {
+      background: #f0faf5;
+    }
   </style>
   {% block extra_head %}{% endblock %}
 </head>
@@ -24,7 +48,16 @@
     <span class="navbar-brand mb-0">Horizon Solar — PMS</span>
   </div>
   <div class="d-flex align-items-center gap-3">
-    <span class="text-white-50 small">{{ user.get_full_name|default:user.username }}</span>
+    <div class="position-relative" id="user-hover-menu">
+      <span class="text-white-50 small" style="cursor:default;">
+        {{ user.get_full_name|default:user.username }}
+      </span>
+      <div id="user-hover-dropdown">
+        <a href="{% url 'my_documents' %}" class="dropdown-item small rounded">
+          <i class="bi bi-folder2-open me-2"></i>My Documents
+        </a>
+      </div>
+    </div>
     <a class="nav-link position-relative me-1 text-white" href="{% url 'notifications' %}"
        title="Notifications">
       <i class="bi bi-bell fs-5"></i>
@@ -119,6 +152,25 @@
     </div>
   </div>
 </div>
+
+<script>
+(function () {
+  document.addEventListener('DOMContentLoaded', function () {
+    var menu    = document.getElementById('user-hover-menu');
+    var dropdown = document.getElementById('user-hover-dropdown');
+    if (!menu || !dropdown) return;
+
+    menu.addEventListener('click', function (e) {
+      e.stopPropagation();
+      dropdown.classList.toggle('open');
+    });
+
+    document.addEventListener('click', function () {
+      dropdown.classList.remove('open');
+    });
+  });
+}());
+</script>
 
 <script>
 (function () {
