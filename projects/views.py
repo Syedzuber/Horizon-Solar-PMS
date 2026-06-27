@@ -1921,15 +1921,22 @@ def task_status_update(request, project_id, task_id):
                 if recipient.pk in seen_pks:
                     continue
                 seen_pks.add(recipient.pk)
+                _pm_link = f'/projects/{project.project_id}/'
+                _pm_message = (
+                    f'Project {project.project_id} ({project.customer_name}) has reached '
+                    f'payment milestone: "{task.task_name}".\n\n'
+                    f'Please initiate collection at the earliest.'
+                )
+                _pm_email_message = (
+                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
+                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
+                )
                 send_notification(
                     recipient=recipient,
-                    message=(
-                        f'Payment milestone reached: "{task.task_name}" completed on '
-                        f'{project.project_id} — {project.customer_name}.'
-                    ),
+                    message=_pm_email_message,
                     channels=['in_app', 'whatsapp', 'email'],
-                    link=f'/projects/{project.project_id}/',
-                    subject=f'Payment Milestone — {project.project_id}',
+                    link=_pm_link,
+                    subject=f'Payment Milestone Reached — {project.customer_name}',
                     template='payment_notification',
                     template_params=[project.customer_name, task.task_name, project.customer_name],
                     related_project=project,
@@ -1976,14 +1983,21 @@ def task_assign(request, project_id, task_id):
             recipient_name = assignee.user.get_full_name() or assignee.user.username
             task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
             task_url_abs = request.build_absolute_uri(task_url)
+            _at_message = (
+                f'Hi {recipient_name},\n\n'
+                f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
+                f'Please login to review details and update progress.'
+            )
+            _at_email_message = (
+                f'{_at_message}\n\nView in Horizon Solar PMS:\n'
+                f'https://horizon-solar-pms-production.up.railway.app{task_url}'
+            )
             send_notification(
                 recipient=assignee,
-                message=(
-                    f'You have been assigned task "{task.task_name}" '
-                    f'on project {project.project_id} — {project.customer_name}.'
-                ),
-                channels=['in_app', 'whatsapp'],
+                message=_at_email_message,
+                channels=['in_app', 'whatsapp', 'email'],
                 link=task_url,
+                subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
                 template='assign_task',
                 template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
                 related_project=project,
@@ -2268,17 +2282,26 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
     if acknowledging_profile not in recipients:
         recipients.append(acknowledging_profile)
     scm_name = request.user.get_full_name() or request.user.username
+    _boq_message = (
+        f'The Bill of Quantities for project {boq.project.customer_name} has been acknowledged '
+        f'by {scm_name}.\n\n'
+        f'Material procurement can now proceed.'
+    )
+    _boq_email_message = (
+        f'{_boq_message}\n\nView in Horizon Solar PMS:\n'
+        f'https://horizon-solar-pms-production.up.railway.app{boq_link}'
+    )
     for recipient in recipients:
         send_notification(
             recipient=recipient,
-            message=message,
-            channels=['in_app', 'whatsapp'],
+            message=_boq_email_message,
+            channels=['in_app', 'whatsapp', 'email'],
             link=boq_link,
+            subject=f'BOQ Acknowledged — {boq.project.customer_name}',
             template='boq_acknowledged',
             template_params=[
                 boq.project.customer_name,   # [0] header
-                boq.project.customer_name,   # [1] body[0] — project_name repeated
-                scm_name,                    # [2] body[1] — scm_name
+                scm_name,                    # [1] body[0] — scm_name
             ],
             related_project=boq.project,
             actor=acknowledging_profile,
@@ -3008,18 +3031,27 @@ def confirm_payment_request(request, project_id, request_id):
     if project.assigned_pm:
         invoice_recipients.append(project.assigned_pm)
     invoice_recipients += list(UserProfile.objects.filter(role='CEO', is_active=True))
+    _ip_link = f'/projects/{project.project_id}/overview/'
+    _ip_message = (
+        f'Payment has been confirmed for project {project.customer_name}.\n\n'
+        f'Vendor: {pr.vendor.name}. Invoice: {pr.invoice_number}. '
+        f'Amount: Rs. {pr.amount}. Item: {boq_desc}.\n\n'
+        f'Records have been updated.'
+    )
+    _ip_email_message = (
+        f'{_ip_message}\n\nView in Horizon Solar PMS:\n'
+        f'https://horizon-solar-pms-production.up.railway.app{_ip_link}'
+    )
     for recipient in invoice_recipients:
         if recipient.pk in seen_pks:
             continue
         seen_pks.add(recipient.pk)
         send_notification(
             recipient=recipient,
-            message=(
-                f'Invoice {pr.invoice_number} paid: ₹{pr.amount} to {pr.vendor.name} '
-                f'for {boq_desc} on {project.project_id}.'
-            ),
-            channels=['in_app', 'whatsapp'],
-            link=f'/projects/{project.project_id}/overview/',
+            message=_ip_email_message,
+            channels=['in_app', 'whatsapp', 'email'],
+            link=_ip_link,
+            subject=f'Invoice Payment Confirmed — {project.customer_name}',
             template='invoice_paid',
             template_params=[project.customer_name, boq_desc, pr.invoice_number, str(pr.amount), pr.vendor.name],
             related_project=project,
@@ -3758,20 +3790,28 @@ def zoho_deal_closed_webhook(request):
             pm_display_name = project.assigned_pm.user.get_full_name() or project.assigned_pm.user.username
             project_link = reverse('project_overview', args=[project.pk])
             project_url_abs = request.build_absolute_uri(project_link)
+            _ap_link = f'/projects/{project.project_id}/'
+            _ap_message = (
+                f'Hi {pm_display_name},\n\n'
+                f'You have been assigned as Project Manager for {project.customer_name} '
+                f'({project.city}).\n\n'
+                f'Please review the project details and begin onboarding.'
+            )
+            _ap_email_message = (
+                f'{_ap_message}\n\nView in Horizon Solar PMS:\n'
+                f'https://horizon-solar-pms-production.up.railway.app{_ap_link}'
+            )
             send_notification(
                 recipient=project.assigned_pm,
-                message=(
-                    f'You have been assigned a new project {project.project_id} '
-                    f'— {project.customer_name} ({project.city}).'
-                ),
-                channels=['in_app', 'whatsapp'],
-                link=f'/projects/{project.project_id}/',
+                message=_ap_email_message,
+                channels=['in_app', 'whatsapp', 'email'],
+                link=_ap_link,
+                subject=f'New Project Assigned: {project.customer_name}',
                 template='assign_project',
                 template_params=[
                     project.customer_name,    # [0] header
-                    project.customer_name,    # [1] body[0] — project_name
-                    pm_display_name,          # [2] body[1] — user_name
-                    project_url_abs,          # [3] body[2] — project_url
+                    pm_display_name,          # [1] body[0] — user_name
+                    project_url_abs,          # [2] body[1] — project_url
                 ],
                 related_project=project,
             )
@@ -4185,11 +4225,22 @@ def create_project_issue(request, project_id):
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
         recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
+        _ic_link = f'/issues/{issue.pk}/'
+        _ic_message = (
+            f'A new issue has been raised on project {project.customer_name}: '
+            f'"{title}".\n\n'
+            f'Please login to review and coordinate resolution.'
+        )
+        _ic_email_message = (
+            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
+            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
+        )
         send_notification(
             recipient=assigned_to,
-            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
-            channels=['in_app', 'whatsapp'],
-            link=f'/issues/{issue.pk}/',
+            message=_ic_email_message,
+            channels=['in_app', 'whatsapp', 'email'],
+            link=_ic_link,
+            subject=f'New Issue Raised — {project.customer_name}',
             template='issue_created',
             template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
             related_project=project,
@@ -4267,11 +4318,22 @@ def create_task_issue(request, project_id, task_id):
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
         recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
+        _ic_link = f'/issues/{issue.pk}/'
+        _ic_message = (
+            f'A new issue has been raised on project {project.customer_name}: '
+            f'"{title}".\n\n'
+            f'Please login to review and coordinate resolution.'
+        )
+        _ic_email_message = (
+            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
+            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
+        )
         send_notification(
             recipient=assigned_to,
-            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
-            channels=['in_app', 'whatsapp'],
-            link=f'/issues/{issue.pk}/',
+            message=_ic_email_message,
+            channels=['in_app', 'whatsapp', 'email'],
+            link=_ic_link,
+            subject=f'New Issue Raised — {project.customer_name}',
             template='issue_created',
             template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
             related_project=project,
@@ -4359,11 +4421,22 @@ def create_delivery_issue(request, project_id, dc_id):
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
         recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
+        _ic_link = f'/issues/{issue.pk}/'
+        _ic_message = (
+            f'A new issue has been raised on project {project.customer_name}: '
+            f'"{title}".\n\n'
+            f'Please login to review and coordinate resolution.'
+        )
+        _ic_email_message = (
+            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
+            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
+        )
         send_notification(
             recipient=assigned_to,
-            message=f'You have been assigned issue "{title}" on {project.project_id} — {project.customer_name}.',
-            channels=['in_app', 'whatsapp'],
-            link=f'/issues/{issue.pk}/',
+            message=_ic_email_message,
+            channels=['in_app', 'whatsapp', 'email'],
+            link=_ic_link,
+            subject=f'New Issue Raised — {project.customer_name}',
             template='issue_created',
             template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
             related_project=project,
@@ -4498,10 +4571,14 @@ def resolve_issue(request, issue_id):
         resolver_name = profile.user.get_full_name() or profile.user.username
         issue_link = f'/issues/{issue.pk}/'
         issue_link_abs = request.build_absolute_uri(issue_link)
-        resolved_params = [project.customer_name, issue.title, project.customer_name, resolver_name, issue_link_abs]
-        resolved_message = (
-            f'{resolver_name} resolved issue "{issue.title}" on {project.project_id}. '
-            f'Please review and close.'
+        resolved_params = [project.customer_name, issue.title, resolver_name, issue_link_abs]
+        _ir_message = (
+            f'The issue "{issue.title}" on project {project.customer_name} '
+            f'has been marked as resolved by {resolver_name}.'
+        )
+        _ir_email_message = (
+            f'{_ir_message}\n\nView in Horizon Solar PMS:\n'
+            f'https://horizon-solar-pms-production.up.railway.app{issue_link}'
         )
         notified_pks = {profile.pk}
         for notify_recipient in [project.assigned_pm, issue.assigned_to, issue.raised_by]:
@@ -4509,9 +4586,10 @@ def resolve_issue(request, issue_id):
                 notified_pks.add(notify_recipient.pk)
                 send_notification(
                     recipient=notify_recipient,
-                    message=resolved_message,
-                    channels=['in_app', 'whatsapp'],
+                    message=_ir_email_message,
+                    channels=['in_app', 'whatsapp', 'email'],
                     link=issue_link,
+                    subject=f'Issue Resolved — {project.customer_name}',
                     template='issue_resolved',
                     template_params=resolved_params,
                     related_project=project,
