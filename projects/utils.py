@@ -160,7 +160,7 @@ def attach_residential_template(project):
                 'phase_order': 1,
                 'tasks': [
                     {'task_order': 1, 'task_name': 'OCR, Documentation & Verification', 'assigned_role': Task.BD,            'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE,        'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE,        'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: Advance Payment
                 ],
             },
             {
@@ -168,7 +168,7 @@ def attach_residential_template(project):
                 'phase_order': 2,
                 'tasks': [
                     {'task_order': 1, 'task_name': 'DEV Schedule',          'assigned_role': Task.PM,            'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER,  'duration_days': 2, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: On Survey Completion
+                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER,  'duration_days': 2, 'task_type': Task.INTERNAL},
                     {'task_order': 3, 'task_name': 'DEV Data to Design',    'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 4, 'task_name': 'DEV Inputs Validation', 'assigned_role': Task.DESIGN,         'duration_days': 1, 'task_type': Task.INTERNAL},
                 ],
@@ -208,7 +208,7 @@ def attach_residential_template(project):
                     {'task_order': 3, 'task_name': 'PO Placed Module',                  'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 4, 'task_name': 'PO Placed Inverter',                'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 5, 'task_name': 'PO for B & C Class Items',          'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Finance Confirmation',              'assigned_role': Task.FINANCE, 'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'Finance Confirmation',              'assigned_role': Task.FINANCE, 'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: Finance Confirmation
                     {'task_order': 7, 'task_name': 'Pre Dispatch Payment Confirmation', 'assigned_role': Task.FINANCE, 'duration_days': 1, 'task_type': Task.INTERNAL},
                 ],
             },
@@ -219,7 +219,7 @@ def attach_residential_template(project):
                     {'task_order': 1, 'task_name': 'Delivery Schedule',             'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 2, 'task_name': 'Delivery of MMS',               'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 3, 'task_name': 'Delivery of B & C Class Items', 'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: On Material Supply
+                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 5, 'task_name': 'Delivery of Inverter',          'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
                 ],
             },
@@ -246,7 +246,7 @@ def attach_residential_template(project):
                     {'task_order': 3, 'task_name': 'SCO Release',                       'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
                     {'task_order': 4, 'task_name': 'Meter Installation by DISCOM',      'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
                     {'task_order': 5, 'task_name': 'RMS Configuration',                 'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: On Commissioning
+                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 7, 'task_name': 'Commissioning Report Prepared',     'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
                     {'task_order': 8, 'task_name': 'Commissioning Report Approved',     'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
                     {'task_order': 9, 'task_name': 'Customer Handover',                 'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
@@ -256,7 +256,7 @@ def attach_residential_template(project):
                 'phase_name':  'Finance Closure',
                 'phase_order': 9,
                 'tasks': [
-                    {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE, 'duration_days': 2, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE, 'duration_days': 2, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: 100% Payment
                 ],
             },
         ]
