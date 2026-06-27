@@ -341,6 +341,15 @@ def dashboard_pm(request):
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
         ).count()
 
+        milestones_list = []
+        for _m in project.milestones.all():
+            milestones_list.append({
+                'milestone_name':        _m.milestone_name,
+                'milestone_description': _m.milestone_description,
+                'amount':                _m.amount,
+                'status':                _m.status,
+            })
+
         projects_with_progress.append({
             'project':                   project,
             'total_tasks':               total_tasks,
@@ -358,6 +367,7 @@ def dashboard_pm(request):
             'delay_days':                delay_days,
             'urgency_count':             blocked_count + overdue_count,
             'due_today_count':           due_today_for_project,
+            'milestones':                milestones_list,
         })
 
     projects_with_progress.sort(
@@ -1759,6 +1769,12 @@ def task_status_update(request, project_id, task_id):
     project = get_object_or_404(Project, project_id=project_id)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
+    if task.assigned_to is None:
+        return JsonResponse({
+            'success': False,
+            'error': 'Task is unassigned. Assign it before changing status.'
+        }, status=400)
+
     # Permission check before any DB write
     try:
         user_role = request.user.profile.role
@@ -3092,6 +3108,7 @@ def dashboard_bd(request):
         milestones_total    = 0
         milestones_received = 0
         milestones_awaiting = 0
+        milestones_list     = []
         for m in project.milestones.all():
             milestones_total += 1
             if m.status == PaymentMilestone.RECEIVED:
@@ -3099,6 +3116,23 @@ def dashboard_bd(request):
             elif m.status == PaymentMilestone.INVOICED:
                 # Invoice sent to client; BD follows up for payment receipt
                 milestones_awaiting += 1
+            # Variance for display: positive = short (expected > received), negative = excess
+            if m.amount is not None and m.amount_received is not None:
+                _var = m.amount - m.amount_received
+                _var_abs = abs(_var)
+            else:
+                _var = None
+                _var_abs = None
+            milestones_list.append({
+                'pk':                   m.pk,
+                'milestone_name':       m.milestone_name,
+                'milestone_description': m.milestone_description,
+                'amount':               m.amount,
+                'amount_received':      m.amount_received,
+                'status':               m.status,
+                'variance':             _var,
+                'variance_abs':         _var_abs,
+            })
 
         # Trigger 6: annotated open_issue_count = Open or In Progress — same as PM/SE dashboards
         blocked_issue_count = project.open_issue_count
@@ -3143,6 +3177,7 @@ def dashboard_bd(request):
             'delay_days':          delay_days,
             'orc_status':          orc_status,
             'orc_overdue':         orc_overdue,
+            'milestones':          milestones_list,
             'milestones_total':    milestones_total,
             'milestones_received': milestones_received,
             'milestones_awaiting': milestones_awaiting,
@@ -3166,6 +3201,79 @@ def dashboard_bd(request):
         'total_orc_overdue':         total_orc_overdue,
         'total_milestones_awaiting': total_milestones_awaiting,
     })
+
+
+@login_required
+@role_required(['BD', 'PM'])
+def set_milestone_amounts(request, project_id):
+    """
+    Set M1/M2/M3 agreed amounts for a project. Called by BD on Phase 1 Task 1 Done gate
+    and by the BD dashboard inline edit pencil.
+    Null values for a milestone key = skip that milestone (used for single-milestone edits).
+    POST body: JSON {m1_amount, m2_amount, m3_amount} where each is a number or null.
+    """
+    if request.method != 'POST':
+        return JsonResponse({'success': False, 'error': 'POST only'}, status=405)
+
+    project = get_object_or_404(Project, project_id=project_id)
+
+    try:
+        data = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({'success': False, 'error': 'Invalid request body.'})
+
+    amounts = {}
+    for name, key in [('M1', 'm1_amount'), ('M2', 'm2_amount'), ('M3', 'm3_amount')]:
+        raw = data.get(key)
+        if raw is None:
+            continue  # null in JSON = skip this milestone
+        raw_str = str(raw).strip()
+        if raw_str == '':
+            return JsonResponse({'success': False, 'error': 'All three milestone amounts are required.'})
+        try:
+            val = Decimal(raw_str)
+            if val < 0:
+                return JsonResponse({'success': False, 'error': 'Amounts must be 0 or greater.'})
+            amounts[name] = val
+        except InvalidOperation:
+            return JsonResponse({'success': False, 'error': 'All three milestone amounts are required.'})
+
+    if not amounts:
+        return JsonResponse({'success': False, 'error': 'No amounts provided.'})
+
+    # Contract value check — only when all three milestones will be non-null after this update
+    existing = {m.milestone_name: m.amount for m in project.milestones.all() if m.amount is not None}
+    merged = dict(existing)
+    merged.update(amounts)
+    if all(merged.get(n) is not None for n in ('M1', 'M2', 'M3')):
+        total = merged['M1'] + merged['M2'] + merged['M3']
+        contract = project.contract_value
+        if contract is not None and total != contract:
+            return JsonResponse({
+                'success': False,
+                'error': (
+                    f'Milestone amounts must sum to ₹{contract:,.0f} (contract value). '
+                    f'Current total: ₹{total:,.0f}. '
+                    f'Difference: ₹{abs(contract - total):,.0f}.'
+                ),
+            })
+
+    try:
+        with transaction.atomic():
+            for name, amount in amounts.items():
+                PaymentMilestone.objects.update_or_create(
+                    project=project, milestone_name=name,
+                    defaults={'amount': amount},
+                )
+        log_activity(
+            project, request.user.profile,
+            'Set milestone amounts: ' + ', '.join(f'{n}=₹{a}' for n, a in amounts.items()),
+            entity_type='Milestone',
+        )
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+    return JsonResponse({'success': True})
 
 
 # ---------------------------------------------------------------------------
@@ -3302,13 +3410,18 @@ def project_overview(request, project_id):
     except Exception:
         pass
 
-    # Milestones with variance
+    # Milestones with variance (positive = short / expected > received; negative = excess)
     milestones = list(project.milestones.all())
     for m in milestones:
         if m.amount is not None and m.amount_received is not None:
             m.variance = m.amount - m.amount_received
+            m.variance_abs = abs(m.variance)
         else:
             m.variance = None
+            m.variance_abs = None
+
+    # Dict of existing amounts keyed by milestone_name — used by BD modal pre-fill
+    milestone_amounts = {m.milestone_name: str(m.amount) if m.amount is not None else '' for m in milestones}
 
     # Phases + task completion percentages (empty for Draft projects)
     phases = []
@@ -3461,6 +3574,7 @@ def project_overview(request, project_id):
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
         'milestones':                  milestones,
+        'milestone_amounts':           milestone_amounts,
         'phases':                      phases,
         'phase_data_json':             json.dumps(phase_data_json),
         'recent_activity':             recent_activity,

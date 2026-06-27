@@ -136,7 +136,7 @@
 
   {# Phase progress bars #}
   {% if phases %}
-  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}col-md-4{% else %}col-md-6{% endif %}">
+  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 fw-semibold small">
         <i data-lucide="bar-chart-3" class="lucide-icon me-1"></i>Task Progress by Phase
@@ -164,7 +164,7 @@
   {% endif %}
 
   {# Payment milestones #}
-  {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}
+  {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}
   <div class="col-12 col-md-4">
     <div class="card shadow-sm h-100">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -202,8 +202,12 @@
                 {% if m.amount_received is not None %}
                   <div style="font-size:.75rem;" class="text-muted">
                     Received: ₹{{ m.amount_received|floatformat:0 }}
-                    {% if m.variance and m.variance != 0 %}
-                      <span class="{% if m.variance > 0 %}text-success{% else %}text-warning{% endif %} ms-1">Δ ₹{{ m.variance|floatformat:0 }}</span>
+                    {% if m.variance is not None and m.variance != 0 %}
+                      {% if m.variance > 0 %}
+                        <span class="text-danger ms-1">₹{{ m.variance_abs|floatformat:0 }} short</span>
+                      {% else %}
+                        <span class="text-danger ms-1">₹{{ m.variance_abs|floatformat:0 }} excess</span>
+                      {% endif %}
                     {% endif %}
                   </div>
                 {% endif %}
@@ -222,6 +226,14 @@
                           data-bs-toggle="collapse"
                           data-bs-target="#editMilestone{{ m.pk }}"
                           title="Edit">
+                    <i class="bi bi-pencil"></i>
+                  </button>
+                {% elif role == 'BD' %}
+                  <button class="btn btn-outline-secondary milestone-edit-btn"
+                          type="button"
+                          data-bs-toggle="collapse"
+                          data-bs-target="#editMilestoneBD{{ m.pk }}"
+                          title="Edit amount">
                     <i class="bi bi-pencil"></i>
                   </button>
                 {% endif %}
@@ -261,6 +273,26 @@
               </form>
             </div>
             {% endif %}
+            {% if role == 'BD' %}
+            <div class="collapse mt-2" id="editMilestoneBD{{ m.pk }}">
+              <div class="p-2 rounded" style="background:#f8f9fa;">
+                <div class="input-group input-group-sm mb-2">
+                  <span class="input-group-text">₹</span>
+                  <input type="number" min="0" step="0.01" placeholder="0"
+                         id="bdAmtInput{{ m.pk }}"
+                         value="{{ m.amount|default:'' }}"
+                         class="form-control form-control-sm">
+                </div>
+                <div id="bdAmtError{{ m.pk }}" class="text-danger small mb-2 d-none"
+                     style="background:rgba(220,53,69,.08);padding:.35rem .5rem;border-radius:.25rem;border:1px solid rgba(220,53,69,.3);"></div>
+                <button type="button" class="btn btn-sm w-100"
+                        style="background:var(--hz-green);color:#fff;font-size:.78rem;"
+                        onclick="saveBDMilestoneAmount('{{ project.project_id }}', '{{ m.milestone_name }}', '{{ csrf_token }}', {{ m.pk }})">
+                  Save
+                </button>
+              </div>
+            </div>
+            {% endif %}
           </div>
           {% endfor %}
         {% else %}
@@ -279,7 +311,7 @@
   </div>
   {% endif %}
 
-  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' %}col-md-4{% else %}col-md-6{% endif %}">
+  <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
         <span class="fw-semibold small"><i data-lucide="history" class="lucide-icon me-1"></i>Recent Activity</span>
@@ -767,18 +799,28 @@
                 {% if is_assigned_pm or user_task_role == task.assigned_role %}
                   <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
-                    <select name="status" onchange="handleTaskStatusChange(this)"
+                    <select name="status"
+                            {% if not task.assigned_to %}disabled{% endif %}
+                            onchange="handleTaskStatusChange(this)"
                             data-original-status="{{ task.status }}"
                             data-task-name="{{ task.task_name }}"
+                            {% if forloop.parentloop.first and forloop.first and user_task_role == 'BD / Sales' %}
+                            data-is-milestone-gate="true"
+                            data-project-id="{{ project.project_id }}"
+                            {% endif %}
                             class="form-select form-select-sm
                               {% if task.status == 'Done' %}border-success text-success
                               {% elif task.status == 'Blocked' %}border-danger text-danger
-                              {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}"
+                              {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}
+                              {% if not task.assigned_to %}opacity-50 cursor-not-allowed{% endif %}"
                             style="font-size:.78rem;">
                       {% for val, label in task_status_choices %}
                         <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
                       {% endfor %}
                     </select>
+                    {% if not task.assigned_to %}
+                    <p class="text-xs text-gray-400 mt-1 italic">Assign task to enable status change</p>
+                    {% endif %}
                     {% if not is_assigned_pm and not task.due_date %}
                     <input type="date" name="due_date"
                            class="form-control form-control-sm mt-1"
@@ -1097,11 +1139,13 @@
 <script>
 (function () {
   /* ── Shared state ─────────────────────────────────────────── */
-  var pendingStatusForm     = null;
-  var bsNoAttachModal       = null;
-  var bsPaymentModal        = null;
-  var _paymentPendingSelect = null;
-  var _FINANCE_CONF_TASKS   = ['Advance Payment Confirmation', 'Finance Confirmation', '100% Payment Confirmation'];
+  var pendingStatusForm       = null;
+  var bsNoAttachModal         = null;
+  var bsPaymentModal          = null;
+  var _paymentPendingSelect   = null;
+  var bsMilestoneModal        = null;
+  var _milestonePendingSelect = null;
+  var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Finance Confirmation', '100% Payment Confirmation'];
 
   /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
   var assignCandidates = {};
@@ -1169,6 +1213,16 @@
       document.getElementById('paymentCaptureForm').action = select.form.action;
       document.getElementById('paymentCaptureAmount').value = '';
       bsPaymentModal.show();
+      return;
+    }
+
+    /* 2.7 BD milestone gate — Phase 1 Task 1 requires M1/M2/M3 amounts before Done */
+    if (newStatus === 'Done' && select.dataset.isMilestoneGate === 'true' && bsMilestoneModal) {
+      _milestonePendingSelect = select;
+      select.value = originalStatus;
+      var milestoneModalEl = document.getElementById('milestoneAmountModal');
+      milestoneModalEl.dataset.projectId = select.dataset.projectId || '';
+      bsMilestoneModal.show();
       return;
     }
 
@@ -1287,6 +1341,81 @@
         });
       });
       paymentCaptureEl.addEventListener('hidden.bs.modal', function () { _paymentPendingSelect = null; });
+    }
+
+    /* Milestone amount gate modal (BD Phase 1 Task 1) */
+    var milestoneGateEl = document.getElementById('milestoneAmountModal');
+    if (milestoneGateEl) {
+      bsMilestoneModal = bootstrap.Modal.getOrCreateInstance(milestoneGateEl);
+
+      milestoneGateEl.addEventListener('show.bs.modal', function () {
+        document.getElementById('modal_m1').value = milestoneGateEl.dataset.m1 || '';
+        document.getElementById('modal_m2').value = milestoneGateEl.dataset.m2 || '';
+        document.getElementById('modal_m3').value = milestoneGateEl.dataset.m3 || '';
+        ['modal_m1_error', 'modal_m2_error', 'modal_m3_error', 'modal_general_error'].forEach(function (id) {
+          document.getElementById(id).classList.add('d-none');
+        });
+      });
+
+      milestoneGateEl.addEventListener('hidden.bs.modal', function () {
+        _milestonePendingSelect = null;
+      });
+
+      document.getElementById('milestoneModalCancel').addEventListener('click', function () {
+        bsMilestoneModal.hide();
+      });
+
+      document.getElementById('milestoneModalConfirm').addEventListener('click', async function () {
+        var m1 = document.getElementById('modal_m1').value.trim();
+        var m2 = document.getElementById('modal_m2').value.trim();
+        var m3 = document.getElementById('modal_m3').value.trim();
+
+        var valid = true;
+        [['modal_m1', m1], ['modal_m2', m2], ['modal_m3', m3]].forEach(function (pair) {
+          var errEl = document.getElementById(pair[0] + '_error');
+          if (pair[1] === '') { errEl.classList.remove('d-none'); valid = false; }
+          else                { errEl.classList.add('d-none'); }
+        });
+        if (!valid) return;
+
+        var confirmBtn = document.getElementById('milestoneModalConfirm');
+        confirmBtn.disabled    = true;
+        confirmBtn.textContent = 'Saving…';
+
+        var projectId = milestoneGateEl.dataset.projectId;
+        var csrf      = document.querySelector('[name=csrfmiddlewaretoken]').value;
+
+        try {
+          var res  = await fetch('/projects/' + projectId + '/milestones/set-amounts/', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrf },
+            body:    JSON.stringify({ m1_amount: m1, m2_amount: m2, m3_amount: m3 }),
+          });
+          var data = await res.json();
+          if (!data.success) {
+            var genErr = document.getElementById('modal_general_error');
+            genErr.textContent = data.error || 'Failed to save amounts.';
+            genErr.classList.remove('d-none');
+            confirmBtn.disabled    = false;
+            confirmBtn.textContent = 'Confirm & Mark Done';
+            return;
+          }
+        } catch (err) {
+          document.getElementById('modal_general_error').textContent = 'Network error. Please try again.';
+          document.getElementById('modal_general_error').classList.remove('d-none');
+          confirmBtn.disabled    = false;
+          confirmBtn.textContent = 'Confirm & Mark Done';
+          return;
+        }
+
+        /* Amounts saved — submit original form as Done */
+        var sel = _milestonePendingSelect;
+        bsMilestoneModal.hide();
+        milestoneGateEl.addEventListener('hidden.bs.modal', function afterClose() {
+          milestoneGateEl.removeEventListener('hidden.bs.modal', afterClose);
+          if (sel) { sel.value = 'Done'; sel.form.submit(); }
+        });
+      });
     }
 
     /* Finance receive modal */
@@ -1441,6 +1570,34 @@
     });
   });
 }());
+
+function saveBDMilestoneAmount(projectId, milestoneName, csrfToken, milestonePk) {
+  var inputEl = document.getElementById('bdAmtInput' + milestonePk);
+  var errorEl = document.getElementById('bdAmtError' + milestonePk);
+  var val = inputEl ? inputEl.value.trim() : '';
+  errorEl.classList.add('d-none');
+  if (val === '') {
+    errorEl.textContent = 'Enter an amount (0 is valid)';
+    errorEl.classList.remove('d-none');
+    return;
+  }
+  var body = { m1_amount: null, m2_amount: null, m3_amount: null };
+  body[milestoneName.toLowerCase() + '_amount'] = val;
+  fetch('/projects/' + projectId + '/milestones/set-amounts/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+    body: JSON.stringify(body),
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.success) { location.reload(); }
+    else {
+      errorEl.textContent = d.error || 'Save failed';
+      errorEl.classList.remove('d-none');
+    }
+  }).catch(function() {
+    errorEl.textContent = 'Network error. Please try again.';
+    errorEl.classList.remove('d-none');
+  });
+}
 </script>
 
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -1466,6 +1623,57 @@
           {% csrf_token %}
           <button type="submit" class="btn btn-danger btn-sm">Delete Project</button>
         </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if user_task_role == 'BD / Sales' %}
+{# ── Milestone Amount Gate Modal (BD Phase 1 Task 1) ─────────────────────── #}
+<div class="modal fade" id="milestoneAmountModal" tabindex="-1" aria-hidden="true"
+     data-m1="{{ milestone_amounts.M1 }}"
+     data-m2="{{ milestone_amounts.M2 }}"
+     data-m3="{{ milestone_amounts.M3 }}">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-1">
+        <h6 class="modal-title fw-semibold">Enter Payment Milestone Amounts</h6>
+      </div>
+      <div class="modal-body pt-1">
+        <p class="text-muted small mb-3">
+          Before marking this task complete, confirm the agreed payment amounts for this project.
+          Enter 0 if a milestone is not applicable.
+        </p>
+        <div class="mb-3">
+          <label class="form-label small fw-medium mb-1">M1 — On Survey Completion</label>
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">₹</span>
+            <input type="number" id="modal_m1" min="0" step="0.01" placeholder="0" class="form-control">
+          </div>
+          <div id="modal_m1_error" class="text-danger small mt-1 d-none">Amount is required (enter 0 if not applicable)</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small fw-medium mb-1">M2 — On Material Supply</label>
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">₹</span>
+            <input type="number" id="modal_m2" min="0" step="0.01" placeholder="0" class="form-control">
+          </div>
+          <div id="modal_m2_error" class="text-danger small mt-1 d-none">Amount is required (enter 0 if not applicable)</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label small fw-medium mb-1">M3 — On Commissioning</label>
+          <div class="input-group input-group-sm">
+            <span class="input-group-text">₹</span>
+            <input type="number" id="modal_m3" min="0" step="0.01" placeholder="0" class="form-control">
+          </div>
+          <div id="modal_m3_error" class="text-danger small mt-1 d-none">Amount is required (enter 0 if not applicable)</div>
+        </div>
+        <p id="modal_general_error" class="text-danger small mt-3 mb-0 px-3 py-2 rounded border border-danger d-none" style="background:rgba(220,53,69,.08);"></p>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="milestoneModalCancel">Cancel</button>
+        <button type="button" class="btn btn-brand btn-sm" id="milestoneModalConfirm">Confirm &amp; Mark Done</button>
       </div>
     </div>
   </div>
