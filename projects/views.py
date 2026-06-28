@@ -1534,27 +1534,18 @@ def _pm_owns_project(request, project):
 @role_required(['PM', 'Admin', 'CEO'])
 def project_list(request):
     """
-    List all projects. PM sees only their own; Admin and CEO see all.
-    Prefetches phases→tasks so get_current_phase() works without N+1.
-    Access: PM (own only), Admin, CEO.
+    Redirect to the role-appropriate projects view.
+    Admin  → Admin Panel project list (full table with assign-PM + delete)
+    PM     → PM dashboard (draft + active project cards)
+    CEO    → CEO dashboard
+    Kept as a named URL so '← Projects' links in project_overview still resolve.
     """
     role = _get_user_role(request)
-    base_qs = (
-        Project.objects
-        .filter(is_deleted=False)
-        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
-        .prefetch_related(
-            Prefetch('phases',
-                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
-        )
-        .order_by('-created_at')
-    )
-    if role == 'PM':
-        projects = base_qs.filter(assigned_pm__user=request.user)
-    else:
-        projects = base_qs
-
-    return render(request, 'projects/project_list.html', {'projects': projects})
+    if role == 'Admin':
+        return redirect('admin_project_list')
+    if role == 'CEO':
+        return redirect('dashboard_ceo')
+    return redirect('dashboard_pm')
 
 
 @login_required
