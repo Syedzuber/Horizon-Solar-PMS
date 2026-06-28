@@ -1,0 +1,151 @@
+{% extends "projects/admin/admin_base.html" %}
+{% block page_title %}All Projects{% endblock %}
+{% block nav_projects %}nav-active{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-xl font-bold text-gray-800">All Projects</h1>
+    <p class="text-sm text-gray-500 mt-0.5">{{ projects|length }} project{{ projects|length|pluralize }} total</p>
+  </div>
+  <a href="/projects/create/" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium text-white"
+     style="background:#1a7a4a;">
+    <i data-lucide="plus" class="w-4 h-4"></i> New Project
+  </a>
+</div>
+
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-gray-100 bg-gray-50 text-xs text-gray-500 uppercase tracking-wider">
+        <th class="px-4 py-3 text-left font-semibold">Project ID</th>
+        <th class="px-4 py-3 text-left font-semibold">Customer</th>
+        <th class="px-4 py-3 text-left font-semibold">Type</th>
+        <th class="px-4 py-3 text-left font-semibold">Status</th>
+        <th class="px-4 py-3 text-left font-semibold">Current Phase</th>
+        <th class="px-4 py-3 text-left font-semibold">Assigned PM</th>
+        <th class="px-4 py-3 text-right font-semibold">Capacity (kW)</th>
+        <th class="px-4 py-3 text-right font-semibold">Contract Value (₹)</th>
+        <th class="px-4 py-3 text-left font-semibold">Target Date</th>
+        <th class="px-4 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for project in projects %}
+      <tr class="hover:bg-gray-50 cursor-pointer"
+          onclick="window.location='{% url 'project_overview' project.project_id %}'">
+
+        <td class="px-4 py-3 font-semibold" onclick="event.stopPropagation()">
+          <a href="{% url 'project_overview' project.project_id %}"
+             class="hover:underline" style="color:#1a7a4a;">
+            {{ project.project_id }}
+          </a>
+        </td>
+
+        <td class="px-4 py-3 text-gray-700">{{ project.customer_name }}</td>
+        <td class="px-4 py-3 text-gray-500">{{ project.project_type }}</td>
+
+        <td class="px-4 py-3">
+          {% if project.status == 'Draft' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">Draft</span>
+          {% elif project.status == 'Active' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">Active</span>
+          {% elif project.status == 'In Progress' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">In Progress</span>
+          {% elif project.status == 'Commissioned' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-teal-100 text-teal-800">Commissioned</span>
+          {% elif project.status == 'On Hold' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">On Hold</span>
+          {% elif project.status == 'Cancelled' %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Cancelled</span>
+          {% else %}
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700">{{ project.status }}</span>
+          {% endif %}
+        </td>
+
+        <td class="px-4 py-3 text-gray-500">
+          {% with cp=project.get_current_phase %}{{ cp|default:"—" }}{% endwith %}
+        </td>
+
+        <td class="px-4 py-3 text-gray-700">
+          {% if project.assigned_pm %}
+            {{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}
+          {% else %}
+            <span class="text-gray-400">—</span>
+          {% endif %}
+        </td>
+
+        <td class="px-4 py-3 text-right text-gray-700">{{ project.capacity_kw }}</td>
+        <td class="px-4 py-3 text-right text-gray-700">{{ project.contract_value }}</td>
+        <td class="px-4 py-3 text-gray-500">{{ project.target_commissioning_date }}</td>
+
+        <td class="px-4 py-3 text-right" onclick="event.stopPropagation()">
+          <button type="button"
+                  class="p-1.5 rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition-colors"
+                  data-project-id="{{ project.project_id }}"
+                  data-customer-name="{{ project.customer_name }}"
+                  onclick="openDeleteModal(this)">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </td>
+      </tr>
+      {% empty %}
+      <tr>
+        <td colspan="10" class="px-4 py-10 text-center text-gray-400 text-sm">No projects found.</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<!-- Delete confirmation modal -->
+<div id="deleteModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 hidden">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+    <div class="flex items-start gap-3 mb-4">
+      <span class="flex-shrink-0 w-9 h-9 rounded-full bg-red-100 flex items-center justify-center">
+        <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600"></i>
+      </span>
+      <div>
+        <h3 class="font-semibold text-gray-900">Delete Project</h3>
+        <p class="text-sm text-gray-500 mt-1">
+          Delete <span id="modalProjectId" class="font-medium text-gray-800"></span>
+          — <span id="modalCustomerName" class="text-gray-700"></span>?
+        </p>
+        <p class="text-xs text-gray-400 mt-1">Soft-deleted — recoverable from the Django admin panel.</p>
+      </div>
+    </div>
+    <div class="flex justify-end gap-2 mt-6">
+      <button type="button" onclick="closeDeleteModal()"
+              class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">
+        Cancel
+      </button>
+      <form id="deleteForm" method="post" action="">
+        {% csrf_token %}
+        <button type="submit"
+                class="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700">
+          Delete Project
+        </button>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function openDeleteModal(btn) {
+  var pid = btn.getAttribute('data-project-id');
+  var name = btn.getAttribute('data-customer-name');
+  document.getElementById('modalProjectId').textContent = pid;
+  document.getElementById('modalCustomerName').textContent = name;
+  document.getElementById('deleteForm').action = '/projects/' + pid + '/delete/';
+  document.getElementById('deleteModal').classList.remove('hidden');
+}
+function closeDeleteModal() {
+  document.getElementById('deleteModal').classList.add('hidden');
+}
+document.getElementById('deleteModal').addEventListener('click', function(e) {
+  if (e.target === this) closeDeleteModal();
+});
+</script>
+{% endblock %}

@@ -6090,3 +6090,20 @@ def admin_audit_log(request):
             'keyword':     keyword,
         },
     })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_project_list(request):
+    """All projects table inside the Admin Panel. Admin only."""
+    projects = (
+        Project.objects
+        .filter(is_deleted=False)
+        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
+        .prefetch_related(
+            Prefetch('phases',
+                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+        )
+        .order_by('-created_at')
+    )
+    return render(request, 'projects/admin/projects_list.html', {'projects': projects})
