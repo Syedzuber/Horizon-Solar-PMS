@@ -27,6 +27,7 @@
         <th class="px-4 py-3 text-right font-semibold">Capacity (kW)</th>
         <th class="px-4 py-3 text-right font-semibold">Contract Value (₹)</th>
         <th class="px-4 py-3 text-left font-semibold">Target Date</th>
+        <th class="px-4 py-3 text-left font-semibold">Created</th>
         <th class="px-4 py-3"></th>
       </tr>
     </thead>
@@ -78,6 +79,7 @@
         <td class="px-4 py-3 text-right text-gray-700">{{ project.capacity_kw }}</td>
         <td class="px-4 py-3 text-right text-gray-700">{{ project.contract_value }}</td>
         <td class="px-4 py-3 text-gray-500">{{ project.target_commissioning_date }}</td>
+        <td class="px-4 py-3 text-gray-500">{{ project.created_at|date:"d M Y" }}</td>
 
         <td class="px-4 py-3 text-right" onclick="event.stopPropagation()">
           <button type="button"
@@ -91,7 +93,7 @@
       </tr>
       {% empty %}
       <tr>
-        <td colspan="10" class="px-4 py-10 text-center text-gray-400 text-sm">No projects found.</td>
+        <td colspan="11" class="px-4 py-10 text-center text-gray-400 text-sm">No projects found.</td>
       </tr>
       {% endfor %}
     </tbody>
