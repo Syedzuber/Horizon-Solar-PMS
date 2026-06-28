@@ -1263,7 +1263,7 @@ def _get_ceo_dashboard_context():
     )
     projects_qs = (
         Project.objects
-        .filter(status__in=active_statuses)
+        .filter(is_deleted=False, status__in=active_statuses)
         .annotate(
             has_blocked_task=Exists(blocked_subq),
             has_at_risk_task=Exists(at_risk_subq),
@@ -1297,6 +1297,7 @@ def _get_ceo_dashboard_context():
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
     task_agg = Task.objects.filter(
+        phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
     ).aggregate(
         task_total     =Count('pk'),
@@ -1356,6 +1357,7 @@ def _get_ceo_dashboard_context():
 
     # -- QUERY 3: Issue aggregate — status counts + resolution time windows --
     issue_agg = Issue.objects.filter(
+        project__is_deleted=False,
         project__status__in=active_statuses,
     ).aggregate(
         issue_total     =Count('pk'),
@@ -1385,6 +1387,25 @@ def _get_ceo_dashboard_context():
         {'label': 'Finance',   'assigned': task_agg['dept_finance_assigned'],'pending': task_agg['dept_finance_pending'],'overdue': task_agg['dept_finance_overdue']},
     ]
 
+    # -- QUERY 4: Finance summary (payment requests + contract value) --
+    active_filter = {
+        'project__is_deleted': False,
+        'project__status__in': ['Active', 'In Progress'],
+    }
+    fin_payment_requests_pending = PaymentRequest.objects.filter(
+        status=PaymentRequest.PENDING, **active_filter
+    ).count()
+    fin_vendor_payments_outstanding = (
+        PaymentRequest.objects.filter(
+            status=PaymentRequest.PENDING, **active_filter
+        ).aggregate(s=Sum('amount'))['s'] or 0
+    )
+    fin_client_contract_value = (
+        Project.objects.filter(
+            is_deleted=False, status__in=['Active', 'In Progress']
+        ).aggregate(s=Sum('contract_value'))['s'] or 0
+    )
+
     ctx = {
         'proj_total':    proj_total,
         'proj_on_time':  proj_on_time,
@@ -1393,6 +1414,9 @@ def _get_ceo_dashboard_context():
         'proj_blocked':  proj_blocked,
         'project_cards': project_cards,
         'dept_rows':     dept_rows,
+        'fin_payment_requests_pending':    fin_payment_requests_pending,
+        'fin_vendor_payments_outstanding': fin_vendor_payments_outstanding,
+        'fin_client_contract_value':       fin_client_contract_value,
     }
     ctx.update(task_agg)
     ctx.update(issue_agg)
