@@ -512,6 +512,12 @@
               <span class="text-muted fst-italic">No target date set</span>
             {% endif %}
           </div>
+          {% if p.activated_at %}
+          <div class="d-flex align-items-center gap-1 mt-1" style="font-size:.8rem;">
+            <i data-lucide="check-circle-2" style="width:13px;height:13px;" class="text-muted flex-shrink-0"></i>
+            <span class="text-muted">Activated {{ p.activated_at|date:"d M Y" }}</span>
+          </div>
+          {% endif %}
 
         </div>
       </a>
