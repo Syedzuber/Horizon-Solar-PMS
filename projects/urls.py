@@ -173,6 +173,7 @@ urlpatterns = [
     path('portal-admin/send-records/',                  views.admin_send_records,        name='admin_send_records'),
     path('portal-admin/audit-log/',                     views.admin_audit_log,           name='admin_audit_log'),
     path('portal-admin/projects/',                      views.admin_project_list,        name='admin_project_list'),
+    path('portal-admin/projects/<str:project_id>/assign-pm/', views.admin_assign_pm,      name='admin_assign_pm'),
     # Redirect old activity-log URL to the new audit-log screen
     path('portal/activity-log/',
          RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),

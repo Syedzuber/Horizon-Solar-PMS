@@ -48,6 +48,41 @@
   </div>
 </div>
 
+{# ── Draft Projects (Zoho-created or manually created, not yet activated) ─── #}
+{% if draft_projects %}
+<div class="mb-4">
+  <h6 class="fw-semibold text-muted mb-2 text-uppercase" style="font-size:.75rem;letter-spacing:.06em;">
+    <i class="bi bi-clock me-1"></i>Draft Projects — Awaiting Activation
+  </h6>
+  {% for dp in draft_projects %}
+  <div class="card mb-2 shadow-sm border-0" style="border-left: 3px solid #f0a829 !important;">
+    <div class="card-body py-2 px-3 d-flex align-items-center gap-3">
+      <div class="flex-grow-1" style="min-width:0;">
+        <div class="fw-semibold text-truncate">{{ dp.customer_name }}</div>
+        <div class="small text-muted">
+          {{ dp.project_id }}
+          {% if dp.city %} · {{ dp.city }}{% endif %}
+          {% if dp.capacity_kw %} · {{ dp.capacity_kw }} kW{% endif %}
+          · Created {{ dp.created_at|date:"d M Y" }}
+        </div>
+      </div>
+      <span class="badge rounded-pill text-dark flex-shrink-0" style="background:#fef3c7;border:1px solid #f0a829;">Draft</span>
+      <div class="d-flex gap-2 flex-shrink-0">
+        <a href="{% url 'project_overview' dp.project_id %}"
+           class="btn btn-sm btn-outline-secondary">View</a>
+        <a href="{% url 'project_activate' dp.project_id %}"
+           class="btn btn-sm text-white"
+           style="background-color:#1a7a4a;"
+           onclick="return confirm('Activate {{ dp.customer_name }} ({{ dp.project_id }})? This will create phases, tasks and payment milestones.')">
+          Activate
+        </a>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h5 class="mb-0 fw-semibold">My Projects</h5>
   <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>

@@ -28,7 +28,7 @@ from .models import (
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
 )
-from .notifications import send_notification
+from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
@@ -285,8 +285,17 @@ def dashboard_pm(request):
         status__in=['Not Started', 'In Progress'],
     ).count()
 
+    # Draft projects assigned to this PM (Zoho-created or manually created and not yet activated)
+    draft_projects = list(
+        Project.objects.filter(
+            assigned_pm=pm_profile,
+            status='Draft',
+            is_deleted=False,
+        ).order_by('-created_at')
+    )
+
     projects_with_progress = []
-    for project in Project.objects.filter(assigned_pm=pm_profile, status__in=['Active', 'In Progress']):
+    for project in Project.objects.filter(assigned_pm=pm_profile, status__in=['Active', 'In Progress'], is_deleted=False):
         try:
             project.boq_status = project.boq.status
             project.boq_url    = f'/projects/{project.project_id}/boq/'
@@ -461,6 +470,7 @@ def dashboard_pm(request):
             'tasks_due_soon':    tasks_due_soon_count,
             'tasks_overdue':     tasks_overdue_count,
         },
+        'draft_projects':          draft_projects,
         'projects_with_progress': projects_with_progress,
         'due_today_tasks':        due_today_tasks,
         'blocked_tasks_list':     blocked_tasks_list,
@@ -3806,12 +3816,6 @@ def zoho_deal_closed_webhook(request):
         profile_match = UserProfile.objects.filter(user__email__iexact=pm_email).first()
         if profile_match:
             assigned_pm = profile_match
-    # Fall back to the default PM (chetan@horizonrenewablepower.com) if the Zoho
-    # Assign_PM field is empty or the email doesn't match any active user
-    if assigned_pm is None:
-        assigned_pm = UserProfile.objects.filter(
-            user__email__iexact='chetan@horizonrenewablepower.com'
-        ).first()
 
     # Create project
     try:
@@ -3854,7 +3858,7 @@ def zoho_deal_closed_webhook(request):
         pass
 
     if project.assigned_pm is None:
-        # Notify Admin: PM could not be assigned (fallback user not found either)
+        # Notify Admin in-app: PM could not be assigned
         try:
             admin_profile = UserProfile.objects.filter(role='Admin').first()
             if admin_profile:
@@ -3865,11 +3869,29 @@ def zoho_deal_closed_webhook(request):
                         f'(deal {record_id}) — PM could not be assigned. Please assign a PM.'
                     ),
                     channels=['in_app'],
-                    link=f'/projects/{project.project_id}/',
+                    link=f'/projects/{project.project_id}/overview/',
                     related_project=project,
                 )
         except Exception as exc:
-            logger.error('Webhook: notification failed for project %s — %s', project.project_id, exc)
+            logger.error('Webhook: in-app notification failed for project %s — %s', project.project_id, exc)
+        # Also email a fixed admin address so the alert lands even if no Admin is logged in
+        try:
+            send_raw_email(
+                to_email='smzk07@gmail.com',
+                subject=f'[SolarPMS] Unassigned Project: {project.project_id}',
+                body=(
+                    f'A new Draft project was created via Zoho CRM but no PM could be assigned.\n\n'
+                    f'Project ID : {project.project_id}\n'
+                    f'Customer   : {project.customer_name}\n'
+                    f'City       : {project.city or "—"}\n'
+                    f'Zoho Deal  : {record_id}\n'
+                    f'PM email from Zoho: {pm_email or "(blank)"}\n\n'
+                    f'Please log in to the Admin Panel and assign a PM:\n'
+                    f'https://horizon-solar-pms-production.up.railway.app/projects/{project.project_id}/overview/'
+                ),
+            )
+        except Exception as exc:
+            logger.error('Webhook: admin alert email failed for project %s — %s', project.project_id, exc)
     else:
         # Notify the assigned PM about their new project
         try:
@@ -6106,4 +6128,84 @@ def admin_project_list(request):
         )
         .order_by('-created_at')
     )
-    return render(request, 'projects/admin/projects_list.html', {'projects': projects})
+    pm_users = (
+        UserProfile.objects
+        .filter(role='PM', is_active=True)
+        .select_related('user')
+        .order_by('user__first_name')
+    )
+    return render(request, 'projects/admin/projects_list.html', {
+        'projects': projects,
+        'pm_users': pm_users,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_assign_pm(request, project_id):
+    """Assign (or reassign) a PM to a Draft project. POST only. Admin only."""
+    if request.method != 'POST':
+        return redirect('admin_project_list')
+
+    project = get_object_or_404(Project, project_id=project_id, is_deleted=False)
+
+    pm_user_id = request.POST.get('pm_user_id', '').strip()
+    if not pm_user_id:
+        messages.error(request, 'Please select a PM.')
+        return redirect('admin_project_list')
+
+    try:
+        pm_profile = UserProfile.objects.select_related('user').get(pk=pm_user_id, role='PM', is_active=True)
+    except UserProfile.DoesNotExist:
+        messages.error(request, 'Selected user is not a valid active PM.')
+        return redirect('admin_project_list')
+
+    old_pm = project.assigned_pm
+    project.assigned_pm = pm_profile
+    project.save(update_fields=['assigned_pm'])
+
+    log_activity(
+        project=project,
+        actor=request.user,
+        action=(
+            f"PM assigned to {pm_profile.user.get_full_name() or pm_profile.user.username}"
+            + (f" (previously {old_pm.user.get_full_name() or old_pm.user.username})" if old_pm else "")
+        ),
+        entity_type='Project',
+        entity_id=project.pk,
+    )
+
+    # Notify the newly assigned PM
+    try:
+        pm_display_name = pm_profile.user.get_full_name() or pm_profile.user.username
+        _link = f'/projects/{project.project_id}/overview/'
+        _abs_link = request.build_absolute_uri(_link)
+        _body = (
+            f'Hi {pm_display_name},\n\n'
+            f'You have been assigned as Project Manager for {project.customer_name}'
+            + (f' ({project.city})' if project.city else '') + '.\n\n'
+            f'Please review the project details and activate when ready.'
+            f'\n\nView in Horizon Solar PMS:\nhttps://horizon-solar-pms-production.up.railway.app{_link}'
+        )
+        send_notification(
+            recipient=pm_profile,
+            message=_body,
+            channels=['in_app', 'whatsapp', 'email'],
+            link=_link,
+            subject=f'New Project Assigned: {project.customer_name}',
+            template='assign_project',
+            template_params=[
+                project.customer_name,
+                pm_display_name,
+                _abs_link,
+            ],
+            related_project=project,
+        )
+    except Exception as exc:
+        logger.error('admin_assign_pm: notification failed for project %s — %s', project.project_id, exc)
+
+    messages.success(
+        request,
+        f'PM assigned to {project.project_id}: {pm_profile.user.get_full_name() or pm_profile.user.username}.'
+    )
+    return redirect('admin_project_list')

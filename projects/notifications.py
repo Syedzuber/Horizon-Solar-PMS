@@ -231,6 +231,35 @@ def _send_email(recipient, subject, message, base):
     #     _log(base, 'email', 'failed', f'HTTP {resp.status_code}: {resp.body}')
 
 
+def send_raw_email(to_email, subject, body):
+    """
+    Send a transactional email to any address without requiring a UserProfile.
+    Used for fixed system-level alerts (e.g. unassigned project from Zoho webhook).
+    Does NOT check master switch — this is a platform-level alert, not user notification.
+    """
+    api_key    = getattr(settings, 'ZEPTOMAIL_API_KEY', '')
+    from_email = getattr(settings, 'ZEPTOMAIL_FROM_EMAIL', '')
+    if not api_key or not from_email:
+        logger.error('send_raw_email: ZEPTOMAIL_API_KEY or ZEPTOMAIL_FROM_EMAIL not configured')
+        return
+    try:
+        resp = requests.post(
+            'https://api.zeptomail.in/v1.1/email',
+            headers={'Authorization': api_key, 'Content-Type': 'application/json'},
+            json={
+                'from': {'address': from_email, 'name': 'Horizon Solar'},
+                'to':   [{'email_address': {'address': to_email, 'name': 'Admin'}}],
+                'subject': subject,
+                'textbody': body,
+            },
+            timeout=10,
+        )
+        if resp.status_code not in (200, 201):
+            logger.error('send_raw_email: HTTP %s — %s', resp.status_code, resp.text[:300])
+    except Exception as exc:
+        logger.error('send_raw_email: %s', exc)
+
+
 def _log(base, channel, status, error_detail='', interakt_message_id=''):
     from .models import NotificationLog
     try:
