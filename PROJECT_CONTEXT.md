@@ -2411,7 +2411,7 @@ Pure CSS + JS — no Bootstrap dropdown JS dependency.
 
 ---
 
-## PHASE 2 BACKLOG (as of 27 June)
+## PHASE 2 BACKLOG (as of 28 June)
 
 - DesignSubmission create/submit form for Design users (file upload + title + description)
 - DesignSubmission approval flow for PM (Approved/Rejected + review notes)
@@ -2423,7 +2423,119 @@ Pure CSS + JS — no Bootstrap dropdown JS dependency.
 
 ---
 
-## MIGRATION STATE — COMPLETE SEQUENCE (27 June 2026)
+## DAY 16 — 28 June 2026
+
+### Deployment fixes (Railway crash + logo 404)
+
+**ImportError on startup:** `views.py` imported `AdminUserEditForm` but `forms.py` defining it had not been committed. Fix: staged and pushed `forms.py` along with 7 new admin templates.
+
+**Logo 404 (two causes):**
+1. File named `honor-logo-1.png` but templates referenced `horizon-logo.png` — renamed file, updated `base.html`.
+2. `Procfile` ran `migrate` but not `collectstatic`; `nixpacks.toml` ran `collectstatic` but not `migrate`. Whichever Railway used, static files were never collected. Fix: both files now run `migrate && collectstatic && gunicorn`.
+
+**Procfile (current):**
+```
+web: python manage.py migrate --run-syncdb && python manage.py collectstatic --noinput && gunicorn solarpms.wsgi --log-file -
+```
+
+**nixpacks.toml (current):**
+```toml
+[start]
+cmd = "python manage.py migrate --run-syncdb && python manage.py collectstatic --noinput && gunicorn solarpms.wsgi --log-file -"
+```
+
+---
+
+### Admin Panel — Project List
+
+Moved the project list out of the generic `/projects/` URL and into the Admin Panel.
+
+**New URL:** `GET /portal-admin/projects/` → `admin_project_list` (Admin only)
+**Sidebar link:** "All Projects" section added above "Settings" in `admin_base.html`
+**Template:** `projects/templates/projects/admin/projects_list.html` — Tailwind table, 11 columns:
+Project ID, Customer, Type, Status, Current Phase, Assigned PM, Capacity (kW), Contract Value (₹), Target Date, Created, (actions)
+
+**`/projects/` URL** (`project_list` view) is now a smart redirect — no longer renders a list:
+- Admin → `/portal-admin/projects/`
+- PM → `/dashboard/pm/`
+- CEO → `/dashboard/ceo/`
+Named URL kept so `{% url 'project_list' %}` references in `project_overview.html` ("← Projects" button) continue to work.
+
+---
+
+### Activation date on all dashboards
+
+`Project.activated_at` (DateTimeField, nullable, stamped on `project_activate`) is now displayed on every role's project card and in the project overview header.
+
+| Template | Location |
+|---|---|
+| `dashboard/pm.html` | After project ID in collapsed card header |
+| `dashboard/bd.html` | Project-ID subtitle line |
+| `dashboard/finance.html` | Project-ID subtitle line |
+| `dashboard/design.html` | Project-ID subtitle line |
+| `dashboard/ceo.html` | Below target date in expanded card body |
+| `projects/project_overview.html` | Already present as info-pill — no change needed |
+
+---
+
+### Zoho webhook — PM assignment redesign
+
+**Removed:** fallback that assigned all unresolved projects to `chetan@horizonrenewablepower.com`.
+
+**New behaviour when Zoho `Assign_PM` email doesn't match any user:**
+- `assigned_pm = None` — project is created as Draft with no PM
+- In-app notification sent to first Admin profile ("PM could not be assigned. Please assign a PM.")
+- Direct email sent to `smzk07@gmail.com` via new `send_raw_email()` helper (bypasses master switch and UserProfile lookup — platform-level alert)
+- Email body includes Project ID, Customer, City, Zoho Deal ID, the PM email from Zoho (or blank), and a direct URL to the project overview
+
+**`send_raw_email(to_email, subject, body)`** — new function in `projects/notifications.py`. Sends ZeptoMail directly to any email address without requiring a UserProfile. Does NOT check `SystemSettings.email_enabled` — reserved for system-level alerts only.
+
+---
+
+### Admin: Assign PM to unassigned projects
+
+Unassigned Draft projects (e.g. from Zoho webhook with no matching PM) can now be assigned directly from the Admin Panel project list.
+
+**New URL:** `POST /portal-admin/projects/<project_id>/assign-pm/` → `admin_assign_pm` (Admin only)
+
+**Table cell behaviour:** When `project.assigned_pm` is None, the Assigned PM cell shows an amber "Assign PM" button (user-plus icon). The cell has `onclick="event.stopPropagation()"` so clicking it doesn't navigate to the project.
+
+**Assign PM modal:** Opens on button click; populated with project ID + customer name from data attributes. Dropdown lists all active PM-role UserProfiles alphabetically. Helper text: "The project stays as Draft. The PM will review and activate it."
+
+**`admin_assign_pm` view:**
+- POST only (GET redirects to list)
+- Validates `pm_user_id` → must be active PM role
+- Sets `project.assigned_pm`, saves with `update_fields=['assigned_pm']`
+- Calls `log_activity()` — logs old PM name if this was a reassignment
+- Fires `assign_project` notification to PM (in_app + whatsapp + email, same payload as webhook)
+- `messages.success` toast, redirects to `admin_project_list`
+
+**`admin_project_list` view** now also passes `pm_users` (all active PMs) to the template for the dropdown.
+
+---
+
+### PM dashboard — Draft Projects section
+
+PMs now see Draft projects assigned to them (Zoho-created or manually created but not yet activated) in a dedicated section above "My Projects".
+
+**Query:** `Project.objects.filter(assigned_pm=pm_profile, status='Draft', is_deleted=False).order_by('-created_at')`
+
+**Card design:** Amber left-border (3px `#f0a829`), shows customer name, project ID, city, capacity, created date, amber "Draft" badge. Two action buttons: **View** (→ project overview) and **Activate** (→ `project_activate`, with `onclick=confirm()` dialog).
+
+Section is hidden entirely when no drafts exist. Context key: `draft_projects`.
+
+Also added `is_deleted=False` guard to the existing active-projects loop in `dashboard_pm` (was missing).
+
+---
+
+### Locked decisions updated
+
+- **Removed:** default PM fallback `chetan@horizonrenewablepower.com` for unresolved Zoho `Assign_PM`. Unresolved Zoho projects now land with `assigned_pm=None`.
+- **Added:** Admin can assign PM from the Admin Panel project list. Admin gets email alert at `smzk07@gmail.com` for unassigned projects.
+
+---
+
+## MIGRATION STATE — COMPLETE SEQUENCE (28 June 2026)
 
 | Migration | Name | Contents |
 |---|---|---|
@@ -2447,14 +2559,19 @@ Pure CSS + JS — no Bootstrap dropdown JS dependency.
 | 0030 | whatsapp_delivery_tracking | NotificationLog.interakt_message_id + delivery_status |
 | 0031 | design_submission | DesignSubmission |
 
+No new migrations in Day 16.
+
 ---
 
-## SPRINT STATUS (27 June 2026)
+## SPRINT STATUS (28 June 2026)
 
-- Hard deadline: 4 July 2026 (board demo) — 7 days remaining
-- Current migration: 0031
+- Hard deadline: 4 July 2026 (board demo) — 6 days remaining
+- Current migration: 0031 (no change)
 - SystemSettings.whatsapp_enabled / email_enabled = False by default — flip ON before demo via Django admin
 - All 8 role dashboards live and redesigned
 - Notification system built and WhatsApp-verified (all 7 templates return HTTP 201 from Interakt)
 - My Documents page live for all roles
+- Zoho webhook: unassigned projects now alert Admin via in-app + email to smzk07@gmail.com
+- Admin can assign PM to any project via Admin Panel modal
+- PM sees Draft projects in dedicated dashboard section
 - Board demo centerpiece: Task "Plant Commissioning" (M3) marked Done by SE → WhatsApp + email fires to Finance + PM + CEO → CEO dashboard updates
