@@ -1,0 +1,91 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}Notification Preferences{% endblock %}
+{% block nav_notif %}nav-active{% endblock %}
+
+{% block content %}
+<div>
+  <h1 class="text-xl font-semibold text-gray-900 mb-1">Notification Preferences</h1>
+  <p class="text-sm text-gray-500 mb-8">Configure per-user channel preferences for external notifications.</p>
+
+  <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="bg-gray-50 border-b border-gray-200">
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">User</th>
+          <th class="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Role</th>
+          <th class="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            <span class="flex items-center justify-center gap-1">
+              <i data-lucide="message-circle" class="w-3.5 h-3.5"></i> WhatsApp
+            </span>
+          </th>
+          <th class="px-4 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">
+            <span class="flex items-center justify-center gap-1">
+              <i data-lucide="mail" class="w-3.5 h-3.5"></i> Email
+            </span>
+          </th>
+          <th class="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wider">Save</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {% for profile in profiles %}
+        <tr class="hover:bg-gray-50">
+          <!-- User -->
+          <td class="px-4 py-3">
+            <div>
+              <p class="font-medium text-gray-900">{{ profile.user.get_full_name|default:profile.user.username }}</p>
+              <p class="text-xs text-gray-400">{{ profile.user.email }}</p>
+            </div>
+          </td>
+
+          <!-- Role -->
+          <td class="px-4 py-3">
+            <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">{{ profile.role }}</span>
+          </td>
+
+          <!-- Form with toggles -->
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="profile_id" value="{{ profile.id }}">
+
+            <!-- WhatsApp toggle -->
+            <td class="px-4 py-3 text-center">
+              <label class="toggle-track mx-auto">
+                <input type="checkbox" name="whatsapp_notifications" {% if profile.whatsapp_notifications %}checked{% endif %}>
+                <span class="toggle-thumb"></span>
+              </label>
+            </td>
+
+            <!-- Email toggle -->
+            <td class="px-4 py-3 text-center">
+              <label class="toggle-track mx-auto">
+                <input type="checkbox" name="email_notifications" {% if profile.email_notifications %}checked{% endif %}>
+                <span class="toggle-thumb"></span>
+              </label>
+            </td>
+
+            <!-- Save button -->
+            <td class="px-4 py-3 text-right">
+              <button type="submit"
+                      class="text-xs px-3 py-1.5 rounded-lg text-white font-medium"
+                      style="background:#1a7a4a;">
+                Save
+              </button>
+            </td>
+          </form>
+        </tr>
+        {% empty %}
+        <tr>
+          <td colspan="5" class="px-4 py-8 text-center text-sm text-gray-400">No user profiles found.</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="mt-4 text-xs text-gray-400 flex items-center gap-1">
+    <i data-lucide="info" class="w-3.5 h-3.5"></i>
+    Master switches on the Settings screen override all per-user toggles when turned off.
+  </p>
+</div>
+{% endblock %}

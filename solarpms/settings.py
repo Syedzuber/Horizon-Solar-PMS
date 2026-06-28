@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'whitenoise.runserver_nostatic',  # Serves static files in development too — avoids STATIC_URL 404s
     'django.contrib.staticfiles',
+    'django.contrib.humanize',
     'projects',
 ]
 

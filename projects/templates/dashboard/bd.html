@@ -202,9 +202,39 @@
     </div>
 
     {% if p.milestones_awaiting > 0 %}
-    <p class="bd-caption mb-3">
-      {{ p.milestones_awaiting }} milestone{{ p.milestones_awaiting|pluralize }} awaiting payment receipt — follow up with the client directly. Nudging happens outside the system in Phase 1.
+    <p class="bd-caption mb-2">
+      {{ p.milestones_awaiting }} milestone{{ p.milestones_awaiting|pluralize }} awaiting payment receipt — follow up with the client directly.
     </p>
+    {% endif %}
+
+    {% if p.milestones %}
+    <div class="border-top border-light pt-3 mb-3">
+      <div class="small fw-semibold text-secondary mb-2">Payment Milestones</div>
+      <div class="d-flex gap-3">
+        {% for m in p.milestones %}
+        <div class="flex-fill" style="min-width:0;">
+          <div class="d-flex align-items-center gap-1 mb-1">
+            <span class="small fw-bold text-secondary">{{ m.milestone_name }}</span>
+            {% if m.status == 'Received' %}
+              <span class="badge" style="background:var(--hz-green);font-size:.6rem;padding:.15rem .35rem;">Received</span>
+            {% elif m.status == 'Invoiced' %}
+              <span class="badge bg-primary" style="font-size:.6rem;padding:.15rem .35rem;">Invoiced</span>
+            {% else %}
+              <span class="badge bg-secondary" style="font-size:.6rem;padding:.15rem .35rem;">Pending</span>
+            {% endif %}
+          </div>
+          {% if m.amount is not None %}
+            <div class="small fw-medium text-truncate">₹{{ m.amount|floatformat:0 }}</div>
+          {% else %}
+            <div class="small text-primary">TBD</div>
+          {% endif %}
+        </div>
+        {% if not forloop.last %}
+          <div class="flex-shrink-0" style="width:1px;background:#e5e7eb;align-self:stretch;"></div>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
     {% else %}
     <div class="mb-3"></div>
     {% endif %}

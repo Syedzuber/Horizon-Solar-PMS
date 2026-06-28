@@ -221,6 +221,34 @@
       </div>
       {% endif %}
 
+      {# — Payment Milestones — #}
+      {% if row.milestones %}
+      <div class="d-flex gap-3 border-top pt-3 mb-3">
+        {% for m in row.milestones %}
+        <div class="flex-fill" style="min-width:0;">
+          <div class="d-flex align-items-center gap-1 mb-1">
+            <span class="small fw-bold text-secondary">{{ m.milestone_name }}</span>
+            {% if m.status == 'Received' %}
+              <span class="badge bg-success" style="font-size:.6rem;padding:.15rem .35rem;">Received</span>
+            {% elif m.status == 'Invoiced' %}
+              <span class="badge bg-primary" style="font-size:.6rem;padding:.15rem .35rem;">Invoiced</span>
+            {% else %}
+              <span class="badge bg-secondary" style="font-size:.6rem;padding:.15rem .35rem;">Pending</span>
+            {% endif %}
+          </div>
+          {% if m.amount is not None %}
+            <div class="small fw-medium text-truncate">₹{{ m.amount|floatformat:0 }}</div>
+          {% else %}
+            <div class="small text-primary">TBD</div>
+          {% endif %}
+        </div>
+        {% if not forloop.last %}
+          <div class="flex-shrink-0" style="width:1px;background:#e5e7eb;align-self:stretch;"></div>
+        {% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+
       {# — Quick actions + link — #}
       <div class="d-flex flex-wrap gap-2 align-items-center">
         {% if row.project.boq_url %}
