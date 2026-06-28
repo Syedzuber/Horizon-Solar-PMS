@@ -2097,3 +2097,364 @@ Finance could mark tasks Done (after state machine fix) but not In Progress, bec
 ## MIGRATION STATE (unchanged)
 
 No migrations added. Latest migration remains 0029.
+
+---
+
+# PROJECT_CONTEXT.md — 20-22 June 2026
+# Covers: Dashboard redesigns (SE / Design / BD / CEO / SCM), VendorBrand model, Task.blocked_since, Project soft-delete
+
+---
+
+## HEADLINE
+
+Major sprint: all remaining role dashboards redesigned to the one-card-per-project pattern.
+VendorBrand multi-brand system built. Project soft-delete implemented. Latest migration: 0029.
+
+---
+
+## DASHBOARD REDESIGNS (no migrations)
+
+### SE Dashboard — one card per project
+- Sorted by urgency (overdue + blocked + pending GRN + open issues — descending)
+- Urgency circle: combined count; green checkmark if zero
+- Collapsed card: project name, Delayed/On-time badge, urgency circle
+- Expanded card: phase progress, SE-assigned task list with status, Raise Issue + View Project buttons
+- View Project → `/projects/<id>/overview/` (same URL as PM)
+- Task status updates and GRN confirmation happen on project_overview, NOT dashboard card
+
+### Design Dashboard — one card per project
+- Sorted by BOQ urgency (Revision Requested first, then others)
+- Card shows BOQ status badge, task progress, urgency badge
+- Summary stat row: Revision Requested count, Pending Approval count
+- BOQ Revision Requested badge links directly to `/projects/<id>/boq/`
+
+### BD Dashboard — one card per project
+- Read-only; no POST actions
+- One card per project: ORC status + M1/M2/M3 payment milestone badges
+- ORC = Order Confirmation Receipt (business document — NOT OCR)
+- BD does NOT create projects; projects arrive via Zoho webhook → PM activates → BD uploads ORC
+
+### CEO Dashboard
+- Portfolio health cards: Total Active, Commissioned This Month, Total Contracted Value (₹), At Risk count
+- Project status badges table: all projects, status/type/phase/PM/capacity
+- Department KPI summary table: PM/SCM/Design/BD/SE/Finance row-wise counts
+- Read-only view across all projects; no role isolation
+
+### SCM Dashboard
+- Vendor quick-link button per project card → `/vendors/` filtered or plain list
+- Per-project 4-stage pipeline display (BOQ → Order → Delivery → Issues)
+- Stall indicator on pipeline stages
+
+### PM Dashboard — delivery issues panel
+- Delivery Issues panel added inside each expanded project card
+- Pulls open DC-scoped issues per project
+- Links to `delivery_challan_detail` for each issue
+
+---
+
+## VENDORBRAND MODEL (migrations 0022/0023)
+
+New model: `VendorBrand`
+- FK Vendor CASCADE (related_name='brands')
+- FK VendorCategory nullable SET_NULL (related_name='brands')
+- `make_brand` CharField(max_length=200)
+- `is_active` BooleanField(default=True)
+
+Rules:
+- `category` nullable — null means brand appears across ALL categories that vendor supplies
+- Non-null scopes brand to one category only
+- Vendors with no brands fall back to company name in BOQ dropdowns
+- Multi-brand form on vendor edit page — inline formset pattern
+- BOQ `make_preference` dropdown filters VendorBrand.make_brand by BOQItem.category
+- BOQ `ordered_vendor` column same brand-aware pattern for SCM
+
+Horizon Solar logo asset added to `static/images/honor-logo-1.png`.
+
+---
+
+## TASK.BLOCKED_SINCE (migration 0024)
+
+New field: `Task.blocked_since = DateTimeField(null=True, blank=True)`
+- Set when status transitions TO 'Blocked'
+- Cleared on un-block (re-blocks age from zero — not cumulative)
+- Used by dashboards to show "blocked N days" badge
+- No trigger in model — set/cleared explicitly in `task_status_update` view
+
+---
+
+## PROJECT SOFT-DELETE (migration 0029)
+
+New fields on Project:
+- `is_deleted = BooleanField(default=False)`
+- `deleted_at = DateTimeField(null=True, blank=True)`
+
+### View — `project_delete`
+- POST only, Admin role only
+- Sets `is_deleted=True`, `deleted_at=now()` — does NOT change `status`
+- Redirects to project list with success message
+
+### Admin overrides (`projects/admin.py`)
+- `delete_model`: soft-delete instead of hard (preserves history)
+- `get_actions`: removes built-in `delete_selected` (avoids misleading cascade-warning page)
+- Custom actions: `soft_delete_selected`, `restore_selected`
+- `get_queryset`: hides `is_deleted=True` by default; filter `is_deleted__exact=1` in admin URL to reveal
+
+### Frontend (Admin role only)
+- Project list: trash icon column per row; Bootstrap confirmation modal
+- Project overview header: "Delete" button; same modal pattern
+- Both use CSRF-protected POST form inside Bootstrap modal
+
+### CRITICAL GOTCHA
+`project_delete` sets `is_deleted=True` only — does NOT change `status`. Deleted projects remain
+`Active` or `In Progress` in the DB. Every dashboard queryset that filters `status__in=[...]` will
+silently include deleted projects unless `is_deleted=False` is also added. Reference pattern:
+`project_list` view — already has it.
+
+---
+
+## MIGRATION STATE (20-22 June)
+
+| Migration | Name | Contents |
+|---|---|---|
+| 0022 | vendor_make_brand | VendorBrand initial model |
+| 0023 | vendor_brand | VendorBrand refinements (is_active etc.) |
+| 0024 | task_blocked_since | Task.blocked_since DateTimeField |
+| 0029 | project_soft_delete | Project.is_deleted + Project.deleted_at |
+
+(0025–0028 are the notification system — documented in the 22 June entry above.)
+
+---
+
+# PROJECT_CONTEXT.md — 25-26 June 2026
+# Covers: WhatsApp delivery tracking (0030), bug fixes on notification call sites + residential template
+
+---
+
+## HEADLINE
+
+WhatsApp delivery tracking added end-to-end. Six bug fixes shipped. Migration 0030 applied.
+
+---
+
+## WHATSAPP DELIVERY TRACKING (migration 0030)
+
+Two new fields on `NotificationLog`:
+- `interakt_message_id = CharField(max_length=100, blank=True, default='')` — Interakt's message ID, stored from API response
+- `delivery_status = CharField(max_length=30, choices=DELIVERY_STATUS_CHOICES, default='')` — updated by Interakt webhook
+
+Delivery status values (priority order, lower → higher):
+`sent` → `delivered` → `read` (higher-priority events always win — never overwrite with a lower-priority status)
+
+### Interakt delivery webhook — `/webhooks/interakt/delivery/`
+- `@csrf_exempt`, no login required (machine-to-machine)
+- HMAC-SHA256 signature validation: `sha256=<hex>` — note the `sha256=` prefix (must prepend to expected digest before `compare_digest`)
+- Updates `NotificationLog.delivery_status` for matching `interakt_message_id` using priority check
+- Always returns HTTP 200
+
+### Admin WhatsApp Log — `/portal/whatsapp-log/`
+- Admin role only
+- Table: channel, status, delivery_status, template_name, recipient, project, created_at
+- Link from Admin dashboard
+
+### show_notification_log management command
+- `python manage.py show_notification_log` — prints last 20 NotificationLog rows
+- For local diagnostics only
+
+---
+
+## BUG FIXES (25-26 June)
+
+### Fix: Interakt webhook signature — must prepend 'sha256='
+**Root cause:** signature comparison was against raw hex digest; Interakt sends `sha256=<hex>`.
+**Fix:** Expected digest built as `'sha256=' + hmac.new(...).hexdigest()` before `compare_digest`.
+
+### Fix: WhatsApp log 500 — Project has no 'name' field
+**Root cause:** notification context used `project.name`; Project model uses `project.customer_name`.
+**Fix:** All notification helper functions updated to use `project.customer_name`.
+
+### Fix: Email channel missing from 7 notification triggers
+**Root cause:** Original implementation only wired WhatsApp channel; email calls were missing.
+**Fix:** All 7 `send_notification()` call sites now pass both 'whatsapp' and 'email' channels.
+
+### Fix: 3 WhatsApp param bugs
+Three templates had wrong variable counts or order in production call sites (post-batch-1 review).
+All corrected to match confirmed Interakt-approved param structures.
+
+### Fix: Residential template milestone flags
+`attach_residential_template()` was not setting `is_payment_milestone=True` on the 3 milestone tasks.
+**Fix:** M1 (Phase 2), M2 (Phase 6 task 4), M3 (Phase 8 task 6 — Plant Commissioning) now flagged.
+This was causing the `payment_notification` to never fire from real task completions.
+
+### Fix: Block status change on unassigned tasks
+`task_status_update` was allowing Blocked transition on tasks with no `assigned_to`.
+**Fix:** Guard added — returns 400 JSON error if `task.assigned_to is None` on Blocked attempt.
+
+---
+
+## MIGRATION STATE (25-26 June)
+
+| Migration | Name | Contents |
+|---|---|---|
+| 0030 | whatsapp_delivery_tracking | NotificationLog.interakt_message_id + delivery_status |
+
+---
+
+# PROJECT_CONTEXT.md — 27 June 2026
+# Covers: My Documents page, DesignSubmission model (0031), navbar username dropdown
+
+---
+
+## HEADLINE
+
+Personal document archive page built for all roles. New DesignSubmission model. Navbar updated.
+Migration 0031 applied.
+
+---
+
+## DESIGNSUBMISSION MODEL (migration 0031)
+
+New model in `projects/models.py`:
+
+```python
+class DesignSubmission(models.Model):
+    STATUS_CHOICES = [('Pending','Pending'), ('Approved','Approved'), ('Rejected','Rejected')]
+
+    project      = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='design_submissions')
+    submitted_by = models.ForeignKey('UserProfile', on_delete=models.SET_NULL,
+                                     null=True, blank=True, related_name='design_submissions')
+    title        = models.CharField(max_length=200)
+    description  = models.TextField(blank=True, default='')
+
+    # Supabase storage — same three-field pattern as ProjectDocument / TaskAttachment
+    file_name    = models.CharField(max_length=255, blank=True, default='')
+    file_url     = models.URLField(max_length=1000, blank=True, default='')
+    supabase_path = models.CharField(max_length=500, blank=True, default='')
+
+    status       = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Pending')
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    reviewed_by  = models.ForeignKey('UserProfile', on_delete=models.SET_NULL,
+                                      null=True, blank=True, related_name='reviewed_design_submissions')
+    reviewed_at  = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-submitted_at']
+```
+
+**NOTE: No create flow yet.** Model + detail view exist; Design Submissions section shows empty until
+a submit form is built. File fields are blank=True to allow migration without data.
+
+---
+
+## MY DOCUMENTS PAGE — `/profile/documents/`
+
+### View — `my_documents`
+Role-aware personal document archive. All querysets capped at `[:50]` (no pagination yet).
+
+| Section | Roles | Query | Link target |
+|---|---|---|---|
+| A — Uploaded Files | All | `TaskAttachment + ProjectDocument` filtered by `uploaded_by=profile, is_deleted=False` | Download (Supabase URL) |
+| B — BOQ Submissions | Design | `BOQ.filter(submitted_by=profile)` | `boq_detail` |
+| C — Design Submissions | Design | `DesignSubmission.filter(submitted_by=profile)` | `design_submission_detail` |
+| D — Delivery Challans | SCM | `DeliveryChallan.filter(created_by=profile)` | `delivery_challan_detail` |
+| E — Payment Requests | SCM | `PaymentRequest.filter(requested_by=request.user)` | `payment_request_detail` |
+
+**CRITICAL — Section E:** `PaymentRequest.requested_by` is FK to `auth.User` (NOT UserProfile).
+Filter uses `requested_by=request.user` (the Django User object), never `requested_by=profile`.
+
+**CRITICAL — Task path:** `TaskAttachment` has no direct `project` FK. Path is `task → phase → project`.
+`select_related` must be `'task__phase__project'`; template uses `att.task.phase.project.project_id`.
+
+**CRITICAL — BOQ fields:** `BOQ.submitted_by` (not `created_by`), `BOQ.submitted_at`
+(not `created_at`). `submitted_at` is nullable — use `|default:"—"` in templates.
+
+### New views added
+- `my_documents` — main listing page
+- `design_submission_detail` — read-only; submitter + PM + Admin access
+- `payment_request_detail` — read-only; SCM + Finance + PM + Admin access
+
+### New URLs added
+```python
+path('profile/documents/',                                            views.my_documents,             name='my_documents'),
+path('design-submissions/<int:pk>/',                                  views.design_submission_detail, name='design_submission_detail'),
+path('projects/<str:project_id>/payment-requests/<int:request_id>/', views.payment_request_detail,   name='payment_request_detail'),
+```
+
+### New templates
+- `projects/templates/projects/my_documents.html`
+- `projects/templates/projects/design_submission_detail.html`
+- `projects/templates/projects/payment_request_detail.html`
+
+---
+
+## NAVBAR USERNAME DROPDOWN
+
+Replaced standalone "My Documents" link with a click-based dropdown under the username.
+
+**HTML structure** (`base.html`):
+```html
+<div class="position-relative" id="user-hover-menu">
+  <span class="text-white-50 small">{{ user.get_full_name|default:user.username }}</span>
+  <div id="user-hover-dropdown">
+    <a href="{% url 'my_documents' %}" class="dropdown-item small rounded">
+      <i class="bi bi-folder2-open me-2"></i>My Documents
+    </a>
+  </div>
+</div>
+```
+
+**Behaviour:** hidden by default (CSS `display:none`), `.open` class sets `display:block`.
+Click on `#user-hover-menu` toggles `.open` on `#user-hover-dropdown`.
+Outside-click listener on `document` removes `.open`.
+Pure CSS + JS — no Bootstrap dropdown JS dependency.
+
+---
+
+## PHASE 2 BACKLOG (as of 27 June)
+
+- DesignSubmission create/submit form for Design users (file upload + title + description)
+- DesignSubmission approval flow for PM (Approved/Rejected + review notes)
+- PaymentRequest listing page for Finance role
+- ORC upload flow for BD role
+- Task dependencies (TaskDependency model, predecessor validation)
+- GRN confirmation mandatory-proof enforcement (currently warn-but-allow)
+- Pagination on My Documents sections (currently `[:50]` hard cap)
+
+---
+
+## MIGRATION STATE — COMPLETE SEQUENCE (27 June 2026)
+
+| Migration | Name | Contents |
+|---|---|---|
+| 0001–0013 | scaffold | All core models through PaymentMilestone + commissioned_at |
+| 0014 | webhook_fields | zoho_deal_id + customer_contact_person on Project |
+| 0015 | file_uploads | ProjectDocument + TaskAttachment |
+| 0016 | issue_activitylog | Issue + ActivityLog |
+| 0017 | comment | Comment |
+| 0018 | delivery_challan | DeliveryChallan + DCLineItem |
+| 0019 | issue_delivery_challan_fk | Issue.delivery_challan FK |
+| 0020 | dclineitem_damaged_quantity | DCLineItem.damaged_quantity |
+| 0021 | add_payment_request | PaymentRequest |
+| 0022 | vendor_make_brand | VendorBrand initial |
+| 0023 | vendor_brand | VendorBrand refinements |
+| 0024 | task_blocked_since | Task.blocked_since |
+| 0025 | userprofile_notification_prefs | UserProfile.email_notifications + whatsapp_notifications |
+| 0026 | notification_log | NotificationLog |
+| 0027 | system_settings | SystemSettings |
+| 0028 | task_is_payment_milestone | Task.is_payment_milestone |
+| 0029 | project_soft_delete | Project.is_deleted + Project.deleted_at |
+| 0030 | whatsapp_delivery_tracking | NotificationLog.interakt_message_id + delivery_status |
+| 0031 | design_submission | DesignSubmission |
+
+---
+
+## SPRINT STATUS (27 June 2026)
+
+- Hard deadline: 4 July 2026 (board demo) — 7 days remaining
+- Current migration: 0031
+- SystemSettings.whatsapp_enabled / email_enabled = False by default — flip ON before demo via Django admin
+- All 8 role dashboards live and redesigned
+- Notification system built and WhatsApp-verified (all 7 templates return HTTP 201 from Interakt)
+- My Documents page live for all roles
+- Board demo centerpiece: Task "Plant Commissioning" (M3) marked Done by SE → WhatsApp + email fires to Finance + PM + CEO → CEO dashboard updates

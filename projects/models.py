@@ -71,6 +71,10 @@ class Project(models.Model):
     )
     activated_at              = models.DateTimeField(blank=True, null=True)  # Set when PM activates; used as due-date chain anchor
     commissioned_at           = models.DateField(null=True, blank=True)  # Set when project status changes to Commissioned
+    cascade_scheduling        = models.BooleanField(
+        default=False,
+        help_text="When True, task due dates chain automatically. Cannot be reverted once enabled.",
+    )
     is_deleted                = models.BooleanField(default=False)
     deleted_at                = models.DateTimeField(null=True, blank=True)
 
@@ -1004,8 +1008,14 @@ class NotificationLog(models.Model):
 class SystemSettings(models.Model):
     """Single-row global settings. Use SystemSettings.get() — never instantiate directly."""
 
-    whatsapp_enabled = models.BooleanField(default=False)
-    email_enabled    = models.BooleanField(default=False)
+    whatsapp_enabled              = models.BooleanField(default=False)
+    email_enabled                 = models.BooleanField(default=False)
+    in_app_notifications_enabled  = models.BooleanField(default=True)
+    maintenance_mode              = models.BooleanField(default=False)
+    cascade_scheduling_enabled    = models.BooleanField(
+        default=False,
+        help_text="When True, PMs can enable cascading date scheduling per project.",
+    )
 
     class Meta:
         verbose_name        = 'System Settings'

@@ -1,4 +1,5 @@
 from django.urls import path
+from django.views.generic import RedirectView
 from . import views
 
 urlpatterns = [
@@ -40,7 +41,8 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),              # PM only
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',   views.task_status_update, name='task_status_update'), # Assigned role or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),        # PM only
-    path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,  name='task_set_due_date'),  # PM only, triggers cascade recalculation
+    path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only
+    path('projects/<str:project_id>/enable-cascade/',              views.enable_cascade_scheduling,  name='enable_cascade_scheduling'), # PM only, irreversible, POST only
 
     # ---------------------------------------------------------------------------
     # Vendors — SCM and Admin only
@@ -157,10 +159,23 @@ urlpatterns = [
     # Portal-wide activity log — Admin only
     # NOTE: /portal/ prefix used instead of /admin/ because Django admin
     # intercepts all /admin/* URLs before the projects URLconf can match them
-    path('portal/activity-log/',
-         views.portal_activity_log, name='portal_activity_log'),
     path('portal/whatsapp-log/',
          views.admin_whatsapp_log, name='admin_whatsapp_log'),
+
+    # ---------------------------------------------------------------------------
+    # Admin Panel — portal-admin/ prefix (Admin role only)
+    # ---------------------------------------------------------------------------
+    path('portal-admin/settings/',                      views.admin_master_switches,    name='admin_master_switches'),
+    path('portal-admin/users/',                         views.admin_user_management,    name='admin_user_management'),
+    path('portal-admin/notification-prefs/',            views.admin_notification_prefs, name='admin_notification_prefs'),
+    path('portal-admin/departments/',                   views.admin_departments,         name='admin_departments'),
+    path('portal-admin/departments/<int:user_id>/edit/', views.admin_user_edit,          name='admin_user_edit'),
+    path('portal-admin/send-records/',                  views.admin_send_records,        name='admin_send_records'),
+    path('portal-admin/audit-log/',                     views.admin_audit_log,           name='admin_audit_log'),
+    # Redirect old activity-log URL to the new audit-log screen
+    path('portal/activity-log/',
+         RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),
+         name='portal_activity_log_redirect'),
 
     # ---------------------------------------------------------------------------
     # Task drill-down — due-date filters for PM, Design, SCM dashboards

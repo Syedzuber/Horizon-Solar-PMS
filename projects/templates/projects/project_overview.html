@@ -749,6 +749,46 @@
   </div>
 </div>
 
+{# ── 5b. Cascade Scheduling Control (PM only, feature gate ON) ──────────── #}
+{% if show_cascade_option %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header py-2">
+    <span class="fw-semibold small">
+      <i class="bi bi-calendar3 me-1"></i>Scheduling
+    </span>
+  </div>
+  <div class="card-body py-3 px-4">
+    {% if project.cascade_scheduling %}
+      {# State 3 — cascade already active, locked display #}
+      <div class="d-flex align-items-center gap-2">
+        <span class="badge" style="background:var(--hz-green); font-size:.8rem;">
+          <i class="bi bi-check-circle me-1"></i>Cascading scheduling is ACTIVE
+        </span>
+        <span class="text-muted small">Task due dates are chained automatically from project activation date.</span>
+      </div>
+    {% else %}
+      {# State 2 — gate ON but not yet enabled #}
+      <div class="d-flex align-items-start gap-3 flex-wrap">
+        <div>
+          <p class="mb-1 small fw-medium">Cascading scheduling is <strong>OFF</strong> for this project.</p>
+          <p class="mb-2 text-muted small">Tasks dates are set independently by each role.</p>
+          <form method="post" action="{% url 'enable_cascade_scheduling' project.project_id %}"
+                onsubmit="return confirm('Enable cascading scheduling? This cannot be undone.')">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-outline-brand btn-sm">
+              Enable cascading scheduling
+            </button>
+          </form>
+          <p class="text-warning small mt-2 mb-0">
+            <i class="bi bi-exclamation-triangle me-1"></i>Once enabled, this cannot be turned off.
+          </p>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── 6. Phase-wise task list ──────────────────────────────────────────────── #}
 {% if project.status == 'Draft' %}
   <div class="alert alert-secondary small">Tasks will appear here after the project is activated.</div>
@@ -836,8 +876,8 @@
                 {% endif %}
               </td>
               <td>
-                {# Finance sees due dates read-only — no date editing on this page for Finance #}
-                {% if is_assigned_pm and role != 'Finance' %}
+                {% if is_assigned_pm %}
+                  {# PM: always editable #}
                   <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
                     {% csrf_token %}
                     <input type="date" name="due_date"
@@ -846,6 +886,23 @@
                            style="width:135px; font-size:.78rem;"
                            onchange="this.form.submit()">
                   </form>
+                {% elif not project.cascade_scheduling and task.assigned_role == user_task_role and role != 'Finance' and role != 'Admin' %}
+                  {# Non-PM: editable only when cascade OFF and task assigned to their role #}
+                  <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
+                    {% csrf_token %}
+                    <input type="date" name="due_date"
+                           value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
+                           class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+                           style="width:135px; font-size:.78rem;"
+                           onchange="this.form.submit()">
+                  </form>
+                {% elif project.cascade_scheduling and task.assigned_role == user_task_role and not is_assigned_pm %}
+                  {# Non-PM, cascade ON: read-only with lock icon #}
+                  <span class="small {% if not task.due_date %}text-muted{% endif %}"
+                        title="Managed by cascading scheduling">
+                    {{ task.due_date|default:"—" }}
+                    <i data-lucide="lock" style="width:11px;height:11px;color:var(--bs-secondary);vertical-align:middle;" class="ms-1"></i>
+                  </span>
                 {% else %}
                   <span class="small {% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
                 {% endif %}

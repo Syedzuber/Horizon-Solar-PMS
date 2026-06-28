@@ -1,0 +1,112 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}Master Switches{% endblock %}
+{% block nav_settings %}nav-active{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <h1 class="text-xl font-semibold text-gray-900 mb-1">Master Switches</h1>
+  <p class="text-sm text-gray-500 mb-8">Global on/off controls for notification channels and system state.</p>
+
+  <form method="post">
+    {% csrf_token %}
+    <div class="bg-white rounded-xl border border-gray-200 divide-y divide-gray-100">
+
+      <!-- WhatsApp -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-green-50">
+            <i data-lucide="message-circle" class="w-4 h-4" style="color:#1a7a4a;"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">WhatsApp notifications (Interakt)</p>
+            <p class="text-xs text-gray-500 mt-0.5">Master switch — overrides all per-user preferences when off</p>
+          </div>
+        </div>
+        <label class="toggle-track">
+          <input type="checkbox" name="whatsapp_enabled" {% if settings.whatsapp_enabled %}checked{% endif %}>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+      <!-- Email -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-blue-50">
+            <i data-lucide="mail" class="w-4 h-4 text-blue-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">Email notifications (ZeptoMail)</p>
+            <p class="text-xs text-gray-500 mt-0.5">Master switch — overrides all per-user preferences when off</p>
+          </div>
+        </div>
+        <label class="toggle-track">
+          <input type="checkbox" name="email_enabled" {% if settings.email_enabled %}checked{% endif %}>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+      <!-- Scheduling -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-teal-50">
+            <i data-lucide="calendar-clock" class="w-4 h-4 text-teal-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">Cascading scheduling</p>
+            <p class="text-xs text-gray-500 mt-0.5">When on, PMs can enable automatic date chaining per project.
+              When off, the option is hidden from all project views.</p>
+          </div>
+        </div>
+        <label class="toggle-track">
+          <input type="checkbox" name="cascade_scheduling_enabled" {% if settings.cascade_scheduling_enabled %}checked{% endif %}>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+      <!-- In-app -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-purple-50">
+            <i data-lucide="bell" class="w-4 h-4 text-purple-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">In-app notifications</p>
+            <p class="text-xs text-gray-500 mt-0.5">Bell icon alerts in the dashboard</p>
+          </div>
+        </div>
+        <label class="toggle-track">
+          <input type="checkbox" name="in_app_notifications_enabled" {% if settings.in_app_notifications_enabled %}checked{% endif %}>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+      <!-- Maintenance mode -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-orange-50">
+            <i data-lucide="wrench" class="w-4 h-4 text-orange-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">Maintenance mode</p>
+            <p class="text-xs text-gray-500 mt-0.5">Blocks all non-admin logins with a maintenance message</p>
+          </div>
+        </div>
+        <label class="toggle-track">
+          <input type="checkbox" name="maintenance_mode" {% if settings.maintenance_mode %}checked{% endif %}>
+          <span class="toggle-thumb"></span>
+        </label>
+      </div>
+
+    </div>
+
+    <div class="mt-6 flex justify-end">
+      <button type="submit"
+              class="px-5 py-2 rounded-lg text-sm font-medium text-white"
+              style="background:#1a7a4a;">
+        Save changes
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

@@ -12,6 +12,7 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import Count, Exists, Max, Min, OuterRef, Prefetch, Q, Sum
+from django.core.exceptions import PermissionDenied
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
@@ -28,7 +29,7 @@ from .models import (
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
 )
 from .notifications import send_notification
-from .forms import UserCreateForm, UserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
@@ -1673,7 +1674,7 @@ def project_activate(request, project_id):
             )
 
     # Log project activation after the transaction commits
-    log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='', entity_id=None)
+    log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
 
     if project.project_type == 'Residential':
         messages.success(request, 'Project activated. 50 tasks created. Set the first task due date to calculate all dates.')
@@ -1709,6 +1710,49 @@ def project_recalculate_dates(request, project_id):
 
     calculate_due_dates(project)
     messages.success(request, 'Due dates recalculated from activation date.')
+    return redirect('project_overview', project_id=project.project_id)
+
+
+@login_required
+def enable_cascade_scheduling(request, project_id):
+    """
+    Irreversibly enable cascading scheduling for a project.
+    POST only, PM only, feature gate must be ON.
+    Once set to True, cascade_scheduling cannot be reverted.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if not _pm_owns_project(request, project):
+        raise PermissionDenied
+
+    settings_obj = SystemSettings.get()
+    if not settings_obj.cascade_scheduling_enabled:
+        messages.error(request, 'Cascading scheduling is not enabled by Admin.')
+        return redirect('project_overview', project_id=project_id)
+
+    # Idempotent — already on, nothing to do
+    if project.cascade_scheduling:
+        return redirect('project_overview', project_id=project_id)
+
+    project.cascade_scheduling = True
+    project.save(update_fields=['cascade_scheduling'])
+
+    # Trigger full recalculation if project has an activation date
+    if project.activated_at:
+        calculate_due_dates(project)
+
+    log_activity(
+        project=project,
+        actor=request.user.profile,
+        action=f"Cascading scheduling enabled for project '{project.project_id}'",
+        entity_type='Project',
+        entity_id=project.id,
+    )
+
+    messages.success(request, 'Cascading scheduling is now active for this project.')
     return redirect('project_overview', project_id=project.project_id)
 
 
@@ -2015,39 +2059,65 @@ def task_assign(request, project_id, task_id):
 
 
 @login_required
-@role_required(['PM'])
 def task_set_due_date(request, project_id, task_id):
     """
-    Set the due date on a task and cascade-recalculate all subsequent task due dates.
-    Clearing the date (empty string) sets due_date=None without cascading.
-    Access: assigned PM only. POST only.
+    Set the due date on a task.
+    PM: can edit any task; cascade-recalculates subsequent tasks.
+    Other roles: can only edit tasks assigned to their role, and only when cascade is OFF.
+    POST only.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
-
-    if not _pm_owns_project(request, project):
-        raise Http404
-
+    profile = request.user.profile
+    is_pm = _pm_owns_project(request, project)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
+    if not is_pm:
+        # Map UserProfile.role to Task.assigned_role (BD → BD / Sales)
+        _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+        user_task_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
+
+        if task.assigned_role != user_task_role:
+            raise PermissionDenied
+
+        if project.cascade_scheduling:
+            messages.error(request, 'Due dates are managed automatically by cascading scheduling.')
+            return redirect('project_overview', project_id=project.project_id)
+
+        # Non-PM: save this task's date only, no cascade ripple
+        date_str = request.POST.get('due_date', '').strip()
+        if date_str:
+            try:
+                task.due_date = date.fromisoformat(date_str)
+                task.save()
+                log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+                messages.success(request, 'Due date updated.')
+            except ValueError:
+                messages.error(request, 'Invalid date.')
+        else:
+            task.due_date = None
+            task.save()
+            log_activity(project, profile, f"Cleared due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+            messages.success(request, 'Due date cleared.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    # PM path — cascade-recalculate on date set, clear without cascade
     date_str = request.POST.get('due_date', '').strip()
     if date_str:
         try:
             new_date = date.fromisoformat(date_str)
             count = recalculate_from_task(project, task, new_date, user=request.user)
             messages.success(request, f'Due date updated. {count} task(s) recalculated.')
-            # Log the due date update on successful recalculation
-            log_activity(project, request.user.profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+            log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
         except ValueError:
             messages.error(request, 'Invalid date.')
     else:
         task.due_date = None
         task.save()
         messages.success(request, 'Due date cleared.')
-        # Log the due date clear
-        log_activity(project, request.user.profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+        log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
     return redirect('project_overview', project_id=project.project_id)
 
 
@@ -3593,6 +3663,10 @@ def project_overview(request, project_id):
     _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
+    # Cascade scheduling context — PM-only feature gate check
+    _sys = SystemSettings.get()
+    show_cascade_option = (_sys.cascade_scheduling_enabled and role == 'PM' and is_assigned_pm)
+
     # Payment requests for this project — Finance sees confirm actions, PM sees read-only
     # The queryset is shared; template role-gates control which actions are rendered.
     payment_requests = []
@@ -3632,6 +3706,7 @@ def project_overview(request, project_id):
         'today':                       date.today(),
         'payment_requests':            payment_requests,
         'user_dashboard_url':          get_user_dashboard(request.user),
+        'show_cascade_option':         show_cascade_option,
     })
 
 
@@ -3766,6 +3841,17 @@ def zoho_deal_closed_webhook(request):
     logger.info('Webhook: project %s created for deal %s (pm=%s)',
                 project.project_id, record_id,
                 project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
+
+    try:
+        ActivityLog.objects.create(
+            project=project,
+            actor=None,
+            action=f"Project '{project.project_id}' created via Zoho CRM webhook",
+            entity_type='Project',
+            entity_id=project.pk,
+        )
+    except Exception:
+        pass
 
     if project.assigned_pm is None:
         # Notify Admin: PM could not be assigned (fallback user not found either)
@@ -5474,4 +5560,533 @@ def payment_request_detail(request, project_id, request_id):
     return render(request, 'projects/payment_request_detail.html', {
         'pr':      pr,
         'project': project,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Admin Panel (portal-admin/) — Admin role only
+# ---------------------------------------------------------------------------
+
+@login_required
+@role_required(['Admin'])
+def admin_master_switches(request):
+    """Screen 1: Master switches for WhatsApp, email, in-app notifications, maintenance mode, cascade scheduling."""
+    settings = SystemSettings.get()
+
+    FIELD_LABELS = {
+        'whatsapp_enabled':             'WhatsApp notifications (Interakt)',
+        'email_enabled':                'Email notifications (ZeptoMail)',
+        'in_app_notifications_enabled': 'In-app notifications',
+        'maintenance_mode':             'Maintenance mode',
+    }
+
+    if request.method == 'POST':
+        actor = request.user.profile
+        for field, label in FIELD_LABELS.items():
+            old_value = getattr(settings, field)
+            new_value = field in request.POST
+            if old_value != new_value:
+                setattr(settings, field, new_value)
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=f"Master switch '{label}' set to {'ON' if new_value else 'OFF'}",
+                    entity_type='System',
+                    entity_id=None,
+                )
+        # Cascade scheduling feature gate — handled separately for specific log message
+        old_cascade = settings.cascade_scheduling_enabled
+        new_cascade = 'cascade_scheduling_enabled' in request.POST
+        if old_cascade != new_cascade:
+            settings.cascade_scheduling_enabled = new_cascade
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"Cascading scheduling feature gate set to {'ON' if new_cascade else 'OFF'}",
+                entity_type='System',
+                entity_id=None,
+            )
+        settings.save()
+        messages.success(request, 'Settings saved.')
+        return redirect('admin_master_switches')
+
+    return render(request, 'projects/admin/master_switches.html', {'settings': settings})
+
+
+@login_required
+@role_required(['Admin'])
+def admin_user_management(request):
+    """Screen 2: Activate/deactivate users and change roles."""
+    from django.contrib.auth.models import User as AuthUser
+
+    role_choices = UserProfile.ROLE_CHOICES
+
+    if request.method == 'POST':
+        action      = request.POST.get('action', '')
+        target_id   = request.POST.get('user_id', '')
+        actor       = request.user.profile
+
+        try:
+            target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+        except AuthUser.DoesNotExist:
+            messages.error(request, 'User not found.')
+            return redirect('admin_user_management')
+
+        # Never allow Admin to deactivate themselves
+        if target_user == request.user and action == 'deactivate':
+            messages.error(request, 'You cannot deactivate your own account.')
+            return redirect('admin_user_management')
+
+        if action == 'deactivate':
+            target_user.is_active = False
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) deactivated",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
+
+        elif action == 'reactivate':
+            target_user.is_active = True
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) reactivated",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
+
+        elif action == 'change_role':
+            new_role = request.POST.get('new_role', '').strip()
+            valid_roles = [r[0] for r in role_choices]
+            if new_role not in valid_roles:
+                messages.error(request, 'Invalid role selected.')
+                return redirect('admin_user_management')
+            old_role = target_user.profile.role
+            if old_role != new_role:
+                target_user.profile.role = new_role
+                target_user.profile.save()
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}'",
+                    entity_type='User',
+                    entity_id=target_user.id,
+                )
+                messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
+            else:
+                messages.success(request, 'No change — role is already set to that value.')
+
+        return redirect('admin_user_management')
+
+    users = (
+        AuthUser.objects
+        .select_related('profile')
+        .order_by('profile__role', 'first_name', 'last_name')
+    )
+    return render(request, 'projects/admin/user_management.html', {
+        'users':        users,
+        'role_choices': role_choices,
+        'current_user': request.user,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_notification_prefs(request):
+    """Screen 3: Per-user WhatsApp and email notification toggles."""
+    if request.method == 'POST':
+        target_profile_id = request.POST.get('profile_id', '')
+        actor = request.user.profile
+        try:
+            target_profile = UserProfile.objects.select_related('user').get(pk=target_profile_id)
+        except UserProfile.DoesNotExist:
+            messages.error(request, 'User not found.')
+            return redirect('admin_notification_prefs')
+
+        new_wa    = 'whatsapp_notifications' in request.POST
+        new_email = 'email_notifications' in request.POST
+
+        for field, label, new_val in [
+            ('whatsapp_notifications', 'WhatsApp', new_wa),
+            ('email_notifications',    'Email',    new_email),
+        ]:
+            old_val = getattr(target_profile, field)
+            if old_val != new_val:
+                setattr(target_profile, field, new_val)
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=(
+                        f"Notification pref updated for "
+                        f"'{target_profile.user.get_full_name() or target_profile.user.username}': "
+                        f"{label} set to {'ON' if new_val else 'OFF'}"
+                    ),
+                    entity_type='Notification',
+                    entity_id=target_profile.id,
+                )
+        target_profile.save()
+        messages.success(request, f'Preferences updated for {target_profile.user.get_full_name() or target_profile.user.username}.')
+        return redirect('admin_notification_prefs')
+
+    profiles = UserProfile.objects.select_related('user').order_by('role', 'user__first_name')
+    return render(request, 'projects/admin/notification_prefs.html', {'profiles': profiles})
+
+
+@login_required
+@role_required(['Admin'])
+def admin_departments(request):
+    """Departments view — users grouped by role, with inline deactivate/reactivate/role-change."""
+    from django.contrib.auth.models import User as AuthUser
+    from itertools import groupby
+
+    DEPT_NAMES = {
+        'PM':            'Project Management',
+        'Site Engineer': 'Site Execution',
+        'SCM':           'Supply Chain',
+        'Finance':       'Finance',
+        'Design':        'Design',
+        'CEO':           'Leadership',
+        'BD':            'Sales & Business Development',
+        'Admin':         'Administration',
+    }
+
+    if request.method == 'POST':
+        action    = request.POST.get('action', '')
+        target_id = request.POST.get('user_id', '')
+        actor     = request.user.profile
+
+        try:
+            target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+        except AuthUser.DoesNotExist:
+            messages.error(request, 'User not found.')
+            return redirect('admin_departments')
+
+        if target_user == request.user and action == 'deactivate':
+            messages.error(request, 'You cannot deactivate your own account.')
+            return redirect('admin_departments')
+
+        if action == 'deactivate':
+            target_user.is_active = False
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) deactivated",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
+
+        elif action == 'reactivate':
+            target_user.is_active = True
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"User '{target_user.get_full_name() or target_user.username}' ({target_user.profile.role}) reactivated",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
+
+        elif action == 'change_role':
+            new_role    = request.POST.get('new_role', '').strip()
+            valid_roles = [r[0] for r in UserProfile.ROLE_CHOICES]
+            if new_role not in valid_roles:
+                messages.error(request, 'Invalid role selected.')
+                return redirect('admin_departments')
+            old_role = target_user.profile.role
+            if old_role != new_role:
+                target_user.profile.role = new_role
+                target_user.profile.save()
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}'",
+                    entity_type='User',
+                    entity_id=target_user.id,
+                )
+                messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
+
+        return redirect('admin_departments')
+
+    all_profiles = (
+        UserProfile.objects
+        .select_related('user')
+        .order_by('role', 'user__first_name', 'user__last_name')
+    )
+
+    grouped = []
+    for role_key, members in groupby(all_profiles, key=lambda p: p.role):
+        member_list = list(members)
+        active_count = sum(1 for m in member_list if m.user.is_active)
+        grouped.append({
+            'role':         role_key,
+            'dept_name':    DEPT_NAMES.get(role_key, role_key),
+            'members':      member_list,
+            'active_count': active_count,
+        })
+
+    return render(request, 'projects/admin/departments.html', {
+        'grouped':      grouped,
+        'role_choices': UserProfile.ROLE_CHOICES,
+        'current_user': request.user,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_user_edit(request, user_id):
+    """Edit a user's full profile from the Admin Panel: name, username, email, phone, role, password."""
+    from django.contrib.auth.models import User as AuthUser
+    target_user = get_object_or_404(AuthUser, pk=user_id)
+    try:
+        profile = target_user.profile
+    except UserProfile.DoesNotExist:
+        profile = UserProfile.objects.create(user=target_user)
+
+    if request.method == 'POST':
+        form = AdminUserEditForm(request.POST, instance_user=target_user)
+        if form.is_valid():
+            cd = form.cleaned_data
+            actor = request.user.profile
+
+            target_user.first_name = cd['first_name']
+            target_user.last_name  = cd['last_name']
+            target_user.username   = cd['username']
+            target_user.email      = cd['email']
+            target_user.is_staff   = (cd['role'] == 'Admin')
+            if cd['new_password']:
+                target_user.set_password(cd['new_password'])
+            target_user.save()
+
+            profile.role         = cd['role']
+            profile.phone_number = cd['phone_number']
+            profile.save()
+
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"User '{target_user.get_full_name() or target_user.username}' profile updated by admin",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            if cd['new_password']:
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=f"Password reset for user '{target_user.username}' by admin",
+                    entity_type='User',
+                    entity_id=target_user.id,
+                )
+
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} updated successfully.')
+            return redirect('admin_departments')
+    else:
+        form = AdminUserEditForm(
+            initial={
+                'first_name':   target_user.first_name,
+                'last_name':    target_user.last_name,
+                'username':     target_user.username,
+                'email':        target_user.email,
+                'phone_number': profile.phone_number,
+                'role':         profile.role,
+            },
+            instance_user=target_user,
+        )
+
+    return render(request, 'projects/admin/user_edit.html', {
+        'form':        form,
+        'target_user': target_user,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_send_records(request):
+    """Screen 5: Notification send log — all channels with filters and CSV export."""
+    import csv
+    from django.http import HttpResponse
+    from django.core.paginator import Paginator
+
+    channel_param   = request.GET.get('channel',   '').strip()
+    status_param    = request.GET.get('status',    '').strip()
+    date_from_param = request.GET.get('date_from', '').strip()
+    date_to_param   = request.GET.get('date_to',   '').strip()
+    export          = request.GET.get('export',    '').strip()
+
+    default_date_from = (timezone.now().date() - timedelta(days=7)).isoformat()
+    date_from = date_from_param or default_date_from
+
+    qs = (
+        NotificationLog.objects
+        .select_related('recipient__user', 'related_project', 'actor__user')
+        .order_by('-created_at')
+    )
+
+    if channel_param and channel_param != 'all':
+        qs = qs.filter(channel=channel_param)
+    if status_param and status_param != 'all':
+        qs = qs.filter(status=status_param)
+    if date_from:
+        try:
+            qs = qs.filter(created_at__date__gte=date.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to_param:
+        try:
+            qs = qs.filter(created_at__date__lte=date.fromisoformat(date_to_param))
+        except ValueError:
+            pass
+
+    # Stat cards — always last 7 days, unfiltered by channel/status
+    seven_days_ago = timezone.now() - timedelta(days=7)
+    stats_qs = NotificationLog.objects.filter(created_at__gte=seven_days_ago)
+    stat_total     = stats_qs.count()
+    stat_whatsapp  = stats_qs.filter(channel='whatsapp').count()
+    stat_email     = stats_qs.filter(channel='email').count()
+    stat_failed    = stats_qs.filter(status='failed').count()
+
+    if export == 'csv':
+        response = HttpResponse(content_type='text/csv')
+        response['Content-Disposition'] = 'attachment; filename="send_records.csv"'
+        writer = csv.writer(response)
+        writer.writerow(['timestamp', 'recipient', 'role', 'channel', 'template', 'api_status', 'delivery_status'])
+        for log in qs.iterator():
+            writer.writerow([
+                log.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                log.recipient.user.get_full_name() or log.recipient.user.username,
+                log.recipient.role,
+                log.channel,
+                log.template_name,
+                log.status,
+                log.delivery_status,
+            ])
+        return response
+
+    paginator   = Paginator(qs, 50)
+    page_number = request.GET.get('page')
+    page_obj    = paginator.get_page(page_number)
+
+    return render(request, 'projects/admin/send_records.html', {
+        'page_obj':    page_obj,
+        'stat_total':  stat_total,
+        'stat_wa':     stat_whatsapp,
+        'stat_email':  stat_email,
+        'stat_failed': stat_failed,
+        'filters': {
+            'channel':   channel_param,
+            'status':    status_param,
+            'date_from': date_from,
+            'date_to':   date_to_param,
+        },
+    })
+
+
+# ---------------------------------------------------------------------------
+# Admin — Audit Log
+# ---------------------------------------------------------------------------
+
+def _export_audit_csv(qs):
+    import csv
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="audit_log.csv"'
+    writer = csv.writer(response)
+    writer.writerow(['Timestamp', 'User', 'Role', 'Action', 'Entity Type', 'Entity ID', 'Project'])
+    for entry in qs:
+        writer.writerow([
+            entry.timestamp.strftime('%Y-%m-%d %H:%M:%S'),
+            entry.actor.user.get_full_name() if entry.actor else '—',
+            entry.actor.role if entry.actor else '—',
+            entry.action,
+            entry.entity_type,
+            entry.entity_id or '—',
+            entry.project.project_id if entry.project else '—',
+        ])
+    return response
+
+
+@login_required
+@role_required(['Admin'])
+def admin_audit_log(request):
+    """Full audit log across all users and projects. Admin only."""
+    from django.core.paginator import Paginator
+
+    qs = ActivityLog.objects.select_related('actor__user', 'project').order_by('-timestamp')
+
+    user_id   = request.GET.get('user', '').strip()
+    entity    = request.GET.get('entity_type', '').strip()
+    project   = request.GET.get('project', '').strip()
+    date_from = request.GET.get('date_from', '').strip()
+    date_to   = request.GET.get('date_to', '').strip()
+    keyword   = request.GET.get('keyword', '').strip()
+
+    if user_id:
+        qs = qs.filter(actor__user__id=user_id)
+    if entity:
+        qs = qs.filter(entity_type=entity)
+    if project:
+        qs = qs.filter(project__project_id=project)
+    if date_from:
+        try:
+            qs = qs.filter(timestamp__date__gte=date.fromisoformat(date_from))
+        except ValueError:
+            pass
+    if date_to:
+        try:
+            qs = qs.filter(timestamp__date__lte=date.fromisoformat(date_to))
+        except ValueError:
+            pass
+    if keyword:
+        qs = qs.filter(action__icontains=keyword)
+
+    if request.GET.get('export') == 'csv':
+        return _export_audit_csv(qs)
+
+    seven_days_ago = timezone.now() - timedelta(days=7)
+    stats = {
+        'today': ActivityLog.objects.filter(timestamp__date=timezone.now().date()).count(),
+        'this_week': ActivityLog.objects.filter(timestamp__gte=seven_days_ago).count(),
+        'admin_actions': ActivityLog.objects.filter(
+            timestamp__gte=seven_days_ago,
+            entity_type__in=['System', 'User', 'Notification'],
+        ).count(),
+        'most_active': (
+            ActivityLog.objects
+            .filter(timestamp__gte=seven_days_ago)
+            .values('actor__user__first_name', 'actor__user__last_name', 'actor__role')
+            .annotate(cnt=Count('id'))
+            .order_by('-cnt')
+            .first()
+        ),
+    }
+
+    paginator = Paginator(qs, 50)
+    page_obj  = paginator.get_page(request.GET.get('page', 1))
+
+    all_users    = UserProfile.objects.select_related('user').order_by('user__first_name')
+    all_projects = Project.objects.filter(is_deleted=False).order_by('project_id')
+    entity_types = ['Task', 'Issue', 'Project', 'Milestone', 'File', 'BOQ', 'Comment',
+                    'User', 'System', 'Notification']
+
+    return render(request, 'projects/admin/audit_log.html', {
+        'page_obj':     page_obj,
+        'stats':        stats,
+        'all_users':    all_users,
+        'all_projects': all_projects,
+        'entity_types': entity_types,
+        'filters': {
+            'user':        user_id,
+            'entity_type': entity,
+            'project':     project,
+            'date_from':   date_from,
+            'date_to':     date_to,
+            'keyword':     keyword,
+        },
     })
