@@ -141,6 +141,69 @@ def calculate_due_dates(project):
         task.save()
 
 
+# Hardcoded fallback durations used when TaskDurationTemplate DB table is empty.
+# Must stay in sync with the seed data in migration 0034_task_duration_template.
+RESIDENTIAL_DURATION_DEFAULTS = {
+    'OCR, Documentation & Verification':    2,
+    'Advance Payment Confirmation':          1,
+    'DEV Schedule':                          1,
+    'DEV Conduct':                           2,
+    'DEV Data to Design':                    1,
+    'DEV Inputs Validation':                 1,
+    'Design':                                2,
+    'Array Layout':                          2,
+    'SLD':                                   2,
+    'Installation Drawings':                 1,
+    'BOQ Preparation':                       1,
+    'Design Approval by Internal Team':      1,
+    'Design Approval by Customer':           1,
+    'Pre Installation Approvals':            2,
+    'LC / PC / NC Required':                 2,
+    'Vendor Registration':                   2,
+    'Document Preparation':                  2,
+    'Signing Document by Customer':          2,
+    'Net Metering Application Submission':   2,
+    'TFR Received':                          2,
+    'Procurement Schedule':                  1,
+    'PO Placed MMS':                         1,
+    'PO Placed Module':                      1,
+    'PO Placed Inverter':                    1,
+    'PO for B & C Class Items':              1,
+    'Finance Confirmation':                  1,
+    'Pre Dispatch Payment Confirmation':     1,
+    'Delivery Schedule':                     1,
+    'Delivery of MMS':                       1,
+    'Delivery of B & C Class Items':         1,
+    'Delivery of Module':                    1,
+    'Delivery of Inverter':                  1,
+    'MMS Installation':                      1,
+    'Earthing Work':                         1,
+    'Module Installation':                   1,
+    'Inverter Installation':                 1,
+    'DC Wire Work':                          1,
+    'AC Cable Work':                         1,
+    'Connections and Voc Testing':           1,
+    'Pre Commissioning Check List':          0,
+    'Pre Commissioning Visit by DISCOM':     2,
+    'Meter Testing':                         1,
+    'SCO Release':                           2,
+    'Meter Installation by DISCOM':          2,
+    'RMS Configuration':                     1,
+    'Plant Commissioning':                   1,
+    'Commissioning Report Prepared':         1,
+    'Commissioning Report Approved':         0,
+    'Customer Handover':                     0,
+    '100% Payment Confirmation':             2,
+}
+
+
+def _get_duration(task_name, overrides):
+    """Return duration_days from DB overrides, falling back to hardcoded defaults."""
+    if task_name in overrides:
+        return overrides[task_name]
+    return RESIDENTIAL_DURATION_DEFAULTS.get(task_name, 1)
+
+
 def attach_residential_template(project):
     """
     Create all 9 phases and 50 tasks for a Residential project.
@@ -149,7 +212,13 @@ def attach_residential_template(project):
     Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
     """
     # import inside function to avoid circular import at module level
-    from .models import ProjectPhase, Task
+    from .models import ProjectPhase, Task, TaskDurationTemplate
+
+    # DB-first duration lookup — falls back to RESIDENTIAL_DURATION_DEFAULTS if table is empty
+    duration_overrides = {
+        obj.task_name: obj.duration_days
+        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
+    }
 
     with transaction.atomic():
 
@@ -159,104 +228,104 @@ def attach_residential_template(project):
                 'phase_name':  'Sales & Documentation',
                 'phase_order': 1,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'OCR, Documentation & Verification', 'assigned_role': Task.BD,            'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE,        'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: Advance Payment
+                    {'task_order': 1, 'task_name': 'OCR, Documentation & Verification', 'assigned_role': Task.BD,     'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: Advance Payment
                 ],
             },
             {
                 'phase_name':  'Detail Engineering Visit',
                 'phase_order': 2,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'DEV Schedule',          'assigned_role': Task.PM,            'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER,  'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'DEV Data to Design',    'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'DEV Inputs Validation', 'assigned_role': Task.DESIGN,         'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': 'DEV Schedule',          'assigned_role': Task.PM,           'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'DEV Conduct',           'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'DEV Data to Design',    'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'DEV Inputs Validation', 'assigned_role': Task.DESIGN,        'task_type': Task.INTERNAL},
                 ],
             },
             {
                 'phase_name':  'Design',
                 'phase_order': 3,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'Design',                            'assigned_role': Task.DESIGN, 'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Array Layout',                      'assigned_role': Task.DESIGN, 'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'SLD',                               'assigned_role': Task.DESIGN, 'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'Installation Drawings',             'assigned_role': Task.DESIGN, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 5, 'task_name': 'BOQ Preparation',                  'assigned_role': Task.DESIGN, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Design Approval by Internal Team', 'assigned_role': Task.PM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 7, 'task_name': 'Design Approval by Customer',      'assigned_role': Task.PM,     'duration_days': 1, 'task_type': Task.EXTERNAL},
+                    {'task_order': 1, 'task_name': 'Design',                            'assigned_role': Task.DESIGN, 'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'Array Layout',                      'assigned_role': Task.DESIGN, 'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'SLD',                               'assigned_role': Task.DESIGN, 'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'Installation Drawings',             'assigned_role': Task.DESIGN, 'task_type': Task.INTERNAL},
+                    {'task_order': 5, 'task_name': 'BOQ Preparation',                  'assigned_role': Task.DESIGN, 'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'Design Approval by Internal Team', 'assigned_role': Task.PM,     'task_type': Task.INTERNAL},
+                    {'task_order': 7, 'task_name': 'Design Approval by Customer',      'assigned_role': Task.PM,     'task_type': Task.EXTERNAL},
                 ],
             },
             {
                 'phase_name':  'Pre-Installation Approvals',
                 'phase_order': 4,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'Pre Installation Approvals',          'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'LC / PC / NC Required',               'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 3, 'task_name': 'Vendor Registration',                 'assigned_role': Task.SCM, 'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 4, 'task_name': 'Document Preparation',                'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 5, 'task_name': 'Signing Document by Customer',        'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 6, 'task_name': 'Net Metering Application Submission', 'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.INTERNAL},
-                    {'task_order': 7, 'task_name': 'TFR Received',                        'assigned_role': Task.PM,  'duration_days': 2, 'task_type': Task.EXTERNAL},
+                    {'task_order': 1, 'task_name': 'Pre Installation Approvals',          'assigned_role': Task.PM,  'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'LC / PC / NC Required',               'assigned_role': Task.PM,  'task_type': Task.EXTERNAL},
+                    {'task_order': 3, 'task_name': 'Vendor Registration',                 'assigned_role': Task.SCM, 'task_type': Task.EXTERNAL},
+                    {'task_order': 4, 'task_name': 'Document Preparation',                'assigned_role': Task.PM,  'task_type': Task.INTERNAL},
+                    {'task_order': 5, 'task_name': 'Signing Document by Customer',        'assigned_role': Task.PM,  'task_type': Task.EXTERNAL},
+                    {'task_order': 6, 'task_name': 'Net Metering Application Submission', 'assigned_role': Task.PM,  'task_type': Task.INTERNAL},
+                    {'task_order': 7, 'task_name': 'TFR Received',                        'assigned_role': Task.PM,  'task_type': Task.EXTERNAL},
                 ],
             },
             {
                 'phase_name':  'Procurement',
                 'phase_order': 5,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'Procurement Schedule',              'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'PO Placed MMS',                     'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'PO Placed Module',                  'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'PO Placed Inverter',                'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 5, 'task_name': 'PO for B & C Class Items',          'assigned_role': Task.SCM,     'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Finance Confirmation',              'assigned_role': Task.FINANCE, 'duration_days': 1, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: Finance Confirmation
-                    {'task_order': 7, 'task_name': 'Pre Dispatch Payment Confirmation', 'assigned_role': Task.FINANCE, 'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': 'Procurement Schedule',              'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'PO Placed MMS',                     'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'PO Placed Module',                  'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'PO Placed Inverter',                'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
+                    {'task_order': 5, 'task_name': 'PO for B & C Class Items',          'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'Finance Confirmation',              'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: Finance Confirmation
+                    {'task_order': 7, 'task_name': 'Pre Dispatch Payment Confirmation', 'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL},
                 ],
             },
             {
                 'phase_name':  'Delivery',
                 'phase_order': 6,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'Delivery Schedule',             'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Delivery of MMS',               'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'Delivery of B & C Class Items', 'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 5, 'task_name': 'Delivery of Inverter',          'assigned_role': Task.SCM, 'duration_days': 1, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': 'Delivery Schedule',             'assigned_role': Task.SCM, 'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'Delivery of MMS',               'assigned_role': Task.SCM, 'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'Delivery of B & C Class Items', 'assigned_role': Task.SCM, 'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'Delivery of Module',            'assigned_role': Task.SCM, 'task_type': Task.INTERNAL},
+                    {'task_order': 5, 'task_name': 'Delivery of Inverter',          'assigned_role': Task.SCM, 'task_type': Task.INTERNAL},
                 ],
             },
             {
                 'phase_name':  'Installation',
                 'phase_order': 7,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'MMS Installation',             'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Earthing Work',                'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'Module Installation',          'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 4, 'task_name': 'Inverter Installation',        'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 5, 'task_name': 'DC Wire Work',                 'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'AC Cable Work',                'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 7, 'task_name': 'Connections and Voc Testing',  'assigned_role': Task.SITE_ENGINEER, 'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 8, 'task_name': 'Pre Commissioning Check List', 'assigned_role': Task.SITE_ENGINEER, 'duration_days': 0, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': 'MMS Installation',             'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': 'Earthing Work',                'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'Module Installation',          'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 4, 'task_name': 'Inverter Installation',        'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 5, 'task_name': 'DC Wire Work',                 'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'AC Cable Work',                'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 7, 'task_name': 'Connections and Voc Testing',  'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
+                    {'task_order': 8, 'task_name': 'Pre Commissioning Check List', 'assigned_role': Task.SITE_ENGINEER, 'task_type': Task.INTERNAL},
                 ],
             },
             {
                 'phase_name':  'Commissioning',
                 'phase_order': 8,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'Pre Commissioning Visit by DISCOM', 'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 2, 'task_name': 'Meter Testing',                     'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 3, 'task_name': 'SCO Release',                       'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 4, 'task_name': 'Meter Installation by DISCOM',      'assigned_role': Task.PM,            'duration_days': 2, 'task_type': Task.EXTERNAL},
-                    {'task_order': 5, 'task_name': 'RMS Configuration',                 'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 7, 'task_name': 'Commissioning Report Prepared',     'assigned_role': Task.SITE_ENGINEER,  'duration_days': 1, 'task_type': Task.INTERNAL},
-                    {'task_order': 8, 'task_name': 'Commissioning Report Approved',     'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
-                    {'task_order': 9, 'task_name': 'Customer Handover',                 'assigned_role': Task.PM,            'duration_days': 0, 'task_type': Task.INTERNAL},
+                    {'task_order': 1, 'task_name': 'Pre Commissioning Visit by DISCOM', 'assigned_role': Task.PM,            'task_type': Task.EXTERNAL},
+                    {'task_order': 2, 'task_name': 'Meter Testing',                     'assigned_role': Task.SITE_ENGINEER,  'task_type': Task.INTERNAL},
+                    {'task_order': 3, 'task_name': 'SCO Release',                       'assigned_role': Task.PM,            'task_type': Task.EXTERNAL},
+                    {'task_order': 4, 'task_name': 'Meter Installation by DISCOM',      'assigned_role': Task.PM,            'task_type': Task.EXTERNAL},
+                    {'task_order': 5, 'task_name': 'RMS Configuration',                 'assigned_role': Task.SITE_ENGINEER,  'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': 'Plant Commissioning',               'assigned_role': Task.SITE_ENGINEER,  'task_type': Task.INTERNAL},
+                    {'task_order': 7, 'task_name': 'Commissioning Report Prepared',     'assigned_role': Task.SITE_ENGINEER,  'task_type': Task.INTERNAL},
+                    {'task_order': 8, 'task_name': 'Commissioning Report Approved',     'assigned_role': Task.PM,            'task_type': Task.INTERNAL},
+                    {'task_order': 9, 'task_name': 'Customer Handover',                 'assigned_role': Task.PM,            'task_type': Task.INTERNAL},
                 ],
             },
             {
                 'phase_name':  'Finance Closure',
                 'phase_order': 9,
                 'tasks': [
-                    {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE, 'duration_days': 2, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: 100% Payment
+                    {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: 100% Payment
                 ],
             },
         ]
@@ -273,7 +342,7 @@ def attach_residential_template(project):
                     task_name=t['task_name'],
                     task_order=t['task_order'],
                     assigned_role=t['assigned_role'],
-                    duration_days=t['duration_days'],
+                    duration_days=_get_duration(t['task_name'], duration_overrides),
                     task_type=t['task_type'],
                     is_payment_milestone=t.get('is_payment_milestone', False),
                 )

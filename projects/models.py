@@ -1130,3 +1130,35 @@ class DesignSubmission(models.Model):
 
     def __str__(self):
         return f"{self.project.project_id} — {self.title}"
+
+
+class TaskDurationTemplate(models.Model):
+    """
+    Admin-editable default duration_days for each task in the residential project template.
+    Seeded from the hardcoded values in attach_residential_template(); changes apply to
+    new projects only — existing tasks are never touched.
+    """
+
+    PROJECT_TYPE_CHOICES = [
+        ('residential', 'Residential'),
+    ]
+
+    project_type  = models.CharField(max_length=50, choices=PROJECT_TYPE_CHOICES, default='residential')
+    phase_name    = models.CharField(max_length=100)
+    task_name     = models.CharField(max_length=200)
+    task_type     = models.CharField(max_length=20)   # 'Internal' or 'External'
+    duration_days = models.PositiveIntegerField(default=1)
+    updated_by    = models.ForeignKey(
+        User,
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='duration_template_edits',
+    )
+    updated_at    = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('project_type', 'task_name')
+        ordering        = ['project_type', 'phase_name', 'task_name']
+
+    def __str__(self):
+        return f"{self.project_type} | {self.phase_name} | {self.task_name} ({self.duration_days}d)"

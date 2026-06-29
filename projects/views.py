@@ -27,6 +27,7 @@ from .models import (
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
+    TaskDurationTemplate,
 )
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
@@ -6224,3 +6225,96 @@ def admin_assign_pm(request, project_id):
         f'PM assigned to {project.project_id}: {pm_profile.user.get_full_name() or pm_profile.user.username}.'
     )
     return redirect('admin_project_list')
+
+
+@login_required
+@role_required(['Admin'])
+def admin_task_durations(request):
+    """
+    Admin view to edit default duration_days for each task in the residential project template.
+    Changes apply to new projects only — existing project tasks are never modified.
+    GET: render grouped table. POST: validate and save changed values.
+    """
+    if request.method == 'POST':
+        actor = request.user.profile
+        changed = 0
+        errors = []
+
+        for key, raw_val in request.POST.items():
+            if not key.startswith('duration_'):
+                continue
+            try:
+                pk = int(key.split('_', 1)[1])
+            except (ValueError, IndexError):
+                continue
+
+            raw_val = raw_val.strip()
+            if not raw_val.isdigit():
+                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
+                continue
+            new_days = int(raw_val)
+
+            try:
+                record = TaskDurationTemplate.objects.get(pk=pk)
+            except TaskDurationTemplate.DoesNotExist:
+                continue
+
+            if new_days == record.duration_days:
+                continue
+
+            old_days = record.duration_days
+            record.duration_days = new_days
+            record.updated_by = request.user
+            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
+            changed += 1
+
+            log_activity(
+                project=None,
+                actor=actor,
+                action=(
+                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
+                    f"changed from {old_days}d to {new_days}d [residential template]"
+                ),
+                entity_type='TaskDurationTemplate',
+                entity_id=record.pk,
+            )
+
+        if errors:
+            for msg in errors:
+                messages.error(request, msg)
+        else:
+            messages.success(request, f'Saved. {changed} duration(s) updated.')
+
+        return redirect('admin_task_durations')
+
+    # GET — group records by phase_name preserving the natural phase order
+    PHASE_ORDER = [
+        'Sales & Documentation',
+        'Detail Engineering Visit',
+        'Design',
+        'Pre-Installation Approvals',
+        'Procurement',
+        'Delivery',
+        'Installation',
+        'Commissioning',
+        'Finance Closure',
+    ]
+    records = list(
+        TaskDurationTemplate.objects
+        .filter(project_type='residential')
+        .select_related('updated_by')
+        .order_by('phase_name', 'task_name')
+    )
+
+    phase_groups = {phase: [] for phase in PHASE_ORDER}
+    for rec in records:
+        if rec.phase_name in phase_groups:
+            phase_groups[rec.phase_name].append(rec)
+
+    # Build ordered list of (phase_name, [records]) skipping empty phases
+    grouped = [(phase, phase_groups[phase]) for phase in PHASE_ORDER if phase_groups[phase]]
+
+    return render(request, 'projects/admin/task_durations.html', {
+        'grouped': grouped,
+        'total': len(records),
+    })

@@ -2575,3 +2575,52 @@ No new migrations in Day 16.
 - Admin can assign PM to any project via Admin Panel modal
 - PM sees Draft projects in dedicated dashboard section
 - Board demo centerpiece: Task "Plant Commissioning" (M3) marked Done by SE → WhatsApp + email fires to Finance + PM + CEO → CEO dashboard updates
+
+---
+
+## DAY 17 — 28 June 2026 (Session 2)
+
+### CEO Dashboard: Finance Summary Strip
+
+Added three finance stat cards at the top of the CEO dashboard (above "Portfolio health"), mirroring the values already shown on the Finance dashboard:
+
+1. **Payment Requests Pending** — count of `PaymentRequest` rows with `status=PENDING` on active projects
+2. **Vendor Payments Outstanding** — sum of pending `PaymentRequest.amount` on active projects  
+3. **Total Client Contract Value** — sum of `Project.contract_value` on active/in-progress projects (amber `#d97706` colour)
+
+**View change:** `_get_ceo_dashboard_context()` in `views.py` — added Query 4 block computing `fin_payment_requests_pending`, `fin_vendor_payments_outstanding`, `fin_client_contract_value`. These are passed into the context dict alongside existing keys.
+
+**Template change:** `projects/templates/dashboard/ceo.html` — new 3-column card row inserted at the top of `{% block content %}`, before the "Portfolio health" section label.
+
+---
+
+### CEO Dashboard: is_deleted Bug Fix
+
+**Bug:** After soft-deleting a project, CEO dashboard numbers (project count, tasks, issues, contract value, payment requests) did not update even after page refresh. Other role dashboards were correct.
+
+**Root cause:** `_get_ceo_dashboard_context()` was missing `is_deleted=False` on all four queries:
+- Query 1 (projects): filtered only on `status__in=active_statuses` — missing `is_deleted=False`
+- Query 2 (tasks): filtered `phase__project__status__in` only — missing `phase__project__is_deleted=False`
+- Query 3 (issues): filtered `project__status__in` only — missing `project__is_deleted=False`
+- Query 4 (finance, newly added): `active_filter` dict was missing `project__is_deleted: False`
+
+**Fix:** Added `is_deleted=False` / `is_deleted__isnull=False` traversal guards to all four queries inside `_get_ceo_dashboard_context()`. No migrations needed.
+
+**Commit:** `73dff0e` — "Add finance summary strip to CEO dashboard and fix is_deleted filter"
+
+---
+
+## SPRINT STATUS (28 June 2026 — End of Day 17)
+
+- Hard deadline: 4 July 2026 (board demo) — 6 days remaining
+- Current migration: 0031 (no change)
+- SystemSettings.whatsapp_enabled / email_enabled = False by default — flip ON before demo via Django admin
+- All 8 role dashboards live and redesigned
+- CEO dashboard now shows finance summary strip (payment requests + vendor outstanding + contract value)
+- CEO dashboard soft-delete filter fixed — numbers now reflect deleted projects correctly
+- Notification system built and WhatsApp-verified (all 7 templates return HTTP 201 from Interakt)
+- My Documents page live for all roles
+- Zoho webhook: unassigned projects now alert Admin via in-app + email to smzk07@gmail.com
+- Admin can assign PM to any project via Admin Panel modal
+- PM sees Draft projects in dedicated dashboard section
+- Board demo centerpiece: Task "Plant Commissioning" (M3) marked Done by SE → WhatsApp + email fires to Finance + PM + CEO → CEO dashboard updates
