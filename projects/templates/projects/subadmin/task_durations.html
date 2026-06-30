@@ -1,0 +1,87 @@
+{% extends "projects/subadmin/subadmin_base.html" %}
+
+{% block page_title %}Task Duration Templates{% endblock %}
+{% block nav_task_durations %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-gray-900">Task Duration Templates</h1>
+  <p class="text-sm text-gray-500 mt-1">Residential Project Template &mdash; {{ total }} tasks</p>
+</div>
+
+<form method="POST" x-data="{ dirty: false }" @input.capture="dirty = true">
+  {% csrf_token %}
+
+  {% for phase_name, records in grouped %}
+  <div class="mb-6">
+    <table class="w-full bg-white border border-gray-200 rounded-lg overflow-hidden text-sm">
+      <thead>
+        <tr class="bg-gray-100">
+          <th colspan="4" class="px-4 py-2 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+            {{ phase_name }}
+          </th>
+        </tr>
+        <tr class="bg-white border-b border-gray-200">
+          <th class="px-4 py-2 text-left font-medium text-gray-500 w-1/2">Task Name</th>
+          <th class="px-4 py-2 text-left font-medium text-gray-500 w-24">Type</th>
+          <th class="px-4 py-2 text-left font-medium text-gray-500 w-36">Duration (days)</th>
+          <th class="px-4 py-2 text-left font-medium text-gray-500">Last Updated</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {% for record in records %}
+        <tr class="hover:bg-gray-50 transition-colors">
+          <td class="px-4 py-2 text-gray-800">{{ record.task_name }}</td>
+          <td class="px-4 py-2">
+            {% if record.task_type == 'External' %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium"
+                    style="background:#fef3c7; color:#92400e;">External</span>
+            {% else %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">Internal</span>
+            {% endif %}
+          </td>
+          <td class="px-4 py-2">
+            <input
+              type="number"
+              name="duration_{{ record.pk }}"
+              value="{{ record.duration_days }}"
+              min="0"
+              class="w-20 border border-gray-300 rounded px-2 py-1 text-center text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+            >
+          </td>
+          <td class="px-4 py-2 text-gray-500 text-xs">
+            {% if record.updated_by %}
+              {{ record.updated_at|date:"d M Y" }} by {{ record.updated_by.get_full_name|default:record.updated_by.username }}
+            {% else %}
+              &mdash;
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endfor %}
+
+  <div class="flex items-center justify-between pt-2 pb-6">
+    <p class="text-xs text-gray-400">
+      Changes apply to new projects only. Existing project timelines are not affected.
+    </p>
+    <div class="flex items-center gap-3">
+      <span x-show="dirty" x-cloak class="text-xs text-amber-600 flex items-center gap-1">
+        <i data-lucide="alert-circle" class="w-3.5 h-3.5"></i> Unsaved changes
+      </span>
+      <button
+        type="submit"
+        class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
+        style="background:#1a7a4a;"
+        onmouseover="this.style.background='#155f3a'"
+        onmouseout="this.style.background='#1a7a4a'"
+      >
+        <i data-lucide="save" class="w-4 h-4"></i>
+        Save Changes
+      </button>
+    </div>
+  </div>
+</form>
+{% endblock %}

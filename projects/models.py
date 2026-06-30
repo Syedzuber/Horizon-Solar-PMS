@@ -275,6 +275,7 @@ class UserProfile(models.Model):
 
     ROLE_CHOICES = [
         ('Admin',         'Admin'),
+        ('System Admin',  'System Admin'),
         ('PM',            'PM'),
         ('Site Engineer', 'Site Engineer'),
         ('Design',        'Design'),

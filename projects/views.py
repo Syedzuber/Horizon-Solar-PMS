@@ -6318,3 +6318,466 @@ def admin_task_durations(request):
         'grouped': grouped,
         'total': len(records),
     })
+
+
+# ---------------------------------------------------------------------------
+# Password management
+# ---------------------------------------------------------------------------
+
+@login_required
+def change_password(request):
+    """Allow any authenticated user to change their own password."""
+    from django.contrib.auth import update_session_auth_hash
+    from django.contrib.auth.forms import PasswordChangeForm
+
+    if request.method == 'POST':
+        form = PasswordChangeForm(request.user, request.POST)
+        if form.is_valid():
+            user = form.save()
+            update_session_auth_hash(request, user)
+            messages.success(request, 'Password changed successfully.')
+            return redirect('my_documents')
+    else:
+        form = PasswordChangeForm(request.user)
+
+    return render(request, 'projects/change_password.html', {'form': form})
+
+
+@login_required
+@role_required(['Admin'])
+def admin_reset_password(request, user_id):
+    """Admin-only: set a new password for any user."""
+    from django.contrib.auth.models import User as AuthUser
+
+    target_user = get_object_or_404(AuthUser, pk=user_id)
+    actor = request.user.profile
+
+    if request.method == 'POST':
+        new_password    = request.POST.get('new_password', '').strip()
+        confirm_password = request.POST.get('confirm_password', '').strip()
+
+        if not new_password:
+            messages.error(request, 'Password cannot be empty.')
+        elif len(new_password) < 8:
+            messages.error(request, 'Password must be at least 8 characters.')
+        elif new_password != confirm_password:
+            messages.error(request, 'Passwords do not match.')
+        else:
+            target_user.set_password(new_password)
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=actor,
+                action=f"Admin reset password for '{target_user.get_full_name() or target_user.username}'",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(
+                request,
+                f'Password reset for {target_user.get_full_name() or target_user.username}.'
+            )
+            return redirect('admin_user_management')
+
+    return render(request, 'projects/admin/reset_password.html', {
+        'target_user': target_user,
+    })
+
+
+# ---------------------------------------------------------------------------
+# System Admin Panel
+# ---------------------------------------------------------------------------
+
+from projects.decorators import system_admin_required  # noqa: E402
+from django.core.exceptions import PermissionDenied  # noqa: E402
+
+
+# Roles that System Admin must never see, query, or be able to assign
+_SA_EXCLUDED_ROLES = ['Admin', 'System Admin']
+
+# Operational roles System Admin may create/edit — never includes Admin or System Admin
+_SA_EDITABLE_ROLE_CHOICES = [
+    ('PM',            'PM'),
+    ('Site Engineer', 'Site Engineer'),
+    ('Design',        'Design'),
+    ('Finance',       'Finance'),
+    ('SCM',           'SCM'),
+    ('CEO',           'CEO'),
+    ('BD',            'BD'),
+]
+
+_SA_DEPT_NAMES = {
+    'PM':            'Project Management',
+    'Site Engineer': 'Site Execution',
+    'SCM':           'Supply Chain',
+    'Finance':       'Finance',
+    'Design':        'Design',
+    'CEO':           'Leadership',
+    'BD':            'Sales & Business Development',
+}
+
+# Phase order for task duration template
+_PHASE_ORDER = [
+    'Sales & Documentation',
+    'Detail Engineering Visit',
+    'Design',
+    'Pre-Installation Approvals',
+    'Procurement',
+    'Delivery',
+    'Installation',
+    'Commissioning',
+    'Finance Closure',
+]
+
+
+@system_admin_required
+def subadmin_projects(request):
+    """System Admin: view all projects and assign unassigned ones to a PM (first-time only)."""
+    if request.method == 'POST':
+        project_pk  = request.POST.get('project_id', '').strip()
+        pm_prof_pk  = request.POST.get('pm_user_id', '').strip()
+
+        if not project_pk or not pm_prof_pk:
+            messages.error(request, 'Please select a PM before assigning.')
+            return redirect('subadmin_projects')
+
+        project = get_object_or_404(Project, pk=project_pk, is_deleted=False)
+
+        # Only first-time assignment — prevent reassignment of already-assigned projects
+        if project.assigned_pm_id:
+            messages.error(request, 'This project already has a PM assigned. Reassignment is not permitted here.')
+            return redirect('subadmin_projects')
+
+        pm_profile = get_object_or_404(UserProfile, pk=pm_prof_pk, role='PM', is_active=True)
+        project.assigned_pm = pm_profile
+        project.save(update_fields=['assigned_pm'])
+
+        log_activity(
+            project=project,
+            actor=request.user.profile,
+            action=f"PM '{pm_profile.user.get_full_name() or pm_profile.user.username}' assigned to project '{project.project_id}' by System Admin",
+            entity_type='Project',
+            entity_id=project.pk,
+        )
+        messages.success(request, f'PM assigned to {project.project_id}.')
+        return redirect('subadmin_projects')
+
+    unassigned  = (
+        Project.objects
+        .filter(assigned_pm__isnull=True, is_deleted=False)
+        .order_by('-created_at')
+    )
+    assigned = (
+        Project.objects
+        .filter(assigned_pm__isnull=False, is_deleted=False)
+        .select_related('assigned_pm__user')
+        .order_by('-created_at')
+    )
+    pm_profiles = (
+        UserProfile.objects
+        .filter(role='PM', is_active=True)
+        .select_related('user')
+        .order_by('user__first_name')
+    )
+
+    return render(request, 'projects/subadmin/projects.html', {
+        'unassigned':  unassigned,
+        'assigned':    assigned,
+        'pm_profiles': pm_profiles,
+    })
+
+
+@system_admin_required
+def subadmin_departments(request):
+    """System Admin departments view — excludes Admin and System Admin from every query."""
+    from django.contrib.auth.models import User as AuthUser
+    from itertools import groupby
+
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+
+        if action == 'create_user':
+            return _subadmin_create_user(request)
+
+        elif action == 'change_role':
+            target_id = request.POST.get('user_id', '').strip()
+            try:
+                target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+            except AuthUser.DoesNotExist:
+                messages.error(request, 'User not found.')
+                return redirect('subadmin_departments')
+
+            # Defense-in-depth: never allow editing Admin or System Admin accounts
+            if target_user.profile.role in _SA_EXCLUDED_ROLES:
+                raise PermissionDenied
+
+            new_role = request.POST.get('new_role', '').strip()
+            valid_roles = [r[0] for r in _SA_EDITABLE_ROLE_CHOICES]
+
+            # Defense-in-depth: cannot promote anyone to Admin or System Admin
+            if new_role not in valid_roles:
+                messages.error(request, 'Invalid role selection.')
+                return redirect('subadmin_departments')
+
+            old_role = target_user.profile.role
+            if old_role != new_role:
+                target_user.profile.role = new_role
+                target_user.profile.save()
+                log_activity(
+                    project=None,
+                    actor=request.user.profile,
+                    action=f"User '{target_user.get_full_name() or target_user.username}' role changed from '{old_role}' to '{new_role}' by System Admin",
+                    entity_type='User',
+                    entity_id=target_user.id,
+                )
+                messages.success(request, f'Role updated for {target_user.get_full_name() or target_user.username}.')
+            return redirect('subadmin_departments')
+
+        elif action == 'edit_user':
+            target_id = request.POST.get('user_id', '').strip()
+            try:
+                target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+            except AuthUser.DoesNotExist:
+                messages.error(request, 'User not found.')
+                return redirect('subadmin_departments')
+
+            # Defense-in-depth: never allow editing Admin or System Admin accounts
+            if target_user.profile.role in _SA_EXCLUDED_ROLES:
+                raise PermissionDenied
+
+            new_role = request.POST.get('new_role', '').strip()
+            valid_roles = [r[0] for r in _SA_EDITABLE_ROLE_CHOICES]
+
+            # Defense-in-depth: cannot promote anyone to Admin or System Admin
+            if new_role not in valid_roles:
+                messages.error(request, 'Invalid role selection.')
+                return redirect('subadmin_departments')
+
+            old_role = target_user.profile.role
+            target_user.first_name = request.POST.get('first_name', target_user.first_name).strip()
+            target_user.last_name  = request.POST.get('last_name',  target_user.last_name).strip()
+            target_user.save()
+
+            target_user.profile.phone_number = request.POST.get('phone_number', target_user.profile.phone_number).strip()
+            if old_role != new_role:
+                target_user.profile.role = new_role
+            target_user.profile.save()
+
+            log_activity(
+                project=None,
+                actor=request.user.profile,
+                action=(
+                    f"User '{target_user.get_full_name() or target_user.username}' details edited by System Admin"
+                    + (f" (role: {old_role} → {new_role})" if old_role != new_role else "")
+                ),
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} updated.')
+            return redirect('subadmin_departments')
+
+        elif action == 'deactivate':
+            target_id = request.POST.get('user_id', '').strip()
+            try:
+                target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+            except AuthUser.DoesNotExist:
+                messages.error(request, 'User not found.')
+                return redirect('subadmin_departments')
+
+            if target_user.profile.role in _SA_EXCLUDED_ROLES:
+                raise PermissionDenied
+
+            target_user.is_active = False
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=request.user.profile,
+                action=f"User '{target_user.get_full_name() or target_user.username}' deactivated by System Admin",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} deactivated.')
+            return redirect('subadmin_departments')
+
+        elif action == 'reactivate':
+            target_id = request.POST.get('user_id', '').strip()
+            try:
+                target_user = AuthUser.objects.select_related('profile').get(pk=target_id)
+            except AuthUser.DoesNotExist:
+                messages.error(request, 'User not found.')
+                return redirect('subadmin_departments')
+
+            if target_user.profile.role in _SA_EXCLUDED_ROLES:
+                raise PermissionDenied
+
+            target_user.is_active = True
+            target_user.save()
+            log_activity(
+                project=None,
+                actor=request.user.profile,
+                action=f"User '{target_user.get_full_name() or target_user.username}' reactivated by System Admin",
+                entity_type='User',
+                entity_id=target_user.id,
+            )
+            messages.success(request, f'{target_user.get_full_name() or target_user.username} reactivated.')
+            return redirect('subadmin_departments')
+
+        messages.error(request, 'Unknown action.')
+        return redirect('subadmin_departments')
+
+    # GET — queryset always excludes Admin and System Admin at DB level
+    all_profiles = (
+        UserProfile.objects
+        .select_related('user')
+        .exclude(role__in=_SA_EXCLUDED_ROLES)
+        .order_by('role', 'user__first_name', 'user__last_name')
+    )
+
+    grouped = []
+    for role_key, members in groupby(all_profiles, key=lambda p: p.role):
+        member_list  = list(members)
+        active_count = sum(1 for m in member_list if m.user.is_active)
+        grouped.append({
+            'role':         role_key,
+            'dept_name':    _SA_DEPT_NAMES.get(role_key, role_key),
+            'members':      member_list,
+            'active_count': active_count,
+        })
+
+    return render(request, 'projects/subadmin/departments.html', {
+        'grouped':               grouped,
+        'editable_role_choices': _SA_EDITABLE_ROLE_CHOICES,
+        'current_user':          request.user,
+    })
+
+
+def _subadmin_create_user(request):
+    """Helper called by subadmin_departments to create a new user. Never creates Admin or System Admin."""
+    from django.contrib.auth.models import User as AuthUser
+
+    first_name   = request.POST.get('first_name', '').strip()
+    last_name    = request.POST.get('last_name', '').strip()
+    username     = request.POST.get('username', '').strip()
+    phone_number = request.POST.get('phone_number', '').strip()
+    role         = request.POST.get('role', '').strip()
+    password     = request.POST.get('password', '')
+
+    # Defense-in-depth: cannot create Admin or System Admin
+    if role in _SA_EXCLUDED_ROLES:
+        messages.error(request, 'Invalid role selection.')
+        return redirect('subadmin_departments')
+
+    valid_roles = [r[0] for r in _SA_EDITABLE_ROLE_CHOICES]
+    if role not in valid_roles:
+        messages.error(request, 'Invalid role selection.')
+        return redirect('subadmin_departments')
+
+    if not username:
+        messages.error(request, 'Username is required.')
+        return redirect('subadmin_departments')
+
+    if not password or len(password) < 8:
+        messages.error(request, 'Password must be at least 8 characters.')
+        return redirect('subadmin_departments')
+
+    if AuthUser.objects.filter(username=username).exists():
+        messages.error(request, f"Username '{username}' is already taken.")
+        return redirect('subadmin_departments')
+
+    new_user = AuthUser.objects.create_user(
+        username=username,
+        password=password,
+        first_name=first_name,
+        last_name=last_name,
+        is_active=True,
+    )
+
+    # UserProfile is auto-created by post_save signal — just update the fields
+    new_user.profile.role         = role
+    new_user.profile.phone_number = phone_number
+    new_user.profile.created_by   = request.user
+    new_user.profile.save()
+
+    log_activity(
+        project=None,
+        actor=request.user.profile,
+        action=f"User '{new_user.get_full_name() or username}' ({role}) created by System Admin",
+        entity_type='User',
+        entity_id=new_user.id,
+    )
+    messages.success(request, f"User '{username}' created successfully as {role}.")
+    return redirect('subadmin_departments')
+
+
+@system_admin_required
+def subadmin_task_durations(request):
+    """System Admin view for task duration templates — same data as admin version, own template."""
+    if request.method == 'POST':
+        actor   = request.user.profile
+        changed = 0
+        errors  = []
+
+        for key, raw_val in request.POST.items():
+            if not key.startswith('duration_'):
+                continue
+            try:
+                pk = int(key.split('_', 1)[1])
+            except (ValueError, IndexError):
+                continue
+
+            raw_val = raw_val.strip()
+            if not raw_val.isdigit():
+                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
+                continue
+            new_days = int(raw_val)
+
+            try:
+                record = TaskDurationTemplate.objects.get(pk=pk)
+            except TaskDurationTemplate.DoesNotExist:
+                continue
+
+            if new_days == record.duration_days:
+                continue
+
+            old_days = record.duration_days
+            record.duration_days = new_days
+            record.updated_by    = request.user
+            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
+            changed += 1
+
+            log_activity(
+                project=None,
+                actor=actor,
+                action=(
+                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
+                    f"changed from {old_days}d to {new_days}d [residential template]"
+                ),
+                entity_type='TaskDurationTemplate',
+                entity_id=record.pk,
+            )
+
+        if errors:
+            for msg in errors:
+                messages.error(request, msg)
+        else:
+            messages.success(request, f'Saved. {changed} duration(s) updated.')
+
+        return redirect('subadmin_task_durations')
+
+    records = list(
+        TaskDurationTemplate.objects
+        .filter(project_type='residential')
+        .select_related('updated_by')
+        .order_by('phase_name', 'task_name')
+    )
+
+    phase_groups = {phase: [] for phase in _PHASE_ORDER}
+    for rec in records:
+        if rec.phase_name in phase_groups:
+            phase_groups[rec.phase_name].append(rec)
+
+    grouped = [(phase, phase_groups[phase]) for phase in _PHASE_ORDER if phase_groups[phase]]
+
+    return render(request, 'projects/subadmin/task_durations.html', {
+        'grouped': grouped,
+        'total':   len(records),
+    })

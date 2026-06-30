@@ -1,0 +1,334 @@
+{% extends "projects/subadmin/subadmin_base.html" %}
+{% load humanize %}
+
+{% block page_title %}Users{% endblock %}
+{% block nav_dept %}nav-active{% endblock %}
+
+{% block content %}
+<div x-data="deptPage()" x-init="init()">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-6">
+    <div>
+      <h1 class="text-xl font-semibold text-gray-900">Users</h1>
+      <p class="text-sm text-gray-500 mt-1">Team members grouped by role. Manage roles and details inline.</p>
+    </div>
+    <button @click="openCreate()"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
+            style="background:#1a7a4a;"
+            onmouseover="this.style.background='#155f3a'"
+            onmouseout="this.style.background='#1a7a4a'">
+      <i data-lucide="user-plus" class="w-4 h-4"></i>
+      Create User
+    </button>
+  </div>
+
+  <!-- Department cards -->
+  <div class="grid gap-6">
+    {% for dept in grouped %}
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+
+      <!-- Dept header -->
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-gray-50">
+        <div class="flex items-center gap-3">
+          <i data-lucide="building-2" class="w-4 h-4 text-gray-400"></i>
+          <span class="font-semibold text-gray-900">{{ dept.dept_name }}</span>
+          <span class="text-xs text-gray-400 font-normal ml-1">({{ dept.role }})</span>
+        </div>
+        <span class="text-xs font-medium px-2 py-1 rounded-full bg-green-50 text-green-700">
+          {{ dept.active_count }} active
+        </span>
+      </div>
+
+      {% if dept.members %}
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-100">
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">User</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Role</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Last active</th>
+            <th class="px-4 py-2.5 text-right text-xs font-semibold text-gray-400 uppercase tracking-wider">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          {% for member in dept.members %}
+          <tr x-data="{ editingRole: false }"
+              class="hover:bg-gray-50 {% if not member.user.is_active %}opacity-50{% endif %}">
+
+            <!-- Avatar + name -->
+            <td class="px-4 py-3">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0
+                  {% if dept.role == 'PM' %}bg-blue-600
+                  {% elif dept.role == 'Site Engineer' %}bg-orange-500
+                  {% elif dept.role == 'Finance' %}bg-purple-600
+                  {% elif dept.role == 'SCM' %}bg-yellow-600
+                  {% elif dept.role == 'Design' %}bg-pink-600
+                  {% elif dept.role == 'CEO' %}bg-red-700
+                  {% elif dept.role == 'BD' %}bg-teal-600
+                  {% else %}bg-gray-400{% endif %}">
+                  {{ member.user.first_name|first|upper }}{{ member.user.last_name|first|upper }}
+                </div>
+                <div>
+                  <p class="font-medium text-gray-900">{{ member.user.get_full_name|default:member.user.username }}</p>
+                  <p class="text-xs text-gray-400">@{{ member.user.username }}</p>
+                </div>
+              </div>
+            </td>
+
+            <!-- Role chip + inline change -->
+            <td class="px-4 py-3">
+              <div x-show="!editingRole">
+                <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700">{{ member.role }}</span>
+                <button @click="editingRole=true" class="ml-2 text-xs text-gray-400 hover:text-gray-700 underline">edit</button>
+              </div>
+              <div x-show="editingRole" x-cloak>
+                <form method="post" class="flex items-center gap-2">
+                  {% csrf_token %}
+                  <input type="hidden" name="action" value="change_role">
+                  <input type="hidden" name="user_id" value="{{ member.user.id }}">
+                  <!-- editable_role_choices from view — never includes Admin or Sub Admin -->
+                  <select name="new_role" class="text-xs border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-green-500">
+                    {% for value, label in editable_role_choices %}
+                      <option value="{{ value }}" {% if member.role == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                  <button type="submit" class="text-xs px-2 py-1 rounded text-white" style="background:#1a7a4a;">Save</button>
+                  <button type="button" @click="editingRole=false" class="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+                </form>
+              </div>
+            </td>
+
+            <!-- Status -->
+            <td class="px-4 py-3">
+              {% if member.user.is_active %}
+                <span class="flex items-center gap-1.5 text-xs text-green-700">
+                  <span class="w-2 h-2 rounded-full bg-green-500"></span> Active
+                </span>
+              {% else %}
+                <span class="flex items-center gap-1.5 text-xs text-gray-400">
+                  <span class="w-2 h-2 rounded-full bg-gray-300"></span> Inactive
+                </span>
+              {% endif %}
+            </td>
+
+            <!-- Last active -->
+            <td class="px-4 py-3 text-xs text-gray-500">
+              {% if member.user.last_login %}
+                {{ member.user.last_login|naturaltime }}
+              {% else %}
+                <span class="text-gray-300">Never</span>
+              {% endif %}
+            </td>
+
+            <!-- Actions -->
+            <td class="px-4 py-3 text-right">
+              <div class="flex items-center justify-end gap-2">
+                <button @click="openEdit({{ member.user.id }}, '{{ member.user.first_name|escapejs }}', '{{ member.user.last_name|escapejs }}', '{{ member.phone_number|escapejs }}', '{{ member.role|escapejs }}')"
+                        class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 flex items-center gap-1">
+                  <i data-lucide="pencil" class="w-3 h-3"></i> Edit
+                </button>
+                {% if member.user.is_active %}
+                  <form method="post" class="inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="deactivate">
+                    <input type="hidden" name="user_id" value="{{ member.user.id }}">
+                    <button type="submit"
+                            onclick="return confirm('Deactivate {{ member.user.get_full_name|default:member.user.username }}?')"
+                            class="text-xs px-3 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50">
+                      Deactivate
+                    </button>
+                  </form>
+                {% else %}
+                  <form method="post" class="inline">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="reactivate">
+                    <input type="hidden" name="user_id" value="{{ member.user.id }}">
+                    <button type="submit"
+                            class="text-xs px-3 py-1.5 rounded-lg border text-white"
+                            style="background:#1a7a4a; border-color:#1a7a4a;">
+                      Reactivate
+                    </button>
+                  </form>
+                {% endif %}
+              </div>
+            </td>
+
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="px-6 py-4 text-sm text-gray-400">No members in this department.</p>
+      {% endif %}
+
+    </div>
+    {% empty %}
+    <div class="bg-white rounded-xl border border-gray-200 px-6 py-8 text-center text-sm text-gray-400">
+      No departments found.
+    </div>
+    {% endfor %}
+  </div>
+
+
+  <!-- ── Create User Modal ─────────────────────────────────────────── -->
+  <div x-show="showCreate" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center"
+       style="background:rgba(0,0,0,0.4);">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6"
+         @click.outside="showCreate=false">
+      <div class="flex items-center justify-between mb-5">
+        <h2 class="text-base font-semibold text-gray-900">Create New User</h2>
+        <button @click="showCreate=false" class="text-gray-400 hover:text-gray-600">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <form method="post" class="space-y-4">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="create_user">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">First Name</label>
+            <input type="text" name="first_name" required
+                   class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Last Name</label>
+            <input type="text" name="last_name"
+                   class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Username</label>
+          <input type="text" name="username" required
+                 class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Phone Number</label>
+          <input type="text" name="phone_number" maxlength="10"
+                 class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+        </div>
+        <div>
+          <!-- Role dropdown — uses editable_role_choices from view, never includes Admin or Sub Admin -->
+          <label class="block text-xs font-medium text-gray-700 mb-1">Role</label>
+          <select name="role" required
+                  class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500 bg-white">
+            <option value="">— Select Role —</option>
+            {% for value, label in editable_role_choices %}
+              <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Password</label>
+          <input type="password" name="password" required minlength="8"
+                 class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+          <p class="text-xs text-gray-400 mt-1">Min. 8 characters. Share with the user securely after creation.</p>
+        </div>
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" @click="showCreate=false"
+                  class="text-sm px-4 py-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button type="submit"
+                  class="text-sm px-4 py-2 rounded text-white font-medium"
+                  style="background:#1a7a4a;"
+                  onmouseover="this.style.background='#155f3a'"
+                  onmouseout="this.style.background='#1a7a4a'">
+            Create User
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+
+  <!-- ── Edit User Modal ───────────────────────────────────────────── -->
+  <div x-show="showEdit" x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center"
+       style="background:rgba(0,0,0,0.4);">
+    <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6"
+         @click.outside="showEdit=false">
+      <div class="flex items-center justify-between mb-5">
+        <h2 class="text-base font-semibold text-gray-900">Edit User</h2>
+        <button @click="showEdit=false" class="text-gray-400 hover:text-gray-600">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <form method="post" class="space-y-4">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="edit_user">
+        <input type="hidden" name="user_id" :value="editUserId">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">First Name</label>
+            <input type="text" name="first_name" x-model="editFirstName" required
+                   class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+          </div>
+          <div>
+            <label class="block text-xs font-medium text-gray-700 mb-1">Last Name</label>
+            <input type="text" name="last_name" x-model="editLastName"
+                   class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-700 mb-1">Phone Number</label>
+          <input type="text" name="phone_number" x-model="editPhone" maxlength="10"
+                 class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500">
+        </div>
+        <div>
+          <!-- Role dropdown — uses editable_role_choices from view, never includes Admin or Sub Admin -->
+          <label class="block text-xs font-medium text-gray-700 mb-1">Role</label>
+          <select name="new_role" x-model="editRole" required
+                  class="w-full text-sm border border-gray-300 rounded px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500 bg-white">
+            {% for value, label in editable_role_choices %}
+              <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="flex justify-end gap-3 pt-2">
+          <button type="button" @click="showEdit=false"
+                  class="text-sm px-4 py-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">
+            Cancel
+          </button>
+          <button type="submit"
+                  class="text-sm px-4 py-2 rounded text-white font-medium"
+                  style="background:#1a7a4a;"
+                  onmouseover="this.style.background='#155f3a'"
+                  onmouseout="this.style.background='#1a7a4a'">
+            Save Changes
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function deptPage() {
+  return {
+    showCreate: false,
+    showEdit:   false,
+    editUserId:    null,
+    editFirstName: '',
+    editLastName:  '',
+    editPhone:     '',
+    editRole:      '',
+    init() {},
+    openCreate() {
+      this.showCreate = true;
+    },
+    openEdit(userId, firstName, lastName, phone, role) {
+      this.editUserId    = userId;
+      this.editFirstName = firstName;
+      this.editLastName  = lastName;
+      this.editPhone     = phone;
+      this.editRole      = role;
+      this.showEdit      = true;
+    },
+  };
+}
+</script>
+{% endblock %}

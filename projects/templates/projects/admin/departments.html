@@ -1,13 +1,13 @@
 {% extends "projects/admin/admin_base.html" %}
 {% load humanize %}
 
-{% block page_title %}Departments{% endblock %}
+{% block page_title %}Users{% endblock %}
 {% block nav_dept %}nav-active{% endblock %}
 
 {% block content %}
 <div>
-  <h1 class="text-xl font-semibold text-gray-900 mb-1">Departments</h1>
-  <p class="text-sm text-gray-500 mb-8">Team members grouped by department. Manage roles and access inline.</p>
+  <h1 class="text-xl font-semibold text-gray-900 mb-1">Users</h1>
+  <p class="text-sm text-gray-500 mb-8">Team members grouped by role. Manage roles and access inline.</p>
 
   <div class="grid gap-6">
     {% for dept in grouped %}

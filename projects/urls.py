@@ -175,10 +175,18 @@ urlpatterns = [
     path('portal-admin/projects/',                      views.admin_project_list,        name='admin_project_list'),
     path('portal-admin/projects/<str:project_id>/assign-pm/', views.admin_assign_pm,      name='admin_assign_pm'),
     path('portal-admin/task-durations/',                views.admin_task_durations,      name='admin_task_durations'),
+    path('portal-admin/users/<int:user_id>/reset-password/', views.admin_reset_password, name='admin_reset_password'),
     # Redirect old activity-log URL to the new audit-log screen
     path('portal/activity-log/',
          RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),
          name='portal_activity_log_redirect'),
+
+    # ---------------------------------------------------------------------------
+    # Sub Admin Panel — sub-admin/ prefix (Sub Admin role only)
+    # ---------------------------------------------------------------------------
+    path('sub-admin/projects/',      views.subadmin_projects,      name='subadmin_projects'),
+    path('sub-admin/task-durations/', views.subadmin_task_durations, name='subadmin_task_durations'),
+    path('sub-admin/departments/',   views.subadmin_departments,    name='subadmin_departments'),
 
     # ---------------------------------------------------------------------------
     # Task drill-down — due-date filters for PM, Design, SCM dashboards
@@ -186,7 +194,8 @@ urlpatterns = [
     # ---------------------------------------------------------------------------
     # My Documents — personal record-keeping sub-page
     # ---------------------------------------------------------------------------
-    path('profile/documents/', views.my_documents, name='my_documents'),
+    path('profile/documents/',    views.my_documents,    name='my_documents'),
+    path('profile/change-password/', views.change_password, name='change_password'),
     path('design-submissions/<int:pk>/', views.design_submission_detail, name='design_submission_detail'),
     path('projects/<str:project_id>/payment-requests/<int:request_id>/',
          views.payment_request_detail, name='payment_request_detail'),

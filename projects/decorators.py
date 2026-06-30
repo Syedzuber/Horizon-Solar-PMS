@@ -9,6 +9,7 @@ logger = logging.getLogger(__name__)
 # Used by login_view and role_required to redirect users after auth.
 ROLE_DASHBOARD = {
     'Admin':         '/dashboard/admin/',
+    'System Admin':  '/sub-admin/projects/',
     'PM':            '/dashboard/pm/',
     'Site Engineer': '/dashboard/site-engineer/',
     'Design':        '/dashboard/design/',
@@ -69,3 +70,6 @@ def role_required(allowed_roles):
             return view_func(request, *args, **kwargs)
         return wrapper
     return decorator
+
+
+system_admin_required = role_required(['System Admin'])

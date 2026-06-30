@@ -1,0 +1,138 @@
+{% extends "projects/subadmin/subadmin_base.html" %}
+{% load humanize %}
+
+{% block page_title %}Unassigned Projects{% endblock %}
+{% block nav_projects %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-gray-900">Unassigned Projects</h1>
+  <p class="text-sm text-gray-500 mt-1">Assign a Project Manager to projects that are currently unassigned.</p>
+</div>
+
+<!-- Section 1: Unassigned projects (action needed) -->
+{% if unassigned %}
+<div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-8">
+  <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 bg-red-50">
+    <div class="flex items-center gap-3">
+      <i data-lucide="alert-circle" class="w-4 h-4 text-red-500"></i>
+      <span class="font-semibold text-gray-900">Needs Assignment</span>
+    </div>
+    <span class="text-xs font-medium px-2 py-1 rounded-full bg-red-100 text-red-700">
+      {{ unassigned|length }} project{{ unassigned|length|pluralize }}
+    </span>
+  </div>
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="border-b border-gray-100">
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Project ID</th>
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Customer</th>
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Type</th>
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</th>
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Created</th>
+        <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Assign PM</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-50">
+      {% for project in unassigned %}
+      <tr class="hover:bg-gray-50">
+        <td class="px-4 py-3 font-mono text-xs text-gray-700">{{ project.project_id }}</td>
+        <td class="px-4 py-3 font-medium text-gray-900">{{ project.customer_name }}</td>
+        <td class="px-4 py-3">
+          <span class="px-2 py-0.5 rounded text-xs font-medium
+            {% if project.project_type == 'residential' %}bg-blue-50 text-blue-700
+            {% elif project.project_type == 'commercial_opex' %}bg-purple-50 text-purple-700
+            {% else %}bg-yellow-50 text-yellow-700{% endif %}">
+            {{ project.get_project_type_display }}
+          </span>
+        </td>
+        <td class="px-4 py-3">
+          <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">{{ project.status }}</span>
+        </td>
+        <td class="px-4 py-3 text-xs text-gray-500">{{ project.created_at|date:"d M Y" }}</td>
+        <td class="px-4 py-3">
+          <form method="post" class="flex items-center gap-2">
+            {% csrf_token %}
+            <input type="hidden" name="project_id" value="{{ project.pk }}">
+            <select name="pm_user_id"
+                    class="text-xs border border-gray-300 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-green-500 bg-white">
+              <option value="">— Select PM —</option>
+              {% for profile in pm_profiles %}
+              <option value="{{ profile.pk }}">{{ profile.user.get_full_name|default:profile.user.username }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit"
+                    class="text-xs px-3 py-1.5 rounded text-white font-medium shrink-0"
+                    style="background:#1a7a4a;"
+                    onmouseover="this.style.background='#155f3a'"
+                    onmouseout="this.style.background='#1a7a4a'">
+              Assign
+            </button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<div class="bg-white rounded-xl border border-gray-200 px-6 py-8 text-center mb-8">
+  <i data-lucide="check-circle" class="w-8 h-8 text-green-500 mx-auto mb-2"></i>
+  <p class="text-sm font-medium text-gray-700">All projects have a PM assigned.</p>
+</div>
+{% endif %}
+
+<!-- Section 2: All assigned projects (collapsed by default, read-only) -->
+<div x-data="{ open: false }">
+  <button @click="open = !open"
+          class="flex items-center gap-2 text-sm text-gray-500 hover:text-gray-800 mb-3">
+    <i data-lucide="chevron-right" class="w-4 h-4 transition-transform" :class="open ? 'rotate-90' : ''"></i>
+    <span class="font-medium">All Assigned Projects</span>
+    <span class="text-xs text-gray-400">({{ assigned|length }})</span>
+  </button>
+
+  <div x-show="open" x-cloak>
+    {% if assigned %}
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      <table class="w-full text-sm">
+        <thead>
+          <tr class="border-b border-gray-100 bg-gray-50">
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Project ID</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Customer</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Type</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Status</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">PM</th>
+            <th class="px-4 py-2.5 text-left text-xs font-semibold text-gray-400 uppercase tracking-wider">Created</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          {% for project in assigned %}
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3 font-mono text-xs text-gray-700">{{ project.project_id }}</td>
+            <td class="px-4 py-3 font-medium text-gray-900">{{ project.customer_name }}</td>
+            <td class="px-4 py-3">
+              <span class="px-2 py-0.5 rounded text-xs font-medium
+                {% if project.project_type == 'residential' %}bg-blue-50 text-blue-700
+                {% elif project.project_type == 'commercial_opex' %}bg-purple-50 text-purple-700
+                {% else %}bg-yellow-50 text-yellow-700{% endif %}">
+                {{ project.get_project_type_display }}
+              </span>
+            </td>
+            <td class="px-4 py-3">
+              <span class="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">{{ project.status }}</span>
+            </td>
+            <td class="px-4 py-3 text-sm text-gray-700">
+              {{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}
+            </td>
+            <td class="px-4 py-3 text-xs text-gray-500">{{ project.created_at|date:"d M Y" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-sm text-gray-400">No assigned projects yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
