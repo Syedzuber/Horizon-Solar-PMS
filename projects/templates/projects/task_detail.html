@@ -21,14 +21,34 @@
     <div class="row g-3">
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Status</small>
-        {% if task.status == 'Done' %}
-          <span class="badge bg-success">Done</span>
-        {% elif task.status == 'In Progress' %}
-          <span class="badge bg-primary">In Progress</span>
-        {% elif task.status == 'Blocked' %}
-          <span class="badge bg-danger">Blocked</span>
+        {% if is_assignee %}
+          <form method="post"
+                action="{% url 'task_detail_status_update' project.project_id task.pk %}"
+                class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
+            <select name="status"
+                    onchange="if (!(window.solarInterceptBlock && window.solarInterceptBlock(this))) { this.closest('form').submit(); }"
+                    data-original-status="{{ task.status }}"
+                    class="form-select form-select-sm d-inline-block w-auto
+                      {% if task.status == 'Done' %}border-success text-success
+                      {% elif task.status == 'Blocked' %}border-danger text-danger
+                      {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}">
+              {% for val, label in task_status_choices %}
+                <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </form>
         {% else %}
-          <span class="badge bg-secondary">Not Started</span>
+          {% if task.status == 'Done' %}
+            <span class="badge bg-success">Done</span>
+          {% elif task.status == 'In Progress' %}
+            <span class="badge bg-primary">In Progress</span>
+          {% elif task.status == 'Blocked' %}
+            <span class="badge bg-danger">Blocked</span>
+          {% else %}
+            <span class="badge bg-secondary">Not Started</span>
+          {% endif %}
         {% endif %}
       </div>
       <div class="col-sm-6 col-md-3">

@@ -2023,6 +2023,170 @@ def task_status_update(request, project_id, task_id):
 
 
 @login_required
+def task_detail_status_update(request, project_id, task_id):
+    """
+    Status update submitted from the task detail page.
+    Only the user specifically assigned to the task (task.assigned_to) may change status.
+    Uses the same transition table and notification flows as task_status_update, but
+    permission is user-level (not role-level) and the redirect returns to the task detail page.
+    POST only.
+    """
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    task    = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    # User-level check: only the specific assigned user, evaluated fresh per request
+    if task.assigned_to is None or task.assigned_to != profile:
+        return HttpResponseForbidden()
+
+    new_status = request.POST.get('status', '').strip()
+    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
+    if new_status not in valid_statuses:
+        messages.error(request, 'Invalid status value.')
+        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    VALID_TRANSITIONS = {
+        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
+        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
+        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
+        Task.DONE:        {Task.BLOCKED},
+    }
+
+    allowed = VALID_TRANSITIONS.get(task.status, set())
+    if new_status not in allowed:
+        messages.error(request, f"Cannot move task from '{task.status}' to '{new_status}'.")
+        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    # In Progress requires a due date — Finance users may supply one inline
+    _due_date_str = request.POST.get('due_date', '').strip()
+    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
+        try:
+            _parsed_due = date.fromisoformat(_due_date_str)
+            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
+            task.due_date = _parsed_due
+        except ValueError:
+            pass
+
+    if new_status == Task.IN_PROGRESS and not task.due_date:
+        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    update_kwargs = {'status': new_status}
+    if new_status == Task.DONE:
+        update_kwargs['completed_at'] = timezone.now()
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        update_kwargs['blocked_since'] = timezone.now()
+    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
+        update_kwargs['blocked_since'] = None
+
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        block_issue_title = request.POST.get('block_issue_title', '').strip()
+        if not block_issue_title:
+            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+
+        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
+        if block_severity not in dict(Issue.SEVERITY_CHOICES):
+            block_severity = Issue.HIGH
+        block_assignee = None
+        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
+        if block_assignee_id:
+            try:
+                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
+            except UserProfile.DoesNotExist:
+                pass
+        issue = Issue.objects.create(
+            project=project,
+            task=task,
+            title=block_issue_title,
+            description=request.POST.get('block_issue_description', '').strip(),
+            severity=block_severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=block_assignee,
+        )
+        log_activity(
+            project, profile,
+            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
+            entity_type='Issue', entity_id=issue.pk,
+        )
+        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
+    else:
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
+
+        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received
+        _FINANCE_TASK_TO_MILESTONE = {
+            'Advance Payment Confirmation': 'M1',
+            'Finance Confirmation':         'M2',
+            '100% Payment Confirmation':    'M3',
+        }
+        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
+            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
+            _ms_update = {'status': 'Received', 'received_date': date.today()}
+            _ar_str    = request.POST.get('amount_received', '').strip()
+            _vr_str    = request.POST.get('variance_reason', '').strip()
+            if _ar_str:
+                try:
+                    _ms_update['amount_received'] = Decimal(_ar_str)
+                except InvalidOperation:
+                    pass
+            if _vr_str:
+                _ms_update['variance_reason'] = _vr_str
+            try:
+                PaymentMilestone.objects.filter(
+                    project=project,
+                    milestone_name=_ms_label,
+                    status__in=['Pending', 'Invoiced'],
+                ).update(**_ms_update)
+            except Exception:
+                pass
+
+        if new_status == Task.DONE and task.is_payment_milestone:
+            seen_pks = set()
+            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
+            if project.assigned_pm:
+                milestone_recipients.append(project.assigned_pm)
+            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
+            for recipient in milestone_recipients:
+                if recipient.pk in seen_pks:
+                    continue
+                seen_pks.add(recipient.pk)
+                _pm_link = f'/projects/{project.project_id}/'
+                _pm_message = (
+                    f'Project {project.project_id} ({project.customer_name}) has reached '
+                    f'payment milestone: "{task.task_name}".\n\n'
+                    f'Please initiate collection at the earliest.'
+                )
+                _pm_email_message = (
+                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
+                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
+                )
+                send_notification(
+                    recipient=recipient,
+                    message=_pm_email_message,
+                    channels=['in_app', 'whatsapp', 'email'],
+                    link=_pm_link,
+                    subject=f'Payment Milestone Reached — {project.customer_name}',
+                    template='payment_notification',
+                    template_params=[project.customer_name, task.task_name, project.customer_name],
+                    related_project=project,
+                    actor=profile,
+                )
+
+    return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+
+@login_required
 @role_required(['PM'])
 def task_assign(request, project_id, task_id):
     """
@@ -4011,14 +4175,18 @@ def task_detail(request, project_id, task_id):
         )
     )
 
+    is_assignee = task.assigned_to is not None and task.assigned_to == profile
+
     return render(request, 'projects/task_detail.html', {
-        'project':       project,
-        'task':          task,
-        'attachments':   attachments,
-        'user_profile':  profile,
-        'task_issues':   task_issues,
-        'all_profiles':  all_profiles,
-        'task_comments': task_comments,
+        'project':            project,
+        'task':               task,
+        'attachments':        attachments,
+        'user_profile':       profile,
+        'task_issues':        task_issues,
+        'all_profiles':       all_profiles,
+        'task_comments':      task_comments,
+        'is_assignee':        is_assignee,
+        'task_status_choices': Task.STATUS_CHOICES,
     })
 
 
