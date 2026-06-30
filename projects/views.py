@@ -11,7 +11,8 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Count, Exists, Max, Min, OuterRef, Prefetch, Q, Sum
+from django.db.models import Count, DecimalField, Exists, F, Max, Min, OuterRef, Prefetch, Q, Sum, Value
+from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
@@ -1406,6 +1407,22 @@ def _get_ceo_dashboard_context():
             is_deleted=False, status__in=['Active', 'In Progress']
         ).aggregate(s=Sum('contract_value'))['s'] or 0
     )
+    # Milestones Finance has invoiced (triggered by task Done) but not yet fully collected.
+    # status='Invoiced' → all of amount is owed; status='Received' with partial → amount-amount_received.
+    # Overpaid/exact rows excluded at DB level (amount_received__gte=amount).
+    _DECIMAL_ZERO = Value(Decimal('0'), output_field=DecimalField())
+    fin_client_payment_pending = (
+        PaymentMilestone.objects.filter(
+            project__is_deleted=False,
+            project__status__in=['Active', 'In Progress'],
+            status__in=['Invoiced', 'Received'],
+            amount__isnull=False,
+        ).filter(
+            Q(amount_received__isnull=True) | Q(amount_received__lt=F('amount'))
+        ).aggregate(
+            s=Sum(F('amount') - Coalesce(F('amount_received'), _DECIMAL_ZERO))
+        )['s'] or 0
+    )
 
     ctx = {
         'proj_total':    proj_total,
@@ -1418,6 +1435,7 @@ def _get_ceo_dashboard_context():
         'fin_payment_requests_pending':    fin_payment_requests_pending,
         'fin_vendor_payments_outstanding': fin_vendor_payments_outstanding,
         'fin_client_contract_value':       fin_client_contract_value,
+        'fin_client_payment_pending':      fin_client_payment_pending,
     }
     ctx.update(task_agg)
     ctx.update(issue_agg)

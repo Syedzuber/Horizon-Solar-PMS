@@ -79,7 +79,7 @@
 {# ── FINANCE SUMMARY STRIP ────────────────────────────────────────────────── #}
 <div class="row g-3 mb-4">
 
-  <div class="col-md-4">
+  <div class="col-sm-6 col-md-3">
     <div class="card shadow-sm text-center py-3">
       <div class="card-body p-2">
         <div class="fw-bold fs-2 text-dark">{{ fin_payment_requests_pending }}</div>
@@ -88,7 +88,7 @@
     </div>
   </div>
 
-  <div class="col-md-4">
+  <div class="col-sm-6 col-md-3">
     <div class="card shadow-sm text-center py-3">
       <div class="card-body p-2">
         <div class="fw-bold fs-2 text-dark">₹{{ fin_vendor_payments_outstanding|floatformat:0 }}</div>
@@ -97,11 +97,20 @@
     </div>
   </div>
 
-  <div class="col-md-4">
+  <div class="col-sm-6 col-md-3">
     <div class="card shadow-sm text-center py-3">
       <div class="card-body p-2">
         <div class="fw-bold fs-2" style="color:#d97706;">₹{{ fin_client_contract_value|floatformat:0 }}</div>
         <div class="text-muted small mt-1">Total Client Contract Value</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-sm-6 col-md-3">
+    <div class="card shadow-sm text-center py-3">
+      <div class="card-body p-2">
+        <div class="fw-bold fs-2 text-dark">₹{{ fin_client_payment_pending|floatformat:0 }}</div>
+        <div class="text-muted small mt-1">Payment Pending from Client</div>
       </div>
     </div>
   </div>
