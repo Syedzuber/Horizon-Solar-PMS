@@ -2129,13 +2129,18 @@ def task_set_due_date(request, project_id, task_id):
             messages.success(request, 'Due date cleared.')
         return redirect('project_overview', project_id=project.project_id)
 
-    # PM path — cascade-recalculate on date set, clear without cascade
+    # PM path — ripple only when cascade is ON
     date_str = request.POST.get('due_date', '').strip()
     if date_str:
         try:
             new_date = date.fromisoformat(date_str)
-            count = recalculate_from_task(project, task, new_date, user=request.user)
-            messages.success(request, f'Due date updated. {count} task(s) recalculated.')
+            if project.cascade_scheduling:
+                count = recalculate_from_task(project, task, new_date, user=request.user)
+                messages.success(request, f'Due date updated. {count} task(s) recalculated.')
+            else:
+                task.due_date = new_date
+                task.save()
+                messages.success(request, 'Due date updated.')
             log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
         except ValueError:
             messages.error(request, 'Invalid date.')
