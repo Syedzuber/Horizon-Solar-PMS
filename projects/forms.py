@@ -243,7 +243,6 @@ class ProjectCreateForm(forms.ModelForm):
             'project_type',
             'capacity_kw',
             'contract_value',
-            'assigned_site_engineer',
             'survey_date',
             'target_commissioning_date',
             'zoho_crm_id',
@@ -256,16 +255,6 @@ class ProjectCreateForm(forms.ModelForm):
             'survey_date':               forms.DateInput(attrs={'type': 'date'}),
             'target_commissioning_date': forms.DateInput(attrs={'type': 'date'}),
         }
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['assigned_site_engineer'].queryset = (
-            UserProfile.objects.filter(role='Site Engineer', is_active=True)
-            .select_related('user')
-        )
-        self.fields['assigned_site_engineer'].label_from_instance = (
-            lambda obj: f"{obj.user.get_full_name() or obj.user.username}"
-        )
 
     def clean_customer_phone(self):
         value = self.cleaned_data['customer_phone'].strip()
@@ -299,7 +288,6 @@ class ProjectEditForm(forms.ModelForm):
             'state',
             'capacity_kw',
             'contract_value',
-            'assigned_site_engineer',
             'survey_date',
             'target_commissioning_date',
             'zoho_crm_id',
@@ -312,16 +300,6 @@ class ProjectEditForm(forms.ModelForm):
             'survey_date':               forms.DateInput(attrs={'type': 'date'}),
             'target_commissioning_date': forms.DateInput(attrs={'type': 'date'}),
         }
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields['assigned_site_engineer'].queryset = (
-            UserProfile.objects.filter(role='Site Engineer', is_active=True)
-            .select_related('user')
-        )
-        self.fields['assigned_site_engineer'].label_from_instance = (
-            lambda obj: f"{obj.user.get_full_name() or obj.user.username}"
-        )
 
     def clean_customer_phone(self):
         value = self.cleaned_data['customer_phone'].strip()

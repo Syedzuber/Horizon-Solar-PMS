@@ -43,10 +43,18 @@
         </select>
       </div>
       <div class="d-flex gap-2">
-        <button type="submit" class="btn btn-primary btn-sm">Save</button>
+        <button type="submit" id="taskAssignSaveBtn" class="btn btn-primary btn-sm">Save</button>
         <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">Cancel</a>
       </div>
     </form>
   </div>
 </div>
+
+<script>
+document.querySelector('form').addEventListener('submit', function () {
+  var btn = document.getElementById('taskAssignSaveBtn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+});
+</script>
 {% endblock %}

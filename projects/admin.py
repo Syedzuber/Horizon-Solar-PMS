@@ -26,7 +26,7 @@ class PhaseInline(admin.TabularInline):
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
     list_display    = ['project_id', 'customer_name', 'project_type', 'status',
-                       'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'assigned_site_engineer', 'is_deleted']
+                       'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
     list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
     readonly_fields = ['project_id', 'created_at', 'activated_at', 'deleted_at']
@@ -35,7 +35,7 @@ class ProjectAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Project Info', {
-            'fields': ('project_id', 'project_type', 'status', 'assigned_pm', 'assigned_site_engineer', 'created_by')
+            'fields': ('project_id', 'project_type', 'status', 'assigned_pm', 'created_by')
         }),
         ('Customer Details', {
             'fields': ('customer_name', 'customer_phone', 'customer_email',

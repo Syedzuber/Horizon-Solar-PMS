@@ -206,7 +206,7 @@ def tasks_drill_down(request, filter_type):
     elif role == 'Design':
         base_qs = base_qs.filter(phase__project__assigned_design=profile)
     elif role == 'Site Engineer':
-        base_qs = base_qs.filter(phase__project__assigned_site_engineer=profile)
+        base_qs = base_qs.filter(assigned_to=profile)
     # SCM and others: all active non-deleted projects
 
     active_statuses = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
@@ -491,8 +491,7 @@ def dashboard_site_engineer(request):
     """SE dashboard. Renders one card per assigned project, sorted by urgency. Site Engineer role only."""
     #
     # Stop-and-report findings (verified against models.py 2026-06-19):
-    # 1. SE-project link: Project.assigned_site_engineer FK → UserProfile (related_name='se_projects')
-    # 2. DeliveryChallan.EXPECTED='Expected' = GRN not yet confirmed (no line items have received_quantity)
+    # 1. DeliveryChallan.EXPECTED='Expected' = GRN not yet confirmed (no line items have received_quantity)
     # 3. is_delayed: view-computed (same logic as PM dashboard) via target_commissioning_date
     # 4. Blocked field: Task.status == 'Blocked' (string); no separate is_blocked boolean
     # 5. task_type values: Task.INTERNAL='Internal', Task.EXTERNAL='External'
@@ -510,9 +509,9 @@ def dashboard_site_engineer(request):
     # issue_count: open issues on this project (Open or In Progress).
     projects = Project.objects.filter(
         is_deleted=False,
-        assigned_site_engineer=se_profile,
         status__in=['Active', 'In Progress'],
-    ).annotate(
+        phases__tasks__assigned_to=se_profile,
+    ).distinct().annotate(
         overdue_count=Count(
             'phases__tasks',
             filter=Q(
@@ -628,7 +627,7 @@ def dashboard_site_engineer(request):
     total_urgent      = sum(p['urgency_count'] for p in projects_data)
 
     _se_task_base = Task.objects.filter(
-        phase__project__assigned_site_engineer=se_profile,
+        assigned_to=se_profile,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
@@ -2244,17 +2243,29 @@ def task_assign(request, project_id, task_id):
                 f'{_at_message}\n\nView in Horizon Solar PMS:\n'
                 f'https://horizon-solar-pms-production.up.railway.app{task_url}'
             )
-            send_notification(
+            # Guard: skip if an identical assign_task notification was logged in
+            # the last 10 seconds — catches browser double-submit before the
+            # redirect completes. 10 s is generous for a redirect but tight enough
+            # to allow a legitimate reassign-to-same-person seconds later.
+            _recent_cutoff = timezone.now() - timedelta(seconds=10)
+            _already_sent = NotificationLog.objects.filter(
                 recipient=assignee,
-                message=_at_email_message,
-                channels=['in_app', 'whatsapp', 'email'],
-                link=task_url,
-                subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
-                template='assign_task',
-                template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
                 related_project=project,
-                actor=request.user.profile,
-            )
+                template_name='assign_task',
+                created_at__gte=_recent_cutoff,
+            ).exists()
+            if not _already_sent:
+                send_notification(
+                    recipient=assignee,
+                    message=_at_email_message,
+                    channels=['in_app', 'whatsapp', 'email'],
+                    link=task_url,
+                    subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
+                    template='assign_task',
+                    template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
+                    related_project=project,
+                    actor=request.user.profile,
+                )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
         return redirect('project_overview', project_id=project.project_id)
@@ -3604,8 +3615,7 @@ def project_overview(request, project_id):
     """
     project = get_object_or_404(
         Project.objects.select_related(
-            'assigned_pm__user', 'assigned_site_engineer__user',
-            'assigned_design__user', 'created_by',
+            'assigned_pm__user', 'assigned_design__user', 'created_by',
         ),
         project_id=project_id,
     )
@@ -3614,8 +3624,6 @@ def project_overview(request, project_id):
 
     # Role isolation
     if role == 'PM' and project.assigned_pm != profile:
-        raise Http404
-    if role == 'Site Engineer' and project.assigned_site_engineer != profile:
         raise Http404
 
     is_assigned_pm    = (project.assigned_pm is not None and project.assigned_pm.user == request.user)
@@ -4034,7 +4042,6 @@ def zoho_deal_closed_webhook(request):
             capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
             contract_value=_safe_decimal(deal.get('Amount')),
             assigned_pm=assigned_pm,
-            assigned_site_engineer=None,
             target_commissioning_date=target_commissioning_date,
             status='Draft',
             zoho_deal_id=record_id,
@@ -6328,7 +6335,7 @@ def admin_project_list(request):
     projects = (
         Project.objects
         .filter(is_deleted=False)
-        .select_related('assigned_pm__user', 'assigned_site_engineer__user')
+        .select_related('assigned_pm__user')
         .prefetch_related(
             Prefetch('phases',
                      queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))

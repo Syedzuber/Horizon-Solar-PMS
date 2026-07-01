@@ -39,14 +39,6 @@ class Project(models.Model):
         null=True,
         blank=True,
     )
-    assigned_site_engineer    = models.ForeignKey(
-        'UserProfile',
-        limit_choices_to={'role': 'Site Engineer', 'is_active': True},
-        related_name='se_projects',
-        on_delete=models.PROTECT,
-        null=True,
-        blank=True,
-    )
     assigned_design           = models.ForeignKey(
         'UserProfile',
         null=True,

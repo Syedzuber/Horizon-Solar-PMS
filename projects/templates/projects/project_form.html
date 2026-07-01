@@ -110,20 +110,6 @@
           <input type="text" class="form-control" value="{{ assigned_pm_display }}" disabled>
         </div>
 
-        <div class="col-md-6">
-          <label class="form-label">Site Engineer <span class="text-danger">*</span></label>
-          <select name="assigned_site_engineer"
-                  class="form-select{% if form.assigned_site_engineer.errors %} is-invalid{% endif %}">
-            <option value="">— Select —</option>
-            {% for choice in form.fields.assigned_site_engineer.queryset %}
-              <option value="{{ choice.pk }}"
-                {% if form.assigned_site_engineer.value|stringformat:"s" == choice.pk|stringformat:"s" %}selected{% endif %}>
-                {{ choice.user.get_full_name|default:choice.user.username }}
-              </option>
-            {% endfor %}
-          </select>
-          {% for e in form.assigned_site_engineer.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
-        </div>
 
         <div class="col-md-4">
           <label class="form-label">Survey Date</label>

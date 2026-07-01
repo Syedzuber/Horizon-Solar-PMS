@@ -158,16 +158,6 @@
           </div>
         </div>
         <div class="col-6 col-md-3">
-          <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Site Engineer</div>
-          <div class="fw-semibold small mt-1">
-            {% if row.project.assigned_site_engineer %}
-              {{ row.project.assigned_site_engineer.user.get_full_name|default:row.project.assigned_site_engineer.user.username }}
-            {% else %}
-              <span class="text-muted">Unassigned</span>
-            {% endif %}
-          </div>
-        </div>
-        <div class="col-6 col-md-3">
           <div class="text-muted" style="font-size:.7rem; text-transform:uppercase; letter-spacing:.04em;">Progress</div>
           <div class="d-flex align-items-center gap-2 mt-1">
             <div class="progress flex-grow-1" style="height:6px;">

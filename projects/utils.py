@@ -207,7 +207,7 @@ def _get_duration(task_name, overrides):
 def attach_residential_template(project):
     """
     Create all 9 phases and 50 tasks for a Residential project.
-    Pre-assigns PM-role tasks to assigned_pm and SE-role tasks to assigned_site_engineer.
+    Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
     Entire operation is atomic — any failure rolls back all phases and tasks.
     Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
     """
@@ -349,20 +349,14 @@ def attach_residential_template(project):
                 for t in phase_data['tasks']
             ])
 
-        # Pre-assign PM and SE tasks to the named people on this project.
-        # filter().update() used instead of individual .save() calls for performance.
+        # Pre-assign PM tasks to the named PM on this project.
+        # SE-role tasks start unassigned — same as Design/SCM/Finance.
         pm_profile = project.assigned_pm
-        se_profile = project.assigned_site_engineer
 
         Task.objects.filter(
             phase__project=project,
             assigned_role=Task.PM,
         ).update(assigned_to=pm_profile)
-
-        Task.objects.filter(
-            phase__project=project,
-            assigned_role=Task.SITE_ENGINEER,
-        ).update(assigned_to=se_profile)
 
         # Integrity checks — roll back everything if counts are wrong.
         # These assertions run inside the atomic block so a mismatch aborts the transaction.
