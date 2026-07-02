@@ -1,0 +1,80 @@
+Record Id
+Deal 
+Owner.id
+Deal Owner
+Amount
+Deal Name
+Closing Date
+Stage
+Type
+Probability (%)
+Expected Revenue
+Next Step
+Lead Source
+Campaign Source.id
+Campaign Source
+Contact Name.id
+Contact Name
+Created By.id
+Created By
+Modified By.id
+Modified By
+Created Time
+Modified Time
+Last Activity Time
+Lead Conversion Time
+Sales Cycle Duration
+Overall Sales Duration
+Tag
+Description
+Pipeline
+Change Log Time
+Locked
+Reason For Loss
+Customer Type
+Next Action
+Pending at
+Date of Enquiry
+Subsidy Required
+Loan Facility Required
+Investment
+Social Lead ID
+Connected To.module
+Connected To.id	
+Mobile
+State
+City
+Rating
+Sanction Load	
+Date of Proposal
+Projects Project Url
+Projects Project Id
+Project Type
+Project_Size_kW
+BOQ
+Version
+BOQ_Status
+Auto_PO_Status
+PO_Id
+PO_Mode
+BOQ
+Last Runtime
+BOQ Error Message
+Inventory_SO_Id
+Lead-Created-Time
+Done By
+Latest Call Action
+Capacity(kW)
+Next Follow Up
+Customer Email
+Roof Top Area
+Current Electricity Bill
+PIN Code
+Installation Type	
+Avg. Units Consumption/Month	
+Cost/kWp	
+Discom	
+Battery Brand	
+Battery Type	
+Battery Warranty	
+Street

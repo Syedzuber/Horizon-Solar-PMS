@@ -1,0 +1,529 @@
+# Day 7 — File Uploads & Document Management
+## All roles can upload files to projects and tasks. Supabase storage. Soft delete with nightly purge.
+
+## Stack context
+Django + PostgreSQL on Railway. Single app: projects/. Bootstrap 5 frontend.
+Supabase for file storage (bucket: solarpms-files, PUBLIC bucket).
+supabase-py is already installed and in requirements.txt.
+projects/supabase_storage.py already exists with utility code — read it before writing upload logic.
+Existing models: Project, Task, ProjectPhase, UserProfile, BOQ, PaymentMilestone, Vendor.
+Current migration: 0014. Today adds migration 0015.
+
+Settings already added to Railway and local .env:
+- SUPABASE_URL
+- SUPABASE_KEY
+- SUPABASE_BUCKET (value: solarpms-files)
+
+---
+
+## Critical — read before writing any code
+
+1. Read projects/supabase_storage.py before writing any upload logic.
+   Use whatever client initialisation pattern already exists there.
+   Do NOT create a second Supabase client. Do NOT import supabase at module level in views.py.
+
+2. Supabase bucket is PUBLIC. Store the permanent public URL in file_url.
+   Do NOT generate signed URLs. Do NOT use signed URLs anywhere.
+   Public URL format: {SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}
+
+3. Add to settings.py:
+   FILE_RETENTION_DAYS = env.int('FILE_RETENTION_DAYS', default=90)
+   DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600
+   FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600
+
+4. Supabase path convention — always use UUID prefix to prevent collisions:
+   project-documents/{project_id}/{uuid}_{original_filename}
+   task-attachments/{project_id}/{task_id}/{uuid}_{original_filename}
+
+---
+
+## Layer 1 — Plain English
+
+Every role can attach files to a project (project-level) and to any specific
+task (task-level). Multiple files can be uploaded in one action. Files are
+stored in Supabase public bucket. Soft delete hides files from UI immediately.
+A nightly management command hard deletes files soft-deleted beyond
+FILE_RETENTION_DAYS (default 90 days). Only the uploader or Admin can delete.
+File types restricted to documents and photos only. 20MB max per file.
+
+---
+
+## Layer 2 — Data Fields
+
+### New models (migration 0015)
+
+```python
+class ProjectDocument(models.Model):
+    DOCUMENT = 'Document'
+    PHOTO = 'Photo'
+    FILE_TYPE_CHOICES = [(DOCUMENT, 'Document'), (PHOTO, 'Photo')]
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='documents'
+    )
+    uploaded_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='project_documents'
+    )
+    file_name = models.CharField(max_length=255)
+    file_url = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_project_documents'
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
+
+
+class TaskAttachment(models.Model):
+    DOCUMENT = 'Document'
+    PHOTO = 'Photo'
+    FILE_TYPE_CHOICES = [(DOCUMENT, 'Document'), (PHOTO, 'Photo')]
+
+    task = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name='attachments'
+    )
+    uploaded_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='task_attachments'
+    )
+    file_name = models.CharField(max_length=255)
+    file_url = models.URLField(max_length=1000)
+    supabase_path = models.CharField(max_length=500)
+    file_type = models.CharField(max_length=20, choices=FILE_TYPE_CHOICES)
+    file_size_kb = models.PositiveIntegerField(default=0)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='deleted_task_attachments'
+    )
+
+    class Meta:
+        ordering = ['-uploaded_at']
+```
+
+### Allowed file types (define in views.py)
+```python
+ALLOWED_DOCUMENT_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx']
+ALLOWED_PHOTO_EXTENSIONS = ['jpg', 'jpeg', 'png']
+ALLOWED_EXTENSIONS = ALLOWED_DOCUMENT_EXTENSIONS + ALLOWED_PHOTO_EXTENSIONS
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20MB
+
+MIME_TYPE_MAP = {
+    'pdf': 'application/pdf',
+    'doc': 'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+}
+```
+
+---
+
+## Layer 3 — User Journey
+
+### Project-level upload
+1. User opens project detail page or project overview page
+2. "Upload Files" button visible to all roles
+3. File picker opens — multiple selection enabled, accept attribute set to
+   .pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png
+4. Client-side validation on file select:
+   - Extension check against allowed list
+   - Size check (each file ≤ 20MB)
+   - Invalid files show inline error, valid files queued for upload
+5. User clicks Upload → POST to /projects/<project_id>/documents/upload/
+6. Django validates server-side: extension, MIME type, size
+7. Each valid file:
+   - Generate UUID, build supabase_path
+   - Upload to Supabase
+   - Build public URL
+   - Create ProjectDocument record
+8. Partial failures: create records for successes, return warning for failures
+9. Redirect back to page — uploaded files appear in document list
+
+### Task-level upload
+1. User opens task detail page
+2. "Attach Files" button visible to all roles
+3. Same file picker and validation flow
+4. POST to /projects/<project_id>/tasks/<task_id>/attachments/upload/
+5. Django verifies task.phase.project.project_id == project_id (cross-project guard)
+6. Files uploaded, TaskAttachment records created
+7. Task detail refreshes — attachment count updated, files listed
+
+### Soft delete
+1. Delete icon visible only to uploader or Admin next to each file
+2. Click delete → browser confirm() dialog:
+   "Delete this file? It can be recovered within 90 days."
+3. POST to delete URL
+4. Ownership check: uploaded_by == current_profile OR role == 'Admin'
+5. Set is_deleted=True, deleted_at=now(), deleted_by=current_profile
+6. Redirect — file no longer appears in any listing
+
+### Nightly hard delete
+Management command: python manage.py purge_deleted_files
+- Finds ProjectDocument and TaskAttachment where:
+  is_deleted=True AND deleted_at < now() - FILE_RETENTION_DAYS
+- For each: delete file from Supabase using supabase_path
+- If Supabase delete fails: log error, skip, continue (retry next night)
+- Delete database record only after Supabase delete succeeds
+- Log total purged count on completion
+
+---
+
+## Layer 4 — Edge Cases
+
+1. Supabase upload fails — do NOT create DB record. Return error to user.
+   Never store a ProjectDocument/TaskAttachment with a broken or empty URL.
+
+2. Partial multi-file upload — 3 of 5 files succeed, 2 fail.
+   Create records for the 3 successes. Return warning listing failed filenames.
+   Never roll back successful uploads because one file failed.
+
+3. Duplicate filename — UUID prefix in path prevents Supabase collision.
+   Same filename from same user allowed — two separate records, different UUIDs.
+
+4. File type spoofing — validate both extension AND MIME type server-side.
+   If extension and MIME type don't match: reject with 400.
+
+5. 20MB limit — client-side check (file.size in bytes) for UX.
+   Server-side check (request.FILES) for security. Both required.
+
+6. Cross-project task injection — in task upload view, verify
+   task.phase.project.project_id == project_id from URL.
+   Return 403 if mismatch.
+
+7. Unauthorised delete — check ownership before soft delete.
+   Return 403 if uploaded_by != current_profile AND role != 'Admin'.
+
+8. Supabase delete fails during purge — log error, skip file, continue.
+   Retry next night. Never let one failure stop the entire purge run.
+
+9. Missing env vars — get_supabase_client() raises ValueError if
+   SUPABASE_URL or SUPABASE_KEY missing. Upload view catches this,
+   returns 500 with user-friendly message. Never crash app on import.
+
+10. Pre-Day-7 projects — no documents or attachments.
+    project.documents.filter(is_deleted=False) returns empty QuerySet safely.
+    Show "No files uploaded yet" empty state with upload button.
+
+11. PM isolation — PM can only see projects assigned to them.
+    File upload and delete views must respect this: get_object_or_404
+    scoped correctly for PM role, same as project_overview view.
+
+---
+
+## Layer 5 — Bug Pre-emption
+
+### Bug 1 — Supabase client crash on missing credentials
+Never initialise Supabase client at module level.
+Use the lazy pattern already in projects/supabase_storage.py.
+If that file uses module-level initialisation, refactor it to a function.
+The app must start and serve requests even if Supabase is misconfigured —
+only the upload action should fail, not the entire app.
+
+### Bug 2 — Django request size limit blocking uploads
+Default DATA_UPLOAD_MAX_MEMORY_SIZE is 2.5MB. Without the override,
+multi-file 20MB uploads crash with RequestDataTooBig before the view runs.
+Confirm these are in settings.py before running the session:
+DATA_UPLOAD_MAX_MEMORY_SIZE = 104857600
+FILE_UPLOAD_MAX_MEMORY_SIZE = 104857600
+
+### Bug 3 — Public URL construction
+Do not guess the public URL format. Build it explicitly:
+```python
+file_url = (
+    f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+    f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+)
+```
+Never use the Supabase client's get_public_url() method without
+verifying the returned format matches the above — different versions
+of supabase-py return different formats.
+
+### Bug 4 — File extension extraction
+Always lowercase the extension before checking:
+```python
+ext = file.name.rsplit('.', 1)[-1].lower()
+```
+A file named Document.PDF must be accepted, not rejected.
+Never split on '.' and take index [1] — filenames can have multiple dots.
+Always use rsplit('.', 1) to get the last extension only.
+
+---
+
+## Layer 6 — Pre-flight Simulation
+
+### Happy path — project document upload
+User selects 2 PDFs and 1 PNG →
+Client validates: all extensions valid, all under 20MB →
+POST fires → Django re-validates extensions, MIME types, sizes →
+get_supabase_client() called →
+File 1: path built with UUID → uploaded to Supabase → public URL built →
+ProjectDocument record created →
+File 2: same →
+File 3 (PNG): same →
+Redirect → 3 files appear in document list with name, type, size, uploader, date.
+
+### Happy path — task attachment
+User opens task → selects 3 site photos →
+POST to /projects/<id>/tasks/<task_id>/attachments/upload/ →
+Cross-project guard: task.phase.project.project_id == project_id ✓ →
+3 photos uploaded → 3 TaskAttachment records created →
+Task detail shows "3 attachments" count + file list.
+
+### Happy path — soft delete
+Uploader clicks delete icon →
+confirm() dialog accepted →
+POST to delete URL →
+Ownership check: uploaded_by == current_profile ✓ →
+is_deleted=True, deleted_at=now(), deleted_by=profile →
+Redirect → file gone from list → other files unaffected.
+
+### Happy path — nightly purge
+Management command runs at 2AM →
+Finds 5 ProjectDocuments and 3 TaskAttachments past retention cutoff →
+For each: Supabase delete called → DB record deleted →
+Logs "Purged 5 project documents, 3 task attachments" →
+Next night: nothing to purge, logs "Purged 0 files".
+
+### Empty states
+| Scenario | Expected behaviour |
+|---|---|
+| No files on project | "No files uploaded yet" + Upload Files button |
+| No attachments on task | "No attachments" + Attach Files button |
+| All files soft-deleted | Same empty state as above |
+| Wrong file type selected | Client rejects instantly with filename listed |
+| File over 20MB | Client rejects instantly, server rejects as fallback |
+| Partial upload failure | "2 of 3 files uploaded. Failed: [filename]" |
+| Supabase credentials missing | "Upload service unavailable. Contact Admin." |
+| Unauthorised delete attempt | 403 — no UI entry point, direct URL block |
+
+### Permissions matrix
+| Action | Who |
+|---|---|
+| Upload project document | All roles |
+| Upload task attachment | All roles |
+| View project documents | All roles (PM sees own projects only) |
+| View task attachments | All roles (PM sees own projects only) |
+| Soft delete | Uploader or Admin only |
+| Hard delete (purge) | Management command only — no UI trigger |
+
+---
+
+## URLs
+
+```python
+# File uploads
+path('projects/<str:project_id>/documents/upload/',
+     views.upload_project_document, name='upload_project_document'),
+
+path('projects/<str:project_id>/documents/<int:doc_pk>/delete/',
+     views.delete_project_document, name='delete_project_document'),
+
+path('projects/<str:project_id>/tasks/<int:task_id>/attachments/upload/',
+     views.upload_task_attachment, name='upload_task_attachment'),
+
+path('projects/<str:project_id>/tasks/<int:task_id>/attachments/<int:attach_pk>/delete/',
+     views.delete_task_attachment, name='delete_task_attachment'),
+```
+
+---
+
+## UI placement
+
+### Project detail page and project overview page
+Add a "Documents" section below existing content.
+Card with:
+- Header: "Project Documents" + "Upload Files" button (right aligned)
+- File list table: File Name (link), Type badge, Size, Uploaded By,
+  Uploaded At, Delete icon (uploader/Admin only)
+- Empty state: "No files uploaded yet"
+- Upload form: hidden, triggered by button click, multifile input
+
+### Task detail page
+Add "Attachments" section below task description.
+Same card pattern:
+- Header: "Attachments" + attachment count badge + "Attach Files" button
+- File list: same columns as above
+- Photo files: show thumbnail preview (img tag with file_url, max-height 80px)
+- Document files: show file icon + filename as download link
+- Empty state: "No attachments"
+
+### Delete confirmation
+Use browser confirm() dialog — no Bootstrap modal needed for delete.
+Keep it simple: one line of JS on the delete button/icon.
+
+---
+
+## Management command
+
+File location: projects/management/commands/purge_deleted_files.py
+Create the management/commands/ directory with __init__.py files if not present.
+
+```python
+from django.core.management.base import BaseCommand
+from django.utils import timezone
+from datetime import timedelta
+from django.conf import settings
+
+class Command(BaseCommand):
+    help = 'Hard delete files soft-deleted beyond FILE_RETENTION_DAYS'
+
+    def handle(self, *args, **options):
+        retention_days = getattr(settings, 'FILE_RETENTION_DAYS', 90)
+        cutoff = timezone.now() - timedelta(days=retention_days)
+
+        from projects.models import ProjectDocument, TaskAttachment
+        from projects.supabase_storage import get_supabase_client
+
+        doc_count = 0
+        attach_count = 0
+
+        for doc in ProjectDocument.objects.filter(
+            is_deleted=True, deleted_at__lt=cutoff
+        ):
+            try:
+                client = get_supabase_client()
+                client.storage.from_(settings.SUPABASE_BUCKET).remove(
+                    [doc.supabase_path]
+                )
+                doc.delete()
+                doc_count += 1
+            except Exception as e:
+                self.stderr.write(
+                    f"Failed to purge ProjectDocument {doc.pk}: {e}"
+                )
+
+        for attach in TaskAttachment.objects.filter(
+            is_deleted=True, deleted_at__lt=cutoff
+        ):
+            try:
+                client = get_supabase_client()
+                client.storage.from_(settings.SUPABASE_BUCKET).remove(
+                    [attach.supabase_path]
+                )
+                attach.delete()
+                attach_count += 1
+            except Exception as e:
+                self.stderr.write(
+                    f"Failed to purge TaskAttachment {attach.pk}: {e}"
+                )
+
+        self.stdout.write(
+            f"Purged {doc_count} project documents, "
+            f"{attach_count} task attachments"
+        )
+```
+
+---
+
+## Deliverables checklist
+
+1. Migration 0015 — ProjectDocument + TaskAttachment models
+2. settings.py additions:
+   FILE_RETENTION_DAYS, DATA_UPLOAD_MAX_MEMORY_SIZE, FILE_UPLOAD_MAX_MEMORY_SIZE
+3. ALLOWED_EXTENSIONS, MIME_TYPE_MAP, MAX_FILE_SIZE_BYTES defined in views.py
+4. Four views:
+   - upload_project_document (multi-file, server validation, Supabase upload)
+   - delete_project_document (ownership check, soft delete)
+   - upload_task_attachment (cross-project guard, multi-file, Supabase upload)
+   - delete_task_attachment (ownership check, soft delete)
+5. Public URL construction using settings.SUPABASE_URL + settings.SUPABASE_BUCKET
+6. Client-side validation: extension check + size check on file input change
+7. Document section added to project detail page and project overview page
+8. Attachment section added to task detail page with photo thumbnails
+9. Delete icon visible only to uploader and Admin
+10. Management command: projects/management/commands/purge_deleted_files.py
+11. URLs wired in urls.py
+12. DO NOT modify any existing working feature outside this scope
+
+---
+
+## After Claude Code session — your manual steps
+
+1. Confirm Supabase bucket is set to PUBLIC in Supabase dashboard
+2. Set up Railway cron job:
+   Command: python manage.py purge_deleted_files
+   Schedule: 0 2 * * * (daily at 2AM)
+3. Test upload of each file type: PDF, DOCX, XLSX, JPG, PNG
+4. Test multi-file upload (select 3+ files at once)
+5. Test wrong file type rejection (try uploading a .txt or .mp4)
+6. Test file over 20MB rejection
+7. Test soft delete — confirm file hidden, confirm non-uploader cannot delete
+8. Check Supabase dashboard — confirm files appear in solarpms-files bucket
+
+---
+
+Additional feature — Upload prompt on task close
+When any user attempts to mark a task as Done, check if the task has
+
+any active (is_deleted=False) attachments.
+If no attachments exist:
+
+Show a warning modal before the status change completes.
+Modal content:
+
+Title: "No attachments on this task"
+Body: "This task has no files attached. Do you want to upload a file
+
+before closing, or close without attachment?"
+Button 1: "Upload File" → dismisses modal, opens the file attach input
+
+on the same page
+Button 2: "Close Without Attachment" → proceeds with marking task Done
+Button 3: "Cancel" → dismisses modal, task stays open
+
+If attachments exist:
+
+No modal. Task closes normally without interruption.
+Implementation:
+
+Intercept the existing task status update action with a JS check
+Before POST fires, check attachment count via a data attribute on the
+
+task row: data-attachment-count="{{ task.attachments.filter(is_deleted=False).count }}"
+If count == 0 and new status == 'Done': show modal, pause POST
+Modal "Close Without Attachment" button fires the original POST
+Modal "Upload File" button triggers the file input click on the
+
+attachment section of the same page
+No new view or URL needed — this is pure frontend logic
+The actual task close POST is unchanged — no server-side blocking
+
+Critical: Do not add any server-side validation that blocks task
+
+closure without an attachment. Warn but allow is the rule for Phase 1.
+
+The mandatory proof flag on Task model is Phase 2 scope — do not build it now.
+
+## Three-layer QA checklist
+
+1. Feature exists — Upload Files button visible on project page and task detail
+   for all roles. Document list renders. Attachment section renders on task.
+
+2. Works correctly:
+   - Multi-file upload saves all files to Supabase and creates DB records
+   - Wrong file type rejected with clear message
+   - File over 20MB rejected
+   - Soft delete hides file immediately from all listings
+   - Delete icon visible only to uploader and Admin
+   - Cross-project task injection blocked (test with mismatched project_id in URL)
+   - Partial failure returns success count + failed filenames
+
+3. Works on mobile:
+   - File picker opens on Android
+   - Uploaded photos display as thumbnails correctly
+   - Document list readable on small screen
+   - Delete confirmation readable on small screen

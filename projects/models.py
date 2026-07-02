@@ -281,6 +281,7 @@ class UserProfile(models.Model):
     role                    = models.CharField(max_length=20, choices=ROLE_CHOICES, blank=True)
     phone_number            = models.CharField(max_length=10, blank=True)
     is_active               = models.BooleanField(default=True)  # Soft deactivation — keeps history without deleting the user
+    is_design_head          = models.BooleanField(default=False)  # Grants Design-task reassignment via task_assign_design_head, independent of role
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)
     created_at              = models.DateTimeField(auto_now_add=True)

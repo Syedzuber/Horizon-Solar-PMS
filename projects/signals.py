@@ -28,7 +28,7 @@ def _get_ip(request):
 @receiver(user_logged_in)
 def log_user_login(sender, request, user, **kwargs):
     try:
-        profile = user.userprofile
+        profile = user.profile  # related_name='profile' on UserProfile.user
         ip = _get_ip(request)
         ActivityLog.objects.create(
             project=None,
@@ -44,10 +44,10 @@ def log_user_login(sender, request, user, **kwargs):
 @receiver(user_logged_out)
 def log_user_logout(sender, request, user, **kwargs):
     try:
-        if user and hasattr(user, 'userprofile'):
+        if user and hasattr(user, 'profile'):
             ActivityLog.objects.create(
                 project=None,
-                actor=user.userprofile,
+                actor=user.profile,
                 action="User logged out",
                 entity_type='User',
                 entity_id=user.id,

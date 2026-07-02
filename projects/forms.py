@@ -149,6 +149,12 @@ class AdminUserEditForm(forms.Form):
     email      = forms.EmailField()
     phone_number = forms.CharField(max_length=10)
     role       = forms.ChoiceField(choices=UserProfile.ROLE_CHOICES)
+    is_design_head = forms.BooleanField(
+        required=False,
+        label='Design Head',
+        help_text='Can reassign any Design-role task, independent of role.',
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
     new_password = forms.CharField(
         min_length=8,
         required=False,

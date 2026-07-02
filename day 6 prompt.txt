@@ -1,0 +1,463 @@
+# Day 6 — Finance dashboard, BD dashboard, Individual project dashboard
+## Partially demo-blocking — Finance feeds CEO dashboard in Week 3
+
+## Stack context
+Django 6 + PostgreSQL on Railway. Single app: projects/. Bootstrap 5 frontend.
+Existing models: Project, Task, ProjectPhase, UserProfile, BOQ, BOQItem,
+BOQRevision, Notification, Vendor. PaymentMilestone is new today.
+See PROJECT_CONTEXT.md for full model definitions and known gotchas.
+
+---
+
+## Feature 1 — Finance dashboard + PaymentMilestone model (1 migration)
+
+### New model — PaymentMilestone
+```python
+class PaymentMilestone(models.Model):
+    PENDING = 'Pending'
+    INVOICED = 'Invoiced'
+    RECEIVED = 'Received'
+    STATUS_CHOICES = [
+        (PENDING, 'Pending'),
+        (INVOICED, 'Invoiced'),
+        (RECEIVED, 'Received'),
+    ]
+    M1 = 'M1'; M2 = 'M2'; M3 = 'M3'
+    NAME_CHOICES = [(M1,'M1'), (M2,'M2'), (M3,'M3')]
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='milestones'
+    )
+    milestone_name = models.CharField(max_length=10, choices=NAME_CHOICES)
+    milestone_description = models.CharField(max_length=100, default='')
+    amount = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    amount_received = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True
+    )
+    variance_reason = models.CharField(max_length=255, blank=True, default='')
+    due_date = models.DateField(null=True, blank=True)
+    invoice_date = models.DateField(null=True, blank=True)
+    received_date = models.DateField(null=True, blank=True)
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default=PENDING
+    )
+    created_by = models.ForeignKey(
+        UserProfile, null=True, blank=True, on_delete=models.SET_NULL
+    )
+
+    class Meta:
+        ordering = ['milestone_name']
+
+    # NOTE: M1, M2, M3 milestones correspond conceptually to tasks 2, 28,
+    # and 51 in the residential task template (payment trigger tasks).
+    # No FK link is intentional for Phase 1 — keep execution tracking
+    # (tasks) and financial tracking (milestones) separate.
+    # Do NOT create a task FK here. Do NOT auto-update milestone status
+    # based on task completion. The notification engine (Week 3) will
+    # bridge these two systems when built.
+```
+
+Run makemigrations and migrate. Migration number will be 0013.
+
+### Activation change
+In the project activation view, after creating phases and tasks, create
+3 PaymentMilestone records. Import PaymentMilestone inside the function
+to avoid circular imports — do NOT import at module level in utils.py:
+
+```python
+def activate_project(request, project_id):
+    ...
+    # Inside function, after attach_residential_template():
+    from projects.models import PaymentMilestone
+    milestone_defaults = [
+        ('M1', 'On Survey Completion'),
+        ('M2', 'On Material Supply'),
+        ('M3', 'On Commissioning'),
+    ]
+    for name, desc in milestone_defaults:
+        PaymentMilestone.objects.create(
+            project=project,
+            milestone_name=name,
+            milestone_description=desc,
+            created_by=request.user.userprofile
+        )
+```
+
+### PM — milestone edit on project detail page
+Add an editable M1/M2/M3 section to the existing project detail page
+(PM only, below existing task section).
+
+Fields per milestone row: milestone_description (text input),
+amount (decimal input, prefix ₹), due_date (date picker).
+
+POST to existing project_detail view with action='update_milestone'
+and milestone_pk as a hidden field. Update only the fields above —
+PM cannot touch status, invoice_date, received_date, or amount_received.
+
+If project has no milestones (pre-Day 6 projects activated before
+this migration): show an empty state card with a "Create milestones"
+button. POST to a new view /projects/<project_id>/milestones/create/
+that creates the 3 default records on demand, then redirects back
+to project detail.
+
+### Finance dashboard — /dashboard/finance/
+
+#### Summary cards (4)
+Use Django ORM aggregation with null guard throughout:
+```python
+from django.db.models import Sum
+from django.utils import timezone
+
+today = timezone.now().date()
+
+total_pending = PaymentMilestone.objects.filter(
+    status='Pending'
+).aggregate(s=Sum('amount'))['s'] or 0
+
+total_invoiced = PaymentMilestone.objects.filter(
+    status='Invoiced'
+).aggregate(s=Sum('amount'))['s'] or 0
+
+total_received = PaymentMilestone.objects.filter(
+    status='Received'
+).aggregate(s=Sum('amount_received'))['s'] or 0
+
+overdue_count = PaymentMilestone.objects.filter(
+    status='Pending',
+    due_date__lt=today,
+    due_date__isnull=False
+).count()
+```
+
+Cards: Total Pending (₹), Total Invoiced (₹), Total Received (₹),
+Overdue count.
+
+#### Project list table
+All active/in-progress projects. Columns: Project ID, Customer,
+M1 badge, M2 badge, M3 badge, Contract Value (₹).
+
+Badge colours:
+- Pending → gray (secondary)
+- Invoiced → blue (primary)
+- Received → green (success)
+- No milestone record → dash
+
+Pending and Invoiced badges are clickable and trigger the
+milestone update actions below.
+Received badges are static — no action, no click.
+
+If a milestone has variance (amount_received < amount and both
+not null): show a small amber warning icon next to the Received
+badge. Hovering shows "Received ₹X against ₹Y agreed".
+
+### Milestone update actions — POST only
+
+#### Mark as Invoiced
+URL: /projects/<project_id>/milestone/<milestone_pk>/invoice/
+Decorator: @login_required @role_required(['Finance'])
+Logic: fetch milestone → verify status=Pending →
+set status=Invoiced, invoice_date=date.today() → save →
+redirect to finance dashboard.
+One-click, no modal needed.
+CRITICAL: POST with CSRF. Never a GET link that changes data.
+
+#### Mark as Received (modal required)
+URL: /projects/<project_id>/milestone/<milestone_pk>/receive/
+Decorator: @login_required @role_required(['Finance'])
+
+Trigger: Finance clicks the Invoiced badge → Bootstrap modal opens.
+Modal contains:
+- Milestone name and agreed amount (read-only display)
+- amount_received field (decimal input, required, prefix ₹)
+- variance_reason field (text input, optional,
+  placeholder "e.g. customer paid partial amount")
+- Submit button: "Mark as Received"
+
+On POST: fetch milestone → verify status=Invoiced →
+set status=Received, received_date=date.today(),
+amount_received=form value, variance_reason=form value →
+save → redirect to finance dashboard.
+
+If amount_received == amount: no variance, clean green badge.
+If amount_received < amount: variance exists, amber warning
+icon appears next to badge.
+If amount_received > amount: treat as overpayment, still mark
+Received, show variance_reason as "Overpayment" if blank.
+
+CRITICAL: received_date, amount_received, and variance_reason
+can only be set by Finance. PM and BD cannot write to these fields.
+
+---
+
+## Feature 2 — BD dashboard — /dashboard/bd/
+
+### Access
+@role_required(['BD']) — BD head sees all projects, no filtering.
+Entire dashboard is read-only. No POST actions anywhere.
+
+### Summary cards (4)
+```python
+from django.utils import timezone
+today = timezone.now().date()
+
+active_projects = Project.objects.filter(
+    status__in=['Active', 'In Progress']
+)
+commissioned_this_month = Project.objects.filter(
+    status='Commissioned',
+    activated_at__month=today.month,
+    activated_at__year=today.year
+).count()
+
+total_contracted = active_projects.aggregate(
+    s=Sum('contract_value')
+)['s'] or 0
+
+pending_payments = PaymentMilestone.objects.filter(
+    status__in=['Pending', 'Invoiced']
+).count()
+```
+
+Cards: Total Active Projects, Commissioned This Month,
+Total Contracted Value (₹), Pending Payments.
+
+### Project list table
+All active/in-progress projects. Columns: Project ID, Customer,
+Capacity (kWp), Current Phase (latest active phase name),
+M1/M2/M3 status badges (read-only, no action buttons),
+Target commissioning date, Assigned PM name.
+
+Each row is clickable — links to /projects/<project_id>/overview/.
+
+### Document upload section
+Placeholder card below project table:
+"Document upload — coming soon. Integration planned for Phase 2."
+No form, no button, no upload functionality.
+
+---
+
+## Feature 3 — Individual project dashboard
+## URL: /projects/<project_id>/overview/
+
+### Access
+All roles via @login_required. PM isolation enforced in view:
+if role is PM and project.assigned_pm != current user → raise Http404.
+All other roles see all projects.
+
+### Entry points — add links from these three places
+1. PM dashboard project list table: add "Overview" link per row
+2. BD dashboard project list table: entire row is clickable
+3. Project detail page: add "Project Overview" button in header
+
+### Panel 1 — Project header (all roles)
+Always visible. Shows: status badge, project type, capacity (kWp),
+customer name, site address, city/state, assigned PM name,
+assigned SE name, assigned Design member name (or "Not assigned"),
+contract value (₹), target commissioning date, activated date.
+
+### Panel 2 — Task progress (PM, SE, Admin only)
+Phase-wise Bootstrap progress bars.
+For each phase: phase name, internal task completion %
+(tasks with status=Done / total tasks with task_type=Internal),
+external pending count (tasks with task_type=External and
+status != Done).
+Do not show phases with zero tasks.
+
+### Panel 3 — BOQ status (PM, SCM, Design, Admin)
+Current BOQ status badge (use same colours as Finance dashboard).
+Last BOQRevision: event type, revised_at date, revised_by name.
+"View full BOQ →" link to /projects/<project_id>/boq/.
+
+CRITICAL: annotate in view with try/except — never access
+project.boq directly in template:
+```python
+try:
+    project.boq_status = project.boq.status
+    project.boq_last_event = (
+        project.boq.revisions.order_by('-revised_at').first()
+    )
+    project.boq_url = f"/projects/{project.project_id}/boq/"
+except Exception:
+    project.boq_status = None
+    project.boq_last_event = None
+    project.boq_url = None
+```
+
+### Panel 4 — Finance milestones (PM, Finance, CEO, Admin)
+Table with columns: Milestone, Description, Amount (₹),
+Due Date, Status badge, Invoice Date, Received Date,
+Amount Received (₹), Variance.
+
+Variance column: if amount and amount_received are both not null
+and amount_received != amount, show the difference in amber text.
+If amount_received == amount or either is null: show "—".
+
+Finance role: Pending badges show "Mark Invoiced" button (POST form).
+Invoiced badges show "Mark Received" button (triggers modal).
+Received badges are static.
+
+All other roles: read-only, no buttons.
+
+If no milestones exist: show empty state row
+"Milestones not set yet — PM can set from project detail page."
+
+### Panel 5 — Recent activity (all roles)
+Combined list of last 5 events across:
+- DueDateChangeLog: task name, old date → new date, changed by, date
+- BOQRevision: event type, version, by whom, date
+
+Combine in Python, sort by date descending, show latest 5.
+Simple list — no pagination needed.
+
+### Full view skeleton
+```python
+@login_required
+def project_overview(request, project_id):
+    project = get_object_or_404(Project, project_id=project_id)
+    profile = request.user.userprofile
+
+    # PM isolation
+    if profile.role == 'PM' and project.assigned_pm != profile:
+        raise Http404
+
+    # BOQ annotation
+    try:
+        project.boq_status = project.boq.status
+        project.boq_last_event = (
+            project.boq.revisions.order_by('-revised_at').first()
+        )
+        project.boq_url = f"/projects/{project.project_id}/boq/"
+    except Exception:
+        project.boq_status = None
+        project.boq_last_event = None
+        project.boq_url = None
+
+    milestones = project.milestones.all()
+    phases = project.phases.prefetch_related('tasks').order_by('phase_order')
+
+    # Recent activity — combine and sort
+    from projects.models import DueDateChangeLog, BOQRevision
+    due_changes = list(
+        DueDateChangeLog.objects.filter(
+            task__phase__project=project
+        ).order_by('-changed_at')[:10]
+    )
+    boq_events = list(
+        BOQRevision.objects.filter(
+            boq__project=project
+        ).order_by('-revised_at')[:10]
+    )
+    # Annotate type for template rendering
+    for e in due_changes:
+        e.event_type = 'due_date'
+        e.event_date = e.changed_at
+    for e in boq_events:
+        e.event_type = 'boq'
+        e.event_date = e.revised_at
+    recent_activity = sorted(
+        due_changes + boq_events,
+        key=lambda x: x.event_date,
+        reverse=True
+    )[:5]
+
+    return render(request, 'projects/project_overview.html', {
+        'project': project,
+        'milestones': milestones,
+        'phases': phases,
+        'recent_activity': recent_activity,
+        'role': profile.role,
+    })
+```
+
+---
+
+## Known failure points — apply defensively throughout
+
+1. DecimalField sum with nulls: always use
+   aggregate(s=Sum('amount'))['s'] or 0.
+   For Total Received use Sum('amount_received'), not Sum('amount').
+
+2. Pre-Day 6 projects with no milestones:
+   project.milestones.all() returns empty QuerySet — safe.
+   Never use .get() on milestones anywhere.
+
+3. project.boq access: always try/except in view, never in template.
+   Same pattern as Day 5. Apply to project_overview view.
+
+4. Milestone update views must be POST with CSRF token.
+   Never GET links that write to the database.
+
+5. Circular import: import PaymentMilestone inside the activation
+   function body, not at module level in utils.py.
+
+6. Mark as Received modal: the modal form must POST to
+   /projects/<id>/milestone/<pk>/receive/ — not to the current page.
+   Use a Bootstrap modal with action attribute set on the form,
+   not on the trigger button. Verify the form action URL is correct
+   before submitting — a common mistake is the modal form posting
+   to the wrong URL when multiple modals exist on one page.
+
+7. Variance calculation: do not calculate variance in the template
+   using arithmetic. Annotate it in the view or on the object
+   in Python:
+   ```python
+   for m in milestones:
+       if m.amount and m.amount_received is not None:
+           m.variance = m.amount - m.amount_received
+       else:
+           m.variance = None
+   ```
+
+---
+
+## Pre-flight simulation results
+
+View 1 (finance_dashboard):
+Aggregate sums with null guard → prefetch milestone sets per project →
+annotate variance flag on received milestones → template renders
+badges and action buttons conditionally by status. Safe.
+
+View 2 (milestone_invoice POST):
+Fetch by PK → verify Finance role → verify status=Pending →
+set Invoiced + invoice_date → save → redirect. Safe.
+
+View 3 (milestone_receive POST):
+Fetch by PK → verify Finance role → verify status=Invoiced →
+validate amount_received (required, decimal) →
+set Received + received_date + amount_received + variance_reason →
+save → redirect. Modal form must POST, not GET. Safe.
+
+View 4 (bd_dashboard):
+Read-only queryset → no POST → aggregate sums with null guard →
+milestone badges from prefetch → all projects visible. Safe.
+
+View 5 (project_overview):
+get_object_or_404 → PM isolation → BOQ try/except →
+milestone queryset with variance annotation →
+recent activity combine + sort → role passed to template →
+panels rendered conditionally. Safe.
+
+Permissions:
+- /dashboard/finance/                         → @role_required(['Finance'])
+- /dashboard/bd/                              → @role_required(['BD'])
+- /projects/<id>/milestone/<pk>/invoice/      → @role_required(['Finance'])
+- /projects/<id>/milestone/<pk>/receive/      → @role_required(['Finance'])
+- /projects/<id>/milestones/create/           → @role_required(['PM'])
+- /projects/<id>/overview/                    → @login_required + PM isolation in view
+
+---
+
+## Deliverables
+Build all three features. Run migration 0013 for PaymentMilestone only.
+Do not modify any existing working feature outside this scope.
+
+After completing confirm:
+1. Feature exists — all dashboards and overview page load
+2. Works correctly — Finance can invoice and receive milestones,
+   modal captures amount_received, variance displays correctly,
+   BD sees read-only milestone status, overview panels render
+   per role
+3. Works on mobile — badges, modal, and progress bars readable
+   on small screen

@@ -125,7 +125,7 @@
             <!-- Actions -->
             <td class="px-4 py-3 text-right">
               <div class="flex items-center justify-end gap-2">
-                <button @click="openEdit({{ member.user.id }}, '{{ member.user.first_name|escapejs }}', '{{ member.user.last_name|escapejs }}', '{{ member.phone_number|escapejs }}', '{{ member.role|escapejs }}')"
+                <button @click="openEdit({{ member.user.id }}, '{{ member.user.first_name|escapejs }}', '{{ member.user.last_name|escapejs }}', '{{ member.phone_number|escapejs }}', '{{ member.role|escapejs }}', {{ member.is_design_head|yesno:'true,false' }})"
                         class="text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 flex items-center gap-1">
                   <i data-lucide="pencil" class="w-3 h-3"></i> Edit
                 </button>
@@ -287,6 +287,13 @@
             {% endfor %}
           </select>
         </div>
+        <div class="flex items-center gap-2">
+          <input type="checkbox" name="is_design_head" id="editIsDesignHead" x-model="editIsDesignHead"
+                 class="form-check-input">
+          <label for="editIsDesignHead" class="text-sm text-gray-700">
+            Design Head — can reassign any Design-role task, independent of role
+          </label>
+        </div>
         <div class="flex justify-end gap-3 pt-2">
           <button type="button" @click="showEdit=false"
                   class="text-sm px-4 py-2 rounded border border-gray-300 text-gray-600 hover:bg-gray-50">
@@ -316,16 +323,18 @@ function deptPage() {
     editLastName:  '',
     editPhone:     '',
     editRole:      '',
+    editIsDesignHead: false,
     init() {},
     openCreate() {
       this.showCreate = true;
     },
-    openEdit(userId, firstName, lastName, phone, role) {
+    openEdit(userId, firstName, lastName, phone, role, isDesignHead) {
       this.editUserId    = userId;
       this.editFirstName = firstName;
       this.editLastName  = lastName;
       this.editPhone     = phone;
       this.editRole      = role;
+      this.editIsDesignHead = isDesignHead;
       this.showEdit      = true;
     },
   };

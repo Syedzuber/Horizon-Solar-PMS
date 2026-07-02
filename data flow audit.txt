@@ -1,0 +1,60 @@
+Cross-Role Data Flow Audit — Findings
+QUESTION 1 — Does GRN confirmation update what SCM sees?
+Verdict: BROKEN (write path is correct; dashboard read path is completely disconnected)
+
+The write path is sound. confirm_grn (views.py:3358, @role_required(['Site Engineer'])) writes these fields on each DCLineItem:
+
+received_quantity (views.py:3402)
+condition (views.py:3403)
+grn_date (views.py:3404)
+grn_confirmed_by (views.py:3405)
+grn_notes (views.py:3406)
+After the loop, it calls recalculate_dc_status(challan) (models.py:772) which recomputes and saves DeliveryChallan.status (Expected / Partially Received / Received / Rejected) from the confirmed line item counts.
+
+The read path is completely wrong. dashboard_scm (views.py:538) queries ZERO DeliveryChallan or DCLineItem records. Every single context variable it passes to the template is Task-based:
+
+deliveries_today: Task.objects.filter(phase__phase_name='Delivery', due_date=date.today()) — Task due dates, not DC receipts
+delivery_tasks: Task.objects.filter(phase__phase_name='Delivery') — Task status/due_date
+pos_by_project: Task.objects.filter(phase__phase_name='Procurement') — Task status again
+boq_awaiting: BOQ status count only
+Practical consequence: If a Site Engineer confirms all materials received (GRN), DeliveryChallan.status becomes Received and all DCLineItem.received_quantity fields are populated. The SCM dashboard shows no change whatsoever. SCM would need to manually navigate to the individual DC detail URL to see the updated GRN.
+
+On override_grn vs confirm_grn: No conflict. Both write the same four fields (received_quantity, condition, grn_date, grn_notes) and both call recalculate_dc_status() consistently. override_grn (views.py:3469) explicitly does NOT overwrite grn_confirmed_by — the original SE's identity is preserved. This is intentional and documented. No inconsistency risk.
+
+QUESTION 2 — Does a material issue raised during GRN reach SCM and PM?
+Verdict: BROKEN — three separate failures
+
+Failure 1: No GRN-specific issue path exists. There is no issue creation mechanism tied to a DeliveryChallan or DCLineItem anywhere in the codebase. The only issue creation views are create_project_issue (views.py:2615, links issue to project only, task=None) and create_task_issue (views.py:2673, links to a specific Task). The delivery challan detail template has zero issue creation links or forms — confirmed by direct template search.
+
+Failure 2: The Issue model has no DeliveryChallan field. The Issue model (models.py:563) has project (FK to Project) and task (nullable FK to Task) — nothing linking to DeliveryChallan or DCLineItem. Even if an SE raises a project-level issue about damaged materials, there is no structured way to query "issues related to DC #42" or "issues about materials for this delivery."
+
+Failure 3: Issues don't appear on either dashboard. The PM dashboard context (views.py:316-332) passes task lists, blocked task lists, overdue tasks, and material summary — no Issue queryset at all. The SCM dashboard context (views.py:584-594) passes pos_by_project, delivery_tasks, boqs — no Issue queryset at all. Issues are only visible by navigating to project_overview (for PM) or issue_detail; SCM has no aggregated issue view anywhere.
+
+Practical consequence: If a Site Engineer wants to report damaged materials during GRN, there is no structured path to do it from the DC page. Even if they navigate to the project overview and raise a generic issue, that issue will not surface on SCM's dashboard. SCM has no mechanism to see "material issues for my deliveries."
+
+QUESTION 3 — Does BOQ approval status correctly gate what SCM sees as "BOQ received"?
+Verdict: CONNECTED
+
+The chain is clean:
+
+boq_submit (views.py:1516) sets boq.status = 'Submitted'. Guard: only allowed from Draft or Revision Requested states.
+dashboard_scm (views.py:548) reads boq_awaiting = BOQ.objects.filter(status='Submitted').count() — increments immediately after Design submits.
+boq_acknowledge (views.py:1550) sets boq.status = 'Acknowledged'. Guard: only allowed from Submitted (line 1546). boq_awaiting count drops.
+No intermediate ambiguity. The four statuses are Draft → Submitted → Acknowledged (or → Revision Requested → Submitted on resubmission). At each point, what SCM sees (boq_awaiting) is exactly the count of BOQs awaiting their action. The boqs context variable (views.py:580) passes all BOQs for active projects regardless of status, so the full BOQ list with current status is also available to the template.
+
+QUESTION 4 — Single source of truth for delivery/material status?
+There are four representations. Three are live; one is dead code. One is structurally disconnected.
+
+#	Where	How computed	Values	Used by
+1	DeliveryChallan.status (models.py:701)	Stored field; written by recalculate_dc_status() after each GRN	Expected / Partially Received / Received / Rejected	DC detail page template
+2	get_material_status(project) (models.py:799)	Recomputed from DCLineItem aggregates on demand	Pending / Received / Partial per category	project_overview (views.py:2036)
+3	get_project_material_summary(project) (models.py:845)	Wraps get_material_status()	Pending / Received / Partial (single string)	Never called — dead code
+4	_project_material_badge(project_id, delivery_lookup) (views.py:97)	Recomputed from pre-fetched DCLineItem aggregate dict	Pending / Partial / Received	dashboard_pm (views.py:276)
+5	delivery_tasks in dashboard_scm (views.py:574)	Task.status and Task.due_date from 'Delivery' phase tasks	Not Started / In Progress / Done / Blocked	SCM dashboard only
+Representations 1, 2, and 4 all read DCLineItem.received_quantity and should stay consistent (they compute the same thing at different granularities). They will not silently drift — all three reflect the same underlying DCLineItem data.
+
+Representation 3 (get_project_material_summary) is defined in models.py but has no callers in views.py. It is dead code.
+
+Representation 5 (Task-based in dashboard_scm) is structurally disconnected from the DC model. A Task in the 'Delivery' phase and a DeliveryChallan for the same project are independent records. There is no code that updates a Task's status when a GRN is confirmed. These two representations can silently diverge indefinitely: a Task can show "In Progress" while the actual DC shows "Received", or vice versa.
+
+Practical consequence of representation 5: The SCM dashboard currently gives SCM a view of delivery scheduling (what tasks are due), not delivery reality (what materials have actually arrived). These are different things and will drift as GRNs are confirmed without corresponding Task status updates.

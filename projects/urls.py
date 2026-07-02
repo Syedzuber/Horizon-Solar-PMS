@@ -42,6 +42,7 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',        views.task_status_update,        name='task_status_update'),        # Assigned role or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/detail-status/', views.task_detail_status_update, name='task_detail_status_update'), # Assigned user only
     path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),        # PM only
+    path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only
     path('projects/<str:project_id>/enable-cascade/',              views.enable_cascade_scheduling,  name='enable_cascade_scheduling'), # PM only, irreversible, POST only
 

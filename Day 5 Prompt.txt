@@ -1,0 +1,227 @@
+# Day 5 — Dashboard strengthening (3 patches)
+## Not demo-blocking — strengthening existing work
+
+## Stack context
+Django 6 + PostgreSQL on Railway. Single app: projects/. Bootstrap 5 frontend.
+Models in scope: Project, Task, ProjectPhase, UserProfile, BOQ.
+See PROJECT_CONTEXT.md for full model definitions.
+
+---
+
+## Patch 1 — Design member assignment (1 migration required)
+
+### What to build
+Add assigned_design ForeignKey on Project model. PM can assign a Design team
+member to a project from the project detail page after activation. On
+assignment, auto-populate assigned_to on all incomplete Design-role tasks.
+Design dashboard filters to only assigned projects.
+
+### Model change
+Project model: add the following field:
+    assigned_design = models.ForeignKey(
+        'UserProfile',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='design_projects',
+        limit_choices_to={'role': 'Design'}
+    )
+Run makemigrations and migrate.
+
+### View logic — project detail POST handler
+After saving assigned_design, run a bulk update:
+    Task.objects.filter(
+        phase__project=project,
+        assigned_role=Task.DESIGN,
+        status__in=['Not Started', 'In Progress']
+    ).update(assigned_to=new_design_user)
+If assigned_design is cleared (set to None), also set assigned_to=None
+on those same tasks in the same operation.
+Use .update() — do NOT use a loop of individual .save() calls.
+
+### Form widget
+Use an explicit ModelChoiceField:
+    queryset=UserProfile.objects.filter(role='Design', is_active=True)
+Do NOT rely on limit_choices_to alone for the form widget — it does not
+filter the rendered dropdown without an explicit queryset.
+
+### UI placement on project detail page
+Add assigned_design as an editable dropdown field in the project info/header
+section at the top of the project detail page, alongside the existing
+assigned_pm and assigned_site_engineer fields.
+Only visible and editable when project status is Active or In Progress.
+Label: "Design Member"
+If no Design-role users exist in the system, show a disabled dropdown
+with placeholder text "No Design users available" — do not crash.
+
+### Design dashboard query change
+Replace the current filter (assigned_role='Design' across all active projects)
+with a project-scoped filter:
+    Task.objects.filter(
+        assigned_role='Design',
+        phase__project__assigned_design=request.user.userprofile
+    ).select_related('phase__project')
+Empty state: if the queryset is empty, show a clear message:
+"No projects assigned to you yet." — not a blank page or a crash.
+
+---
+
+## Patch 2 — PM dashboard BOQ status column (no migration)
+
+### What to build
+Add a BOQ column to the project list table on the PM dashboard. Each row
+shows a coloured Bootstrap badge for BOQ status with a direct link to
+the project's BOQ page.
+
+### View annotation — CRITICAL, do not skip
+In pm_dashboard view, after fetching the projects queryset, annotate
+each project before passing to the template:
+
+    for project in projects:
+        try:
+            project.boq_status = project.boq.status
+            project.boq_url = f"/projects/{project.project_id}/boq/"
+        except Exception:
+            project.boq_status = None
+            project.boq_url = None
+
+IMPORTANT: Never access project.boq directly in the template.
+It raises RelatedObjectDoesNotExist if no BOQ exists for that project.
+Always annotate in the view first.
+
+BOQ URL uses project.project_id (string format e.g. HRP-RES-2026-001),
+not project.pk (integer).
+
+### Badge colours (Bootstrap classes)
+Draft             → badge bg-secondary (gray)
+Submitted         → badge bg-primary (blue)
+Acknowledged      → badge bg-success (green)
+Revision Requested → badge bg-warning text-dark (amber)
+None (no BOQ yet) → plain dash character, no badge, no link
+
+### Table column
+Add "BOQ" as the last column header in the project list table.
+Each cell: if boq_status is not None, render the badge wrapped in an
+<a> tag linking to boq_url. If boq_status is None, render a plain "—".
+
+---
+
+## Patch 3 — SCM and Design dashboard BOQ surfacing (no migration)
+
+### SCM dashboard changes
+
+1. Replace the "POs Pending" summary card with "BOQ awaiting action":
+       count = BOQ.objects.filter(status='Submitted').count()
+   Card label: "BOQ Awaiting Action"
+   Card value: the count integer
+   Show card even when count is 0.
+
+2. Add a "BOQ Status" section as a project list below the existing
+   task sections. Query BOQ objects directly (not projects) to avoid
+   RelatedObjectDoesNotExist entirely:
+       boqs = BOQ.objects.filter(
+           project__status__in=['Active', 'In Progress']
+       ).select_related('project').order_by('project__project_id')
+
+   Each row in the list shows:
+   - Project ID (e.g. HRP-RES-2026-001)
+   - Customer name (from project.customer_name or equivalent)
+   - BOQ status badge (same colour scheme as Patch 2)
+   - A "View BOQ →" link to /projects/<project.project_id>/boq/
+
+   Both the Project ID and the "View BOQ →" link navigate to the BOQ page.
+
+3. If no BOQ records exist: show the section with an empty state row
+   "No active BOQs" — do not hide the section entirely.
+
+### Design dashboard changes
+
+1. Add "Revision Requested" summary card:
+       count = BOQ.objects.filter(
+           status='Revision Requested',
+           project__assigned_design=request.user.userprofile
+       ).count()
+   Card label: "Revision Requested"
+   Card value: the count integer
+   Show card even when count is 0.
+
+2. Add a "BOQ Status" section as a project list. Iterate the Design
+   user's assigned projects (already filtered by assigned_design after
+   Patch 1). Apply the same try/except annotation pattern from Patch 2:
+       for project in assigned_projects:
+           try:
+               project.boq_status = project.boq.status
+               project.boq_url = f"/projects/{project.project_id}/boq/"
+           except Exception:
+               project.boq_status = None
+               project.boq_url = None
+
+   Each row shows:
+   - Project ID
+   - Customer name
+   - BOQ status badge (same colour scheme as Patch 2)
+   - A "View BOQ →" link to the BOQ page
+
+   Show ALL assigned projects regardless of BOQ status — Design needs
+   to see projects with no BOQ yet because they are responsible for
+   creating it. A project with no BOQ shows a dash in the status column
+   and no link.
+
+3. If no projects are assigned to the current Design user: show the
+   section with empty state "No projects assigned to you yet."
+
+---
+
+## Known failure points — apply these defensively throughout
+
+1. RelatedObjectDoesNotExist on BOQ access
+   Never access project.boq in any template directly.
+   Always annotate boq_status and boq_url in the view using try/except.
+   This applies to pm_dashboard, design_dashboard, and anywhere else
+   a project object is passed to a template.
+
+2. Design dropdown showing wrong users
+   Use explicit ModelChoiceField queryset=UserProfile.objects.filter(
+   role='Design', is_active=True). Do not rely on limit_choices_to
+   alone — it does not filter the rendered form widget.
+
+3. Task bulk update
+   Use Task.objects.filter(...).update(assigned_to=user) — one query.
+   Do not loop individual .save() calls. This includes the None/clear
+   case: .update(assigned_to=None).
+
+---
+
+## Pre-flight simulation results
+
+View 1 — project_detail save (Patch 1):
+POST → extract assigned_design from form → save to project → bulk
+Task.update(assigned_to=new_user) → if new_user is None, also
+Task.update(assigned_to=None) → redirect to project detail. Safe.
+
+View 2 — pm_dashboard annotation (Patch 2):
+Fetch projects queryset → loop → try/except boq access → annotate
+boq_status + boq_url on each project object → pass to template →
+template uses {{ project.boq_status|default:"—" }}. Safe.
+
+Permissions: no new URLs added in this day. All changes are to existing
+views and templates. Existing @login_required and @role_required
+decorators remain unchanged.
+
+Empty states:
+- Design dashboard with no assigned projects → "No projects assigned
+  to you yet." message.
+- SCM BOQ section with no BOQs → section visible with empty state row.
+- Design BOQ section with no assigned projects → empty state row.
+
+---
+
+## Deliverables
+Build all three patches in order: Patch 1 first (migration), then
+Patch 2, then Patch 3.
+Run migration for Patch 1 only — no other migrations needed.
+Do not modify any existing working feature outside these three patches.
+After completing, confirm:
+(1) feature exists
+(2) works correctly
+(3) works on mobile

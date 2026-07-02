@@ -70,12 +70,12 @@
       <div class="d-flex gap-2 flex-shrink-0">
         <a href="{% url 'project_overview' dp.project_id %}"
            class="btn btn-sm btn-outline-secondary">View</a>
-        <a href="{% url 'project_activate' dp.project_id %}"
-           class="btn btn-sm text-white"
-           style="background-color:#1a7a4a;"
-           onclick="return confirm('Activate {{ dp.customer_name }} ({{ dp.project_id }})? This will create phases, tasks and payment milestones.')">
+        <button type="button"
+                class="btn btn-sm text-white"
+                style="background-color:#1a7a4a;"
+                data-activate-url="{% url 'project_activate' dp.project_id %}">
           Activate
-        </a>
+        </button>
       </div>
     </div>
   </div>
@@ -398,8 +398,45 @@
       else { dateErr.textContent = ''; }
       if (!valid) e.preventDefault();
     });
+
+    document.querySelectorAll('[data-activate-url]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var modalEl = document.getElementById('activateDesignerModal');
+        if (!modalEl) return;
+        document.getElementById('activateDesignerForm').action = btn.dataset.activateUrl;
+        document.getElementById('activateDesignerSelect').value = '';
+        bootstrap.Modal.getOrCreateInstance(modalEl).show();
+      });
+    });
   });
 }());
 </script>
+
+<div class="modal fade" id="activateDesignerModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Activate Project</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form method="post" id="activateDesignerForm">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p class="mb-3">Select a Designer before activating this project.</p>
+          <select name="assigned_design_id" id="activateDesignerSelect" class="form-select" required>
+            <option value="">— Select Designer —</option>
+            {% for designer in design_candidates %}
+              <option value="{{ designer.pk }}">{{ designer.user.get_full_name|default:designer.user.username }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-success">Activate</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
 
 {% endblock %}

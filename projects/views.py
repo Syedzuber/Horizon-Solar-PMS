@@ -204,7 +204,13 @@ def tasks_drill_down(request, filter_type):
     if role == 'PM':
         base_qs = base_qs.filter(phase__project__assigned_pm=profile)
     elif role == 'Design':
-        base_qs = base_qs.filter(phase__project__assigned_design=profile)
+        # Union: FK-owned projects (assigned_design) plus projects where this
+        # Design user has been given a task by the Design lead — task-driven
+        # visibility, same pattern as the SE dashboard fix.
+        base_qs = base_qs.filter(
+            Q(phase__project__assigned_design=profile) |
+            Q(phase__project__phases__tasks__assigned_to=profile)
+        ).distinct()
     elif role == 'Site Engineer':
         base_qs = base_qs.filter(assigned_to=profile)
     # SCM and others: all active non-deleted projects
@@ -482,6 +488,7 @@ def dashboard_pm(request):
         'due_date_changes':       due_date_changes,
         'today':                  date.today(),
         'all_profiles':           UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        'design_candidates':      UserProfile.objects.filter(role='Design', is_active=True).select_related('user'),
     })
 
 
@@ -661,23 +668,31 @@ def dashboard_design(request):
     design_profile = request.user.profile
 
     # Trigger 1: assigned_design FK confirmed on Project model.
+    # Union: FK-owned projects plus projects where this Design user has been
+    # given a task by the Design lead — task-driven visibility, same pattern
+    # as the SE dashboard fix. assigned_design stays as the ownership field
+    # (Phase 2 Design Head role will manage it); this only widens visibility.
     # Prefetch BOQ for each project — avoids N+1 when reading boq.status in loop.
     projects_qs = (
         Project.objects.filter(
+            Q(assigned_design=design_profile) |
+            Q(phases__tasks__assigned_to=design_profile),
             is_deleted=False,
-            assigned_design=design_profile,
             status__in=['Active', 'In Progress'],
         )
         .prefetch_related('boq')
+        .distinct()
         .order_by('project_id')
     )
 
-    # Summary totals — single query, scoped to this Design user's portfolio
+    # Summary totals — scoped to this Design user's visible portfolio (same
+    # union as projects_qs, so the stat matches which cards are shown).
     total_revisions = BOQ.objects.filter(
-        project__assigned_design=design_profile,
+        Q(project__assigned_design=design_profile) |
+        Q(project__phases__tasks__assigned_to=design_profile),
         project__status__in=['Active', 'In Progress'],
         status='Revision Requested',
-    ).count()
+    ).distinct().count()
 
     # Trigger 5: no SLA/due-date mechanism exists for Design or BOQ submission.
     # total_design_overdue and total_boq_overdue hardcoded to 0 until Zuber
@@ -742,12 +757,13 @@ def dashboard_design(request):
     # Most-urgent-first; all-clear projects sink to bottom
     project_rows.sort(key=lambda r: r['urgency_count'], reverse=True)
 
+    # phase__project__in=projects_qs guarantees this stat block counts tasks
+    # from exactly the same project set as the cards above — no drift between
+    # the two if the visibility union ever changes.
     _design_task_base = Task.objects.filter(
-        phase__project__assigned_design=design_profile,
-        phase__project__is_deleted=False,
-        phase__project__status__in=['Active', 'In Progress'],
+        phase__project__in=projects_qs,
         due_date__isnull=False,
-    )
+    ).distinct()
     _d_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _d_soon   = today + timedelta(days=7)
     design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
@@ -1677,8 +1693,11 @@ def project_edit(request, project_id):
 @role_required(['PM'])
 def project_activate(request, project_id):
     """
-    Activate a Draft project: sets status=Active, stamps activated_at,
-    attaches the Residential template (phases + tasks), and creates M1/M2/M3 milestones.
+    Activate a Draft project: sets status=Active, stamps activated_at, assigns
+    the designer, attaches the Residential template (phases + tasks), and
+    creates M1/M2/M3 milestones.
+    A designer must be selected before activation — this is what makes the
+    project visible on the Design dashboard once Design tasks are seeded.
     All DB writes are wrapped in transaction.atomic() — a failure rolls back everything.
     Access: assigned PM only. POST only.
     """
@@ -1695,7 +1714,15 @@ def project_activate(request, project_id):
         messages.warning(request, 'Project is already active.')
         return redirect('project_overview', project_id=project.project_id)
 
+    assigned_design_id = request.POST.get('assigned_design_id', '').strip()
+    if not assigned_design_id:
+        messages.error(request, 'Please select a Designer before activating.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    designer = get_object_or_404(UserProfile, pk=assigned_design_id, role='Design', is_active=True)
+
     with transaction.atomic():
+        project.assigned_design = designer
         project.status = 'Active'
         project.activated_at = timezone.now()
         project.save()
@@ -2247,6 +2274,76 @@ def task_assign(request, project_id, task_id):
             # the last 10 seconds — catches browser double-submit before the
             # redirect completes. 10 s is generous for a redirect but tight enough
             # to allow a legitimate reassign-to-same-person seconds later.
+            _recent_cutoff = timezone.now() - timedelta(seconds=10)
+            _already_sent = NotificationLog.objects.filter(
+                recipient=assignee,
+                related_project=project,
+                template_name='assign_task',
+                created_at__gte=_recent_cutoff,
+            ).exists()
+            if not _already_sent:
+                send_notification(
+                    recipient=assignee,
+                    message=_at_email_message,
+                    channels=['in_app', 'whatsapp', 'email'],
+                    link=task_url,
+                    subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
+                    template='assign_task',
+                    template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
+                    related_project=project,
+                    actor=request.user.profile,
+                )
+        else:
+            Task.objects.filter(pk=task.pk).update(assigned_to=None)
+        return redirect('project_overview', project_id=project.project_id)
+
+    return render(request, 'projects/task_assign_form.html', {
+        'project':    project,
+        'task':       task,
+        'candidates': candidates,
+    })
+
+
+@login_required
+def task_assign_design_head(request, project_id, task_id):
+    """
+    Assign (or clear) the individual user on a Design-role task. Separate from
+    task_assign — gated on UserProfile.is_design_head instead of the PM-owns-
+    project rule, so a Design Head can reassign Design tasks without being the
+    project's PM. Candidate list is always Design-role, active users.
+    Access: is_design_head flag only, and only for tasks where assigned_role == 'Design'.
+    """
+    if not request.user.profile.is_design_head:
+        raise Http404
+
+    project = get_object_or_404(Project, project_id=project_id, is_deleted=False)
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    if task.assigned_role != 'Design':
+        raise Http404
+
+    candidates = UserProfile.objects.filter(role='Design', is_active=True)
+
+    if request.method == 'POST':
+        assigned_to_id = request.POST.get('assigned_to', '').strip()
+        if assigned_to_id:
+            assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role='Design', is_active=True)
+            Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            recipient_name = assignee.user.get_full_name() or assignee.user.username
+            task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
+            task_url_abs = request.build_absolute_uri(task_url)
+            _at_message = (
+                f'Hi {recipient_name},\n\n'
+                f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
+                f'Please login to review details and update progress.'
+            )
+            _at_email_message = (
+                f'{_at_message}\n\nView in Horizon Solar PMS:\n'
+                f'https://horizon-solar-pms-production.up.railway.app{task_url}'
+            )
+            # Guard: skip if an identical assign_task notification was logged in
+            # the last 10 seconds — catches browser double-submit before the
+            # redirect completes.
             _recent_cutoff = timezone.now() - timedelta(seconds=10)
             _already_sent = NotificationLog.objects.filter(
                 recipient=assignee,
@@ -6102,8 +6199,9 @@ def admin_user_edit(request, user_id):
                 target_user.set_password(cd['new_password'])
             target_user.save()
 
-            profile.role         = cd['role']
-            profile.phone_number = cd['phone_number']
+            profile.role            = cd['role']
+            profile.phone_number    = cd['phone_number']
+            profile.is_design_head  = cd['is_design_head']
             profile.save()
 
             log_activity(
@@ -6133,6 +6231,7 @@ def admin_user_edit(request, user_id):
                 'email':        target_user.email,
                 'phone_number': profile.phone_number,
                 'role':         profile.role,
+                'is_design_head': profile.is_design_head,
             },
             instance_user=target_user,
         )
@@ -6755,7 +6854,8 @@ def subadmin_departments(request):
             target_user.last_name  = request.POST.get('last_name',  target_user.last_name).strip()
             target_user.save()
 
-            target_user.profile.phone_number = request.POST.get('phone_number', target_user.profile.phone_number).strip()
+            target_user.profile.phone_number   = request.POST.get('phone_number', target_user.profile.phone_number).strip()
+            target_user.profile.is_design_head = request.POST.get('is_design_head') == 'on'
             if old_role != new_role:
                 target_user.profile.role = new_role
             target_user.profile.save()

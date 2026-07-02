@@ -1,0 +1,46 @@
+## Code commenting standard — apply to ALL new code in this session
+
+### View functions — docstring on every function
+"""
+One line: what this view does and who can access it.
+Example: Create a new [entity]. Access: [role(s)] only. POST only.
+"""
+
+### Permission checks — explain the rule being enforced
+# [Explain who is allowed and why others are blocked]
+# Example: Only the assigned PM can activate their own project
+
+### Complex querysets — explain what it fetches and why
+# [Explain what the queryset returns and why it is written this way]
+# Example: Prefetch replies to avoid N+1 — template iterates comment.replies.all()
+
+### Non-obvious logic — explain the decision
+# [Explain why the code is written this way, not what it does]
+# Example: filter().update() used instead of .save() to prevent race condition
+# on concurrent status changes from two users
+
+# Example: import inside function to avoid circular import at module level
+
+# Example: Always return 200 even on error — non-200 causes Zoho to retry
+# and creates duplicate projects
+
+### Non-obvious model fields — inline comment on the same line
+field_name = models.CharField(...)  # [What this field stores and why it exists]
+
+### URL entries — brief comment above each path
+# [View name] — [who can access it]
+path('...', views.view_name, name='...'),
+
+### TODO flags — flag known issues without fixing them
+# TODO: [describe the issue and why it is deferred]
+# Example: TODO: role decorator assumes UserProfile exists —
+# crashes for admin-created users without a profile. Fix before scaling.
+
+## Rules
+- Every view function must have a docstring — no exceptions
+- Every permission check must have a comment explaining the rule
+- Every filter().update() must have a race condition comment
+- Every lazy import must have a circular import comment
+- Every non-obvious queryset must explain what and why
+- Flag issues with TODO — never fix unrelated things in the same session
+- Apply to ALL new code written in this session, not just complex parts

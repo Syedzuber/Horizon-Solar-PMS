@@ -1,0 +1,92 @@
+
+Project card is base to every dashboard
+The card is expandable on click, the unexpanded card display important info without expanding it - Info like - Project name, Due date, Current Phase, Current Assigned person, Current Status - Delayed/On time
+
+SCM--
+The dashboard should be directed by Project, 
+i.e. List assign projects 
+     Show - Procurement, Deliveries , BOQ for one project at one place in one card
+	 
+	 1st Step is getting BOQ from design team 
+	 2nd step is procurement - placing the order, which we are not handling from our system in phase 1
+	 3rd Step is Delivery - The team (site team in particuar) need to be informed that the procured items are reaching the site, We are handling that through creating GRN
+	 4th Step is handling issues in delivery and material quality if something is flagged by Site team or PM i,e the material arrived is not matching the quantity or it is damaged
+	 
+	 
+	My suggestion is to Create one project in one card - Showing status of each step 
+	1.Project 1
+		BOQ  - Recieved/Pending - Excepted/Rejected
+		Procurement - order placed/Order pending
+		Delivery - Delivery Scheduled/ Delivery Done
+		Issues in MAterial - Delayed/Damaged/Partial
+		
+	2. Raise Issues
+	3. Create reminder for invoice payment for finance
+		
+		
+		
+Site Engineer
+The Dashboard can show Projects assigned as alist of horizontal cards
+
+	1. 1st impactful thing to be handled is - reciept of material
+			Update status of material - Recieved/Pending/
+			Update GRN
+			
+	2. 2nd - Execute assigned tasks 
+			Update Status - already done - Started /in progress/ Blocked/ Done - When mark Started - mandatory to mention the due date
+			
+	3. 3rd - Raise Issues - Already done
+	
+Every important marker should be marked in the project card
+
+
+Finance 
+
+	Similar Project Card
+	
+	1. List m1, M2, M3 milestone for every project with status
+	2. Recieved invoice payment request from SCM
+	
+
+
+Design
+
+	Similar project card - Showing one card for each assigned project
+		- List task for assigned projects
+		- Submit Design
+		- Submit BOQ
+		- Raise Issues
+		
+
+Business Development
+
+	Project Card - Showing one card for each assigned project
+		- Update OCR
+		- Update payment Status
+		- Upload document
+		- See current Status
+		
+		
+CEO 
+
+	Blocks for Important numbers - 
+		- Active projects
+		- Total Issues
+		- Payment Due
+		- Total contract value
+	
+	Project Cards
+	
+	
+Admin 
+	
+	Exact Replica of CEO Dashboard + Option to Edit/Delete everything
+	Settings
+		- Team
+			- Department wise list
+			- Add/Edit/Delete team mambers
+			
+
+
+	
+

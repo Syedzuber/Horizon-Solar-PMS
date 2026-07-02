@@ -87,6 +87,16 @@
             {% if form.role.errors %}<p class="mt-1 text-xs text-red-600">{{ form.role.errors|join:", " }}</p>{% endif %}
           </div>
 
+          <!-- Design Head -->
+          <div class="col-span-2 flex items-center gap-2 pt-1">
+            <input type="checkbox" name="is_design_head" id="id_is_design_head"
+                   {% if form.is_design_head.value %}checked{% endif %}
+                   class="form-check-input">
+            <label for="id_is_design_head" class="text-sm text-gray-700">
+              Design Head — can reassign any Design-role task, independent of role
+            </label>
+          </div>
+
         </div>
       </div>
 

@@ -115,8 +115,8 @@ class MilestoneAdmin(admin.ModelAdmin):
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display  = ['user', 'role', 'phone_number', 'is_active', 'whatsapp_notifications', 'email_notifications', 'created_by']
-    list_filter   = ['role', 'is_active']
+    list_display  = ['user', 'role', 'phone_number', 'is_active', 'is_design_head', 'whatsapp_notifications', 'email_notifications', 'created_by']
+    list_filter   = ['role', 'is_active', 'is_design_head']
     search_fields = ['user__username', 'user__first_name', 'user__last_name']
 
 
