@@ -33,6 +33,7 @@ from .models import (
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
+from .permissions import user_can_manage_project
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
 logger = logging.getLogger(__name__)
@@ -1584,8 +1585,12 @@ def _get_user_role(request):
 
 
 def _pm_owns_project(request, project):
-    """Return True if the request user is the assigned PM on this project."""
-    return project.assigned_pm is not None and project.assigned_pm.user == request.user
+    """Return True if the request user is the assigned PM on this project.
+
+    Thin adapter over the canonical user_can_manage_project() — kept so its
+    existing callers stay unchanged. No ownership comparison lives here anymore.
+    """
+    return user_can_manage_project(request.user, project)
 
 
 @login_required
@@ -3720,10 +3725,10 @@ def project_overview(request, project_id):
     role    = profile.role
 
     # Role isolation
-    if role == 'PM' and project.assigned_pm != profile:
+    if role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
-    is_assigned_pm    = (project.assigned_pm is not None and project.assigned_pm.user == request.user)
+    is_assigned_pm    = user_can_manage_project(request.user, project)
     can_assign_design = is_assigned_pm and project.status in ('Active', 'In Progress')
 
     # Handle POST actions — PM for all actions; Finance limited to update_milestone
@@ -4277,7 +4282,7 @@ def task_detail(request, project_id, task_id):
     profile = request.user.profile
 
     # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     task        = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -4330,7 +4335,7 @@ def upload_project_document(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     files = request.FILES.getlist('files')
@@ -4424,7 +4429,7 @@ def delete_project_document(request, project_id, doc_pk):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     doc = get_object_or_404(ProjectDocument, pk=doc_pk, project=project, is_deleted=False)
@@ -4464,7 +4469,7 @@ def upload_task_attachment(request, project_id, task_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -4550,7 +4555,7 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     task   = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -4583,8 +4588,14 @@ def _issue_base_qs():
 
 
 def _is_project_pm(profile, project):
-    """Return True if profile is the PM assigned to project. Used for issue close/reopen guards."""
-    return profile.role == 'PM' and project.assigned_pm == profile
+    """Return True if profile is the PM assigned to project. Used for issue close/reopen guards.
+
+    The ownership comparison routes through the canonical user_can_manage_project();
+    the role == 'PM' conjunct is preserved deliberately to keep behaviour identical
+    (assigned_pm is not role-constrained at the DB level, so the webhook path can in
+    principle set a non-PM profile — this guard must still exclude that case).
+    """
+    return profile.role == 'PM' and user_can_manage_project(profile.user, project)
 
 
 @login_required
@@ -4599,7 +4610,7 @@ def create_project_issue(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     title       = request.POST.get('title', '').strip()
@@ -4690,7 +4701,7 @@ def create_task_issue(request, project_id, task_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -4785,7 +4796,7 @@ def create_delivery_issue(request, project_id, dc_id):
     profile = request.user.profile
 
     # PM isolation: PMs can only interact with their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
@@ -4884,7 +4895,7 @@ def issue_detail(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
@@ -4923,7 +4934,7 @@ def update_issue_status(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -4963,7 +4974,7 @@ def resolve_issue(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -5099,7 +5110,7 @@ def assign_issue(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -5141,7 +5152,7 @@ def create_task_comment(request, project_id, task_id):
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -5191,7 +5202,7 @@ def create_issue_comment(request, issue_id):
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -5277,7 +5288,7 @@ def project_timeline(request, project_id):
     profile = request.user.profile
 
     # PM isolation: PM can only view their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     # All activity logs for this project, newest first, with actor data
@@ -5564,7 +5575,7 @@ def delivery_challan_detail(request, project_id, dc_id):
         return HttpResponseForbidden()
 
     # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and project.assigned_pm != profile:
+    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
