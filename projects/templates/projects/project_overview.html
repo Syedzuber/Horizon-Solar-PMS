@@ -23,6 +23,13 @@
 
   /* ── Milestone edit collapse button ────────────────────────── */
   .milestone-edit-btn { font-size:.7rem; padding:0 .35rem; }
+
+  /* ── "My task" row highlight (per-viewer) ──────────────────────
+     Rows where the logged-in user is the task's assignee get a subtle
+     brand-green tint — reads as "this one's yours / on track", not alarming.
+     Set on the cells (not the <tr>) so it isn't overridden by Bootstrap's
+     per-cell --bs-table-bg; .table-hover still layers its hover state on top. */
+  tr.task-row-mine > td { background-color: rgba(124, 184, 71, 0.08); }
 </style>
 
 {# ── 1. Compact project info card ──────────────────────────────────────── #}
@@ -49,7 +56,10 @@
             <button type="button" class="btn btn-brand btn-sm"
                     data-activate-url="{% url 'project_activate' project.project_id %}">Activate</button>
           {% else %}
-            <a href="{% url 'task_add' project.project_id %}" class="btn btn-brand btn-sm">+ Add Task</a>
+            <a href="{% url 'task_add' project.project_id %}" class="btn btn-brand btn-sm"
+               hx-get="{% url 'task_add' project.project_id %}"
+               hx-target="#taskFormModalContent" hx-swap="innerHTML"
+               hx-on::after-request="if (event.detail.successful) window.showTaskFormModal();">+ Add Task</a>
           {% endif %}
         {% endif %}
         <a href="{% url 'project_timeline' project.project_id %}" class="btn btn-outline-secondary btn-sm">
@@ -87,6 +97,13 @@
       <span class="info-pill">
         <i class="bi bi-person-badge-fill"></i>PM:
         {% if project.assigned_pm %}{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}{% else %}<em>—</em>{% endif %}
+      </span>
+      <span class="info-pill">
+        <i class="bi bi-people-fill"></i>Coordinators:
+        {% for c in project.coordinators.all %}{{ c.user.get_full_name|default:c.user.username }}{% if not forloop.last %}, {% endif %}{% empty %}<em>—</em>{% endfor %}
+        {% if is_assigned_pm %}
+          <a href="{% url 'assign_coordinators' project.project_id %}" class="ms-1 text-decoration-none" title="Manage coordinators"><i class="bi bi-pencil"></i></a>
+        {% endif %}
       </span>
       <span class="info-pill">
         <i class="bi bi-pen-fill"></i>Design:
@@ -350,7 +367,7 @@
 {# ── 3. BOQ + Delivery Challans + Material Status ──────────────────────────── #}
 <div class="row g-3 mb-4">
 
-  {% if role == 'PM' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
+  {% if role == 'PM' or role == 'Project Coordinator' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
   <div class="col-12 col-md-4">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -391,9 +408,19 @@
             {% else %}
               <p class="text-muted small mb-2">Version {{ project.boq.version }}. No revisions yet.</p>
             {% endif %}
+            {% if role == 'Design' and project.boq_status != 'Submitted' and project.boq_status != 'Acknowledged' %}
+            {# Design can keep editing until the BOQ is submitted; after submit the read-only link below takes over #}
+            <a href="{{ project.boq_url }}" class="btn btn-brand btn-sm w-100 mt-2">Update BOQ</a>
+            {% else %}
             <a href="{{ project.boq_url }}" class="btn btn-outline-brand btn-sm w-100 mt-2">View full BOQ →</a>
+            {% endif %}
           {% else %}
+            {% if role == 'Design' %}
+            {# No BOQ yet — boq_detail auto-creates the standard BOQ on first visit for Design. Mirrors the Delivery Challan "+ Add First DC" empty-state action. #}
+            <a href="{% url 'boq_detail' project.project_id %}" class="btn btn-brand btn-sm w-100">Create BOQ</a>
+            {% else %}
             <p class="text-muted small mb-0">BOQ not yet created.</p>
+            {% endif %}
           {% endif %}
         </div>
       </div>
@@ -403,7 +430,7 @@
 
 
 
-  {% if role == 'SCM' or role == 'PM' or role == 'Site Engineer' or role == 'Admin' %}
+  {% if role == 'SCM' or role == 'PM' or role == 'Project Coordinator' or role == 'Site Engineer' or role == 'Admin' %}
   <div class="col-12 col-md-4">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -474,7 +501,7 @@
   </div>
   {% endif %}
 
-  {% if role == 'PM' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
+  {% if role == 'PM' or role == 'Project Coordinator' or role == 'SCM' or role == 'Site Engineer' or role == 'Admin' %}
   <div class="col-12 col-md-4">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -790,7 +817,7 @@
   <div class="card shadow-sm mb-3">
     <div class="card-header d-flex justify-content-between align-items-center py-2">
       <span class="fw-semibold small">Phase {{ phase.phase_order }}: {{ phase.phase_name }}</span>
-      <small class="text-muted">{{ phase.tasks.count }} task{{ phase.tasks.count|pluralize }}</small>
+      <small id="phase-count-{{ phase.pk }}" class="text-muted">{{ phase.tasks.count }} task{{ phase.tasks.count|pluralize }}</small>
     </div>
     <div class="card-body p-0">
       <div class="table-responsive">
@@ -805,110 +832,13 @@
               <th style="width:8rem;">Completed</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody id="phase-tasks-{{ phase.pk }}">
             {% for task in phase.tasks.all %}
-            <tr data-task-id="{{ task.pk }}"
-                data-project-id="{{ project.project_id }}"
-                data-attachment-count="{{ task.active_attachment_count }}">
-              <td class="text-muted small">{{ task.task_order }}</td>
-              <td><a href="{% url 'task_detail' project.project_id task.pk %}"
-                     class="text-decoration-none text-body small">{{ task.task_name }}</a></td>
-              <td class="small">
-                {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
-                {% else %}<span class="text-muted">Unassigned</span>{% endif %}
-                {% if is_assigned_pm %}
-                  <button type="button"
-                          class="btn btn-outline-secondary ms-1 py-0 px-1"
-                          style="font-size:.68rem;"
-                          onclick="openAssignModal(this)"
-                          data-task-id="{{ task.pk }}"
-                          data-task-name="{{ task.task_name }}"
-                          data-role="{{ task.assigned_role }}"
-                          data-current-pk="{% if task.assigned_to %}{{ task.assigned_to.pk }}{% endif %}"
-                          data-project-id="{{ project.project_id }}"
-                          title="Assign"><i data-lucide="pencil" class="lucide-icon"></i></button>
-                {% endif %}
-                {% if task.assigned_role == 'Design' and request.user.profile.is_design_head %}
-                  <a href="{% url 'task_assign_design_head' project.project_id task.pk %}"
-                     class="btn btn-outline-secondary ms-1 py-0 px-1"
-                     style="font-size:.68rem;"
-                     title="Reassign"><i data-lucide="pencil" class="lucide-icon"></i></a>
-                {% endif %}
-              </td>
-              <td>
-                {% if is_assigned_pm or user_task_role == task.assigned_role %}
-                  <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline">
-                    {% csrf_token %}
-                    <select name="status"
-                            {% if not task.assigned_to %}disabled{% endif %}
-                            onchange="handleTaskStatusChange(this)"
-                            data-original-status="{{ task.status }}"
-                            data-task-name="{{ task.task_name }}"
-                            {% if forloop.parentloop.first and forloop.first and user_task_role == 'BD / Sales' %}
-                            data-is-milestone-gate="true"
-                            data-project-id="{{ project.project_id }}"
-                            {% endif %}
-                            class="form-select form-select-sm
-                              {% if task.status == 'Done' %}border-success text-success
-                              {% elif task.status == 'Blocked' %}border-danger text-danger
-                              {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}
-                              {% if not task.assigned_to %}opacity-50 cursor-not-allowed{% endif %}"
-                            style="font-size:.78rem;">
-                      {% for val, label in task_status_choices %}
-                        <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
-                      {% endfor %}
-                    </select>
-                    {% if not task.assigned_to %}
-                    <p class="text-xs text-gray-400 mt-1 italic">Assign task to enable status change</p>
-                    {% endif %}
-                    {% if not is_assigned_pm and not task.due_date %}
-                    <input type="date" name="due_date"
-                           class="form-control form-control-sm mt-1"
-                           style="display:none; width:130px; font-size:.75rem;"
-                           onchange="var sel=this.form.querySelector('select[name=status]'); if(sel) sel.value='In Progress'; this.form.submit();">
-                    {% endif %}
-                  </form>
-                {% else %}
-                  {% if task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
-                  {% elif task.status == 'Blocked' %}<span class="badge bg-danger">Blocked</span>
-                  {% elif task.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
-                  {% else %}<span class="badge bg-secondary">Not Started</span>{% endif %}
-                {% endif %}
-              </td>
-              <td>
-                {% if is_assigned_pm %}
-                  {# PM: always editable #}
-                  <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
-                    {% csrf_token %}
-                    <input type="date" name="due_date"
-                           value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
-                           class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
-                           style="width:135px; font-size:.78rem;"
-                           onchange="this.form.submit()">
-                  </form>
-                {% elif not project.cascade_scheduling and task.assigned_role == user_task_role and role != 'Finance' and role != 'Admin' %}
-                  {# Non-PM: editable only when cascade OFF and task assigned to their role #}
-                  <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline">
-                    {% csrf_token %}
-                    <input type="date" name="due_date"
-                           value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
-                           class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
-                           style="width:135px; font-size:.78rem;"
-                           onchange="this.form.submit()">
-                  </form>
-                {% elif project.cascade_scheduling and task.assigned_role == user_task_role and not is_assigned_pm %}
-                  {# Non-PM, cascade ON: read-only with lock icon #}
-                  <span class="small {% if not task.due_date %}text-muted{% endif %}"
-                        title="Managed by cascading scheduling">
-                    {{ task.due_date|default:"—" }}
-                    <i data-lucide="lock" style="width:11px;height:11px;color:var(--bs-secondary);vertical-align:middle;" class="ms-1"></i>
-                  </span>
-                {% else %}
-                  <span class="small {% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
-                {% endif %}
-              </td>
-              <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>
-            </tr>
+            {% if forloop.parentloop.first and forloop.first %}
+              {% include 'projects/partials/_task_row.html' with is_milestone_gate_candidate=True %}
+            {% else %}
+              {% include 'projects/partials/_task_row.html' %}
+            {% endif %}
             {% empty %}
             <tr><td colspan="6" class="text-center text-muted py-2 small">No tasks in this phase.</td></tr>
             {% endfor %}
@@ -1197,6 +1127,20 @@
 </div>
 {% endif %}
 
+{% comment %}
+Generic task-form modal (#4 assign-design-head, #6 add-task). Content is loaded
+via hx-get into #taskFormModalContent; the form inside posts via hx-post and, on
+success, the server sends a taskFormDone HX-Trigger that closes this modal.
+Not gated on is_assigned_pm — a Design Head who is not the PM uses it for #4.
+{% endcomment %}
+<div class="modal fade" id="taskFormModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content" id="taskFormModalContent">
+      {# hx-get fills this in #}
+    </div>
+  </div>
+</div>
+
 <form method="post" enctype="multipart/form-data" action="" id="quickAttachForm" style="display:none;">
   {% csrf_token %}
   <input type="hidden" id="quickAttachNext" name="next" value="{% url 'project_overview' project.project_id %}">
@@ -1317,9 +1261,27 @@
       pendingStatusForm = select.form;
       bsNoAttachModal.show();
     } else {
-      select.form.submit();
+      /* requestSubmit() fires the submit event HTMX listens for (plain .submit()
+         bypasses HTMX). Without HTMX loaded it degrades to a native submit. */
+      select.form.requestSubmit();
     }
   };
+
+  /* ── Generic task-form modal (#4 assign-design-head, #6 add-task) ─────── */
+  /* Shown only from an hx-on::after-request on the trigger, so it never opens
+     when HTMX is absent (the trigger's href then navigates to the standalone
+     page — the pre-Prompt-C fallback). Closed by the server's taskFormDone
+     HX-Trigger on a successful submit. */
+  window.showTaskFormModal = function () {
+    var el = document.getElementById('taskFormModal');
+    if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+  };
+  document.body.addEventListener('taskFormDone', function () {
+    var el = document.getElementById('taskFormModal');
+    if (!el) return;
+    var inst = bootstrap.Modal.getInstance(el);
+    if (inst) inst.hide();
+  });
 
   /* ── Assign modal (imperative — avoids relatedTarget mobile issues) ──── */
   window.openAssignModal = function (btn) {
@@ -1333,8 +1295,17 @@
     var projId    = btn.dataset.projectId;
 
     document.getElementById('assignTaskName').textContent = taskName;
-    document.getElementById('assignForm').action =
-      '/projects/' + projId + '/tasks/' + taskId + '/assign/';
+    var assignForm = document.getElementById('assignForm');
+    var assignUrl  = '/projects/' + projId + '/tasks/' + taskId + '/assign/';
+    /* action= drives the graceful-degradation native POST; hx-post + hx-target
+       drive the HTMX row swap. Both are rebuilt per modal-open so the dynamic,
+       JS-assembled URL is preserved (there is no Django url-reverse tag for
+       this route in the markup). */
+    assignForm.action = assignUrl;
+    assignForm.setAttribute('hx-post', assignUrl);
+    assignForm.setAttribute('hx-target', '#task-row-' + taskId);
+    assignForm.setAttribute('hx-swap', 'outerHTML');
+    if (window.htmx) window.htmx.process(assignForm);
 
     var sel = document.getElementById('assignSelect');
     sel.innerHTML = '<option value="">— Unassign —</option>';
@@ -1418,7 +1389,7 @@
       document.getElementById('noAttachCloseBtn').addEventListener('click', function () {
         var formToSubmit = pendingStatusForm;
         bsNoAttachModal.hide();
-        if (formToSubmit) formToSubmit.submit();
+        if (formToSubmit) formToSubmit.requestSubmit();
       });
       noAttachEl.addEventListener('hide.bs.modal', function () { pendingStatusForm = null; });
     }
@@ -1432,7 +1403,7 @@
         bsPaymentModal.hide();
         paymentCaptureEl.addEventListener('hidden.bs.modal', function onHide() {
           paymentCaptureEl.removeEventListener('hidden.bs.modal', onHide);
-          if (sel) { sel.value = 'Done'; sel.form.submit(); }
+          if (sel) { sel.value = 'Done'; sel.form.requestSubmit(); }
         });
       });
       paymentCaptureEl.addEventListener('hidden.bs.modal', function () { _paymentPendingSelect = null; });
@@ -1508,7 +1479,7 @@
         bsMilestoneModal.hide();
         milestoneGateEl.addEventListener('hidden.bs.modal', function afterClose() {
           milestoneGateEl.removeEventListener('hidden.bs.modal', afterClose);
-          if (sel) { sel.value = 'Done'; sel.form.submit(); }
+          if (sel) { sel.value = 'Done'; sel.form.requestSubmit(); }
         });
       });
     }

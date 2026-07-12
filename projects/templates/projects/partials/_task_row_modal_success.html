@@ -1,0 +1,9 @@
+{% comment %}
+#4 Assign-Design-Head success response. Like #6, the POST targets
+#taskFormModalContent (cleared as the modal closes via the taskFormDone
+HX-Trigger); the updated row is swapped out-of-band into its existing
+#task-row-<pk>. Wrapped in <template> so the <tr> survives HTML parsing.
+Expects: row_task, primary_is_gate, plus shared row context.
+{% endcomment %}
+<template>{% include 'projects/partials/_task_row.html' with task=row_task is_milestone_gate_candidate=primary_is_gate oob=True %}</template>
+{% include 'projects/partials/_hx_messages.html' %}

@@ -1,0 +1,17 @@
+{% comment %}
+Out-of-band flash-message fragment for HTMX responses.
+
+Reuses Django's existing messages framework: any messages.success/.error/.warning
+set in the view is rendered here and swapped into #hxMessages (in base.html)
+out-of-band, so the "N task(s) recalculated" / error / feedback text appears
+inline without a full-page reload. Iterating {% for message %} consumes the
+messages, exactly as the base-template block would on a full render.
+{% endcomment %}
+<div id="hxMessages" hx-swap-oob="true">
+  {% for message in messages %}
+    <div class="alert alert-{{ message.tags|default:'info' }} alert-dismissible fade show" role="alert">
+      {{ message }}
+      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+    </div>
+  {% endfor %}
+</div>

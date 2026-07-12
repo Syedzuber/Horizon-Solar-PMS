@@ -1,0 +1,6 @@
+{% comment %}
+HTMX response for #9 create_task_comment: re-renders the thread into
+#commentThread and surfaces any flash (e.g. validation error) inline.
+{% endcomment %}
+{% include 'projects/partials/_task_comments.html' %}
+{% include 'projects/partials/_hx_messages.html' %}

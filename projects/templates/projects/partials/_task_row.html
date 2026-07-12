@@ -1,0 +1,130 @@
+{% comment %}
+Single task row for the project-overview phase table.
+
+Extracted verbatim from project_overview.html's inline row markup so that the
+initial page render and every HTMX partial response (#1 status, #3 assign,
+#5 due-date + cascade OOB rows) share one source of truth. Behaviour — the
+role-gating {% if %} blocks, the disabled-select logic, the cascade lock icon —
+is a byte-for-byte copy of the original inline markup; only the HTMX plumbing
+below was added.
+
+Expected context:
+  task, project, is_assigned_pm, user_task_role, role, task_status_choices
+  is_milestone_gate_candidate  — True only for the first task of the first phase
+                                  (replaces the old forloop.first check; the BD
+                                  milestone gate still only fires for BD users)
+  oob                          — when True, mark the <tr> for out-of-band swap
+{% endcomment %}
+<tr id="task-row-{{ task.pk }}"{% if oob %} hx-swap-oob="true"{% endif %}
+    {% if task.assigned_to and task.assigned_to == request.user.profile %}class="task-row-mine"{% endif %}
+    data-task-id="{{ task.pk }}"
+    data-project-id="{{ project.project_id }}"
+    data-attachment-count="{{ task.active_attachment_count }}">
+  <td class="text-muted small">{{ task.task_order }}</td>
+  <td><a href="{% url 'task_detail' project.project_id task.pk %}"
+         class="text-decoration-none text-body small">{{ task.task_name }}</a></td>
+  <td class="small">
+    {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
+    {% else %}<span class="text-muted">Unassigned</span>{% endif %}
+    {% if is_assigned_pm %}
+      <button type="button"
+              class="btn btn-outline-secondary ms-1 py-0 px-1"
+              style="font-size:.68rem;"
+              onclick="openAssignModal(this)"
+              data-task-id="{{ task.pk }}"
+              data-task-name="{{ task.task_name }}"
+              data-role="{{ task.assigned_role }}"
+              data-current-pk="{% if task.assigned_to %}{{ task.assigned_to.pk }}{% endif %}"
+              data-project-id="{{ project.project_id }}"
+              title="Assign"><i data-lucide="pencil" class="lucide-icon"></i></button>
+    {% endif %}
+    {% if task.assigned_role == 'Design' and request.user.profile.is_design_head %}
+      <a href="{% url 'task_assign_design_head' project.project_id task.pk %}"
+         class="btn btn-outline-secondary ms-1 py-0 px-1"
+         style="font-size:.68rem;"
+         hx-get="{% url 'task_assign_design_head' project.project_id task.pk %}"
+         hx-target="#taskFormModalContent" hx-swap="innerHTML"
+         hx-on::after-request="if (event.detail.successful) window.showTaskFormModal();"
+         title="Reassign"><i data-lucide="pencil" class="lucide-icon"></i></a>
+    {% endif %}
+  </td>
+  <td>
+    {% if is_assigned_pm or user_task_role == task.assigned_role %}
+      <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline"
+            hx-post="{% url 'task_status_update' project.project_id task.pk %}"
+            hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <select name="status"
+                {% if not task.assigned_to %}disabled{% endif %}
+                onchange="handleTaskStatusChange(this)"
+                data-original-status="{{ task.status }}"
+                data-task-name="{{ task.task_name }}"
+                {% if is_milestone_gate_candidate and user_task_role == 'BD / Sales' %}
+                data-is-milestone-gate="true"
+                data-project-id="{{ project.project_id }}"
+                {% endif %}
+                class="form-select form-select-sm
+                  {% if task.status == 'Done' %}border-success text-success
+                  {% elif task.status == 'Blocked' %}border-danger text-danger
+                  {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}
+                  {% if not task.assigned_to %}opacity-50 cursor-not-allowed{% endif %}"
+                style="font-size:.78rem;">
+          {% for val, label in task_status_choices %}
+            <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+        {% if not task.assigned_to %}
+        <p class="text-xs text-gray-400 mt-1 italic">Assign task to enable status change</p>
+        {% endif %}
+        {% if not is_assigned_pm and not task.due_date %}
+        <input type="date" name="due_date"
+               class="form-control form-control-sm mt-1"
+               style="display:none; width:130px; font-size:.75rem;"
+               onchange="var sel=this.form.querySelector('select[name=status]'); if(sel) sel.value='In Progress'; this.form.requestSubmit();">
+        {% endif %}
+      </form>
+    {% else %}
+      {% if task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
+      {% elif task.status == 'Blocked' %}<span class="badge bg-danger">Blocked</span>
+      {% elif task.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
+      {% else %}<span class="badge bg-secondary">Not Started</span>{% endif %}
+    {% endif %}
+  </td>
+  <td>
+    {% if is_assigned_pm %}
+      {# PM: always editable #}
+      <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline"
+            hx-post="{% url 'task_set_due_date' project.project_id task.pk %}"
+            hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <input type="date" name="due_date"
+               value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
+               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+               style="width:135px; font-size:.78rem;"
+               onchange="this.form.requestSubmit()">
+      </form>
+    {% elif not project.cascade_scheduling and task.assigned_role == user_task_role and role != 'Finance' and role != 'Admin' %}
+      {# Non-PM: editable only when cascade OFF and task assigned to their role #}
+      <form method="post" action="{% url 'task_set_due_date' project.project_id task.pk %}" class="d-inline"
+            hx-post="{% url 'task_set_due_date' project.project_id task.pk %}"
+            hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
+        {% csrf_token %}
+        <input type="date" name="due_date"
+               value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
+               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+               style="width:135px; font-size:.78rem;"
+               onchange="this.form.requestSubmit()">
+      </form>
+    {% elif project.cascade_scheduling and task.assigned_role == user_task_role and not is_assigned_pm %}
+      {# Non-PM, cascade ON: read-only with lock icon #}
+      <span class="small {% if not task.due_date %}text-muted{% endif %}"
+            title="Managed by cascading scheduling">
+        {{ task.due_date|default:"—" }}
+        <i data-lucide="lock" style="width:11px;height:11px;color:var(--bs-secondary);vertical-align:middle;" class="ms-1"></i>
+      </span>
+    {% else %}
+      <span class="small {% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
+    {% endif %}
+  </td>
+  <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>
+</tr>

@@ -38,7 +38,7 @@
   </style>
   {% block extra_head %}{% endblock %}
 </head>
-<body>
+<body hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
 
 {% if user.is_authenticated %}
 <nav class="navbar navbar-dark horizon-nav px-4">
@@ -87,11 +87,75 @@
     {% endfor %}
   {% endif %}
 
+  {# HTMX-driven flash messages land here (out-of-band swap target) — see partials/_hx_messages.html #}
+  <div id="hxMessages"></div>
+
   {% block content %}{% endblock %}
 
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+<script>
+/*
+ * Global HTMX wiring (loaded once for every page).
+ * Graceful degradation: if this script (or the CDN) fails to load, htmx is
+ * simply absent — every form that carries hx-* attributes still submits as a
+ * normal full-page POST, exactly as it did before this change.
+ */
+(function () {
+  if (!window.htmx) return;
+
+  /* Re-initialise Lucide icons inside any freshly-swapped fragment (task rows,
+     status blocks, attachment lists all contain <i data-lucide> icons). */
+  document.body.addEventListener('htmx:afterSwap', function () {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  });
+
+  /* Auto-dismiss success/warning flashes that arrive via an OOB swap, mirroring
+     the page-load behaviour so HTMX flashes don't linger forever. */
+  document.body.addEventListener('htmx:oobAfterSwap', function (evt) {
+    if (evt.target && evt.target.id === 'hxMessages') {
+      evt.target.querySelectorAll('.alert-success, .alert-warning').forEach(function (el) {
+        setTimeout(function () {
+          el.style.transition = 'opacity .5s ease';
+          el.style.opacity    = '0';
+          setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
+        }, 5000);
+      });
+    }
+  });
+
+  /* A non-2xx response never silently vanishes: surface it inline near the top
+     so the user always sees that the action failed (mirrors the audit's
+     "do not swallow non-2xx responses" requirement). */
+  document.body.addEventListener('htmx:responseError', function (evt) {
+    var box = document.getElementById('hxMessages');
+    if (!box) return;
+    var msg = 'Action failed. Please retry.';
+    try {
+      var parsed = JSON.parse(evt.detail.xhr.responseText);
+      if (parsed && parsed.error) msg = parsed.error;
+    } catch (e) {
+      if (evt.detail.xhr.status === 403) msg = 'You do not have permission to do that.';
+    }
+    box.innerHTML =
+      '<div class="alert alert-danger alert-dismissible fade show" role="alert">' +
+      msg + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
+  });
+
+  /* Close the shared Assign modal once its HTMX assign request succeeds
+     (the view emits an "taskAssigned" HX-Trigger). No-op on pages without it. */
+  document.body.addEventListener('taskAssigned', function () {
+    var modalEl = document.getElementById('assignModal');
+    if (!modalEl) return;
+    var inst = bootstrap.Modal.getInstance(modalEl);
+    if (inst) inst.hide();
+  });
+}());
+</script>
 
 {# ── Shared: Block Task modal (used by all dashboards + project_detail) ─── #}
 <div class="modal fade" id="blockTaskModal" tabindex="-1" aria-labelledby="blockTaskModalLabel" aria-hidden="true">

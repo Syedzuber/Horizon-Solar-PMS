@@ -21,35 +21,9 @@
     <div class="row g-3">
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Status</small>
-        {% if is_assignee %}
-          <form method="post"
-                action="{% url 'task_detail_status_update' project.project_id task.pk %}"
-                class="d-inline">
-            {% csrf_token %}
-            <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
-            <select name="status"
-                    onchange="if (!(window.solarInterceptBlock && window.solarInterceptBlock(this))) { this.closest('form').submit(); }"
-                    data-original-status="{{ task.status }}"
-                    class="form-select form-select-sm d-inline-block w-auto
-                      {% if task.status == 'Done' %}border-success text-success
-                      {% elif task.status == 'Blocked' %}border-danger text-danger
-                      {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}">
-              {% for val, label in task_status_choices %}
-                <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
-              {% endfor %}
-            </select>
-          </form>
-        {% else %}
-          {% if task.status == 'Done' %}
-            <span class="badge bg-success">Done</span>
-          {% elif task.status == 'In Progress' %}
-            <span class="badge bg-primary">In Progress</span>
-          {% elif task.status == 'Blocked' %}
-            <span class="badge bg-danger">Blocked</span>
-          {% else %}
-            <span class="badge bg-secondary">Not Started</span>
-          {% endif %}
-        {% endif %}
+        <div id="taskStatusBlock">
+          {% include 'projects/partials/_task_detail_status.html' %}
+        </div>
       </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Assigned Role</small>
@@ -82,19 +56,24 @@
   <div class="card-header d-flex justify-content-between align-items-center">
     <span class="fw-semibold">
       Attachments
-      {% if attachments %}
-        <span class="badge bg-secondary ms-1">{{ attachments|length }}</span>
-      {% endif %}
+      <span id="attachCountBadge">{% if attachments %}<span class="badge bg-secondary ms-1">{{ attachments|length }}</span>{% endif %}</span>
     </span>
     <button type="button" class="btn btn-primary btn-sm" id="attachTriggerBtn">
       Attach Files
     </button>
   </div>
 
-  {# Hidden upload form #}
+  {% comment %}
+  Hidden upload form. hx-encoding is REQUIRED for the multipart file upload —
+  without it HTMX would send an empty urlencoded body and the upload silently
+  fails. action=/method=post drive the graceful-degradation native POST.
+  {% endcomment %}
   <form method="post" enctype="multipart/form-data"
         action="{% url 'upload_task_attachment' project.project_id task.pk %}"
-        id="attachUploadForm">
+        id="attachUploadForm"
+        hx-post="{% url 'upload_task_attachment' project.project_id task.pk %}"
+        hx-encoding="multipart/form-data"
+        hx-target="#attachmentList" hx-swap="innerHTML">
     {% csrf_token %}
     <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
     <input type="file" id="attachFileInput" name="files" multiple
@@ -105,70 +84,8 @@
   {# Validation errors display #}
   <div id="attachErrorBox" class="alert alert-danger mx-3 mt-3 d-none" role="alert"></div>
 
-  <div class="card-body p-0">
-    {% if attachments %}
-    <div class="table-responsive">
-      <table class="table table-sm table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>File</th>
-            <th style="width:7rem;">Type</th>
-            <th style="width:6rem;">Size</th>
-            <th style="width:11rem;">Uploaded By</th>
-            <th style="width:10rem;">Uploaded At</th>
-            <th style="width:4rem;"></th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for attach in attachments %}
-          <tr>
-            <td>
-              {% if attach.file_type == 'Photo' %}
-                <img src="{{ attach.file_url }}" alt="{{ attach.file_name }}"
-                     class="me-2 rounded" style="max-height:60px;max-width:80px;object-fit:cover;">
-              {% endif %}
-              <a href="{{ attach.file_url }}" target="_blank" rel="noopener">{{ attach.file_name }}</a>
-            </td>
-            <td>
-              {% if attach.file_type == 'Photo' %}
-                <span class="badge bg-info text-dark">Photo</span>
-              {% else %}
-                <span class="badge bg-secondary">Document</span>
-              {% endif %}
-            </td>
-            <td class="text-muted small">{{ attach.file_size_kb }} KB</td>
-            <td class="text-muted small">
-              {% if attach.uploaded_by %}
-                {{ attach.uploaded_by.user.get_full_name|default:attach.uploaded_by.user.username }}
-              {% else %}—{% endif %}
-            </td>
-            <td class="text-muted small">{{ attach.uploaded_at|date:"d M Y H:i" }}</td>
-            <td>
-              {% if attach.uploaded_by == user_profile or user_profile.role == 'Admin' %}
-              <form method="post"
-                    action="{% url 'delete_task_attachment' project.project_id task.pk attach.pk %}"
-                    class="d-inline"
-                    onsubmit="return confirm('Delete this file? It can be recovered within 90 days.')">
-                {% csrf_token %}
-                <input type="hidden" name="next" value="{% url 'task_detail' project.project_id task.pk %}">
-                <button type="submit" class="btn btn-outline-danger btn-sm py-0 px-1"
-                        title="Delete">
-                  <i class="bi bi-trash"></i>
-                </button>
-              </form>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <div class="text-center text-muted py-4">
-      <i class="bi bi-paperclip fs-3 d-block mb-2"></i>
-      No attachments yet.
-    </div>
-    {% endif %}
+  <div class="card-body p-0" id="attachmentList">
+    {% include 'projects/partials/_task_attachments.html' %}
   </div>
 </div>
 
@@ -208,7 +125,9 @@
 
     errorBox.classList.add('d-none');
     if (files.length > 0) {
-      uploadForm.submit();
+      /* requestSubmit() fires the submit event HTMX intercepts; without HTMX it
+         degrades to a native multipart POST → redirect (unchanged behaviour). */
+      uploadForm.requestSubmit();
     }
   });
 }());
@@ -305,148 +224,20 @@
   </div>
   <div class="card-body">
 
-    {# Thread: top-level comments with indented replies below each #}
-    {% if task_comments %}
-      {% for comment in task_comments %}
-      <div class="mb-3" id="comment-{{ comment.pk }}">
-
-        {# ── Parent comment ─────────────────────────────────────────────── #}
-        <div class="d-flex gap-3">
-          {# Avatar initial circle, color keyed by role #}
-          {% if comment.author %}
-            <div class="rounded-circle d-flex align-items-center justify-content-center text-white fw-bold flex-shrink-0"
-                 style="width:36px;height:36px;font-size:0.85rem;
-                 {% if comment.author.role == 'Admin' %}background:#dc3545;
-                 {% elif comment.author.role == 'PM' %}background:#343a40;
-                 {% elif comment.author.role == 'Site Engineer' %}background:#0d6efd;
-                 {% elif comment.author.role == 'Design' %}background:#198754;
-                 {% elif comment.author.role == 'Finance' %}background:#0dcaf0;color:#000;
-                 {% elif comment.author.role == 'SCM' %}background:#ffc107;color:#000;
-                 {% else %}background:#6c757d;{% endif %}">
-              {{ comment.author.user.get_full_name|default:comment.author.user.username|slice:":1"|upper }}
-            </div>
-          {% else %}
-            <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary text-white fw-bold flex-shrink-0"
-                 style="width:36px;height:36px;font-size:0.85rem;">?</div>
-          {% endif %}
-
-          <div class="flex-grow-1">
-            {% if comment.is_deleted %}
-              <p class="text-muted fst-italic mb-1">This comment was deleted.</p>
-            {% else %}
-              <div class="d-flex justify-content-between align-items-start gap-2 mb-1 flex-wrap">
-                <div>
-                  {% if comment.author %}
-                    <span class="fw-semibold small">
-                      {{ comment.author.user.get_full_name|default:comment.author.user.username }}
-                    </span>
-                    <span class="badge bg-secondary ms-1" style="font-size:0.65rem;">{{ comment.author.role }}</span>
-                  {% else %}
-                    <span class="fw-semibold small text-muted">Unknown</span>
-                  {% endif %}
-                  <span class="text-muted small ms-2">{{ comment.created_at|date:"d M Y H:i" }}</span>
-                </div>
-                <div class="d-flex gap-2 align-items-center">
-                  {# Delete icon — author or Admin only #}
-                  {% if user_profile == comment.author or user_profile.role == 'Admin' %}
-                  <form method="post" action="{% url 'delete_comment' comment.pk %}"
-                        onsubmit="return confirm('Delete this comment?')">
-                    {% csrf_token %}
-                    <button type="submit" class="btn btn-link btn-sm text-danger p-0" title="Delete comment">
-                      <i class="bi bi-trash"></i>
-                    </button>
-                  </form>
-                  {% endif %}
-                </div>
-              </div>
-              <p class="mb-1" style="white-space:pre-wrap;">{{ comment.body }}</p>
-              {# Reply link — only on parent comments (not on replies) #}
-              <a href="#" class="small text-muted"
-                 onclick="toggleReplyBox({{ comment.pk }}); return false;">Reply</a>
-
-              {# Inline reply form — hidden by default, shown on Reply click #}
-              <div id="reply-box-{{ comment.pk }}" class="d-none mt-2">
-                <form method="post" action="{% url 'create_task_comment' project.project_id task.pk %}">
-                  {% csrf_token %}
-                  <input type="hidden" name="parent" value="{{ comment.pk }}">
-                  <textarea name="body" class="form-control form-control-sm mb-2" rows="2"
-                            placeholder="Write a reply…"></textarea>
-                  <div class="d-flex gap-2">
-                    <button type="submit" class="btn btn-primary btn-sm">Reply</button>
-                    <button type="button" class="btn btn-outline-secondary btn-sm"
-                            onclick="toggleReplyBox({{ comment.pk }})">Cancel</button>
-                  </div>
-                </form>
-              </div>
-            {% endif %}
-
-            {# ── Replies indented under parent ──────────────────────────── #}
-            {% for reply in comment.replies.all %}
-            <div class="d-flex gap-3 mt-3 ms-2 ps-3 border-start">
-              {% if reply.author %}
-                <div class="rounded-circle d-flex align-items-center justify-content-center text-white fw-bold flex-shrink-0"
-                     style="width:30px;height:30px;font-size:0.75rem;
-                     {% if reply.author.role == 'Admin' %}background:#dc3545;
-                     {% elif reply.author.role == 'PM' %}background:#343a40;
-                     {% elif reply.author.role == 'Site Engineer' %}background:#0d6efd;
-                     {% elif reply.author.role == 'Design' %}background:#198754;
-                     {% elif reply.author.role == 'Finance' %}background:#0dcaf0;color:#000;
-                     {% elif reply.author.role == 'SCM' %}background:#ffc107;color:#000;
-                     {% else %}background:#6c757d;{% endif %}">
-                  {{ reply.author.user.get_full_name|default:reply.author.user.username|slice:":1"|upper }}
-                </div>
-              {% else %}
-                <div class="rounded-circle d-flex align-items-center justify-content-center bg-secondary text-white fw-bold flex-shrink-0"
-                     style="width:30px;height:30px;font-size:0.75rem;">?</div>
-              {% endif %}
-              <div class="flex-grow-1">
-                {% if reply.is_deleted %}
-                  <p class="text-muted fst-italic mb-0">This comment was deleted.</p>
-                {% else %}
-                  <div class="d-flex justify-content-between align-items-start gap-2 mb-1 flex-wrap">
-                    <div>
-                      {% if reply.author %}
-                        <span class="fw-semibold small">
-                          {{ reply.author.user.get_full_name|default:reply.author.user.username }}
-                        </span>
-                        <span class="badge bg-secondary ms-1" style="font-size:0.65rem;">{{ reply.author.role }}</span>
-                      {% else %}
-                        <span class="fw-semibold small text-muted">Unknown</span>
-                      {% endif %}
-                      <span class="text-muted small ms-2">{{ reply.created_at|date:"d M Y H:i" }}</span>
-                    </div>
-                    {% if user_profile == reply.author or user_profile.role == 'Admin' %}
-                    <form method="post" action="{% url 'delete_comment' reply.pk %}"
-                          onsubmit="return confirm('Delete this comment?')">
-                      {% csrf_token %}
-                      <button type="submit" class="btn btn-link btn-sm text-danger p-0" title="Delete reply">
-                        <i class="bi bi-trash"></i>
-                      </button>
-                    </form>
-                    {% endif %}
-                  </div>
-                  <p class="mb-0" style="white-space:pre-wrap;">{{ reply.body }}</p>
-                {% endif %}
-              </div>
-            </div>
-            {% endfor %}
-
-          </div>
-        </div>
-
-        {% if not forloop.last %}<hr class="my-3">{% endif %}
-      </div>
-      {% endfor %}
-    {% else %}
-      <p class="text-muted text-center py-3 mb-3">
-        <i class="bi bi-chat-dots fs-3 d-block mb-2"></i>
-        No comments yet.
-      </p>
-    {% endif %}
+    {% comment %}
+    Thread: top-level comments with indented replies below each.
+    Swapped as a unit into #commentThread on new comment / reply.
+    {% endcomment %}
+    <div id="commentThread">
+      {% include 'projects/partials/_task_comments.html' %}
+    </div>
 
     {# ── New top-level comment form ───────────────────────────────────────── #}
     <hr>
-    <form method="post" action="{% url 'create_task_comment' project.project_id task.pk %}">
+    <form method="post" action="{% url 'create_task_comment' project.project_id task.pk %}"
+          hx-post="{% url 'create_task_comment' project.project_id task.pk %}"
+          hx-target="#commentThread" hx-swap="innerHTML"
+          hx-on::after-request="if (event.detail.successful) this.reset();">
       {% csrf_token %}
       <div class="mb-2">
         <textarea name="body" class="form-control" rows="3"

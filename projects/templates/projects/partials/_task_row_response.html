@@ -1,0 +1,16 @@
+{% comment %}
+HTMX response body for task-row actions (#1 status, #3 assign, #5 due-date).
+
+  row_task        — the primary task whose <tr> replaces the hx-target
+  oob_tasks       — additional tasks to swap out-of-band (cascade ripple, #5);
+                    empty for the single-row actions
+  primary_is_gate — is_milestone_gate_candidate for the primary row
+
+Shared row context (is_assigned_pm, user_task_role, role, task_status_choices,
+project) is inherited by the includes below and overridden per-row where needed.
+{% endcomment %}
+{% include 'projects/partials/_task_row.html' with task=row_task is_milestone_gate_candidate=primary_is_gate oob=False %}
+{% for t in oob_tasks %}
+{% include 'projects/partials/_task_row.html' with task=t is_milestone_gate_candidate=False oob=True %}
+{% endfor %}
+{% include 'projects/partials/_hx_messages.html' %}

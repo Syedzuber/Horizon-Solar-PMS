@@ -1,0 +1,35 @@
+{% comment %}
+Assign-Task form fields — shared by the standalone page (task_assign_form.html,
+used by both #3 task_assign and #4 task_assign_design_head as the no-JS fallback)
+and the #4 modal (task_assign_design_head_modal.html). Expects `task` and
+`candidates` in context. Identical markup to the original standalone body.
+{% endcomment %}
+<dl class="row mb-3">
+  <dt class="col-sm-4">Task</dt>
+  <dd class="col-sm-8">{{ task.task_name }}</dd>
+  <dt class="col-sm-4">Role</dt>
+  <dd class="col-sm-8">{{ task.assigned_role }}</dd>
+  <dt class="col-sm-4">Current</dt>
+  <dd class="col-sm-8">
+    {% if task.assigned_to %}
+      {{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
+    {% else %}
+      <span class="text-muted">Unassigned</span>
+    {% endif %}
+  </dd>
+</dl>
+
+<div class="mb-3">
+  <label for="assigned_to" class="form-label fw-semibold">Assign to</label>
+  <select name="assigned_to" id="assigned_to" class="form-select">
+    <option value="">— Unassign —</option>
+    {% for person in candidates %}
+      <option value="{{ person.pk }}"
+        {% if task.assigned_to and task.assigned_to.pk == person.pk %}selected{% endif %}>
+        {{ person.user.get_full_name|default:person.user.username }}
+      </option>
+    {% empty %}
+      <option disabled>No active {{ task.assigned_role }} users found</option>
+    {% endfor %}
+  </select>
+</div>

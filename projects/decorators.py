@@ -11,6 +11,10 @@ ROLE_DASHBOARD = {
     'Admin':         '/dashboard/admin/',
     'System Admin':  '/sub-admin/projects/',
     'PM':            '/dashboard/pm/',
+    # Coordinators reuse the PM dashboard (scoped to their coordinated projects).
+    # Without this entry the role fell back silently to the Admin dashboard — a
+    # role-inappropriate-data-exposure risk, not a cosmetic bug.
+    'Project Coordinator': '/dashboard/pm/',
     'Site Engineer': '/dashboard/site-engineer/',
     'Design':        '/dashboard/design/',
     'Finance':       '/dashboard/finance/',

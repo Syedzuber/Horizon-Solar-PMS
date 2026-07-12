@@ -1,0 +1,8 @@
+{% comment %}
+HTMX response for #7 upload / #8 delete: swaps the attachment list into
+#attachmentList, updates the header count badge out-of-band, and surfaces the
+success/warning/error flash inline.
+{% endcomment %}
+{% include 'projects/partials/_task_attachments.html' %}
+<span id="attachCountBadge" hx-swap-oob="true">{% if attachments %}<span class="badge bg-secondary ms-1">{{ attachments|length }}</span>{% endif %}</span>
+{% include 'projects/partials/_hx_messages.html' %}

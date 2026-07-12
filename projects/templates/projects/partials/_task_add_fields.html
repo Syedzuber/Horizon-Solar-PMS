@@ -1,0 +1,55 @@
+{% comment %}
+Add-Task form fields — single source of truth shared by the standalone page
+(task_add_form.html) and the modal (task_add_modal.html). Expects `form`
+(TaskAddForm) and `project` in context. Renders non-field errors + the four
+fields with inline Bootstrap validation, identical to the original standalone
+markup.
+{% endcomment %}
+{% if form.non_field_errors %}
+  <div class="alert alert-danger">
+    {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+  </div>
+{% endif %}
+
+<div class="mb-3">
+  <label class="form-label">Phase <span class="text-danger">*</span></label>
+  <select name="phase" class="form-select{% if form.phase.errors %} is-invalid{% endif %}">
+    <option value="">— Select phase —</option>
+    {% for phase in form.fields.phase.queryset %}
+      <option value="{{ phase.pk }}"
+        {% if form.phase.value|stringformat:"s" == phase.pk|stringformat:"s" %}selected{% endif %}>
+        Phase {{ phase.phase_order }}: {{ phase.phase_name }}
+      </option>
+    {% endfor %}
+  </select>
+  {% for e in form.phase.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+</div>
+
+<div class="mb-3">
+  <label class="form-label">Task Name <span class="text-danger">*</span></label>
+  <input type="text" name="task_name" maxlength="200"
+         class="form-control{% if form.task_name.errors %} is-invalid{% endif %}"
+         value="{{ form.task_name.value|default:'' }}">
+  {% for e in form.task_name.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+</div>
+
+<div class="mb-3">
+  <label class="form-label">Assigned Role <span class="text-danger">*</span></label>
+  <select name="assigned_role" class="form-select{% if form.assigned_role.errors %} is-invalid{% endif %}">
+    {% for val, label in form.fields.assigned_role.choices %}
+      <option value="{{ val }}"
+        {% if form.assigned_role.value == val %}selected{% endif %}>
+        {{ label }}
+      </option>
+    {% endfor %}
+  </select>
+  {% for e in form.assigned_role.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+</div>
+
+<div class="mb-4">
+  <label class="form-label">Due Date</label>
+  <input type="date" name="due_date"
+         class="form-control{% if form.due_date.errors %} is-invalid{% endif %}"
+         value="{{ form.due_date.value|default:'' }}">
+  {% for e in form.due_date.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+</div>

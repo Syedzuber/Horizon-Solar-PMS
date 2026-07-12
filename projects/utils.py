@@ -48,7 +48,10 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
     Internal tasks chain sequentially; external tasks mirror the current
     internal chain position (run in parallel, not blocking the chain).
     Logs every changed due_date in DueDateChangeLog.
-    Returns the number of tasks whose due_date changed.
+    Returns a (count, changed_tasks) tuple: the number of tasks whose due_date
+    changed, and the list of those Task instances (with their new due_date already
+    applied in memory). The task list is consumed by the HTMX due-date endpoint to
+    render out-of-band row swaps for the cascade ripple — no cascade math changes.
     """
     # import inside function to avoid circular import at module level
     from .models import Task, DueDateChangeLog
@@ -109,7 +112,7 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
             for t, old_d, new_d in changes
         ])
 
-    return len(changes)
+    return len(changes), [t for t, _old, _new in changes]
 
 
 def calculate_due_dates(project):

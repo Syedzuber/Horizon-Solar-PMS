@@ -1,0 +1,33 @@
+{% comment %}
+#6 Add-Task modal content — rendered into #taskFormModalContent (the .modal-content
+div) on hx-get, and re-rendered here with inline field errors on a failed hx-post so
+the modal stays open. Non-HTMX requests never reach this template (they get the full
+standalone task_add_form.html). `blocked` is set when the project isn't Active.
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title">Add Task — {{ project.project_id }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+{% if blocked %}
+  <div class="modal-body">
+    {% for message in messages %}
+      <div class="alert alert-{{ message.tags|default:'warning' }} mb-0" role="alert">{{ message }}</div>
+    {% endfor %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Close</button>
+  </div>
+{% else %}
+  <form method="post" action="{% url 'task_add' project.project_id %}" novalidate
+        hx-post="{% url 'task_add' project.project_id %}"
+        hx-target="#taskFormModalContent" hx-swap="innerHTML">
+    {% csrf_token %}
+    <div class="modal-body">
+      {% include 'projects/partials/_task_add_fields.html' %}
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+      <button type="submit" class="btn btn-primary btn-sm">Add Task</button>
+    </div>
+  </form>
+{% endif %}

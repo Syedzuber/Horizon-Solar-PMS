@@ -45,6 +45,7 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only
     path('projects/<str:project_id>/enable-cascade/',              views.enable_cascade_scheduling,  name='enable_cascade_scheduling'), # PM only, irreversible, POST only
+    path('projects/<str:project_id>/coordinators/',                views.assign_coordinators,        name='assign_coordinators'),        # PM or coordinator; manages coordinators M2M
 
     # ---------------------------------------------------------------------------
     # Vendors — SCM and Admin only

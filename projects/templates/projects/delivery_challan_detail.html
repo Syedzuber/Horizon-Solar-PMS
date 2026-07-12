@@ -31,7 +31,7 @@
           </button>
         {% endif %}
         {# Raise Issue — available to SE and SCM who are actively receiving/managing this DC #}
-        {% if role == 'Site Engineer' or role == 'SCM' or role == 'PM' or role == 'Admin' %}
+        {% if role == 'Site Engineer' or role == 'SCM' or role == 'PM' or role == 'Project Coordinator' or role == 'Admin' %}
           <button type="button" class="btn btn-outline-danger btn-sm"
                   data-bs-toggle="modal" data-bs-target="#raiseDcIssueModal">
             Raise Issue

@@ -1,0 +1,27 @@
+{% comment %}
+#6 Add-Task success response. The POST targets #taskFormModalContent (which is
+cleared as the modal closes via the taskFormDone HX-Trigger); all real updates
+are out-of-band:
+  - the chosen phase's <tbody> is re-rendered from server truth (phase.tasks in
+    task_order) — this correctly handles the empty→first-task transition and
+    keeps ordering, rather than blindly appending. Wrapped in <template> so the
+    table rows survive HTML parsing (htmx extracts OOB elements from templates).
+  - that phase's task-count header is swapped from the freshly re-queried count.
+Expects: phase, phase_tasks, phase_count, gate_task_pk, plus the shared row
+context (is_assigned_pm, user_task_role, role, project, task_status_choices).
+{% endcomment %}
+<template>
+  <tbody id="phase-tasks-{{ phase.pk }}" hx-swap-oob="true">
+    {% for task in phase_tasks %}
+      {% if task.pk == gate_task_pk %}
+        {% include 'projects/partials/_task_row.html' with is_milestone_gate_candidate=True %}
+      {% else %}
+        {% include 'projects/partials/_task_row.html' %}
+      {% endif %}
+    {% empty %}
+      <tr><td colspan="6" class="text-center text-muted py-2 small">No tasks in this phase.</td></tr>
+    {% endfor %}
+  </tbody>
+</template>
+<small id="phase-count-{{ phase.pk }}" hx-swap-oob="true" class="text-muted">{{ phase_count }} task{{ phase_count|pluralize }}</small>
+{% include 'projects/partials/_hx_messages.html' %}

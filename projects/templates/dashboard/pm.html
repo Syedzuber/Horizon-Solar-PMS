@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}PM Dashboard — SolarPMS{% endblock %}
+{% block title %}{{ role_label|default:"PM" }} Dashboard — SolarPMS{% endblock %}
 
 {% block content %}
 <style>
@@ -85,7 +85,15 @@
 
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h5 class="mb-0 fw-semibold">My Projects</h5>
-  <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>
+  {% comment %}
+     Create Project is PM-only (project_create @role_required(['PM'])). Coordinator
+     create-project authority is undecided (audit Section 5), so the button is hidden
+     for coordinators to avoid a guaranteed 403 — this is not a decision, it is
+     flagged for Zuber in the Prompt 2 report.
+  {% endcomment %}
+  {% if user_role == 'PM' %}
+    <a href="{% url 'project_create' %}" class="btn btn-primary btn-sm">+ New Project</a>
+  {% endif %}
 </div>
 
 {% if not projects_with_progress %}

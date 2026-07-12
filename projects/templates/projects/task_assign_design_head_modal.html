@@ -1,0 +1,21 @@
+{% comment %}
+#4 Assign-Design-Head modal content — rendered into #taskFormModalContent on
+hx-get, submitted via hx-post. Non-HTMX requests get the full standalone
+task_assign_form.html instead. Expects `project`, `task`, `candidates`.
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title">Assign Task</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form method="post" action="{% url 'task_assign_design_head' project.project_id task.pk %}"
+      hx-post="{% url 'task_assign_design_head' project.project_id task.pk %}"
+      hx-target="#taskFormModalContent" hx-swap="innerHTML">
+  {% csrf_token %}
+  <div class="modal-body">
+    {% include 'projects/partials/_task_assign_fields.html' %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+    <button type="submit" class="btn btn-primary btn-sm">Save</button>
+  </div>
+</form>

@@ -47,6 +47,16 @@ class Project(models.Model):
         related_name='design_projects',
         limit_choices_to={'role': 'Design'},
     )
+    # Additive-only: Coordinators share the PM's execution authority on this project.
+    # This NEVER replaces assigned_pm — see permissions.user_can_manage_project().
+    # M2M to UserProfile (matching assigned_pm's type) so ownership comparisons stay
+    # on one canonical pattern. Assign via .add()/.remove(), never overwrite assigned_pm.
+    coordinators              = models.ManyToManyField(
+        'UserProfile',
+        related_name='coordinated_projects',
+        blank=True,
+        limit_choices_to={'role': 'Project Coordinator'},
+    )
     survey_date               = models.DateField(blank=True, null=True)
     target_commissioning_date = models.DateField(blank=True, null=True)
     status                    = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
@@ -266,10 +276,11 @@ class UserProfile(models.Model):
     """Extends Django's User with a role and phone number. One profile per user."""
 
     ROLE_CHOICES = [
-        ('Admin',         'Admin'),
-        ('System Admin',  'System Admin'),
-        ('PM',            'PM'),
-        ('Site Engineer', 'Site Engineer'),
+        ('Admin',               'Admin'),
+        ('System Admin',        'System Admin'),
+        ('PM',                  'PM'),
+        ('Project Coordinator', 'Project Coordinator'),
+        ('Site Engineer',       'Site Engineer'),
         ('Design',        'Design'),
         ('Finance',       'Finance'),
         ('SCM',           'SCM'),

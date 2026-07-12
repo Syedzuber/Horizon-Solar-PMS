@@ -33,7 +33,7 @@ from .models import (
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
-from .permissions import user_can_manage_project
+from .permissions import user_can_manage_project, project_managers
 from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
 
 logger = logging.getLogger(__name__)
@@ -202,8 +202,14 @@ def tasks_drill_down(request, filter_type):
         due_date__isnull=False,
     ).select_related('phase__project')
 
-    if role == 'PM':
-        base_qs = base_qs.filter(phase__project__assigned_pm=profile)
+    if role in ('PM', 'Project Coordinator'):
+        # Coordinators are scoped exactly like a PM, but to the projects they
+        # coordinate. For a pure PM the coordinators clause matches nothing, so
+        # this is identical to the old assigned_pm-only filter (additive-only).
+        base_qs = base_qs.filter(
+            Q(phase__project__assigned_pm=profile) |
+            Q(phase__project__coordinators=profile)
+        ).distinct()
     elif role == 'Design':
         # Union: FK-owned projects (assigned_design) plus projects where this
         # Design user has been given a task by the Design lead — task-driven
@@ -252,25 +258,39 @@ def tasks_drill_down(request, filter_type):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def dashboard_pm(request):
     """
     PM dashboard: summary cards + per-project progress + task lists.
-    All queries scoped to the PM's own projects only.
-    Access: PM only.
+    Scoped to the projects the user manages — projects they are assigned PM of,
+    plus (for a Project Coordinator) projects they coordinate.
+    Access: PM and Project Coordinator.
     TODO: the per-project loop runs multiple queries per project — consider
     annotating with Subquery or moving to prefetch_related before scaling.
     """
     pm_profile = request.user.profile
 
+    # Projects this user manages: own PM projects OR projects they coordinate.
+    # For a pure PM (no coordinator rows) this equals their assigned projects
+    # exactly, so PM behaviour is unchanged — this is strictly additive.
+    managed_project_ids = list(
+        Project.objects.filter(
+            Q(assigned_pm=pm_profile) | Q(coordinators=pm_profile)
+        ).values_list('id', flat=True).distinct()
+    )
+
+    # Role-appropriate label for the dashboard heading (PM vs Project Coordinator).
+    user_role  = pm_profile.role
+    role_label = 'Project Coordinator' if user_role == 'Project Coordinator' else 'PM'
+
     # Summary card counts — each is a single COUNT query
     active_projects = Project.objects.filter(
-        assigned_pm=pm_profile,
+        id__in=managed_project_ids,
         status__in=['Active', 'In Progress'],
     ).count()
 
     due_today = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         due_date=date.today(),
         due_date__isnull=False,
         task_type=Task.INTERNAL,
@@ -278,18 +298,18 @@ def dashboard_pm(request):
     ).count()
 
     blocked_tasks = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         status='Blocked',
     ).count()
 
     pending_approvals = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         assigned_role=Task.PM,
         status='Not Started',
     ).count()
 
     external_pending = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         task_type=Task.EXTERNAL,
         status__in=['Not Started', 'In Progress'],
     ).count()
@@ -297,14 +317,14 @@ def dashboard_pm(request):
     # Draft projects assigned to this PM (Zoho-created or manually created and not yet activated)
     draft_projects = list(
         Project.objects.filter(
-            assigned_pm=pm_profile,
+            id__in=managed_project_ids,
             status='Draft',
             is_deleted=False,
         ).order_by('-created_at')
     )
 
     projects_with_progress = []
-    for project in Project.objects.filter(assigned_pm=pm_profile, status__in=['Active', 'In Progress'], is_deleted=False):
+    for project in Project.objects.filter(id__in=managed_project_ids, status__in=['Active', 'In Progress'], is_deleted=False):
         try:
             project.boq_status = project.boq.status
             project.boq_url    = f'/projects/{project.project_id}/boq/'
@@ -407,7 +427,7 @@ def dashboard_pm(request):
     if projects_with_progress:
         _all_dc_issues = list(
             Issue.objects.filter(
-                delivery_challan__project__assigned_pm=pm_profile,
+                delivery_challan__project_id__in=managed_project_ids,
                 status__in=[Issue.OPEN, Issue.IN_PROGRESS],
             )
             .select_related('project', 'delivery_challan', 'raised_by__user')
@@ -421,43 +441,43 @@ def dashboard_pm(request):
             row['delivery_issues'] = _dc_issues_by_project.get(row['project'].project_id, [])
 
     due_today_tasks = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         due_date=date.today(), due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
     ).select_related('phase__project', 'assigned_to').order_by('phase__project__project_id')
 
     blocked_tasks_list = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         status='Blocked',
     ).select_related('phase__project')
 
     pending_approvals_list = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         assigned_role=Task.PM,
         status='Not Started',
     ).select_related('phase__project')
 
     external_pending_list = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         task_type=Task.EXTERNAL,
         status__in=['Not Started', 'In Progress'],
     ).select_related('phase__project')
 
     team_due_today = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         due_date=date.today(), due_date__isnull=False,
         status__in=['Not Started', 'In Progress'],
     ).exclude(assigned_role=Task.PM).select_related('phase__project')
 
     seven_days_ago = date.today() - timedelta(days=7)
     due_date_changes = DueDateChangeLog.objects.filter(
-        task__phase__project__assigned_pm=pm_profile,
+        task__phase__project_id__in=managed_project_ids,
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
 
     _pm_task_base = Task.objects.filter(
-        phase__project__assigned_pm=pm_profile,
+        phase__project_id__in=managed_project_ids,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
@@ -490,6 +510,8 @@ def dashboard_pm(request):
         'today':                  date.today(),
         'all_profiles':           UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
         'design_candidates':      UserProfile.objects.filter(role='Design', is_active=True).select_related('user'),
+        'user_role':              user_role,
+        'role_label':             role_label,
     })
 
 
@@ -1662,7 +1684,7 @@ def project_delete(request, project_id):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def project_edit(request, project_id):
     """
     Edit a Draft project's fields. Active+ projects are locked — edit is blocked
@@ -1695,7 +1717,7 @@ def project_edit(request, project_id):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def project_activate(request, project_id):
     """
     Activate a Draft project: sets status=Active, stamps activated_at, assigns
@@ -1760,7 +1782,7 @@ def project_activate(request, project_id):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def project_recalculate_dates(request, project_id):
     """
     Recalculate all task due dates from project.activated_at using the duration_days chain.
@@ -1832,7 +1854,7 @@ def enable_cascade_scheduling(request, project_id):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def task_add(request, project_id):
     """
     Add a single manual task to an active project. Only allowed when status=Active.
@@ -1844,8 +1866,13 @@ def task_add(request, project_id):
     if not _pm_owns_project(request, project):
         raise Http404
 
+    hx = _is_hx(request)
+
     if project.status != 'Active':
         messages.warning(request, 'Tasks can only be added to active projects.')
+        if hx:
+            # Never redirect an hx request into the modal — surface the warning inside it.
+            return render(request, 'projects/task_add_modal.html', {'project': project, 'blocked': True})
         return redirect('project_overview', project_id=project.project_id)
 
     if request.method == 'POST':
@@ -1862,14 +1889,163 @@ def task_add(request, project_id):
                 due_date=cd['due_date'],
             )
             messages.success(request, f"Task '{cd['task_name']}' added successfully.")
+            if hx:
+                # New row(s) + updated count swapped OOB into the chosen phase; modal closes.
+                return _render_task_add_success_hx(request, project, phase)
             return redirect('project_overview', project_id=project.project_id)
+        # Invalid POST — re-render the modal body with inline field errors (modal stays open).
+        if hx:
+            return render(request, 'projects/task_add_modal.html', {'form': form, 'project': project})
     else:
         form = TaskAddForm(project=project)
+        if hx:
+            # hx-get → load the form into the modal instead of the standalone page.
+            return render(request, 'projects/task_add_modal.html', {'form': form, 'project': project})
 
     return render(request, 'projects/task_add_form.html', {
         'form':    form,
         'project': project,
     })
+
+
+# ---------------------------------------------------------------------------
+# HTMX partial-response helpers (reload elimination — Prompt B)
+#
+# Each helper re-derives exactly the per-row / per-section context the full-page
+# render uses, so a single swapped fragment is byte-identical to what the page
+# would have produced. None of these change server-side behaviour for a normal
+# (non-HTMX) request — the callers branch on _is_hx() and fall through to the
+# original redirect/full-render path when HX-Request is absent.
+# ---------------------------------------------------------------------------
+
+def _is_hx(request):
+    """True when the request was issued by HTMX (so we return a partial, not a redirect)."""
+    return request.headers.get('HX-Request') == 'true'
+
+
+def _gate_task_pk(project):
+    """PK of the first task of the first phase — the only row that can carry the
+    BD milestone-amount gate. Reproduces the template's
+    `forloop.parentloop.first and forloop.first` check when a single row is
+    re-rendered outside the phase loop."""
+    first_phase = (
+        ProjectPhase.objects.filter(project=project).order_by('phase_order').first()
+    )
+    if not first_phase:
+        return None
+    first_task = Task.objects.filter(phase=first_phase).order_by('task_order').first()
+    return first_task.pk if first_task else None
+
+
+def _render_task_row_hx(request, project, task, oob_tasks=None):
+    """Render the HTMX task-row response for project_overview (#1/#3/#5):
+    the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
+    rows, and the OOB flash-message fragment. Recomputes the same per-row
+    permission context the page uses so role-gating is identical to a full render."""
+    profile = getattr(request.user, 'profile', None)
+    role    = getattr(profile, 'role', None)
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
+    is_assigned_pm = _pm_owns_project(request, project)
+    gate_pk        = _gate_task_pk(project)
+    return render(request, 'projects/partials/_task_row_response.html', {
+        'project':             project,
+        'row_task':            task,
+        'oob_tasks':           oob_tasks or [],
+        'primary_is_gate':     task.pk == gate_pk,
+        'is_assigned_pm':      is_assigned_pm,
+        'user_task_role':      user_task_role,
+        'role':                role,
+        'task_status_choices': Task.STATUS_CHOICES,
+    })
+
+
+def _render_task_status_hx(request, project, task):
+    """Render the HTMX status-block response for the task-detail page (#2)."""
+    profile = getattr(request.user, 'profile', None)
+    return render(request, 'projects/partials/_task_detail_status_response.html', {
+        'project':             project,
+        'task':                task,
+        'is_assignee':         task.assigned_to is not None and task.assigned_to == profile,
+        'task_status_choices': Task.STATUS_CHOICES,
+    })
+
+
+def _render_attachments_hx(request, project, task):
+    """Render the HTMX attachment-list response (#7 upload / #8 delete). Uses the
+    same is_deleted=False filter the task-detail page uses so the swapped list is
+    identical to a full render."""
+    profile = getattr(request.user, 'profile', None)
+    return render(request, 'projects/partials/_task_attachments_response.html', {
+        'project':      project,
+        'task':         task,
+        'attachments':  task.attachments.filter(is_deleted=False),
+        'user_profile': profile,
+    })
+
+
+def _render_comments_hx(request, project, task):
+    """Render the HTMX comment-thread response (#9). Mirrors the task-detail
+    queryset (top-level comments with prefetched replies)."""
+    profile = getattr(request.user, 'profile', None)
+    task_comments = (
+        Comment.objects.filter(task=task, parent=None)
+        .select_related('author__user')
+        .prefetch_related(
+            Prefetch('replies', queryset=Comment.objects.select_related('author__user'))
+        )
+    )
+    return render(request, 'projects/partials/_task_comments_response.html', {
+        'project':       project,
+        'task':          task,
+        'task_comments': task_comments,
+        'user_profile':  profile,
+    })
+
+
+def _render_task_assign_design_success_hx(request, project, task):
+    """#4 success: OOB-swap the updated row into its existing #task-row-<pk> and
+    close the modal (taskFormDone trigger). Recomputes the same per-row context
+    the page uses, from the requesting user's perspective (a Design Head need not
+    be the PM)."""
+    profile = getattr(request.user, 'profile', None)
+    role    = getattr(profile, 'role', None)
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    resp = render(request, 'projects/partials/_task_row_modal_success.html', {
+        'project':             project,
+        'row_task':            task,
+        'primary_is_gate':     task.pk == _gate_task_pk(project),
+        'is_assigned_pm':      _pm_owns_project(request, project),
+        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
+        'role':                role,
+        'task_status_choices': Task.STATUS_CHOICES,
+    })
+    resp['HX-Trigger'] = 'taskFormDone'
+    return resp
+
+
+def _render_task_add_success_hx(request, project, phase):
+    """#6 success: OOB-swap the chosen phase's <tbody> and task-count header from
+    freshly-queried server truth, and close the modal (taskFormDone trigger).
+    phase.tasks uses Task Meta ordering ['task_order'] so the re-render matches the
+    page order and correctly places the new row."""
+    profile = getattr(request.user, 'profile', None)
+    role    = getattr(profile, 'role', None)
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    phase_tasks = list(phase.tasks.all())
+    resp = render(request, 'projects/partials/_task_add_success.html', {
+        'project':             project,
+        'phase':               phase,
+        'phase_tasks':         phase_tasks,
+        'phase_count':         len(phase_tasks),
+        'gate_task_pk':        _gate_task_pk(project),
+        'is_assigned_pm':      _pm_owns_project(request, project),
+        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
+        'role':                role,
+        'task_status_choices': Task.STATUS_CHOICES,
+    })
+    resp['HX-Trigger'] = 'taskFormDone'
+    return resp
 
 
 @login_required
@@ -1889,6 +2065,11 @@ def task_status_update(request, project_id, task_id):
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     if task.assigned_to is None:
+        # HTMX: revert the (disabled-select edge) change and surface the error inline
+        # instead of rendering raw JSON into the row target.
+        if _is_hx(request):
+            messages.error(request, 'Task is unassigned. Assign it before changing status.')
+            return _render_task_row_hx(request, project, task)
         return JsonResponse({
             'success': False,
             'error': 'Task is unassigned. Assign it before changing status.'
@@ -1907,12 +2088,17 @@ def task_status_update(request, project_id, task_id):
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(user_role, user_role)
 
     if normalised_user_role != task.assigned_role and not is_pm:
+        if _is_hx(request):
+            messages.error(request, 'You do not have permission to change this task.')
+            return _render_task_row_hx(request, project, task)
         return HttpResponseForbidden()
 
     new_status = request.POST.get('status', '').strip()
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
     if new_status not in valid_statuses:
         messages.error(request, 'Invalid status value.')
+        if _is_hx(request):
+            return _render_task_row_hx(request, project, task)
         return redirect('project_overview', project_id=project.project_id)
 
     # State machine: defines allowed next states for each current state.
@@ -1930,6 +2116,8 @@ def task_status_update(request, project_id, task_id):
             request,
             f"Cannot move task from '{task.status}' to '{new_status}'."
         )
+        if _is_hx(request):
+            return _render_task_row_hx(request, project, task)
         return redirect('project_overview', project_id=project.project_id)
 
     # Finance can supply due_date inline when switching to In Progress — save before the guard
@@ -1945,6 +2133,8 @@ def task_status_update(request, project_id, task_id):
     # Server-side guard: In Progress requires a due date
     if new_status == Task.IN_PROGRESS and not task.due_date:
         messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        if _is_hx(request):
+            return _render_task_row_hx(request, project, task)
         return redirect('project_overview', project_id=project.project_id)
 
     update_kwargs = {'status': new_status}
@@ -1962,6 +2152,8 @@ def task_status_update(request, project_id, task_id):
         block_issue_title = request.POST.get('block_issue_title', '').strip()
         if not block_issue_title:
             messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            if _is_hx(request):
+                return _render_task_row_hx(request, project, task)
             next_url = request.POST.get('next', '')
             if next_url and not _urlparse(next_url).netloc:
                 return redirect(next_url)
@@ -2020,11 +2212,24 @@ def task_status_update(request, project_id, task_id):
             if _vr_str:
                 _ms_update['variance_reason'] = _vr_str
             try:
-                PaymentMilestone.objects.filter(
+                _ms_updated = PaymentMilestone.objects.filter(
                     project=project,
                     milestone_name=_ms_label,
                     status__in=['Pending', 'Invoiced'],
                 ).update(**_ms_update)
+                # Attribution: this Finance-confirmation task can be completed by the PM
+                # OR a Project Coordinator (drizzle-down authority), which auto-flips the
+                # milestone to Received. Log WHO did it — by name and role — so Finance can
+                # identify the specific person, never attributed generically to "PM".
+                if _ms_updated:
+                    _actor = request.user.profile
+                    _actor_name = _actor.user.get_full_name() or _actor.user.username
+                    log_activity(
+                        project, _actor,
+                        f"Milestone {_ms_label} auto-marked Received via completion of "
+                        f"Finance task '{task.task_name}' by {_actor_name} ({_actor.role})",
+                        entity_type='Milestone',
+                    )
             except Exception:
                 pass  # Non-critical — never block the task update
 
@@ -2033,8 +2238,7 @@ def task_status_update(request, project_id, task_id):
         if new_status == Task.DONE and task.is_payment_milestone:
             seen_pks = set()
             milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            if project.assigned_pm:
-                milestone_recipients.append(project.assigned_pm)
+            milestone_recipients += project_managers(project)
             milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
             for recipient in milestone_recipients:
                 if recipient.pk in seen_pks:
@@ -2061,6 +2265,12 @@ def task_status_update(request, project_id, task_id):
                     related_project=project,
                     actor=request.user.profile,
                 )
+
+    # HTMX success: swap just this row with its new status/completed date. task was
+    # updated via filter().update() so refresh the in-memory copy before rendering.
+    if _is_hx(request):
+        task.refresh_from_db()
+        return _render_task_row_hx(request, project, task)
 
     # Honour the ?next= redirect if it's a local URL (netloc empty = same domain)
     next_url = request.POST.get('next', None)
@@ -2099,6 +2309,8 @@ def task_detail_status_update(request, project_id, task_id):
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
     if new_status not in valid_statuses:
         messages.error(request, 'Invalid status value.')
+        if _is_hx(request):
+            return _render_task_status_hx(request, project, task)
         return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     VALID_TRANSITIONS = {
@@ -2111,6 +2323,8 @@ def task_detail_status_update(request, project_id, task_id):
     allowed = VALID_TRANSITIONS.get(task.status, set())
     if new_status not in allowed:
         messages.error(request, f"Cannot move task from '{task.status}' to '{new_status}'.")
+        if _is_hx(request):
+            return _render_task_status_hx(request, project, task)
         return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     # In Progress requires a due date — Finance users may supply one inline
@@ -2125,6 +2339,8 @@ def task_detail_status_update(request, project_id, task_id):
 
     if new_status == Task.IN_PROGRESS and not task.due_date:
         messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        if _is_hx(request):
+            return _render_task_status_hx(request, project, task)
         return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     update_kwargs = {'status': new_status}
@@ -2139,6 +2355,8 @@ def task_detail_status_update(request, project_id, task_id):
         block_issue_title = request.POST.get('block_issue_title', '').strip()
         if not block_issue_title:
             messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            if _is_hx(request):
+                return _render_task_status_hx(request, project, task)
             return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
@@ -2192,19 +2410,28 @@ def task_detail_status_update(request, project_id, task_id):
             if _vr_str:
                 _ms_update['variance_reason'] = _vr_str
             try:
-                PaymentMilestone.objects.filter(
+                _ms_updated = PaymentMilestone.objects.filter(
                     project=project,
                     milestone_name=_ms_label,
                     status__in=['Pending', 'Invoiced'],
                 ).update(**_ms_update)
+                # Attribution (see task_status_update): record the specific person who
+                # completed the Finance-confirmation task and thereby flipped the milestone.
+                if _ms_updated:
+                    _actor_name = profile.user.get_full_name() or profile.user.username
+                    log_activity(
+                        project, profile,
+                        f"Milestone {_ms_label} auto-marked Received via completion of "
+                        f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
+                        entity_type='Milestone',
+                    )
             except Exception:
                 pass
 
         if new_status == Task.DONE and task.is_payment_milestone:
             seen_pks = set()
             milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            if project.assigned_pm:
-                milestone_recipients.append(project.assigned_pm)
+            milestone_recipients += project_managers(project)
             milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
             for recipient in milestone_recipients:
                 if recipient.pk in seen_pks:
@@ -2232,11 +2459,15 @@ def task_detail_status_update(request, project_id, task_id):
                     actor=profile,
                 )
 
+    if _is_hx(request):
+        task.refresh_from_db()
+        return _render_task_status_hx(request, project, task)
+
     return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def task_assign(request, project_id, task_id):
     """
     Assign (or clear) the individual user on a task. Candidate list is filtered
@@ -2300,6 +2531,14 @@ def task_assign(request, project_id, task_id):
                 )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
+
+        if _is_hx(request):
+            task.refresh_from_db()
+            resp = _render_task_row_hx(request, project, task)
+            # Fires the "taskAssigned" event so the shared Assign modal closes.
+            resp['HX-Trigger'] = 'taskAssigned'
+            return resp
+
         return redirect('project_overview', project_id=project.project_id)
 
     return render(request, 'projects/task_assign_form.html', {
@@ -2370,7 +2609,20 @@ def task_assign_design_head(request, project_id, task_id):
                 )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
+
+        if _is_hx(request):
+            task.refresh_from_db()
+            return _render_task_assign_design_success_hx(request, project, task)
+
         return redirect('project_overview', project_id=project.project_id)
+
+    if _is_hx(request):
+        # hx-get → load the assign form into the shared modal instead of the standalone page.
+        return render(request, 'projects/task_assign_design_head_modal.html', {
+            'project':    project,
+            'task':       task,
+            'candidates': candidates,
+        })
 
     return render(request, 'projects/task_assign_form.html', {
         'project':    project,
@@ -2405,6 +2657,8 @@ def task_set_due_date(request, project_id, task_id):
 
         if project.cascade_scheduling:
             messages.error(request, 'Due dates are managed automatically by cascading scheduling.')
+            if _is_hx(request):
+                return _render_task_row_hx(request, project, task)
             return redirect('project_overview', project_id=project.project_id)
 
         # Non-PM: save this task's date only, no cascade ripple
@@ -2422,15 +2676,18 @@ def task_set_due_date(request, project_id, task_id):
             task.save()
             log_activity(project, profile, f"Cleared due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
             messages.success(request, 'Due date cleared.')
+        if _is_hx(request):
+            return _render_task_row_hx(request, project, task)
         return redirect('project_overview', project_id=project.project_id)
 
     # PM path — ripple only when cascade is ON
+    changed_tasks = []
     date_str = request.POST.get('due_date', '').strip()
     if date_str:
         try:
             new_date = date.fromisoformat(date_str)
             if project.cascade_scheduling:
-                count = recalculate_from_task(project, task, new_date, user=request.user)
+                count, changed_tasks = recalculate_from_task(project, task, new_date, user=request.user)
                 messages.success(request, f'Due date updated. {count} task(s) recalculated.')
             else:
                 task.due_date = new_date
@@ -2444,7 +2701,92 @@ def task_set_due_date(request, project_id, task_id):
         task.save()
         messages.success(request, 'Due date cleared.')
         log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
+
+    if _is_hx(request):
+        # Swap the edited row; every other task the cascade actually moved is
+        # swapped out-of-band so the whole ripple updates without a reload.
+        task.refresh_from_db()
+        oob = [t for t in changed_tasks if t.pk != task.pk]
+        return _render_task_row_hx(request, project, task, oob_tasks=oob)
+
     return redirect('project_overview', project_id=project.project_id)
+
+
+@login_required
+def assign_coordinators(request, project_id):
+    """
+    Manage the Project Coordinators on a project (multi-select).
+
+    Coordinators share the PM's execution authority — additive-only, see
+    permissions.user_can_manage_project(). Access is gated on that same capability:
+    a PM (or an existing coordinator) on THIS project may edit the coordinator set.
+
+    Uses M2M .add()/.remove() ONLY — this endpoint never assigns or reads
+    assigned_pm, so PM ownership can never be transferred or lost through it
+    (the Overwrite bug the invariant warns against is impossible here by construction).
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+
+    # Only someone who already manages this project (PM or a coordinator on it) may edit.
+    if not user_can_manage_project(request.user, project):
+        raise Http404
+
+    candidates = (
+        UserProfile.objects
+        .filter(role='Project Coordinator', is_active=True)
+        .select_related('user')
+        .order_by('user__first_name')
+    )
+
+    if request.method == 'POST':
+        selected_ids = {int(v) for v in request.POST.getlist('coordinator_ids') if v.isdigit()}
+        valid_ids    = set(candidates.values_list('pk', flat=True))
+        desired      = selected_ids & valid_ids   # ignore anything not an active PC candidate
+
+        current   = set(project.coordinators.values_list('pk', flat=True))
+        to_add    = desired - current
+        to_remove = current - desired
+
+        # M2M operations ONLY — assigned_pm is never touched.
+        if to_add:
+            project.coordinators.add(*to_add)
+        if to_remove:
+            project.coordinators.remove(*to_remove)
+
+        if to_add or to_remove:
+            actor = request.user.profile
+            log_activity(
+                project, actor,
+                f"Updated project coordinators (added {len(to_add)}, removed {len(to_remove)})",
+                entity_type='Project', entity_id=project.pk,
+            )
+            # In-app notify newly-added coordinators (no WhatsApp template dependency).
+            for _prof in UserProfile.objects.filter(pk__in=to_add).select_related('user'):
+                _name = _prof.user.get_full_name() or _prof.user.username
+                _link = f'/projects/{project.project_id}/overview/'
+                send_notification(
+                    recipient=_prof,
+                    message=(
+                        f'Hi {_name}, you have been added as a Project Coordinator for '
+                        f'{project.customer_name} ({project.project_id}). You now have '
+                        f'execution access to this project.'
+                    ),
+                    channels=['in_app'],
+                    link=_link,
+                    related_project=project,
+                    actor=actor,
+                )
+            messages.success(request, 'Project coordinators updated.')
+        else:
+            messages.info(request, 'No changes to project coordinators.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    current_ids = set(project.coordinators.values_list('pk', flat=True))
+    return render(request, 'projects/assign_coordinators_form.html', {
+        'project':     project,
+        'candidates':  candidates,
+        'current_ids': current_ids,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -2672,9 +3014,7 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
     design_user_name = boq.submitted_by.user.get_full_name() or boq.submitted_by.user.username
     boq_link = f'/projects/{boq.project.project_id}/boq/'
     boq_link_abs = request.build_absolute_uri(boq_link)
-    recipients = []
-    if boq.project.assigned_pm:
-        recipients.append(boq.project.assigned_pm)
+    recipients = list(project_managers(boq.project))
     if acknowledging_profile not in recipients:
         recipients.append(acknowledging_profile)
     scm_name = request.user.get_full_name() or request.user.username
@@ -2768,7 +3108,7 @@ def boq_detail(request, project_id):
     profile = request.user.profile
     role    = profile.role
 
-    if role not in ('Design', 'SCM', 'PM', 'Admin'):
+    if role not in ('Design', 'SCM', 'PM', 'Project Coordinator', 'Admin'):
         return HttpResponseForbidden()
 
     # Get or auto-create BOQ for Design users (non-Design sees 'no BOQ yet' state)
@@ -3033,7 +3373,7 @@ def boq_request_revision(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role != 'PM':
+    if profile.role not in ('PM', 'Project Coordinator'):
         return HttpResponseForbidden()
 
     boq = get_object_or_404(BOQ, project=project)
@@ -3085,7 +3425,7 @@ def boq_history(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role not in ('PM', 'Design', 'SCM', 'Admin'):
+    if profile.role not in ('PM', 'Project Coordinator', 'Design', 'SCM', 'Admin'):
         return HttpResponseForbidden()
 
     boq = get_object_or_404(BOQ, project=project)
@@ -3243,7 +3583,7 @@ def milestone_receive(request, project_id, milestone_pk):
 
 
 @login_required
-@role_required(['PM'])
+@role_required(['PM', 'Project Coordinator'])
 def milestone_create(request, project_id):
     """
     Create the standard M1/M2/M3 milestones for a project if none exist yet.
@@ -3424,8 +3764,7 @@ def confirm_payment_request(request, project_id, request_id):
     boq_desc = pr.boq_item.description if pr.boq_item else '(item)'
     seen_pks = set()
     invoice_recipients = list(UserProfile.objects.filter(role='SCM', is_active=True))
-    if project.assigned_pm:
-        invoice_recipients.append(project.assigned_pm)
+    invoice_recipients += project_managers(project)
     invoice_recipients += list(UserProfile.objects.filter(role='CEO', is_active=True))
     _ip_link = f'/projects/{project.project_id}/overview/'
     _ip_message = (
@@ -4481,6 +4820,8 @@ def upload_task_attachment(request, project_id, task_id):
     files = request.FILES.getlist('files')
     if not files:
         messages.error(request, 'No files selected.')
+        if _is_hx(request):
+            return _render_attachments_hx(request, project, task)
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     try:
@@ -4488,6 +4829,8 @@ def upload_task_attachment(request, project_id, task_id):
         client = get_supabase_client()
     except (ValueError, ImportError) as exc:
         messages.error(request, f"Upload service unavailable. Contact Admin. ({exc})")
+        if _is_hx(request):
+            return _render_attachments_hx(request, project, task)
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     bucket    = settings.SUPABASE_BUCKET
@@ -4537,6 +4880,9 @@ def upload_task_attachment(request, project_id, task_id):
     else:
         messages.error(request, f"No files uploaded. Failed: {', '.join(failures)}")
 
+    if _is_hx(request):
+        return _render_attachments_hx(request, project, task)
+
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
         return redirect(next_url)
@@ -4572,6 +4918,10 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     # Log the task attachment deletion
     log_activity(project, profile, f"Deleted file: {attach.file_name}", entity_type='File', entity_id=attach.pk)
     messages.success(request, f'"{attach.file_name}" deleted.')
+
+    if _is_hx(request):
+        return _render_attachments_hx(request, project, task)
+
     next_url = request.POST.get('next', '')
     if next_url and not _urlparse(next_url).netloc:
         return redirect(next_url)
@@ -4588,14 +4938,15 @@ def _issue_base_qs():
 
 
 def _is_project_pm(profile, project):
-    """Return True if profile is the PM assigned to project. Used for issue close/reopen guards.
+    """Return True if profile manages this project (PM or Project Coordinator).
 
-    The ownership comparison routes through the canonical user_can_manage_project();
-    the role == 'PM' conjunct is preserved deliberately to keep behaviour identical
-    (assigned_pm is not role-constrained at the DB level, so the webhook path can in
-    principle set a non-PM profile — this guard must still exclude that case).
+    Used for issue close/reopen guards. Full drizzle-down: coordinators get the same
+    issue-lifecycle authority as the PM on their projects. The ownership comparison
+    routes through the canonical user_can_manage_project(); the role gate is kept
+    (and now includes Project Coordinator) so the pathological webhook case — where
+    assigned_pm could point to a non-manager profile — is still excluded.
     """
-    return profile.role == 'PM' and user_can_manage_project(profile.user, project)
+    return profile.role in ('PM', 'Project Coordinator') and user_can_manage_project(profile.user, project)
 
 
 @login_required
@@ -4676,15 +5027,18 @@ def create_project_issue(request, project_id):
             related_project=project,
             actor=profile,
         )
-    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
-        send_notification(
-            recipient=project.assigned_pm,
-            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
-            channels=['in_app'],
-            link=f'/issues/{issue.pk}/',
-            related_project=project,
-            actor=profile,
-        )
+    # Notify every project manager (PM + coordinators), skipping the raiser and the
+    # assignee (who are notified through other paths). project_managers() dedupes.
+    for _mgr in project_managers(project):
+        if _mgr != profile and _mgr != assigned_to:
+            send_notification(
+                recipient=_mgr,
+                message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+                channels=['in_app'],
+                link=f'/issues/{issue.pk}/',
+                related_project=project,
+                actor=profile,
+            )
     messages.success(request, f'Issue "{title}" raised successfully.')
     return redirect('project_overview', project_id=project_id)
 
@@ -4769,15 +5123,18 @@ def create_task_issue(request, project_id, task_id):
             related_project=project,
             actor=profile,
         )
-    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
-        send_notification(
-            recipient=project.assigned_pm,
-            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
-            channels=['in_app'],
-            link=f'/issues/{issue.pk}/',
-            related_project=project,
-            actor=profile,
-        )
+    # Notify every project manager (PM + coordinators), skipping the raiser and the
+    # assignee (who are notified through other paths). project_managers() dedupes.
+    for _mgr in project_managers(project):
+        if _mgr != profile and _mgr != assigned_to:
+            send_notification(
+                recipient=_mgr,
+                message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+                channels=['in_app'],
+                link=f'/issues/{issue.pk}/',
+                related_project=project,
+                actor=profile,
+            )
     messages.success(request, f'Issue "{title}" raised.')
     return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -4872,15 +5229,18 @@ def create_delivery_issue(request, project_id, dc_id):
             related_project=project,
             actor=profile,
         )
-    if project.assigned_pm and project.assigned_pm != profile and project.assigned_pm != assigned_to:
-        send_notification(
-            recipient=project.assigned_pm,
-            message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
-            channels=['in_app'],
-            link=f'/issues/{issue.pk}/',
-            related_project=project,
-            actor=profile,
-        )
+    # Notify every project manager (PM + coordinators), skipping the raiser and the
+    # assignee (who are notified through other paths). project_managers() dedupes.
+    for _mgr in project_managers(project):
+        if _mgr != profile and _mgr != assigned_to:
+            send_notification(
+                recipient=_mgr,
+                message=f'Issue "{title}" raised on {project.project_id} — {project.customer_name}.',
+                channels=['in_app'],
+                link=f'/issues/{issue.pk}/',
+                related_project=project,
+                actor=profile,
+            )
     messages.success(request, f'Issue "{title}" raised for DC {challan.dc_number}.')
     return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
@@ -5011,7 +5371,7 @@ def resolve_issue(request, issue_id):
             f'https://horizon-solar-pms-production.up.railway.app{issue_link}'
         )
         notified_pks = {profile.pk}
-        for notify_recipient in [project.assigned_pm, issue.assigned_to, issue.raised_by]:
+        for notify_recipient in project_managers(project) + [issue.assigned_to, issue.raised_by]:
             if notify_recipient and notify_recipient.pk not in notified_pks:
                 notified_pks.add(notify_recipient.pk)
                 send_notification(
@@ -5158,6 +5518,8 @@ def create_task_comment(request, project_id, task_id):
     body = request.POST.get('body', '').strip()
     if not body:
         messages.error(request, 'Comment body is required.')
+        if _is_hx(request):
+            return _render_comments_hx(request, project, task)
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     parent_pk      = request.POST.get('parent', '').strip()
@@ -5167,9 +5529,15 @@ def create_task_comment(request, project_id, task_id):
         parent_comment = get_object_or_404(Comment, pk=parent_pk)
         # Reject replies to replies — only one level of nesting supported
         if parent_comment.parent is not None:
+            if _is_hx(request):
+                messages.error(request, 'Replies to replies are not supported.')
+                return _render_comments_hx(request, project, task)
             return HttpResponse("Replies to replies are not supported.", status=400)
         # Parent must belong to this same task, not another
         if parent_comment.task != task:
+            if _is_hx(request):
+                messages.error(request, 'Parent comment mismatch.')
+                return _render_comments_hx(request, project, task)
             return HttpResponse("Parent comment mismatch.", status=400)
 
     Comment.objects.create(
@@ -5187,6 +5555,9 @@ def create_task_comment(request, project_id, task_id):
         log_activity(project, profile, f"Replied to comment on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
     else:
         log_activity(project, profile, f"Commented on task: {task.task_name}", entity_type='Comment', entity_id=task.pk)
+
+    if _is_hx(request):
+        return _render_comments_hx(request, project, task)
 
     return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -5571,7 +5942,7 @@ def delivery_challan_detail(request, project_id, dc_id):
     profile = request.user.profile
 
     # Only SCM, PM, SE, Admin can view DC pages
-    if profile.role not in ('SCM', 'PM', 'Site Engineer', 'Admin'):
+    if profile.role not in ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin'):
         return HttpResponseForbidden()
 
     # PM isolation: PM sees only their own projects
@@ -6704,23 +7075,25 @@ _SA_EXCLUDED_ROLES = ['Admin', 'System Admin']
 
 # Operational roles System Admin may create/edit — never includes Admin or System Admin
 _SA_EDITABLE_ROLE_CHOICES = [
-    ('PM',            'PM'),
-    ('Site Engineer', 'Site Engineer'),
-    ('Design',        'Design'),
-    ('Finance',       'Finance'),
-    ('SCM',           'SCM'),
-    ('CEO',           'CEO'),
-    ('BD',            'BD'),
+    ('PM',                  'PM'),
+    ('Project Coordinator', 'Project Coordinator'),
+    ('Site Engineer',       'Site Engineer'),
+    ('Design',              'Design'),
+    ('Finance',             'Finance'),
+    ('SCM',                 'SCM'),
+    ('CEO',                 'CEO'),
+    ('BD',                  'BD'),
 ]
 
 _SA_DEPT_NAMES = {
-    'PM':            'Project Management',
-    'Site Engineer': 'Site Execution',
-    'SCM':           'Supply Chain',
-    'Finance':       'Finance',
-    'Design':        'Design',
-    'CEO':           'Leadership',
-    'BD':            'Sales & Business Development',
+    'PM':                  'Project Management',
+    'Project Coordinator': 'Project Management',  # Coordinators sit under PM in the org
+    'Site Engineer':       'Site Execution',
+    'SCM':                 'Supply Chain',
+    'Finance':             'Finance',
+    'Design':              'Design',
+    'CEO':                 'Leadership',
+    'BD':                  'Sales & Business Development',
 }
 
 # Phase order for task duration template
