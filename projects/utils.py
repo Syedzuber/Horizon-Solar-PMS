@@ -20,17 +20,27 @@ def generate_project_id(project_type):
     }
     prefix = PREFIX_MAP[project_type]
     year = timezone.now().year
+    id_prefix = f"HRP-{prefix}-{year}-"
 
-    # select_for_update() cannot be combined with .count() (Django raises
-    # NotSupportedError). Fetch locked IDs instead and count in Python.
-    locked_ids = list(
+    # Derive the next number from the highest suffix ever issued, NOT from a row
+    # count — a count reuses numbers once rows are deleted and collides with the
+    # surviving project's ID. Uses the unfiltered default manager on purpose so
+    # soft-deleted projects (is_deleted=True) still reserve their number.
+    locked_ids = (
         Project.objects
         .select_for_update()
-        .filter(project_type=project_type, created_at__year=year)
-        .values_list('id', flat=True)
+        .filter(project_id__startswith=id_prefix)
+        .values_list('project_id', flat=True)
     )
-    count = len(locked_ids)
-    return f"HRP-{prefix}-{year}-{count+1:03d}"
+
+    highest = 0
+    for existing_id in locked_ids:
+        suffix = existing_id[len(id_prefix):]
+        # Ignore anything that isn't a plain number (hand-edited or legacy IDs)
+        if suffix.isdigit():
+            highest = max(highest, int(suffix))
+
+    return f"HRP-{prefix}-{year}-{highest + 1:03d}"
 
 
 def add_workdays(start_date, days):
