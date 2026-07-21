@@ -1,0 +1,8 @@
+{% comment %}
+HTMX response for every checklist action (add / edit / delete / move / complete):
+swaps the item list into #checklistSection, refreshes the header count badge
+out-of-band, and surfaces the success/error flash inline.
+{% endcomment %}
+{% include 'projects/partials/_checklist.html' %}
+<span id="checklistCountBadge" hx-swap-oob="true">{% if checklist_items %}<span class="badge bg-secondary ms-1">{{ checklist_items|length }}</span>{% endif %}</span>
+{% include 'projects/partials/_hx_messages.html' %}
