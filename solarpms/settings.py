@@ -137,6 +137,15 @@ INTERAKT_API_KEY = config('INTERAKT_API_KEY', default='')
 ZEPTOMAIL_API_KEY    = config('ZEPTOMAIL_API_KEY', default='')
 ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonrenewablepower.com')
 
+# EOD aggregate (company-wide) digest recipients — fixed addresses, not UserProfiles.
+# Mirrors the Santosh-for-Finance hardcoding pattern. Zuber MUST replace both
+# placeholders (env vars ADMIN_DIGEST_EMAIL / HR_DIGEST_EMAIL, or edit here) with real
+# addresses before production; send_eod_digest refuses the aggregate send while either
+# still contains "REPLACE_WITH". For NotificationLog to record these sends, the address
+# should match a real user account's email (see notifications.send_aggregate_email).
+ADMIN_DIGEST_EMAIL = config('ADMIN_DIGEST_EMAIL', default='REPLACE_WITH_ACTUAL_ADMIN_EMAIL')
+HR_DIGEST_EMAIL    = config('HR_DIGEST_EMAIL',    default='REPLACE_WITH_ACTUAL_HR_EMAIL')
+
 # SendGrid fallback — uncomment in notifications.py _send_email() if ZeptoMail stalls
 # SENDGRID_API_KEY = config('SENDGRID_API_KEY', default='')
 

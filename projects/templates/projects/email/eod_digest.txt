@@ -1,0 +1,16 @@
+Horizon Solar — {{ heading|default:"End-of-Day Summary" }} ({{ date_str }})
+
+Hi {{ recipient_name }},
+
+{% if intro %}{{ intro }}{% else %}Here's a snapshot of your activity today (IST):{% endif %}
+
+- Open tasks {{ assigned_label|default:"assigned to you" }} : {{ metrics.assigned }}
+- Tasks started today        : {{ metrics.started }}
+- Tasks closed today         : {{ metrics.closed }}
+- Issues raised today        : {{ metrics.issues_raised }}
+- Issues resolved today      : {{ metrics.issues_resolved }}
+
+{% if footer_note %}{{ footer_note }}{% else %}These figures reflect your own actions today.{% endif %}
+{% if app_url %}
+Open Horizon Solar: {{ app_url }}
+{% endif %}

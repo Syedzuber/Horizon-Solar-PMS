@@ -1,0 +1,118 @@
+{% autoescape on %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Horizon Solar — EOD Summary</title>
+</head>
+<!--
+  Email HTML: table-based layout + inline styles only. Do NOT use fl/grid/external CSS —
+  email clients (Outlook, Gmail) strip <style> and don't support modern layout. Cards are
+  table cells so they render consistently. Colours are a fixed light palette (email clients
+  have no reliable dark-mode signal, so we commit to one look).
+-->
+<body style="margin:0; padding:0; background-color:#f4f6f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px; max-width:600px; background-color:#ffffff; border-radius:10px; overflow:hidden; border:1px solid #e5e9ee;">
+          <!-- Header -->
+          <tr>
+            <td style="background-color:#0f4c81; padding:24px 28px;">
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:20px; font-weight:bold; color:#ffffff;">Horizon Solar</div>
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#cfe0f0; margin-top:4px;">{{ heading|default:"End-of-Day Summary" }} &middot; {{ date_str }}</div>
+            </td>
+          </tr>
+
+          <!-- Greeting -->
+          <tr>
+            <td style="padding:24px 28px 8px 28px; font-family:Arial,Helvetica,sans-serif; font-size:15px; color:#22303c;">
+              Hi {{ recipient_name }},<br>
+              <span style="font-size:14px; color:#5a6b7b;">{% if intro %}{{ intro }}{% else %}Here&rsquo;s a snapshot of your activity today.{% endif %}</span>
+            </td>
+          </tr>
+
+          <!-- Snapshot card: assigned open tasks -->
+          <tr>
+            <td style="padding:12px 28px 4px 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef4fb; border-radius:8px;">
+                <tr>
+                  <td style="padding:16px 20px; font-family:Arial,Helvetica,sans-serif;">
+                    <span style="font-size:26px; vertical-align:middle;">&#128203;</span>
+                    <span style="font-size:30px; font-weight:bold; color:#0f4c81; vertical-align:middle; margin-left:8px;">{{ metrics.assigned }}</span>
+                    <span style="font-size:14px; color:#5a6b7b; vertical-align:middle; margin-left:8px;">open task{{ metrics.assigned|pluralize }} {{ assigned_label|default:"assigned to you" }}</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Today's activity: 4 horizontal cards (2x2 on narrow, wraps naturally) -->
+          <tr>
+            <td style="padding:12px 22px 4px 22px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  {% comment %}Each metric card is a fixed-width cell with padding between via inner tables.{% endcomment %}
+                  <td width="50%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f9f4; border:1px solid #e2efe2; border-radius:8px;">
+                      <tr><td align="center" style="padding:18px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:24px;">&#9654;&#65039;</div>
+                        <div style="font-size:28px; font-weight:bold; color:#2e7d32; margin-top:4px;">{{ metrics.started }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:2px;">Tasks started today</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                  <td width="50%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f9f4; border:1px solid #e2efe2; border-radius:8px;">
+                      <tr><td align="center" style="padding:18px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:24px;">&#9989;</div>
+                        <div style="font-size:28px; font-weight:bold; color:#2e7d32; margin-top:4px;">{{ metrics.closed }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:2px;">Tasks closed today</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td width="50%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf5f0; border:1px solid #f3e2d6; border-radius:8px;">
+                      <tr><td align="center" style="padding:18px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:24px;">&#9888;&#65039;</div>
+                        <div style="font-size:28px; font-weight:bold; color:#c05621; margin-top:4px;">{{ metrics.issues_raised }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:2px;">Issues raised today</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                  <td width="50%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf5f0; border:1px solid #f3e2d6; border-radius:8px;">
+                      <tr><td align="center" style="padding:18px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:24px;">&#128736;&#65039;</div>
+                        <div style="font-size:28px; font-weight:bold; color:#c05621; margin-top:4px;">{{ metrics.issues_resolved }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:2px;">Issues resolved today</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          {% if app_url %}
+          <tr>
+            <td align="center" style="padding:20px 28px 8px 28px;">
+              <a href="{{ app_url }}" style="display:inline-block; background-color:#0f4c81; color:#ffffff; font-family:Arial,Helvetica,sans-serif; font-size:14px; text-decoration:none; padding:11px 22px; border-radius:6px;">Open Horizon Solar</a>
+            </td>
+          </tr>
+          {% endif %}
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:18px 28px 24px 28px; font-family:Arial,Helvetica,sans-serif; font-size:12px; color:#9aa7b4; border-top:1px solid #eef1f4;">
+              {% if footer_note %}{{ footer_note }}{% else %}You receive this daily summary because email notifications are on for your account. These figures reflect your own actions today (IST).{% endif %}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>{% endautoescape %}

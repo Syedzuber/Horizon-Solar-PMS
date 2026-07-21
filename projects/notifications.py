@@ -31,16 +31,20 @@ def send_notification(
     template_params=None,
     related_project=None,
     actor=None,
+    html_message=None,
 ):
     """
     Send a notification to recipient on one or more channels.
 
     Args:
         recipient       : UserProfile — the person to notify.
-        message         : str — in-app / email body text.
+        message         : str — in-app / email body text. For email, this is the
+                          plain-text fallback (textbody) when html_message is given.
         channels        : list of 'in_app' | 'whatsapp' | 'email'. Defaults to ['in_app'].
         link            : relative URL for in-app click-through (e.g. '/issues/5/').
         subject         : email subject line.
+        html_message    : optional str — HTML email body (htmlbody). When provided,
+                          `message` is still sent as the plain-text alternative.
         template        : Interakt template API name (required if 'whatsapp' in channels).
         template_params : list — positional values in Interakt's REGISTERED order.
                           Pull the exact order from the Interakt console, NOT the preview.
@@ -90,7 +94,7 @@ def send_notification(
             if not recipient.email_notifications:
                 _log(_base, 'email', 'skipped', 'User preference off')
                 continue
-            _send_email(recipient, subject, message, _base)
+            _send_email(recipient, subject, message, _base, html_message)
 
 
 # ---------------------------------------------------------------------------
@@ -173,26 +177,29 @@ def _send_whatsapp(recipient, template, template_params, base):
         _log(base, 'whatsapp', 'failed', str(e))
 
 
-def _send_email(recipient, subject, message, base):
-    email = (recipient.user.email or '').strip()
-    if not email:
-        _log(base, 'email', 'failed', 'Recipient has no email address')
-        return
+def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):
+    """Low-level ZeptoMail HTTP send. Returns (ok: bool, detail: str).
 
+    Single home for the ZeptoMail endpoint + payload shape, shared by _send_email
+    (per-user notifications) and send_aggregate_email (company-wide digest) so neither
+    duplicates the API contract. htmlbody is included only when html_body is given, so a
+    text-only caller produces a byte-identical payload to before this was extracted.
+    """
     api_key    = getattr(settings, 'ZEPTOMAIL_API_KEY', '')
     from_email = getattr(settings, 'ZEPTOMAIL_FROM_EMAIL', '')
-
     if not api_key or not from_email:
-        _log(base, 'email', 'failed', 'ZEPTOMAIL_API_KEY or ZEPTOMAIL_FROM_EMAIL not configured')
-        return
+        return False, 'ZEPTOMAIL_API_KEY or ZEPTOMAIL_FROM_EMAIL not configured'
 
-    display_name = recipient.user.get_full_name() or recipient.user.username
     payload = {
         'from':    {'address': from_email, 'name': 'Horizon Solar'},
-        'to':      [{'email_address': {'address': email, 'name': display_name}}],
+        'to':      [{'email_address': {'address': to_email, 'name': to_name}}],
         'subject': subject or 'Horizon Solar — Notification',
-        'textbody': message,
+        'textbody': text_body,
     }
+    # ZeptoMail accepts htmlbody + textbody together (multipart alternative). Clients
+    # that can render HTML use htmlbody; the rest fall back to the plain-text message.
+    if html_body:
+        payload['htmlbody'] = html_body
 
     try:
         resp = requests.post(
@@ -205,11 +212,21 @@ def _send_email(recipient, subject, message, base):
             timeout=10,
         )
         if resp.status_code in (200, 201):
-            _log(base, 'email', 'sent')
-        else:
-            _log(base, 'email', 'failed', f'HTTP {resp.status_code}: {resp.text[:500]}')
+            return True, ''
+        return False, f'HTTP {resp.status_code}: {resp.text[:500]}'
     except Exception as e:
-        _log(base, 'email', 'failed', str(e))
+        return False, str(e)
+
+
+def _send_email(recipient, subject, message, base, html_message=None):
+    email = (recipient.user.email or '').strip()
+    if not email:
+        _log(base, 'email', 'failed', 'Recipient has no email address')
+        return
+
+    display_name = recipient.user.get_full_name() or recipient.user.username
+    ok, detail = _zeptomail_post(email, display_name, subject, message, html_message)
+    _log(base, 'email', 'sent' if ok else 'failed', '' if ok else detail)
 
     # --- SendGrid fallback (commented out; uncomment if ZeptoMail domain verification stalls) ---
     # from sendgrid import SendGridAPIClient
@@ -258,6 +275,52 @@ def send_raw_email(to_email, subject, body):
             logger.error('send_raw_email: HTTP %s — %s', resp.status_code, resp.text[:300])
     except Exception as exc:
         logger.error('send_raw_email: %s', exc)
+
+
+def send_aggregate_email(to_email, subject, text_body, html_body=None,
+                         log_recipient=None, template_name=''):
+    """
+    Send a company-wide digest email to a FIXED address (Admin/HR), not a UserProfile.
+
+    Gated ONLY by the global master switch (SystemSettings.email_enabled) — there is no
+    per-recipient preference row for these addresses. Reuses _zeptomail_post so the HTML
+    body and API contract match the per-user path.
+
+    Logging: NotificationLog.recipient is a required FK to UserProfile, so a row is written
+    only when log_recipient (a UserProfile whose email the caller matched to this address)
+    is supplied. If the address has no matching user account, the send still happens but is
+    recorded to the application log instead — it cannot appear in NotificationLog.
+    """
+    from .models import SystemSettings
+
+    to_email = (to_email or '').strip()
+    base = None
+    if log_recipient is not None:
+        base = dict(recipient=log_recipient, related_project=None, actor=None,
+                    message=text_body, template_name=template_name)
+
+    def _record(status, detail=''):
+        if base is not None:
+            _log(base, 'email', status, detail)
+        else:
+            log_fn = logger.info if status == 'sent' else logger.warning
+            log_fn('send_aggregate_email: %s -> %s (%s) %s', status, to_email, template_name, detail)
+
+    if not to_email:
+        _record('failed', 'No recipient address')
+        return
+
+    try:
+        email_enabled = SystemSettings.get().email_enabled
+    except Exception as e:
+        logger.error('send_aggregate_email: could not read SystemSettings — %s', e)
+        email_enabled = False
+    if not email_enabled:
+        _record('skipped', 'Master switch off')
+        return
+
+    ok, detail = _zeptomail_post(to_email, 'Horizon Solar', subject, text_body, html_body)
+    _record('sent' if ok else 'failed', '' if ok else detail)
 
 
 def _log(base, channel, status, error_detail='', interakt_message_id=''):
