@@ -240,9 +240,17 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_pm_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_pm_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_pm_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_pm_due_today %}text-warning{% endif %}">{{ dept_pm_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_pm_due_week }}</span>
         </div>
       </div>
     </div>
@@ -264,9 +272,17 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_scm_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_scm_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_scm_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_scm_due_today %}text-warning{% endif %}">{{ dept_scm_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_scm_due_week }}</span>
         </div>
       </div>
     </div>
@@ -288,9 +304,17 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_design_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_design_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_design_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_design_due_today %}text-warning{% endif %}">{{ dept_design_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_design_due_week }}</span>
         </div>
       </div>
     </div>
@@ -312,9 +336,17 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_bd_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_bd_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_bd_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_bd_due_today %}text-warning{% endif %}">{{ dept_bd_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_bd_due_week }}</span>
         </div>
       </div>
     </div>
@@ -336,9 +368,17 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_se_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_se_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_se_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_se_due_today %}text-warning{% endif %}">{{ dept_se_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_se_due_week }}</span>
         </div>
       </div>
     </div>
@@ -360,15 +400,88 @@
           <span class="text-muted">Pending</span>
           <span class="fw-semibold">{{ dept_finance_pending }}</span>
         </div>
-        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
           <span class="text-muted">Overdue</span>
           <span class="fw-bold {% if dept_finance_overdue %}text-danger{% else %}text-muted{% endif %}">{{ dept_finance_overdue }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline mb-1" style="font-size:.82rem;">
+          <span class="text-muted">Due today</span>
+          <span class="fw-semibold {% if dept_finance_due_today %}text-warning{% endif %}">{{ dept_finance_due_today }}</span>
+        </div>
+        <div class="d-flex justify-content-between align-items-baseline" style="font-size:.82rem;">
+          <span class="text-muted">Due this week</span>
+          <span class="fw-semibold">{{ dept_finance_due_week }}</span>
         </div>
       </div>
     </div>
   </div>
 
 </div>{# /row dept cards #}
+
+
+{# ── SECTION 2b: WORKLOAD & DUE-DATE METRICS ─────────────────────────────── #}
+<div class="section-label">Workload &amp; due dates</div>
+<div class="row g-3 mb-4">
+
+  {# Top-5 assignees by open tasks #}
+  <div class="col-md-6 col-xl-6">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="users" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Top Assignees</span>
+          <span class="ms-auto text-muted" style="font-size:.72rem;">open tasks</span>
+        </div>
+        {% if top_assignees %}
+          {% for row in top_assignees %}
+          <div class="stat-row">
+            <span class="text-muted text-truncate" style="max-width:75%;">{{ forloop.counter }}. {{ row.display_name }}</span>
+            <span class="stat-num dark">{{ row.count }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="text-muted mb-0" style="font-size:.85rem;">No open tasks assigned to anyone.</p>
+        {% endif %}
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          Open = Not Started, In Progress or Blocked. Top 5 by count.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  {# Due Today #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="calendar-check" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Due Today</span>
+        </div>
+        <div class="fw-bold" style="font-size:2rem;line-height:1;{% if due_today_count %}color:#d97706;{% else %}color:#1e293b;{% endif %}">{{ due_today_count }}</div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          Internal tasks due today, not yet Done.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  {# Due This Week — overlaps Due Today by design #}
+  <div class="col-sm-6 col-xl-3">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <i data-lucide="calendar-range" class="icon-md text-muted"></i>
+          <span class="fw-semibold">Due This Week</span>
+        </div>
+        <div class="fw-bold text-dark" style="font-size:2rem;line-height:1;">{{ due_this_week_count }}</div>
+        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
+          Mon–Sun, internal tasks not yet Done — <strong>includes today</strong>.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</div>{# /row workload & due-date metrics #}
 
 
 {# ── SECTION 3: KPI CARDS ─────────────────────────────────────────────────── #}
