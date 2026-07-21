@@ -133,6 +133,28 @@
 }());
 </script>
 
+{# ── Checklist section ────────────────────────────────────────────────────── #}
+{% comment %}
+Renders only when an active Checklist is assigned to this task's (task_name,
+project_type) via ChecklistTaskLink. Item authoring/assignment is done in portal-admin;
+this surface is completion-only. #checklistSection is an isolated HTMX swap target — the
+completion action re-renders only this block, leaving #attachmentList / #taskStatusBlock /
+#commentThread untouched.
+{% endcomment %}
+{% if checklist %}
+<div class="card shadow-sm mb-4">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      {{ checklist.name }}
+      <span id="checklistCountBadge">{% if checklist_items %}<span class="badge bg-secondary ms-1">{{ checklist_items|length }}</span>{% endif %}</span>
+    </span>
+  </div>
+  <div class="card-body p-0" id="checklistSection">
+    {% include 'projects/partials/_checklist.html' %}
+  </div>
+</div>
+{% endif %}
+
 {# ── Issues section ───────────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

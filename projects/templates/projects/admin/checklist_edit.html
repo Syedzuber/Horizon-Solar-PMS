@@ -1,0 +1,145 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}{{ checklist.name }} — Checklist{% endblock %}
+
+{% block nav_checklists %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{% url 'admin_checklists' %}" class="text-sm text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i> All checklists
+  </a>
+</div>
+
+{# ── Name + active ─────────────────────────────────────────────────────────── #}
+<div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
+  <form method="POST" action="{% url 'admin_checklist_update' checklist.pk %}" class="flex items-end gap-4 flex-wrap">
+    {% csrf_token %}
+    <div class="flex-1 min-w-[16rem]">
+      <label class="block text-xs font-medium text-gray-500 mb-1">Checklist name</label>
+      <input type="text" name="name" value="{{ checklist.name }}" required maxlength="200"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+    </div>
+    <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
+      <input type="checkbox" name="is_active" {% if checklist.is_active %}checked{% endif %}
+             class="rounded border-gray-300 text-green-600 focus:ring-green-500">
+      Active
+    </label>
+    <button type="submit"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
+            style="background:#1a7a4a;"
+            onmouseover="this.style.background='#155f3a'" onmouseout="this.style.background='#1a7a4a'">
+      <i data-lucide="save" class="w-4 h-4"></i> Save
+    </button>
+  </form>
+  <p class="text-xs text-gray-400 mt-2">Inactive checklists are hidden on task detail pages.</p>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+  {# ── Items ───────────────────────────────────────────────────────────────── #}
+  <div class="bg-white border border-gray-200 rounded-lg p-5">
+    <h2 class="text-sm font-semibold text-gray-900 mb-3">Items <span class="text-gray-400">({{ items|length }})</span></h2>
+
+    {% for item in items %}
+    <div class="flex items-center gap-2 py-2 border-b border-gray-100">
+      <span class="text-xs text-gray-400 w-5 text-right">{{ forloop.counter }}</span>
+      <form method="POST" action="{% url 'admin_checklist_item_edit' checklist.pk item.pk %}" class="flex-1 flex items-center gap-2">
+        {% csrf_token %}
+        <input type="text" name="label" value="{{ item.label }}" required
+               class="flex-1 border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+        <button type="submit" class="text-xs text-green-700 hover:underline">Save</button>
+      </form>
+      <form method="POST" action="{% url 'admin_checklist_item_move' checklist.pk item.pk %}" class="inline">
+        {% csrf_token %}<input type="hidden" name="direction" value="up">
+        <button type="submit" class="text-gray-400 hover:text-gray-700 px-1" title="Move up" {% if forloop.first %}disabled{% endif %}>↑</button>
+      </form>
+      <form method="POST" action="{% url 'admin_checklist_item_move' checklist.pk item.pk %}" class="inline">
+        {% csrf_token %}<input type="hidden" name="direction" value="down">
+        <button type="submit" class="text-gray-400 hover:text-gray-700 px-1" title="Move down" {% if forloop.last %}disabled{% endif %}>↓</button>
+      </form>
+      <form method="POST" action="{% url 'admin_checklist_item_delete' checklist.pk item.pk %}" class="inline"
+            onsubmit="return confirm('Delete this item?');">
+        {% csrf_token %}
+        <button type="submit" class="text-gray-400 hover:text-red-600 px-1" title="Delete">
+          <i data-lucide="trash-2" class="w-4 h-4"></i>
+        </button>
+      </form>
+    </div>
+    {% empty %}
+    <p class="text-sm text-gray-400 py-2">No items yet.</p>
+    {% endfor %}
+
+    <form method="POST" action="{% url 'admin_checklist_item_add' checklist.pk %}" class="flex items-center gap-2 mt-4">
+      {% csrf_token %}
+      <input type="text" name="label" required placeholder="New item…"
+             class="flex-1 border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+      <button type="submit" class="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+        <i data-lucide="plus" class="w-4 h-4"></i> Add
+      </button>
+    </form>
+  </div>
+
+  {# ── Assigned tasks ──────────────────────────────────────────────────────── #}
+  <div class="bg-white border border-gray-200 rounded-lg p-5">
+    <h2 class="text-sm font-semibold text-gray-900 mb-3">Assigned tasks <span class="text-gray-400">({{ links|length }})</span></h2>
+
+    {% for link in links %}
+    <div class="flex items-center justify-between gap-2 py-2 border-b border-gray-100">
+      <span class="text-sm text-gray-800">{{ link.task_name }}
+        <span class="text-xs text-gray-400 ml-1">· {{ link.project_type }}</span>
+      </span>
+      <form method="POST" action="{% url 'admin_checklist_link_delete' checklist.pk link.pk %}" class="inline"
+            onsubmit="return confirm('Unassign this task?');">
+        {% csrf_token %}
+        <button type="submit" class="text-xs text-red-600 hover:underline">Unassign</button>
+      </form>
+    </div>
+    {% empty %}
+    <p class="text-sm text-gray-400 py-2">Not assigned to any task yet.</p>
+    {% endfor %}
+
+    <form method="POST" action="{% url 'admin_checklist_link_add' checklist.pk %}" class="mt-4 space-y-2">
+      {% csrf_token %}
+      <div>
+        <label class="block text-xs font-medium text-gray-500 mb-1">Task name</label>
+        <select name="task_name" required
+                class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+          <option value="">Select a task…</option>
+          {% for phase_name, task_name in task_name_pairs %}
+          <option value="{{ task_name }}">{{ task_name }} — {{ phase_name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-xs font-medium text-gray-500 mb-1">Project type</label>
+        <select name="project_type" required
+                class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+          {% for value, label in project_types %}
+          <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type="submit" class="inline-flex items-center gap-1 px-3 py-1.5 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+        <i data-lucide="link" class="w-4 h-4"></i> Assign task
+      </button>
+    </form>
+    <p class="text-xs text-gray-400 mt-2">
+      Task names are sourced from the Residential project template. A task already assigned
+      to another checklist is rejected — unassign it there first.
+    </p>
+  </div>
+
+</div>
+
+{# ── Danger zone ───────────────────────────────────────────────────────────── #}
+<div class="mt-6 flex justify-end">
+  <form method="POST" action="{% url 'admin_checklist_delete' checklist.pk %}"
+        onsubmit="return confirm('Delete this checklist? Its items, task assignments, and all completion records will be permanently removed.');">
+    {% csrf_token %}
+    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50">
+      <i data-lucide="trash-2" class="w-4 h-4"></i> Delete checklist
+    </button>
+  </form>
+</div>
+{% endblock %}

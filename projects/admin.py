@@ -1,6 +1,10 @@
 from django.contrib import admin
 from django.utils import timezone
-from .models import Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile, NotificationLog, SystemSettings
+from .models import (
+    Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile,
+    NotificationLog, SystemSettings,
+    Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
+)
 
 
 class MilestoneInline(admin.TabularInline):
@@ -134,6 +138,40 @@ class NotificationLogAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+class ChecklistItemInline(admin.TabularInline):
+    model = ChecklistItem
+    extra = 1
+    fields = ['order', 'label']
+
+
+class ChecklistTaskLinkInline(admin.TabularInline):
+    model = ChecklistTaskLink
+    extra = 1
+    fields = ['task_name', 'project_type']
+
+
+@admin.register(Checklist)
+class ChecklistAdmin(admin.ModelAdmin):
+    list_display  = ['name', 'is_active', 'created_by', 'created_at']
+    list_filter   = ['is_active']
+    search_fields = ['name']
+    inlines       = [ChecklistItemInline, ChecklistTaskLinkInline]
+
+
+@admin.register(ChecklistTaskLink)
+class ChecklistTaskLinkAdmin(admin.ModelAdmin):
+    list_display = ['task_name', 'project_type', 'checklist']
+    list_filter  = ['project_type']
+    search_fields = ['task_name']
+
+
+@admin.register(ChecklistItemCompletion)
+class ChecklistItemCompletionAdmin(admin.ModelAdmin):
+    list_display  = ['item', 'task', 'is_checked', 'checked_by', 'checked_at']
+    list_filter   = ['is_checked']
+    readonly_fields = ['item', 'task', 'checked_by', 'checked_at', 'created_at']
 
 
 @admin.register(SystemSettings)
