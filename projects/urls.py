@@ -36,6 +36,7 @@ urlpatterns = [
     path('projects/<str:project_id>/',                         views.project_detail,        name='project_detail'),
     path('projects/<str:project_id>/delete/',                  views.project_delete,        name='project_delete'),        # Admin only, POST only
     path('projects/<str:project_id>/edit/',                    views.project_edit,          name='project_edit'),          # PM only, Draft status only
+    path('projects/<str:project_id>/fields/edit/',             views.project_field_edit,    name='project_field_edit'),    # PM/Coordinator, non-Draft only — capacity/contract/target date
     path('projects/<str:project_id>/activate/',                views.project_activate,           name='project_activate'),           # PM only, POST only — creates phases/tasks/milestones
     path('projects/<str:project_id>/recalculate-dates/',       views.project_recalculate_dates,  name='project_recalculate_dates'),  # PM only, POST only
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),              # PM only
@@ -121,6 +122,13 @@ urlpatterns = [
          views.delete_task_attachment, name='delete_task_attachment'),     # Uploader or Admin only
 
     # ---------------------------------------------------------------------------
+    # Checklist completion — on the task detail page (role-match or PM/coordinator).
+    # Item authoring/assignment lives under portal-admin/ (see below).
+    # ---------------------------------------------------------------------------
+    path('projects/<str:project_id>/tasks/<int:task_id>/checklist/<int:item_id>/complete/',
+         views.checklist_item_complete, name='checklist_item_complete'),              # Role-match or PM/coordinator
+
+    # ---------------------------------------------------------------------------
     # Issues — any role with project access can raise; PM closes
     # ---------------------------------------------------------------------------
     path('projects/<str:project_id>/issues/create/',
@@ -179,6 +187,19 @@ urlpatterns = [
     path('portal-admin/projects/<str:project_id>/assign-pm/', views.admin_assign_pm,      name='admin_assign_pm'),
     path('portal-admin/task-durations/',                views.admin_task_durations,      name='admin_task_durations'),
     path('portal-admin/users/<int:user_id>/reset-password/', views.admin_reset_password, name='admin_reset_password'),
+
+    # Reusable Checklists — author name + items, assign to (task_name, project_type). Admin only.
+    path('portal-admin/checklists/',                    views.admin_checklists,          name='admin_checklists'),
+    path('portal-admin/checklists/create/',             views.admin_checklist_create,    name='admin_checklist_create'),
+    path('portal-admin/checklists/<int:checklist_id>/',        views.admin_checklist_edit,   name='admin_checklist_edit'),
+    path('portal-admin/checklists/<int:checklist_id>/update/', views.admin_checklist_update, name='admin_checklist_update'),
+    path('portal-admin/checklists/<int:checklist_id>/delete/', views.admin_checklist_delete, name='admin_checklist_delete'),
+    path('portal-admin/checklists/<int:checklist_id>/items/add/',                    views.admin_checklist_item_add,    name='admin_checklist_item_add'),
+    path('portal-admin/checklists/<int:checklist_id>/items/<int:item_id>/edit/',     views.admin_checklist_item_edit,   name='admin_checklist_item_edit'),
+    path('portal-admin/checklists/<int:checklist_id>/items/<int:item_id>/delete/',   views.admin_checklist_item_delete, name='admin_checklist_item_delete'),
+    path('portal-admin/checklists/<int:checklist_id>/items/<int:item_id>/move/',     views.admin_checklist_item_move,   name='admin_checklist_item_move'),
+    path('portal-admin/checklists/<int:checklist_id>/links/add/',                    views.admin_checklist_link_add,    name='admin_checklist_link_add'),
+    path('portal-admin/checklists/<int:checklist_id>/links/<int:link_id>/delete/',   views.admin_checklist_link_delete, name='admin_checklist_link_delete'),
     # Redirect old activity-log URL to the new audit-log screen
     path('portal/activity-log/',
          RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),

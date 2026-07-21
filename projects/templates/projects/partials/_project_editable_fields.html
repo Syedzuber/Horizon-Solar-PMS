@@ -1,0 +1,22 @@
+{% comment %}
+The three post-activation-editable project pills (capacity, contract value, target
+commissioning date), grouped so #project-editable-fields can be swapped on its own by
+the field-edit HTMX response — nothing else in the header DOM is touched.
+
+Included in the overview stats strip (oob=False) and re-rendered out-of-band on a
+successful edit (oob=True). Each pill stays {% if %}-guarded so a field edited from
+blank -> value appears, and value -> blank disappears, after the swap.
+
+Expects: project, oob (bool).
+{% endcomment %}
+<span id="project-editable-fields" class="d-flex flex-wrap gap-3"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {% if project.capacity_kw %}
+    <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.capacity_kw }} kWp</span>
+  {% endif %}
+  {% if project.contract_value %}
+    <span class="info-pill"><i class="bi bi-currency-rupee"></i>{{ project.contract_value }}</span>
+  {% endif %}
+  {% if project.target_commissioning_date %}
+    <span class="info-pill"><i class="bi bi-calendar-check"></i>{{ project.target_commissioning_date|date:"d M Y" }}</span>
+  {% endif %}
+</span>

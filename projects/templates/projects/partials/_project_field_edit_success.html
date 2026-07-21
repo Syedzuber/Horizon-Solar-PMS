@@ -1,0 +1,11 @@
+{% comment %}
+Post-activation field-edit success response. The POST targets #fieldEditModalContent
+(cleared as the modal closes via the fieldEditDone HX-Trigger); every real update is
+out-of-band, so no unrelated DOM region is swapped:
+  - #project-editable-fields is re-rendered from server truth (capacity / contract
+    value / target date pills).
+  - flash messages swap into #hxMessages.
+Expects: project, oob=True.
+{% endcomment %}
+{% include 'projects/partials/_project_editable_fields.html' with oob=True %}
+{% include 'projects/partials/_hx_messages.html' %}

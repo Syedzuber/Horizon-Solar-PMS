@@ -325,6 +325,55 @@ class ProjectEditForm(forms.ModelForm):
         return value
 
 
+class PostActivationFieldEditForm(forms.ModelForm):
+    """Narrow edit form for the three business fields a PM/Coordinator may change
+    AFTER a project leaves Draft (see views.project_field_edit). Deliberately
+    exposes ONLY capacity / contract value / target commissioning date plus an
+    optional free-text reason — never the customer/scope fields on ProjectEditForm.
+
+    Positive-value validation mirrors ProjectEditForm. clean_contract_value also
+    blocks a *change* to contract_value once payment-milestone amounts exist,
+    because set_milestone_amounts validated M1+M2+M3 == contract_value and nothing
+    reconciles them here (accepted design gap — the block keeps the invariant safe).
+    """
+
+    reason = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={'rows': 2, 'class': 'form-control form-control-sm',
+                                     'placeholder': 'Optional — why is this changing?'}),
+    )
+
+    class Meta:
+        model = Project
+        fields = ['capacity_kw', 'contract_value', 'target_commissioning_date']
+        labels = {'capacity_kw': 'Capacity (kW)'}
+        widgets = {
+            'capacity_kw':               forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
+            'contract_value':            forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
+            'target_commissioning_date': forms.DateInput(attrs={'type': 'date', 'class': 'form-control form-control-sm'}),
+        }
+
+    def clean_capacity_kw(self):
+        value = self.cleaned_data.get('capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('Capacity must be greater than zero.')
+        return value
+
+    def clean_contract_value(self):
+        value = self.cleaned_data.get('contract_value')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('Contract value must be greater than zero.')
+        # During clean_<field>, self.instance still holds the pre-save DB value
+        # (construct_instance runs later in _post_clean), so this compares new vs old.
+        if value != self.instance.contract_value and \
+                self.instance.milestones.filter(amount__isnull=False).exists():
+            raise forms.ValidationError(
+                'Contract value cannot be changed after payment milestone amounts are set. '
+                'Reconcile the M1/M2/M3 milestone amounts first.'
+            )
+        return value
+
+
 class TaskAddForm(forms.Form):
 
     phase         = forms.ModelChoiceField(queryset=ProjectPhase.objects.none())

@@ -1,0 +1,47 @@
+{% comment %}
+Post-activation field-edit modal content — rendered into #fieldEditModalContent on
+hx-get, and re-rendered here with inline field errors on a failed hx-post so the modal
+stays open. On success the server returns _project_field_edit_success.html instead
+(which closes the modal via the fieldEditDone HX-Trigger and OOB-swaps the pills).
+
+Only capacity / contract value / target commissioning date are exposed here — never
+the customer/scope fields. Expects: project, form.
+{% endcomment %}
+<div class="modal-header">
+  <h5 class="modal-title">Edit Project Fields — {{ project.project_id }}</h5>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form method="post" action="{% url 'project_field_edit' project.project_id %}" novalidate
+      hx-post="{% url 'project_field_edit' project.project_id %}"
+      hx-target="#fieldEditModalContent" hx-swap="innerHTML">
+  {% csrf_token %}
+  <div class="modal-body">
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger py-2 small mb-2">{{ form.non_field_errors|striptags }}</div>
+    {% endif %}
+    <div class="mb-2">
+      <label class="form-label small mb-1">Capacity (kWp)</label>
+      {{ form.capacity_kw }}
+      {% if form.capacity_kw.errors %}<div class="text-danger small mt-1">{{ form.capacity_kw.errors|striptags }}</div>{% endif %}
+    </div>
+    <div class="mb-2">
+      <label class="form-label small mb-1">Contract Value (₹)</label>
+      {{ form.contract_value }}
+      {% if form.contract_value.errors %}<div class="text-danger small mt-1">{{ form.contract_value.errors|striptags }}</div>{% endif %}
+    </div>
+    <div class="mb-2">
+      <label class="form-label small mb-1">Target Commissioning Date</label>
+      {{ form.target_commissioning_date }}
+      {% if form.target_commissioning_date.errors %}<div class="text-danger small mt-1">{{ form.target_commissioning_date.errors|striptags }}</div>{% endif %}
+      <div class="form-text small">Editing this does not shift task due dates — the schedule is intentionally unchanged.</div>
+    </div>
+    <div class="mb-1">
+      <label class="form-label small mb-1">Reason <span class="text-muted">(optional)</span></label>
+      {{ form.reason }}
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+    <button type="submit" class="btn btn-brand btn-sm">Save changes</button>
+  </div>
+</form>

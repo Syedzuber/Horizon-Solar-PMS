@@ -82,14 +82,17 @@
     {# Compact stats strip #}
     <div class="d-flex flex-wrap gap-3 border-top pt-2 small text-muted">
       <span class="info-pill"><i class="bi bi-lightning-charge-fill"></i>{{ project.project_type }}</span>
-      {% if project.capacity_kw %}
-        <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.capacity_kw }} kWp</span>
-      {% endif %}
-      {% if project.contract_value %}
-        <span class="info-pill"><i class="bi bi-currency-rupee"></i>{{ project.contract_value }}</span>
-      {% endif %}
-      {% if project.target_commissioning_date %}
-        <span class="info-pill"><i class="bi bi-calendar-check"></i>{{ project.target_commissioning_date|date:"d M Y" }}</span>
+      {# Post-activation-editable business fields — swap target for the field-edit modal #}
+      {% include 'projects/partials/_project_editable_fields.html' with oob=False %}
+      {% if is_assigned_pm and project.status != 'Draft' %}
+        {# Separate, smaller entry point from the Draft-only "Edit" button — opens a 3-field modal #}
+        <button type="button" class="btn btn-link btn-sm p-0 align-baseline text-muted"
+                title="Edit capacity / contract value / target commissioning date"
+                hx-get="{% url 'project_field_edit' project.project_id %}"
+                hx-target="#fieldEditModalContent" hx-swap="innerHTML"
+                hx-on::after-request="if (event.detail.successful) window.showFieldEditModal();">
+          <i class="bi bi-pencil-square"></i>
+        </button>
       {% endif %}
       <span class="info-pill">
         <i class="bi bi-geo-alt-fill"></i>{{ project.city }}{% if project.city and project.state %}, {% endif %}{{ project.state }}
@@ -1141,6 +1144,21 @@ Not gated on is_assigned_pm — a Design Head who is not the PM uses it for #4.
   </div>
 </div>
 
+{% comment %}
+Post-activation field-edit modal (capacity / contract value / target commissioning
+date). Content is loaded via hx-get into #fieldEditModalContent; the form inside posts
+via hx-post and, on success, the server sends a fieldEditDone HX-Trigger that closes
+this modal while OOB-swapping the #project-editable-fields header pills. The trigger
+button lives in the header stats strip, gated on is_assigned_pm + non-Draft.
+{% endcomment %}
+<div class="modal fade" id="fieldEditModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content" id="fieldEditModalContent">
+      {# hx-get fills this in #}
+    </div>
+  </div>
+</div>
+
 <form method="post" enctype="multipart/form-data" action="" id="quickAttachForm" style="display:none;">
   {% csrf_token %}
   <input type="hidden" id="quickAttachNext" name="next" value="{% url 'project_overview' project.project_id %}">
@@ -1173,7 +1191,7 @@ Not gated on is_assigned_pm — a Design Head who is not the PM uses it for #4.
   var _paymentPendingSelect   = null;
   var bsMilestoneModal        = null;
   var _milestonePendingSelect = null;
-  var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Finance Confirmation', '100% Payment Confirmation'];
+  var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation'];
 
   /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
   var assignCandidates = {};
@@ -1278,6 +1296,21 @@ Not gated on is_assigned_pm — a Design Head who is not the PM uses it for #4.
   };
   document.body.addEventListener('taskFormDone', function () {
     var el = document.getElementById('taskFormModal');
+    if (!el) return;
+    var inst = bootstrap.Modal.getInstance(el);
+    if (inst) inst.hide();
+  });
+
+  /* ── Post-activation field-edit modal ────────────────────────────────── */
+  /* Same pattern as the task-form modal: shown only from an hx-on::after-request
+     on the header pencil trigger, and closed by the server's fieldEditDone
+     HX-Trigger on a successful save (which also OOB-swaps the header pills). */
+  window.showFieldEditModal = function () {
+    var el = document.getElementById('fieldEditModal');
+    if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+  };
+  document.body.addEventListener('fieldEditDone', function () {
+    var el = document.getElementById('fieldEditModal');
     if (!el) return;
     var inst = bootstrap.Modal.getInstance(el);
     if (inst) inst.hide();
