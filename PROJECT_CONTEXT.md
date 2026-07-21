@@ -23,7 +23,7 @@ NEXT SESSION GOAL:
 Project Creation (manual form)
 
 TASK TEMPLATE — LOCKED DECISIONS:
-- 51 tasks, 9 phases, Residential only
+- 52 tasks (44 internal, 8 external), 9 phases, Residential only
 - Project ID format: HRP-RES-2026-001
 - Capacity field name: capacity_kw
 - Design is a valid assigned_role on Task model
@@ -2015,8 +2015,8 @@ if request.method == 'POST' and (is_assigned_pm or (role == 'Finance' and reques
 ### Bidirectional sync — Finance confirmation tasks ↔ PaymentMilestone
 
 Three Finance tasks in the residential template map to milestones:
-- "Advance Payment Confirmation" (Phase 1, task 2) ↔ M1
-- "Finance Confirmation" (Phase 5, task 6) ↔ M2
+- "Advance Payment Confirmation" (Phase 1, task 3) ↔ M1
+- "Pre Dispatch Payment Confirmation" (Phase 5, task 7) ↔ M2  (replaced the deleted "Finance Confirmation")
 - "100% Payment Confirmation" (Phase 9, task 1) ↔ M3
 
 **Task → Milestone (implemented in `task_status_update`):** When Finance (or PM) marks one of these tasks Done, the corresponding milestone auto-sets to `status='Received'`, `received_date=today()`. Amount_received and variance_reason are also saved if supplied in the POST.
@@ -2090,7 +2090,7 @@ Finance could mark tasks Done (after state machine fix) but not In Progress, bec
 - **`VALID_TRANSITIONS[NOT_STARTED]` now includes DONE:** Finance confirmation tasks (acknowledgment tasks) can skip In Progress. All other task types can also now skip In Progress — acceptable because the attachment check still warns on Done with no files.
 - **Finance due_date input is inside the status form:** It POSTs `due_date` to `task_status_update`, not to `task_set_due_date`. The view saves it before the guard. PM's due_date input is a separate form in the due_date column posting to `task_set_due_date` — these are two different mechanisms for two different roles.
 - **Payment capture modal is inside `{% if role == 'Finance' %}` block:** PM marking a Finance confirmation task Done from the task list does NOT see the payment capture modal (modal not rendered for PM). PM can still mark tasks Done normally; the sync fires without payment info.
-- **Bidirectional sync is name-based:** Task names 'Advance Payment Confirmation', 'Finance Confirmation', '100% Payment Confirmation' are hardcoded. If task names in the residential template ever change, the sync will silently stop firing. Never rename these tasks without updating both `_FINANCE_TASK_TO_MILESTONE` dicts.
+- **Bidirectional sync is name-based:** Task names 'Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation' are hardcoded. If task names in the residential template ever change, the sync will silently stop firing. Never rename these tasks without updating **all three** places: both `_FINANCE_TASK_TO_MILESTONE` dicts, both `_MILESTONE_TO_FINANCE_TASK` dicts (in `views.py`), and the `_FINANCE_CONF_TASKS` JS array in `project_overview.html` (which gates the client-side payment-capture modal).
 
 ---
 
