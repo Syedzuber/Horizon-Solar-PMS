@@ -125,16 +125,20 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
     return len(changes), [t for t, _old, _new in changes]
 
 
-def calculate_due_dates(project):
+def calculate_due_dates(project, user=None):
     """
     Assign due_date to every task on project starting from project.activated_at.
     Internal tasks chain sequentially off the previous internal task's due date.
     External tasks get the same due date as the current internal chain position
     (they run in parallel, not blocking the chain).
     Called on full recalculation (project_recalculate_dates view).
+
+    Writes ONE summary ActivityLog line for the whole recalc — never per-task, and
+    no DueDateChangeLog rows (matching the cascade approach). `user` is the acting
+    user; pass None for a system-triggered recalc with no clear actor.
     """
     # import inside function to avoid circular import at module level
-    from .models import Task
+    from .models import Task, log_activity
 
     tasks = (
         Task.objects
@@ -144,6 +148,7 @@ def calculate_due_dates(project):
 
     previous_internal_due = project.activated_at.date()
 
+    count = 0
     for task in tasks:
         if task.task_type == Task.EXTERNAL:
             # External tasks shadow the current internal chain date
@@ -152,6 +157,14 @@ def calculate_due_dates(project):
             task.due_date = add_workdays(previous_internal_due, task.duration_days)
             previous_internal_due = task.due_date
         task.save()
+        count += 1
+
+    log_activity(
+        project, user.profile if user else None,
+        f"Recalculated due dates for {count} tasks",
+        entity_type='Project', entity_id=project.pk,
+        action_code='due_dates_recalculated',
+    )
 
 
 # Hardcoded fallback durations used when TaskDurationTemplate DB table is empty.
@@ -217,32 +230,51 @@ def _get_duration(task_name, overrides):
     return RESIDENTIAL_DURATION_DEFAULTS.get(task_name, 1)
 
 
-def attach_residential_template(project):
+# --- Residential Finance-owned tasks (part of the Residential template) -----
+# The same production Finance user back-assigns two groups of tasks at activation:
+#   1. Three fixed "send invoice" tasks inserted into the template
+#      (Phase 1 / pos 2, Phase 5 / pos 6, Phase 8 / pos 10) — plain manual
+#      tasks, no PDF/email automation.
+#   2. Three finance-confirmation tasks already in the template
+#      (RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES below).
+#
+# The assignee is resolved by email in ONE place. The account exists in
+# production; it is required data — if absent, activation fails loudly and rolls
+# back (see attach_residential_template) rather than creating tasks unassigned.
+RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL = 'santosh@horizonrenewablepower.com'
+
+# Identified by fixed name (no dedicated model field) for future filtering.
+INVOICE_TASK_ADVANCE  = 'Send Invoice - Advance Payment'
+INVOICE_TASK_MATERIAL = 'Send Invoice - Material Supply'
+INVOICE_TASK_FINAL    = 'Send Invoice - Final Payment'
+INVOICE_TASK_NAMES = (INVOICE_TASK_ADVANCE, INVOICE_TASK_MATERIAL, INVOICE_TASK_FINAL)
+
+# Existing finance-confirmation tasks back-assigned to the same Finance user.
+# ("Finance Confirmation" is intentionally NOT here — it is deleted from the
+# template; its M2 milestone role passes to Pre Dispatch Payment Confirmation.)
+RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES = (
+    'Advance Payment Confirmation',       # Phase 1
+    'Pre Dispatch Payment Confirmation',  # Phase 5 (M2 payment milestone)
+    '100% Payment Confirmation',          # Phase 9
+)
+
+
+def build_residential_phases():
     """
-    Create all 9 phases and 50 tasks for a Residential project.
-    Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
-    Entire operation is atomic — any failure rolls back all phases and tasks.
-    Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
+    Return the Residential EPC template as a list of phase dicts (9 phases / 52 tasks).
+    Single source of truth: attach_residential_template() builds projects from this, and
+    the checklist admin's task-name picker sources its known task names from it. Task is
+    imported inside to avoid a module-level circular import.
     """
-    # import inside function to avoid circular import at module level
-    from .models import ProjectPhase, Task, TaskDurationTemplate
-
-    # DB-first duration lookup — falls back to RESIDENTIAL_DURATION_DEFAULTS if table is empty
-    duration_overrides = {
-        obj.task_name: obj.duration_days
-        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
-    }
-
-    with transaction.atomic():
-
-        # Full Residential EPC template — 9 phases, 50 tasks (42 internal, 8 external)
-        PHASES = [
+    from .models import Task
+    PHASES = [
             {
                 'phase_name':  'Sales & Documentation',
                 'phase_order': 1,
                 'tasks': [
-                    {'task_order': 1, 'task_name': 'OCR, Documentation & Verification', 'assigned_role': Task.BD,     'task_type': Task.INTERNAL},
-                    {'task_order': 2, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: Advance Payment
+                    {'task_order': 1, 'task_name': 'OCR, Documentation & Verification', 'assigned_role': Task.BD,      'task_type': Task.INTERNAL},
+                    {'task_order': 2, 'task_name': INVOICE_TASK_ADVANCE,                'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL},  # Send invoice — advance
+                    {'task_order': 3, 'task_name': 'Advance Payment Confirmation',       'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M1: Advance Payment
                 ],
             },
             {
@@ -290,8 +322,8 @@ def attach_residential_template(project):
                     {'task_order': 3, 'task_name': 'PO Placed Module',                  'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
                     {'task_order': 4, 'task_name': 'PO Placed Inverter',                'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
                     {'task_order': 5, 'task_name': 'PO for B & C Class Items',          'assigned_role': Task.SCM,     'task_type': Task.INTERNAL},
-                    {'task_order': 6, 'task_name': 'Finance Confirmation',              'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: Finance Confirmation
-                    {'task_order': 7, 'task_name': 'Pre Dispatch Payment Confirmation', 'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL},
+                    {'task_order': 6, 'task_name': INVOICE_TASK_MATERIAL,              'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL},  # Send invoice — material supply
+                    {'task_order': 7, 'task_name': 'Pre Dispatch Payment Confirmation', 'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M2: Pre Dispatch (replaces deleted Finance Confirmation)
                 ],
             },
             {
@@ -332,6 +364,7 @@ def attach_residential_template(project):
                     {'task_order': 7, 'task_name': 'Commissioning Report Prepared',     'assigned_role': Task.SITE_ENGINEER,  'task_type': Task.INTERNAL},
                     {'task_order': 8, 'task_name': 'Commissioning Report Approved',     'assigned_role': Task.PM,            'task_type': Task.INTERNAL},
                     {'task_order': 9, 'task_name': 'Customer Handover',                 'assigned_role': Task.PM,            'task_type': Task.INTERNAL},
+                    {'task_order': 10, 'task_name': INVOICE_TASK_FINAL,                 'assigned_role': Task.FINANCE,       'task_type': Task.INTERNAL},  # Send invoice — final payment
                 ],
             },
             {
@@ -341,7 +374,46 @@ def attach_residential_template(project):
                     {'task_order': 1, 'task_name': '100% Payment Confirmation', 'assigned_role': Task.FINANCE, 'task_type': Task.INTERNAL, 'is_payment_milestone': True},  # M3: 100% Payment
                 ],
             },
-        ]
+    ]
+    return PHASES
+
+
+def get_residential_template_task_names():
+    """Return the ordered, de-duplicated list of (phase_name, task_name) pairs for the
+    Residential template — the known task names the checklist admin can assign to."""
+    pairs = []
+    seen = set()
+    for phase in build_residential_phases():
+        for t in phase['tasks']:
+            name = t['task_name']
+            if name not in seen:
+                seen.add(name)
+                pairs.append((phase['phase_name'], name))
+    return pairs
+
+
+def attach_residential_template(project):
+    """
+    Create all 9 phases and 52 tasks for a Residential project.
+    Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
+    The send-invoice and finance-confirmation tasks are auto-assigned to
+    RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL (required data — activation fails loudly
+    and rolls back if that user is absent).
+    Entire operation is atomic — any failure rolls back all phases and tasks.
+    Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
+    """
+    # import inside function to avoid circular import at module level
+    from .models import ProjectPhase, Task, TaskDurationTemplate, UserProfile
+
+    # DB-first duration lookup — falls back to RESIDENTIAL_DURATION_DEFAULTS if table is empty
+    duration_overrides = {
+        obj.task_name: obj.duration_days
+        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
+    }
+
+    with transaction.atomic():
+
+        PHASES = build_residential_phases()
 
         for phase_data in PHASES:
             phase = ProjectPhase.objects.create(
@@ -371,13 +443,36 @@ def attach_residential_template(project):
             assigned_role=Task.PM,
         ).update(assigned_to=pm_profile)
 
+        # Auto-assign the send-invoice AND finance-confirmation tasks to the same
+        # Finance user (by email), resolved in one place. This is required data:
+        # if the account is missing, fail loudly so the whole atomic activation
+        # rolls back — never create these tasks unassigned. Uses an explicit raise
+        # (not the assert pattern below) because asserts are stripped under
+        # `python -O`, which would silently re-enable create-unassigned behavior.
+        finance_assignee = (
+            UserProfile.objects
+            .filter(user__email=RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL)
+            .first()
+        )
+        if finance_assignee is None:
+            raise UserProfile.DoesNotExist(
+                f"Cannot activate Residential project: finance assignee "
+                f"'{RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL}' not found. A Finance "
+                f"UserProfile with this email must exist to own the send-invoice "
+                f"and finance-confirmation tasks."
+            )
+        Task.objects.filter(
+            phase__project=project,
+            task_name__in=INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES,
+        ).update(assigned_to=finance_assignee)
+
         # Integrity checks — roll back everything if counts are wrong.
         # These assertions run inside the atomic block so a mismatch aborts the transaction.
         task_count = Task.objects.filter(phase__project=project).count()
-        assert task_count == 50, f"Expected 50 tasks, got {task_count}"
+        assert task_count == 52, f"Expected 52 tasks, got {task_count}"
 
         internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        assert internal_count == 42, f"Expected 42 internal tasks, got {internal_count}"
+        assert internal_count == 44, f"Expected 44 internal tasks, got {internal_count}"
 
         external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
         assert external_count == 8, f"Expected 8 external tasks, got {external_count}"

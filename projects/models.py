@@ -272,6 +272,45 @@ class DueDateChangeLog(models.Model):
         return f"{self.task.task_name}: {self.old_date} → {self.new_date}"
 
 
+class ProjectFieldEditLog(models.Model):
+    """Audit trail for post-activation edits to a project's business fields.
+
+    One row is written per CHANGED field each time a PM/Coordinator edits a
+    non-Draft (Activated+) project's capacity, contract value, or target
+    commissioning date via the post-activation field-edit endpoint. No-op edits
+    (new == old) are skipped by the view, so this table records real changes only.
+
+    Values are stored as text so a single log uniformly diffs decimals and dates.
+    Mirrors DueDateChangeLog: actor -> UserProfile, on_delete=SET_NULL,
+    auto_now_add timestamp, newest-first ordering.
+    """
+
+    CAPACITY_KW               = 'capacity_kw'
+    CONTRACT_VALUE            = 'contract_value'
+    TARGET_COMMISSIONING_DATE = 'target_commissioning_date'
+    # Field names deliberately match Project field names so the view can getattr()
+    # old/new values by iterating these choices.
+    FIELD_CHOICES = [
+        (CAPACITY_KW,               'Capacity (kW)'),
+        (CONTRACT_VALUE,            'Contract Value'),
+        (TARGET_COMMISSIONING_DATE, 'Target Commissioning Date'),
+    ]
+
+    project    = models.ForeignKey('Project', on_delete=models.CASCADE, related_name='field_edit_logs')
+    field_name = models.CharField(max_length=32, choices=FIELD_CHOICES)
+    old_value  = models.TextField(blank=True, default='')  # text for uniform diffing across types
+    new_value  = models.TextField(blank=True, default='')
+    edited_by  = models.ForeignKey('UserProfile', on_delete=models.SET_NULL, null=True)
+    edited_at  = models.DateTimeField(auto_now_add=True)
+    reason     = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-edited_at']
+
+    def __str__(self):
+        return f"{self.project.project_id} {self.field_name}: {self.old_value} → {self.new_value}"
+
+
 class UserProfile(models.Model):
     """Extends Django's User with a role and phone number. One profile per user."""
 
@@ -671,6 +710,10 @@ class ActivityLog(models.Model):
         'UserProfile', on_delete=models.SET_NULL, null=True, blank=True, related_name='activity_logs',
     )
     action      = models.CharField(max_length=255)   # Human-readable description of what happened
+    # Stable machine-readable event key for querying (e.g. 'task_assigned', 'issue_resolved').
+    # Blank on existing rows and on the ~80 call sites not yet retrofitted — populated only where
+    # this feature logs, or where the EOD digest queries. Never string-match `action`; filter this.
+    action_code = models.CharField(max_length=50, blank=True, db_index=True, default='')
     entity_type = models.CharField(max_length=50, blank=True, default='')   # e.g. 'Task', 'Issue', 'BOQ', 'File'
     entity_id   = models.PositiveIntegerField(null=True, blank=True)         # PK of the affected object
     timestamp   = models.DateTimeField(auto_now_add=True)
@@ -940,10 +983,14 @@ def get_project_material_summary(project):
         return 'Partial'
 
 
-def log_activity(project, actor, action, entity_type='', entity_id=None):
+def log_activity(project, actor, action, entity_type='', entity_id=None, action_code=''):
     """
     Write one ActivityLog entry. Silently swallows exceptions so a failed log
     never aborts the primary operation that called it.
+
+    action_code is an optional stable machine-readable event key. Most existing
+    call sites leave it blank; supply it only where a consumer (e.g. the EOD
+    digest) needs to filter on the event type instead of string-matching `action`.
     """
     try:
         # import inside function to avoid circular import at module level
@@ -954,6 +1001,7 @@ def log_activity(project, actor, action, entity_type='', entity_id=None):
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
+            action_code=action_code,
         )
     except Exception as e:
         import logging
@@ -1167,3 +1215,102 @@ class TaskDurationTemplate(models.Model):
 
     def __str__(self):
         return f"{self.project_type} | {self.phase_name} | {self.task_name} ({self.duration_days}d)"
+
+
+class Checklist(models.Model):
+    """
+    A named, reusable checklist template authored once in portal-admin and surfaced on
+    a task by explicitly linking it to one or more (task_name, project_type) pairs via
+    ChecklistTaskLink. Its line items live in ChecklistItem; per-task completion state
+    lives in ChecklistItemCompletion. Replaces the prior per-task-instance checklist
+    model — checklists are now reusable across every task with the linked name/type.
+    """
+
+    name       = models.CharField(max_length=200)
+    is_active  = models.BooleanField(default=True)  # Inactive checklists are hidden on task detail
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='created_checklists',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class ChecklistItem(models.Model):
+    """
+    One line item belonging to a Checklist. `order` is ascending within the checklist and
+    is swapped by the admin up/down actions (no drag library). Deleting the parent
+    Checklist cascades to its items (and each item cascades to its completions).
+    """
+
+    checklist = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='items')
+    label     = models.TextField()
+    order     = models.PositiveIntegerField(default=0)  # Ascending within checklist; swapped by move up/down
+
+    class Meta:
+        ordering = ['order', 'pk']  # pk tiebreak keeps ordering stable when two items share an order
+
+    def __str__(self):
+        return f"Checklist {self.checklist_id} — {self.label[:40]}"
+
+
+class ChecklistTaskLink(models.Model):
+    """
+    Assigns a Checklist to a task, keyed by (task_name, project_type) rather than a
+    concrete Task row, so every task instance with that name in that project type shows
+    the checklist. UNIQUE on (task_name, project_type): a given task can have at most one
+    checklist. Assigning a second checklist to an already-linked pair is rejected at the
+    admin-view layer with a clear error, not silently overwritten. Deleting the Checklist
+    cascades away its links.
+    """
+
+    checklist    = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='task_links')
+    task_name    = models.CharField(max_length=200)
+    project_type = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
+
+    class Meta:
+        unique_together = ('task_name', 'project_type')
+        ordering        = ['project_type', 'task_name']
+
+    def __str__(self):
+        return f"{self.task_name} [{self.project_type}] → checklist {self.checklist_id}"
+
+
+class ChecklistItemCompletion(models.Model):
+    """
+    Per-task completion state for one ChecklistItem. Keyed by (item, task) so the same
+    checklist item, shown on two different tasks, is completed independently. Completing
+    an item requires BOTH a tick and a photo: is_checked is only ever set True together
+    with the three photo_* fields in the same save, so a checked item can never lack a
+    photo. Reuses the same three-field Supabase convention as the rest of the app.
+    """
+
+    item       = models.ForeignKey(ChecklistItem, on_delete=models.CASCADE, related_name='completions')
+    task       = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='checklist_completions')
+    is_checked = models.BooleanField(default=False)
+
+    # Supabase storage — same three-field convention as PaymentRequest / TaskAttachment.
+    # One photo per completion; blank until the item is checked.
+    photo_file_name     = models.CharField(max_length=255, blank=True, default='')   # Original filename
+    photo_url           = models.URLField(max_length=1000, blank=True, default='')   # Public Supabase URL for browser access
+    photo_supabase_path = models.CharField(max_length=500, blank=True, default='')   # Supabase path for purge commands
+
+    checked_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='checked_checklist_items',
+    )
+    checked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('item', 'task')
+        ordering        = ['pk']
+
+    def __str__(self):
+        state = 'checked' if self.is_checked else 'pending'
+        return f"Task {self.task_id} / item {self.item_id} — {state}"

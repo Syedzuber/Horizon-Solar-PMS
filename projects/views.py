@@ -21,7 +21,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from .models import (
-    UserProfile, Project, ProjectPhase, Task, DueDateChangeLog,
+    UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
     Vendor, VendorCategory, VendorBrand,
     BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
@@ -29,12 +29,16 @@ from .models import (
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
     TaskDurationTemplate,
+    Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
 )
 from .notifications import send_notification, send_raw_email
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, TaskAddForm, VendorForm
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm
 from .decorators import login_required, role_required, get_user_dashboard
 from .permissions import user_can_manage_project, project_managers
-from .utils import attach_residential_template, calculate_due_dates, recalculate_from_task
+from .utils import (
+    attach_residential_template, calculate_due_dates, recalculate_from_task,
+    get_residential_template_task_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1363,6 +1367,16 @@ def _get_ceo_dashboard_context():
             task_type=Task.EXTERNAL, due_date__lt=today, due_date__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
         )),
+        # Due-date windows — internal-only (matches Overdue convention); Blocked counts as still-open.
+        # "This week" reuses the Mon–Sun boundaries above; today's tasks intentionally count in both.
+        due_today_count    =Count('pk', filter=Q(
+            task_type=Task.INTERNAL, due_date=today,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        )),
+        due_this_week_count=Count('pk', filter=Q(
+            task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        )),
         # KPI time windows — use completed_at (DateTimeField, set by task_status_update on Done)
         task_done_this_week  =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=week_start_dt,       completed_at__lt=week_end_dt)),
         task_done_last_week  =Count('pk', filter=Q(status=Task.DONE, completed_at__gte=last_week_start_dt,  completed_at__lt=last_week_end_dt)),
@@ -1393,6 +1407,21 @@ def _get_ceo_dashboard_context():
         dept_finance_assigned=Count('pk', filter=Q(assigned_role=Task.FINANCE, assigned_to__isnull=False)),
         dept_finance_pending =Count('pk', filter=Q(assigned_role=Task.FINANCE, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
         dept_finance_overdue =Count('pk', filter=Q(assigned_role=Task.FINANCE, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        # -- Per-department due-date windows: 6 roles × 2 columns (Due Today / Due This Week) --
+        # Same convention as the portfolio-wide due counts: internal-only, open incl. Blocked.
+        # "This week" reuses the Mon–Sun boundaries; today's tasks intentionally count in both.
+        dept_pm_due_today =Count('pk', filter=Q(assigned_role=Task.PM,            task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_pm_due_week  =Count('pk', filter=Q(assigned_role=Task.PM,            task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_scm_due_today=Count('pk', filter=Q(assigned_role=Task.SCM,           task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_scm_due_week =Count('pk', filter=Q(assigned_role=Task.SCM,           task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_design_due_today=Count('pk', filter=Q(assigned_role=Task.DESIGN,     task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_design_due_week =Count('pk', filter=Q(assigned_role=Task.DESIGN,     task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_bd_due_today =Count('pk', filter=Q(assigned_role=Task.BD,            task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_bd_due_week  =Count('pk', filter=Q(assigned_role=Task.BD,            task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_se_due_today =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_se_due_week  =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_finance_due_today=Count('pk', filter=Q(assigned_role=Task.FINANCE,   task_type=Task.INTERNAL, due_date=today,                                        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
+        dept_finance_due_week =Count('pk', filter=Q(assigned_role=Task.FINANCE,   task_type=Task.INTERNAL, due_date__gte=week_start, due_date__lt=week_end, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
     )
 
     # -- QUERY 3: Issue aggregate — status counts + resolution time windows --
@@ -1462,6 +1491,30 @@ def _get_ceo_dashboard_context():
         )['s'] or 0
     )
 
+    # -- QUERY 5: Top-5 assignee leaderboard (open tasks per user) --
+    # Open = Not Started / In Progress / Blocked (Blocked counts as still on the plate).
+    # select_related pulls the profile→user names in the same query — no per-row round-trip.
+    top_assignees = list(
+        Task.objects.filter(
+            phase__project__is_deleted=False,
+            phase__project__status__in=active_statuses,
+            assigned_to__isnull=False,
+            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+        )
+        .values(
+            'assigned_to',
+            'assigned_to__user__first_name',
+            'assigned_to__user__last_name',
+            'assigned_to__user__username',
+        )
+        .annotate(count=Count('pk'))
+        .order_by('-count')[:5]
+    )
+    # Resolve a display name (get_full_name equivalent) without a second query.
+    for row in top_assignees:
+        full_name = f"{row['assigned_to__user__first_name']} {row['assigned_to__user__last_name']}".strip()
+        row['display_name'] = full_name or row['assigned_to__user__username']
+
     ctx = {
         'proj_total':    proj_total,
         'proj_on_time':  proj_on_time,
@@ -1470,6 +1523,7 @@ def _get_ceo_dashboard_context():
         'proj_blocked':  proj_blocked,
         'project_cards': project_cards,
         'dept_rows':     dept_rows,
+        'top_assignees': top_assignees,
         'fin_payment_requests_pending':    fin_payment_requests_pending,
         'fin_vendor_payments_outstanding': fin_vendor_payments_outstanding,
         'fin_client_contract_value':       fin_client_contract_value,
@@ -1615,6 +1669,27 @@ def _pm_owns_project(request, project):
     return user_can_manage_project(request.user, project)
 
 
+def _user_can_complete_checklist_item(user, task, project):
+    """Return True if `user` may tick / photograph checklist items on `task`.
+
+    Locked decision (Prompt 1): the SAME model as task_status_update's permission
+    check — the user's role matches task.assigned_role OR they have PM/coordinator
+    authority on the project. This is deliberately broader than the assigned-user-only
+    rule task_detail_status_update uses; both surfaces live on the same page.
+    Defined once and reused by both the completion view and the template context so
+    the two never drift.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if user_can_manage_project(user, project):
+        return True
+    # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
+    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+    normalised_user_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
+    return normalised_user_role == task.assigned_role
+
+
 @login_required
 @role_required(['PM', 'Admin', 'CEO'])
 def project_list(request):
@@ -1716,6 +1791,107 @@ def project_edit(request, project_id):
     })
 
 
+def _fmt_field_value(value):
+    """Stringify a Project field value for ProjectFieldEditLog storage; None -> ''.
+    Decimals render like '5.00', dates like '2026-07-21', so the audit log diffs
+    every field type uniformly as text."""
+    return '' if value is None else str(value)
+
+
+def _render_field_edit_modal_hx(request, project, form):
+    """Render the post-activation field-edit modal body — for the GET load and for
+    re-rendering with inline errors on a failed POST. Swapped into
+    #fieldEditModalContent (mirrors the task-form modal convention)."""
+    return render(request, 'projects/partials/_project_field_edit_form.html', {
+        'project': project,
+        'form':    form,
+    })
+
+
+@login_required
+def project_field_edit(request, project_id):
+    """Post-activation edit of a project's capacity / contract value / target
+    commissioning date. Separate from project_edit (Draft-only, full form): this path
+    is for NON-Draft projects, applies immediately with no approval gate, and writes
+    one ProjectFieldEditLog row per CHANGED field (no-op fields are skipped).
+
+    Editing target_commissioning_date does NOT trigger due-date cascade recalculation
+    (recalculate_from_task / calculate_due_dates are untouched) — the contractual
+    target stays decoupled from the operational task schedule by design.
+
+    Authorization is user_can_manage_project() ALONE (assigned PM or Coordinator) —
+    no role-string / assigned_pm comparison here. GET returns the modal body; POST
+    validates, saves, logs, and (HTMX) OOB-swaps the header pills.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+
+    # Server-side authority check — the button is only rendered for managers, but the
+    # POST handler must not rely on that (see spec §5).
+    if not user_can_manage_project(request.user, project):
+        raise Http404
+
+    # Draft projects must use the full edit flow (project_edit); reject here so the two
+    # paths stay disjoint and a Draft can never reach this no-cascade branch (spec §5).
+    if project.status == 'Draft':
+        messages.warning(request, 'Draft projects are edited from the full edit form.')
+        if _is_hx(request):
+            return render(request, 'projects/partials/_hx_messages.html')
+        return redirect('project_overview', project_id=project.project_id)
+
+    if request.method == 'POST':
+        # Capture originals BEFORE binding: ModelForm.is_valid() mutates `project` in
+        # place (construct_instance in _post_clean), so getattr after save() would
+        # already return the NEW values.
+        old_values = {name: getattr(project, name) for name, _ in ProjectFieldEditLog.FIELD_CHOICES}
+        form = PostActivationFieldEditForm(request.POST, instance=project)
+        if form.is_valid():
+            profile = getattr(request.user, 'profile', None)
+            reason  = form.cleaned_data.get('reason', '')
+            changed = []
+            with transaction.atomic():
+                form.save()
+                for name, _ in ProjectFieldEditLog.FIELD_CHOICES:
+                    new_val = getattr(project, name)
+                    if old_values[name] != new_val:  # skip no-op edits — no audit noise
+                        ProjectFieldEditLog.objects.create(
+                            project=project,
+                            field_name=name,
+                            old_value=_fmt_field_value(old_values[name]),
+                            new_value=_fmt_field_value(new_val),
+                            edited_by=profile,
+                            reason=reason,
+                        )
+                        changed.append(name)
+                if changed:
+                    log_activity(
+                        project, profile,
+                        f"Edited project fields: {', '.join(changed)}",
+                        entity_type='Project', entity_id=project.pk,
+                    )
+            if changed:
+                messages.success(request, f"Updated {len(changed)} field{'' if len(changed) == 1 else 's'}.")
+            else:
+                messages.info(request, 'No changes to save.')
+            if _is_hx(request):
+                resp = render(request, 'projects/partials/_project_field_edit_success.html', {
+                    'project': project,
+                    'oob':     True,
+                })
+                resp['HX-Trigger'] = 'fieldEditDone'  # closes the modal client-side
+                return resp
+            return redirect('project_overview', project_id=project.project_id)
+
+        # Invalid submit → re-render the modal with inline errors (HTMX), else redirect.
+        if _is_hx(request):
+            return _render_field_edit_modal_hx(request, project, form)
+        messages.error(request, 'Please correct the errors and try again.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    # GET → modal body prefilled from the current instance values.
+    form = PostActivationFieldEditForm(instance=project)
+    return _render_field_edit_modal_hx(request, project, form)
+
+
 @login_required
 @role_required(['PM', 'Project Coordinator'])
 def project_activate(request, project_id):
@@ -1774,7 +1950,7 @@ def project_activate(request, project_id):
     log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
 
     if project.project_type == 'Residential':
-        messages.success(request, 'Project activated. 50 tasks created. Set the first task due date to calculate all dates.')
+        messages.success(request, 'Project activated. 53 tasks created. Set the first task due date to calculate all dates.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 
@@ -1805,7 +1981,7 @@ def project_recalculate_dates(request, project_id):
         messages.warning(request, 'Project has no activation date — cannot calculate due dates.')
         return redirect('project_overview', project_id=project.project_id)
 
-    calculate_due_dates(project)
+    calculate_due_dates(project, user=request.user)
     messages.success(request, 'Due dates recalculated from activation date.')
     return redirect('project_overview', project_id=project.project_id)
 
@@ -1839,7 +2015,7 @@ def enable_cascade_scheduling(request, project_id):
 
     # Trigger full recalculation if project has an activation date
     if project.activated_at:
-        calculate_due_dates(project)
+        calculate_due_dates(project, user=request.user)
 
     log_activity(
         project=project,
@@ -2001,6 +2177,53 @@ def _render_comments_hx(request, project, task):
         'task_comments': task_comments,
         'user_profile':  profile,
     })
+
+
+def _checklist_for_task(task, project):
+    """Resolve the active Checklist assigned to this task via ChecklistTaskLink
+    (task_name + project_type), or None. Inactive checklists are treated as unassigned."""
+    link = (ChecklistTaskLink.objects
+            .select_related('checklist')
+            .filter(task_name=task.task_name, project_type=project.project_type)
+            .first())
+    if link is None or not link.checklist.is_active:
+        return None
+    return link.checklist
+
+
+def _checklist_context(request, project, task):
+    """Build the shared context for the checklist section — used by the full task-detail
+    render, the HTMX response partial, and any view that swaps #checklistSection. Items come
+    from the Checklist linked to this (task_name, project_type); per-item completion state is
+    looked up per (item, task) so each task instance completes independently. Keeps the
+    permission flag computed in exactly one place."""
+    profile = getattr(request.user, 'profile', None)
+    checklist = _checklist_for_task(task, project)
+    items = list(checklist.items.all()) if checklist else []
+    completions = {}
+    if items:
+        completions = {
+            c.item_id: c
+            for c in ChecklistItemCompletion.objects.filter(task=task, item__in=items)
+                                                    .select_related('checked_by')
+        }
+    rows = [{'item': it, 'completion': completions.get(it.id)} for it in items]
+    return {
+        'project':            project,
+        'task':               task,
+        'checklist':          checklist,
+        'checklist_rows':     rows,
+        'checklist_items':    items,   # truthiness + count badge
+        'user_profile':       profile,
+        'can_complete_items': _user_can_complete_checklist_item(request.user, task, project),
+    }
+
+
+def _render_checklist_hx(request, project, task):
+    """Render the HTMX checklist response — swaps the item list into #checklistSection,
+    updates the header count badge out-of-band, and surfaces flash messages inline."""
+    return render(request, 'projects/partials/_checklist_response.html',
+                  _checklist_context(request, project, task))
 
 
 def _render_task_assign_design_success_hx(request, project, task):
@@ -2184,20 +2407,21 @@ def task_status_update(request, project_id, task_id):
         log_activity(
             project, request.user.profile,
             f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk,
+            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
         )
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
     else:
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
         # Log status changes for all non-blocked transitions (blocked has its own log above)
-        log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
+        log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
+                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
 
         # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
         # Mapping by task name — names are fixed in the residential template.
         _FINANCE_TASK_TO_MILESTONE = {
-            'Advance Payment Confirmation': 'M1',
-            'Finance Confirmation':         'M2',
-            '100% Payment Confirmation':    'M3',
+            'Advance Payment Confirmation':      'M1',
+            'Pre Dispatch Payment Confirmation': 'M2',
+            '100% Payment Confirmation':         'M3',
         }
         if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
             _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
@@ -2384,12 +2608,13 @@ def task_detail_status_update(request, project_id, task_id):
         log_activity(
             project, profile,
             f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk,
+            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
         )
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
     else:
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
-        log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk)
+        log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
+                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
 
         # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received
         _FINANCE_TASK_TO_MILESTONE = {
@@ -2466,6 +2691,30 @@ def task_detail_status_update(request, project_id, task_id):
     return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
 
+def _log_task_assignment(project, actor, task, prev_assignee, new_assignee):
+    """Write the correct ActivityLog line for a change to Task.assigned_to.
+
+    Three shapes, distinguished by prev/new: positive assignment, reassignment,
+    and unassign. `prev_assignee` is the value on the task BEFORE the update;
+    `new_assignee` is the value after (or None). No-op (prev == new) writes nothing.
+    """
+    if prev_assignee == new_assignee:
+        return
+
+    def _name(p):
+        return p.user.get_full_name() or p.user.username
+
+    if new_assignee is None:
+        action, code = f"Unassigned from {_name(prev_assignee)}", 'task_unassigned'
+    elif prev_assignee is None:
+        action, code = f"Assigned to {_name(new_assignee)}", 'task_assigned'
+    else:
+        action, code = (f"Reassigned from {_name(prev_assignee)} to {_name(new_assignee)}",
+                        'task_reassigned')
+
+    log_activity(project, actor, action, entity_type='Task', entity_id=task.pk, action_code=code)
+
+
 @login_required
 @role_required(['PM', 'Project Coordinator'])
 def task_assign(request, project_id, task_id):
@@ -2490,10 +2739,12 @@ def task_assign(request, project_id, task_id):
     candidates = UserProfile.objects.filter(role=profile_role, is_active=True)
 
     if request.method == 'POST':
+        prev_assignee = task.assigned_to  # captured before the update, for assignment logging
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
             Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            _log_task_assignment(project, request.user.profile, task, prev_assignee, assignee)
             recipient_name = assignee.user.get_full_name() or assignee.user.username
             task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
             task_url_abs = request.build_absolute_uri(task_url)
@@ -2531,6 +2782,7 @@ def task_assign(request, project_id, task_id):
                 )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
+            _log_task_assignment(project, request.user.profile, task, prev_assignee, None)
 
         if _is_hx(request):
             task.refresh_from_db()
@@ -2569,10 +2821,12 @@ def task_assign_design_head(request, project_id, task_id):
     candidates = UserProfile.objects.filter(role='Design', is_active=True)
 
     if request.method == 'POST':
+        prev_assignee = task.assigned_to  # captured before the update, for assignment logging
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role='Design', is_active=True)
             Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            _log_task_assignment(project, request.user.profile, task, prev_assignee, assignee)
             recipient_name = assignee.user.get_full_name() or assignee.user.username
             task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
             task_url_abs = request.build_absolute_uri(task_url)
@@ -2609,6 +2863,7 @@ def task_assign_design_head(request, project_id, task_id):
                 )
         else:
             Task.objects.filter(pk=task.pk).update(assigned_to=None)
+            _log_task_assignment(project, request.user.profile, task, prev_assignee, None)
 
         if _is_hx(request):
             task.refresh_from_db()
@@ -4139,19 +4394,34 @@ def project_overview(request, project_id):
                     return redirect('project_overview', project_id=project.project_id)
                 project.assigned_design = design_user
                 project.save(update_fields=['assigned_design'])
-                Task.objects.filter(
+                _n = Task.objects.filter(
                     phase__project=project,
                     assigned_role=Task.DESIGN,
                     status__in=['Not Started', 'In Progress'],
                 ).update(assigned_to=design_user)
+                # One summary line for the whole bulk assignment — never per-task.
+                _design_name = design_user.user.get_full_name() or design_user.user.username
+                log_activity(
+                    project, request.user.profile,
+                    f"Assigned Design lead {_design_name} to {_n} tasks",
+                    entity_type='Project', entity_id=project.pk,
+                    action_code='design_bulk_assigned',
+                )
             else:
                 project.assigned_design = None
                 project.save(update_fields=['assigned_design'])
-                Task.objects.filter(
+                _n = Task.objects.filter(
                     phase__project=project,
                     assigned_role=Task.DESIGN,
                     status__in=['Not Started', 'In Progress'],
                 ).update(assigned_to=None)
+                # Clearing the Design lead is also a single summary line.
+                log_activity(
+                    project, request.user.profile,
+                    f"Cleared Design lead from {_n} tasks",
+                    entity_type='Project', entity_id=project.pk,
+                    action_code='design_bulk_assigned',
+                )
             messages.success(request, 'Design member updated.')
             return redirect('project_overview', project_id=project.project_id)
 
@@ -4213,9 +4483,13 @@ def project_overview(request, project_id):
                 'ext_pending':    ext_pending,
             })
 
-    # Recent activity from ActivityLog (authoritative audit trail)
+    # Recent activity from ActivityLog (authoritative audit trail).
+    # Exclude task_unassigned — the lowest-signal of the new assignment events — so it
+    # doesn't crowd status/issue activity out of this 8-item feed. The full trail
+    # (including unassigns) is still visible in the per-project timeline and audit log.
     recent_activity = list(
         ActivityLog.objects.filter(project=project)
+        .exclude(action_code='task_unassigned')
         .select_related('actor__user')
         .order_by('-timestamp')[:8]
     )
@@ -4585,10 +4859,13 @@ def zoho_deal_closed_webhook(request):
 # ---------------------------------------------------------------------------
 
 
-def _validate_and_upload(file, supabase_client, bucket, supabase_path):
-    """Validate one file and upload to Supabase. Raises ValueError on validation failure."""
+def _validate_and_upload(file, supabase_client, bucket, supabase_path, allowed_extensions=None):
+    """Validate one file and upload to Supabase. Raises ValueError on validation failure.
+    Pass allowed_extensions (e.g. ALLOWED_PHOTO_EXTENSIONS) to restrict the accepted types
+    for this call; defaults to ALLOWED_EXTENSIONS, preserving every existing caller."""
+    allowed = allowed_extensions if allowed_extensions is not None else ALLOWED_EXTENSIONS
     ext = file.name.rsplit('.', 1)[-1].lower() if '.' in file.name else ''
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in allowed:
         raise ValueError(f"unsupported type (.{ext})")
     if file.size > MAX_FILE_SIZE_BYTES:
         raise ValueError("exceeds 20 MB limit")
@@ -4643,7 +4920,7 @@ def task_detail(request, project_id, task_id):
 
     is_assignee = task.assigned_to is not None and task.assigned_to == profile
 
-    return render(request, 'projects/task_detail.html', {
+    context = {
         'project':            project,
         'task':               task,
         'attachments':        attachments,
@@ -4653,7 +4930,11 @@ def task_detail(request, project_id, task_id):
         'task_comments':      task_comments,
         'is_assignee':        is_assignee,
         'task_status_choices': Task.STATUS_CHOICES,
-    })
+    }
+    # Checklist — items come from the Checklist linked to this (task_name, project_type);
+    # completion is per-(item, task). Shared with the HTMX swap via _checklist_context().
+    context.update(_checklist_context(request, project, task))
+    return render(request, 'projects/task_detail.html', context)
 
 
 # ---------------------------------------------------------------------------
@@ -4929,6 +5210,117 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
 
 
 # ---------------------------------------------------------------------------
+# Checklist completion — on the task-detail page
+#
+# The checklist itself (name + items) is authored in portal-admin and assigned to a
+# task via ChecklistTaskLink; item CRUD lives there, NOT here. On task detail the only
+# action is COMPLETION: tick an item + upload its required photo, writing a
+# ChecklistItemCompletion row keyed by (item, task). Completion is gated by
+# _user_can_complete_checklist_item (role-match OR PM/coordinator) and swaps
+# #checklistSection via _render_checklist_hx. The task-closing gate is intentionally
+# NOT here — that is a later change.
+# ---------------------------------------------------------------------------
+
+def _checklist_error(request, project, task, msg):
+    """Surface a checklist error: HTMX → re-render the section with the flash inline;
+    non-HTMX → message + redirect to the task detail page."""
+    messages.error(request, msg)
+    if _is_hx(request):
+        return _render_checklist_hx(request, project, task)
+    return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+
+@login_required
+def checklist_item_complete(request, project_id, task_id, item_id):
+    """Tick one checklist item on this task AND upload its required photo as one atomic
+    action, writing a ChecklistItemCompletion row keyed by (item, task). is_checked is set
+    True only together with the three photo_* fields in the same save — a checked item can
+    never lack a photo. The item must belong to the Checklist assigned to this task.
+    Access: role-match OR PM/coordinator (_user_can_complete_checklist_item). POST only."""
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = get_object_or_404(Project, project_id=project_id)
+    task    = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    # The item must belong to the checklist currently linked to this task — never trust a
+    # raw item_id. _checklist_for_task enforces the (task_name, project_type) link + active.
+    checklist = _checklist_for_task(task, project)
+    if checklist is None:
+        return _checklist_error(request, project, task, 'No checklist is assigned to this task.')
+    item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+
+    if not _user_can_complete_checklist_item(request.user, task, project):
+        if _is_hx(request):
+            return _checklist_error(request, project, task,
+                                    'You do not have permission to complete items on this task.')
+        return HttpResponseForbidden()
+
+    profile = request.user.profile
+
+    # Already completed on this task? Idempotent no-op (the template hides the form once done).
+    existing = ChecklistItemCompletion.objects.filter(item=item, task=task).first()
+    if existing is not None and existing.is_checked:
+        if _is_hx(request):
+            return _render_checklist_hx(request, project, task)
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    photo = request.FILES.get('photo')
+    if not photo:
+        return _checklist_error(request, project, task,
+                                'A photo is required to check this item.')
+
+    try:
+        from .supabase_storage import get_supabase_client
+        client = get_supabase_client()
+    except (ValueError, ImportError) as exc:
+        return _checklist_error(request, project, task,
+                                f"Upload service unavailable. Contact Admin. ({exc})")
+
+    bucket = settings.SUPABASE_BUCKET
+    supabase_path = (
+        f"checklist-photos/{project.project_id}/{task.pk}/{item.pk}/"
+        f"{_uuid.uuid4()}_{photo.name}"
+    )
+    try:
+        # Photo-only allow-list — reuses the shared helper (audit Point 2)
+        _validate_and_upload(photo, client, bucket, supabase_path,
+                             allowed_extensions=ALLOWED_PHOTO_EXTENSIONS)
+    except ValueError as exc:
+        return _checklist_error(request, project, task, f"Photo rejected: {exc}")
+    except Exception as exc:
+        logger.error('Supabase checklist photo upload failed for %s: %s', photo.name, exc)
+        return _checklist_error(request, project, task, 'Photo upload failed. Please try again.')
+
+    file_url = (
+        f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+        f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+    )
+
+    # Atomic completion: tick + all three photo fields written together on the (item, task) row.
+    completion, _created = ChecklistItemCompletion.objects.get_or_create(item=item, task=task)
+    completion.photo_file_name     = photo.name
+    completion.photo_url           = file_url
+    completion.photo_supabase_path = supabase_path
+    completion.is_checked          = True
+    completion.checked_by          = request.user
+    completion.checked_at          = timezone.now()
+    completion.save(update_fields=[
+        'photo_file_name', 'photo_url', 'photo_supabase_path',
+        'is_checked', 'checked_by', 'checked_at',
+    ])
+
+    log_activity(project, profile,
+                 f"Completed checklist item '{item.label}' on task: {task.task_name}",
+                 entity_type='ChecklistItemCompletion', entity_id=completion.pk)
+    messages.success(request, 'Checklist item checked.')
+
+    if _is_hx(request):
+        return _render_checklist_hx(request, project, task)
+    return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+# ---------------------------------------------------------------------------
 # Issues
 # ---------------------------------------------------------------------------
 
@@ -5002,7 +5394,7 @@ def create_project_issue(request, project_id):
         assigned_to=assigned_to,
         due_date=due_date,
     )
-    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
         recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
@@ -5098,7 +5490,7 @@ def create_task_issue(request, project_id, task_id):
         assigned_to=assigned_to,
         due_date=due_date,
     )
-    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk)
+    log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
         recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
@@ -5203,7 +5595,7 @@ def create_delivery_issue(request, project_id, dc_id):
     log_activity(
         project, profile,
         f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
-        entity_type='Issue', entity_id=issue.pk,
+        entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
     )
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
@@ -5357,7 +5749,7 @@ def resolve_issue(request, issue_id):
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
-        log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        log_activity(project, profile, f"Resolved issue: {issue.title}", entity_type='Issue', entity_id=issue.pk, action_code='issue_resolved')
         resolver_name = profile.user.get_full_name() or profile.user.username
         issue_link = f'/issues/{issue.pk}/'
         issue_link_abs = request.build_absolute_uri(issue_link)
@@ -5417,7 +5809,7 @@ def close_issue(request, issue_id):
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
-        log_activity(project, profile, f"PM closed issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        log_activity(project, profile, f"PM closed issue: {issue.title}", entity_type='Issue', entity_id=issue.pk, action_code='issue_closed')
         messages.success(request, 'Issue closed.')
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -5451,7 +5843,7 @@ def reopen_issue(request, issue_id):
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
-        log_activity(project, profile, f"PM reopened issue: {issue.title}", entity_type='Issue', entity_id=issue.pk)
+        log_activity(project, profile, f"PM reopened issue: {issue.title}", entity_type='Issue', entity_id=issue.pk, action_code='issue_reopened')
         messages.success(request, 'Issue reopened.')
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -6861,13 +7253,14 @@ def admin_assign_pm(request, project_id):
 
     log_activity(
         project=project,
-        actor=request.user,
+        actor=request.user.profile,  # was request.user (a User) — silently rejected by the FK
         action=(
             f"PM assigned to {pm_profile.user.get_full_name() or pm_profile.user.username}"
             + (f" (previously {old_pm.user.get_full_name() or old_pm.user.username})" if old_pm else "")
         ),
         entity_type='Project',
         entity_id=project.pk,
+        action_code='pm_assigned',
     )
 
     # Notify the newly assigned PM
@@ -6997,6 +7390,289 @@ def admin_task_durations(request):
         'grouped': grouped,
         'total': len(records),
     })
+
+
+# ---------------------------------------------------------------------------
+# Portal-admin: reusable Checklists
+#
+# A Checklist is authored once here (name + ordered items) and surfaced on a task
+# by linking it to one or more (task_name, project_type) pairs. UNIQUE on that pair
+# — a task can have at most one checklist; a second assignment is rejected here with a
+# clear error (not just at the DB level). Task names for the picker are sourced from the
+# hardcoded Residential template via utils.get_residential_template_task_names(). All
+# mutations are Admin-only and log_activity(entity_type='Checklist'). Item CRUD lives
+# here (NOT on task detail); task detail is completion-only.
+# ---------------------------------------------------------------------------
+
+def _checklist_task_name_choices():
+    """Ordered (phase_name, task_name) pairs the admin may assign — from the Residential
+    template. Reported source: projects.utils.get_residential_template_task_names(), which
+    reads the single hardcoded PHASES structure shared with attach_residential_template()."""
+    return get_residential_template_task_names()
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklists(request):
+    """List all Checklists (name, item count, assigned task_name/project_type pairs, active
+    toggle). Access: Admin only."""
+    checklists = (
+        Checklist.objects
+        .prefetch_related('items', 'task_links')
+        .all()
+    )
+    return render(request, 'projects/admin/checklists.html', {
+        'checklists': checklists,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_create(request):
+    """Create a new empty Checklist, then redirect to its editor. Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklists')
+
+    name = request.POST.get('name', '').strip()
+    if not name:
+        messages.error(request, 'Please enter a checklist name.')
+        return redirect('admin_checklists')
+
+    checklist = Checklist.objects.create(name=name, created_by=request.user)
+    log_activity(None, request.user.profile,
+                 f"Created checklist '{name}'",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, f'Checklist "{name}" created. Add items and assign tasks below.')
+    return redirect('admin_checklist_edit', checklist_id=checklist.pk)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_edit(request, checklist_id):
+    """Editor for one Checklist: rename/active toggle, item add/edit/delete/reorder, and
+    task-link assign/unassign. GET only — mutations POST to the dedicated actions below."""
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    items = checklist.items.all()
+    links = checklist.task_links.all()
+
+    return render(request, 'projects/admin/checklist_edit.html', {
+        'checklist':       checklist,
+        'items':           items,
+        'links':           links,
+        'task_name_pairs': _checklist_task_name_choices(),
+        'project_types':   Project.PROJECT_TYPE_CHOICES,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_update(request, checklist_id):
+    """Rename a Checklist and/or toggle its active flag. Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    name = request.POST.get('name', '').strip()
+    if not name:
+        messages.error(request, 'Checklist name cannot be empty.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    is_active = request.POST.get('is_active') == 'on'
+    checklist.name = name
+    checklist.is_active = is_active
+    checklist.save(update_fields=['name', 'is_active'])
+
+    log_activity(None, request.user.profile,
+                 f"Updated checklist '{name}' (active={is_active})",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, 'Checklist saved.')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_delete(request, checklist_id):
+    """Delete a Checklist. Cascades to its items, task links, and item completions.
+    Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklists')
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    name = checklist.name
+    checklist.delete()  # CASCADE: items → completions, and task_links
+
+    log_activity(None, request.user.profile,
+                 f"Deleted checklist '{name}' (and its items, links, and completions)",
+                 entity_type='Checklist', entity_id=None)
+    messages.success(request, f'Checklist "{name}" deleted.')
+    return redirect('admin_checklists')
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_item_add(request, checklist_id):
+    """Append one item to a Checklist. Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    label = request.POST.get('label', '').strip()
+    if not label:
+        messages.error(request, 'Please enter a label for the item.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    next_order = (checklist.items.aggregate(Max('order'))['order__max'] or 0) + 1
+    item = ChecklistItem.objects.create(checklist=checklist, label=label, order=next_order)
+
+    log_activity(None, request.user.profile,
+                 f"Added item '{label}' to checklist '{checklist.name}'",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, 'Item added.')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_item_edit(request, checklist_id, item_id):
+    """Edit one Checklist item's label. Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+    label = request.POST.get('label', '').strip()
+    if not label:
+        messages.error(request, 'Label cannot be empty.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    item.label = label
+    item.save(update_fields=['label'])
+
+    log_activity(None, request.user.profile,
+                 f"Edited item to '{label}' on checklist '{checklist.name}'",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, 'Item updated.')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_item_delete(request, checklist_id, item_id):
+    """Delete one Checklist item (cascades to its completions). Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+    label = item.label
+    item.delete()
+
+    log_activity(None, request.user.profile,
+                 f"Deleted item '{label}' from checklist '{checklist.name}'",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, 'Item deleted.')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_item_move(request, checklist_id, item_id):
+    """Reorder a Checklist item up or down by swapping `order` with its neighbour (no drag
+    library). Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+    direction = request.POST.get('direction', '')
+
+    if direction == 'up':
+        neighbor = (checklist.items
+                    .filter(order__lt=item.order).order_by('-order', '-pk').first())
+    elif direction == 'down':
+        neighbor = (checklist.items
+                    .filter(order__gt=item.order).order_by('order', 'pk').first())
+    else:
+        messages.error(request, 'Invalid move direction.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    # No neighbour → already at the top/bottom; silent no-op
+    if neighbor is not None:
+        with transaction.atomic():
+            item.order, neighbor.order = neighbor.order, item.order
+            item.save(update_fields=['order'])
+            neighbor.save(update_fields=['order'])
+        log_activity(None, request.user.profile,
+                     f"Reordered item '{item.label}' {direction} on checklist '{checklist.name}'",
+                     entity_type='Checklist', entity_id=checklist.pk)
+
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_link_add(request, checklist_id):
+    """Assign this Checklist to a (task_name, project_type) pair. Enforces the
+    one-checklist-per-task-name+type rule at this layer with a clear error before the DB
+    unique constraint is ever hit. Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    task_name = request.POST.get('task_name', '').strip()
+    project_type = request.POST.get('project_type', '').strip()
+
+    valid_task_names = {name for _phase, name in _checklist_task_name_choices()}
+    valid_types = {value for value, _label in Project.PROJECT_TYPE_CHOICES}
+    if task_name not in valid_task_names or project_type not in valid_types:
+        messages.error(request, 'Please choose a valid task name and project type.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    # Uniqueness enforced here with a clear message — a second checklist on an already-linked
+    # (task_name, project_type) is rejected, never silently overwritten.
+    existing = (ChecklistTaskLink.objects
+                .select_related('checklist')
+                .filter(task_name=task_name, project_type=project_type)
+                .first())
+    if existing is not None:
+        if existing.checklist_id == checklist.pk:
+            messages.error(request, f'"{task_name}" ({project_type}) is already assigned to this checklist.')
+        else:
+            messages.error(
+                request,
+                f'"{task_name}" ({project_type}) is already assigned to checklist '
+                f'"{existing.checklist.name}". Unassign it there first.'
+            )
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    link = ChecklistTaskLink.objects.create(
+        checklist=checklist, task_name=task_name, project_type=project_type,
+    )
+    log_activity(None, request.user.profile,
+                 f"Assigned checklist '{checklist.name}' to task '{task_name}' ({project_type})",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, f'Assigned to "{task_name}" ({project_type}).')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+@login_required
+@role_required(['Admin'])
+def admin_checklist_link_delete(request, checklist_id, link_id):
+    """Unassign a Checklist from a task (delete one ChecklistTaskLink). Access: Admin only.
+    POST only."""
+    if request.method != 'POST':
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    checklist = get_object_or_404(Checklist, pk=checklist_id)
+    link = get_object_or_404(ChecklistTaskLink, pk=link_id, checklist=checklist)
+    task_name, project_type = link.task_name, link.project_type
+    link.delete()
+
+    log_activity(None, request.user.profile,
+                 f"Unassigned checklist '{checklist.name}' from task '{task_name}' ({project_type})",
+                 entity_type='Checklist', entity_id=checklist.pk)
+    messages.success(request, f'Unassigned from "{task_name}" ({project_type}).')
+    return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
 
 # ---------------------------------------------------------------------------
