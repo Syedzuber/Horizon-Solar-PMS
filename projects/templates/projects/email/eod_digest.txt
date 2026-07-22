@@ -4,8 +4,11 @@ Hi {{ recipient_name }},
 
 {% if intro %}{{ intro }}{% else %}Here's a snapshot of your activity today (IST):{% endif %}
 
-- Open tasks {{ assigned_label|default:"assigned to you" }} : {{ metrics.assigned }}
-- Tasks started today        : {{ metrics.started }}
+{% if is_coordinator %}- Active projects you coordinate      : {{ metrics.coord_projects }}
+- Open tasks across those projects    : {{ metrics.coord_open_tasks }}
+- Open issues across those projects   : {{ metrics.coord_open_issues }}
+{% else %}- Open tasks {{ assigned_label|default:"assigned to you" }} : {{ metrics.assigned }}
+{% endif %}- Tasks started today        : {{ metrics.started }}
 - Tasks closed today         : {{ metrics.closed }}
 - Issues raised today        : {{ metrics.issues_raised }}
 - Issues resolved today      : {{ metrics.issues_resolved }}

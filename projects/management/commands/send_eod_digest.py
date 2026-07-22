@@ -75,8 +75,8 @@ class Command(BaseCommand):
                             help='Override the reporting date (IST), format YYYY-MM-DD.')
 
     def handle(self, *args, **options):
-        from projects.models import Task, ActivityLog, UserProfile
-        from projects.notifications import send_notification
+        from projects.models import Task, ActivityLog, UserProfile, Project, Issue
+        from projects.notifications import send_notification, _log
 
         dry_run   = options['dry_run']
         only_email = options['user'].strip().lower()
@@ -93,19 +93,32 @@ class Command(BaseCommand):
                           'https://horizon-solar-pms-production.up.railway.app')
 
         # --- Recipients: active profiles of active users (deactivated users excluded) ---
-        recipients = (
+        # Hard role exclusion (§1): CEO/Admin/System Admin never get an INDIVIDUAL digest —
+        # they already receive the company-wide aggregate email below, so a personal one is
+        # redundant. This is permanent, NOT activity-gated. BD is deliberately NOT here — it
+        # goes through the open-work gating (§3) like every other role. The aggregate totals
+        # are computed by a separate query (_company_totals) that ignores this exclusion, so
+        # an excluded user's own actions still count company-wide.
+        excluded_roles = getattr(settings, 'EOD_DIGEST_EXCLUDED_ROLES', [])
+        recipients = list(
             UserProfile.objects
             .filter(is_active=True, user__is_active=True)
+            .exclude(role__in=excluded_roles)
             .select_related('user')
             .order_by('user__first_name', 'user__username')
         )
         if only_email:
-            recipients = recipients.filter(user__email__iexact=only_email)
+            recipients = [p for p in recipients if (p.user.email or '').lower() == only_email]
 
-        recipient_pks = list(recipients.values_list('pk', flat=True))
+        recipient_pks = [p.pk for p in recipients]
         if not recipient_pks:
             self.stdout.write('No matching active recipients — nothing to do.')
             return
+
+        # Coordinator recipients get a role-based template branch (§2) and their own gating
+        # inputs (§3). Roles are mutually exclusive, so this is a clean branch, not an overlay.
+        COORDINATOR_ROLE = 'Project Coordinator'
+        coord_pks = {p.pk for p in recipients if p.role == COORDINATOR_ROLE}
 
         # --- Metric 1: open tasks assigned to each user (snapshot, grouped) ---
         assigned_map = dict(
@@ -135,24 +148,126 @@ class Command(BaseCommand):
             metric_key = CODE_TO_METRIC[row['action_code']]
             activity_map.setdefault(row['actor'], {})[metric_key] = row['c']
 
+        # --- Non-coordinator gating input: does this user have any OPEN issue they are
+        # assigned to OR raised (§3)? Only >0 matters, so we collect the set of pks with at
+        # least one unresolved issue via two grouped lookups (assigned_to, then raised_by).
+        # "Unresolved" = status not in (Resolved, Closed). Issue has raised_by, not created_by.
+        UNRESOLVED = [Issue.RESOLVED, Issue.CLOSED]
+        open_issue_users = set(
+            Issue.objects.filter(assigned_to__in=recipient_pks)
+            .exclude(status__in=UNRESOLVED)
+            .values_list('assigned_to', flat=True)
+        )
+        open_issue_users.update(
+            Issue.objects.filter(raised_by__in=recipient_pks)
+            .exclude(status__in=UNRESOLVED)
+            .values_list('raised_by', flat=True)
+        )
+
+        # --- Coordinator content + gating (§2/§3), grouped per coordinator. "Active" project
+        # = not soft-deleted, activated (activated_at set, so Draft is excluded), and not
+        # Cancelled — per the confirmed definition. All three maps key on the coordinator pk.
+        coord_projects_map = {}   # coord_pk -> count of active coordinated projects
+        coord_tasks_map    = {}   # coord_pk -> open tasks (status != Done) across those projects
+        coord_issues_map   = {}   # coord_pk -> unresolved issues across those projects
+        if coord_pks:
+            active_proj = dict(
+                project__is_deleted=False,
+                project__activated_at__isnull=False,
+            )
+            # Projects you coordinate — distinct projects per coordinator.
+            proj_rows = (
+                Project.objects
+                .filter(coordinators__in=coord_pks, is_deleted=False,
+                        activated_at__isnull=False)
+                .exclude(status='Cancelled')
+                .values_list('coordinators')
+                .annotate(c=Count('id', distinct=True))
+            )
+            for cpk, c in proj_rows:
+                if cpk in coord_pks:
+                    coord_projects_map[cpk] = c
+            # Open tasks across coordinated active projects (status != Done).
+            task_rows = (
+                Task.objects
+                .filter(phase__project__coordinators__in=coord_pks,
+                        phase__project__is_deleted=False,
+                        phase__project__activated_at__isnull=False)
+                .exclude(phase__project__status='Cancelled')
+                .exclude(status=Task.DONE)
+                .values_list('phase__project__coordinators')
+                .annotate(c=Count('id', distinct=True))
+            )
+            for cpk, c in task_rows:
+                if cpk in coord_pks:
+                    coord_tasks_map[cpk] = c
+            # Open (unresolved) issues across coordinated active projects.
+            issue_rows = (
+                Issue.objects
+                .filter(project__coordinators__in=coord_pks, **active_proj)
+                .exclude(project__status='Cancelled')
+                .exclude(status__in=UNRESOLVED)
+                .values_list('project__coordinators')
+                .annotate(c=Count('id', distinct=True))
+            )
+            for cpk, c in issue_rows:
+                if cpk in coord_pks:
+                    coord_issues_map[cpk] = c
+
         date_str = today.strftime('%d %b %Y')
-        sent = errored = attempted = 0
+        sent = errored = attempted = skipped = 0
 
         for profile in recipients:
             act = activity_map.get(profile.pk, {})
+            is_coordinator = profile.pk in coord_pks
             metrics = {
                 'assigned':        assigned_map.get(profile.pk, 0),
                 'started':         act.get('started', 0),
                 'closed':          act.get('closed', 0),
                 'issues_raised':   act.get('issues_raised', 0),
                 'issues_resolved': act.get('issues_resolved', 0),
+                # Coordinator-only fields (§2). Zero/ignored for every other role.
+                'coord_projects':    coord_projects_map.get(profile.pk, 0),
+                'coord_open_tasks':  coord_tasks_map.get(profile.pk, 0),
+                'coord_open_issues': coord_issues_map.get(profile.pk, 0),
             }
+
+            # --- Open-work gating (§3) --------------------------------------------------
+            # Primary trigger = open workload snapshot (independent of today's activity).
+            # For a coordinator that's their coordinated projects' open work; for everyone
+            # else it's their own open assigned tasks OR open issues (assigned/raised).
+            if is_coordinator:
+                has_open_work = (metrics['coord_open_tasks'] > 0
+                                 or metrics['coord_open_issues'] > 0)
+            else:
+                has_open_work = (metrics['assigned'] > 0
+                                 or profile.pk in open_issue_users)
+            # "Today" metrics are ADDITIONAL OR-triggers, not a replacement — this keeps the
+            # same-day-closure case sending (closed_today=1 even when open count is now 0).
+            has_today_activity = (metrics['started'] or metrics['closed']
+                                  or metrics['issues_raised'] or metrics['issues_resolved'])
+            if not (has_open_work or has_today_activity):
+                skipped += 1
+                reason = 'skipped: no open tasks/issues, no activity today'
+                if dry_run:
+                    self.stdout.write(f"[dry-run][skip] {profile.user.get_full_name() or profile.user.username} — {reason}")
+                else:
+                    # Log the skip to NotificationLog, consistent with the send path's
+                    # skip rows (channel='email', status='skipped', reason in error_detail).
+                    _log(
+                        dict(recipient=profile, related_project=None, actor=None,
+                             message='', template_name='eod_digest'),
+                        'email', 'skipped', reason,
+                    )
+                continue
+
             recipient_name = profile.user.get_full_name() or profile.user.username
             ctx = {
                 'recipient_name': recipient_name,
                 'date_str':       date_str,
                 'metrics':        metrics,
                 'app_url':        app_url,
+                'is_coordinator': is_coordinator,
             }
 
             # Render both bodies now — surfaces template errors in dry-run too.
@@ -166,13 +281,22 @@ class Command(BaseCommand):
                 continue
 
             if dry_run:
-                self.stdout.write(
-                    f"[dry-run] {recipient_name:<28} "
-                    f"assigned={metrics['assigned']} started={metrics['started']} "
-                    f"closed={metrics['closed']} raised={metrics['issues_raised']} "
-                    f"resolved={metrics['issues_resolved']} "
-                    f"email={profile.user.email or '(none)'}"
-                )
+                if is_coordinator:
+                    self.stdout.write(
+                        f"[dry-run] {recipient_name:<28} [coordinator] "
+                        f"projects={metrics['coord_projects']} open_tasks={metrics['coord_open_tasks']} "
+                        f"open_issues={metrics['coord_open_issues']} started={metrics['started']} "
+                        f"closed={metrics['closed']} raised={metrics['issues_raised']} "
+                        f"resolved={metrics['issues_resolved']} email={profile.user.email or '(none)'}"
+                    )
+                else:
+                    self.stdout.write(
+                        f"[dry-run] {recipient_name:<28} "
+                        f"assigned={metrics['assigned']} started={metrics['started']} "
+                        f"closed={metrics['closed']} raised={metrics['issues_raised']} "
+                        f"resolved={metrics['issues_resolved']} "
+                        f"email={profile.user.email or '(none)'}"
+                    )
                 continue
 
             attempted += 1
@@ -194,10 +318,13 @@ class Command(BaseCommand):
                 self.stderr.write(f'SEND FAIL {recipient_name}: {exc}')
 
         if dry_run:
-            self.stdout.write(f"Dry run complete for {len(recipient_pks)} recipient(s), date {date_str}. Nothing sent.")
+            self.stdout.write(
+                f"Dry run complete for {len(recipient_pks)} recipient(s), date {date_str}. "
+                f"{skipped} gated out (no open work / no activity). Nothing sent.")
         else:
             summary = (f"EOD digest ({date_str}): {attempted} attempted, {sent} handed to sender, "
-                       f"{errored} errored. Per-channel outcome (sent/skipped/failed) in NotificationLog.")
+                       f"{skipped} gated out, {errored} errored. "
+                       f"Per-channel outcome (sent/skipped/failed) in NotificationLog.")
             self.stdout.write(summary)
             logger.info(summary)
 

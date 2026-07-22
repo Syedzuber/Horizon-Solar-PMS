@@ -146,6 +146,13 @@ ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonre
 ADMIN_DIGEST_EMAIL = config('ADMIN_DIGEST_EMAIL', default='REPLACE_WITH_ACTUAL_ADMIN_EMAIL')
 HR_DIGEST_EMAIL    = config('HR_DIGEST_EMAIL',    default='REPLACE_WITH_ACTUAL_HR_EMAIL')
 
+# EOD individual-digest hard role exclusions (UserProfile.role stored values). These roles
+# never receive a personal digest regardless of activity — they already get the company-wide
+# aggregate email above, so a personal digest is redundant (NOT an activity/low-involvement
+# decision). Values must match UserProfile.ROLE_CHOICES exactly. 'BD' is deliberately absent —
+# BD is handled by the open-work gating in send_eod_digest, not a hard exclusion.
+EOD_DIGEST_EXCLUDED_ROLES = ['CEO', 'Admin', 'System Admin']
+
 # SendGrid fallback — uncomment in notifications.py _send_email() if ZeptoMail stalls
 # SENDGRID_API_KEY = config('SENDGRID_API_KEY', default='')
 
@@ -184,3 +191,6 @@ LOGGING = {
         'level': 'INFO',
     },
 }
+
+ADMIN_DIGEST_EMAIL = 'smzk07@gmail.com'
+HR_DIGEST_EMAIL = 'shweta@horizonrenewablepower.com'

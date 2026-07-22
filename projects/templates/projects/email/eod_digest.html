@@ -32,6 +32,37 @@
             </td>
           </tr>
 
+          {% if is_coordinator %}
+          <!-- Coordinator snapshot (§2): replaces the personal "assigned to you" card, which
+               is always structurally zero for a coordinator. Three stacked stat rows. -->
+          <tr>
+            <td style="padding:12px 28px 4px 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef4fb; border-radius:8px;">
+                <tr>
+                  <td style="padding:14px 20px; font-family:Arial,Helvetica,sans-serif; border-bottom:1px solid #dbe6f2;">
+                    <span style="font-size:24px; vertical-align:middle;">&#128188;</span>
+                    <span style="font-size:28px; font-weight:bold; color:#0f4c81; vertical-align:middle; margin-left:8px;">{{ metrics.coord_projects }}</span>
+                    <span style="font-size:14px; color:#5a6b7b; vertical-align:middle; margin-left:8px;">active project{{ metrics.coord_projects|pluralize }} you coordinate</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 20px; font-family:Arial,Helvetica,sans-serif; border-bottom:1px solid #dbe6f2;">
+                    <span style="font-size:24px; vertical-align:middle;">&#128203;</span>
+                    <span style="font-size:28px; font-weight:bold; color:#0f4c81; vertical-align:middle; margin-left:8px;">{{ metrics.coord_open_tasks }}</span>
+                    <span style="font-size:14px; color:#5a6b7b; vertical-align:middle; margin-left:8px;">open task{{ metrics.coord_open_tasks|pluralize }} across those projects</span>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 20px; font-family:Arial,Helvetica,sans-serif;">
+                    <span style="font-size:24px; vertical-align:middle;">&#9888;&#65039;</span>
+                    <span style="font-size:28px; font-weight:bold; color:#c05621; vertical-align:middle; margin-left:8px;">{{ metrics.coord_open_issues }}</span>
+                    <span style="font-size:14px; color:#5a6b7b; vertical-align:middle; margin-left:8px;">open issue{{ metrics.coord_open_issues|pluralize }} across those projects</span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          {% else %}
           <!-- Snapshot card: assigned open tasks -->
           <tr>
             <td style="padding:12px 28px 4px 28px;">
@@ -46,6 +77,7 @@
               </table>
             </td>
           </tr>
+          {% endif %}
 
           <!-- Today's activity: 4 horizontal cards (2x2 on narrow, wraps naturally) -->
           <tr>
