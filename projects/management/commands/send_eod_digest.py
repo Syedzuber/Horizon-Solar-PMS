@@ -242,9 +242,10 @@ class Command(BaseCommand):
         admin_email = (getattr(settings, 'ADMIN_DIGEST_EMAIL', '') or '').strip()
         hr_email    = (getattr(settings, 'HR_DIGEST_EMAIL', '') or '').strip()
         recipients = [
-            ('Admin', 'ADMIN_DIGEST_EMAIL', admin_email),
-            ('HR',    'HR_DIGEST_EMAIL',    hr_email),
+    ('Admin', admin_email, admin_email),
+    ('HR', hr_email, hr_email),
         ]
+        
 
         totals = self._company_totals(today)
         self.stdout.write(
