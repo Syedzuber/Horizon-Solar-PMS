@@ -63,6 +63,20 @@ urlpatterns = [
     path('design/<str:project_id>/blocked/',          design_views.design_mark_blocked,     name='design_mark_blocked'),
 
     # ---------------------------------------------------------------------------
+    # OPEX design workflow (Part 3) — Arka, CAD, BOQ and versioning.
+    # NO NAVIGATION LINKS: these screens are URL-reachable only, exactly like the
+    # Part 2 pair above. Wiring them into the dashboards is Part 4.5.
+    # ---------------------------------------------------------------------------
+    path('design/<str:project_id>/work/',           design_views.design_site_workspace,  name='design_site_workspace'),
+    path('design/<str:project_id>/review/',         design_views.design_head_review,     name='design_head_review'),
+    path('design/<str:project_id>/arka/submit/',    design_views.design_arka_submit,     name='design_arka_submit'),
+    path('design/<str:project_id>/arka/approve/',   design_views.design_arka_approve,    name='design_arka_approve'),
+    path('design/<str:project_id>/arka/reject/',    design_views.design_arka_reject,     name='design_arka_reject'),
+    path('design/<str:project_id>/artifact/upload/', design_views.design_artifact_upload, name='design_artifact_upload'),
+    path('design/<str:project_id>/artifact/<int:pk>/', design_views.design_file_download, name='design_file_download'),
+    path('design/<str:project_id>/boq/complete/',   design_views.design_boq_complete,    name='design_boq_complete'),
+
+    # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO
     # ---------------------------------------------------------------------------
     path('projects/',                                          views.project_list,          name='project_list'),

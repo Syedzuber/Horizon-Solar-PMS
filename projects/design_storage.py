@@ -1,5 +1,6 @@
 """
-Private-bucket storage for OPEX design artifacts (surveys now; CAD/BOQ from Part 3).
+Private-bucket storage for OPEX design artifacts — surveys (Part 2), CAD and BOQ
+attachments (Part 3).
 
 WHY A SECOND MODULE RATHER THAN EXTENDING supabase_storage.py
 -------------------------------------------------------------
@@ -141,6 +142,43 @@ def upload_design_file(file_obj, path):
         raise DesignStorageError(f'Upload to storage failed: {type(exc).__name__}')
 
     return DESIGN_BUCKET, path
+
+
+def delete_design_objects(objects):
+    """
+    Delete stored objects from the PRIVATE design bucket. Used by
+    `teardown_opex_test_data` (E5) so tearing down test rows does not leave the bucket
+    holding orphaned surveys, CAD files and BOQ attachments.
+
+    `objects` is an iterable of (bucket, path) pairs. Returns a list of
+    (bucket, path, ok, error) tuples — ONE PER OBJECT, and it never raises. Deleting
+    test data must not become impossible because storage is unreachable, so every
+    failure is reported back to the caller to print rather than propagated.
+
+    Objects are removed ONE AT A TIME rather than in a batch, so a single failure is
+    attributed to the object that caused it instead of losing the whole batch.
+
+    THE PUBLIC BUCKET IS UNREACHABLE FROM HERE. Any pair naming a bucket other than
+    DESIGN_BUCKET is refused, not deleted — a corrupt or hand-edited `bucket` column
+    must never be able to point a delete at `SUPABASE_BUCKET`.
+    """
+    results = []
+    client = None
+    for bucket, path in objects:
+        if not bucket or not path:
+            continue
+        if bucket != DESIGN_BUCKET:
+            results.append((bucket, path, False,
+                            f'refused: not the design bucket ({DESIGN_BUCKET!r})'))
+            continue
+        try:
+            if client is None:
+                client = _client()
+            client.storage.from_(bucket).remove([path])
+            results.append((bucket, path, True, ''))
+        except Exception as exc:
+            results.append((bucket, path, False, f'{type(exc).__name__}: {exc}'))
+    return results
 
 
 def get_design_file_url(bucket, path, expires_in=3600):

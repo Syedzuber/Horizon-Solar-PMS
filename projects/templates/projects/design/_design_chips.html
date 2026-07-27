@@ -1,0 +1,39 @@
+{% comment %}
+Status-pill CSS for the two Part 3 design screens.
+
+COPIED, NOT SHARED, ON PURPOSE. These are the same `.chip` rules the Design dashboard
+defines inline in its own extra_head (dashboard/design.html:24-44), so the Part 3
+screens carry the same pills as the expanded tender card. They could not be imported
+from there without editing that template, which Part 3's hard rules forbid, and
+promoting them into base.html would change a file every screen in the product loads.
+
+Included from extra_head by site_workspace.html and head_review.html. If the dashboard
+palette ever moves into a stylesheet, delete this file and drop the include.
+{% endcomment %}
+<style>
+  .chip {
+    display: inline-flex; align-items: center; gap: .3rem;
+    padding: .2rem .55rem; border-radius: 999px;
+    font-size: .78rem; font-weight: 600; line-height: 1.4;
+    white-space: nowrap;
+  }
+  .chip-green  { background: #d1fae5; color: #065f46; }
+  .chip-grey   { background: #e5e7eb; color: #374151; }
+  .chip-amber  { background: #fef3c7; color: #92400e; }
+  .chip-navy   { background: #dbeafe; color: #1e3a8a; }
+  .chip-red    { background: #fee2e2; color: #991b1b; }
+
+  .chip-dot { width: .45rem; height: .45rem; border-radius: 50%; flex-shrink: 0; }
+  .chip-dot-green { background: #059669; }
+  .chip-dot-grey  { background: #9ca3af; }
+  .chip-dot-amber { background: #d97706; }
+  .chip-dot-navy  { background: #1d4ed8; }
+  .chip-dot-red   { background: #dc2626; }
+
+  /* Version label. Pairing is the point of this screen, so the version a CAD file
+     derives from is set in the same monospace face as the version it carries. */
+  .ver-tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .75rem; font-weight: 700;
+  }
+</style>

@@ -222,6 +222,144 @@ is dead code today and its presence invites a future contributor to wire the two
 | E2 | `get_supabase_client()` reads `os.environ` directly, while `settings.py` reads the same values through `python-decouple`. Railway populates `os.environ`, so it works in production, but locally (where credentials live in `.env`) the helper raises `SUPABASE_URL and SUPABASE_KEY must be configured`. Any local testing of the four existing public-bucket upload paths is therefore impossible without exporting the vars by hand. The new `design_storage.py` reads `settings` instead and works in both. | `projects/supabase_storage.py:12-13` |
 | E3 | Part 2's brief specified "Tailwind + Alpine + Lucide per project convention", but Tailwind and Alpine load **only** in `projects/admin/admin_base.html` (the portal-admin chrome). Every user-facing screen extends the Bootstrap `base.html`. The two new screens follow the sibling screens (Bootstrap) rather than adding a Tailwind CDN to `base.html`. If Tailwind is genuinely wanted for user-facing screens, that is a base-template decision, not a per-screen one. | `projects/templates/base.html` vs `projects/admin/admin_base.html` |
 | E4 | **Blocked duration is recoverable but not a first-class field.** Clearing a block leaves `survey_returned_at` in place and sets `survey_uploaded_at`, so the most recent stopped-clock interval is the difference between them, and the full history is in `ActivityLog` (`design_blocked` / `design_survey_unblocked`). A second block overwrites `survey_returned_at`, so only the latest interval is directly queryable. Part 5's overdue maths may want a dedicated `blocked_seconds` accumulator or a separate block-history row; adding one is a schema change and was out of scope for Part 2. | `projects/models.py` — `DesignAssignment` |
-| E5 | Replaced survey objects are never deleted from the private bucket. `build_design_path()` mints a fresh uuid4 per upload, so a replacement never overwrites its predecessor — deliberate, since an older `DesignAssignment` state may still reference the old path, but it means orphaned objects accumulate. `purge_deleted_files` does not know about the design bucket. | `projects/design_storage.py`, `projects/management/commands/purge_deleted_files.py` |
+| E5 | Replaced survey objects are never deleted from the private bucket. `build_design_path()` mints a fresh uuid4 per upload, so a replacement never overwrites its predecessor — deliberate, since an older `DesignAssignment` state may still reference the old path, but it means orphaned objects accumulate. `purge_deleted_files` does not know about the design bucket. **PARTLY CLOSED by Part 3** — see below. | `projects/design_storage.py`, `projects/management/commands/purge_deleted_files.py` |
+
+> **UPDATE (Part 3 session).** The *teardown* half of E5 is closed:
+> `teardown_opex_test_data` now collects `(bucket, path)` from every `DesignFile` and
+> from `DesignAssignment.survey_file_path` before deleting rows, and removes those
+> objects through the new `design_storage.delete_design_objects()`. `--dry-run` lists
+> them; failures are reported per object and never abort the row deletion; the public
+> bucket is refused by the helper. Verified: 4 objects listed, 4 removed, the bucket's
+> top-level listing then returned `[]`.
+>
+> **Still open:** the *production* half. A replaced survey or a superseded CAD version
+> leaves its object behind during normal use — teardown only helps test data.
+> `purge_deleted_files` still does not know about the design bucket, and superseded
+> `DesignFile` rows are deliberately kept (they are the version history), so a real
+> reaper has to decide which superseded objects are safe to drop.
 | E7 | A multi-line `{# … #}` comment renders straight onto the page (Django's hash comment is single-line only — `base.html:92` documents this). `vendor_form.html:34` opens one that is never closed on the same line, so its text is emitted into the rendered page. Cosmetic there because the text contains no markup, but the same mistake in `head_sites.html` produced a phantom `<form>` element (see below). Pre-existing and not fixed here. | `projects/templates/vendors/vendor_form.html:34` |
 | E6 | Reallocation after design work has started is refused with a message rather than supported. `_allocate_one()` rejects any status outside `awaiting_allocation` / `allocated` / `due_date_proposed`. Handing a half-finished site to another designer is a real scenario that Part 3+ will need to decide on (what happens to the in-flight attempt, the agreed due date, and the artifacts). | `projects/design_views.py` — `_allocate_one` |
+
+---
+
+## F. Found during Part 3 (Arka, CAD, BOQ, versioning) — recorded, deliberately not fixed
+
+### F1 — Allocating a site does not stamp `assigned_design`, so the allocated designer can be locked out of its BOQ
+
+**This is the sharpest one in this file. It will bite the first real OPEX tender.**
+
+`_allocate_one()` sets `DesignAssignment.assigned_to` and never touches
+`Project.assigned_design`. `user_can_edit_project_boq()` is W-narrow — it gates on
+`project.assigned_design_id == profile.pk` and nothing else (Part 0.6, correctly, and
+Part 3's hard rules forbid changing it). The two fields are therefore free to diverge,
+and when they do the Design Head can allocate a site to a designer who then **cannot
+enter its BOQ at all**.
+
+Measured on the local database at the start of the Part 3 session, on the site Part 2
+testing had left in `in_design`:
+
+```
+project.assigned_design       = priyanka
+design_assignment.assigned_to = nayeem
+priyanka  view_boq=True  edit_boq=True   GET /projects/Test-Site-02/boq/ -> 200
+nayeem    view_boq=False edit_boq=False  GET /projects/Test-Site-02/boq/ -> 403
+praveen   view_boq=True  edit_boq=False  GET /projects/Test-Site-02/boq/ -> 200
+```
+
+Part 3's verification therefore ran on a site where the two agreed. The design workspace
+surfaces the mismatch rather than hiding it — `site_workspace.html` renders a warning
+when `user_can_edit_project_boq()` is False for the allocated designer — but a warning
+is not a fix.
+
+**The fix is one line** in `_allocate_one()`: set `assignment.project.assigned_design =
+designer` alongside `assigned_to`, in the same transaction. It touches nothing Part 3
+is forbidden to touch (not the BOQ views, not the BOQ models, not either Part 0.6
+helper). It was left out only because allocation is Part 2's surface and Part 3's brief
+says to report rather than fix. **Whoever owns Part 4 should do it before the module
+goes near a live tender.**
+
+Open question that goes with it: `assigned_design` is also what the Design dashboard
+filters its project cards on, so stamping it makes an OPEX site appear on the allocated
+designer's Residential-style dashboard as well. That is probably wanted, but it is a
+behaviour change and should be a decision, not a side effect.
+
+**Location:** `projects/design_views.py` — `_allocate_one`; `projects/permissions.py` —
+`user_can_edit_project_boq`
+
+### F2 — Six existing OPEX sites have a null `assigned_design`
+
+`IPGCL26-MB001` … `IPGCL26-MB006` (program `Finolex`, code `IPGCL26`) all carry
+`assigned_design = NULL` on the local database; only `IPGCL26-MB007` is stamped. These
+were created through the OPEX site path, not seeded. Under the W-narrow write rule, a
+designer allocated to any of them is blocked from BOQ entry entirely — the same failure
+as F1, arriving by a different route. Not measured on Railway.
+
+**Location:** data, not code.
+
+### F3 — The Part 3 screens have no navigation entry point either
+
+`/design/<project_id>/work/` and `/design/<project_id>/review/` are reachable only by
+typing the URL, for exactly the reason E1 records: linking them means editing
+`base.html` or an existing dashboard template, both of which are stop conditions.
+`head_review.html` links to the workspace and back to the Part 2 tender screen, and
+`site_workspace.html` links back to `/design/my-sites/`, so the four screens are
+navigable **once you are inside one of them** — but there is still no way in from the
+product. Part 4.5 owns this. (Extension of E1, restated because it now covers four
+screens rather than two.)
+
+**Location:** `projects/templates/base.html`, `projects/templates/dashboard/design.html`
+
+### F4 — The `.chip` pill CSS is now defined in two places
+
+`projects/design/_design_chips.html` reproduces the `.chip` / `.chip-dot` rules that
+`dashboard/design.html:24-44` defines inline in its own `extra_head`, so the Part 3
+screens carry the same status pills as the expanded tender card. It is a copy because
+importing them would mean editing the dashboard template (forbidden) and promoting them
+to `base.html` would touch every screen in the product. The two copies can drift. The
+real fix is a stylesheet, which is a base-template decision — same shape as E3.
+
+**Location:** `projects/templates/projects/design/_design_chips.html`
+
+### F5 — There is no path to revise an Arka once it is approved
+
+`design_arka_submit()` accepts a submission only from `in_design` or `arka_rejected`.
+Deliberate: resubmitting while a version is pending would leave the Head reviewing a
+version that no longer exists, and resubmitting after approval would silently orphan
+every CAD and BOQ artifact already paired to it through `derived_from_arka`.
+
+But it means that once an Arka is approved, the designer has **no way to correct it**.
+`design_arka_reject()` only accepts a `pending` verdict, so the Head cannot un-approve
+either. Today the only exit is a new attempt, and the two things that open one — a QC
+failure and a PM change request — are Parts 4 and 5. Until one of them lands, an
+approved-but-wrong Arka is a dead end.
+
+**Location:** `projects/design_views.py` — `ARKA_SUBMITTABLE_STATUSES`,
+`design_arka_submit`, `_verdict_target`
+
+### F6 — `boq_submitted_at` is a one-way stamp and does not track later BOQ edits
+
+`design_boq_complete()` refuses if the stamp is already set, and there is no un-mark.
+More importantly, nothing invalidates the stamp if the designer goes back to
+`boq_detail` and changes quantities afterwards — `boq_submitted_at` records *that* the
+BOQ was declared done, not *what* it contained. The BOQ's own
+`Draft` / `Submitted` / `Acknowledged` status is maintained separately by `boq_detail`
+and the two are not reconciled anywhere (verified: the attempt reached
+`artifacts_uploaded` while `BOQ.status` was still `Draft`).
+
+Whether the design workflow should require `BOQ.status == 'Submitted'`, or snapshot the
+BOQ at mark-complete time, is a decision for whoever builds QC review — QC is what
+actually needs to know which BOQ it is looking at.
+
+**Location:** `projects/design_views.py` — `design_boq_complete`; `projects/models.py` —
+`DesignAttempt.boq_submitted_at`
+
+### F7 — Nothing tells the Design Head an Arka is waiting
+
+Submitting an Arka changes a status and writes an `ActivityLog` row. There is no
+notification, no queue, and no badge, and the review screen is per-site and
+URL-only (F3) — so in the product as it stands today the Head learns an Arka is pending
+by being told out of band. Notifications are explicitly Part 7 and the Design Head
+dashboard is Part 5; this is recorded so the gap between "Part 3 works" and "Part 3 is
+usable" is not mistaken for a bug later.
+
+**Location:** `projects/design_views.py` — `design_arka_submit`

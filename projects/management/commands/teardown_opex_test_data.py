@@ -26,16 +26,39 @@ Projects before the Program (`Project.program` is also PROTECT). Deleting in thi
 is what makes the command work at all once Part 2 has created design artifacts —
 it is not merely for tidy per-model counts.
 
+STORAGE OBJECTS ARE DELETED TOO (E5)
+------------------------------------
+Deleting the rows alone used to leave every uploaded survey, CAD file and BOQ
+attachment sitting in the private Supabase bucket with nothing referencing it —
+`build_design_path()` mints a fresh uuid4 per upload, so replaced files never overwrite
+their predecessors and orphans accumulate with every seed/teardown cycle.
+
+The bucket and path are collected from `DesignFile` and from
+`DesignAssignment.survey_file_path` BEFORE any row is deleted (afterwards there is
+nothing left to read them from), and the objects are removed through
+`design_storage.delete_design_objects()`.
+
+STORAGE FAILURES ARE REPORTED, NOT FATAL. An unreachable bucket, a revoked key or an
+object someone already deleted by hand must never make the test rows undeletable — the
+whole point of this command is that it always works. Every object gets its own
+success/failure line and the row deletion proceeds regardless.
+
+THE PUBLIC BUCKET IS NEVER TOUCHED. `delete_design_objects()` refuses any pair whose
+bucket is not the private design bucket, so a hand-edited `bucket` column cannot aim a
+delete at `SUPABASE_BUCKET` or at the four existing public-bucket call sites.
+
 SAFETY
 ------
 Rows are identified ONLY by the literal `Test-` prefix, imported from the seed command
 so the two cannot drift. Every Project caught in the sweep is re-checked against that
 prefix immediately before deletion; a single non-prefixed row aborts the whole
-transaction rather than being deleted.
+transaction rather than being deleted. Storage objects inherit that safety: they are
+read off rows that already passed the prefix guard, never located by listing the bucket.
 """
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
+from projects.design_storage import delete_design_objects
 from projects.management.commands.seed_opex_test_data import (
     TEST_PREFIX, PROGRAM_NAME,
 )
@@ -126,6 +149,25 @@ class Command(BaseCommand):
 
         counts = [(label, qs.count()) for label, qs in steps]
 
+        # ---- collect storage objects BEFORE anything is deleted ----
+        # Read from the same querysets the deletion steps use, so the objects listed are
+        # exactly the objects belonging to the rows about to go. Ordered and labelled so
+        # the dry run reads as an inventory rather than a list of opaque uuids.
+        storage_targets = []   # (label, bucket, path)
+        for f in (DesignFile.objects
+                  .filter(attempt__in=attempts)
+                  .select_related('attempt__assignment__project')
+                  .order_by('attempt__assignment__project__project_id', 'kind', 'version')):
+            storage_targets.append((
+                f'{f.attempt.assignment.project.project_id} {f.kind} v{f.version}',
+                f.bucket, f.path,
+            ))
+        for a in (assignments.select_related('project').order_by('project__project_id')):
+            if a.survey_file_path:
+                storage_targets.append((
+                    f'{a.project.project_id} survey', a.survey_file_bucket, a.survey_file_path,
+                ))
+
         self.stdout.write('Targets (identified by the %r prefix):' % TEST_PREFIX)
         for p in programs.order_by('pk'):
             self.stdout.write(f'  Program pk={p.pk} name={p.name!r} code={p.short_tender_code!r}')
@@ -140,10 +182,42 @@ class Command(BaseCommand):
         self.stdout.write(f'  {"TOTAL":<20} {total}')
         self.stdout.write('')
 
+        self.stdout.write(f'Storage objects in the private design bucket ({len(storage_targets)}):')
+        if not storage_targets:
+            self.stdout.write('  (none)')
+        for label, bucket, path in storage_targets:
+            self.stdout.write(f'  {label:<34} {bucket}/{path}')
+        self.stdout.write('')
+
         if not confirm:
             self.stdout.write(self.style.WARNING(
-                'DRY RUN — nothing deleted. Re-run with --confirm to delete.'))
+                'DRY RUN — nothing deleted, no storage object removed. '
+                'Re-run with --confirm to delete.'))
             return
+
+        # ---- storage first, per the E5 brief: collect, delete objects, then rows ----
+        # Deliberately OUTSIDE the transaction. Supabase cannot participate in a Postgres
+        # transaction, so wrapping it would buy nothing and a rollback could not put an
+        # object back. Failures are printed and the row deletion below runs regardless.
+        if storage_targets:
+            self.stdout.write('Removing storage objects:')
+            label_by_path = {(b, p): lbl for lbl, b, p in storage_targets}
+            results = delete_design_objects([(b, p) for _lbl, b, p in storage_targets])
+            failures = 0
+            for bucket, path, ok, error in results:
+                label = label_by_path.get((bucket, path), '')
+                if ok:
+                    self.stdout.write(self.style.SUCCESS(f'  removed  {label:<34} {bucket}/{path}'))
+                else:
+                    failures += 1
+                    self.stderr.write(self.style.WARNING(
+                        f'  FAILED   {label:<34} {bucket}/{path} — {error}'))
+            if failures:
+                self.stdout.write(self.style.WARNING(
+                    f'{failures} storage object(s) could not be removed. Row deletion '
+                    f'continues — an unreachable bucket must not make test data '
+                    f'undeletable.'))
+            self.stdout.write('')
 
         deleted = []
         with transaction.atomic():

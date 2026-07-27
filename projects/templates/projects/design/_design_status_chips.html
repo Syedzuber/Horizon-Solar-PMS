@@ -1,0 +1,60 @@
+{% comment %}
+The three status pills shared by both Part 3 screens: where the site is in the design
+sequence, whether the current Arka is approved, and whether the BOQ is done.
+
+Same markup as the expanded tender card on the Design dashboard
+(dashboard/design.html:217-262): a `.chip` with a colour modifier wrapping a
+`.chip-dot`. Context comes from _workspace_context() in design_views.py, so the
+designer's screen and the Head's screen can never disagree about the state.
+{% endcomment %}
+<div class="d-flex flex-wrap gap-2 mb-3">
+
+  {# Where the site is in the sequence — one pill, driven by DesignAssignment.status #}
+  {% if status == 'artifacts_uploaded' %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Design: Package complete</span>
+  {% elif status == 'arka_rejected' %}
+    <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+      Design: Arka rejected</span>
+  {% elif status == 'arka_submitted' %}
+    <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+      Design: Arka submitted</span>
+  {% else %}
+    <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+      Design: {{ assignment.get_status_display }}</span>
+  {% endif %}
+
+  {# Arka verdict — the gate that unlocks CAD and BOQ #}
+  {% if arka_approved %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Arka v{{ arka.version }}: Approved</span>
+  {% elif arka and arka.verdict == 'rejected' %}
+    <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+      Arka v{{ arka.version }}: Rejected</span>
+  {% elif arka %}
+    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+      Arka v{{ arka.version }}: Awaiting approval</span>
+  {% else %}
+    <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+      Arka: Not submitted</span>
+  {% endif %}
+
+  {# CAD — at least one current CAD file is required to complete the package #}
+  {% if has_cad %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      CAD: Uploaded</span>
+  {% else %}
+    <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+      CAD: Pending</span>
+  {% endif %}
+
+  {# BOQ — the attempt's own stamp, NOT the BOQ model's Draft/Submitted status #}
+  {% if boq_complete %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      BOQ: Complete</span>
+  {% else %}
+    <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+      BOQ: Pending</span>
+  {% endif %}
+
+</div>

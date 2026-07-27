@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head — Arka review for ONE OPEX site (Part 3).
+
+Bootstrap extending base.html with the Design dashboard's `.chip` pills, same as
+site_workspace.html and head_sites.html. Not Tailwind — see finding E3.
+
+NO NAVIGATION ENTRY POINT: URL-reachable only (/design/<id>/review/). Part 4.5 wires it
+in, and the Design Head DASHBOARD — pending-Arka queues across every tender, workload,
+metrics — is Part 5. This screen deliberately covers one site.
+
+The approve and reject buttons are gated server-side in design_arka_approve /
+design_arka_reject on `user_is_design_head`, so the designer cannot approve their own
+Arka whether or not this template renders the buttons.
+{% endcomment %}
+
+{% block title %}Arka review — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Arka review — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.city }}{% if project.program %} · {{ project.program.name }}
+      ({{ project.program.short_tender_code }}){% endif %}
+      {% if assignment.assigned_to %}
+        · designer {{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}
+      {% endif %}
+    </div>
+  </div>
+  {% if project.program %}
+  <a href="{% url 'design_head_sites' pk=project.program_id %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>Tender sites
+  </a>
+  {% endif %}
+</div>
+
+{% include "projects/design/_design_status_chips.html" %}
+
+{# ── Verdict ─────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">Pending Arka</div>
+  <div class="card-body py-3">
+    {% if can_verdict %}
+      <div class="mb-3">
+        <div>
+          <span class="ver-tag">Arka v{{ arka.version }}</span>
+          <span class="ms-2">{{ arka.capacity_kw }} kW designed</span>
+        </div>
+        <div class="small mt-1">
+          <a href="{{ arka.arka_link }}" target="_blank" rel="noopener">{{ arka.arka_link }}</a>
+        </div>
+        <div class="text-muted small mt-1">
+          Submitted {{ arka.submitted_at|date:"d M Y H:i" }} by
+          {{ arka.submitted_by.user.get_full_name|default:arka.submitted_by.user.username }}
+        </div>
+      </div>
+
+      <div class="d-flex flex-wrap align-items-start gap-3">
+        <form method="post" action="{% url 'design_arka_approve' project_id=project.project_id %}">
+          {% csrf_token %}
+          <button class="btn btn-sm btn-success">Approve Arka v{{ arka.version }}</button>
+          <div class="text-muted mt-1" style="font-size:.7rem;">
+            Unlocks CAD and BOQ upload for the designer.
+          </div>
+        </form>
+
+        {% comment %}
+        Reject: the reason is REQUIRED. The view refuses an empty one with a message,
+        and the Part 1 CHECK constraint rejection_reason_required_when_rejected enforces
+        the same rule at the database level for any writer that bypasses the view.
+        {% endcomment %}
+        <form method="post" action="{% url 'design_arka_reject' project_id=project.project_id %}"
+              class="d-flex flex-wrap align-items-start gap-2">
+          {% csrf_token %}
+          <div>
+            <input type="text" name="rejection_reason" class="form-control form-control-sm"
+                   placeholder="Why is it rejected? (required)" style="min-width:24rem;" required>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              The designer sees this verbatim and submits v{{ arka.version|add:1 }}.
+            </div>
+          </div>
+          <button class="btn btn-sm btn-outline-danger">Reject</button>
+        </form>
+      </div>
+
+    {% elif arka and arka.verdict == 'approved' %}
+      <div class="small">
+        <span class="ver-tag">Arka v{{ arka.version }}</span> approved
+        {% if arka.reviewed_by %}by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}{% endif %}
+        {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}.
+        Nothing to review — waiting on the designer's CAD and BOQ.
+      </div>
+    {% elif arka and arka.verdict == 'rejected' %}
+      <div class="small">
+        <span class="ver-tag">Arka v{{ arka.version }}</span> rejected. Waiting for the
+        designer to submit v{{ arka.version|add:1 }}.
+      </div>
+    {% else %}
+      <div class="small text-muted">
+        No Arka is awaiting a verdict on this site
+        (status &ldquo;{{ assignment.get_status_display }}&rdquo;).
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% include "projects/design/_design_artifacts.html" %}
+
+<div class="text-muted small">
+  Designer's view of this site:
+  <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
+</div>
+
+{% endblock %}

@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% comment %}
+Designer — design workspace for ONE OPEX site (Part 3).
+
+Bootstrap extending base.html, with the Design dashboard's `.chip` pills reproduced via
+the _design_chips.html include. Not Tailwind: Tailwind and Alpine load only in
+projects/admin/admin_base.html (the portal-admin chrome), and adding a CDN to base.html
+is out of scope. Same reasoning as head_sites.html — see finding E3.
+
+NO NAVIGATION ENTRY POINT. This screen is URL-reachable only (/design/<id>/work/);
+wiring it into the dashboards is Part 4.5.
+
+EVERY BUTTON HERE IS DECORATION OVER A SERVER-SIDE RULE. Hiding the CAD form until the
+Arka is approved is a convenience; design_artifact_upload() refuses the POST regardless.
+{% endcomment %}
+
+{% block title %}Design — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Design workspace — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.city }}{% if project.program %} · {{ project.program.name }}
+      ({{ project.program.short_tender_code }}){% endif %}
+    </div>
+  </div>
+  <a href="{% url 'design_my_sites' %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>My sites
+  </a>
+</div>
+
+{% include "projects/design/_design_status_chips.html" %}
+
+{% if not is_designer %}
+  <div class="alert alert-secondary py-2 small">
+    You are viewing this as Design Head. The actions below belong to the allocated
+    designer{% if assignment.assigned_to %}
+    ({{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}){% endif %};
+    approve or reject the Arka on the
+    <a href="{% url 'design_head_review' project_id=project.project_id %}">review screen</a>.
+  </div>
+{% endif %}
+
+{% comment %}
+The rejection reason, surfaced at the top rather than buried in the version history —
+it is the one thing a designer with a rejected Arka needs to read first. The rejected
+submission stays is_current until the replacement is submitted, which is what keeps it
+readable here.
+{% endcomment %}
+{% if arka and arka.verdict == 'rejected' %}
+<div class="alert alert-danger py-2">
+  <div class="fw-semibold small mb-1">
+    Arka v{{ arka.version }} was rejected
+    {% if arka.reviewed_by %}by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}{% endif %}
+    {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}
+  </div>
+  <div class="small">{{ arka.rejection_reason }}</div>
+  <div class="text-muted small mt-1">Submit a corrected Arka below as v{{ arka.version|add:1 }}.</div>
+</div>
+{% endif %}
+
+{# ── 1. Arka submission ──────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">1 · Arka</div>
+  <div class="card-body py-3">
+    {% if can_submit_arka %}
+      <form method="post" action="{% url 'design_arka_submit' project_id=project.project_id %}"
+            class="row g-2 align-items-end">
+        {% csrf_token %}
+        <div class="col-12 col-md-3">
+          <label class="form-label small mb-1">Designed capacity (kW)</label>
+          <input type="number" step="0.01" min="0.01" name="capacity_kw"
+                 class="form-control form-control-sm" required>
+        </div>
+        <div class="col-12 col-md-6">
+          <label class="form-label small mb-1">Arka link</label>
+          <input type="url" name="arka_link" class="form-control form-control-sm"
+                 placeholder="https://…" required>
+        </div>
+        <div class="col-12 col-md-3">
+          <button class="btn btn-sm text-white w-100" style="background-color:#1a7a4a;">
+            Submit Arka{% if arka %} v{{ arka.version|add:1 }}{% endif %}
+          </button>
+        </div>
+        <div class="col-12">
+          <div class="text-muted small">
+            Capacity is recorded as designed. It is not compared against the tendered
+            capacity anywhere in this workflow.
+          </div>
+        </div>
+      </form>
+    {% elif arka and arka.verdict == 'pending' %}
+      <div class="small text-muted">
+        Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) is with the Design Head.
+        CAD and BOQ unlock once it is approved.
+      </div>
+    {% elif arka_approved %}
+      <div class="small">
+        <span class="ver-tag">Arka v{{ arka.version }}</span> approved
+        ({{ arka.capacity_kw }} kW) —
+        <a href="{{ arka.arka_link }}" target="_blank" rel="noopener">open the Arka</a>.
+      </div>
+    {% else %}
+      <div class="small text-muted">
+        An Arka can only be submitted by the allocated designer while the site is in
+        design or its previous Arka was rejected.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── 2. CAD and optional BOQ attachments ─────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">2 · CAD &amp; attachments</div>
+  <div class="card-body py-3">
+    {% if not arka_approved %}
+      <div class="alert alert-warning py-2 small mb-0">
+        CAD and BOQ files can only be uploaded once the current Arka is approved.
+        Uploading earlier guarantees rework against a layout that may still change.
+      </div>
+    {% elif is_designer %}
+      <form method="post" enctype="multipart/form-data"
+            action="{% url 'design_artifact_upload' project_id=project.project_id %}"
+            class="row g-2 align-items-end">
+        {% csrf_token %}
+        <div class="col-12 col-md-3">
+          <label class="form-label small mb-1">Kind</label>
+          <select name="kind" class="form-select form-select-sm" required>
+            {% for value, label in cad_kinds %}
+              <option value="{{ value }}">{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-6">
+          <label class="form-label small mb-1">File</label>
+          <input type="file" name="artifact_file" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-12 col-md-3">
+          <button class="btn btn-sm btn-primary w-100">Upload</button>
+        </div>
+        <div class="col-12">
+          <div class="text-muted small">
+            Private bucket. Max 25 MB. Will be recorded as derived from
+            <span class="ver-tag">Arka v{{ arka.version }}</span>. Re-uploading a kind
+            creates the next version and supersedes the previous one.
+          </div>
+        </div>
+      </form>
+    {% else %}
+      <div class="small text-muted">Only the allocated designer can upload artifacts.</div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── 3. BOQ ──────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">3 · BOQ</div>
+  <div class="card-body py-3">
+    {% comment %}
+    Quantities are entered on the EXISTING BOQ screen (boq_detail) — this workflow
+    does not duplicate the BOQ, it links to it and records that the step is done.
+    {% endcomment %}
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <a href="{% url 'boq_detail' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary">
+        Enter BOQ quantities
+      </a>
+
+      {% if boq %}
+        <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+          BOQ status: {{ boq.status }}</span>
+      {% endif %}
+
+      {% if boq_complete %}
+        <span class="small text-success">
+          Marked complete {{ attempt.boq_submitted_at|date:"d M Y H:i" }}
+          by {{ attempt.boq_submitted_by.user.get_full_name|default:attempt.boq_submitted_by.user.username }}
+        </span>
+      {% elif is_designer and arka_approved %}
+        <form method="post" action="{% url 'design_boq_complete' project_id=project.project_id %}">
+          {% csrf_token %}
+          <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+            Mark BOQ complete
+          </button>
+        </form>
+      {% endif %}
+    </div>
+
+    {% if is_designer and not can_edit_boq %}
+      <div class="alert alert-warning py-2 small mt-2 mb-0">
+        You are allocated to this site, but its <code>assigned_design</code> names a
+        different user, so the BOQ screen will refuse you. Ask the Design Head to point
+        <code>assigned_design</code> at you before entering quantities.
+      </div>
+    {% endif %}
+
+    {% if not arka_approved %}
+      <div class="text-muted small mt-2">
+        The BOQ can only be marked complete once the current Arka is approved.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% include "projects/design/_design_artifacts.html" %}
+
+{% endblock %}

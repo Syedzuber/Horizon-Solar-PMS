@@ -1,6 +1,7 @@
 """
 OPEX design workflow views — Part 2: survey upload, allocation, due-date handshake,
-and the blocked flag.
+and the blocked flag. Part 3: Arka submission and verdict, CAD upload, BOQ entry
+and the artifact-pairing rules that bind them together.
 
 A separate module from views.py (which is ~9,000 lines) because this is a self-contained
 new subsystem; urls.py imports it alongside `views`. No existing view is modified.
@@ -15,9 +16,13 @@ continues to run on its six design Task rows with PM-owned approval and is not r
 from here.
 """
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.contrib import messages
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from django.db import transaction
+from django.db.models import Max
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -28,12 +33,19 @@ from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
 )
 from .models import (
-    Program, Project, UserProfile, DesignAssignment, DueDateCommitment, log_activity,
+    Program, Project, UserProfile, BOQ, DesignAssignment, DueDateCommitment,
+    DesignAttempt, ArkaSubmission, DesignFile, log_activity,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
+    DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
+    ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
+    ATTEMPT_REASON_INITIAL,
+    DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
+    DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
 )
 from .permissions import (
-    user_can_view_design, user_is_assigned_designer, user_is_design_head,
+    user_can_edit_project_boq, user_can_view_design, user_is_assigned_designer,
+    user_is_design_head,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,6 +54,29 @@ logger = logging.getLogger(__name__)
 # only while the assignment is still in one of these — see design_allocate().
 REALLOCATABLE_STATUSES = (DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
                           DESIGN_DUE_DATE_PROPOSED)
+
+# ── Part 3 ─────────────────────────────────────────────────────────────────────
+# The two statuses from which a designer may submit an Arka version: the first one
+# from `in_design`, and every replacement from `arka_rejected`.
+#
+# `arka_submitted` is deliberately EXCLUDED. Once a version is submitted it is either
+# awaiting a verdict (resubmitting would leave the Head reviewing a version that no
+# longer exists) or approved (resubmitting would silently orphan the CAD and BOQ
+# artifacts already paired to it via derived_from_arka). Either way the Head must act
+# first. See design_arka_submit().
+ARKA_SUBMITTABLE_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_REJECTED)
+
+# The two CAD kinds. At least one is required before an attempt can reach
+# `artifacts_uploaded`; the BOQ kinds are optional attachments and never count.
+CAD_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG)
+
+# Every kind design_artifact_upload() accepts. A `kind` outside this tuple is refused
+# rather than silently defaulted — the whitelist is the enforcement point, not the
+# select element in the template.
+UPLOADABLE_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
+                    DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF)
+
+KIND_LABELS = dict(DESIGN_FILE_KIND_CHOICES)
 
 
 # ---------------------------------------------------------------------------
@@ -634,3 +669,617 @@ def design_mark_blocked(request, project_id):
     messages.success(request, f'{project.project_id} flagged as blocked. The Design Head '
                               f'can see the reason and your clock is stopped.')
     return redirect('design_my_sites')
+
+
+# ===========================================================================
+# PART 3 — Arka, CAD, BOQ and versioning
+# ===========================================================================
+#
+# THE ONE RULE THIS SECTION EXISTS TO ENFORCE
+# -------------------------------------------
+# No CAD file and no BOQ submission may exist until the CURRENT Arka version has
+# verdict='approved', and every artifact records WHICH Arka version it was drawn
+# against (DesignFile.derived_from_arka, NOT NULL from Part 1).
+#
+# Both halves are enforced HERE, in the view, not by hiding a button: every write
+# endpoint below calls _require_approved_arka() before it touches storage or the
+# database, so a direct POST to a bare URL is refused exactly as a click would be.
+# Verified by direct POST — see the session's verification run.
+#
+# WHY THE PAIRING MATTERS: CAD and BOQ both derive from the approved layout. A CAD
+# drawn against a superseded Arka is rework that QC has no way to detect once the
+# versions have moved on, so the version it was built from is recorded at write time
+# rather than inferred later from timestamps.
+#
+# ATTEMPTS ARE OPENED LAZILY. Part 2 left `current_attempt_number` at 0 and created
+# no DesignAttempt rows, so the first Arka submission opens attempt 1
+# (opened_reason='initial'). Attempts 2+ are opened by a QC failure or a PM change
+# request, which are Parts 4 and 5 — nothing here ever opens a second attempt.
+
+
+# ---------------------------------------------------------------------------
+# Part 3 helpers
+# ---------------------------------------------------------------------------
+
+def _current_attempt(assignment):
+    """The attempt design work is currently happening on, or None before the first
+    Arka submission. Read from `current_attempt_number` rather than "the latest row",
+    so the pointer the rest of the module maintains is the single source of truth."""
+    if not assignment.current_attempt_number:
+        return None
+    return assignment.attempts.filter(
+        attempt_number=assignment.current_attempt_number).first()
+
+
+def _open_first_attempt(assignment):
+    """Open attempt 1 for an assignment that has none, and move the pointer.
+
+    Callers own the transaction. Only ever creates attempt 1: a second attempt is a
+    rework loop (QC failure / PM change request) and belongs to a later part.
+    """
+    attempt = DesignAttempt.objects.create(
+        assignment=assignment, attempt_number=1,
+        opened_reason=ATTEMPT_REASON_INITIAL,
+    )
+    assignment.current_attempt_number = 1
+    assignment.save(update_fields=['current_attempt_number', 'updated_at'])
+    return attempt
+
+
+def _current_arka(attempt):
+    """The live Arka version for an attempt. The partial unique constraint from Part 1
+    guarantees there is at most one."""
+    if attempt is None:
+        return None
+    return attempt.arka_submissions.filter(is_current=True).first()
+
+
+def _approved_arka(attempt):
+    """The current Arka ONLY IF it has been approved. This is the object CAD and BOQ
+    artifacts pair to — deliberately not "the most recently approved version", so a
+    superseded approval can never become the parent of a new artifact."""
+    arka = _current_arka(attempt)
+    if arka is not None and arka.verdict == ARKA_APPROVED:
+        return arka
+    return None
+
+
+def _require_approved_arka(attempt):
+    """Return the approved current Arka, or raise ValueError with the message the
+    designer needs to see.
+
+    Single chokepoint for settled decision 1. Every artifact write path calls this;
+    none of them re-derives the rule, so the three call sites cannot drift.
+    """
+    if attempt is None:
+        raise ValueError('no design attempt has been opened yet — submit an Arka first')
+    arka = _current_arka(attempt)
+    if arka is None:
+        raise ValueError('no Arka has been submitted yet. CAD and BOQ can only be '
+                         'uploaded against an approved Arka')
+    if arka.verdict == ARKA_PENDING:
+        raise ValueError(f'Arka v{arka.version} is still awaiting the Design Head\'s '
+                         f'approval. CAD and BOQ cannot be uploaded until it is approved')
+    if arka.verdict == ARKA_REJECTED:
+        raise ValueError(f'Arka v{arka.version} was rejected. Submit a new Arka version '
+                         f'and have it approved before uploading CAD or BOQ')
+    return arka
+
+
+def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
+    """Section 5 — evaluate the progression rule after every Part 3 write.
+
+    The attempt moves `arka_submitted` -> `artifacts_uploaded` once it has ALL THREE:
+    an approved current Arka, at least one current CAD file, and boq_submitted_at set.
+
+    Called explicitly at the end of each action rather than wired to a signal, so the
+    transition is visible next to the write that could have caused it. Idempotent —
+    it only fires from `arka_submitted`, so calling it twice does nothing the second
+    time. Returns True if it advanced.
+
+    Deliberately does NOT continue on to `in_qc`; handing the package to QC is Part 4.
+    """
+    if assignment.status != DESIGN_ARKA_SUBMITTED:
+        return False
+    if attempt is None or _approved_arka(attempt) is None:
+        return False
+    if not attempt.design_files.filter(kind__in=CAD_KINDS, is_current=True).exists():
+        return False
+    if attempt.boq_submitted_at is None:
+        return False
+
+    assignment.status = DESIGN_ARTIFACTS_UPLOADED
+    assignment.save(update_fields=['status', 'updated_at'])
+    log_activity(assignment.project, actor,
+                 f'Design package complete on attempt {attempt.attempt_number} — '
+                 f'approved Arka, CAD and BOQ all present',
+                 entity_type='DesignAttempt', entity_id=attempt.pk,
+                 action_code='design_artifacts_uploaded')
+    return True
+
+
+def _attempt_files(attempt):
+    """Every DesignFile on an attempt, newest version of each kind first, with the Arka
+    version it derives from preloaded — the pairing is what the screens exist to show."""
+    if attempt is None:
+        return []
+    return list(attempt.design_files
+                .select_related('derived_from_arka', 'uploaded_by__user')
+                .order_by('kind', '-version'))
+
+
+def _designer_boq(project):
+    """The project's BOQ, or None. Read-only — this module never creates, seeds or
+    writes a BOQ row (settled decision 4); `boq_detail` owns all of that."""
+    try:
+        return project.boq
+    except BOQ.DoesNotExist:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# 6. Screens
+# ---------------------------------------------------------------------------
+
+def _workspace_context(project, assignment):
+    """Shared context for both Part 3 screens, so the designer and the Head are looking
+    at the same computed truth rather than two templates deriving it separately."""
+    attempt = _current_attempt(assignment)
+    arka    = _current_arka(attempt)
+    boq     = _designer_boq(project)
+    files   = _attempt_files(attempt)
+    return {
+        'project':        project,
+        'assignment':     assignment,
+        'attempt':        attempt,
+        'arka':           arka,
+        'arka_approved':  _approved_arka(attempt) is not None,
+        'arka_history':   (list(attempt.arka_submissions.select_related(
+                               'submitted_by__user', 'reviewed_by__user')
+                               .order_by('-version')) if attempt else []),
+        'files':          files,
+        'has_cad':        any(f.kind in CAD_KINDS and f.is_current for f in files),
+        'boq':            boq,
+        'boq_complete':   bool(attempt and attempt.boq_submitted_at),
+        'cad_kinds':      [(k, KIND_LABELS[k]) for k in UPLOADABLE_KINDS],
+        'status':         assignment.status,
+    }
+
+
+@login_required
+def design_site_workspace(request, project_id):
+    """The designer's per-site design screen: submit an Arka, read the rejection
+    reason, upload CAD, see every uploaded version with the Arka it derives from,
+    reach BOQ entry and mark the BOQ complete.
+
+    Read access is the allocated designer or the Design Head — the Head needs to see
+    exactly what the designer sees when a question comes up. Every ACTION on the
+    screen is separately gated in its own view; being able to load this page confers
+    nothing.
+    """
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        raise Http404('No design assignment for this site.')
+
+    is_designer = user_is_assigned_designer(request.user, assignment)
+    if not (is_designer or user_is_design_head(request.user)):
+        return HttpResponseForbidden('Only the allocated designer or the Design Head '
+                                     'may open this site\'s design workspace.')
+
+    ctx = _workspace_context(project, assignment)
+    ctx.update({
+        'is_designer':  is_designer,
+        'can_submit_arka': is_designer and assignment.status in ARKA_SUBMITTABLE_STATUSES,
+        # The BOQ link is only useful if the existing Part 0.6 gate lets this user in.
+        # Surfaced rather than hidden: a designer allocated to a site whose
+        # `assigned_design` names someone else is locked out of BOQ entry, and being
+        # told so beats a bare 403 from boq_detail.
+        'can_edit_boq': user_can_edit_project_boq(request.user, project),
+    })
+    return render(request, 'projects/design/site_workspace.html', ctx)
+
+
+@login_required
+def design_head_review(request, project_id):
+    """The Design Head's Arka review screen for one site: the pending Arka with its
+    capacity and link, the approve and reject-with-reason actions, the full version
+    history, and the artifacts submitted so far."""
+    project = _opex_site(project_id)
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden('Design Head only.')
+
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        raise Http404('No design assignment for this site.')
+
+    ctx = _workspace_context(project, assignment)
+    arka = ctx['arka']
+    ctx['can_verdict'] = bool(
+        arka is not None
+        and arka.verdict == ARKA_PENDING
+        and assignment.status == DESIGN_ARKA_SUBMITTED
+    )
+    return render(request, 'projects/design/head_review.html', ctx)
+
+
+# ---------------------------------------------------------------------------
+# 7. Arka submission
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_arka_submit(request, project_id):
+    """The allocated DESIGNER submits an Arka version.
+
+    Permission is `assignment.assigned_to == profile` and nobody else — explicitly
+    including the Design Head, who reviews these and must not be able to author one.
+
+    VERSIONING: version is max(version for this attempt) + 1, starting at 1, and any
+    previous submission is flipped to is_current=False BEFORE the insert, in the same
+    transaction. The partial unique constraint `uniq_current_arka_per_attempt` rejects
+    the insert otherwise — the ordering is load-bearing, not stylistic.
+
+    A rejected version stays is_current=True until this replacement lands, so the
+    designer can read what was rejected and why right up to the moment they fix it.
+    """
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None or not user_is_assigned_designer(request.user, assignment):
+        return HttpResponseForbidden('Only the designer allocated to this site may '
+                                     'submit an Arka.')
+    if request.method != 'POST':
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    if assignment.status not in ARKA_SUBMITTABLE_STATUSES:
+        return _back(f'{project.project_id}: an Arka can only be submitted while the '
+                     f'site is in design or its previous Arka was rejected '
+                     f'(this site is "{assignment.get_status_display()}").')
+
+    # ── capacity: recorded, NOT validated against anything (settled decision 5) ──
+    # Positive-number validation only. There is deliberately no comparison against
+    # tendered capacity, no mismatch gate and no rollup — that is Part 5 reporting and
+    # a separate commercial decision.
+    raw_capacity = (request.POST.get('capacity_kw') or '').strip()
+    try:
+        capacity = Decimal(raw_capacity)
+    except (InvalidOperation, ValueError):
+        return _back('Please enter the designed capacity in kW as a number.')
+    if capacity <= 0:
+        return _back('Designed capacity must be greater than zero.')
+
+    arka_link = (request.POST.get('arka_link') or '').strip()
+    if not arka_link:
+        return _back('An Arka link is required.')
+    try:
+        URLValidator()(arka_link)
+    except ValidationError:
+        return _back('Please enter a valid Arka link (a full URL, including https://).')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        attempt = _current_attempt(assignment)
+        if attempt is None:
+            attempt = _open_first_attempt(assignment)
+
+        # Stand the previous version down BEFORE inserting — see the docstring.
+        attempt.arka_submissions.filter(is_current=True).update(is_current=False)
+        next_version = (attempt.arka_submissions.aggregate(
+            m=Max('version'))['m'] or 0) + 1
+
+        arka = ArkaSubmission.objects.create(
+            attempt=attempt, version=next_version,
+            capacity_kw=capacity, arka_link=arka_link,
+            submitted_by=profile, verdict=ARKA_PENDING, is_current=True,
+        )
+        assignment.status = DESIGN_ARKA_SUBMITTED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Arka v{arka.version} submitted ({capacity} kW) for approval',
+                     entity_type='ArkaSubmission', entity_id=arka.pk,
+                     action_code='design_arka_submitted')
+
+    return _back(f'{project.project_id}: Arka v{next_version} submitted — awaiting '
+                 f'Design Head approval.', ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 8. Arka verdict
+# ---------------------------------------------------------------------------
+
+def _verdict_target(request, project):
+    """The Arka a verdict may be recorded against, or a (None, message) pair.
+
+    Shared by approve and reject so the two cannot disagree about which submission is
+    reviewable. The designer cannot reach either endpoint: both are gated on
+    `user_is_design_head` by their callers, so nobody can approve their own Arka.
+    """
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return None, None, f'{project.project_id}: no design assignment for this site.'
+    if assignment.status != DESIGN_ARKA_SUBMITTED:
+        return None, None, (f'{project.project_id}: there is no Arka awaiting a verdict '
+                            f'(status "{assignment.get_status_display()}").')
+    attempt = _current_attempt(assignment)
+    arka = _current_arka(attempt)
+    if arka is None:
+        return None, None, f'{project.project_id}: no current Arka submission found.'
+    if arka.verdict != ARKA_PENDING:
+        return None, None, (f'{project.project_id}: Arka v{arka.version} has already '
+                            f'been {arka.get_verdict_display().lower()}.')
+    return assignment, arka, None
+
+
+@login_required
+def design_arka_approve(request, project_id):
+    """The Design HEAD approves the current Arka version.
+
+    Status deliberately STAYS at `arka_submitted`: approval unlocks CAD and BOQ upload,
+    it does not complete the package. The next status is `artifacts_uploaded` and it is
+    reached by _maybe_advance_to_artifacts_uploaded(), not here — no new status value
+    is invented for "Arka approved, artifacts outstanding".
+    """
+    project = _opex_site(project_id)
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden('Design Head only.')
+    if request.method != 'POST':
+        return redirect('design_head_review', project_id=project.project_id)
+
+    assignment, arka, error = _verdict_target(request, project)
+    if error:
+        messages.error(request, error)
+        return redirect('design_head_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    with transaction.atomic():
+        arka.verdict     = ARKA_APPROVED
+        arka.reviewed_by = profile
+        arka.reviewed_at = timezone.now()
+        arka.save(update_fields=['verdict', 'reviewed_by', 'reviewed_at'])
+        log_activity(project, profile,
+                     f'Arka v{arka.version} approved ({arka.capacity_kw} kW)',
+                     entity_type='ArkaSubmission', entity_id=arka.pk,
+                     action_code='design_arka_approved')
+        # A re-approval on an attempt that already carries CAD and a submitted BOQ
+        # would otherwise leave the status behind; evaluating here costs one query.
+        _maybe_advance_to_artifacts_uploaded(
+            assignment, _current_attempt(assignment), profile)
+
+    messages.success(request, f'{project.project_id}: Arka v{arka.version} approved — '
+                              f'the designer can now upload CAD and enter the BOQ.')
+    return redirect('design_head_review', project_id=project.project_id)
+
+
+@login_required
+def design_arka_reject(request, project_id):
+    """The Design HEAD rejects the current Arka version. A reason is MANDATORY.
+
+    The reason is checked here so the designer gets a usable message, and the Part 1
+    CHECK constraint `rejection_reason_required_when_rejected` enforces the same rule
+    at the database level for any writer that bypasses this view. Both were verified
+    this session.
+
+    The rejected submission stays is_current=True — it is the record of what was
+    rejected — and is stood down only when the designer submits the replacement.
+    """
+    project = _opex_site(project_id)
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden('Design Head only.')
+    if request.method != 'POST':
+        return redirect('design_head_review', project_id=project.project_id)
+
+    assignment, arka, error = _verdict_target(request, project)
+    if error:
+        messages.error(request, error)
+        return redirect('design_head_review', project_id=project.project_id)
+
+    reason = (request.POST.get('rejection_reason') or '').strip()
+    if not reason:
+        messages.error(request, f'{project.project_id}: a rejection reason is required '
+                                f'— the designer cannot act on "rejected" alone.')
+        return redirect('design_head_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    with transaction.atomic():
+        arka.verdict          = ARKA_REJECTED
+        arka.rejection_reason = reason
+        arka.reviewed_by      = profile
+        arka.reviewed_at      = timezone.now()
+        arka.save(update_fields=['verdict', 'rejection_reason',
+                                 'reviewed_by', 'reviewed_at'])
+        assignment.status = DESIGN_ARKA_REJECTED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Arka v{arka.version} rejected: {reason}',
+                     entity_type='ArkaSubmission', entity_id=arka.pk,
+                     action_code='design_arka_rejected')
+
+    messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected — '
+                              f'the designer has been asked to submit a new version.')
+    return redirect('design_head_review', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# 9. CAD and BOQ artifact upload
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_artifact_upload(request, project_id):
+    """The allocated DESIGNER uploads a CAD (pdf/dwg) or optional BOQ (xlsx/pdf) file.
+
+    REFUSED unless the current Arka is approved — settled decision 1, enforced here and
+    not by the template. A direct POST to this URL with an unapproved Arka gets the same
+    refusal a hidden button would have prevented.
+
+    PAIRING: derived_from_arka is set to the value _require_approved_arka() returns,
+    which is the CURRENT approved version. It is never read off an older submission and
+    never inferred from timestamps.
+
+    VERSIONING is per (attempt, kind). Re-uploading a kind creates version N+1, flips
+    the previous row to is_current=False and sets its superseded_by to the new row —
+    which is why the new row is created first and the old one updated second.
+
+    ORDERING: the file goes to storage BEFORE the transaction opens, exactly as the
+    Part 2 survey upload does, so a storage failure aborts before any row is written
+    and no DesignFile can ever point at an object that does not exist.
+    """
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None or not user_is_assigned_designer(request.user, assignment):
+        return HttpResponseForbidden('Only the designer allocated to this site may '
+                                     'upload design artifacts.')
+    if request.method != 'POST':
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    kind = (request.POST.get('kind') or '').strip()
+    if kind not in UPLOADABLE_KINDS:
+        return _back('Choose which kind of file this is.')
+
+    upload = request.FILES.get('artifact_file')
+    if not upload:
+        return _back('Please choose a file to upload.')
+
+    attempt = _current_attempt(assignment)
+    try:
+        arka = _require_approved_arka(attempt)
+    except ValueError as exc:
+        return _back(f'{project.project_id}: {exc}.')
+
+    # `kind` is whitelisted above, so it is safe as a storage path segment.
+    path = build_design_path(project.project_id, kind, upload.name)
+    try:
+        bucket, stored_path = upload_design_file(upload, path)
+    except DesignStorageError as exc:
+        return _back(f'{project.project_id}: {exc}')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        previous = attempt.design_files.filter(kind=kind, is_current=True).first()
+        next_version = (attempt.design_files.filter(kind=kind)
+                        .aggregate(m=Max('version'))['m'] or 0) + 1
+
+        design_file = DesignFile.objects.create(
+            attempt=attempt, kind=kind, version=next_version,
+            bucket=bucket, path=stored_path,
+            original_filename=(upload.name or '')[:255],
+            size_bytes=getattr(upload, 'size', None),
+            content_type=(getattr(upload, 'content_type', '') or '')[:100],
+            derived_from_arka=arka,
+            uploaded_by=profile, is_current=True,
+        )
+        if previous is not None:
+            previous.is_current    = False
+            previous.superseded_by = design_file
+            previous.save(update_fields=['is_current', 'superseded_by'])
+
+        log_activity(project, profile,
+                     f'{KIND_LABELS[kind]} v{next_version} uploaded, derived from '
+                     f'Arka v{arka.version}',
+                     entity_type='DesignFile', entity_id=design_file.pk,
+                     action_code='design_artifact_uploaded')
+
+        advanced = _maybe_advance_to_artifacts_uploaded(assignment, attempt, profile)
+
+    msg = (f'{project.project_id}: {KIND_LABELS[kind]} v{next_version} uploaded '
+           f'(derived from Arka v{arka.version}).')
+    if advanced:
+        msg += ' The design package is now complete.'
+    return _back(msg, ok=True)
+
+
+@login_required
+def design_file_download(request, project_id, pk):
+    """Redirect to a freshly-signed, short-lived URL for one DesignFile.
+
+    Same shape as the Part 2 survey download: the URL is minted per request, never
+    stored, and visibility is the ordinary project visibility rule. The file is looked
+    up THROUGH this project's assignment, so a pk belonging to another site's attempt
+    is a 404 rather than a signed link.
+    """
+    project = _opex_site(project_id)
+    if not user_can_view_design(request.user, project):
+        return HttpResponseForbidden('You do not have access to this site.')
+
+    design_file = get_object_or_404(
+        DesignFile, pk=pk, attempt__assignment__project=project)
+    try:
+        url = get_design_file_url(design_file.bucket, design_file.path)
+    except DesignStorageError as exc:
+        messages.error(request, str(exc))
+        return redirect('design_site_workspace', project_id=project.project_id)
+    if not url:
+        raise Http404('No stored object for this file.')
+    return redirect(url)
+
+
+# ---------------------------------------------------------------------------
+# 10. BOQ completion
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_boq_complete(request, project_id):
+    """The allocated DESIGNER marks the BOQ complete for the current attempt.
+
+    THE BOQ ITSELF IS NOT DUPLICATED (settled decision 4). Quantities live in the
+    existing BOQ / BOQItem rows and are entered through the existing `boq_detail`
+    screen under the Part 0.6 permission helpers, neither of which this module touches.
+    All that happens here is that the ATTEMPT records boq_submitted_at /
+    boq_submitted_by — the design workflow's own note that this step is done.
+
+    REFUSED unless the current Arka is approved, for the same reason CAD is: a BOQ
+    priced off an unapproved layout is rework.
+
+    The "at least one quantity" guard reads the existing BOQ and mirrors the check
+    `boq_detail`'s own submit branch applies (views.py — `boq_quantity__gt=0`), so this
+    stamp cannot be set on an empty BOQ. It is a READ of BOQ rows; nothing here writes
+    one.
+    """
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None or not user_is_assigned_designer(request.user, assignment):
+        return HttpResponseForbidden('Only the designer allocated to this site may mark '
+                                     'its BOQ complete.')
+    if request.method != 'POST':
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect('design_site_workspace', project_id=project.project_id)
+
+    attempt = _current_attempt(assignment)
+    try:
+        _require_approved_arka(attempt)
+    except ValueError as exc:
+        return _back(f'{project.project_id}: {exc}.')
+
+    if attempt.boq_submitted_at is not None:
+        return _back(f'{project.project_id}: the BOQ for attempt '
+                     f'{attempt.attempt_number} is already marked complete.')
+
+    boq = _designer_boq(project)
+    if boq is None or not boq.items.filter(boq_quantity__gt=0).exists():
+        return _back(f'{project.project_id}: enter a quantity for at least one BOQ item '
+                     f'before marking the BOQ complete.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        attempt.boq_submitted_at = timezone.now()
+        attempt.boq_submitted_by = profile
+        attempt.save(update_fields=['boq_submitted_at', 'boq_submitted_by'])
+        log_activity(project, profile,
+                     f'BOQ marked complete for attempt {attempt.attempt_number}',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_boq_submitted')
+        advanced = _maybe_advance_to_artifacts_uploaded(assignment, attempt, profile)
+
+    msg = f'{project.project_id}: BOQ marked complete.'
+    if advanced:
+        msg += ' The design package is now complete.'
+    return _back(msg, ok=True)
