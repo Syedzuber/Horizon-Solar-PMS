@@ -39,6 +39,14 @@ a one-off manual `item_master` assignment (2 rows), not a code change.
 `0047` has not been run on Railway; the linked/null split there may differ, and the
 migration prints the same three numbers when it runs, so check that output.
 
+> **UPDATE (Part 1 session).** `0047` has now run on Railway. Production reported
+> **186 `BOQItem` rows, 184 linked, 2 left null**, and — unlike local — **one** distinct
+> unmatched description (`'Miscellaneous net metering transportation rubber mat fire
+> extinguisher warning boards'`), so both production rows share the same text while the
+> two local rows differ from each other. Production PKs were never obtained (the
+> environment blocked the read), so the one-off `item_master` fix is still open and
+> cannot be written as a hardcoded-PK migration until those PKs are read.
+
 ### B2 — `unit` and `category` widths/choices disagree between catalogue and BOQ row
 
 | | `BOQItemMaster` | `BOQItem` |
@@ -136,7 +144,13 @@ the same way. Both were gated this session and both remain dead code.
 
 **Location:** `projects/views.py:4402-4407`
 
-### C11 — Precondition ratio was measured on the local database, not Railway
+### ~~C11 — Precondition ratio was measured on the local database, not Railway~~ — **CLOSED**
+
+> **CLOSED (Part 1 session).** The precondition was re-measured on live Railway data:
+> **25 active projects, 3 with a null `assigned_design` = 12%**, below the 20% threshold.
+> `user_can_edit_project_boq()` was narrowed to **W-narrow** (`assigned_design` only; the
+> task-holding fallback was deleted) in commit `83739b6`. The original entry is kept below
+> for the record — its "W-broad is selected" statement no longer describes the code.
 
 The Part 0.6 precondition (share of active projects with a null `assigned_design`, threshold
 20%, selecting W-broad vs W-narrow for the write rule) was run against the local Postgres
@@ -152,3 +166,48 @@ designer who holds a task on the project, whereas W-narrow chosen wrongly would 
 designers out of live projects that were never stamped with an `assigned_design`.
 
 **Location:** `projects/permissions.py` — `user_can_edit_project_boq()`
+
+---
+
+## D. Found during Part 1 (OPEX design data model) — recorded, deliberately not fixed
+
+Part 1 added `'Design Head'` to `UserProfile.ROLE_CHOICES` as a real role. No user was
+migrated onto it and `is_design_head` was not removed, so nothing below is currently
+live — but each is a gap that opens the moment the first user is given the new role.
+
+| # | Finding | Location |
+|---|---------|----------|
+| D1 | `_SA_EDITABLE_ROLE_CHOICES` is a hardcoded role list that does **not** include `'Design Head'`, so a System Admin cannot assign the new role. Meanwhile the user create/edit dropdowns derive from `UserProfile.ROLE_CHOICES` and now *do* offer it — the two role pickers in the product disagree about which roles exist. Part 4 needs this resolved before a Design Head can be provisioned through the UI. | `projects/views.py:8758` |
+| D2 | Docstring is now factually false: it states `'Design Head' is not yet in UserProfile.ROLE_CHOICES`, which Part 1 changed. The test still passes — it sets `profile.role` directly and `choices` is not enforced on `save()` — so this is a stale comment, not a broken test. | `projects/tests_permissions.py:256` |
+| D3 | `EOD_DIGEST_EXCLUDED_ROLES` has no entry for `'Design Head'`, so the first holder of the role will start receiving end-of-day digests built for delivery roles. Decide whether Design Head is excluded (like CEO/Admin/System Admin) or gets its own content branch. | EOD digest command / notification config |
+
+### D4 — Conditional-requirement rules: two enforced, one deliberately not
+
+Three fields in the Part 1 models carry "required when *condition*" rules. Two were added
+as DB `CheckConstraint`s in migration `0049`:
+
+- `DesignAttempt.qc_remarks` — required when `qc_verdict = 'failed'`
+- `ArkaSubmission.rejection_reason` — required when `verdict = 'rejected'`
+
+`DueDateCommitment.change_reason` ("required when this is not the first commitment") was
+**not** constrained. A `CHECK` sees only the row being written, and this rule depends on
+whether sibling rows exist for the same assignment, so it cannot be expressed as one. It
+remains a view-layer rule and is currently unenforced anywhere — the first code that
+creates a superseding commitment must enforce it.
+
+Both constraints test for the empty string only. The fields are `NOT NULL` with
+`default=''`, so there is no null case, but a **whitespace-only** value still passes.
+Rejecting that belongs with form validation in a later part.
+
+### D5 — `DesignSubmission` overlaps the new design models
+
+`DesignSubmission` (model + two read views, no write path — carried from A4/C7) covers
+roughly the same ground as the new `ArkaSubmission` + `DesignFile` pair: a design artifact
+submitted by a Design user, with a pending/approved/rejected verdict plus `reviewed_by` /
+`reviewed_at` / `review_notes`, and a stored file. It differs in being flat per-project
+with no attempt, no versioning, no Arka pairing, and a public `file_url` rather than the
+bucket + path the new models use.
+
+Part 1 left it entirely alone by instruction — not repurposed, extended or removed. The
+open question is whether it should be deleted once the OPEX design module lands, since it
+is dead code today and its presence invites a future contributor to wire the two together.

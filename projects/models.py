@@ -1566,12 +1566,17 @@ class ChecklistItemCompletion(models.Model):
 # with PM-owned approval, entirely untouched by anything in this section. The two
 # approval models genuinely differ and are deliberately not unified.
 #
-# Several fields below are documented as "required when <condition>" (qc_remarks on
-# a failed QC, rejection_reason on a rejected Arka, change_reason on a non-first
-# commitment). Those are CONDITIONAL requirements that depend on workflow state, so
-# they are recorded here as documentation and left unenforced in this session rather
-# than invented as constraints the later parts would have to unwind. Enforcement
-# belongs with the transition logic that establishes the condition.
+# Three fields carry "required when <condition>" rules. Two of them depend only on
+# values in their OWN row and are enforced as DB CheckConstraints below:
+#   • DesignAttempt.qc_remarks       — required when qc_verdict = 'failed'
+#   • ArkaSubmission.rejection_reason — required when verdict  = 'rejected'
+# The third, DueDateCommitment.change_reason ("required when this is not the first
+# commitment"), depends on SIBLING ROWS — a CHECK constraint cannot see them — so it
+# stays a view-layer rule and is deliberately NOT constrained here.
+#
+# Both constraints test for the empty string only. The fields are NOT NULL with
+# default='', so there is no null case to cover, but a whitespace-only value would
+# still pass; rejecting that belongs with the form validation in a later part.
 # ===========================================================================
 
 # DesignAssignment.status values. Module-level so views, forms and tests in later
@@ -1822,6 +1827,15 @@ class DesignAttempt(models.Model):
     class Meta:
         ordering        = ['assignment', 'attempt_number']
         unique_together = ('assignment', 'attempt_number')
+        constraints = [
+            # A failed QC must say why. Expressed as the VALID case: either the verdict
+            # is not 'failed', or remarks are non-empty. Self-contained (reads only this
+            # row's own columns), which is what makes it expressible as a CHECK.
+            models.CheckConstraint(
+                condition=~models.Q(qc_verdict=QC_FAILED) | ~models.Q(qc_remarks=''),
+                name='qc_remarks_required_when_qc_failed',
+            ),
+        ]
 
     def __str__(self):
         return f"Attempt {self.attempt_number} — assignment {self.assignment_id} ({self.qc_verdict})"
@@ -1871,6 +1885,12 @@ class ArkaSubmission(models.Model):
                 fields=['attempt'],
                 condition=models.Q(is_current=True),
                 name='uniq_current_arka_per_attempt',
+            ),
+            # A rejected Arka must say why. Same shape as the QC constraint above:
+            # expressed as the valid case, and self-contained to this row.
+            models.CheckConstraint(
+                condition=~models.Q(verdict=ARKA_REJECTED) | ~models.Q(rejection_reason=''),
+                name='rejection_reason_required_when_rejected',
             ),
         ]
 
