@@ -22,26 +22,41 @@ capacity are Part 5.
   </a>
 </div>
 
-{# ── Bulk allocation: one designer, many sites, one transaction ──────────── #}
-<form method="post" action="{% url 'design_bulk_allocate' pk=program.pk %}">
-  {% csrf_token %}
-  <div class="card shadow-sm mb-3">
-    <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
-      <span class="small fw-semibold">Bulk allocate selected:</span>
-      <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;">
-        <option value="">Choose a designer…</option>
-        {% for d in designers %}
-          <option value="{{ d.pk }}">{{ d.user.get_full_name|default:d.user.username }}</option>
-        {% endfor %}
-      </select>
-      <button type="submit" class="btn btn-sm btn-success">Allocate selected</button>
-      <span class="text-muted small ms-auto">
-        All-or-nothing — if any selected site fails, none are allocated.
-      </span>
-    </div>
-  </div>
+{% comment %}
+Bulk allocation: one designer, many sites, one transaction.
 
-  <div class="card shadow-sm">
+This form contains ONLY the designer picker and its submit button. It must NOT wrap
+the table: the table rows carry their own upload/allocate/approve forms, and HTML
+forbids nesting one form inside another — a browser silently drops the inner one, so
+every per-row button would submit THIS form instead. The row checkboxes join this
+form by id via the HTML5 `form` attribute, which is what that attribute exists for.
+
+Note this block uses {% templatetag openblock %} comment {% templatetag closeblock %},
+not the single-line hash form: a multi-line hash comment renders straight onto the
+page, and any markup named inside it becomes real elements.
+{% endcomment %}
+<form method="post" action="{% url 'design_bulk_allocate' pk=program.pk %}" id="bulkAllocateForm">
+  {% csrf_token %}
+</form>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+    <span class="small fw-semibold">Bulk allocate selected:</span>
+    <select name="designer_id" form="bulkAllocateForm"
+            class="form-select form-select-sm" style="max-width:16rem;">
+      <option value="">Choose a designer…</option>
+      {% for d in designers %}
+        <option value="{{ d.pk }}">{{ d.user.get_full_name|default:d.user.username }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit" form="bulkAllocateForm" class="btn btn-sm btn-success">Allocate selected</button>
+    <span class="text-muted small ms-auto">
+      All-or-nothing — if any selected site fails, none are allocated.
+    </span>
+  </div>
+</div>
+
+<div class="card shadow-sm">
     <div class="table-responsive">
       <table class="table table-sm align-middle mb-0">
         <thead class="table-light">
@@ -60,8 +75,13 @@ capacity are Part 5.
           <tr {% if row.is_blocked %}class="table-warning"{% endif %}>
             <td>
               {% if row.allocatable %}
+                {# Checkbox posts with the bulk form above, via its form attribute. #}
                 <input type="checkbox" class="form-check-input" name="site_ids"
-                       value="{{ row.site.project_id }}">
+                       form="bulkAllocateForm" value="{{ row.site.project_id }}">
+              {% else %}
+                {# Disabled, not absent, so the reason is visible rather than a blank cell. #}
+                <input type="checkbox" class="form-check-input" disabled
+                       title="Upload a survey before this site can be allocated">
               {% endif %}
             </td>
             <td>
@@ -227,7 +247,6 @@ capacity are Part 5.
         </tbody>
       </table>
     </div>
-  </div>
-</form>
+</div>
 
 {% endblock %}
