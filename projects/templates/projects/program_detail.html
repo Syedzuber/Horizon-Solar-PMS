@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}{{ program.name }} — Program — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <a href="{% url 'program_list' %}" class="text-decoration-none small">← Programs</a>
+    <h4 class="mb-0 mt-1">{{ program.name }}</h4>
+    <div class="text-muted small">
+      <span class="badge bg-secondary">{{ program.program_type }}</span>
+      {{ program.client_name }}
+      {% if program.reference_display and program.reference_display != program.name %}
+        · {{ program.reference_display }}
+      {% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    {% if can_edit %}
+      <a href="{% url 'program_edit' pk=program.pk %}" class="btn btn-outline-secondary btn-sm">Edit</a>
+    {% endif %}
+    {% if can_delete %}
+      <form method="post" action="{% url 'program_delete' pk=program.pk %}"
+            onsubmit="return confirm('Delete this program? Only allowed when it has no active sites.');">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-outline-danger btn-sm">Delete</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Aggregate rollup vs. planned targets -->
+<div class="row g-3 mb-4">
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100"><div class="card-body">
+      <div class="text-muted small text-uppercase">Active sites (live)</div>
+      <div class="fs-3 fw-semibold">
+        {{ rollup.total }}{% if program.planned_site_count %}<span class="text-muted fs-6"> / {{ program.planned_site_count }} planned</span>{% endif %}
+      </div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100"><div class="card-body">
+      <div class="text-muted small text-uppercase">Total planned capacity</div>
+      <div class="fs-3 fw-semibold">{{ program.total_capacity|default:"—" }}{% if program.total_capacity %} MW{% endif %}</div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100"><div class="card-body">
+      <div class="text-muted small text-uppercase">Expected completion</div>
+      <div class="fs-5 fw-semibold">{{ program.expected_completion_date|default:"—" }}</div>
+    </div></div>
+  </div>
+  <div class="col-md-3">
+    <div class="card shadow-sm h-100"><div class="card-body">
+      <div class="text-muted small text-uppercase">Status</div>
+      <div class="fs-5 fw-semibold">{{ program.status }}</div>
+    </div></div>
+  </div>
+</div>
+
+<!-- Stage breakdown (compute-live from child-site status) -->
+<div class="card shadow-sm mb-4"><div class="card-body">
+  <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Stage breakdown</h6>
+  {% for status, count in rollup.by_status.items %}
+    <span class="badge {% if count %}bg-primary{% else %}bg-light text-muted border{% endif %} me-1 mb-1">{{ status }}: {{ count }}</span>
+  {% endfor %}
+</div></div>
+
+<!-- Child sites -->
+<div class="card shadow-sm">
+  <div class="card-header bg-white d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">Sites ({{ rollup.total }})</span>
+    {% if can_edit and program.program_type == 'OPEX' %}
+      <div class="d-flex gap-2">
+        <a href="{% url 'opex_site_bulk_upload' pk=program.pk %}" class="btn btn-outline-primary btn-sm">Bulk Upload Sites</a>
+        <a href="{% url 'opex_site_create' pk=program.pk %}" class="btn btn-primary btn-sm">+ Add Site</a>
+      </div>
+    {% endif %}
+  </div>
+  {% if sites %}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Project ID</th>
+          {% if program.program_type == 'OPEX' %}<th>Site Code</th>{% endif %}
+          <th>Customer / Site</th>
+          <th>Status</th>
+          <th>Assigned PM</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sites %}
+        <tr>
+          <td><a href="{% url 'project_overview' project_id=s.project_id %}" class="text-decoration-none fw-semibold">{{ s.project_id }}</a></td>
+          {% if program.program_type == 'OPEX' %}<td>{{ s.site_code|default:"—" }}</td>{% endif %}
+          <td>{{ s.customer_name }}</td>
+          <td>{{ s.status }}</td>
+          <td>{% if s.assigned_pm %}{{ s.assigned_pm.user.get_full_name|default:s.assigned_pm.user.username }}{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card-body text-muted text-center py-4">No sites linked to this program yet.</div>
+  {% endif %}
+</div>
+{% endblock %}

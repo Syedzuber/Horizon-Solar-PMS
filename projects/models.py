@@ -21,14 +21,41 @@ class Project(models.Model):
         ('Cancelled',    'Cancelled'),
     ]
 
-    project_id                = models.CharField(max_length=20, unique=True, editable=False, blank=True)  # Auto-generated: HRP-{PREFIX}-{YEAR}-{NNN}
-    customer_name             = models.CharField(max_length=100)
+    # Widened 20 → 30 to hold the OPEX tender-based format `{short_tender_code}-{site_code}`
+    # (e.g. IPGCL26-S045) alongside the legacy auto-generated HRP-{PREFIX}-{YEAR}-{NNN}.
+    # Additive/safe — nothing depends on the old width. Two formats coexist by design.
+    project_id                = models.CharField(max_length=30, unique=True, editable=False, blank=True)
+    # 200 mirrors Program.client_name — an OPEX site auto-copies client_name into this
+    # field at creation, so the widths must match or a long client entity name would
+    # overflow. (Originally 200, later narrowed to 100; this restores it.) For OPEX the
+    # value is the frozen parent-tender client name; for Residential/CAPEX it is the
+    # typed customer name.
+    customer_name             = models.CharField(max_length=200)
+    # For Residential/CAPEX this is the customer's phone; for OPEX sites (created via
+    # OpexSiteForm) it is REINTERPRETED as the Site In-Charge phone. Same column, dual
+    # meaning by project_type — see OpexSiteForm and opex_site_form.html.
     customer_phone            = models.CharField(max_length=10)
+    # Dual meaning like customer_phone: customer email (Residential/CAPEX) vs Site
+    # In-Charge email (OPEX).
     customer_email            = models.EmailField(blank=True, null=True)
     site_address              = models.TextField()
     city                      = models.CharField(max_length=50)
     state                     = models.CharField(max_length=50, default='Uttar Pradesh')
     project_type              = models.CharField(max_length=20, choices=PROJECT_TYPE_CHOICES)
+    # First and only PARENT FK on Project. Nullable/forward-only: every pre-existing
+    # project stays program=null (no backfill). on_delete=PROTECT so a Program can
+    # never cascade-delete or orphan its child sites (see Program soft-delete rules).
+    # Type-match / Residential-exclusion invariants are enforced in _validate_program_link().
+    program                   = models.ForeignKey(
+        'Program',
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name='sites',
+    )
+    # OPEX-under-Program only: user-entered, matches the tender's official site list.
+    # NOT auto-generated. Combined with Program.short_tender_code to compose project_id.
+    site_code                 = models.CharField(max_length=30, null=True, blank=True)
     capacity_kw               = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
     contract_value            = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     assigned_pm               = models.ForeignKey(
@@ -62,6 +89,10 @@ class Project(models.Model):
     status                    = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
     zoho_crm_id               = models.CharField(max_length=50, blank=True, null=True)
     zoho_deal_id              = models.CharField(max_length=100, blank=True, default='')  # Stores Zoho Record Id for duplicate webhook guard
+    # Originally a Zoho-only field (contact person on the CRM deal). Now ALSO reused as
+    # the Site In-Charge Name for OPEX sites created via OpexSiteForm — where the form
+    # makes it required even though the model keeps blank=True (Zoho/other paths may omit
+    # it). Dual meaning by project_type, same pattern as customer_phone/customer_email.
     customer_contact_person   = models.CharField(max_length=255, blank=True, default='')
     created_at                = models.DateTimeField(auto_now_add=True)
     created_by                = models.ForeignKey(
@@ -94,8 +125,37 @@ class Project(models.Model):
                     return phase.phase_name
         return None
 
+    def _validate_program_link(self):
+        """Enforce the Program-linkage invariants at save time (spec §4 edge cases).
+
+        No-op for the vast majority of rows (program is null). When a site IS linked
+        to a Program, two rules hold unconditionally, at EVERY save path (form, view,
+        webhook, shell), because they live here rather than on any one form:
+          • Residential projects may NEVER belong to a Program.
+          • A site's project_type must equal its Program's program_type
+            (no CAPEX site under an OPEX Program, or vice-versa).
+        Raises ValidationError so callers surface a clear message, never an
+        IntegrityError. `project_type` is validated, not `program.program_type`,
+        against the reused OPEX/CAPEX vocabulary they share.
+        """
+        if self.program_id is None:
+            return
+        from django.core.exceptions import ValidationError
+        if self.project_type == 'Residential':
+            raise ValidationError('Residential projects cannot be linked to a Program.')
+        program_type = self.program.program_type
+        if self.project_type != program_type:
+            raise ValidationError(
+                f'Type mismatch: a {self.project_type} site cannot belong to a '
+                f'{program_type} Program.'
+            )
+
     def save(self, *args, **kwargs):
-        # Generate project_id only on first save; subsequent saves skip ID generation
+        # Program-link invariants run on every save (cheap; short-circuits when program is null)
+        self._validate_program_link()
+        # Generate project_id only on first save; subsequent saves skip ID generation.
+        # NOTE: OPEX sites created under a Program set project_id EXPLICITLY before
+        # save() (Program-scoped creation path), so they skip this generator entirely.
         if not self.project_id:
             # import inside method to avoid circular import at module level
             from django.db import transaction
@@ -105,6 +165,137 @@ class Project(models.Model):
                 super().save(*args, **kwargs)
         else:
             super().save(*args, **kwargs)
+
+
+class Program(models.Model):
+    """Parent record grouping multiple sites under one OPEX tender or one multi-site
+    CAPEX contract. Each child site remains an ordinary Project (via Project.program)
+    running its own independent survey→design→BOQ→execution lifecycle — this model
+    only groups and reports; it owns no per-site workflow.
+
+    Forward-only: introduced for newly awarded tenders / signed contracts. Existing
+    projects are never backfilled (they stay program=null). Soft-deleted the same way
+    as Project (is_deleted + deleted_at), with NO custom manager, so uniqueness checks
+    that must include soft-deleted rows keep working (see the OPEX creation path)."""
+
+    # Reuses Project's project_type vocabulary, restricted to OPEX/CAPEX — same casing,
+    # same values (Residential never has a Program). This is what the type-match check
+    # in Project._validate_program_link compares against directly.
+    PROGRAM_TYPE_CHOICES = [
+        ('OPEX',  'OPEX'),
+        ('CAPEX', 'CAPEX'),
+    ]
+    # Match Project.STATUS_CHOICES exactly (same title-case, same semantic role).
+    STATUS_CHOICES = Project.STATUS_CHOICES
+
+    program_type             = models.CharField(max_length=20, choices=PROGRAM_TYPE_CHOICES)
+    name                     = models.CharField(max_length=200)      # e.g. "IPGCL Delhi Tender"
+    client_name              = models.CharField(max_length=200)      # Govt subsidiary (OPEX) or commercial client (CAPEX)
+    status                   = models.CharField(max_length=20, choices=STATUS_CHOICES, default='Draft')
+
+    # OPEX only, required — the human-entered short code (e.g. IPGCL26) used to compose
+    # each site's globally-unique project_id. Globally unique across ALL Programs
+    # (incl. soft-deleted) — enforced by explicit, soft-delete-aware validation at the
+    # entry form, NOT a DB unique constraint (a partial "unique when non-blank" index
+    # can't be expressed cleanly and would raise a raw IntegrityError). Blank for CAPEX.
+    short_tender_code        = models.CharField(max_length=20, blank=True, default='')
+
+    # Generic — both OPEX and CAPEX. Storage/comparison targets only, no automation.
+    total_capacity           = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text='Total planned capacity in MW (storage only).',
+    )
+    expected_completion_date = models.DateField(null=True, blank=True)
+    planned_site_count       = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text='Target site count from the tender/contract. Informational ONLY — '
+                  'never enforced as a cap. The live actual count comes from the rollup.',
+    )
+
+    # OPEX-specific (nullable; populate only when program_type == 'OPEX').
+    tender_reference_number  = models.CharField(max_length=100, blank=True, default='')
+    bid_value                = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    award_date               = models.DateField(null=True, blank=True)
+    ppa_reference            = models.CharField(max_length=100, blank=True, default='')
+    ppa_signed_date          = models.DateField(null=True, blank=True)
+    ppa_per_unit_rate        = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)
+    ppa_escalation_percentage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    ppa_escalation_frequency = models.CharField(max_length=50, blank=True, default='')
+    # ^ PPA fields are STORAGE ONLY. No escalation calculation is performed anywhere —
+    #   that ownership (PMS vs external billing) is a deferred Finance decision.
+
+    # CAPEX-specific placeholders (nullable; storage only). Full financing/loan design
+    # AND logic are deferred entirely to the future CAPEX workflow spec.
+    financing_partner_name    = models.CharField(max_length=200, blank=True, default='')
+    financing_assistance_type = models.CharField(max_length=100, blank=True, default='')
+
+    created_at               = models.DateTimeField(auto_now_add=True)
+    updated_at               = models.DateTimeField(auto_now=True)
+    created_by               = models.ForeignKey(
+        User, related_name='created_programs', on_delete=models.PROTECT, null=True, blank=True,
+    )
+    is_deleted               = models.BooleanField(default=False)
+    deleted_at               = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        label = self.tender_reference_number if self.program_type == 'OPEX' else self.name
+        return f"{label or self.name} ({self.program_type})"
+
+    @property
+    def reference_display(self):
+        """Human-facing identifier: OPEX shows its tender reference number; CAPEX has
+        no formal reference number and shows its name. There is no auto-generated
+        program_id by design."""
+        if self.program_type == 'OPEX' and self.tender_reference_number:
+            return self.tender_reference_number
+        return self.name
+
+
+# ---------------------------------------------------------------------------
+# Program rollup — COMPUTE-LIVE only (spec §4: "do not denormalize a counter that
+# can silently drift"). Stage = Project.status (the one status vocabulary already on
+# every site); grouped in a single query per Program, soft-deleted sites excluded.
+# ---------------------------------------------------------------------------
+
+def program_rollup_annotations():
+    """Aggregate-queryset annotations for the Program LIST view (avoids N+1 across
+    programs — one query annotates every program's live site counts). Yields
+    `site_total` plus one `site_<status>` count per Project status. Mirror of
+    get_program_rollup so list and detail never disagree."""
+    from django.db.models import Count, Q
+    anno = {
+        'site_total': Count('sites', filter=Q(sites__is_deleted=False), distinct=True),
+    }
+    for status, _ in Project.STATUS_CHOICES:
+        key = 'site_' + status.lower().replace(' ', '_')
+        anno[key] = Count(
+            'sites',
+            filter=Q(sites__is_deleted=False, sites__status=status),
+            distinct=True,
+        )
+    return anno
+
+
+def get_program_rollup(program):
+    """Live site-count-by-stage rollup for ONE Program (detail page — single-object,
+    no N+1). Returns {'total': int, 'by_status': {status: count, ...}} covering every
+    Project.status value (zero-filled). Excludes soft-deleted sites, so adding,
+    removing, or soft-deleting a site is reflected immediately with no stored counter."""
+    from django.db.models import Count
+    by_status = {status: 0 for status, _ in Project.STATUS_CHOICES}
+    total = 0
+    rows = (
+        program.sites.filter(is_deleted=False)
+        .values('status')
+        .annotate(n=Count('id'))
+    )
+    for row in rows:
+        by_status[row['status']] = row['n']
+        total += row['n']
+    return {'total': total, 'by_status': by_status}
 
 
 class ProjectPhase(models.Model):
@@ -418,49 +609,65 @@ class VendorBrand(models.Model):
         return f"{self.make_brand} — {self.vendor.name}"
 
 
+class BOQItemMaster(models.Model):
+    """
+    Catalogue of BOQ line items. The single source of truth for what a standard
+    BOQ line *is* — BOQItem rows reference an entry here so quantities can be
+    summed across sites for grouped procurement.
+
+    BOQItem.description stays a point-in-time snapshot: editing a catalogue row
+    here never rewrites BOQ rows already created from it.
+
+    Rows are deactivated via is_active, never deleted — BOQItem.item_master is
+    SET_NULL, so a delete would silently break the aggregation join.
+    """
+
+    code        = models.CharField(max_length=32, unique=True)   # Short stable identifier, e.g. ITM-001
+    description = models.CharField(max_length=255)
+    unit        = models.CharField(max_length=20)                # Required — quantities cannot be aggregated across sites without a consistent unit
+    category    = models.CharField(max_length=64, blank=True)    # Display grouping only; carries no logic
+    is_active   = models.BooleanField(default=True)
+    sort_order  = models.PositiveIntegerField(default=0)         # Also becomes BOQItem.serial_no on creation
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'code']
+
+    def __str__(self):
+        return f"{self.code} — {self.description}"
+
+
 def get_standard_boq_items():
     """
-    Return the 37-item standard BOQ template for a Residential solar project.
-    Used when auto-creating a BOQ for Design users; serial numbers must stay stable.
+    Return the standard BOQ template for a Residential solar project, read from
+    the BOQItemMaster catalogue (active rows, in sort_order).
+    Used when auto-creating a BOQ for Design users; serial numbers must stay stable
+    — serial_no comes from the catalogue's sort_order, not from row position, so
+    deactivating an entry does not renumber the rest.
+
+    Raises RuntimeError on an empty catalogue rather than falling back to a literal
+    list: a silent fallback would hide a migration that never ran.
     """
+    rows = list(
+        BOQItemMaster.objects
+        .filter(is_active=True)
+        .order_by('sort_order', 'code')
+        .values('sort_order', 'category', 'description', 'unit')
+    )
+    if not rows:
+        raise RuntimeError(
+            'BOQItemMaster catalogue is empty — the standard BOQ template cannot be '
+            'built. Run migrations (projects.0047) to populate it.'
+        )
     return [
-        {'serial_no':  1, 'category': 'Solar Modules', 'description': '595Wp Solar modules DCR',                                                                           'uom': 'Nos'},
-        {'serial_no':  2, 'category': 'Solar Modules', 'description': 'Module Transport',                                                                                  'uom': 'Nos'},
-        {'serial_no':  3, 'category': 'Structure',     'description': 'Module Mounting Structure with STAAD report HDGI/GI',                                               'uom': 'LOT'},
-        {'serial_no':  4, 'category': 'Structure',     'description': 'Module Mounting Structures transport',                                                              'uom': 'LOT'},
-        {'serial_no':  5, 'category': 'Inverter',      'description': '10 kW Grid-Tie Inverter Single Phase',                                                              'uom': 'Nos'},
-        {'serial_no':  6, 'category': 'Inverter',      'description': 'Data Logger if required',                                                                           'uom': 'Nos'},
-        {'serial_no':  7, 'category': 'Inverter',      'description': 'Inverter Transport',                                                                                'uom': 'Nos'},
-        {'serial_no':  8, 'category': 'BOS',           'description': '1CX4sqmm XLPE Tin Cu string cables RED',                                                           'uom': 'Mtr'},
-        {'serial_no':  9, 'category': 'BOS',           'description': '1CX4sqmm XLPE Tin Cu string cables Black',                                                         'uom': 'Mtr'},
-        {'serial_no': 10, 'category': 'BOS',           'description': '4C X 6mm2 XLPE Tin Cu cables',                                                                     'uom': 'Mtr'},
-        {'serial_no': 11, 'category': 'BOS',           'description': '1CX6mm2 Earthing cable Green',                                                                     'uom': 'Mtr'},
-        {'serial_no': 12, 'category': 'BOS',           'description': 'MC4 Connectors Male and Female',                                                                   'uom': 'Nos'},
-        {'serial_no': 13, 'category': 'BOS',           'description': 'PVC Conduit 25MM',                                                                                 'uom': 'Mtr'},
-        {'serial_no': 14, 'category': 'BOS',           'description': 'Flexible Conduit 25MM GI/PVC',                                                                     'uom': 'Mtr'},
-        {'serial_no': 15, 'category': 'BOS',           'description': 'PVC Elbow 25MM',                                                                                   'uom': 'Nos'},
-        {'serial_no': 16, 'category': 'BOS',           'description': 'PVC Tee 25MM',                                                                                     'uom': 'Nos'},
-        {'serial_no': 17, 'category': 'BOS',           'description': 'PVC Nail Clip 25MM 150PCS',                                                                        'uom': 'Pkt'},
-        {'serial_no': 18, 'category': 'BOS',           'description': 'CU Pin LUG 4 SQMM',                                                                               'uom': 'Nos'},
-        {'serial_no': 19, 'category': 'BOS',           'description': 'CU Ring LUG 4 SQMM',                                                                              'uom': 'Nos'},
-        {'serial_no': 20, 'category': 'BOS',           'description': 'CU Pin LUG 6 SQMM',                                                                               'uom': 'Nos'},
-        {'serial_no': 21, 'category': 'BOS',           'description': 'CU Ring LUG 6 SQMM',                                                                              'uom': 'Nos'},
-        {'serial_no': 22, 'category': 'BOS',           'description': 'Cable Tie 300MM UV resistant',                                                                     'uom': 'Pkt'},
-        {'serial_no': 23, 'category': 'BOS',           'description': 'PVC Tape Red Blue Black Yellow Green',                                                             'uom': 'Nos'},
-        {'serial_no': 24, 'category': 'BOS',           'description': 'Silver Spray Paint',                                                                               'uom': 'Nos'},
-        {'serial_no': 25, 'category': 'BOS',           'description': 'Lockfix for fixing fastener in RCC roof 500ML',                                                    'uom': 'Nos'},
-        {'serial_no': 26, 'category': 'BOS',           'description': 'HSV Hilti M12 Mechanical Wedge Anchors L-100MM',                                                   'uom': 'Nos'},
-        {'serial_no': 27, 'category': 'BOS',           'description': 'Fasteners Inverter Mounting',                                                                      'uom': 'Nos'},
-        {'serial_no': 28, 'category': 'BOS',           'description': 'ACDB-10KW 3P MCB4P 16 AMPS',                                                                      'uom': 'Nos'},
-        {'serial_no': 29, 'category': 'BOS',           'description': 'Copper Bonded Earthing Rod 1MTR chemical earthing',                                                'uom': 'Nos'},
-        {'serial_no': 30, 'category': 'BOS',           'description': 'Earthing Compound bag 25KG ECOSOLX',                                                               'uom': 'Nos'},
-        {'serial_no': 31, 'category': 'BOS',           'description': 'Heavy duty synthetic circular chamber',                                                            'uom': 'Nos'},
-        {'serial_no': 32, 'category': 'BOS',           'description': 'Conventional Lightning Arrestor 1Mtr IEC62305',                                                    'uom': 'Nos'},
-        {'serial_no': 33, 'category': 'BOS',           'description': 'PU Foam Sealant Spray 750ml for joint filling',                                                    'uom': 'Nos'},
-        {'serial_no': 34, 'category': 'BOS',           'description': 'Module Cleaning System without motor',                                                             'uom': 'Nos'},
-        {'serial_no': 35, 'category': 'BOS',           'description': 'Site Installation charges including civil work',                                                    'uom': 'Nos'},
-        {'serial_no': 36, 'category': 'BOS',           'description': 'Miscellaneous - (net metering,transportation,rubber mat,fire extinguishers,warning boards)',             'uom': 'Nos'},
-        {'serial_no': 37, 'category': 'BOS',           'description': 'Contingency',                                                                                      'uom': 'LS'},
+        {
+            'serial_no':   r['sort_order'],
+            'category':    r['category'],
+            'description': r['description'],
+            'uom':         r['unit'],
+        }
+        for r in rows
     ]
 
 
@@ -516,7 +723,13 @@ class BOQItem(models.Model):
     boq              = models.ForeignKey(BOQ, on_delete=models.CASCADE, related_name='items')
     serial_no        = models.IntegerField()
     category         = models.CharField(max_length=20, choices=CATEGORY_CHOICES)
-    description      = models.TextField()
+    description      = models.TextField()   # Point-in-time snapshot — never rewritten when item_master is later edited
+    item_master      = models.ForeignKey(
+        'BOQItemMaster',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='boq_items',   # The join used to sum quantities across sites; null for ad-hoc / legacy rows
+    )
     make_preference  = models.ForeignKey(
         Vendor,
         on_delete=models.SET_NULL,
@@ -1068,6 +1281,14 @@ class SystemSettings(models.Model):
     cascade_scheduling_enabled    = models.BooleanField(
         default=False,
         help_text="When True, PMs can enable cascading date scheduling per project.",
+    )
+    gantt_client_buffer_days      = models.PositiveIntegerField(
+        default=3,
+        help_text="Calendar days added to each phase end in the Client Gantt view, cascading downstream.",
+    )
+    gantt_external_min_display_days = models.PositiveIntegerField(
+        default=3,
+        help_text="Minimum visual bar width (days) for external/third-party Gantt tasks so they don't render too thin.",
     )
 
     class Meta:

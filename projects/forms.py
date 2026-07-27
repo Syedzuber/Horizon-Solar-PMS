@@ -1,7 +1,7 @@
 import re
 from django import forms
 from django.contrib.auth.models import User
-from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory
+from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster
 
 
 class UserCreateForm(forms.Form):
@@ -262,9 +262,31 @@ class ProjectCreateForm(forms.ModelForm):
             'target_commissioning_date': forms.DateInput(attrs={'type': 'date'}),
         }
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # OPEX projects are NEVER standalone going forward — every new OPEX site is
+        # created under a Program via the dedicated OPEX site path (opex_site_create).
+        # Drop OPEX from this generic form's choices so it can't be selected here.
+        # Enforced at the form layer, never as a DB NOT NULL on program (that would
+        # break existing legacy program=null rows). See also clean_project_type.
+        self.fields['project_type'].choices = [
+            (value, label) for value, label in self.fields['project_type'].choices
+            if value != 'OPEX'
+        ]
+
     def clean_customer_phone(self):
         value = self.cleaned_data['customer_phone'].strip()
         _validate_phone(value)
+        return value
+
+    def clean_project_type(self):
+        # Defense-in-depth: reject a hand-crafted POST that smuggles OPEX past the
+        # trimmed <select> above.
+        value = self.cleaned_data.get('project_type')
+        if value == 'OPEX':
+            raise forms.ValidationError(
+                'OPEX projects must be created under a Program, not from this form.'
+            )
         return value
 
     def clean_capacity_kw(self):
@@ -436,4 +458,270 @@ class VendorForm(forms.ModelForm):
         cleaned = super().clean()
         if cleaned.get('msme_status') and not (cleaned.get('msme_number') or '').strip():
             self.add_error('msme_number', 'MSME number is required when MSME status is checked.')
+        return cleaned
+
+
+# ---------------------------------------------------------------------------
+# BOQ Item Master (catalogue)
+# ---------------------------------------------------------------------------
+
+_ITEM_CODE_RE = re.compile(r'^[A-Z0-9][A-Z0-9\-_]*$')
+
+
+class BOQItemMasterForm(forms.ModelForm):
+    """Create / edit one catalogue entry. `code` is create-only — it is the stable
+    identifier BOQ rows and grouped procurement refer to, so the edit view drops the
+    field rather than letting it be reassigned (see admin_boq_item_edit)."""
+
+    class Meta:
+        model  = BOQItemMaster
+        fields = ['code', 'description', 'unit', 'category', 'is_active', 'sort_order']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name, field in self.fields.items():
+            if isinstance(field.widget, forms.CheckboxInput):
+                field.widget.attrs.setdefault('class', 'form-check-input')
+            else:
+                field.widget.attrs.setdefault('class', 'form-control')
+        self.fields['category'].help_text = 'Display grouping only — leave blank if not needed.'
+        self.fields['unit'].help_text     = 'e.g. Nos, Mtr, Kg, Set, Lot. Required — quantities cannot be summed across sites without it.'
+        self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
+
+    def clean_code(self):
+        value = (self.cleaned_data.get('code') or '').strip().upper()
+        if not _ITEM_CODE_RE.fullmatch(value):
+            raise forms.ValidationError(
+                'Use uppercase letters, digits, hyphen or underscore only (e.g. ITM-038).'
+            )
+        return value
+
+    def clean_description(self):
+        return (self.cleaned_data.get('description') or '').strip()
+
+    def clean_unit(self):
+        value = (self.cleaned_data.get('unit') or '').strip()
+        if not value:
+            raise forms.ValidationError('Unit is required.')
+        return value
+
+
+# ---------------------------------------------------------------------------
+# Programs (OPEX tender / multi-site CAPEX contract parent)
+# ---------------------------------------------------------------------------
+
+_bs = {'class': 'form-control'}          # module-level so the nested Meta.widgets can see it
+_CODE_STRIP_RE = re.compile(r'[^A-Z0-9]')
+# Reserved: a short_tender_code of 'HRP' would blur OPEX tender IDs into the legacy
+# HRP-prefixed format. Rejected case-insensitively (spec: reserved-code guard).
+_RESERVED_TENDER_CODES = {'HRP'}
+
+
+def normalize_program_code(value):
+    """Uppercase + strip to [A-Z0-9] (drops spaces/hyphens/punctuation). Shared by
+    short_tender_code here and by the OPEX site_code in the Program-scoped creation
+    path, so both halves of a composed project_id normalize identically. A hyphen
+    inside a token would blur the single `{code}-{site}` delimiter — hence stripped."""
+    return _CODE_STRIP_RE.sub('', (value or '').upper())
+
+
+class ProgramForm(forms.ModelForm):
+    """Create / edit a Program (OPEX tender or multi-site CAPEX contract).
+
+    OPEX-only rules (spec §2 / §4): short_tender_code is required, normalized,
+    reserved-code-guarded, and globally unique across ALL Programs INCLUDING
+    soft-deleted ones (it is a building block of a globally-unique site project_id,
+    so a soft-deleted collision would still produce colliding IDs). tender_reference_number,
+    when supplied, is likewise unique soft-delete-aware. All uniqueness checks are
+    explicit .filter().exists() queries returning a clear message — never a raw DB error.
+    """
+
+    class Meta:
+        model = Program
+        fields = [
+            'program_type', 'name', 'client_name', 'status',
+            'short_tender_code', 'total_capacity', 'expected_completion_date',
+            'planned_site_count',
+            # OPEX-specific
+            'tender_reference_number', 'bid_value', 'award_date',
+            'ppa_reference', 'ppa_signed_date', 'ppa_per_unit_rate',
+            'ppa_escalation_percentage', 'ppa_escalation_frequency',
+            # CAPEX-specific placeholders
+            'financing_partner_name', 'financing_assistance_type',
+        ]
+        widgets = {
+            'program_type':              forms.Select(attrs={'class': 'form-select'}),
+            'status':                    forms.Select(attrs={'class': 'form-select'}),
+            'name':                      forms.TextInput(attrs=_bs),
+            'client_name':               forms.TextInput(attrs=_bs),
+            'short_tender_code':         forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. IPGCL26'}),
+            'total_capacity':            forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'expected_completion_date':  forms.DateInput(attrs={**_bs, 'type': 'date'}),
+            'planned_site_count':        forms.NumberInput(attrs={**_bs, 'min': '0'}),
+            'tender_reference_number':   forms.TextInput(attrs=_bs),
+            'bid_value':                 forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'award_date':                forms.DateInput(attrs={**_bs, 'type': 'date'}),
+            'ppa_reference':             forms.TextInput(attrs=_bs),
+            'ppa_signed_date':           forms.DateInput(attrs={**_bs, 'type': 'date'}),
+            'ppa_per_unit_rate':         forms.NumberInput(attrs={**_bs, 'step': '0.0001'}),
+            'ppa_escalation_percentage': forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'ppa_escalation_frequency':  forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. Annual'}),
+            'financing_partner_name':    forms.TextInput(attrs=_bs),
+            'financing_assistance_type': forms.TextInput(attrs=_bs),
+        }
+        labels = {
+            'total_capacity':      'Total planned capacity (MW)',
+            'short_tender_code':   'Short tender code (OPEX)',
+            'planned_site_count':  'Planned site count',
+        }
+
+    def clean_short_tender_code(self):
+        return normalize_program_code(self.cleaned_data.get('short_tender_code'))
+
+    def clean(self):
+        cleaned = super().clean()
+        program_type = cleaned.get('program_type')
+        code = cleaned.get('short_tender_code', '')
+
+        if program_type == 'OPEX':
+            if not code:
+                self.add_error('short_tender_code',
+                               'Short tender code is required for an OPEX tender.')
+            else:
+                if code in _RESERVED_TENDER_CODES:
+                    self.add_error('short_tender_code',
+                                   "'HRP' is reserved and cannot be used as a tender code.")
+                else:
+                    # Soft-delete-aware global uniqueness — query the UNFILTERED manager
+                    # (no is_deleted filter) so a soft-deleted Program's code can't be
+                    # reused into a colliding site project_id.
+                    dupes = Program.objects.filter(short_tender_code=code)
+                    if self.instance.pk:
+                        dupes = dupes.exclude(pk=self.instance.pk)
+                    if dupes.exists():
+                        self.add_error('short_tender_code',
+                                       f"Tender code '{code}' is already used by another Program.")
+
+            # tender_reference_number uniqueness (when provided), soft-delete-aware.
+            ref = (cleaned.get('tender_reference_number') or '').strip()
+            if ref:
+                ref_dupes = Program.objects.filter(tender_reference_number=ref)
+                if self.instance.pk:
+                    ref_dupes = ref_dupes.exclude(pk=self.instance.pk)
+                if ref_dupes.exists():
+                    self.add_error('tender_reference_number',
+                                   f"Tender reference '{ref}' is already used by another Program.")
+
+        elif program_type == 'CAPEX':
+            # CAPEX never carries a short_tender_code — clear any stray value so it
+            # never participates in the OPEX uniqueness space.
+            cleaned['short_tender_code'] = ''
+
+        return cleaned
+
+
+class OpexSiteForm(forms.ModelForm):
+    """Create ONE OPEX site under a specific OPEX Program — the Program-scoped
+    counterpart to ProjectCreateForm.
+
+    Unlike the generic create flow (which lets Project.save() generate the ID), this
+    form captures site_code and COMPOSES the site's globally-unique
+    project_id = `{short_tender_code}-{site_code}` explicitly, so the view can set it
+    before save() and bypass generate_project_id() entirely (spec: OPEX must not go
+    through the suffix-parser). Every check is pre-save with a clear message — a
+    duplicate site_code or an over-length ID never surfaces as a raw IntegrityError:
+      • site_code is normalized (upper + [A-Z0-9]) identically to short_tender_code.
+      • site_code is unique WITHIN the Program, checked soft-delete-aware (unfiltered
+        manager) so a soft-deleted site can't have its code reused into a colliding ID.
+      • the composed ID must fit project_id's 30-char column.
+      • the composed ID is re-checked for global uniqueness (defensive backstop).
+    On success, `self.composed_project_id` holds the value for the view to persist.
+    """
+
+    class Meta:
+        model = Project
+        # customer_name is intentionally NOT on this form — it is auto-set to
+        # program.client_name in the view (frozen at creation, like project_id).
+        # survey_date / target_commissioning_date are dropped for OPEX sites (they stay
+        # null and every reader guards for that). customer_contact_person is reused as the
+        # Site In-Charge Name; customer_phone / customer_email are reinterpreted as the
+        # Site In-Charge phone/email (see the dual-meaning notes on the model fields).
+        fields = [
+            'site_code', 'customer_contact_person', 'customer_phone', 'customer_email',
+            'site_address', 'city', 'state', 'capacity_kw',
+        ]
+        labels = {
+            'capacity_kw': 'Capacity (kW)',
+            'site_code': 'Site Code',
+            'customer_contact_person': 'Site In-Charge Name',
+            'customer_phone': 'Site In-Charge Phone',
+            'customer_email': 'Site In-Charge Email',
+        }
+        widgets = {
+            'site_code':                 forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. S045'}),
+            'customer_contact_person':   forms.TextInput(attrs=_bs),
+            'customer_phone':            forms.TextInput(attrs={**_bs, 'maxlength': '10'}),
+            'customer_email':            forms.EmailInput(attrs=_bs),
+            'site_address':              forms.Textarea(attrs={**_bs, 'rows': 3}),
+            'city':                      forms.TextInput(attrs=_bs),
+            'state':                     forms.TextInput(attrs=_bs),
+            'capacity_kw':               forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+        }
+
+    def __init__(self, *args, program=None, **kwargs):
+        # `program` is the parent OPEX Program; required to validate site_code
+        # uniqueness within the tender and to compose the project_id.
+        self.program = program
+        self.composed_project_id = None
+        super().__init__(*args, **kwargs)
+        # Site In-Charge Name is required on THIS form to mirror customer_phone's required
+        # status, even though the model keeps customer_contact_person blank=True (other
+        # paths — e.g. the Zoho webhook — legitimately omit it).
+        self.fields['customer_contact_person'].required = True
+
+    def clean_customer_phone(self):
+        value = self.cleaned_data['customer_phone'].strip()
+        _validate_phone(value)
+        return value
+
+    def clean_capacity_kw(self):
+        value = self.cleaned_data.get('capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('Capacity must be greater than zero.')
+        return value
+
+    def clean_site_code(self):
+        code = normalize_program_code(self.cleaned_data.get('site_code'))
+        if not code:
+            raise forms.ValidationError('Site code is required.')
+        return code
+
+    def clean(self):
+        cleaned = super().clean()
+        code = cleaned.get('site_code')
+        if not code or self.program is None:
+            return cleaned
+
+        # Uniqueness WITHIN this tender — unfiltered manager includes soft-deleted sites
+        # so a deleted site's code (which still reserves its global project_id) can't be reused.
+        if self.program.sites.filter(site_code=code).exists():
+            self.add_error('site_code', f"Site code {code} is already used in this tender.")
+            return cleaned
+
+        composed = f"{self.program.short_tender_code}-{code}"
+        if len(composed) > 30:
+            self.add_error(
+                'site_code',
+                f"The composed project ID '{composed}' is {len(composed)} characters — "
+                f"the maximum is 30. Use a shorter site code."
+            )
+            return cleaned
+
+        # Defensive global-uniqueness backstop (should already be guaranteed by the two
+        # uniqueness rules above); never let it reach the DB as an IntegrityError.
+        if Project.objects.filter(project_id=composed).exists():
+            self.add_error('site_code', f"A project with ID '{composed}' already exists.")
+            return cleaned
+
+        self.composed_project_id = composed
         return cleaned

@@ -1,0 +1,38 @@
+{# Weekly Gantt grid. Expects `grid` = build_gantt_view() output ({weeks, rows}). #}
+{% if grid.weeks %}
+<div class="gantt-scroll">
+  <table class="gantt-table">
+    <thead>
+      <tr>
+        <th class="gantt-label-head">Task</th>
+        {% for wk in grid.weeks %}<th class="gantt-week-head">{{ wk.label }}</th>{% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in grid.rows %}
+      <tr>
+        <td class="gantt-label" title="{{ row.phase_label }}">
+          <span class="gantt-dot" style="background-color:{{ row.color }};"></span>{{ row.label }}
+          {% if row.is_external %}<span class="gantt-tag">ext</span>{% endif %}
+          {% if not row.has_dates %}<span class="gantt-tbd">date TBD</span>{% endif %}
+        </td>
+        {% for cell in row.cells %}
+        <td class="gantt-cell">
+          {% if cell.marker %}
+            <span class="gantt-diamond" style="background-color:{{ row.color }};"
+                  title="{{ row.label }} · {{ row.status }} · {{ row.start|date:'d M Y' }}"></span>
+          {% elif cell.filled %}
+            <div class="gantt-bar{% if row.is_external %} gantt-bar-ext{% endif %}{% if cell.first %} gantt-bar-first{% endif %}{% if cell.last %} gantt-bar-last{% endif %}{% if row.status == 'Done' %} gantt-bar-done{% endif %}"
+                 style="background-color:{{ row.color }};"
+                 title="{{ row.label }} · {{ row.status }} · {{ row.start|date:'d M' }} → {{ row.end|date:'d M' }}"></div>
+          {% endif %}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+  <div class="text-center text-muted py-4 small">No scheduled dates to display.</div>
+{% endif %}

@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block title %}{{ action }} Program — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">{{ action }} Program</h4>
+  <a href="{% url 'program_list' %}" class="btn btn-outline-secondary btn-sm">← Back to Programs</a>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-4">
+
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger">
+        {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+      </div>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Program Details</h6>
+      <div class="row g-3 mb-4">
+        <div class="col-md-4">
+          <label class="form-label">Program Type <span class="text-danger">*</span></label>
+          {{ form.program_type }}
+          {% for e in form.program_type.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Status</label>
+          {{ form.status }}
+          {% for e in form.status.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4" id="field-short_tender_code">
+          <label class="form-label">{{ form.short_tender_code.label }} <span class="text-danger opex-req">*</span></label>
+          {{ form.short_tender_code }}
+          <div class="form-text">Uppercase letters/digits only, e.g. IPGCL26. Used to build site IDs.</div>
+          {% for e in form.short_tender_code.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Name <span class="text-danger">*</span></label>
+          {{ form.name }}
+          {% for e in form.name.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">Client Name <span class="text-danger">*</span></label>
+          {{ form.client_name }}
+          {% for e in form.client_name.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">{{ form.total_capacity.label }}</label>
+          {{ form.total_capacity }}
+          {% for e in form.total_capacity.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Expected Completion Date</label>
+          {{ form.expected_completion_date }}
+          {% for e in form.expected_completion_date.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">{{ form.planned_site_count.label }}</label>
+          {{ form.planned_site_count }}
+          <div class="form-text">Target only — never enforced as a limit.</div>
+          {% for e in form.planned_site_count.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+      </div>
+
+      <div id="opex-fields">
+        <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">OPEX Tender Details</h6>
+        <div class="row g-3 mb-4">
+          <div class="col-md-4">
+            <label class="form-label">Tender Reference Number</label>
+            {{ form.tender_reference_number }}
+            {% for e in form.tender_reference_number.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Bid Value (₹)</label>
+            {{ form.bid_value }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">Award Date</label>
+            {{ form.award_date }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">PPA Reference</label>
+            {{ form.ppa_reference }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">PPA Signed Date</label>
+            {{ form.ppa_signed_date }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">PPA Per-Unit Rate (₹)</label>
+            {{ form.ppa_per_unit_rate }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">PPA Escalation (%)</label>
+            {{ form.ppa_escalation_percentage }}
+          </div>
+          <div class="col-md-4">
+            <label class="form-label">PPA Escalation Frequency</label>
+            {{ form.ppa_escalation_frequency }}
+          </div>
+        </div>
+        <p class="text-muted small">PPA fields are stored for record-keeping only — no escalation is calculated here.</p>
+      </div>
+
+      <div id="capex-fields">
+        <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">CAPEX Financing (placeholders)</h6>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <label class="form-label">Financing Partner Name</label>
+            {{ form.financing_partner_name }}
+          </div>
+          <div class="col-md-6">
+            <label class="form-label">Financing Assistance Type</label>
+            {{ form.financing_assistance_type }}
+          </div>
+        </div>
+        <p class="text-muted small">Financing fields are storage-only placeholders — no loan logic runs yet.</p>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary">
+          {% if action == 'Create' %}Create Program{% else %}Save Changes{% endif %}
+        </button>
+        <a href="{% url 'program_list' %}" class="btn btn-outline-secondary">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script>
+  // Show only the type-relevant field groups. Pure display convenience — the server
+  // still validates by program_type regardless of what the browser shows/hides.
+  (function () {
+    const typeSel = document.querySelector('[name="program_type"]');
+    const opex = document.getElementById('opex-fields');
+    const capex = document.getElementById('capex-fields');
+    const tenderCodeGroup = document.getElementById('field-short_tender_code');
+    function sync() {
+      const v = typeSel ? typeSel.value : '';
+      const isOpex = v === 'OPEX';
+      const isCapex = v === 'CAPEX';
+      opex.style.display = isOpex ? '' : 'none';
+      capex.style.display = isCapex ? '' : 'none';
+      tenderCodeGroup.style.display = isOpex ? '' : 'none';
+    }
+    if (typeSel) { typeSel.addEventListener('change', sync); sync(); }
+  })();
+</script>
+{% endblock %}

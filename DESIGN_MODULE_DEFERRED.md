@@ -1,0 +1,154 @@
+# Design Module — Deferred Findings
+
+Items found but deliberately **not fixed**. Opened by Part 0.5 (BOQ Item Master).
+Nothing in this file was changed by that session.
+
+---
+
+## A. Explicitly out of scope for Part 0.5 (carried forward)
+
+| # | Finding | Location |
+|---|---------|----------|
+| A1 | ~~BOQ endpoints are gated by role string (`if role not in ('Design','SCM','PM','Project Coordinator','Admin')`) rather than `user_can_manage_project()`. A PM who does not manage the project still passes.~~ **CLOSED by Part 0.6** — see section C. | `projects/views.py` — `boq_detail`, `boq_submit`, `boq_acknowledge`, `boq_request_revision`, `boq_history` |
+| A2 | `'Acknowledged'` is present in `_DESIGN_EDITABLE`, so Design can still edit a BOQ that SCM has already acknowledged. | `projects/views.py:4203` (`boq_detail`) |
+| A3 | Supabase object URLs are public with no signed-URL helper. | `projects/supabase_storage.py` |
+| A4 | `DesignSubmission` has no write path — the model exists but nothing creates rows. | `projects/models.py` |
+| A5 | Role-string comparisons (`profile.role == 'X'`, `role in (...)`) are used throughout instead of a permission helper. | codebase-wide |
+
+---
+
+## B. Found during Part 0.5
+
+### B1 — Two legacy BOQ rows will never aggregate
+
+Local DB: 149 `BOQItem` rows, 147 linked, **2 left null**. Both are variants of catalogue
+item 36 (`ITM-036`):
+
+```
+'Miscellaneous - (net metering,transportation,rubber mat,fire extinguishers,warning boards'
+    → the catalogue string truncated: the trailing ")" is missing
+'Miscellaneous net metering transportation rubber mat fire extinguisher warning boards'
+    → punctuation stripped, "extinguishers" singular
+```
+
+Back-linking was specified as exact-string-match only, so these stay null by design.
+They will be silently excluded from any cross-site quantity roll-up. Fixing them means
+a one-off manual `item_master` assignment (2 rows), not a code change.
+
+**Not verified on production.** These counts are from the local Postgres DB. Migration
+`0047` has not been run on Railway; the linked/null split there may differ, and the
+migration prints the same three numbers when it runs, so check that output.
+
+### B2 — `unit` and `category` widths/choices disagree between catalogue and BOQ row
+
+| | `BOQItemMaster` | `BOQItem` |
+|---|---|---|
+| unit | `unit` — `CharField(max_length=20)`, free text | `uom` — `CharField(max_length=10, choices=UOM_CHOICES)` |
+| category | `category` — `CharField(max_length=64)`, free text | `category` — `CharField(max_length=20, choices=CATEGORY_CHOICES)` |
+
+An Admin creating a catalogue entry with a unit longer than 10 characters, or a category
+longer than 20, will make the *next* BOQ creation fail with a Postgres
+`value too long for type character varying` error — the failure surfaces at BOQ creation,
+not at catalogue save. An off-list-but-short value (e.g. unit `Roll`) saves fine and
+produces a `BOQItem` whose `uom` is outside `UOM_CHOICES`; choices are not enforced at the
+DB level and `bulk_create` skips validation, so it goes in silently and renders as-is.
+
+Neither field was widened or constrained — changing `BOQItem` was out of scope. The
+practical fix is either to validate `unit`/`category` against the `BOQItem` choice lists in
+`BOQItemMasterForm`, or to widen `BOQItem.uom`/`category` and drop the choice lists.
+
+### B3 — `serial_no` derives from `sort_order`, which is not unique
+
+`get_standard_boq_items()` now returns `serial_no = BOQItemMaster.sort_order`. This is
+deliberate: it keeps serial numbers stable when a catalogue entry is deactivated (position
+in the list would not). But `sort_order` has `default=0` and no uniqueness constraint, so:
+
+- a catalogue row saved with the raw default produces `BOQItem.serial_no = 0`
+- two rows sharing a `sort_order` produce two BOQ rows with the same serial number
+
+Mitigated only by the create form pre-filling `sort_order` with `max + 1`. Not enforced.
+
+### B4 — Ad-hoc BOQ rows carry no catalogue link
+
+`add_item` (`projects/views.py:4291`) creates rows with free-text `description` and
+`is_standard_item=False`. `item_master` stays null, so ad-hoc rows are invisible to grouped
+procurement. This is correct for Part 0.5 (there is no catalogue entry to point at), but
+the design module will need a decision: either force ad-hoc rows to pick a catalogue entry,
+or accept that they aggregate separately.
+
+### B5 — Test suite could not be run locally
+
+`manage.py test projects` fails with `permission denied to create database` — the local
+Postgres role cannot create the test database, with or without `--keepdb`. The 51 existing
+tests were therefore **not executed** this session. No existing test references BOQ
+(`grep` over `tests.py`, `tests_gantt.py`, `tests_permissions.py` returns nothing), and the
+new migration seeds the catalogue on any fresh test database, so BOQ creation inside a test
+run will work — but that is reasoning, not a passing run.
+
+---
+
+## C. Found during Part 0.6 (BOQ permission gating) — reviewed, deliberately not fixed
+
+Part 0.6 closed A1: BOQ read/write is now project-scoped through
+`user_can_view_project_boq()` / `user_can_edit_project_boq()` in `projects/permissions.py`.
+Everything below was found while doing that and was left alone on purpose.
+
+| # | Finding | Location |
+|---|---------|----------|
+| C1 | BOQ auto-creates and seeds ~53 catalogue rows on **GET**, not on an explicit user action. Now gated on `user_can_edit_project_boq()`, so only an authorised designer can trigger it — but a side-effecting GET is still wrong, is not idempotent, and is created by a page load rather than an intent. Converting it to a POST action is its own session. | `projects/views.py:4184-4196` |
+| C2 | `'Acknowledged'` is present in `_DESIGN_EDITABLE`, so Design can still edit quantities on a BOQ that SCM has already acknowledged. (Duplicate of A2, restated with the current line.) | `projects/views.py:4218` |
+| C3 | `dashboard_scm` serialises **every** active project's BOQ items to JSON into the template for the raise-payment-request dropdown. SCM is portfolio-wide by remit so this is not a privilege breach, but it is a portfolio-wide BOQ data dump that no BOQ gate covers, and it grows linearly with the project count. | `projects/views.py:1397-1447` |
+| C4 | `raise_payment_request` is SCM-role-gated with no project relationship check. The BOQ item lookup is correctly scoped (`boq__project=project`), so it cannot select another project's item — but the endpoint itself is reachable for any project. | `projects/views.py:4700-4702` |
+| C5 | Project lookups do not filter `is_deleted`: 36 call sites use `get_object_or_404(Project, project_id=project_id)` against 3 that add `is_deleted=False`. Soft-deleted projects' BOQs stay reachable. Codebase-wide pattern, not BOQ-specific. | `projects/views.py`, codebase-wide |
+| C6 | Supabase object URLs are public with no signed-URL helper, 4 inline call sites. (Carried from A3.) | `projects/supabase_storage.py` |
+| C7 | `DesignSubmission` has a model and read views but no write path — nothing creates rows. (Carried from A4.) | `projects/models.py` |
+| C8 | 39 role-string comparisons, 56 `@role_required` decorators, and 30 template role checks remain outside BOQ. (Carried from A5.) | codebase-wide |
+| C9 | `is_design_head` confers no approval authority. Part 0.6 gave Design Head portfolio-wide BOQ **read** and deliberately no write, so the flag still grants oversight without any approval lever. | `projects/models.py:525`, `projects/permissions.py` |
+
+### C10 — `boq_submit` crashes for every authorised caller (pre-existing, found by verification)
+
+`boq_submit` builds its `BOQRevision.snapshot` with a raw `.values()` call that leaves
+`boq_quantity` / `ordered_quantity` as `Decimal`:
+
+```python
+snapshot = list(boq.items.values(
+    'serial_no', 'category', 'description', 'uom',
+    'boq_quantity', 'ordered_quantity', ...
+))
+```
+
+`BOQRevision.snapshot` is a `JSONField`, so psycopg raises
+`TypeError: Object of type Decimal is not JSON serializable` on save. The endpoint therefore
+**500s for any BOQ that has a quantity set** — which is every BOQ that passes its own
+"at least one item must have a quantity" guard immediately above. It cannot ever have
+succeeded.
+
+The sibling helper `_boq_snapshot()` (`projects/views.py:4029`) does the `Decimal → float`
+conversion correctly, and `boq_detail`'s inline `submit_design` branch uses it. The template
+posts `submit_design` to `boq_detail` (`boq_detail.html:270`) and never targets
+`/boq/submit/`, so the broken endpoint is unreachable from the UI and the crash has gone
+unnoticed.
+
+Not fixed here: Part 0.6 changes authorisation only, and this is a serialisation bug behind
+the gate. The fix is one line — call `_boq_snapshot(boq)` — but the real question is whether
+this duplicate endpoint should exist at all, since `boq_acknowledge` duplicates the SCM path
+the same way. Both were gated this session and both remain dead code.
+
+**Location:** `projects/views.py:4402-4407`
+
+### C11 — Precondition ratio was measured on the local database, not Railway
+
+The Part 0.6 precondition (share of active projects with a null `assigned_design`, threshold
+20%, selecting W-broad vs W-narrow for the write rule) was run against the local Postgres
+(`solarpms_local`): **14 active projects, 6 with a null `assigned_design` = 42.9% → W-broad**.
+Catalogue rows: 37.
+
+Two attempts to read the same figures from the Railway production database were blocked by
+the environment's permission classifier. The selected rule is therefore based on local data.
+If Railway's ratio is 20% or below, the write rule should narrow to W-narrow by deleting the
+task-holding fallback on the last line of `user_can_edit_project_boq()` — no other change is
+needed. W-broad is the safer direction to be wrong in: it can only over-grant write to a
+designer who holds a task on the project, whereas W-narrow chosen wrongly would lock
+designers out of live projects that were never stamped with an `assigned_design`.
+
+**Location:** `projects/permissions.py` — `user_can_edit_project_boq()`

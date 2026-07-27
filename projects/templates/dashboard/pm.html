@@ -101,6 +101,18 @@
 {% endif %}
 
 {% for row in projects_with_progress %}
+{% comment %}
+Section header — rendered only when the view found BOTH tender and residential
+projects in this user's list (views._apply_project_sections tags the first row of
+each group). With a single type the keys are absent and nothing renders, so the
+dashboard looks exactly as it did before. Label only: no collapse/expand control.
+{% endcomment %}
+{% if row.section_label %}
+<div class="d-flex align-items-baseline gap-2 mt-4 mb-2">
+  <span class="fw-semibold" style="color:#1a7a4a;">{{ row.section_label }}</span>
+  <span class="small text-muted">({{ row.section_count }})</span>
+</div>
+{% endif %}
 <div class="card mb-2 shadow-sm border-0">
 
   {# ── Collapsed header (always visible) ──────────────────────────────── #}

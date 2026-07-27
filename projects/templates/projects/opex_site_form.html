@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Add Site — {{ program.name }} — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <a href="{% url 'program_detail' pk=program.pk %}" class="text-decoration-none small">← {{ program.name }}</a>
+    <h4 class="mb-0 mt-1">Add OPEX Site</h4>
+    <div class="text-muted small">
+      Tender code <span class="badge bg-secondary">{{ program.short_tender_code }}</span>
+      — the site ID is composed as <code>{{ program.short_tender_code }}-&lt;site code&gt;</code>.
+    </div>
+  </div>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body p-4">
+
+    {% if form.non_field_errors %}
+      <div class="alert alert-danger">
+        {% for error in form.non_field_errors %}{{ error }}{% endfor %}
+      </div>
+    {% endif %}
+
+    <form method="post" novalidate>
+      {% csrf_token %}
+
+      <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Site Identity</h6>
+      <div class="row g-3 mb-4">
+        <div class="col-md-4">
+          <label class="form-label">Site Code <span class="text-danger">*</span></label>
+          {{ form.site_code }}
+          <div class="form-text">Uppercase letters/digits, matching the tender's site list (e.g. S045).</div>
+          {% for e in form.site_code.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+      </div>
+
+      <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Site In-Charge & Location</h6>
+      <div class="row g-3 mb-4">
+        <div class="col-12">
+          <label class="form-label">Customer / Tender Name</label>
+          <input type="text" class="form-control" value="{{ program.client_name }}" readonly disabled>
+          <div class="form-text">Set automatically from the parent tender's client — frozen at creation.</div>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Site In-Charge Name <span class="text-danger">*</span></label>
+          {{ form.customer_contact_person }}
+          {% for e in form.customer_contact_person.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Site In-Charge Phone <span class="text-danger">*</span></label>
+          {{ form.customer_phone }}
+          {% for e in form.customer_phone.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Site In-Charge Email</label>
+          {{ form.customer_email }}
+          {% for e in form.customer_email.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-12">
+          <label class="form-label">Site Address <span class="text-danger">*</span></label>
+          {{ form.site_address }}
+          {% for e in form.site_address.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">City <span class="text-danger">*</span></label>
+          {{ form.city }}
+          {% for e in form.city.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">State <span class="text-danger">*</span></label>
+          {{ form.state }}
+          {% for e in form.state.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+      </div>
+
+      <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Technical</h6>
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <label class="form-label">Capacity (kW)</label>
+          {{ form.capacity_kw }}
+          {% for e in form.capacity_kw.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+      </div>
+
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary">Create Site</button>
+        <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-outline-secondary">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

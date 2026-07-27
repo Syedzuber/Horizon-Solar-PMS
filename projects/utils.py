@@ -167,6 +167,163 @@ def calculate_due_dates(project, user=None):
     )
 
 
+def compute_gantt_schedule(project, buffer_days=0, external_min_days=0):
+    """
+    Compute (start, end) per task IN-MEMORY for the Gantt, WITHOUT writing anything.
+
+    HYBRID date source (stored-or-computed):
+      - A task's END is its Task.due_date when that is set, otherwise the computed
+        chain end (previous end + duration_days). So a PM's due-date edits (and the
+        cascade in recalculate_from_task) move the bars, while the ~all-null live
+        projects still render via the computed chain and are never blank.
+      - The chain cursor advances to each internal task's actual (unbuffered) end, so
+        downstream tasks chain off a stored due date when one is present.
+
+    Bar rules:
+      - Internal task: start = chain cursor, end = due_date or (cursor + duration);
+        advances the cursor. A guard clamps end >= start if a manual due date inverts.
+      - Internal duration-0 task: milestone (zero-width) at its due_date if set, else the
+        cursor; does not advance the cursor.
+      - External task: parallel/non-blocking — start = cursor, cursor NOT advanced.
+        Display width = max(duration_days, external_min_days) so it never renders as a
+        thin sliver on the client chart (its stored due date, which the cascade pins to
+        the current internal position, is not used for width).
+      - buffer_days: applied as a per-phase display OFFSET — a task in phase p is shifted
+        by (p - 1) * buffer_days. Applied on top of BOTH stored and computed dates, so the
+        Client view stays padded regardless of source. buffer_days=0 == the raw schedule.
+
+    Returns a list of row dicts in (phase_order, task_order) order, or [] when
+    project.activated_at is None (caller renders a "not activated" message).
+    """
+    from .models import Task
+
+    if project.activated_at is None:
+        return []
+
+    tasks = (
+        Task.objects
+        .filter(phase__project=project)
+        .select_related('phase')
+        .order_by('phase__phase_order', 'task_order')
+    )
+
+    rows = []
+    cursor = project.activated_at.date()   # raw (unbuffered) chain position
+    buffer_accum = 0                        # accumulated per-phase buffer, applied as a display offset
+    prev_phase_order = None
+
+    for task in tasks:
+        phase_order = task.phase.phase_order
+        # Cross into a new phase → the client buffer for downstream tasks grows by one step.
+        if prev_phase_order is not None and phase_order != prev_phase_order:
+            buffer_accum += buffer_days
+        prev_phase_order = phase_order
+
+        dur = task.duration_days or 0
+        if task.task_type == Task.EXTERNAL:
+            raw_start = cursor
+            raw_end = add_workdays(cursor, max(dur, external_min_days))
+            is_marker, is_external = False, True
+        elif dur == 0:
+            raw_start = raw_end = task.due_date if task.due_date is not None else cursor
+            is_marker, is_external = True, False
+        else:
+            raw_start = cursor
+            raw_end = task.due_date if task.due_date is not None else add_workdays(cursor, dur)
+            if raw_end < raw_start:            # guard a manually-inverted due date
+                raw_end = raw_start
+            cursor = raw_end                   # chain off the actual end (stored or computed)
+            is_marker, is_external = (raw_start == raw_end), False
+
+        offset = timedelta(days=buffer_accum)
+        rows.append({
+            'task_name':   task.task_name,
+            'phase_name':  task.phase.phase_name,
+            'phase_order': phase_order,
+            'task_order':  task.task_order,
+            'task_type':   task.task_type,
+            'is_external': is_external,
+            'is_marker':   is_marker,
+            'status':      task.status,
+            'start':       raw_start + offset,
+            'end':         raw_end + offset,
+        })
+
+    return rows
+
+
+def build_gantt_view(rows, phase_label_map=None, task_label_map=None):
+    """
+    Turn compute_gantt_schedule() rows into a render-ready weekly grid.
+
+    Weekly columns run from the Monday on/before the earliest start to the week of
+    the latest end (partial first/last weeks included). Each row carries a per-week
+    `cells` list so the template needs no arithmetic:
+      cell = {filled, marker, first, last}
+    A bar occupies contiguous `filled` cells (rounded at first/last); a milestone
+    shows a `marker` diamond in a single cell; tasks with no dates get all-empty
+    cells and are flagged has_dates=False (rendered as a "date TBD" row).
+
+    phase_label_map / task_label_map (Client view) remap the band + task labels;
+    a missing key falls back to the internal name — never blank. Pass None (Internal
+    view) to use internal names verbatim.
+    """
+    from .gantt_constants import GANTT_PHASE_COLORS
+
+    phase_label_map = phase_label_map or {}
+    task_label_map  = task_label_map or {}
+
+    dated = [r for r in rows if r['start'] and r['end']]
+    weeks = []
+    grid_start = None
+    if dated:
+        min_start = min(r['start'] for r in dated)
+        max_end   = max(r['end'] for r in dated)
+        grid_start = min_start - timedelta(days=min_start.weekday())  # Monday anchor
+        n_weeks = (max_end - grid_start).days // 7 + 1
+        for i in range(n_weeks):
+            wk_start = grid_start + timedelta(days=7 * i)
+            weeks.append({'label': wk_start.strftime('%d %b'), 'start': wk_start})
+
+    out_rows = []
+    for r in rows:
+        has_dates = bool(r['start'] and r['end'])
+        cells = []
+        if has_dates and grid_start is not None:
+            offset = (r['start'] - grid_start).days // 7
+            if r['is_marker']:
+                span = 1
+            else:
+                end_idx = (r['end'] - grid_start).days // 7
+                span = max(1, end_idx - offset + 1)
+            for i in range(len(weeks)):
+                in_bar = offset <= i < offset + span
+                cells.append({
+                    'filled': in_bar and not r['is_marker'],
+                    'marker': r['is_marker'] and i == offset,
+                    'first':  in_bar and i == offset,
+                    'last':   in_bar and i == offset + span - 1,
+                })
+        else:
+            cells = [{'filled': False, 'marker': False, 'first': False, 'last': False} for _ in weeks]
+
+        out_rows.append({
+            'label':       task_label_map.get(r['task_name'], r['task_name']),
+            'phase_label': phase_label_map.get(r['phase_name'], r['phase_name']),
+            'phase_order': r['phase_order'],
+            'color':       GANTT_PHASE_COLORS.get(r['phase_order'], '#888888'),
+            'is_external': r['is_external'],
+            'is_marker':   r['is_marker'],
+            'status':      r['status'],
+            'has_dates':   has_dates,
+            'start':       r['start'],
+            'end':         r['end'],
+            'cells':       cells,
+        })
+
+    return {'weeks': weeks, 'rows': out_rows}
+
+
 # Hardcoded fallback durations used when TaskDurationTemplate DB table is empty.
 # Must stay in sync with the seed data in migration 0034_task_duration_template.
 RESIDENTIAL_DURATION_DEFAULTS = {

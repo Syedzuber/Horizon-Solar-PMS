@@ -4,6 +4,7 @@ from .models import (
     Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile,
     NotificationLog, SystemSettings,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
+    Program,
 )
 
 
@@ -25,6 +26,36 @@ class PhaseInline(admin.TabularInline):
     fields = ['phase_order', 'phase_name']
     readonly_fields = ['created_at']
     show_change_link = True
+
+
+@admin.register(Program)
+class ProgramAdmin(admin.ModelAdmin):
+    list_display  = ['name', 'program_type', 'client_name', 'status',
+                     'short_tender_code', 'planned_site_count', 'is_deleted']
+    list_filter   = ['program_type', 'status', 'is_deleted']
+    search_fields = ['name', 'client_name', 'short_tender_code', 'tender_reference_number']
+    readonly_fields = ['created_at', 'updated_at', 'deleted_at']
+    fieldsets = (
+        ('Program', {
+            'fields': ('program_type', 'name', 'client_name', 'status',
+                       'short_tender_code', 'total_capacity',
+                       'expected_completion_date', 'planned_site_count')
+        }),
+        ('OPEX Tender', {
+            'fields': ('tender_reference_number', 'bid_value', 'award_date',
+                       'ppa_reference', 'ppa_signed_date', 'ppa_per_unit_rate',
+                       'ppa_escalation_percentage', 'ppa_escalation_frequency'),
+            'classes': ('collapse',),
+        }),
+        ('CAPEX Financing', {
+            'fields': ('financing_partner_name', 'financing_assistance_type'),
+            'classes': ('collapse',),
+        }),
+        ('Meta', {
+            'fields': ('created_by', 'created_at', 'updated_at', 'is_deleted', 'deleted_at'),
+            'classes': ('collapse',),
+        }),
+    )
 
 
 @admin.register(Project)

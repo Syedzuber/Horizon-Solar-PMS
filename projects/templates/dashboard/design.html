@@ -148,6 +148,19 @@
 {# ── Project cards — one per active/in-progress project ──────────────────── #}
 {# Sorted most-urgent-first by view (revision_requested projects first, then all-clear) #}
 {% for p in project_rows %}
+{% comment %}
+Section header — rendered only when the view found BOTH tender and residential
+projects in this user's list (views._apply_project_sections tags the first row of
+each group). With a single type the keys are absent and nothing renders, so the
+dashboard looks exactly as it did before. Label only: no collapse/expand control,
+the per-card x-data expand behaviour below is untouched.
+{% endcomment %}
+{% if p.section_label %}
+<div class="d-flex align-items-baseline gap-2 mt-4 mb-2">
+  <span class="fw-semibold" style="color:#1a7a4a;">{{ p.section_label }}</span>
+  <span class="small text-muted">({{ p.section_count }})</span>
+</div>
+{% endif %}
 <div x-data="{ expanded: false }" class="card mb-2 shadow-sm border-0">
 
   {# ── Collapsed header (always visible) ──────────────────────────────────── #}

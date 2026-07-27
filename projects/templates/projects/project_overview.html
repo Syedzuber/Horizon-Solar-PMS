@@ -30,6 +30,27 @@
      Set on the cells (not the <tr>) so it isn't overridden by Bootstrap's
      per-cell --bs-table-bg; .table-hover still layers its hover state on top. */
   tr.task-row-mine > td { background-color: rgba(124, 184, 71, 0.08); }
+
+  /* ── Gantt schedule grid ───────────────────────────────────── */
+  .gantt-scroll  { overflow-x:auto; }
+  .gantt-table   { border-collapse:collapse; width:max-content; min-width:100%; font-size:.75rem; }
+  .gantt-label-head, .gantt-label {
+    position:sticky; left:0; z-index:2; background:#fff; min-width:15rem; max-width:15rem;
+    text-align:left; padding:.25rem .5rem; white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; border-right:1px solid #e9ecef;
+  }
+  .gantt-week-head { min-width:2.6rem; padding:.25rem .15rem; text-align:center; color:#6c757d;
+                     font-weight:500; border-bottom:1px solid #e9ecef; white-space:nowrap; }
+  .gantt-cell    { min-width:2.6rem; height:26px; padding:0; text-align:center; border-bottom:1px solid #f1f3f5; }
+  .gantt-bar     { height:14px; margin:6px 0; width:100%; }
+  .gantt-bar-first { border-top-left-radius:7px;  border-bottom-left-radius:7px;  }
+  .gantt-bar-last  { border-top-right-radius:7px; border-bottom-right-radius:7px; }
+  .gantt-bar-ext { background-image:repeating-linear-gradient(45deg, rgba(255,255,255,.5) 0 4px, transparent 4px 8px); }
+  .gantt-bar-done { opacity:.5; }
+  .gantt-diamond { display:inline-block; width:12px; height:12px; transform:rotate(45deg); margin:7px 0; }
+  .gantt-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:.35rem; vertical-align:middle; }
+  .gantt-tag { font-size:.6rem; background:#e9ecef; color:#495057; border-radius:3px; padding:0 .25rem; margin-left:.25rem; text-transform:uppercase; }
+  .gantt-tbd { font-size:.6rem; color:#adb5bd; margin-left:.25rem; }
 </style>
 
 {# ── 1. Compact project info card ──────────────────────────────────────── #}
@@ -808,6 +829,72 @@
         </div>
       </div>
     {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# ── 5.5 Gantt schedule (Residential only; computed live from activation date) ── #}
+{% if gantt_available %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center py-2">
+    <span class="fw-semibold small"><i data-lucide="calendar-range" class="lucide-icon me-1"></i>Schedule (Gantt)</span>
+    <div class="d-flex align-items-center gap-2">
+      {% if gantt_can_view_client and not gantt_not_activated %}
+      <div class="btn-group btn-group-sm" role="group" aria-label="Gantt view toggle">
+        <button type="button" class="btn btn-outline-brand active" id="ganttBtnInternal">Internal</button>
+        <button type="button" class="btn btn-outline-brand" id="ganttBtnClient">Client</button>
+      </div>
+      {% endif %}
+      <button class="btn btn-link btn-sm p-0 text-muted block-toggle" type="button"
+              data-bs-toggle="collapse" data-bs-target="#ganttCollapse" aria-expanded="true">
+        <i class="bi bi-chevron-down collapse-chevron"></i>
+      </button>
+    </div>
+  </div>
+  <div class="collapse show" id="ganttCollapse">
+    <div class="card-body p-3">
+      {% if gantt_not_activated %}
+        <div class="text-center text-muted py-4 small">Schedule will be available once the project is activated.</div>
+      {% else %}
+        {# TODO: task names/order + display-name maps are hardcoded (projects/gantt_constants.py); re-check when Project Templates ships. #}
+        <div id="ganttInternalWrap">
+          {% include 'projects/partials/_gantt_grid.html' with grid=gantt_internal %}
+        </div>
+        {% if gantt_can_view_client %}
+        <div id="ganttClientWrap" style="display:none;">
+          <p class="text-muted small mb-2">
+            <i class="bi bi-info-circle me-1"></i>Client view — buffered schedule, reflects current plan as of {{ today|date:"d M Y" }}.
+          </p>
+          {% include 'projects/partials/_gantt_grid.html' with grid=gantt_client %}
+        </div>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% if gantt_can_view_client and not gantt_not_activated %}
+<script>
+(function () {
+  var bi = document.getElementById('ganttBtnInternal'),
+      bc = document.getElementById('ganttBtnClient'),
+      wi = document.getElementById('ganttInternalWrap'),
+      wc = document.getElementById('ganttClientWrap');
+  if (!bi || !bc || !wi || !wc) return;
+  bi.addEventListener('click', function () {
+    wi.style.display = ''; wc.style.display = 'none';
+    bi.classList.add('active'); bc.classList.remove('active');
+  });
+  bc.addEventListener('click', function () {
+    wi.style.display = 'none'; wc.style.display = '';
+    bc.classList.add('active'); bi.classList.remove('active');
+  });
+})();
+</script>
+{% endif %}
+{% else %}
+<div class="card shadow-sm mb-3">
+  <div class="card-body py-3 text-center text-muted small">
+    <i class="bi bi-info-circle me-1"></i>Gantt schedule is available for Residential projects only.
   </div>
 </div>
 {% endif %}

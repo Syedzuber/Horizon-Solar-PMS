@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block title %}Bulk Upload Sites — {{ program.name }} — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <a href="{% url 'program_detail' pk=program.pk %}" class="text-decoration-none small">← {{ program.name }}</a>
+    <h4 class="mb-0 mt-1">Bulk Upload Sites</h4>
+    <div class="text-muted small">
+      Tender code <span class="badge bg-secondary">{{ program.short_tender_code }}</span>
+      — each site ID is composed as <code>{{ program.short_tender_code }}-&lt;site code&gt;</code>.
+    </div>
+  </div>
+</div>
+
+<div class="alert alert-light border small mb-4">
+  In this Program: <strong>{{ existing_count }}</strong> site{{ existing_count|pluralize }}
+  {% if planned %}· Planned total: <strong>{{ planned }}</strong>{% else %}· No planned total set{% endif %}.
+</div>
+
+{% if file_error %}
+  <div class="alert alert-danger">{{ file_error }}</div>
+{% endif %}
+
+{# =================== STAGE 1: UPLOAD =================== #}
+{% if stage == 'upload' %}
+<div class="card shadow-sm">
+  <div class="card-body p-4">
+    <ol class="small text-muted mb-4">
+      <li>Download the template and fill one row per site on the <strong>Sites</strong> sheet.</li>
+      <li>Upload it back — every row is validated before anything is saved.</li>
+      <li>You can upload more batches later until the Program reaches its planned site count.</li>
+    </ol>
+    <a href="{% url 'opex_site_bulk_template' pk=program.pk %}" class="btn btn-outline-secondary btn-sm mb-4">
+      ⭳ Download Template
+    </a>
+    <form method="post" enctype="multipart/form-data">
+      {% csrf_token %}
+      <input type="hidden" name="phase" value="preview">
+      <div class="mb-3">
+        <label class="form-label">Excel file (.xlsx)</label>
+        <input type="file" name="file" accept=".xlsx" class="form-control" required>
+      </div>
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-primary">Upload & Preview</button>
+        <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-outline-secondary">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{# =================== STAGE 2: PREVIEW =================== #}
+{% if stage == 'preview' %}
+<div class="card shadow-sm mb-3">
+  <div class="card-body">
+    <div class="d-flex flex-wrap gap-3">
+      <span class="badge bg-secondary fs-6">Total rows: {{ total_rows }}</span>
+      <span class="badge bg-success fs-6">Valid: {{ valid_count }}</span>
+      <span class="badge {% if invalid_count %}bg-danger{% else %}bg-light text-muted border{% endif %} fs-6">With errors: {{ invalid_count }}</span>
+    </div>
+    {% if extra_headers %}
+      <div class="alert alert-warning small mt-3 mb-0">
+        Ignored unrecognized column(s): {{ extra_headers|join:", " }}. They were not imported.
+      </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if invalid_count %}
+<div class="card shadow-sm mb-3 border-danger">
+  <div class="card-header bg-white fw-semibold text-danger">Rows with errors — fix and re-upload</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 align-middle">
+      <thead class="table-light"><tr><th>Row</th><th>Site Code</th><th>Errors</th></tr></thead>
+      <tbody>
+        {% for r in results %}{% if not r.valid %}
+        <tr>
+          <td>{{ r.index }}</td>
+          <td>{{ r.site_code|default:"—" }}</td>
+          <td class="text-danger small">
+            {% for field, msgs in r.errors.items %}
+              <div><strong>{{ field }}:</strong> {{ msgs|join:" " }}</div>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endif %}{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if valid_count %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white fw-semibold">
+    {% if all_valid %}Sites to be created{% else %}Valid rows (not created — fix the errors above first){% endif %}
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 align-middle">
+      <thead class="table-light"><tr><th>Row</th><th>Site Code</th><th>Site In-Charge</th><th>City</th></tr></thead>
+      <tbody>
+        {% for r in results %}{% if r.valid %}
+        <tr>
+          <td>{{ r.index }}</td>
+          <td><code>{{ program.short_tender_code }}-{{ r.site_code }}</code></td>
+          <td>{{ r.name }}</td>
+          <td>{{ r.city }}</td>
+        </tr>
+        {% endif %}{% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card shadow-sm">
+  <div class="card-body">
+    {% if all_valid %}
+      <div class="mb-3 small">
+        This batch: <strong>{{ total_rows }}</strong> ·
+        Already in Program: <strong>{{ existing_count }}</strong> ·
+        {% if planned %}Planned total: <strong>{{ planned }}</strong> ·
+          After this batch: <strong>{{ after_count }}</strong> of {{ planned }}.
+        {% else %}After this batch: <strong>{{ after_count }}</strong>.{% endif %}
+      </div>
+      {% if exceeds_planned %}
+        <div class="alert alert-warning small">
+          This will exceed the planned site count of {{ planned }} — planned count is a target only
+          and won't block this upload.
+        </div>
+      {% endif %}
+      <form method="post">
+        {% csrf_token %}
+        <input type="hidden" name="phase" value="commit">
+        <input type="hidden" name="rows_json" value="{{ rows_json }}">
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn btn-primary">Confirm — Create {{ total_rows }} Site{{ total_rows|pluralize }}</button>
+          <a href="{% url 'opex_site_bulk_upload' pk=program.pk %}" class="btn btn-outline-secondary">Upload a different file</a>
+        </div>
+      </form>
+    {% else %}
+      <div class="alert alert-danger small mb-3">
+        No sites will be created while any row has an error — nothing has been saved.
+      </div>
+      <a href="{% url 'opex_site_bulk_upload' pk=program.pk %}" class="btn btn-primary">Fix and re-upload</a>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
+{# =================== STAGE 3: RESULT =================== #}
+{% if stage == 'result' %}
+  {% if success %}
+  <div class="card shadow-sm border-success">
+    <div class="card-body">
+      <h5 class="text-success">✓ {{ created_count }} site{{ created_count|pluralize }} created.</h5>
+      <p class="small text-muted">
+        Program now has {{ new_total }}{% if planned %} of {{ planned }} planned{% endif %} site{{ new_total|pluralize }}.
+      </p>
+      <div class="mb-3">
+        {% for pid in created %}<span class="badge bg-light text-dark border me-1 mb-1"><code>{{ pid }}</code></span>{% endfor %}
+      </div>
+      <div class="d-flex gap-2">
+        <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-primary">Back to Program</a>
+        <a href="{% url 'opex_site_bulk_upload' pk=program.pk %}" class="btn btn-outline-secondary">Upload another batch</a>
+      </div>
+    </div>
+  </div>
+  {% else %}
+  <div class="card shadow-sm border-danger">
+    <div class="card-body">
+      <h5 class="text-danger">Batch not created — nothing was saved.</h5>
+      <p class="small">
+        {% if commit_error.index %}Row {{ commit_error.index }} failed at commit time:{% else %}The batch failed at commit time:{% endif %}
+      </p>
+      <div class="text-danger small mb-3">
+        {% for field, msgs in commit_error.errors.items %}
+          <div><strong>{{ field }}:</strong> {{ msgs|join:" " }}</div>
+        {% endfor %}
+      </div>
+      <p class="small text-muted">The whole batch was rolled back — no partial sites were created.</p>
+      <a href="{% url 'opex_site_bulk_upload' pk=program.pk %}" class="btn btn-primary">Re-upload</a>
+    </div>
+  </div>
+  {% endif %}
+{% endif %}
+
+{% endblock %}

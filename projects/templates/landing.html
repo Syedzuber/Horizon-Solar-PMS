@@ -1,0 +1,122 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <title>Horizon PMS — Choose a view</title>
+  {% comment %}
+  Standalone Tailwind page, deliberately NOT extending the Bootstrap base.html —
+  same pattern as registration/login.html, which this screen follows immediately.
+  {% endcomment %}
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            'horizon-green': {
+              DEFAULT: '#1a7a4a',
+              light: '#7cb847',
+              50: '#eef8f0',
+              100: '#d7eedd',
+              600: '#1a7a4a',
+              700: '#155f3a',
+            },
+            'horizon-gold': {
+              DEFAULT: '#f0a829',
+              light: '#efc938',
+              50: '#fef8ec',
+              100: '#fcecc7',
+              600: '#f0a829',
+              700: '#c98816',
+            },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Soft ambient background — identical treatment to the sign-in screen */
+    .auth-bg {
+      background-color: #fafaf8;
+      background-image:
+        radial-gradient(circle at 12% 18%, rgba(26, 122, 74, 0.07), transparent 38%),
+        radial-gradient(circle at 88% 82%, rgba(240, 168, 41, 0.09), transparent 42%);
+    }
+  </style>
+</head>
+<body class="auth-bg min-h-screen flex flex-col">
+
+  <!-- Top accent bar — same 3px brand gradient used across the app -->
+  <div class="h-[3px] bg-gradient-to-r from-horizon-green to-horizon-gold"></div>
+
+  <main class="flex-1 flex items-center justify-center px-4 py-10">
+    <div class="w-full max-w-[560px]">
+
+      <!-- Logo -->
+      <div class="flex justify-center mb-8">
+        <img src="{% static 'images/horizon-logo.png' %}" alt="Horizon Renewable Power"
+             class="h-8 w-auto">
+      </div>
+
+      <div class="mb-6 text-center">
+        <h1 class="text-lg font-semibold text-slate-800">
+          Welcome, {{ user.get_full_name|default:user.username }}
+        </h1>
+        <p class="text-sm text-slate-500 mt-1">Choose which portfolio to view</p>
+      </div>
+
+      {% comment %}
+      Two large tap targets. Mobile-first: stacked full-width by default,
+      side-by-side from the sm breakpoint up.
+      {% endcomment %}
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {% for card in cards %}
+          <a href="{{ card.url }}"
+             class="group block bg-white border border-slate-200 rounded-2xl shadow-sm
+                    p-6 min-h-[168px] flex flex-col justify-between
+                    hover:border-horizon-green-600 hover:shadow-md
+                    focus:outline-none focus:ring-2 focus:ring-horizon-green-600/30
+                    transition-all">
+
+            <div class="flex items-start justify-between gap-3">
+              <span class="inline-flex items-center justify-center w-11 h-11 rounded-xl
+                           bg-horizon-green-50 text-horizon-green-600">
+                {% if card.key == 'residential' %}
+                  <i data-lucide="home" class="w-5 h-5"></i>
+                {% else %}
+                  <i data-lucide="file-text" class="w-5 h-5"></i>
+                {% endif %}
+              </span>
+              <i data-lucide="arrow-right"
+                 class="w-5 h-5 text-slate-300 group-hover:text-horizon-green-600 transition-colors"></i>
+            </div>
+
+            <div class="mt-4">
+              <div class="text-base font-semibold text-slate-800">{{ card.label }}</div>
+              <div class="mt-1 flex items-baseline gap-1.5">
+                {# Zero is shown, never hidden — an empty context is information. #}
+                <span class="text-2xl font-bold text-horizon-green-600">{{ card.count }}</span>
+                <span class="text-sm text-slate-500">
+                  active project{{ card.count|pluralize }}
+                </span>
+              </div>
+            </div>
+          </a>
+        {% endfor %}
+      </div>
+
+      <p class="text-center text-xs text-slate-400 mt-8">
+        Horizon Renewable Power · Internal use only
+      </p>
+
+    </div>
+  </main>
+
+  <script>
+    lucide.createIcons();
+  </script>
+</body>
+</html>

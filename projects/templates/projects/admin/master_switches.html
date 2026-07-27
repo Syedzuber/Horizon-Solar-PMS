@@ -64,6 +64,40 @@
         </label>
       </div>
 
+      <!-- Gantt: Client buffer -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-amber-50">
+            <i data-lucide="calendar-range" class="w-4 h-4 text-amber-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">Client Gantt buffer (days)</p>
+            <p class="text-xs text-gray-500 mt-0.5">Calendar days added to each phase end in the client-facing
+              Gantt view, cascading downstream. Internal view is unaffected.</p>
+          </div>
+        </div>
+        <input type="number" min="0" name="gantt_client_buffer_days"
+               value="{{ settings.gantt_client_buffer_days }}"
+               class="w-20 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-right">
+      </div>
+
+      <!-- Gantt: External min bar width -->
+      <div class="flex items-center justify-between px-6 py-5">
+        <div class="flex items-start gap-3">
+          <div class="mt-0.5 w-8 h-8 rounded-lg flex items-center justify-center bg-amber-50">
+            <i data-lucide="bar-chart-horizontal" class="w-4 h-4 text-amber-600"></i>
+          </div>
+          <div>
+            <p class="text-sm font-medium text-gray-900">Gantt external min bar width (days)</p>
+            <p class="text-xs text-gray-500 mt-0.5">Minimum visual width for external / third-party tasks
+              (DISCOM, customer) so they don't render as thin slivers.</p>
+          </div>
+        </div>
+        <input type="number" min="0" name="gantt_external_min_display_days"
+               value="{{ settings.gantt_external_min_display_days }}"
+               class="w-20 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-right">
+      </div>
+
       <!-- In-app -->
       <div class="flex items-center justify-between px-6 py-5">
         <div class="flex items-start gap-3">

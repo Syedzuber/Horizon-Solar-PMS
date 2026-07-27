@@ -10,7 +10,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
-from django.db import transaction
+from django.db import transaction, IntegrityError
 from django.db.models import Count, DecimalField, Exists, F, Max, Min, OuterRef, Prefetch, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied
@@ -23,22 +23,30 @@ from django.views.decorators.csrf import csrf_exempt
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
     Vendor, VendorCategory, VendorBrand,
-    BOQ, BOQItem, BOQRevision, Notification, get_standard_boq_items,
+    BOQ, BOQItem, BOQItemMaster, BOQRevision, Notification, get_standard_boq_items,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
     TaskDurationTemplate,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
+    Program, program_rollup_annotations, get_program_rollup,
 )
 from .notifications import send_notification, send_raw_email
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm
-from .decorators import login_required, role_required, get_user_dashboard
-from .permissions import user_can_manage_project, project_managers
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
+from .decorators import (
+    login_required, role_required, get_user_dashboard,
+    get_post_login_url, LANDING_ROLES,
+)
+from .permissions import (
+    user_can_manage_project, project_managers, user_can_manage_program,
+    user_can_view_project_boq, user_can_edit_project_boq,
+)
 from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
-    get_residential_template_task_names,
+    get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
 )
+from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -64,16 +72,149 @@ MIME_TYPE_MAP = {
 
 
 # ---------------------------------------------------------------------------
+# Dashboard context (EPC Residential / Tenders)
+# ---------------------------------------------------------------------------
+# A pure DISPLAY filter for the three department-level dashboards (CEO, Finance,
+# SCM) whose querysets today mix Residential projects with OPEX/CAPEX tender
+# sites. It changes what is *shown*, never what is *permitted* — no permission
+# function is consulted, called differently, or modified anywhere in this feature.
+#
+# Context lives in the URL query string only (?context=...). Nothing is written
+# to the session or to UserProfile, so a deep link to a project is completely
+# unaffected: no context, no filter, no redirect.
+
+CONTEXT_RESIDENTIAL = 'residential'
+CONTEXT_TENDERS     = 'tenders'
+VALID_CONTEXTS      = (CONTEXT_RESIDENTIAL, CONTEXT_TENDERS)
+
+# Values are the exact Project.PROJECT_TYPE_CHOICES strings (models.py:8-12).
+# CAPEX has zero rows today; it is included so those sites appear automatically
+# the moment the first one is created — no code change needed then.
+CONTEXT_PROJECT_TYPES = {
+    CONTEXT_RESIDENTIAL: ['Residential'],
+    CONTEXT_TENDERS:     ['OPEX', 'CAPEX'],
+}
+
+CONTEXT_LABELS = {
+    CONTEXT_RESIDENTIAL: 'EPC Residential',
+    CONTEXT_TENDERS:     'Tenders',
+}
+
+
+def _read_context(request):
+    """
+    Pull the context out of the query string. Returns None for absent, blank or
+    unrecognised values — and None means 'apply no filter at all', i.e. exactly
+    the pre-existing portfolio-wide behaviour. There is no way for a bad value
+    to narrow or widen what a user sees.
+    """
+    raw = (request.GET.get('context') or '').strip().lower()
+    return raw if raw in VALID_CONTEXTS else None
+
+
+def _context_filter(context, prefix=''):
+    """
+    Filter kwargs restricting a queryset to the given context's project types.
+
+    Returns {} when context is None, so `**_context_filter(None)` added to any
+    .filter() call is a no-op and leaves the queryset byte-identical.
+
+    prefix is the ORM path from the model being queried to Project, e.g.
+    'project__' for PaymentRequest, 'phase__project__' for Task.
+    """
+    types = CONTEXT_PROJECT_TYPES.get(context)
+    if not types:
+        return {}
+    return {f'{prefix}project_type__in': types}
+
+
+def _context_nav(request, context):
+    """
+    Template context for the header switcher rendered by base.html.
+
+    Only the three LANDING_ROLES dashboards supply this, so no other page grows
+    a switcher. Returns None for anyone else, which renders nothing.
+    """
+    try:
+        role = request.user.profile.role
+    except Exception:
+        return None
+    if role not in LANDING_ROLES:
+        return None
+
+    path = request.path
+    return {
+        'current':      context,
+        'current_label': CONTEXT_LABELS.get(context, 'All Projects'),
+        'residential_url': f'{path}?context={CONTEXT_RESIDENTIAL}',
+        'tenders_url':     f'{path}?context={CONTEXT_TENDERS}',
+    }
+
+
+# ---------------------------------------------------------------------------
+# Dashboard sectioning (Tenders / EPC Residential)
+# ---------------------------------------------------------------------------
+# Presentation only, for the PM / Project Coordinator, Design and Sales & BD
+# dashboards. Each of those views has already built its row list; this partitions
+# that list in place. It issues NO query — every project it inspects is an object
+# the view already fetched — and it never adds or drops a row.
+
+SECTION_TENDERS     = 'Tenders'
+SECTION_RESIDENTIAL = 'EPC Residential'
+
+# Same source of truth the context filter uses, so the two features can't drift.
+_TENDER_TYPES = tuple(CONTEXT_PROJECT_TYPES[CONTEXT_TENDERS])   # ('OPEX', 'CAPEX')
+
+
+def _apply_project_sections(rows):
+    """
+    Group an already-built dashboard row list into Tenders then EPC Residential.
+
+    rows: list of dicts, each carrying the fetched Project under key 'project' —
+    the shape dashboard_pm, dashboard_design and dashboard_bd all already use.
+
+    Behaviour:
+      * Both types present -> returns tenders + residential (Tenders first), with
+        'section_label'/'section_count' set on the FIRST row of each group. The
+        template renders a header only where those keys appear.
+      * Only one type present (or the list is empty) -> returns `rows` completely
+        untouched, with no section keys at all, so the dashboard renders exactly
+        as it does today.
+
+    Relative order WITHIN each group is preserved: the partition is stable, so
+    whatever the view already sorted by still holds inside a section.
+
+    No DB access. `project_type` is read off the in-memory Project instance; none
+    of the three views defers or restricts loaded fields, so it is always present.
+    A type outside PROJECT_TYPE_CHOICES cannot occur today (verified: 0 rows) and
+    would fall into the Residential group rather than vanish from the page.
+    """
+    tenders     = [r for r in rows if r['project'].project_type in _TENDER_TYPES]
+    residential = [r for r in rows if r['project'].project_type not in _TENDER_TYPES]
+
+    # One type only (or none) — no headers, original list and order returned as-is.
+    if not tenders or not residential:
+        return rows
+
+    tenders[0]['section_label']     = SECTION_TENDERS
+    tenders[0]['section_count']     = len(tenders)
+    residential[0]['section_label'] = SECTION_RESIDENTIAL
+    residential[0]['section_count'] = len(residential)
+    return tenders + residential
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 
 def login_view(request):
     """
     Render login form and authenticate. Redirects already-authenticated users
-    to their role dashboard immediately. Access: public.
+    onward immediately. CEO/Finance/SCM land on the context chooser; every other
+    role goes straight to its role dashboard exactly as before. Access: public.
     """
     if request.user.is_authenticated:
-        return redirect(get_user_dashboard(request.user))
+        return redirect(get_post_login_url(request.user))
 
     if request.method == 'POST':
         username = request.POST.get('username', '').strip()
@@ -81,7 +222,7 @@ def login_view(request):
         user = authenticate(request, username=username, password=password)
         if user is not None:
             login(request, user)
-            return redirect(get_user_dashboard(user))
+            return redirect(get_post_login_url(user))
         messages.error(request, 'Invalid username or password')
         return render(request, 'registration/login.html')
 
@@ -92,6 +233,32 @@ def logout_view(request):
     """Log out the current user and redirect to login page. Access: any authenticated user."""
     logout(request)
     return redirect('/login/')
+
+
+@login_required
+@role_required(list(LANDING_ROLES))
+def landing(request):
+    """
+    Two-card context chooser shown after login to CEO / Finance / SCM.
+
+    Each card links to the user's own role dashboard with ?context= set. The
+    counts use the identical portfolio scope the three dashboards use
+    (is_deleted=False, status in Active/In Progress) so a card's number always
+    matches the dashboard it opens. A zero-count context still renders its card.
+    """
+    base_qs = Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
+    dashboard_url = get_user_dashboard(request.user)
+
+    cards = []
+    for key in VALID_CONTEXTS:
+        cards.append({
+            'key':   key,
+            'label': CONTEXT_LABELS[key],
+            'count': base_qs.filter(**_context_filter(key)).count(),
+            'url':   f'{dashboard_url}?context={key}',
+        })
+
+    return render(request, 'landing.html', {'cards': cards})
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +611,11 @@ def dashboard_pm(request):
         for row in projects_with_progress:
             row['delivery_issues'] = _dc_issues_by_project.get(row['project'].project_id, [])
 
+    # Group into Tenders / EPC Residential for display. Runs last, after every
+    # per-row annotation and the sort above, so within-section order is exactly
+    # the order this dashboard already produced. No query, no row added or lost.
+    projects_with_progress = _apply_project_sections(projects_with_progress)
+
     due_today_tasks = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         due_date=date.today(), due_date__isnull=False,
@@ -784,6 +956,10 @@ def dashboard_design(request):
     # Most-urgent-first; all-clear projects sink to bottom
     project_rows.sort(key=lambda r: r['urgency_count'], reverse=True)
 
+    # Group into Tenders / EPC Residential for display — presentation only, applied
+    # after the sort so within-section order is unchanged. No query, no row change.
+    project_rows = _apply_project_sections(project_rows)
+
     # phase__project__in=projects_qs guarantees this stat block counts tasks
     # from exactly the same project set as the cards above — no drift between
     # the two if the visibility union ever changes.
@@ -816,12 +992,19 @@ def dashboard_finance(request):
     """Finance dashboard. One card per project, milestone + payment-request status. Finance role only."""
     today = date.today()
 
+    # Display context (EPC Residential / Tenders). None => no filter => the exact
+    # portfolio-wide behaviour this dashboard had before the context feature.
+    # Applied to the project list AND to every summary aggregate below, so the
+    # header tiles never report a wider scope than the cards underneath them.
+    ctx = _read_context(request)
+
     # Trigger 3: Finance is department-level — no assigned_finance field on Project.
     # Show all active/in-progress projects across the portfolio.
     # Trigger 1: milestones live on PaymentMilestone model (related_name='milestones').
     # Trigger 2: PaymentRequest exists — prefetch pending requests only, with vendor name.
     projects_qs = (
-        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
+        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'],
+                               **_context_filter(ctx))
         .prefetch_related(
             'milestones',
             Prefetch(
@@ -839,18 +1022,21 @@ def dashboard_finance(request):
     total_milestones_awaiting = PaymentMilestone.objects.filter(
         project__status__in=['Active', 'In Progress'],
         status=PaymentMilestone.PENDING,
+        **_context_filter(ctx, 'project__'),
     ).count()
 
     # Trigger 2: PaymentRequest confirmed present — query real pending count and value
     total_payment_requests = PaymentRequest.objects.filter(
         project__status__in=['Active', 'In Progress'],
         status=PaymentRequest.PENDING,
+        **_context_filter(ctx, 'project__'),
     ).count()
 
     total_payment_request_value = (
         PaymentRequest.objects.filter(
             project__status__in=['Active', 'In Progress'],
             status=PaymentRequest.PENDING,
+            **_context_filter(ctx, 'project__'),
         ).aggregate(s=Sum('amount'))['s'] or 0
     )
 
@@ -858,6 +1044,7 @@ def dashboard_finance(request):
         Project.objects.filter(
             is_deleted=False,
             status__in=['Active', 'In Progress'],
+            **_context_filter(ctx),
         ).aggregate(s=Sum('contract_value'))['s'] or 0
     )
 
@@ -928,6 +1115,7 @@ def dashboard_finance(request):
         'total_client_contract_value':  total_client_contract_value,
         'project_rows':                 project_rows,
         'today':                        today,
+        'context_nav':                  _context_nav(request, ctx),
     })
 
 
@@ -942,14 +1130,21 @@ def dashboard_scm(request):
     """
     today = date.today()
 
+    # Display context (EPC Residential / Tenders). None => no filter => the exact
+    # portfolio-wide behaviour this dashboard had before the context feature.
+    ctx = _read_context(request)
+
     # BOQ awaiting SCM acknowledgment (Q3 — confirmed working, left unchanged)
-    boq_awaiting = BOQ.objects.filter(status='Submitted').count()
+    boq_awaiting = BOQ.objects.filter(
+        status='Submitted', **_context_filter(ctx, 'project__'),
+    ).count()
 
     # Deliveries today: DCs with expected_delivery_date=today not yet fully received
     deliveries_today = DeliveryChallan.objects.filter(
         project__status__in=['Active', 'In Progress'],
         expected_delivery_date=today,
         status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED],
+        **_context_filter(ctx, 'project__'),
     ).count()
 
     # Overdue: DCs whose expected date has passed and are still unresolved (including Rejected = severe)
@@ -958,11 +1153,13 @@ def dashboard_scm(request):
         expected_delivery_date__lt=today,
         expected_delivery_date__isnull=False,
         status__in=[DeliveryChallan.EXPECTED, DeliveryChallan.PARTIALLY_RECEIVED, DeliveryChallan.REJECTED],
+        **_context_filter(ctx, 'project__'),
     ).count()
 
     # Active projects SCM tracks: all Active/In Progress non-deleted projects
     active_projects = list(
-        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'])
+        Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'],
+                               **_context_filter(ctx))
         .select_related('assigned_pm__user')
         .order_by('project_id')
     )
@@ -974,6 +1171,7 @@ def dashboard_scm(request):
     raw_challans = (
         DeliveryChallan.objects.filter(
             project__status__in=['Active', 'In Progress'],
+            **_context_filter(ctx, 'project__'),
         )
         .select_related('project', 'vendor')
         .order_by('project__project_id', '-dc_date')
@@ -997,6 +1195,7 @@ def dashboard_scm(request):
                 DeliveryChallan.PARTIALLY_RECEIVED,
                 DeliveryChallan.REJECTED,
             ],
+            **_context_filter(ctx, 'project__'),
         )
         .select_related('project', 'vendor')
         .order_by('expected_delivery_date', 'project__project_id')
@@ -1192,6 +1391,7 @@ def dashboard_scm(request):
         Issue.objects.filter(
             delivery_challan__project__status__in=['Active', 'In Progress'],
             status__in=[Issue.OPEN, Issue.IN_PROGRESS],
+            **_context_filter(ctx, 'delivery_challan__project__'),
         )
         .select_related('project', 'delivery_challan', 'raised_by__user')
         .order_by('-raised_at')[:20]
@@ -1226,6 +1426,7 @@ def dashboard_scm(request):
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
+        **_context_filter(ctx, 'phase__project__'),
     )
     _s_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _s_soon   = today + timedelta(days=7)
@@ -1248,10 +1449,11 @@ def dashboard_scm(request):
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
         'boq_items_by_project': json.dumps(boq_items_by_project),
         'scm_vendors':          json.dumps(scm_vendors),
+        'context_nav':          _context_nav(request, ctx),
     })
 
 
-def _get_ceo_dashboard_context():
+def _get_ceo_dashboard_context(context=None):
     """
     Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
     Query 1: Active project list with Exists annotations for blocked/at_risk classification.
@@ -1307,7 +1509,7 @@ def _get_ceo_dashboard_context():
     )
     projects_qs = (
         Project.objects
-        .filter(is_deleted=False, status__in=active_statuses)
+        .filter(is_deleted=False, status__in=active_statuses, **_context_filter(context))
         .annotate(
             has_blocked_task=Exists(blocked_subq),
             has_at_risk_task=Exists(at_risk_subq),
@@ -1343,6 +1545,7 @@ def _get_ceo_dashboard_context():
     task_agg = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
+        **_context_filter(context, 'phase__project__'),
     ).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
@@ -1428,6 +1631,7 @@ def _get_ceo_dashboard_context():
     issue_agg = Issue.objects.filter(
         project__is_deleted=False,
         project__status__in=active_statuses,
+        **_context_filter(context, 'project__'),
     ).aggregate(
         issue_total     =Count('pk'),
         issue_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -1460,6 +1664,7 @@ def _get_ceo_dashboard_context():
     active_filter = {
         'project__is_deleted': False,
         'project__status__in': ['Active', 'In Progress'],
+        **_context_filter(context, 'project__'),
     }
     fin_payment_requests_pending = PaymentRequest.objects.filter(
         status=PaymentRequest.PENDING, **active_filter
@@ -1471,7 +1676,8 @@ def _get_ceo_dashboard_context():
     )
     fin_client_contract_value = (
         Project.objects.filter(
-            is_deleted=False, status__in=['Active', 'In Progress']
+            is_deleted=False, status__in=['Active', 'In Progress'],
+            **_context_filter(context),
         ).aggregate(s=Sum('contract_value'))['s'] or 0
     )
     # Milestones Finance has invoiced (triggered by task Done) but not yet fully collected.
@@ -1484,6 +1690,7 @@ def _get_ceo_dashboard_context():
             project__status__in=['Active', 'In Progress'],
             status__in=['Invoiced', 'Received'],
             amount__isnull=False,
+            **_context_filter(context, 'project__'),
         ).filter(
             Q(amount_received__isnull=True) | Q(amount_received__lt=F('amount'))
         ).aggregate(
@@ -1500,6 +1707,7 @@ def _get_ceo_dashboard_context():
             phase__project__status__in=active_statuses,
             assigned_to__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+            **_context_filter(context, 'phase__project__'),
         )
         .values(
             'assigned_to',
@@ -1537,8 +1745,12 @@ def _get_ceo_dashboard_context():
 @login_required
 def dashboard_ceo(request):
     """CEO portfolio overview. Access: CEO role only. Renders in 3 DB queries via _get_ceo_dashboard_context."""
-    ctx = _get_ceo_dashboard_context()
+    # Display context (EPC Residential / Tenders). None => no filter => the exact
+    # portfolio-wide behaviour this dashboard had before the context feature.
+    selected_context = _read_context(request)
+    ctx = _get_ceo_dashboard_context(selected_context)
     ctx['now'] = timezone.now()
+    ctx['context_nav'] = _context_nav(request, selected_context)
     return render(request, 'dashboard/ceo.html', ctx)
 
 
@@ -2082,6 +2294,606 @@ def task_add(request, project_id):
         'form':    form,
         'project': project,
     })
+
+
+# ---------------------------------------------------------------------------
+# Programs (OPEX tender / multi-site CAPEX contract parent)
+#
+# Foundation only: Program CRUD + compute-live rollup reporting. Child sites are
+# ordinary Projects linked via Project.program. This section touches NO existing
+# project list / dashboard view. OPEX site-creation plumbing lives in its own
+# section (opex_site_create) — see Prompt 2.
+# ---------------------------------------------------------------------------
+
+def _can_access_program(request, program):
+    """View-layer access gate for a SPECIFIC Program (mirrors _pm_owns_project's role
+    for projects). Admin / CEO reach every Program (role_required already limits who
+    gets here). A PM reaches a Program they manage — canonical user_can_manage_program
+    (authority over any child site) — OR one they created (covers a brand-new empty
+    Program whose creator has no site to derive authority from yet). The created_by
+    fallback is a creator check, NOT a re-implementation of PM/coordinator comparison."""
+    role = _get_user_role(request)
+    if role in ('Admin', 'CEO'):
+        return True
+    if user_can_manage_program(request.user, program):
+        return True
+    return program.created_by_id == request.user.id
+
+
+@login_required
+@role_required(['Admin', 'PM', 'CEO'])
+def program_list(request):
+    """Role-scoped list of Programs with a live site-count-by-stage rollup.
+
+    Admin / CEO see every non-deleted Program; a PM sees only Programs they can access
+    (manage a child site, or created it). Rollup counts are annotated on the queryset
+    (single query — no N+1 across Programs), computed live from child-site status.
+    """
+    programs = (
+        Program.objects.filter(is_deleted=False)
+        .annotate(**program_rollup_annotations())
+        .prefetch_related('sites', 'sites__coordinators', 'sites__assigned_pm')
+    )
+    role = _get_user_role(request)
+    if role == 'PM':
+        programs = [p for p in programs if _can_access_program(request, p)]
+    else:
+        programs = list(programs)
+
+    # Attach a display-ready stage breakdown to each program from the annotated
+    # counts (dynamic attr access isn't clean in templates). Only non-zero stages.
+    status_keys = [
+        (status, 'site_' + status.lower().replace(' ', '_'))
+        for status, _ in Project.STATUS_CHOICES
+    ]
+    for p in programs:
+        p.rollup_badges = [
+            (status, getattr(p, key)) for status, key in status_keys if getattr(p, key)
+        ]
+
+    return render(request, 'projects/program_list.html', {
+        'programs':   programs,
+        'can_create': role in ('Admin', 'PM'),
+    })
+
+
+@login_required
+@role_required(['Admin', 'PM', 'CEO'])
+def program_detail(request, pk):
+    """Program detail: live aggregate rollup vs. planned targets, plus the child-site
+    list (each linking to the existing project_overview). Read-only for CEO."""
+    program = get_object_or_404(Program, pk=pk, is_deleted=False)
+    if not _can_access_program(request, program):
+        raise Http404
+
+    rollup = get_program_rollup(program)
+    sites = (
+        program.sites.filter(is_deleted=False)
+        .select_related('assigned_pm', 'assigned_pm__user')
+        .order_by('project_id')
+    )
+    role = _get_user_role(request)
+    return render(request, 'projects/program_detail.html', {
+        'program':   program,
+        'rollup':    rollup,
+        'sites':     sites,
+        'can_edit':  role in ('Admin', 'PM'),
+        'can_delete': role == 'Admin',
+    })
+
+
+@login_required
+@role_required(['Admin', 'PM'])
+def program_create(request):
+    """Create a Program (OPEX tender or multi-site CAPEX contract). Admin/PM only."""
+    if request.method == 'POST':
+        form = ProgramForm(request.POST)
+        if form.is_valid():
+            program = form.save(commit=False)
+            program.created_by = request.user
+            program.save()
+            log_activity(
+                None, getattr(request.user, 'profile', None),
+                f"Created {program.program_type} Program: {program.name}",
+                entity_type='Program', entity_id=program.pk, action_code='program_created',
+            )
+            messages.success(request, f"Program '{program.name}' created successfully.")
+            return redirect('program_detail', pk=program.pk)
+    else:
+        form = ProgramForm()
+    return render(request, 'projects/program_form.html', {'form': form, 'action': 'Create'})
+
+
+@login_required
+@role_required(['Admin', 'PM'])
+def program_edit(request, pk):
+    """Edit a Program. Access mirrors program_detail. Each CHANGED field is audit-logged
+    (one ActivityLog row per field) following the post-activation contract-edit pattern —
+    editing a Program must never silently orphan/rewrite data. project_id values on
+    existing child sites are immutable and are NOT touched by any rename here."""
+    program = get_object_or_404(Program, pk=pk, is_deleted=False)
+    if not _can_access_program(request, program):
+        raise Http404
+
+    if request.method == 'POST':
+        form = ProgramForm(request.POST, instance=program)
+        if form.is_valid():
+            changed = form.changed_data
+            actor = getattr(request.user, 'profile', None)
+            with transaction.atomic():
+                program = form.save()
+                for field in changed:
+                    log_activity(
+                        None, actor,
+                        f"Edited Program '{program.name}' field: {field}",
+                        entity_type='Program', entity_id=program.pk, action_code='program_edited',
+                    )
+            messages.success(request, f"Program '{program.name}' updated successfully.")
+            return redirect('program_detail', pk=program.pk)
+    else:
+        form = ProgramForm(instance=program)
+    return render(request, 'projects/program_form.html', {
+        'form': form, 'action': 'Edit', 'program': program,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def program_delete(request, pk):
+    """Soft-delete a Program. Admin only, POST only. BLOCKED while it still has any
+    non-deleted child site — a Program must never cascade-delete or orphan its sites."""
+    if request.method != 'POST':
+        return redirect('program_detail', pk=pk)
+    program = get_object_or_404(Program, pk=pk, is_deleted=False)
+
+    active_sites = program.sites.filter(is_deleted=False).count()
+    if active_sites:
+        messages.error(
+            request,
+            f"Cannot delete Program '{program.name}': it still has {active_sites} "
+            f"active site(s). Remove or reassign them first."
+        )
+        return redirect('program_detail', pk=program.pk)
+
+    program.is_deleted = True
+    program.deleted_at = timezone.now()
+    program.save(update_fields=['is_deleted', 'deleted_at'])
+    log_activity(
+        None, getattr(request.user, 'profile', None),
+        f"Deleted Program: {program.name}",
+        entity_type='Program', entity_id=program.pk, action_code='program_deleted',
+    )
+    messages.success(request, f"Program '{program.name}' has been deleted.")
+    return redirect('program_list')
+
+
+def create_opex_site(program, data, creator, profile=None):
+    """Create ONE OPEX site under an OPEX Program — request-independent core, extracted
+    from opex_site_create so a future bulk-upload path can call it per-row without
+    duplicating the field-setting/validation logic.
+
+    Callers own access control: `program` MUST already be loaded, OPEX-typed, and
+    access-checked (no role / _can_access_program checks happen here).
+
+    Args:
+        program: parent OPEX Program (already validated + access-checked by the caller).
+        data:    form data (a QueryDict like request.POST, or a plain dict for bulk) whose
+                 keys match OpexSiteForm's fields.
+        creator: the User creating the site (stored as created_by).
+        profile: creator's UserProfile, used for PM auto-assignment; a non-PM (or None)
+                 profile leaves assigned_pm=None, matching the single-add behavior.
+
+    Returns:
+        (site, form). On success: (the saved Project, the valid bound form). On failure:
+        (None, the bound form carrying validation errors) — the caller re-renders that
+        same form instance so entered values and per-field errors are preserved. Bulk
+        callers can read `form.errors` (a dict) off the returned form.
+
+    Composes the site's globally-unique project_id `{short_tender_code}-{site_code}` and
+    sets it EXPLICITLY before save() so generate_project_id()'s suffix-parser is bypassed
+    entirely. The ID is STORED (not derived at read time), which is what makes it immutable
+    across a later Program rename.
+    """
+    form = OpexSiteForm(data, program=program)
+    if not form.is_valid():
+        return None, form
+
+    with transaction.atomic():
+        site = form.save(commit=False)
+        site.program = program
+        site.project_type = 'OPEX'          # forced — never user-selectable here
+        # customer_name is not a form field for OPEX — freeze it to the parent
+        # tender's client_name at creation (store, don't compute; a later Program
+        # rename must not retroactively change existing sites). Model width was
+        # widened to 200 to match client_name so this can never overflow.
+        site.customer_name = program.client_name
+        site.status = 'Draft'
+        # A PM creator owns the site; an Admin creator leaves it unassigned
+        # (assign later via admin_assign_pm) — assigned_pm requires a PM profile.
+        site.assigned_pm = profile if (profile and profile.role == 'PM') else None
+        site.created_by = creator
+        site.project_id = form.composed_project_id   # explicit → skips generate_project_id()
+        site.save()
+    log_activity(
+        site, profile,
+        f"Created OPEX site {site.project_id} under program {program.name}",
+        entity_type='Project', entity_id=site.pk, action_code='opex_site_created',
+    )
+    return site, form
+
+
+@login_required
+@role_required(['Admin', 'PM'])
+def opex_site_create(request, pk):
+    """Create ONE OPEX site under an OPEX Program (Prompt 2 — dedicated plumbing).
+
+    This is the ONLY forward path to a new OPEX project. Access mirrors the Program:
+    Admin, or a PM who can access it. The creation core lives in create_opex_site() so
+    a future bulk-upload path can reuse it.
+    """
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    if not _can_access_program(request, program):
+        raise Http404
+
+    if request.method == 'POST':
+        profile = getattr(request.user, 'profile', None)
+        site, form = create_opex_site(program, request.POST, request.user, profile=profile)
+        if site is not None:
+            messages.success(request, f"Site {site.project_id} created under {program.name}.")
+            return redirect('program_detail', pk=program.pk)
+    else:
+        form = OpexSiteForm(program=program)
+
+    return render(request, 'projects/opex_site_form.html', {'form': form, 'program': program})
+
+
+# ===========================================================================
+# OPEX bulk site upload (Prompt 3)
+#
+# Upload an Excel file of sites under one OPEX Program and create them in one
+# ALL-OR-NOTHING batch, reusing create_opex_site() (and therefore OpexSiteForm)
+# for every row so validation NEVER drifts from the single-add path.
+#
+# Flow is two requests: (1) upload -> parse + dry-run validate -> preview; the
+# validated rows ride back to the browser as JSON in a hidden field. (2) confirm
+# -> the exact previewed rows are re-validated and committed for real inside one
+# outer transaction. A file only ever adds sites; multiple independent batches
+# per Program are expected (running total vs planned_site_count is informational).
+# ===========================================================================
+
+# Excel column header (normalized: .strip().lower()) -> OpexSiteForm data key.
+# Order here is the order columns are emitted into the downloadable template.
+_BULK_COLUMNS = [
+    ('Site Code',            'site_code',                True),
+    ('Site In-Charge Name',  'customer_contact_person',  True),
+    ('Site In-Charge Phone', 'customer_phone',           True),
+    ('Site In-Charge Email', 'customer_email',           False),
+    ('Site Address',         'site_address',             True),
+    ('City',                 'city',                     True),
+    ('State',                'state',                    False),
+    ('Capacity (kW)',        'capacity_kw',              False),
+]
+_BULK_HEADER_TO_KEY = {h.strip().lower(): key for h, key, _req in _BULK_COLUMNS}
+_BULK_REQUIRED_HEADERS = [h for h, _key, req in _BULK_COLUMNS if req]
+_BULK_MAX_ROWS = 500   # soft guard against a runaway file timing out the request
+
+
+class _DryRunRollback(Exception):
+    """Sentinel used ONLY by _validate_site_row_dry_run to unwind a deliberately
+    rolled-back transaction. Dedicated (never a bare Exception) so it is obvious in
+    a traceback and can never be confused with a real failure."""
+    pass
+
+
+class _CommitAbort(Exception):
+    """Sentinel raised inside the real commit loop when a row that passed dry-run
+    fails at commit time (race / tampered payload). Rolls back the WHOLE batch so
+    the all-or-nothing guarantee holds end-to-end, not just at dry-run."""
+    def __init__(self, index, errors):
+        self.index = index          # 1-based row number for the report
+        self.errors = errors        # form.errors dict
+        super().__init__()
+
+
+def _validate_site_row_dry_run(program, data, creator, profile):
+    """Validate ONE would-be site with the REAL create_opex_site path, then throw the
+    result away — a dry run that reuses production logic instead of re-checking the
+    form by hand (which would silently drift the moment create_opex_site changes).
+
+    HOW IT WORKS: create_opex_site() only reaches the DB for a *valid* row — an invalid
+    row returns (None, form) before its atomic block ever opens. So we wrap the call in
+    our own transaction.atomic(); for a valid row create_opex_site performs the real
+    INSERT plus its ActivityLog write inside that savepoint, and we immediately raise
+    _DryRunRollback to force Django to roll every bit of it back. Nothing is persisted,
+    yet the exact production validation + project_id composition ran.
+
+    WHY THE EXCEPTION IS LOAD-BEARING: if a future "simplification" deletes the raise,
+    the transaction commits and this preview quietly starts creating real sites on every
+    keystroke of a preview. The raise is the whole rollback mechanism — do not remove it.
+    Safe only because log_activity is pure-DB (no email/WhatsApp side-effect), so the
+    rollback leaves no trace outside the transaction.
+
+    Returns (form, is_valid). `form` carries form.errors for the preview when invalid.
+    """
+    captured = {}
+    try:
+        with transaction.atomic():
+            site, form = create_opex_site(program, data, creator, profile=profile)
+            captured['form'] = form
+            captured['valid'] = site is not None
+            if site is not None:
+                raise _DryRunRollback()   # load-bearing: forces rollback of the real INSERT
+    except _DryRunRollback:
+        pass
+    return captured['form'], captured['valid']
+
+
+def _bulk_cell_to_str(value):
+    """Excel cell -> trimmed string WITHOUT lossy coercion. openpyxl hands back numbers
+    as int/float; a phone/site-code typed as a number must render as plain digits (no
+    '.0'), but we never strip or reshape characters a user actually typed as text — bad
+    values stay bad so OpexSiteForm can reject them loudly (spec §5: no silent coercion)."""
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    return str(value).strip()
+
+
+def _parse_bulk_workbook(uploaded_file):
+    """Parse the uploaded .xlsx into (rows, extra_headers, error). Reads ONLY the 'Sites'
+    sheet (the downloadable template keeps all guidance on a separate 'Instructions' sheet,
+    so helper text can never be mistaken for a data row). Returns error!=None for a
+    whole-file rejection (bad file, missing required column, empty, too many rows)."""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(uploaded_file, read_only=True, data_only=True)
+    except Exception:
+        return None, None, "Could not read the file — please upload the .xlsx template unchanged."
+
+    ws = wb['Sites'] if 'Sites' in wb.sheetnames else wb.active
+    all_rows = list(ws.iter_rows(values_only=True))
+    wb.close()
+    if not all_rows:
+        return None, None, "The file is empty."
+
+    header_cells = [_bulk_cell_to_str(c) for c in all_rows[0]]
+    header_norm = [h.strip().lower() for h in header_cells]
+    missing = [h for h in _BULK_REQUIRED_HEADERS if h.strip().lower() not in header_norm]
+    if missing:
+        return None, None, "Missing required column(s): " + ", ".join(missing) + "."
+
+    # Columns present in the file but not part of the template — ignored, warned (not rejected).
+    extra_headers = [header_cells[i] for i, hn in enumerate(header_norm)
+                     if hn and hn not in _BULK_HEADER_TO_KEY]
+
+    data_rows = all_rows[1:]
+    # Drop wholly-blank trailing rows Excel loves to include.
+    data_rows = [r for r in data_rows if any(_bulk_cell_to_str(c) for c in r)]
+    if not data_rows:
+        return None, None, "The file has headers but no site rows to import."
+    if len(data_rows) > _BULK_MAX_ROWS:
+        return None, None, (f"This file has {len(data_rows)} rows — the per-upload limit is "
+                            f"{_BULK_MAX_ROWS}. Split it into smaller batches.")
+
+    rows = []
+    for raw in data_rows:
+        data = {}
+        for i, hn in enumerate(header_norm):
+            key = _BULK_HEADER_TO_KEY.get(hn)
+            if key and i < len(raw):
+                data[key] = _bulk_cell_to_str(raw[i])
+        rows.append(data)
+    return rows, extra_headers, None
+
+
+def _bulk_infile_duplicate_indices(rows):
+    """1-based row numbers whose site_code collides with another row IN THE SAME FILE.
+    Normalizes with the SAME normalize_program_code the form uses, so 's045' / 'S-045'
+    are seen as the duplicates they are. This is the ONE check dry-run cannot make (each
+    row rolls back before the next runs), so it must happen here (spec §4 / §5)."""
+    seen = {}
+    for idx, data in enumerate(rows, start=1):
+        code = normalize_program_code(data.get('site_code'))
+        if code:
+            seen.setdefault(code, []).append(idx)
+    dupes = set()
+    for code, idxs in seen.items():
+        if len(idxs) > 1:
+            dupes.update(idxs)
+    return dupes
+
+
+@login_required
+@role_required(['Admin', 'PM'])
+def opex_site_bulk_upload(request, pk):
+    """Bulk-create OPEX sites under one Program from an uploaded .xlsx (Admin/PM, OPEX
+    only — same gate as opex_site_create). Two POST phases keyed by the 'phase' field:
+    'preview' (a file upload -> validate + preview) and 'commit' (confirm the previewed
+    JSON -> create for real, all-or-nothing)."""
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    if not _can_access_program(request, program):
+        raise Http404
+
+    profile = getattr(request.user, 'profile', None)
+    rollup = get_program_rollup(program)
+    existing_count = rollup['total']
+    planned = program.planned_site_count
+
+    ctx = {
+        'program': program,
+        'existing_count': existing_count,
+        'planned': planned,
+        'stage': 'upload',
+    }
+
+    phase = request.POST.get('phase') if request.method == 'POST' else None
+
+    # ---- Phase: PREVIEW (parse + dry-run validate the uploaded file) ----
+    if phase == 'preview':
+        uploaded = request.FILES.get('file')
+        if not uploaded:
+            ctx['file_error'] = "Please choose a file to upload."
+            return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+        rows, extra_headers, file_error = _parse_bulk_workbook(uploaded)
+        if file_error:
+            ctx['file_error'] = file_error
+            return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+        dup_indices = _bulk_infile_duplicate_indices(rows)
+        results = []
+        all_valid = True
+        for idx, data in enumerate(rows, start=1):
+            form, valid = _validate_site_row_dry_run(program, data, request.user, profile)
+            errors = {field: list(msgs) for field, msgs in form.errors.items()}
+            if idx in dup_indices:
+                errors.setdefault('site_code', [])
+                errors['site_code'].append("Duplicate site code within this file.")
+                valid = False
+            if not valid:
+                all_valid = False
+            results.append({
+                'index': idx,
+                'data': data,
+                'site_code': data.get('site_code', ''),
+                'name': data.get('customer_contact_person', ''),
+                'city': data.get('city', ''),
+                'errors': errors,
+                'valid': valid,
+            })
+
+        after_count = existing_count + len(rows)
+        ctx.update({
+            'stage': 'preview',
+            'results': results,
+            'total_rows': len(rows),
+            'valid_count': sum(1 for r in results if r['valid']),
+            'invalid_count': sum(1 for r in results if not r['valid']),
+            'all_valid': all_valid,
+            'extra_headers': extra_headers,
+            'after_count': after_count,
+            'exceeds_planned': bool(planned) and after_count > planned,
+            # Only valid-batch rows ride forward; all_valid is required to show Confirm.
+            'rows_json': json.dumps([r['data'] for r in results]) if all_valid else '',
+        })
+        return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+    # ---- Phase: COMMIT (create the previewed rows for real, all-or-nothing) ----
+    if phase == 'commit':
+        try:
+            rows = json.loads(request.POST.get('rows_json') or '[]')
+        except (ValueError, TypeError):
+            rows = None
+        if not rows or not isinstance(rows, list):
+            ctx['file_error'] = "Nothing to create — please upload and preview a file first."
+            return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+        # Re-check in-file duplicates on the confirmed payload (defends against a tampered
+        # hidden field); the per-row create below re-runs full validation for real.
+        dup_indices = _bulk_infile_duplicate_indices(rows)
+
+        created = []
+        commit_error = None
+        try:
+            with transaction.atomic():
+                if dup_indices:
+                    raise _CommitAbort(min(dup_indices),
+                                       {'site_code': ['Duplicate site code within this file.']})
+                for idx, data in enumerate(rows, start=1):
+                    site, form = create_opex_site(program, data, request.user, profile=profile)
+                    if site is None:
+                        raise _CommitAbort(idx, {f: list(m) for f, m in form.errors.items()})
+                    created.append(site.project_id)
+                # Batch-level audit entry (in addition to create_opex_site's per-site logs).
+                # Inside the atomic, so a failed batch rolls this back too.
+                log_activity(
+                    None, profile,
+                    f"Bulk uploaded {len(created)} sites to program {program.name}",
+                    entity_type='Program', entity_id=program.pk,
+                    action_code='opex_sites_bulk_created',
+                )
+        except _CommitAbort as abort:
+            created = []
+            commit_error = {'index': abort.index, 'errors': abort.errors}
+        except IntegrityError:
+            created = []
+            commit_error = {'index': None, 'errors': {
+                '__all__': ['A site code was taken by another user between preview and confirm. '
+                            'Nothing was created — please re-upload to refresh the check.']}}
+
+        if commit_error is not None:
+            ctx.update({'stage': 'result', 'success': False, 'commit_error': commit_error})
+            return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+        # Success — recompute the running total from the DB post-commit.
+        new_total = get_program_rollup(program)['total']
+        messages.success(request, f"{len(created)} sites created under {program.name}.")
+        ctx.update({
+            'stage': 'result', 'success': True,
+            'created': created, 'created_count': len(created),
+            'new_total': new_total, 'planned': planned,
+        })
+        return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+    # GET (or unknown phase) — the initial upload screen.
+    return render(request, 'projects/opex_site_bulk_upload.html', ctx)
+
+
+@login_required
+@role_required(['Admin', 'PM'])
+def opex_site_bulk_template(request, pk):
+    """Download the .xlsx template for this Program's bulk upload: a 'Sites' sheet with
+    just the header row (what the parser reads), plus an 'Instructions' sheet holding the
+    field guide, phone-format rule, and a worked example — kept OFF the data sheet so no
+    guidance row can ever be imported as a real site."""
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    if not _can_access_program(request, program):
+        raise Http404
+
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = 'Sites'
+    ws.append([h for h, _key, _req in _BULK_COLUMNS])
+
+    info = wb.create_sheet('Instructions')
+    info.append(['OPEX Bulk Site Upload — Instructions'])
+    info.append([])
+    info.append([f'Program: {program.name}  (tender code {program.short_tender_code})'])
+    info.append(['Each site ID is composed as  <tender code>-<Site Code>.'])
+    info.append([])
+    info.append(['Fill one row per site on the "Sites" sheet. Do not rename the header row.'])
+    info.append([])
+    info.append(['Column', 'Required?', 'Notes'])
+    _notes = {
+        'site_code': 'Uppercase letters/digits (e.g. S045). Unique within this tender.',
+        'customer_contact_person': 'Site In-Charge full name.',
+        'customer_phone': '10 digits, no country code, must start with 6, 7, 8, or 9.',
+        'customer_email': 'Optional.',
+        'site_address': 'Full site address.',
+        'city': 'City.',
+        'state': 'Optional — defaults to "Uttar Pradesh" if left blank.',
+        'capacity_kw': 'Optional. Number, e.g. 150.00.',
+    }
+    for header, key, req in _BULK_COLUMNS:
+        info.append([header, 'Yes' if req else 'No', _notes.get(key, '')])
+    info.append([])
+    info.append(['Example (do NOT copy this onto the Sites sheet as-is):'])
+    info.append([h for h, _key, _req in _BULK_COLUMNS])
+    info.append(['S045', 'Ravi Kumar', '9876543210', 'ravi@example.com',
+                 '12 Grid Lane, Sector 5', 'Delhi', 'Delhi', '150.00'])
+
+    resp = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = (
+        f'attachment; filename="opex_sites_{program.short_tender_code or program.pk}.xlsx"')
+    wb.save(resp)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -3357,26 +4169,39 @@ def boq_detail(request, project_id):
       Design: save_design, submit_design, add_item, delete_item
       SCM:    save_scm, acknowledge_scm
     BOQ is auto-created for Design users if it doesn't exist yet.
-    Access: Design, SCM, PM, Admin.
+
+    Access is project-scoped, not role-scoped: read requires a relationship to THIS project
+    (or a portfolio-wide read role), and each write branch below re-checks edit authority
+    separately. The read gate deliberately does not stand in for the write gate — they are
+    different questions with different answers, so do not hoist a single check to the top.
     """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
     role    = profile.role
 
-    if role not in ('Design', 'SCM', 'PM', 'Project Coordinator', 'Admin'):
+    if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
 
-    # Get or auto-create BOQ for Design users (non-Design sees 'no BOQ yet' state)
+    # Get or auto-create BOQ for users who may author one (others see 'no BOQ yet' state)
     try:
         boq = project.boq
     except BOQ.DoesNotExist:
         boq = None
 
     if boq is None:
-        if role == 'Design':
+        # Seeding 53 catalogue rows is a WRITE, so it takes the write gate even though we
+        # are on a GET. A reader with no authorship relationship to this project must not
+        # be able to bring a BOQ into existence just by loading the page.
+        if user_can_edit_project_boq(request.user, project):
             boq = BOQ.objects.create(project=project)
+            # description is copied as a point-in-time snapshot; item_master carries the
+            # stable catalogue link that quantity aggregation across sites joins on.
+            masters = {
+                m.description: m
+                for m in BOQItemMaster.objects.filter(is_active=True)
+            }
             BOQItem.objects.bulk_create([
-                BOQItem(boq=boq, **item_data)
+                BOQItem(boq=boq, item_master=masters.get(item_data['description']), **item_data)
                 for item_data in get_standard_boq_items()
             ])
         else:
@@ -3393,7 +4218,12 @@ def boq_detail(request, project_id):
         # Design can edit in these statuses; Submitted is locked until SCM acts
         _DESIGN_EDITABLE = ('Draft', 'Revision Requested', 'Acknowledged')
 
-        if action in ('save_design', 'submit_design') and role == 'Design' and boq.status in _DESIGN_EDITABLE:
+        # Computed once for the three Design write branches below. Replaces the bare
+        # `role == 'Design'` test each of them used to carry: role alone let any Design user
+        # write the BOQ of any project in the system.
+        _can_edit = user_can_edit_project_boq(request.user, project)
+
+        if action in ('save_design', 'submit_design') and _can_edit and boq.status in _DESIGN_EDITABLE:
             boq.notes = request.POST.get('notes', '').strip() or None
             boq.save(update_fields=['notes'])
             for item in boq.items.all():
@@ -3473,7 +4303,7 @@ def boq_detail(request, project_id):
             messages.success(request, 'BOQ acknowledged.')
             return redirect('boq_detail', project_id=project_id)
 
-        elif action == 'add_item' and role == 'Design' and boq.status in _DESIGN_EDITABLE:
+        elif action == 'add_item' and _can_edit and boq.status in _DESIGN_EDITABLE:
             category    = request.POST.get('new_category', 'Other')
             description = request.POST.get('new_description', '').strip()
             uom         = request.POST.get('new_uom', 'Nos')
@@ -3487,11 +4317,15 @@ def boq_detail(request, project_id):
                 messages.success(request, 'Row added.')
             return redirect('boq_detail', project_id=project_id)
 
-        elif action == 'delete_item' and role == 'Design' and boq.status in _DESIGN_EDITABLE:
+        elif action == 'delete_item' and _can_edit and boq.status in _DESIGN_EDITABLE:
             item_id = request.POST.get('item_id', '')
-            if item_id:
-                BOQItem.objects.filter(pk=item_id, boq=boq, is_standard_item=False).delete()
-                messages.success(request, 'Row deleted.')
+            if item_id.isdigit():
+                # Object consistency: the item must belong to THIS project's BOQ. An id from
+                # another project's BOQ is a 404, not a silent no-op reported as success.
+                item = get_object_or_404(BOQItem, pk=int(item_id), boq=boq)
+                if not item.is_standard_item:     # standard rows are undeletable, as before
+                    item.delete()
+                    messages.success(request, 'Row deleted.')
             return redirect('boq_detail', project_id=project_id)
 
         return redirect('boq_detail', project_id=project_id)
@@ -3538,7 +4372,7 @@ def boq_submit(request, project_id):
     Standalone BOQ submit endpoint (also handled inline in boq_detail).
     Validates at least one item has a quantity, snapshots the BOQ, and moves
     status to Submitted. Increments version on resubmission.
-    Access: Design only. POST only.
+    Access: Design, on a project this user has a design relationship to. POST only.
     """
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
@@ -3546,9 +4380,11 @@ def boq_submit(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role != 'Design':
+    if not user_can_edit_project_boq(request.user, project):
         return HttpResponseForbidden()
 
+    # `project=project` scopes the BOQ to the project in the URL — a BOQ belonging to any
+    # other project is unreachable through this endpoint.
     boq = get_object_or_404(BOQ, project=project)
 
     if boq.status not in ('Draft', 'Revision Requested'):
@@ -3599,9 +4435,13 @@ def boq_acknowledge(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
+    # DELIBERATELY role-only, with no project relationship requirement. SCM is portfolio-wide
+    # by remit and acknowledges BOQs across every project; scoping this to a relationship
+    # would break acknowledgement system-wide. Do not "harden" this to match the Design gates.
     if profile.role != 'SCM':
         return HttpResponseForbidden()
 
+    # `project=project` scopes the BOQ to the project in the URL.
     boq = get_object_or_404(BOQ, project=project)
 
     if boq.status != 'Submitted':
@@ -3623,14 +4463,19 @@ def boq_request_revision(request, project_id):
     PM requests a revision on a Submitted or Acknowledged BOQ.
     Snapshots current state before moving to 'Revision Requested'.
     GET renders the reason form; POST processes the request.
-    Access: PM only.
+
+    Access: PM-level management authority on THIS project — the assigned PM or a Project
+    Coordinator on it. Coordinators were always in the old role tuple and that is correct;
+    user_can_manage_project() treats them as PM-equivalent, so routing through it keeps the
+    two in step. (The docstring previously said "PM only", which the role tuple never was.)
     """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role not in ('PM', 'Project Coordinator'):
+    if not user_can_manage_project(request.user, project):
         return HttpResponseForbidden()
 
+    # `project=project` scopes the BOQ to the project in the URL.
     boq = get_object_or_404(BOQ, project=project)
 
     if boq.status not in ('Submitted', 'Acknowledged'):
@@ -3675,14 +4520,15 @@ def boq_history(request, project_id):
     """
     BOQ revision timeline. Annotates each BOQRevision with event_type and badge
     styling based on the reason text. Ordered oldest-first for a readable timeline.
-    Access: PM, Design, SCM, Admin.
+    Access: same read gate as boq_detail — the history is the BOQ's own audit trail, so
+    anyone who may read the BOQ may read how it got there, and nobody else.
     """
     project = get_object_or_404(Project, project_id=project_id)
-    profile = request.user.profile
 
-    if profile.role not in ('PM', 'Project Coordinator', 'Design', 'SCM', 'Admin'):
+    if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
 
+    # `project=project` scopes the BOQ to the project in the URL.
     boq = get_object_or_404(BOQ, project=project)
     # Chronological order so the timeline reads top-to-bottom oldest-first
     raw_revisions = boq.revisions.select_related('revised_by__user').order_by('revised_at')
@@ -4613,6 +5459,26 @@ def project_overview(request, project_id):
             .order_by('-requested_date')
         )
 
+    # ── Gantt (Residential only; computed live from activated_at + duration_days) ──
+    # Internal view: every role that can see this project. Client (buffered/friendly)
+    # view: PM / Project Coordinator / CEO only — computed and passed ONLY for them so
+    # the buffered schedule is never in the DOM for other roles.
+    gantt_available     = (project.project_type == 'Residential')
+    gantt_not_activated = False
+    gantt_internal      = None
+    gantt_client        = None
+    gantt_can_view_client = role in ('PM', 'Project Coordinator', 'CEO')
+    if gantt_available:
+        ext_min = _sys.gantt_external_min_display_days
+        internal_rows = compute_gantt_schedule(project, 0, ext_min)
+        gantt_not_activated = (project.activated_at is None)
+        gantt_internal = build_gantt_view(internal_rows)
+        if gantt_can_view_client:
+            client_rows = compute_gantt_schedule(project, _sys.gantt_client_buffer_days, ext_min)
+            gantt_client = build_gantt_view(
+                client_rows, GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP,
+            )
+
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
         'milestones':                  milestones,
@@ -4643,6 +5509,11 @@ def project_overview(request, project_id):
         'payment_requests':            payment_requests,
         'user_dashboard_url':          get_user_dashboard(request.user),
         'show_cascade_option':         show_cascade_option,
+        'gantt_available':             gantt_available,
+        'gantt_not_activated':         gantt_not_activated,
+        'gantt_can_view_client':       gantt_can_view_client,
+        'gantt_internal':              gantt_internal,
+        'gantt_client':                gantt_client,
     })
 
 
@@ -6713,6 +7584,29 @@ def admin_master_switches(request):
                 entity_type='System',
                 entity_id=None,
             )
+        # Gantt integer settings — parse defensively; keep current value on bad/negative input.
+        GANTT_INT_FIELDS = {
+            'gantt_client_buffer_days':       'Client Gantt buffer (days)',
+            'gantt_external_min_display_days': 'Gantt external min bar width (days)',
+        }
+        for field, label in GANTT_INT_FIELDS.items():
+            raw = request.POST.get(field, '').strip()
+            try:
+                new_int = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if new_int < 0:
+                continue
+            old_int = getattr(settings, field)
+            if old_int != new_int:
+                setattr(settings, field, new_int)
+                log_activity(
+                    project=None,
+                    actor=actor,
+                    action=f"{label} set to {new_int}",
+                    entity_type='System',
+                    entity_id=None,
+                )
         settings.save()
         messages.success(request, 'Settings saved.')
         return redirect('admin_master_switches')
@@ -7673,6 +8567,117 @@ def admin_checklist_link_delete(request, checklist_id, link_id):
                  entity_type='Checklist', entity_id=checklist.pk)
     messages.success(request, f'Unassigned from "{task_name}" ({project_type}).')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+
+# ---------------------------------------------------------------------------
+# Admin Panel — BOQ Item Master (catalogue)
+#
+# The catalogue BOQ line items reference. Editing an entry here never touches an
+# existing BOQItem: BOQItem.description is a point-in-time snapshot taken at BOQ
+# creation, and nothing below writes to BOQItem.
+#
+# Deactivate, never delete — BOQItem.item_master is SET_NULL, so deleting a row
+# would silently drop rows out of cross-site quantity aggregation. Hence no delete
+# view exists.
+# ---------------------------------------------------------------------------
+
+@login_required
+@role_required(['Admin'])
+def admin_boq_items(request):
+    """List all BOQItemMaster entries in template order, with an optional active filter
+    and the count of BOQ rows linked to each. Access: Admin only."""
+    items = BOQItemMaster.objects.annotate(linked_count=Count('boq_items'))
+
+    active_filter = request.GET.get('active', '')
+    if active_filter == '1':
+        items = items.filter(is_active=True)
+    elif active_filter == '0':
+        items = items.filter(is_active=False)
+
+    return render(request, 'projects/admin/boq_items.html', {
+        'items':         items,
+        'active_filter': active_filter,
+        'active_count':  BOQItemMaster.objects.filter(is_active=True).count(),
+        'total_count':   BOQItemMaster.objects.count(),
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_boq_item_create(request):
+    """Add one catalogue entry. Access: Admin only."""
+    if request.method == 'POST':
+        form = BOQItemMasterForm(request.POST)
+        if form.is_valid():
+            item = form.save()
+            log_activity(None, request.user.profile,
+                         f"Created BOQ catalogue item '{item.code} — {item.description}'",
+                         entity_type='BOQItemMaster', entity_id=item.pk)
+            messages.success(request, f'Catalogue item "{item.code}" added.')
+            return redirect('admin_boq_items')
+    else:
+        # Suggest the next slot at the end of the template rather than 0
+        next_order = (BOQItemMaster.objects.aggregate(m=Max('sort_order'))['m'] or 0) + 1
+        form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True})
+
+    return render(request, 'projects/admin/boq_item_form.html', {
+        'form':  form,
+        'title': 'Add BOQ Catalogue Item',
+        'item':  None,
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_boq_item_edit(request, item_id):
+    """Edit one catalogue entry. `code` is create-only and is removed from the form here
+    — reassigning it would break the identifier existing BOQ rows were grouped under.
+    Existing BOQItem rows are never modified. Access: Admin only."""
+    item = get_object_or_404(BOQItemMaster, pk=item_id)
+
+    if request.method == 'POST':
+        form = BOQItemMasterForm(request.POST, instance=item)
+        del form.fields['code']
+        if form.is_valid():
+            form.save()
+            log_activity(None, request.user.profile,
+                         f"Updated BOQ catalogue item '{item.code}' "
+                         f"(active={item.is_active})",
+                         entity_type='BOQItemMaster', entity_id=item.pk)
+            messages.success(request, f'Catalogue item "{item.code}" saved.')
+            return redirect('admin_boq_items')
+    else:
+        form = BOQItemMasterForm(instance=item)
+        del form.fields['code']
+
+    return render(request, 'projects/admin/boq_item_form.html', {
+        'form':         form,
+        'title':        f'Edit BOQ Catalogue Item — {item.code}',
+        'item':         item,
+        'linked_count': item.boq_items.count(),
+    })
+
+
+@login_required
+@role_required(['Admin'])
+def admin_boq_item_toggle(request, item_id):
+    """Deactivate / reactivate one catalogue entry. Deactivated entries drop out of
+    get_standard_boq_items(), so new BOQs stop including them; BOQ rows already created
+    from the entry keep their description, quantity and item_master link untouched.
+    Access: Admin only. POST only."""
+    if request.method != 'POST':
+        return redirect('admin_boq_items')
+
+    item = get_object_or_404(BOQItemMaster, pk=item_id)
+    item.is_active = not item.is_active
+    item.save(update_fields=['is_active', 'updated_at'])
+
+    state = 'activated' if item.is_active else 'deactivated'
+    log_activity(None, request.user.profile,
+                 f"{state.capitalize()} BOQ catalogue item '{item.code}'",
+                 entity_type='BOQItemMaster', entity_id=item.pk)
+    messages.success(request, f'Catalogue item "{item.code}" {state}.')
+    return redirect('admin_boq_items')
 
 
 # ---------------------------------------------------------------------------

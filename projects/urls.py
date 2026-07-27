@@ -9,6 +9,10 @@ urlpatterns = [
     path('login/',  views.login_view,  name='login'),
     path('logout/', views.logout_view, name='logout'),
 
+    # Context chooser (EPC Residential / Tenders) — CEO, Finance and SCM land
+    # here after login. Display filter only; grants no access of any kind.
+    path('landing/', views.landing, name='landing'),
+
     # ---------------------------------------------------------------------------
     # Dashboards — each restricted to its own role via @role_required
     # ---------------------------------------------------------------------------
@@ -27,6 +31,18 @@ urlpatterns = [
     path('users/',                    views.user_list,   name='user_list'),
     path('users/create/',             views.user_create, name='user_create'),
     path('users/<int:user_id>/edit/', views.user_edit,   name='user_edit'),
+
+    # ---------------------------------------------------------------------------
+    # Programs — OPEX tender / multi-site CAPEX contract parent (Admin, PM, CEO)
+    # ---------------------------------------------------------------------------
+    path('programs/',                 views.program_list,   name='program_list'),
+    path('programs/create/',          views.program_create, name='program_create'),   # Admin/PM
+    path('programs/<int:pk>/',        views.program_detail, name='program_detail'),
+    path('programs/<int:pk>/edit/',   views.program_edit,   name='program_edit'),      # Admin/PM
+    path('programs/<int:pk>/delete/', views.program_delete, name='program_delete'),    # Admin only, POST only
+    path('programs/<int:pk>/sites/add/', views.opex_site_create, name='opex_site_create'),  # Admin/PM — OPEX programs only
+    path("programs/<int:pk>/sites/bulk/", views.opex_site_bulk_upload, name='opex_site_bulk_upload'),
+    path("programs/<int:pk>/sites/bulk/template/", views.opex_site_bulk_template, name='opex_site_bulk_template'),
 
     # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO
@@ -200,6 +216,13 @@ urlpatterns = [
     path('portal-admin/checklists/<int:checklist_id>/items/<int:item_id>/move/',     views.admin_checklist_item_move,   name='admin_checklist_item_move'),
     path('portal-admin/checklists/<int:checklist_id>/links/add/',                    views.admin_checklist_link_add,    name='admin_checklist_link_add'),
     path('portal-admin/checklists/<int:checklist_id>/links/<int:link_id>/delete/',   views.admin_checklist_link_delete, name='admin_checklist_link_delete'),
+
+    # BOQ Item Master — catalogue BOQ line items reference. Deactivate only, no delete. Admin only.
+    path('portal-admin/boq-items/',                        views.admin_boq_items,       name='admin_boq_items'),
+    path('portal-admin/boq-items/add/',                    views.admin_boq_item_create, name='admin_boq_item_create'),
+    path('portal-admin/boq-items/<int:item_id>/edit/',     views.admin_boq_item_edit,   name='admin_boq_item_edit'),
+    path('portal-admin/boq-items/<int:item_id>/toggle/',   views.admin_boq_item_toggle, name='admin_boq_item_toggle'),
+
     # Redirect old activity-log URL to the new audit-log screen
     path('portal/activity-log/',
          RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),

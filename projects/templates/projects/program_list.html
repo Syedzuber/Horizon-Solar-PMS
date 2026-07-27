@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Programs — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h4 class="mb-0">Programs</h4>
+  {% if can_create %}
+    <a href="{% url 'program_create' %}" class="btn btn-primary btn-sm">+ New Program</a>
+  {% endif %}
+</div>
+
+{% if programs %}
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Program</th>
+          <th>Type</th>
+          <th>Client</th>
+          <th>Status</th>
+          <th class="text-center">Sites</th>
+          <th>Stage breakdown</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in programs %}
+        <tr>
+          <td>
+            <a href="{% url 'program_detail' pk=p.pk %}" class="fw-semibold text-decoration-none">{{ p.name }}</a>
+            {% if p.reference_display and p.reference_display != p.name %}
+              <div class="text-muted small">{{ p.reference_display }}</div>
+            {% endif %}
+          </td>
+          <td><span class="badge bg-secondary">{{ p.program_type }}</span></td>
+          <td>{{ p.client_name }}</td>
+          <td>{{ p.status }}</td>
+          <td class="text-center">
+            <span class="fw-semibold">{{ p.site_total }}</span>
+            {% if p.planned_site_count %}<span class="text-muted small"> / {{ p.planned_site_count }}</span>{% endif %}
+          </td>
+          <td>
+            {% for status, count in p.rollup_badges %}
+              <span class="badge bg-light text-dark border me-1">{{ status }}: {{ count }}</span>
+            {% empty %}
+              <span class="text-muted small">—</span>
+            {% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="card shadow-sm">
+  <div class="card-body text-center text-muted py-5">
+    No programs yet.
+    {% if can_create %}<a href="{% url 'program_create' %}">Create the first one.</a>{% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -48,6 +48,11 @@
     <span class="navbar-brand mb-0">Horizon Solar — PMS</span>
   </div>
   <div class="d-flex align-items-center gap-3">
+    {% if user.profile.role == 'Admin' or user.profile.role == 'PM' or user.profile.role == 'CEO' %}
+      <a href="{% url 'program_list' %}" class="nav-link text-white small" title="Programs">
+        <i class="bi bi-diagram-3 me-1"></i>Programs
+      </a>
+    {% endif %}
     <div class="position-relative" id="user-hover-menu">
       <span class="text-white-50 small" style="cursor:default;">
         {{ user.get_full_name|default:user.username }}
@@ -74,6 +79,44 @@
     <a href="{% url 'logout' %}" class="btn btn-sm btn-outline-light">Logout</a>
   </div>
 </nav>
+{% endif %}
+
+{% comment %}
+── Context switcher ──────────────────────────────────────────────────────
+Only the CEO, Finance and SCM dashboards put `context_nav` in their template
+context (via views._context_nav), so this strip appears nowhere else. It sits
+in the page header, one tap from either context or from the chooser. Display
+filter only — it changes what is listed, never what may be opened.
+Bootstrap classes here because base.html is a Bootstrap document; the landing
+screen itself is standalone Tailwind, matching registration/login.html.
+Multi-line comments MUST use {% comment %}; Django's {# #} is single-line only
+and otherwise renders straight onto the page.
+{% endcomment %}
+{% if context_nav %}
+<div class="border-bottom bg-white">
+  <div class="container py-2 d-flex flex-wrap align-items-center gap-2">
+    <a href="{% url 'landing' %}"
+       class="text-decoration-none small fw-semibold d-inline-flex align-items-center"
+       style="color:#1a7a4a; min-height:36px;">
+      <i class="bi bi-grid-1x2 me-1"></i>All views
+    </a>
+
+    <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Project context">
+      <a href="{{ context_nav.residential_url }}"
+         class="btn {% if context_nav.current == 'residential' %}text-white{% else %}btn-outline-secondary{% endif %}"
+         style="min-height:36px; {% if context_nav.current == 'residential' %}background-color:#1a7a4a; border-color:#1a7a4a;{% endif %}"
+         {% if context_nav.current == 'residential' %}aria-current="page"{% endif %}>
+        EPC Residential
+      </a>
+      <a href="{{ context_nav.tenders_url }}"
+         class="btn {% if context_nav.current == 'tenders' %}text-white{% else %}btn-outline-secondary{% endif %}"
+         style="min-height:36px; {% if context_nav.current == 'tenders' %}background-color:#1a7a4a; border-color:#1a7a4a;{% endif %}"
+         {% if context_nav.current == 'tenders' %}aria-current="page"{% endif %}>
+        Tenders
+      </a>
+    </div>
+  </div>
+</div>
 {% endif %}
 
 <div class="container mt-4">

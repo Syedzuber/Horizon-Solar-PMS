@@ -24,20 +24,59 @@ ROLE_DASHBOARD = {
 }
 
 
-def get_user_dashboard(user):
+# Roles that see the two-context landing screen (EPC Residential / Tenders)
+# after login instead of dropping straight onto their dashboard. These are the
+# only three roles whose dashboards commingle Residential projects with OPEX /
+# CAPEX tender sites, so they are the only ones that need to pick a context.
+# This is a display concern only — it grants and removes no access.
+LANDING_ROLES = ('CEO', 'Finance', 'SCM')
+
+LANDING_URL = '/landing/'
+
+
+def get_user_dashboard(user, context=None):
     """
     Return the correct dashboard URL for the given user based on their role.
     Falls back to /dashboard/admin/ if the user has no UserProfile — prevents
     a crash for superusers created via manage.py createsuperuser.
+
+    context: optional 'residential' | 'tenders'. When supplied for a LANDING_ROLES
+    user, the context is appended as a query param so the dashboard filters itself.
+    When omitted (the default) the return value is byte-identical to before —
+    every existing caller keeps its current behaviour.
     """
     try:
         role = user.profile.role
-        return ROLE_DASHBOARD.get(role, '/dashboard/admin/')
+        url = ROLE_DASHBOARD.get(role, '/dashboard/admin/')
     except Exception:
         # TODO: role decorator assumes UserProfile exists — crashes for
         # admin-created users without a profile. Fix before scaling.
         logger.warning("No UserProfile found for user %s — falling back to admin dashboard", user.username)
         return '/dashboard/admin/'
+
+    if context and role in LANDING_ROLES:
+        return f'{url}?context={context}'
+    return url
+
+
+def get_post_login_url(user):
+    """
+    Where to send a user immediately after authenticating.
+
+    CEO / Finance / SCM land on the context chooser; every other role keeps the
+    exact previous behaviour (straight to their role dashboard). Used only by
+    login_view — role_required's denial redirect deliberately still uses
+    get_user_dashboard() so a wrong-role bounce is unchanged.
+    """
+    try:
+        role = user.profile.role
+    except Exception:
+        logger.warning("No UserProfile found for user %s — falling back to admin dashboard", user.username)
+        return '/dashboard/admin/'
+
+    if role in LANDING_ROLES:
+        return LANDING_URL
+    return get_user_dashboard(user)
 
 
 def login_required(view_func):

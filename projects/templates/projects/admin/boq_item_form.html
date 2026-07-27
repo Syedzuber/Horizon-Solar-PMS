@@ -1,0 +1,70 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}{{ title }}{% endblock %}
+
+{% block nav_boq_items %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <a href="{% url 'admin_boq_items' %}" class="text-sm text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i> Back to BOQ Item Master
+  </a>
+  <h1 class="text-xl font-semibold text-gray-900 mt-2">{{ title }}</h1>
+  {% if item %}
+    <p class="text-sm text-gray-500 mt-1">
+      Code <span class="font-mono text-xs text-gray-700">{{ item.code }}</span> is fixed after creation.
+      {{ linked_count }} existing BOQ row{{ linked_count|pluralize }} link{{ linked_count|pluralize:"s," }} to this entry —
+      saving here does not change any of them.
+    </p>
+  {% endif %}
+</div>
+
+<form method="POST" class="bg-white border border-gray-200 rounded-lg p-6 max-w-2xl">
+  {% csrf_token %}
+
+  {% if form.non_field_errors %}
+    <div class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200">
+      {{ form.non_field_errors }}
+    </div>
+  {% endif %}
+
+  {% for field in form %}
+    <div class="mb-5">
+      <label for="{{ field.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+        {{ field.label }}{% if field.field.required %} <span class="text-red-500">*</span>{% endif %}
+      </label>
+      {{ field }}
+      {% if field.help_text %}
+        <p class="text-xs text-gray-500 mt-1">{{ field.help_text }}</p>
+      {% endif %}
+      {% for error in field.errors %}
+        <p class="text-xs text-red-600 mt-1">{{ error }}</p>
+      {% endfor %}
+    </div>
+  {% endfor %}
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
+            style="background:#1a7a4a;"
+            onmouseover="this.style.background='#155f3a'" onmouseout="this.style.background='#1a7a4a'">
+      <i data-lucide="save" class="w-4 h-4"></i> Save
+    </button>
+    <a href="{% url 'admin_boq_items' %}" class="text-sm text-gray-500 hover:text-gray-800">Cancel</a>
+  </div>
+</form>
+
+<style>
+  /* Match the plain-Tailwind admin screens — the form uses Bootstrap-ish class names
+     inherited from the shared ModelForm widget defaults. */
+  .form-control {
+    width: 100%;
+    border: 1px solid #d1d5db;
+    border-radius: 0.25rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+  }
+  .form-control:focus { outline: none; border-color: #1a7a4a; box-shadow: 0 0 0 2px rgba(26,122,74,0.2); }
+  .form-check-input { width: 1rem; height: 1rem; }
+</style>
+{% endblock %}
