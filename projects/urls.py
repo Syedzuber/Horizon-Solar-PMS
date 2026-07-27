@@ -1,6 +1,7 @@
 from django.urls import path
 from django.views.generic import RedirectView
 from . import views
+from . import design_views   # OPEX design workflow (Part 2) — separate module, no existing view changed
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -43,6 +44,23 @@ urlpatterns = [
     path('programs/<int:pk>/sites/add/', views.opex_site_create, name='opex_site_create'),  # Admin/PM — OPEX programs only
     path("programs/<int:pk>/sites/bulk/", views.opex_site_bulk_upload, name='opex_site_bulk_upload'),
     path("programs/<int:pk>/sites/bulk/template/", views.opex_site_bulk_template, name='opex_site_bulk_template'),
+
+    # ---------------------------------------------------------------------------
+    # OPEX design workflow (Part 2) — survey, allocation, due-date handshake.
+    # Design Head authority is UserProfile.is_design_head, not the role string.
+    # All POST-only except the two screens and the signed-URL redirect.
+    # ---------------------------------------------------------------------------
+    path('programs/<int:pk>/design/',        design_views.design_head_sites,   name='design_head_sites'),
+    path('programs/<int:pk>/design/allocate/', design_views.design_bulk_allocate, name='design_bulk_allocate'),
+    path('design/my-sites/',                 design_views.design_my_sites,     name='design_my_sites'),
+    path('design/<str:project_id>/survey/upload/',   design_views.design_survey_upload,   name='design_survey_upload'),
+    path('design/<str:project_id>/survey/',          design_views.design_survey_download, name='design_survey_download'),
+    path('design/<str:project_id>/allocate/',        design_views.design_allocate,        name='design_allocate'),
+    path('design/<str:project_id>/due-date/propose/', design_views.design_due_date_propose, name='design_due_date_propose'),
+    path('design/<str:project_id>/due-date/approve/', design_views.design_due_date_approve, name='design_due_date_approve'),
+    path('design/<str:project_id>/due-date/reject/',  design_views.design_due_date_reject,  name='design_due_date_reject'),
+    path('design/<str:project_id>/due-date/change/',  design_views.design_due_date_change,  name='design_due_date_change'),
+    path('design/<str:project_id>/blocked/',          design_views.design_mark_blocked,     name='design_mark_blocked'),
 
     # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO

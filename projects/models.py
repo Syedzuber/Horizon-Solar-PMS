@@ -1594,9 +1594,22 @@ DESIGN_IN_QC               = 'in_qc'
 DESIGN_QC_FAILED           = 'qc_failed'
 DESIGN_RELEASED            = 'released'
 
+# Order below is the LINEAR workflow order, corrected in Part 2. The Design Head
+# receives the survey when a tender starts, uploads it, and only then allocates the
+# site — so allocation follows survey upload rather than preceding it:
+#
+#   awaiting_survey -> awaiting_allocation -> allocated -> due_date_proposed -> in_design
+#
+# `survey_returned` is NOT part of that line any more. It is repurposed as an
+# off-sequence BLOCKED FLAG: the assigned designer marks the site blocked on an
+# inadequate survey, which stops their clock and surfaces to the Head. It is listed
+# last for that reason. (A designer cannot "return" a survey to the Head who both
+# supplied it and approves the work — there is no independent party to return it to.)
+#
+# Values are UNCHANGED — this is ordering and labelling only, so the migration is an
+# AlterField on choices with no data operation.
 DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_AWAITING_SURVEY,     'Awaiting survey'),
-    (DESIGN_SURVEY_RETURNED,     'Survey returned'),
     (DESIGN_AWAITING_ALLOCATION, 'Awaiting allocation'),
     (DESIGN_ALLOCATED,           'Allocated'),
     (DESIGN_DUE_DATE_PROPOSED,   'Due date proposed'),
@@ -1607,6 +1620,7 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_IN_QC,               'In QC'),
     (DESIGN_QC_FAILED,           'QC failed'),
     (DESIGN_RELEASED,            'Released'),
+    (DESIGN_SURVEY_RETURNED,     'Blocked — survey inadequate'),
 ]
 
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and

@@ -297,6 +297,58 @@ def user_can_manage_program(user, program):
     return False
 
 
+# ---------------------------------------------------------------------------
+# OPEX design module (Part 2)
+#
+# Same rule as the rest of this file: no view compares a role string or an ownership
+# field inline. Every design-workflow authority question is answered here.
+#
+# DESIGN HEAD AUTHORITY IS THE `is_design_head` BOOLEAN, NOT THE ROLE STRING.
+# Part 1 added 'Design Head' to ROLE_CHOICES, but no user holds it and 56 existing
+# @role_required decorators still match 'Design' literally — switching now would lock
+# the real Design Head out of every screen he already uses. Part 4 migrates this
+# properly. Until then the flag is the single source of truth, and the role string is
+# deliberately NOT consulted anywhere in this section.
+#
+# `design_head_deputy` exists on UserProfile from Part 1 and is deliberately NOT read
+# here — acting-for-the-Head is Part 4.
+# ---------------------------------------------------------------------------
+
+def user_is_design_head(user):
+    """Return True if `user` holds Design Head authority.
+
+    Reads UserProfile.is_design_head only. Returns False rather than raising for a user
+    with no profile, matching the guard style of the helpers above."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return bool(profile.is_design_head)
+
+
+def user_is_assigned_designer(user, assignment):
+    """Return True if `user` is the designer this assignment is allocated to.
+
+    Deliberately strict: it is an identity check against `assignment.assigned_to` and
+    nothing else. The Design Head does NOT satisfy it — proposing a due date is the
+    designer's act, and the Head approving his own proposal would collapse the
+    two-sided handshake into one side."""
+    if assignment is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return assignment.assigned_to_id == profile.pk
+
+
+def user_can_view_design(user, project):
+    """Return True if `user` may SEE the design workflow (including a signed survey
+    link) for `project`.
+
+    Routed straight through the existing user_can_view_project() so design visibility
+    can never drift from project visibility — deliberately NOT re-derived here."""
+    return user_can_view_project(user, project)
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:

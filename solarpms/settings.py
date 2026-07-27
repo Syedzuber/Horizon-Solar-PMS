@@ -25,6 +25,10 @@ ZOHO_WEBHOOK_SECRET = config('ZOHO_WEBHOOK_SECRET', default='')
 SUPABASE_URL    = config('SUPABASE_URL', default='')
 SUPABASE_KEY    = config('SUPABASE_KEY', default='')
 SUPABASE_BUCKET = config('SUPABASE_BUCKET', default='solarpms-files')  # Bucket for all project/task files
+# Separate PRIVATE bucket for OPEX design artifacts (surveys, and CAD/BOQ from Part 3).
+# Objects here are reachable only via a short-lived signed URL minted per request; no URL
+# is ever stored. SUPABASE_BUCKET above stays public and is untouched.
+SUPABASE_DESIGN_BUCKET = config('SUPABASE_DESIGN_BUCKET', default='Horizon-PMS-Design')
 
 # How long (days) to keep soft-deleted files before purge_deleted_files hard-deletes them
 FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)

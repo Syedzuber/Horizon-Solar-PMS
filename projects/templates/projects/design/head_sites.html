@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head — site list for one OPEX tender.
+
+Bootstrap, extending base.html, because that is what every comparable user-facing screen
+does (program_list, program_detail, opex_site_form). Tailwind + Alpine are loaded ONLY by
+projects/admin/admin_base.html, which is the portal-admin chrome and wrong for this
+screen; using Tailwind here would mean adding a CDN to base.html, which is out of scope.
+
+Functional workflow screen only — not the Design Head dashboard. Metrics, workload and
+capacity are Part 5.
+{% endcomment %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <div>
+    <h5 class="mb-0">Design — {{ program.name }}</h5>
+    <div class="text-muted small">{{ program.client_name }} · {{ program.short_tender_code }}</div>
+  </div>
+  <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>Tender
+  </a>
+</div>
+
+{# ── Bulk allocation: one designer, many sites, one transaction ──────────── #}
+<form method="post" action="{% url 'design_bulk_allocate' pk=program.pk %}">
+  {% csrf_token %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+      <span class="small fw-semibold">Bulk allocate selected:</span>
+      <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;">
+        <option value="">Choose a designer…</option>
+        {% for d in designers %}
+          <option value="{{ d.pk }}">{{ d.user.get_full_name|default:d.user.username }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-sm btn-success">Allocate selected</button>
+      <span class="text-muted small ms-auto">
+        All-or-nothing — if any selected site fails, none are allocated.
+      </span>
+    </div>
+  </div>
+
+  <div class="card shadow-sm">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th style="width:2.5rem;"></th>
+            <th>Site</th>
+            <th>Status</th>
+            <th>Designer</th>
+            <th>Due date</th>
+            <th>Survey</th>
+            <th class="text-end">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in rows %}
+          <tr {% if row.is_blocked %}class="table-warning"{% endif %}>
+            <td>
+              {% if row.allocatable %}
+                <input type="checkbox" class="form-check-input" name="site_ids"
+                       value="{{ row.site.project_id }}">
+              {% endif %}
+            </td>
+            <td>
+              <div class="fw-semibold small">{{ row.site.project_id }}</div>
+              <div class="text-muted" style="font-size:.75rem;">{{ row.site.city }}</div>
+            </td>
+            <td>
+              <span class="badge {% if row.is_blocked %}bg-warning text-dark{% else %}bg-secondary{% endif %}">
+                {% if row.assignment %}{{ row.assignment.get_status_display }}{% else %}Awaiting survey{% endif %}
+              </span>
+              {% if row.is_blocked %}
+                <div class="small text-dark mt-1">
+                  <i class="bi bi-exclamation-triangle me-1"></i>{{ row.assignment.survey_return_reason }}
+                  <div class="text-muted" style="font-size:.7rem;">
+                    flagged {{ row.assignment.survey_returned_at|date:"d M Y H:i" }}
+                    by {{ row.assignment.survey_returned_by.user.get_full_name }}
+                  </div>
+                </div>
+              {% endif %}
+            </td>
+            <td class="small">
+              {% if row.assignment.assigned_to %}
+                {{ row.assignment.assigned_to.user.get_full_name|default:row.assignment.assigned_to.user.username }}
+              {% else %}<span class="text-muted">—</span>{% endif %}
+            </td>
+            <td class="small">
+              {% if row.current_due %}
+                {{ row.current_due.proposed_date|date:"d M Y" }}
+                {% if row.current_due.approved_at %}
+                  <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
+                {% else %}
+                  <span class="badge bg-info-subtle text-info-emphasis">proposed</span>
+                {% endif %}
+                {% if row.revisions %}
+                  <div class="text-muted" style="font-size:.7rem;">{{ row.revisions }} revision(s)</div>
+                {% endif %}
+              {% else %}<span class="text-muted">—</span>{% endif %}
+            </td>
+            <td class="small">
+              {% if row.has_survey %}
+                <a href="{% url 'design_survey_download' project_id=row.site.project_id %}"
+                   target="_blank" rel="noopener">View</a>
+              {% else %}<span class="text-muted">none</span>{% endif %}
+            </td>
+            <td class="text-end" style="min-width:19rem;">
+
+              {# Upload / replace survey #}
+              <div class="d-inline-block">
+                <button class="btn btn-sm btn-outline-secondary" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#up{{ row.site.pk }}">
+                  {% if row.has_survey %}Replace survey{% else %}Upload survey{% endif %}
+                </button>
+              </div>
+
+              {# Allocate one #}
+              {% if row.allocatable %}
+                <button class="btn btn-sm btn-outline-primary" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#al{{ row.site.pk }}">Allocate</button>
+              {% endif %}
+
+              {# Approve / reject a proposed date #}
+              {% if row.assignment.status == 'due_date_proposed' %}
+                <button class="btn btn-sm btn-success" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#ap{{ row.site.pk }}">Due date</button>
+              {% endif %}
+
+              {# Change an agreed date #}
+              {% if row.assignment.status == 'in_design' %}
+                <button class="btn btn-sm btn-outline-warning" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#ch{{ row.site.pk }}">Change date</button>
+              {% endif %}
+            </td>
+          </tr>
+
+          {# ── inline action panels (collapse, one row each) ───────────────── #}
+          <tr class="collapse" id="up{{ row.site.pk }}">
+            <td colspan="7" class="bg-light">
+              <form method="post" enctype="multipart/form-data"
+                    action="{% url 'design_survey_upload' project_id=row.site.project_id %}"
+                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                {% csrf_token %}
+                <input type="file" name="survey_file" class="form-control form-control-sm"
+                       style="max-width:22rem;" required>
+                <button class="btn btn-sm btn-primary">Upload</button>
+                <span class="text-muted small">
+                  Private bucket. Max 25 MB. pdf, doc(x), xls(x), jpg, png, dwg, zip.
+                  {% if row.is_blocked %}Uploading a replacement clears the blocked flag.{% endif %}
+                </span>
+              </form>
+            </td>
+          </tr>
+
+          {% if row.allocatable %}
+          <tr class="collapse" id="al{{ row.site.pk }}">
+            <td colspan="7" class="bg-light">
+              <form method="post" action="{% url 'design_allocate' project_id=row.site.project_id %}"
+                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                {% csrf_token %}
+                <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;" required>
+                  <option value="">Choose a designer…</option>
+                  {% for d in designers %}
+                    <option value="{{ d.pk }}"
+                      {% if row.assignment.assigned_to_id == d.pk %}selected{% endif %}>
+                      {{ d.user.get_full_name|default:d.user.username }}
+                    </option>
+                  {% endfor %}
+                </select>
+                <button class="btn btn-sm btn-primary">Allocate</button>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+
+          {% if row.assignment.status == 'due_date_proposed' %}
+          <tr class="collapse" id="ap{{ row.site.pk }}">
+            <td colspan="7" class="bg-light">
+              <div class="d-flex flex-wrap align-items-center gap-3 py-2">
+                <span class="small">
+                  Proposed <strong>{{ row.current_due.proposed_date|date:"d M Y" }}</strong>
+                  by {{ row.current_due.proposed_by.user.get_full_name }}
+                  {% if row.current_due.change_reason %}
+                    <span class="text-muted">— {{ row.current_due.change_reason }}</span>
+                  {% endif %}
+                </span>
+                <form method="post" action="{% url 'design_due_date_approve' project_id=row.site.project_id %}">
+                  {% csrf_token %}
+                  <button class="btn btn-sm btn-success">Approve</button>
+                </form>
+                <form method="post" action="{% url 'design_due_date_reject' project_id=row.site.project_id %}"
+                      class="d-flex align-items-center gap-2">
+                  {% csrf_token %}
+                  <input type="text" name="reason" class="form-control form-control-sm"
+                         placeholder="Reason (optional)" style="max-width:18rem;">
+                  <button class="btn btn-sm btn-outline-danger">Reject</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endif %}
+
+          {% if row.assignment.status == 'in_design' %}
+          <tr class="collapse" id="ch{{ row.site.pk }}">
+            <td colspan="7" class="bg-light">
+              <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
+                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                {% csrf_token %}
+                <input type="date" name="proposed_date" class="form-control form-control-sm"
+                       style="max-width:12rem;" required>
+                <input type="text" name="change_reason" class="form-control form-control-sm"
+                       placeholder="Reason for the change (required)" style="max-width:22rem;" required>
+                <button class="btn btn-sm btn-warning">Propose new date</button>
+                <span class="text-muted small">Creates a new commitment; the old one is superseded.</span>
+              </form>
+            </td>
+          </tr>
+          {% endif %}
+
+        {% empty %}
+          <tr><td colspan="7" class="text-center text-muted py-4 small">
+            This tender has no sites yet.
+          </td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</form>
+
+{% endblock %}

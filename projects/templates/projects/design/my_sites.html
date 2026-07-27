@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% comment %}
+Designer — my allocated sites.
+
+Bootstrap extending base.html, matching every sibling user-facing screen; see the note in
+head_sites.html for why not Tailwind. Functional workflow screen, not a dashboard.
+{% endcomment %}
+{% block content %}
+
+<h5 class="mb-3">My design sites</h5>
+
+{% if not rows %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center text-muted small py-4">
+      No sites are allocated to you yet.
+    </div>
+  </div>
+{% endif %}
+
+{% for row in rows %}
+<div class="card shadow-sm mb-2 {% if row.is_blocked %}border-warning{% endif %}">
+  <div class="card-body py-3">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+      <div>
+        <div class="fw-semibold">{{ row.site.project_id }}</div>
+        <div class="text-muted small">
+          {{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}
+        </div>
+      </div>
+      <div class="text-end">
+        <span class="badge {% if row.is_blocked %}bg-warning text-dark{% else %}bg-secondary{% endif %}">
+          {{ row.assignment.get_status_display }}
+        </span>
+        {% if row.current_due %}
+          <div class="small mt-1">
+            Due {{ row.current_due.proposed_date|date:"d M Y" }}
+            {% if row.current_due.approved_at %}
+              <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
+            {% else %}
+              <span class="badge bg-info-subtle text-info-emphasis">awaiting approval</span>
+            {% endif %}
+          </div>
+          {% if row.revisions %}
+            <div class="text-muted" style="font-size:.7rem;">{{ row.revisions }} revision(s)</div>
+          {% endif %}
+        {% endif %}
+      </div>
+    </div>
+
+    {% if row.is_blocked %}
+      <div class="alert alert-warning py-2 my-2 small">
+        <i class="bi bi-exclamation-triangle me-1"></i>
+        You flagged this site as blocked on {{ row.assignment.survey_returned_at|date:"d M Y H:i" }} —
+        {{ row.assignment.survey_return_reason }}
+        <div class="text-muted mt-1">
+          Your clock is stopped until the Design Head uploads a replacement survey.
+        </div>
+      </div>
+    {% endif %}
+
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      {% if row.assignment.survey_file_path %}
+        <a class="btn btn-sm btn-outline-secondary"
+           href="{% url 'design_survey_download' project_id=row.site.project_id %}"
+           target="_blank" rel="noopener">
+          <i class="bi bi-file-earmark-text me-1"></i>View survey
+        </a>
+      {% endif %}
+
+      {% if row.can_propose %}
+        <button class="btn btn-sm btn-primary" type="button"
+                data-bs-toggle="collapse" data-bs-target="#prop{{ row.site.pk }}">
+          Propose due date
+        </button>
+      {% endif %}
+
+      {% if row.assignment.status == 'in_design' %}
+        <button class="btn btn-sm btn-outline-warning" type="button"
+                data-bs-toggle="collapse" data-bs-target="#chg{{ row.site.pk }}">
+          Change agreed date
+        </button>
+      {% endif %}
+
+      {% if not row.is_blocked %}
+        <button class="btn btn-sm btn-outline-danger" type="button"
+                data-bs-toggle="collapse" data-bs-target="#blk{{ row.site.pk }}">
+          Mark blocked
+        </button>
+      {% endif %}
+
+      {% if row.awaiting %}
+        <span class="align-self-center text-muted small">
+          Waiting for the Design Head to approve your proposed date.
+        </span>
+      {% endif %}
+    </div>
+
+    {% if row.can_propose %}
+    <div class="collapse mt-2" id="prop{{ row.site.pk }}">
+      <form method="post" action="{% url 'design_due_date_propose' project_id=row.site.project_id %}"
+            class="d-flex flex-wrap align-items-center gap-2">
+        {% csrf_token %}
+        <input type="date" name="proposed_date" class="form-control form-control-sm"
+               style="max-width:12rem;" required>
+        <button class="btn btn-sm btn-primary">Propose</button>
+        <span class="text-muted small">The Design Head must approve before design starts.</span>
+      </form>
+    </div>
+    {% endif %}
+
+    {% if row.assignment.status == 'in_design' %}
+    <div class="collapse mt-2" id="chg{{ row.site.pk }}">
+      <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
+            class="d-flex flex-wrap align-items-center gap-2">
+        {% csrf_token %}
+        <input type="date" name="proposed_date" class="form-control form-control-sm"
+               style="max-width:12rem;" required>
+        <input type="text" name="change_reason" class="form-control form-control-sm"
+               placeholder="Reason for the change (required)" style="max-width:22rem;" required>
+        <button class="btn btn-sm btn-warning">Propose new date</button>
+      </form>
+    </div>
+    {% endif %}
+
+    {% if not row.is_blocked %}
+    <div class="collapse mt-2" id="blk{{ row.site.pk }}">
+      <form method="post" action="{% url 'design_mark_blocked' project_id=row.site.project_id %}"
+            class="d-flex flex-wrap align-items-center gap-2">
+        {% csrf_token %}
+        <input type="text" name="reason" class="form-control form-control-sm"
+               placeholder="What is inadequate about the survey? (required)"
+               style="max-width:28rem;" required>
+        <button class="btn btn-sm btn-outline-danger">Mark blocked</button>
+        <span class="text-muted small">Stops your clock and notifies the Head on his screen.</span>
+      </form>
+    </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}

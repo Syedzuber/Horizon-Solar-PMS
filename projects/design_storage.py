@@ -1,0 +1,161 @@
+"""
+Private-bucket storage for OPEX design artifacts (surveys now; CAD/BOQ from Part 3).
+
+WHY A SECOND MODULE RATHER THAN EXTENDING supabase_storage.py
+-------------------------------------------------------------
+The existing bucket is PUBLIC and its four call sites build long-lived public URLs by
+string concatenation and store them in the database. That bucket, its helper and those
+call sites are deliberately untouched here — this module is the correct-by-construction
+replacement used by new code only.
+
+Two rules this module enforces that the old path does not:
+
+  1. NO URL IS EVER STORED. `upload_design_file()` returns (bucket, path) and nothing
+     else. Callers persist those two strings; a URL is minted per request by
+     `get_design_file_url()` and expires.
+  2. The bucket is PRIVATE. Verified: fetching an object's public URL returns HTTP 400,
+     a signed URL returns 200, and a signed URL stops working once it expires.
+
+CLIENT CREDENTIALS
+------------------
+`supabase_storage.get_supabase_client()` reads os.environ directly, which is populated
+on Railway but NOT from the local .env (that is read by python-decouple into Django
+settings). This module reads `settings` instead, so it behaves identically in both
+environments. The old helper is left exactly as it is.
+"""
+import uuid
+
+from django.conf import settings
+
+# Bucket name comes from the environment with a clear default — never inlined at a
+# call site. Distinct from SUPABASE_BUCKET, which remains the public bucket.
+DESIGN_BUCKET = getattr(settings, 'SUPABASE_DESIGN_BUCKET', 'Horizon-PMS-Design')
+
+# Server-side validation. Deliberately NARROWER than the public bucket's list: design
+# artifacts are documents and drawings, never arbitrary images.
+ALLOWED_DESIGN_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'jpeg', 'png',
+                             'dwg', 'zip']
+MAX_DESIGN_FILE_BYTES = 25 * 1024 * 1024   # 25 MB
+
+DESIGN_MIME_TYPE_MAP = {
+    'pdf':  'application/pdf',
+    'doc':  'application/msword',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls':  'application/vnd.ms-excel',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'jpg':  'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png':  'image/png',
+    'dwg':  'application/acad',
+    'zip':  'application/zip',
+}
+
+
+class DesignStorageError(Exception):
+    """Upload or validation failure. Callers catch this and surface the message —
+    it never carries anything secret."""
+
+
+def _client():
+    """Supabase client built from Django settings (not os.environ — see module docstring)."""
+    url = settings.SUPABASE_URL
+    key = settings.SUPABASE_KEY
+    if not url or not key:
+        raise DesignStorageError('Supabase is not configured (SUPABASE_URL / SUPABASE_KEY).')
+    from supabase import create_client
+    return create_client(url, key)
+
+
+def build_design_path(project_id, kind, filename):
+    """
+    Storage path convention:
+
+        {project_id}/{kind}/{uuid4-hex}.{ext}
+
+    The project identifier makes objects greppable and lets a whole site be located or
+    purged by prefix. `kind` ('survey' now; 'cad'/'boq' in Part 3) separates artifact
+    types. A fresh uuid4 is the filename, so two uploads of the same original filename
+    can NEVER collide and a replaced survey does not overwrite its predecessor — the
+    old object stays addressable by the path already recorded on any prior row.
+    The original filename is not used in the path at all, so user-supplied text can
+    never influence the storage location.
+    """
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in (filename or '') else ''
+    suffix = f'.{ext}' if ext else ''
+    return f'{project_id}/{kind}/{uuid.uuid4().hex}{suffix}'
+
+
+def validate_design_file(file_obj):
+    """Server-side validation — extension, size, and MIME consistency. Raises
+    DesignStorageError. Called by upload_design_file(), so it cannot be skipped by a
+    caller that forgets; the form layer is a convenience, not the enforcement point."""
+    name = getattr(file_obj, 'name', '') or ''
+    ext = name.rsplit('.', 1)[-1].lower() if '.' in name else ''
+    if ext not in ALLOWED_DESIGN_EXTENSIONS:
+        raise DesignStorageError(
+            f'Unsupported file type (.{ext or "none"}). Allowed: '
+            f'{", ".join(ALLOWED_DESIGN_EXTENSIONS)}.'
+        )
+    size = getattr(file_obj, 'size', 0) or 0
+    if size > MAX_DESIGN_FILE_BYTES:
+        raise DesignStorageError(
+            f'File is {size / 1024 / 1024:.1f} MB — the limit is '
+            f'{MAX_DESIGN_FILE_BYTES // 1024 // 1024} MB.'
+        )
+    if size == 0:
+        raise DesignStorageError('File is empty.')
+
+    expected = DESIGN_MIME_TYPE_MAP.get(ext, '')
+    actual = (getattr(file_obj, 'content_type', '') or '').split(';')[0].strip()
+    # Same tolerance as the existing uploader: browsers send octet-stream for many of
+    # these types, so that is accepted rather than rejected.
+    if expected and actual and actual not in (expected, 'application/octet-stream'):
+        raise DesignStorageError('File content type does not match its extension.')
+    return ext
+
+
+def upload_design_file(file_obj, path):
+    """
+    Upload one file to the PRIVATE design bucket.
+
+    Returns (bucket, path) — never a URL. Raises DesignStorageError on validation or
+    upload failure, so the caller can abort its transaction before writing any row and
+    never leave a database record pointing at an object that does not exist.
+    """
+    ext = validate_design_file(file_obj)
+
+    try:
+        file_obj.seek(0)
+        payload = file_obj.read()
+    except Exception as exc:
+        raise DesignStorageError(f'Could not read the uploaded file: {exc}')
+
+    try:
+        _client().storage.from_(DESIGN_BUCKET).upload(
+            path=path,
+            file=payload,
+            file_options={'content-type': DESIGN_MIME_TYPE_MAP.get(ext, 'application/octet-stream')},
+        )
+    except Exception as exc:
+        # Message is surfaced to the user, so keep it short and non-leaky.
+        raise DesignStorageError(f'Upload to storage failed: {type(exc).__name__}')
+
+    return DESIGN_BUCKET, path
+
+
+def get_design_file_url(bucket, path, expires_in=3600):
+    """
+    Mint a signed URL for a stored object, at request time.
+
+    Nothing calls this at write time and no result is ever persisted — that is the
+    whole point of the private bucket. Returns None when there is no file recorded, so
+    templates can simply test the value.
+    """
+    if not bucket or not path:
+        return None
+    try:
+        res = _client().storage.from_(bucket).create_signed_url(path, expires_in)
+    except Exception as exc:
+        raise DesignStorageError(f'Could not generate a link: {type(exc).__name__}')
+    # storage3 has used several key spellings across versions.
+    return res.get('signedURL') or res.get('signedUrl') or res.get('signed_url')
