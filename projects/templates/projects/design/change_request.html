@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% comment %}
+PM — raise a design change request on a site they manage.
+
+Reachable by the assigned PM and by any active Project Coordinator on the site, because
+user_can_manage_project() covers both and this screen routes through it rather than
+comparing assigned_pm itself.
+
+THE WINDOW. A change request is only a system action once QC has started on the current
+attempt; before that the form is replaced by an explanation, because a change at that
+stage is a conversation with the Design Head, not a record. After release the window is
+shut. (The real close condition is BOQ locking, which is a later part — release stands in
+for it today.)
+{% endcomment %}
+
+{% block title %}Change request — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Design change request — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.city }}{% if project.program %} · {{ project.program.name }}{% endif %}
+      {% if assignment.assigned_to %}
+        · designer {{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}
+      {% endif %}
+    </div>
+  </div>
+  <a href="{% url 'project_overview' project.project_id %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>Project
+  </a>
+</div>
+
+<div class="d-flex flex-wrap gap-2 mb-3">
+  <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+    Design: {{ assignment.get_status_display }}</span>
+  {% if attempt %}
+    <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+      Attempt {{ attempt.attempt_number }}</span>
+  {% endif %}
+  {% if window_open %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Change window open</span>
+  {% else %}
+    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+      Change window closed</span>
+  {% endif %}
+</div>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">Request a change</div>
+  <div class="card-body py-3">
+
+    {% if window_open %}
+      <form method="post" action="{% url 'design_change_request' project_id=project.project_id %}">
+        {% csrf_token %}
+        <label class="form-label small mb-1">What needs to change?</label>
+        <textarea name="reason" class="form-control form-control-sm mb-2" rows="3" required
+                  placeholder="Describe the change (required). The designer sees this verbatim."></textarea>
+        <button class="btn btn-sm btn-warning">Raise change request</button>
+        <div class="text-muted small mt-2">
+          This sends the site back to the designer on a new attempt straight away.
+          {% if assignment.status == 'in_qc' %}
+            <strong>QC is in progress on this package — raising a change suspends the
+            review, and no verdict will be recorded on it.</strong>
+          {% endif %}
+        </div>
+      </form>
+
+    {% elif released %}
+      <div class="alert alert-secondary py-2 small mb-0">
+        The design for this site was released
+        {% if assignment.released_at %}on {{ assignment.released_at|date:"d M Y H:i" }}{% endif %}.
+        A change now is a new scope of work rather than a change request.
+      </div>
+
+    {% else %}
+      <div class="alert alert-secondary py-2 small mb-0">
+        QC has not started on the current package, so there is nothing settled to raise a
+        change against. Talk to the Design Head — a change at this stage does not need a
+        formal request, and the designer can simply pick it up.
+      </div>
+    {% endif %}
+
+  </div>
+</div>
+
+{% if requests %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">
+    Change requests raised on this site
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for cr in requests %}
+    <li class="list-group-item py-2">
+      <div class="d-flex flex-wrap justify-content-between gap-2">
+        <div class="small">
+          <strong>{{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }}</strong>
+          on attempt {{ cr.attempt.attempt_number }}
+          <div>{{ cr.reason }}</div>
+        </div>
+        <div class="text-end">
+          <div class="text-muted" style="font-size:.7rem;">{{ cr.requested_at|date:"d M Y H:i" }}</div>
+          {% if cr.resulting_attempt %}
+            <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+              Opened attempt {{ cr.resulting_attempt.attempt_number }}</span>
+          {% else %}
+            <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+              Unresolved</span>
+          {% endif %}
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% include "projects/design/_attempt_history.html" %}
+
+{% endblock %}

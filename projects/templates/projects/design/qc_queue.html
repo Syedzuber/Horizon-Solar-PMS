@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head / deputy — sites waiting for QC and sites currently in review.
+
+THIS IS NOT THE DESIGN HEAD DASHBOARD. No metrics, no workload, no capacity rollup, no
+overdue logic — those are Part 5 and are explicitly out of scope here. This is a worklist
+of two statuses and nothing else.
+
+Bootstrap extending base.html with the shared chip pills, same as every other screen in
+this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
+{% endcomment %}
+
+{% block title %}QC queue — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Design QC queue</h5>
+    <div class="text-muted small">
+      Packages awaiting review and reviews in progress.
+      {% if is_deputy %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
+          Acting as deputy</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if not rows %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center text-muted small py-4">
+      Nothing is waiting for QC. Sites appear here once the designer has an approved Arka,
+      at least one CAD file and a completed BOQ.
+    </div>
+  </div>
+{% endif %}
+
+{% for row in rows %}
+<div class="card shadow-sm mb-2">
+  <div class="card-body py-3">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+      <div>
+        <div class="fw-semibold">{{ row.site.project_id }}</div>
+        <div class="text-muted small">
+          {{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}
+          {% if row.assignment.assigned_to %}
+            · designer {{ row.assignment.assigned_to.user.get_full_name|default:row.assignment.assigned_to.user.username }}
+          {% endif %}
+        </div>
+      </div>
+      <div class="text-end">
+        {% if row.in_qc %}
+          <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>In QC</span>
+        {% else %}
+          <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>Awaiting QC</span>
+        {% endif %}
+        {% if row.attempt %}
+          <div class="text-muted" style="font-size:.7rem;">
+            attempt {{ row.attempt.attempt_number }}
+            {% if row.attempt.opened_reason != 'initial' %}
+              ({{ row.attempt.get_opened_reason_display }})
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if row.arka %}
+      <div class="small mt-2">
+        <span class="ver-tag">Arka v{{ row.arka.version }}</span>
+        · {{ row.arka.capacity_kw }} kW designed
+      </div>
+    {% endif %}
+
+    {% if row.open_crs %}
+      <div class="alert alert-warning py-2 small mt-2 mb-0">
+        {{ row.open_crs|length }} unresolved PM change request{{ row.open_crs|length|pluralize }}
+        on this attempt — a QC verdict is blocked until actioned.
+      </div>
+    {% endif %}
+
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      <a href="{% url 'design_qc_review' project_id=row.site.project_id %}"
+         class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        Open package
+      </a>
+
+      {% if not row.can_qc %}
+        {% comment %}
+        Self-QC. The button is absent AND the endpoint refuses — the server-side rule in
+        user_can_qc_design() is the enforcement point; this only explains why.
+        {% endcomment %}
+        <span class="align-self-center text-muted small">
+          You are the designer allocated to this site, so you cannot QC it.
+        </span>
+      {% endif %}
+    </div>
+
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}

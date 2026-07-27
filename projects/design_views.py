@@ -1,7 +1,8 @@
 """
 OPEX design workflow views — Part 2: survey upload, allocation, due-date handshake,
 and the blocked flag. Part 3: Arka submission and verdict, CAD upload, BOQ entry
-and the artifact-pairing rules that bind them together.
+and the artifact-pairing rules that bind them together. Part 4: QC review, the
+attempt lifecycle, the Design Head's deputy, PM change requests and release.
 
 A separate module from views.py (which is ~9,000 lines) because this is a self-contained
 new subsystem; urls.py imports it alongside `views`. No existing view is modified.
@@ -34,18 +35,21 @@ from .design_storage import (
 )
 from .models import (
     Program, Project, UserProfile, BOQ, DesignAssignment, DueDateCommitment,
-    DesignAttempt, ArkaSubmission, DesignFile, log_activity,
+    DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
+    DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_RELEASED,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
-    ATTEMPT_REASON_INITIAL,
+    QC_PENDING, QC_PASSED, QC_FAILED,
+    ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
 )
 from .permissions import (
-    user_can_edit_project_boq, user_can_view_design, user_is_assigned_designer,
-    user_is_design_head,
+    user_can_edit_project_boq, user_can_qc_design, user_can_request_design_change,
+    user_can_view_design, user_has_design_head_authority, user_is_assigned_designer,
+    user_is_design_head, user_is_design_head_deputy,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +81,19 @@ UPLOADABLE_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
                     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF)
 
 KIND_LABELS = dict(DESIGN_FILE_KIND_CHOICES)
+
+# ── Part 4 ─────────────────────────────────────────────────────────────────────
+# Statuses during which a PM change request is permitted. The window OPENS at QC start
+# (settled decision 3) — before that, `qc_started_at` is null and a change is a
+# conversation, not a system action — and closes at release, because BOQ locking (the
+# real close condition) is Part 6 and does not exist yet.
+#
+# `qc_failed` is included: the package is back with the designer, and a PM who spots a
+# requirement change at that moment should not have to wait for the next QC round to
+# say so. `released` is excluded, which is the close condition standing in for the lock.
+CHANGE_REQUEST_STATUSES = (DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_IN_DESIGN,
+                           DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
+                           DESIGN_ARTIFACTS_UPLOADED)
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +149,7 @@ def _deny(request, message, redirect_to):
 def design_head_sites(request, pk):
     """Design Head's working screen for one tender: every site, its status, designer,
     current due date and blocked flag, with the actions for each."""
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
 
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
@@ -214,7 +231,7 @@ def design_survey_upload(request, project_id):
     _status_after_unblock), preserving the allocation and any approved due date.
     """
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_sites', pk=project.program_id)
@@ -360,7 +377,7 @@ def _resolve_designer(raw_id):
 def design_allocate(request, project_id):
     """Allocate one OPEX site to a designer. Design Head only, POST only."""
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_sites', pk=project.program_id)
@@ -397,7 +414,7 @@ def design_bulk_allocate(request, pk):
     whole batch. A partially-applied bulk allocation would be worse than none — the Head
     would have to work out which half landed.
     """
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
     if request.method != 'POST':
@@ -494,7 +511,7 @@ def design_due_date_propose(request, project_id):
 def design_due_date_approve(request, project_id):
     """The HEAD approves the current proposal. Completes the handshake."""
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_sites', pk=project.program_id)
@@ -532,7 +549,7 @@ def design_due_date_reject(request, project_id):
     proposes again. The rejected commitment is stood down, not deleted — the history of
     what was proposed and refused stays on the record."""
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_sites', pk=project.program_id)
@@ -579,7 +596,7 @@ def design_due_date_change(request, project_id):
     if assignment is None:
         raise Http404('No design assignment for this site.')
 
-    is_head     = user_is_design_head(request.user)
+    is_head     = user_has_design_head_authority(request.user)
     is_designer = user_is_assigned_designer(request.user, assignment)
     if not (is_head or is_designer):
         return HttpResponseForbidden('Only the Design Head or the allocated designer may '
@@ -863,13 +880,17 @@ def design_site_workspace(request, project_id):
         raise Http404('No design assignment for this site.')
 
     is_designer = user_is_assigned_designer(request.user, assignment)
-    if not (is_designer or user_is_design_head(request.user)):
+    if not (is_designer or user_has_design_head_authority(request.user)):
         return HttpResponseForbidden('Only the allocated designer or the Design Head '
                                      'may open this site\'s design workspace.')
 
     ctx = _workspace_context(project, assignment)
     ctx.update({
         'is_designer':  is_designer,
+        # Part 4: the designer reads the QC verdict, the QC remarks and any PM change
+        # request off the shared attempt-history partial, so they see the same record of
+        # what happened as the Head does on the QC screen.
+        'history':      _attempt_history(assignment),
         'can_submit_arka': is_designer and assignment.status in ARKA_SUBMITTABLE_STATUSES,
         # The BOQ link is only useful if the existing Part 0.6 gate lets this user in.
         # Surfaced rather than hidden: a designer allocated to a site whose
@@ -886,7 +907,7 @@ def design_head_review(request, project_id):
     capacity and link, the approve and reject-with-reason actions, the full version
     history, and the artifacts submitted so far."""
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
 
     assignment = getattr(project, 'design_assignment', None)
@@ -995,7 +1016,7 @@ def _verdict_target(request, project):
 
     Shared by approve and reject so the two cannot disagree about which submission is
     reviewable. The designer cannot reach either endpoint: both are gated on
-    `user_is_design_head` by their callers, so nobody can approve their own Arka.
+    `user_has_design_head_authority` by their callers, so nobody can approve their own Arka.
     """
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
@@ -1023,7 +1044,7 @@ def design_arka_approve(request, project_id):
     is invented for "Arka approved, artifacts outstanding".
     """
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_review', project_id=project.project_id)
@@ -1066,7 +1087,7 @@ def design_arka_reject(request, project_id):
     rejected — and is stood down only when the designer submits the replacement.
     """
     project = _opex_site(project_id)
-    if not user_is_design_head(request.user):
+    if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
     if request.method != 'POST':
         return redirect('design_head_review', project_id=project.project_id)
@@ -1283,3 +1304,515 @@ def design_boq_complete(request, project_id):
     if advanced:
         msg += ' The design package is now complete.'
     return _back(msg, ok=True)
+
+
+# ===========================================================================
+# PART 4 — QC review, attempt lifecycle, deputy, PM change requests, release
+# ===========================================================================
+#
+# TWO REWORK LOOPS, COUNTED SEPARATELY AND NEVER COLLAPSED
+# --------------------------------------------------------
+# A new attempt opens for exactly two reasons, and which one it was is the whole
+# point of recording it:
+#
+#   opened_reason='qc_failed'          the package was wrong    — execution error
+#   opened_reason='pm_change_request'  the brief changed        — moving requirement
+#
+# A tender whose rework is mostly `qc_failed` has a design quality problem. One whose
+# rework is mostly `pm_change_request` has a requirements problem, and no amount of
+# designer coaching will fix it. Merging the two fields would erase the only signal
+# that tells them apart, so:
+#
+#   AN ATTEMPT CLOSED BY A PM CHANGE REQUEST KEEPS qc_verdict='pending'.
+#   It was never judged. Writing 'failed' there would inflate the QC failure rate with
+#   rework the designer did not cause. This is enforced in design_change_request()
+#   below, which touches closed_at and nothing else on the outgoing attempt.
+#
+# WHO MAY DO WHAT
+# ---------------
+# QC is `user_can_qc_design()` — Head-or-deputy AND NOT the allocated designer. The
+# self-QC exclusion is in the permission helper, not here, so the two QC entry points
+# (start and verdict) cannot drift. Change requests are
+# `user_can_request_design_change()`, which routes to the untouched
+# `user_can_manage_project()`.
+
+
+# ---------------------------------------------------------------------------
+# 11. Attempt lifecycle — the one place a new attempt is opened
+# ---------------------------------------------------------------------------
+
+def _open_next_attempt(assignment, reason, actor, detail):
+    """Close the current attempt and open the next one. THE ONLY PLACE THIS HAPPENS.
+
+    Both rework loops call this with a different `reason`; the mechanics are identical
+    and are deliberately written once. Duplicating them across the QC-fail and
+    change-request views is exactly how the two would drift into disagreeing about
+    which fields get set.
+
+    Caller owns the transaction — both call sites already have one open for their own
+    writes, and closing one attempt while failing to open the next would be the worst
+    possible partial state.
+
+    What it does NOT touch is as important as what it does:
+      * `qc_verdict` on the outgoing attempt — the caller owns that. QC-fail sets it to
+        'failed' before calling; a change request leaves it 'pending' forever.
+      * `assigned_to`, the survey, and the approved DueDateCommitment — all preserved.
+        Rework does not reopen the allocation or renegotiate the due date; the site
+        goes back to the same designer under the same commitment (settled decision 2).
+
+    Returns the new DesignAttempt.
+    """
+    now = timezone.now()
+    current = _current_attempt(assignment)
+    if current is not None and current.closed_at is None:
+        current.closed_at = now
+        current.save(update_fields=['closed_at'])
+
+    next_number = (assignment.attempts.aggregate(m=Max('attempt_number'))['m'] or 0) + 1
+    new_attempt = DesignAttempt.objects.create(
+        assignment=assignment, attempt_number=next_number, opened_reason=reason,
+    )
+
+    assignment.current_attempt_number = next_number
+    assignment.status = DESIGN_IN_DESIGN
+    assignment.save(update_fields=['current_attempt_number', 'status', 'updated_at'])
+
+    log_activity(assignment.project, actor,
+                 f'Attempt {next_number} opened ({new_attempt.get_opened_reason_display()}): '
+                 f'{detail}',
+                 entity_type='DesignAttempt', entity_id=new_attempt.pk,
+                 action_code=f'design_attempt_opened_{reason}')
+    return new_attempt
+
+
+def _open_change_requests(attempt):
+    """Change requests on this attempt that have not yet produced a new attempt.
+
+    An unresolved change request is one whose `resulting_attempt` is still null. It
+    blocks a QC verdict: judging a package that is already known to need rework wastes
+    the review and produces a verdict about a design nobody intends to build.
+    """
+    if attempt is None:
+        return DesignChangeRequest.objects.none()
+    return attempt.change_requests.filter(resulting_attempt__isnull=True)
+
+
+def _package_is_complete(attempt):
+    """Whether an attempt actually has a reviewable package: approved current Arka, at
+    least one current CAD file, and a BOQ marked complete.
+
+    Same three conditions Part 3's _maybe_advance_to_artifacts_uploaded() evaluates,
+    re-checked here at QC start rather than trusting the status alone — the status is a
+    cached conclusion, these rows are the evidence.
+    """
+    if attempt is None:
+        return False
+    if _approved_arka(attempt) is None:
+        return False
+    if not attempt.design_files.filter(kind__in=CAD_KINDS, is_current=True).exists():
+        return False
+    return attempt.boq_submitted_at is not None
+
+
+# ---------------------------------------------------------------------------
+# 12. QC review
+# ---------------------------------------------------------------------------
+
+def _qc_guard(request, project, required_statuses):
+    """Shared entry checks for the three QC endpoints.
+
+    Returns (assignment, attempt, error), where `error` is:
+        None  -> refuse with 403. The caller has no QC authority here.
+        ''    -> proceed.
+        str   -> refuse with this message and a redirect. Authorised, wrong state.
+
+    ORDER IS DELIBERATE: authority is decided FIRST, before anything about the site's
+    state is revealed. A user with no QC authority gets an identical 403 whether the
+    site is mid-review, already released, or has no design assignment at all — the
+    refusal never doubles as a state oracle.
+
+    The authority question is asked through user_can_qc_design(), which is where the
+    self-QC exclusion lives, so a designer reviewing their own site is refused
+    identically at all three endpoints — including when that designer is the Head or
+    his named deputy.
+    """
+    assignment = getattr(project, 'design_assignment', None)
+
+    # `assignment` may be None here; user_can_qc_design() returns False for that, which
+    # is the correct answer — there is nothing to QC and nobody may QC it.
+    if not user_can_qc_design(request.user, assignment):
+        return None, None, None
+    if assignment.status not in required_statuses:
+        return assignment, None, (
+            f'{project.project_id}: QC is not available at this stage '
+            f'(status "{assignment.get_status_display()}").')
+    return assignment, _current_attempt(assignment), ''
+
+
+@login_required
+def design_qc_start(request, project_id):
+    """Head or deputy takes a completed package into review.
+
+    `artifacts_uploaded` -> `in_qc`, and `qc_started_at` is stamped on the attempt.
+
+    STAMPING qc_started_at IS WHAT OPENS THE PM CHANGE REQUEST WINDOW (settled
+    decision 3). Before this moment a PM asking for a change is a conversation; after
+    it, it is a system action that suspends the review and opens a new attempt.
+
+    The three package conditions are re-checked from the rows rather than inferred from
+    the status — a site could reach `artifacts_uploaded` and then have its only CAD file
+    superseded by nothing, and QC should refuse that rather than review an empty package.
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_ARTIFACTS_UPLOADED,))
+    if error is None:
+        return HttpResponseForbidden(
+            'QC is for the Design Head or his named deputy, and never for the designer '
+            'allocated to this site.')
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_queue')
+
+    if not _package_is_complete(attempt):
+        messages.error(request, f'{project.project_id}: the package is incomplete — QC '
+                                f'needs an approved Arka, at least one current CAD file '
+                                f'and a BOQ marked complete.')
+        return redirect('design_qc_queue')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        attempt.qc_started_at = timezone.now()
+        attempt.save(update_fields=['qc_started_at'])
+        assignment.status = DESIGN_IN_QC
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'QC started on attempt {attempt.attempt_number}',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_qc_started')
+
+    messages.success(request, f'{project.project_id}: QC started on attempt '
+                              f'{attempt.attempt_number}. The PM can now raise a change '
+                              f'request against this package.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+@login_required
+def design_qc_pass(request, project_id):
+    """QC passes: the attempt closes, the site is released.
+
+    Release sets `released_at` / `released_by` on the assignment and moves it to
+    `released`. THAT IS ALL IT DOES (settled decision 9). It does not lock, group or
+    hand over the BOQ — those are Part 6 and reading anything into `released` beyond
+    "design is finished" would pre-empt decisions that have not been made.
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_IN_QC,))
+    if error is None:
+        return HttpResponseForbidden(
+            'QC is for the Design Head or his named deputy, and never for the designer '
+            'allocated to this site.')
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_queue')
+
+    # An unresolved change request means this package is already known to need rework.
+    # Judging it anyway would record a verdict about a design nobody intends to build.
+    open_crs = _open_change_requests(attempt)
+    if open_crs.exists():
+        messages.error(request, f'{project.project_id}: a PM change request on this '
+                                f'attempt is still unresolved — it must be actioned '
+                                f'before a QC verdict can be recorded.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    now = timezone.now()
+    with transaction.atomic():
+        attempt.qc_verdict     = QC_PASSED
+        attempt.qc_reviewed_by = profile
+        attempt.qc_reviewed_at = now
+        attempt.closed_at      = now
+        attempt.save(update_fields=['qc_verdict', 'qc_reviewed_by', 'qc_reviewed_at',
+                                    'closed_at'])
+        assignment.released_at = now
+        assignment.released_by = profile
+        assignment.status      = DESIGN_RELEASED
+        assignment.save(update_fields=['released_at', 'released_by', 'status', 'updated_at'])
+        log_activity(project, profile,
+                     f'QC passed on attempt {attempt.attempt_number} — design released',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_qc_passed')
+
+    messages.success(request, f'{project.project_id}: QC passed — design released on '
+                              f'attempt {attempt.attempt_number}.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+@login_required
+def design_qc_fail(request, project_id):
+    """QC fails: the attempt closes with remarks, and attempt N+1 opens for rework.
+
+    `qc_remarks` is mandatory. Checked here so the reviewer gets a usable message, and
+    enforced underneath by the Part 1 CHECK constraint
+    `qc_remarks_required_when_qc_failed` for any writer that bypasses this view. A
+    failure with no remarks is not a review — the designer has nothing to act on.
+
+    The new attempt starts at `in_design` and the designer resubmits an Arka. Allocation,
+    survey and the approved due date are all preserved (settled decision 2) — see
+    _open_next_attempt().
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_IN_QC,))
+    if error is None:
+        return HttpResponseForbidden(
+            'QC is for the Design Head or his named deputy, and never for the designer '
+            'allocated to this site.')
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_queue')
+
+    if _open_change_requests(attempt).exists():
+        messages.error(request, f'{project.project_id}: a PM change request on this '
+                                f'attempt is still unresolved — it must be actioned '
+                                f'before a QC verdict can be recorded.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    remarks = (request.POST.get('qc_remarks') or '').strip()
+    if not remarks:
+        messages.error(request, f'{project.project_id}: QC remarks are required to fail '
+                                f'a package — the designer cannot act on "failed" alone.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    now = timezone.now()
+    with transaction.atomic():
+        attempt.qc_verdict     = QC_FAILED
+        attempt.qc_remarks     = remarks
+        attempt.qc_reviewed_by = profile
+        attempt.qc_reviewed_at = now
+        attempt.save(update_fields=['qc_verdict', 'qc_remarks', 'qc_reviewed_by',
+                                    'qc_reviewed_at'])
+        # Status passes THROUGH qc_failed on its way back to in_design. Recorded as its
+        # own log line so the failure is visible in the trail even though the stored
+        # status moves straight on to the new attempt's in_design.
+        assignment.status = DESIGN_QC_FAILED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'QC failed on attempt {attempt.attempt_number}: {remarks}',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_qc_failed')
+
+        new_attempt = _open_next_attempt(
+            assignment, ATTEMPT_REASON_QC_FAILED, profile,
+            f'QC failure on attempt {attempt.attempt_number}')
+
+    messages.success(request, f'{project.project_id}: QC failed — attempt '
+                              f'{new_attempt.attempt_number} opened and the site is back '
+                              f'with the designer.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# 13. PM change requests
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_change_request(request, project_id):
+    """The site's assigned PM (or a coordinator) requests a change.
+
+    WINDOW: `qc_started_at` must be set on the current attempt, and the site must not be
+    released (settled decision 3). Before QC starts there is nothing settled to raise a
+    change against and the request is refused with a message; after release the design is
+    finished. The real close condition is BOQ locking, which is Part 6 — until it exists,
+    release stands in for it.
+
+    IF QC IS IN FLIGHT, IT IS SUSPENDED (settled decision 4). The site returns to the
+    designer immediately and no verdict is recorded. Critically, the outgoing attempt
+    keeps `qc_verdict='pending'`: it was never judged, and marking it 'failed' would
+    charge the designer with a rework loop the PM caused. That distinction is the reason
+    both `opened_reason` values exist.
+    """
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if not user_can_request_design_change(request.user, project):
+        return HttpResponseForbidden(
+            'Only the PM assigned to this site (or one of its coordinators) may request '
+            'a design change.')
+    if request.method != 'POST':
+        return redirect('design_change_request_form', project_id=project.project_id)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect('design_change_request_form', project_id=project.project_id)
+
+    if assignment is None:
+        return _back(f'{project.project_id}: design has not started on this site yet.')
+
+    reason = (request.POST.get('reason') or '').strip()
+    if not reason:
+        return _back('Please say what needs to change — a reason is required.')
+
+    attempt = _current_attempt(assignment)
+    if attempt is None:
+        return _back(f'{project.project_id}: design has not started on this site yet.')
+
+    if assignment.status == DESIGN_RELEASED:
+        return _back(f'{project.project_id}: the design is already released — a change '
+                     f'now is a new scope of work, not a change request.')
+
+    if attempt.qc_started_at is None:
+        return _back(f'{project.project_id}: QC has not started on this package yet, so '
+                     f'there is nothing settled to raise a change against. Talk to the '
+                     f'Design Head — a change at this stage does not need a formal '
+                     f'request.')
+
+    if assignment.status not in CHANGE_REQUEST_STATUSES:
+        return _back(f'{project.project_id}: a change request cannot be raised at this '
+                     f'stage (status "{assignment.get_status_display()}").')
+
+    profile = request.user.profile
+    was_in_qc = assignment.status == DESIGN_IN_QC
+    with transaction.atomic():
+        change = DesignChangeRequest.objects.create(
+            attempt=attempt, requested_by=profile, reason=reason)
+        log_activity(project, profile,
+                     f'PM change request on attempt {attempt.attempt_number}: {reason}'
+                     + (' (QC in progress — review suspended)' if was_in_qc else ''),
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_requested')
+
+        # The outgoing attempt's qc_verdict is deliberately left at 'pending' — see the
+        # docstring. _open_next_attempt() sets closed_at and nothing else on it.
+        new_attempt = _open_next_attempt(
+            assignment, ATTEMPT_REASON_PM_CHANGE_REQUEST, profile,
+            f'change requested on attempt {attempt.attempt_number}')
+
+        change.resulting_attempt = new_attempt
+        change.save(update_fields=['resulting_attempt'])
+
+    msg = (f'{project.project_id}: change request recorded — attempt '
+           f'{new_attempt.attempt_number} opened and the site is back with the designer.')
+    if was_in_qc:
+        msg += ' The QC review in progress was suspended without a verdict.'
+    return _back(msg, ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 14. Part 4 screens
+# ---------------------------------------------------------------------------
+
+def _attempt_history(assignment):
+    """Every attempt on an assignment, oldest first, with the change requests that
+    closed each one. The two rework loops must be tellable apart at a glance, which is
+    what `opened_reason` renders as on the screens."""
+    return list(assignment.attempts
+                .select_related('qc_reviewed_by__user', 'boq_submitted_by__user')
+                .prefetch_related('change_requests__requested_by__user',
+                                  'arka_submissions')
+                .order_by('attempt_number'))
+
+
+@login_required
+def design_qc_queue(request):
+    """Head / deputy: every site waiting for QC, plus everything currently in review.
+
+    Deliberately NOT the Design Head dashboard — no metrics, no workload, no capacity,
+    no overdue logic. It is a worklist of sites at `artifacts_uploaded` and `in_qc`, and
+    nothing else; the dashboard is Part 5.
+    """
+    if not user_has_design_head_authority(request.user):
+        return HttpResponseForbidden('Design Head or named deputy only.')
+
+    assignments = (DesignAssignment.objects
+                   .filter(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC),
+                           project__is_deleted=False)
+                   .select_related('project', 'project__program', 'assigned_to__user')
+                   .order_by('status', 'project__project_id'))
+
+    rows = []
+    for assignment in assignments:
+        attempt = _current_attempt(assignment)
+        rows.append({
+            'assignment':  assignment,
+            'site':        assignment.project,
+            'attempt':     attempt,
+            'arka':        _current_arka(attempt),
+            'in_qc':       assignment.status == DESIGN_IN_QC,
+            'open_crs':    list(_open_change_requests(attempt)),
+            # Self-QC is refused per site, so the button state has to be per row: the
+            # deputy may QC most sites but not the ones allocated to them.
+            'can_qc':      user_can_qc_design(request.user, assignment),
+        })
+
+    return render(request, 'projects/design/qc_queue.html', {
+        'rows':      rows,
+        'is_deputy': user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
+    })
+
+
+@login_required
+def design_qc_review(request, project_id):
+    """Head / deputy: the full package for one site — Arka link and capacity, CAD and
+    BOQ files by signed URL, BOQ link, attempt history — with the QC actions."""
+    project = _opex_site(project_id)
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        raise Http404('No design assignment for this site.')
+    if not user_has_design_head_authority(request.user):
+        return HttpResponseForbidden('Design Head or named deputy only.')
+
+    ctx = _workspace_context(project, assignment)
+    attempt = ctx['attempt']
+    open_crs = list(_open_change_requests(attempt))
+    can_qc = user_can_qc_design(request.user, assignment)
+    ctx.update({
+        'history':       _attempt_history(assignment),
+        'open_crs':      open_crs,
+        'can_qc':        can_qc,
+        'can_start_qc':  can_qc and assignment.status == DESIGN_ARTIFACTS_UPLOADED
+                         and _package_is_complete(attempt),
+        'can_verdict':   can_qc and assignment.status == DESIGN_IN_QC and not open_crs,
+        'is_self_qc':    user_is_assigned_designer(request.user, assignment),
+        'is_deputy':     user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
+        'released':      assignment.status == DESIGN_RELEASED,
+    })
+    return render(request, 'projects/design/qc_review.html', ctx)
+
+
+@login_required
+def design_change_request_form(request, project_id):
+    """PM: raise a change request on a site they manage, and see the history of the ones
+    already raised. GET only — the POST target is design_change_request()."""
+    project = _opex_site(project_id)
+    if not user_can_request_design_change(request.user, project):
+        return HttpResponseForbidden(
+            'Only the PM assigned to this site (or one of its coordinators) may request '
+            'a design change.')
+
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        raise Http404('Design has not started on this site yet.')
+
+    attempt = _current_attempt(assignment)
+    window_open = bool(attempt and attempt.qc_started_at
+                       and assignment.status in CHANGE_REQUEST_STATUSES
+                       and assignment.status != DESIGN_RELEASED)
+
+    return render(request, 'projects/design/change_request.html', {
+        'project':     project,
+        'assignment':  assignment,
+        'attempt':     attempt,
+        'history':     _attempt_history(assignment),
+        'window_open': window_open,
+        'released':    assignment.status == DESIGN_RELEASED,
+        'requests':    list(DesignChangeRequest.objects
+                            .filter(attempt__assignment=assignment)
+                            .select_related('requested_by__user', 'attempt',
+                                            'resulting_attempt')
+                            .order_by('-requested_at')),
+    })

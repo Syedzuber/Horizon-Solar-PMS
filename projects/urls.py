@@ -77,6 +77,21 @@ urlpatterns = [
     path('design/<str:project_id>/boq/complete/',   design_views.design_boq_complete,    name='design_boq_complete'),
 
     # ---------------------------------------------------------------------------
+    # OPEX design workflow (Part 4) — QC review, attempt lifecycle, deputy,
+    # PM change requests, release.
+    # QC authority is Head OR named deputy, minus the site's own designer:
+    # permissions.user_can_qc_design(). Change requests route through the untouched
+    # user_can_manage_project(). Still no navigation links — Part 4.5 integrates.
+    # ---------------------------------------------------------------------------
+    path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
+    path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),
+    path('design/<str:project_id>/qc/start/',       design_views.design_qc_start,        name='design_qc_start'),
+    path('design/<str:project_id>/qc/pass/',        design_views.design_qc_pass,         name='design_qc_pass'),
+    path('design/<str:project_id>/qc/fail/',        design_views.design_qc_fail,         name='design_qc_fail'),
+    path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),
+    path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
+
+    # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO
     # ---------------------------------------------------------------------------
     path('projects/',                                          views.project_list,          name='project_list'),

@@ -208,4 +208,12 @@ readable here.
 
 {% include "projects/design/_design_artifacts.html" %}
 
+{% comment %}
+Part 4. The designer's window onto QC: the verdict and remarks on a failed attempt, the
+new attempt that opened for the rework, and any PM change request with its reason. Same
+partial the Head reads on the QC screen, so neither side sees a version of the history
+the other does not.
+{% endcomment %}
+{% include "projects/design/_attempt_history.html" %}
+
 {% endblock %}

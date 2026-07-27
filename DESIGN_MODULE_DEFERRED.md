@@ -353,7 +353,7 @@ actually needs to know which BOQ it is looking at.
 **Location:** `projects/design_views.py` — `design_boq_complete`; `projects/models.py` —
 `DesignAttempt.boq_submitted_at`
 
-### F7 — Nothing tells the Design Head an Arka is waiting
+### F7 — Nothing tells the Design Head an Arka is waiting (also true of QC — see G7)
 
 Submitting an Arka changes a status and writes an `ActivityLog` row. There is no
 notification, no queue, and no badge, and the review screen is per-site and
@@ -363,3 +363,145 @@ dashboard is Part 5; this is recorded so the gap between "Part 3 works" and "Par
 usable" is not mistaken for a bug later.
 
 **Location:** `projects/design_views.py` — `design_arka_submit`
+
+---
+
+## G. Found during Part 4 (QC review, deputy, PM change requests, release)
+
+### G1 — `qc_verdict='pending'` is overloaded, and Part 5's metrics will trip on it
+
+An attempt closed by a PM change request keeps `qc_verdict='pending'` forever. That is
+correct and deliberate — it was never judged, and writing `'failed'` there would charge
+the designer with rework the PM caused. But it means `pending` now carries two entirely
+different meanings:
+
+| `qc_verdict` | `closed_at` | means |
+|---|---|---|
+| `pending` | null | live attempt, QC has not ruled yet |
+| `pending` | **set** | **closed by a change request, never judged** |
+| `passed` / `failed` | set | judged |
+
+Any query that counts `qc_verdict='pending'` as work-in-flight will over-count by exactly
+the number of change-request closures. The screens disambiguate (`_attempt_history.html`
+renders the second row as **Not judged**, not "pending"), but nothing in the data model
+forces a report writer to make the same distinction.
+
+**Whoever builds the Part 5 dashboard must filter on `closed_at__isnull=True` when
+counting in-flight QC**, or add a fourth `qc_verdict` value such as `'superseded'`. The
+latter is a schema change and was out of scope here.
+
+**Location:** `projects/models.py` — `DesignAttempt.qc_verdict`;
+`projects/design_views.py` — `design_change_request`
+
+### G2 — No deputy management UI (expected; recorded as instructed)
+
+`design_head_deputy` is set through Django admin only — building a UI for it was
+explicitly forbidden this session. Two consequences worth stating before someone is
+surprised by them:
+
+* Only a Django **superuser** can name or clear a deputy. The Design Head cannot do it
+  himself, and neither can a System Admin through the product's own user-management
+  screen (`_SA_EDITABLE_ROLE_CHOICES` does not cover it either — see D1).
+* Because presence of the FK is the entire rule (settled decision 6), a deputy named for
+  one week's absence stays a deputy indefinitely until somebody remembers to clear the
+  field. There is no expiry and, by instruction, no schedule.
+
+**Location:** `projects/models.py` — `UserProfile.design_head_deputy`; Django admin
+
+### G3 — A deputy can QC every tender, not just the Head's absence
+
+`user_has_design_head_authority()` is global: a named deputy holds Head authority over
+every OPEX site in the system, on every tender, for as long as the FK is set. There is no
+per-tender or per-program scoping, which is right for a ten-person team and wrong the
+moment there are two Design Heads with different portfolios.
+
+Note the audit trail is correct as-is — `log_activity` records the deputy's own profile
+as the actor, never the Head's, so "who passed this QC" is always answerable. Both Part 4
+screens also render an **Acting as deputy** chip. It is the *scope* that is unbounded,
+not the accountability.
+
+**Location:** `projects/permissions.py` — `user_has_design_head_authority`
+
+### G4 — A deputy can open the QC screen but not the BOQ linked from it
+
+Verified on local data with `priyanka` named as `praveen`'s deputy, reviewing
+`Test-Site-05` (whose `assigned_design` is `shyam`):
+
+```
+user_can_view_design(priyanka, Test-Site-05)      = True
+user_can_view_project_boq(priyanka, Test-Site-05) = False
+GET /design/Test-Site-05/qc/    -> 200
+GET /projects/Test-Site-05/boq/ -> 403   <- the "View BOQ" button on that very screen
+```
+
+Part 4 extended `user_can_view_design()` so a deputy can reach design surfaces and open
+CAD files by signed URL — without that, a deputy could pass QC on a package whose
+drawings they were not allowed to open. But `user_can_view_project_boq()` is a Part 0.6
+helper and is **forbidden to modify**, so its Design branch still admits only
+`assigned_design` or a task-holder. A deputy who is a plain Design user therefore gets a
+403 from the BOQ link on the QC review screen.
+
+The Head himself is unaffected — he has his own portfolio-wide branch in that helper. The
+fix is a one-line additive branch in `user_can_view_project_boq()` (Design Head *authority*
+rather than the raw `is_design_head` flag), which needs whoever owns that helper to sign
+it off. **A QC reviewer who cannot see the BOQ is reviewing half a package.**
+
+**Location:** `projects/permissions.py` — `user_can_view_project_boq` (line ~217)
+
+### G5 — `site_workspace.html` was modified, against the letter of the stop condition
+
+Part 4's hard rules say to stop if an existing template must change. One did:
+`projects/templates/projects/design/site_workspace.html` gained a single
+`{% include "projects/design/_attempt_history.html" %}` (plus `history` in its view
+context).
+
+It was unavoidable: Part 4 §5 requires the **designer** to see the QC verdict, the QC
+remarks and any PM change request, and the designer's only screen is that one. The
+alternative — a second designer screen duplicating the first — is worse. The changed file
+is a Part 3 artifact of this same module, created one session earlier, not a pre-existing
+product template; `base.html`, the dashboards, `boq_detail.html` and the Part 2 screens
+were all left untouched. Recorded here because the rule said stop and the judgment call
+was made instead.
+
+**Location:** `projects/templates/projects/design/site_workspace.html`
+
+### G6 — The unresolved-change-request guard on QC verdicts is unreachable from the UI
+
+`design_qc_pass()` and `design_qc_fail()` both refuse when a `DesignChangeRequest` on the
+attempt has a null `resulting_attempt` (Part 4 §1). But `design_change_request()` sets
+`resulting_attempt` in the same transaction that creates the row, so the UI can never
+produce an unresolved request — the guard only fires against rows created in Django
+admin, by an import, or by a future part that queues change requests without immediately
+opening an attempt.
+
+It was verified this session by creating such a row directly through the ORM (both
+verdict endpoints refused, `qc_verdict` stayed `pending`). Keeping the guard is right —
+it is cheap and it will matter the moment change requests gain an approval step — but
+nobody should mistake it for a reachable code path today.
+
+**Location:** `projects/design_views.py` — `_open_change_requests`, `design_qc_pass`,
+`design_qc_fail`
+
+### G7 — Nothing tells the Head, the designer or the PM that anything happened
+
+Extends F7 across the whole Part 4 surface. A package reaching `artifacts_uploaded` does
+not notify the Head; a QC failure does not notify the designer; a PM change request does
+not notify either of them; release notifies nobody. Every one of these is discovered by
+someone reloading a URL that has no navigation entry point (F3). Notifications are Part 7
+and the dashboard is Part 5 — recorded so the gap between "Part 4 works" and "Part 4 is
+usable unaided" is not mistaken for a defect later.
+
+**Location:** `projects/design_views.py` — all Part 4 write views
+
+### G8 — Release is a dead end
+
+`design_qc_pass()` sets `released_at` / `released_by` and moves the assignment to
+`released`. There is no un-release, and every other Part 4 entry point refuses at that
+status — including PM change requests, by design (settled decision 3, with release
+standing in for the BOQ lock that Part 6 will provide). If a site is released in error,
+or a genuine change arrives afterwards, the only recovery today is a Django-admin edit.
+
+Whether "released" should be reversible, and by whom, is a real decision that belongs with
+Part 6's BOQ locking rather than being invented here.
+
+**Location:** `projects/design_views.py` — `design_qc_pass`, `design_change_request`

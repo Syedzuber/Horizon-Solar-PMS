@@ -298,7 +298,7 @@ def user_can_manage_program(user, program):
 
 
 # ---------------------------------------------------------------------------
-# OPEX design module (Part 2)
+# OPEX design module (Parts 2-4)
 #
 # Same rule as the rest of this file: no view compares a role string or an ownership
 # field inline. Every design-workflow authority question is answered here.
@@ -306,23 +306,114 @@ def user_can_manage_program(user, program):
 # DESIGN HEAD AUTHORITY IS THE `is_design_head` BOOLEAN, NOT THE ROLE STRING.
 # Part 1 added 'Design Head' to ROLE_CHOICES, but no user holds it and 56 existing
 # @role_required decorators still match 'Design' literally — switching now would lock
-# the real Design Head out of every screen he already uses. Part 4 migrates this
-# properly. Until then the flag is the single source of truth, and the role string is
-# deliberately NOT consulted anywhere in this section.
+# the real Design Head out of every screen he already uses. The role migration is its
+# own later part. Until then the flag is the single source of truth, and the role
+# string is deliberately NOT consulted anywhere in this section.
 #
-# `design_head_deputy` exists on UserProfile from Part 1 and is deliberately NOT read
-# here — acting-for-the-Head is Part 4.
+# PART 4 ADDS THE DEPUTY. `design_head_deputy` on the Head's UserProfile names one
+# person who may act for him. Every Part 2 and Part 3 view that asked
+# `user_is_design_head()` now asks `user_has_design_head_authority()` instead, so the
+# deputy is admitted everywhere the Head is admitted, in one edit rather than thirteen.
 # ---------------------------------------------------------------------------
 
 def user_is_design_head(user):
-    """Return True if `user` holds Design Head authority.
+    """Return True if `user` IS the Design Head — the flag itself, deputy excluded.
 
-    Reads UserProfile.is_design_head only. Returns False rather than raising for a user
+    Deliberately kept narrow and separate from user_has_design_head_authority(). This
+    is the predicate for "is this person the Head", which is a different question from
+    "may this person act with the Head's authority"; conflating them would make the
+    deputy indistinguishable from the Head in any future audit, log line or screen that
+    needs to tell them apart.
+
+    Views should call user_has_design_head_authority(), not this. Reads
+    UserProfile.is_design_head only, and returns False rather than raising for a user
     with no profile, matching the guard style of the helpers above."""
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
     return bool(profile.is_design_head)
+
+
+def user_is_design_head_deputy(user):
+    """Return True if `user` is the named deputy of somebody who is a Design Head.
+
+    THE PRESENCE OF THE FK IS THE WHOLE RULE (settled decision 6). There is no absence
+    schedule, no date range and no on/off switch — if the Head has named you, you may
+    act, and when he clears the field you may not. Anything richer is a scheduling
+    feature nobody asked for.
+
+    `is_design_head=True` is re-checked on the NAMING profile, not assumed: a deputy is
+    only a deputy of an actual Head, so clearing someone's Head flag silently revokes
+    the authority of anyone they had deputised. Reverse relation `deputy_for` comes from
+    the self-FK's related_name (models.py — UserProfile.design_head_deputy).
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.deputy_for.filter(is_design_head=True).exists()
+
+
+def user_has_design_head_authority(user):
+    """Return True if `user` may act with Design Head authority — the Head OR his
+    named deputy.
+
+    THIS IS THE FUNCTION VIEWS SHOULD CALL. It is the single gate for survey upload,
+    allocation, due-date approval and rejection, Arka approve and reject, and QC start
+    and verdict — everywhere Parts 2 and 3 used `is_design_head` directly.
+
+    It deliberately does NOT confer portfolio-wide project or BOQ visibility. The Head
+    gets that from his own branches in user_can_view_project() and
+    user_can_view_project_boq(), which are out of scope for this part and are not
+    touched; a deputy sees design surfaces through user_can_view_design() below and
+    otherwise keeps whatever visibility their own role gives them. Widening a deputy's
+    read access across the whole portfolio would be a much larger decision than
+    "somebody is covering QC this week".
+
+    NOT SUFFICIENT FOR QC ON ITS OWN — see user_can_qc_design(), which additionally
+    refuses the assigned designer.
+    """
+    return user_is_design_head(user) or user_is_design_head_deputy(user)
+
+
+def user_can_qc_design(user, assignment):
+    """Return True if `user` may start or decide QC on `assignment`.
+
+    Two conditions, and BOTH are required:
+
+        Design Head authority (Head or named deputy)
+        AND NOT the designer this site is allocated to
+
+    THE SECOND CONDITION IS THE POINT. Nobody QCs their own package — not a designer,
+    not a deputy who happens to be the allocated designer, and not the Head himself if
+    he has taken a site on personally (settled decision 1). QC is a second pair of eyes
+    or it is nothing, and a self-review that passes is indistinguishable in the data
+    from one that was never done.
+
+    Expressed here rather than inline in the QC views so the two of them (start and
+    verdict) cannot drift apart, and so the rule is greppable. Note this is a NARROWING
+    of user_has_design_head_authority(), never a widening — it can only ever refuse
+    somebody that function would have admitted.
+    """
+    if assignment is None:
+        return False
+    if not user_has_design_head_authority(user):
+        return False
+    return not user_is_assigned_designer(user, assignment)
+
+
+def user_can_request_design_change(user, project):
+    """Return True if `user` may raise a PM change request against `project`.
+
+    Routed straight through user_can_manage_project() — the one canonical PM-authority
+    path, which already covers the assigned PM and every active Project Coordinator
+    (settled decision 5). Deliberately NOT re-derived here and that function is NOT
+    modified; this wrapper exists only so the change-request view states its rule by
+    name like every other view in the design module, rather than reaching for a
+    general-purpose helper directly.
+    """
+    if project is None:
+        return False
+    return user_can_manage_project(user, project)
 
 
 def user_is_assigned_designer(user, assignment):
@@ -341,12 +432,21 @@ def user_is_assigned_designer(user, assignment):
 
 
 def user_can_view_design(user, project):
-    """Return True if `user` may SEE the design workflow (including a signed survey
-    link) for `project`.
+    """Return True if `user` may SEE the design workflow (including a signed survey or
+    CAD link) for `project`.
 
-    Routed straight through the existing user_can_view_project() so design visibility
-    can never drift from project visibility — deliberately NOT re-derived here."""
-    return user_can_view_project(user, project)
+    Routed through the existing user_can_view_project() so design visibility can never
+    drift from project visibility — deliberately NOT re-derived here.
+
+    PART 4 ADDS THE DEPUTY as a second, additive branch. It is needed, not cosmetic: a
+    deputy is typically a plain Design user, and user_can_view_project()'s Design branch
+    only admits them where they are `assigned_design` or hold a task. Without this a
+    deputy could pass QC on a site whose CAD file they were not allowed to open — which
+    is not a review, it is a rubber stamp. The Head already reaches every site through
+    his own branch in user_can_view_project(); this widens the same design surfaces to
+    whoever he has named, and nothing else. user_can_view_project() itself is untouched.
+    """
+    return user_can_view_project(user, project) or user_has_design_head_authority(user)
 
 
 def project_managers(project):

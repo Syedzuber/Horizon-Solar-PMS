@@ -1,0 +1,182 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head / deputy — the full package for one site, with the QC actions.
+
+Reuses _design_status_chips.html and _design_artifacts.html from Part 3, so the reviewer
+sees exactly the artifacts the designer uploaded, with the same version and Arka-pairing
+labels. The reviewer is not shown a different view of the package from the person who
+built it.
+
+Every button here is decoration over a server-side rule. Hiding "Pass" while a change
+request is unresolved is a convenience; design_qc_pass() refuses the POST regardless.
+{% endcomment %}
+
+{% block title %}QC — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">QC review — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.city }}{% if project.program %} · {{ project.program.name }}{% endif %}
+      {% if assignment.assigned_to %}
+        · designer {{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}
+      {% endif %}
+      {% if is_deputy %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
+          Acting as deputy</span>
+      {% endif %}
+    </div>
+  </div>
+  <a href="{% url 'design_qc_queue' %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>QC queue
+  </a>
+</div>
+
+{% include "projects/design/_design_status_chips.html" %}
+
+{% if released %}
+  <div class="alert alert-success py-2">
+    <div class="fw-semibold small">Design released</div>
+    <div class="small">
+      {{ assignment.released_at|date:"d M Y H:i" }}
+      by {{ assignment.released_by.user.get_full_name|default:assignment.released_by.user.username }}.
+      BOQ locking, grouping and SCM handover are a later part — release marks design
+      complete and nothing more.
+    </div>
+  </div>
+{% endif %}
+
+{% if is_self_qc %}
+  <div class="alert alert-danger py-2 small">
+    You are the designer allocated to this site. Nobody reviews their own package — the QC
+    actions are unavailable to you here and the endpoints will refuse them.
+  </div>
+{% endif %}
+
+{% if open_crs %}
+  <div class="alert alert-warning py-2">
+    <div class="fw-semibold small mb-1">
+      {{ open_crs|length }} unresolved PM change request{{ open_crs|length|pluralize }}
+    </div>
+    {% for cr in open_crs %}
+      <div class="small">
+        {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
+        {{ cr.requested_at|date:"d M Y H:i" }} — {{ cr.reason }}
+      </div>
+    {% endfor %}
+    <div class="text-muted small mt-1">
+      A verdict cannot be recorded while a change request is unresolved.
+    </div>
+  </div>
+{% endif %}
+
+{# ── The package ──────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">The package</div>
+  <div class="card-body py-3">
+    {% if arka %}
+      <div class="small">
+        <span class="ver-tag">Arka v{{ arka.version }}</span>
+        · <strong>{{ arka.capacity_kw }} kW</strong> designed
+        {% if arka.verdict == 'approved' %}
+          · approved {{ arka.reviewed_at|date:"d M Y H:i" }}
+          by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}
+        {% endif %}
+      </div>
+      <div class="small mt-1">
+        <a href="{{ arka.arka_link }}" target="_blank" rel="noopener">{{ arka.arka_link }}</a>
+      </div>
+    {% else %}
+      <div class="small text-muted">No Arka on this attempt.</div>
+    {% endif %}
+
+    <div class="mt-2">
+      <a href="{% url 'boq_detail' project.project_id %}" class="btn btn-sm btn-outline-secondary">
+        View BOQ
+      </a>
+      {% if boq_complete %}
+        <span class="small text-success ms-1">
+          BOQ marked complete {{ attempt.boq_submitted_at|date:"d M Y H:i" }}
+        </span>
+      {% else %}
+        <span class="small text-muted ms-1">BOQ not marked complete.</span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{# ── QC actions ───────────────────────────────────────────────────────────── #}
+{% if can_qc %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">QC decision</div>
+  <div class="card-body py-3">
+
+    {% if can_start_qc %}
+      <form method="post" action="{% url 'design_qc_start' project_id=project.project_id %}">
+        {% csrf_token %}
+        <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">Start QC</button>
+        <div class="text-muted small mt-1">
+          Starting QC opens the PM change request window on this package.
+        </div>
+      </form>
+
+    {% elif can_verdict %}
+      <div class="d-flex flex-wrap align-items-start gap-3">
+        <form method="post" action="{% url 'design_qc_pass' project_id=project.project_id %}">
+          {% csrf_token %}
+          <button class="btn btn-sm btn-success">Pass &amp; release</button>
+          <div class="text-muted mt-1" style="font-size:.7rem;">
+            Closes the attempt and marks the site design-complete.
+          </div>
+        </form>
+
+        {% comment %}
+        Fail: remarks are REQUIRED. The view refuses an empty value with a message and the
+        Part 1 CHECK constraint qc_remarks_required_when_qc_failed enforces the same rule
+        at the database level for anything that bypasses the view.
+        {% endcomment %}
+        <form method="post" action="{% url 'design_qc_fail' project_id=project.project_id %}"
+              class="d-flex flex-wrap align-items-start gap-2">
+          {% csrf_token %}
+          <div>
+            <textarea name="qc_remarks" class="form-control form-control-sm" rows="2"
+                      style="min-width:26rem;" required
+                      placeholder="What is wrong with the package? (required)"></textarea>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              The designer sees this verbatim; a new attempt opens for the rework.
+            </div>
+          </div>
+          <button class="btn btn-sm btn-outline-danger">Fail</button>
+        </form>
+      </div>
+
+    {% elif assignment.status == 'in_qc' %}
+      <div class="small text-muted">
+        A verdict is blocked while a PM change request on this attempt is unresolved.
+      </div>
+    {% elif released %}
+      <div class="small text-muted">This site is released — QC is complete.</div>
+    {% else %}
+      <div class="small text-muted">
+        Nothing to review yet. QC starts once the package is complete
+        (status &ldquo;{{ assignment.get_status_display }}&rdquo;).
+      </div>
+    {% endif %}
+
+  </div>
+</div>
+{% endif %}
+
+{% include "projects/design/_design_artifacts.html" %}
+{% include "projects/design/_attempt_history.html" %}
+
+<div class="text-muted small">
+  Designer's view of this site:
+  <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
+</div>
+
+{% endblock %}

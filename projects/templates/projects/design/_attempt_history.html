@@ -1,0 +1,115 @@
+{% comment %}
+Attempt history for one site — every attempt, why it opened, how it ended.
+
+THE TWO REWORK LOOPS ARE DELIBERATELY DIFFERENT COLOURS. `qc_failed` is red because the
+package was wrong; `pm_change_request` is amber because the brief changed. They are the
+same event shape and different causes, and a screen that renders them identically throws
+away the only signal that tells a design-quality problem from a requirements problem.
+
+Note the PM-change-request rows show "not judged" rather than a verdict: that attempt was
+closed without QC ever ruling on it, and its qc_verdict stays 'pending' forever by design.
+Rendering that as "pending" alone would read like a review still in progress.
+
+Shared by qc_review.html, change_request.html and site_workspace.html, so the designer,
+the Head and the PM all read the same history in the same shape.
+{% endcomment %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small">
+    Attempt history
+    <span class="text-muted fw-normal">— {{ history|length }} attempt{{ history|length|pluralize }}</span>
+  </div>
+
+  {% if not history %}
+    <div class="card-body py-3 text-muted small">No attempt has been opened yet.</div>
+  {% else %}
+    <ul class="list-group list-group-flush">
+      {% for a in history %}
+      <li class="list-group-item py-2
+                 {% if a.opened_reason == 'qc_failed' %}border-start border-4 border-danger
+                 {% elif a.opened_reason == 'pm_change_request' %}border-start border-4 border-warning{% endif %}">
+
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+          <div>
+            <span class="ver-tag">Attempt {{ a.attempt_number }}</span>
+
+            {# Why this attempt opened — the distinction that must survive #}
+            {% if a.opened_reason == 'qc_failed' %}
+              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+                Rework: QC failed</span>
+            {% elif a.opened_reason == 'pm_change_request' %}
+              <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+                Rework: PM change request</span>
+            {% else %}
+              <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+                Initial</span>
+            {% endif %}
+
+            {% if a.attempt_number == assignment.current_attempt_number %}
+              <span class="badge bg-primary-subtle text-primary-emphasis">current</span>
+            {% endif %}
+
+            <div class="text-muted" style="font-size:.7rem;">
+              opened {{ a.opened_at|date:"d M Y H:i" }}
+              {% if a.closed_at %} · closed {{ a.closed_at|date:"d M Y H:i" }}
+              {% else %} · open{% endif %}
+              {% if a.qc_started_at %} · QC started {{ a.qc_started_at|date:"d M Y H:i" }}{% endif %}
+            </div>
+          </div>
+
+          <div class="text-end">
+            {% if a.qc_verdict == 'passed' %}
+              <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>QC passed</span>
+            {% elif a.qc_verdict == 'failed' %}
+              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>QC failed</span>
+            {% elif a.closed_at %}
+              {# Closed with a pending verdict = closed by a change request, never judged #}
+              <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>Not judged</span>
+            {% elif a.qc_started_at %}
+              <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>In QC</span>
+            {% else %}
+              <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>QC not started</span>
+            {% endif %}
+            {% if a.qc_reviewed_at %}
+              <div class="text-muted" style="font-size:.7rem;">
+                {{ a.qc_reviewed_at|date:"d M Y H:i" }}
+                by {{ a.qc_reviewed_by.user.get_full_name|default:a.qc_reviewed_by.user.username }}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if a.qc_remarks %}
+          <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
+            <strong>QC remarks:</strong> {{ a.qc_remarks }}
+          </div>
+        {% endif %}
+
+        {% for cr in a.change_requests.all %}
+          <div class="alert alert-warning py-2 px-2 my-2 small mb-0">
+            <strong>PM change request</strong>
+            — {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
+            {{ cr.requested_at|date:"d M Y H:i" }}
+            <div>{{ cr.reason }}</div>
+            {% if cr.resulting_attempt %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Resolved — opened attempt {{ cr.resulting_attempt.attempt_number }}.
+              </div>
+            {% else %}
+              <div class="fw-semibold" style="font-size:.7rem;">
+                Unresolved — blocks a QC verdict on this attempt.
+              </div>
+            {% endif %}
+          </div>
+        {% endfor %}
+
+        {% if a.boq_submitted_at %}
+          <div class="text-muted" style="font-size:.7rem;">
+            BOQ marked complete {{ a.boq_submitted_at|date:"d M Y H:i" }}
+            by {{ a.boq_submitted_by.user.get_full_name|default:a.boq_submitted_by.user.username }}
+          </div>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</div>
