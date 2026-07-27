@@ -512,6 +512,11 @@ class UserProfile(models.Model):
         ('Project Coordinator', 'Project Coordinator'),
         ('Site Engineer',       'Site Engineer'),
         ('Design',        'Design'),
+        # Design Head becomes a real role here (OPEX design module, Part 1). The
+        # is_design_head boolean below is NOT removed and no user is migrated onto this
+        # role in this session — both forms are accepted by permissions.user_can_view_project
+        # and user_can_view_project_boq, which already branch on either.
+        ('Design Head',   'Design Head'),
         ('Finance',       'Finance'),
         ('SCM',           'SCM'),
         ('CEO',           'CEO'),
@@ -523,6 +528,17 @@ class UserProfile(models.Model):
     phone_number            = models.CharField(max_length=10, blank=True)
     is_active               = models.BooleanField(default=True)  # Soft deactivation — keeps history without deleting the user
     is_design_head          = models.BooleanField(default=False)  # Grants Design-task reassignment via task_assign_design_head, independent of role
+    # Names a deputy who may act for the Design Head during absence. STORAGE ONLY in this
+    # session — nothing reads this field yet; the acting-for rules are Part 4. Self-FK so
+    # the deputy is itself a UserProfile; SET_NULL so deactivating the deputy's profile
+    # never deletes the Design Head's own row.
+    design_head_deputy      = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='deputy_for',
+    )
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)
     created_at              = models.DateTimeField(auto_now_add=True)
@@ -1535,3 +1551,407 @@ class ChecklistItemCompletion(models.Model):
     def __str__(self):
         state = 'checked' if self.is_checked else 'pending'
         return f"Task {self.task_id} / item {self.item_id} — {state}"
+
+
+# ===========================================================================
+# OPEX Design Module — Part 1: data model only
+#
+# Scope note (deliberate): these models RECORD state. They contain no transition
+# logic — no save() override advances a status, no signal fires, no state machine
+# is enforced here. The rules that move an assignment through the statuses below
+# arrive in Part 2 onward. A model that silently changes its own status is much
+# harder to debug than one that does not.
+#
+# OPEX ONLY. Residential design work continues to run on its six design Task rows
+# with PM-owned approval, entirely untouched by anything in this section. The two
+# approval models genuinely differ and are deliberately not unified.
+#
+# Several fields below are documented as "required when <condition>" (qc_remarks on
+# a failed QC, rejection_reason on a rejected Arka, change_reason on a non-first
+# commitment). Those are CONDITIONAL requirements that depend on workflow state, so
+# they are recorded here as documentation and left unenforced in this session rather
+# than invented as constraints the later parts would have to unwind. Enforcement
+# belongs with the transition logic that establishes the condition.
+# ===========================================================================
+
+# DesignAssignment.status values. Module-level so views, forms and tests in later
+# parts import one list instead of copying string literals.
+DESIGN_AWAITING_SURVEY     = 'awaiting_survey'
+DESIGN_SURVEY_RETURNED     = 'survey_returned'
+DESIGN_AWAITING_ALLOCATION = 'awaiting_allocation'
+DESIGN_ALLOCATED           = 'allocated'
+DESIGN_DUE_DATE_PROPOSED   = 'due_date_proposed'
+DESIGN_IN_DESIGN           = 'in_design'
+DESIGN_ARKA_SUBMITTED      = 'arka_submitted'
+DESIGN_ARKA_REJECTED       = 'arka_rejected'
+DESIGN_ARTIFACTS_UPLOADED  = 'artifacts_uploaded'
+DESIGN_IN_QC               = 'in_qc'
+DESIGN_QC_FAILED           = 'qc_failed'
+DESIGN_RELEASED            = 'released'
+
+DESIGN_ASSIGNMENT_STATUS_CHOICES = [
+    (DESIGN_AWAITING_SURVEY,     'Awaiting survey'),
+    (DESIGN_SURVEY_RETURNED,     'Survey returned'),
+    (DESIGN_AWAITING_ALLOCATION, 'Awaiting allocation'),
+    (DESIGN_ALLOCATED,           'Allocated'),
+    (DESIGN_DUE_DATE_PROPOSED,   'Due date proposed'),
+    (DESIGN_IN_DESIGN,           'In design'),
+    (DESIGN_ARKA_SUBMITTED,      'Arka submitted'),
+    (DESIGN_ARKA_REJECTED,       'Arka rejected'),
+    (DESIGN_ARTIFACTS_UPLOADED,  'Artifacts uploaded'),
+    (DESIGN_IN_QC,               'In QC'),
+    (DESIGN_QC_FAILED,           'QC failed'),
+    (DESIGN_RELEASED,            'Released'),
+]
+
+# DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
+# deliberately not collapsed into one field: a QC failure is the design failing
+# review, a PM change request is the requirement changing underneath it. Rework
+# rates for the two mean different things and must stay distinguishable.
+ATTEMPT_REASON_INITIAL           = 'initial'
+ATTEMPT_REASON_QC_FAILED         = 'qc_failed'
+ATTEMPT_REASON_PM_CHANGE_REQUEST = 'pm_change_request'
+
+DESIGN_ATTEMPT_REASON_CHOICES = [
+    (ATTEMPT_REASON_INITIAL,           'Initial'),
+    (ATTEMPT_REASON_QC_FAILED,         'QC failed'),
+    (ATTEMPT_REASON_PM_CHANGE_REQUEST, 'PM change request'),
+]
+
+QC_PENDING = 'pending'
+QC_PASSED  = 'passed'
+QC_FAILED  = 'failed'
+
+QC_VERDICT_CHOICES = [
+    (QC_PENDING, 'Pending'),
+    (QC_PASSED,  'Passed'),
+    (QC_FAILED,  'Failed'),
+]
+
+ARKA_PENDING  = 'pending'
+ARKA_APPROVED = 'approved'
+ARKA_REJECTED = 'rejected'
+
+ARKA_VERDICT_CHOICES = [
+    (ARKA_PENDING,  'Pending'),
+    (ARKA_APPROVED, 'Approved'),
+    (ARKA_REJECTED, 'Rejected'),
+]
+
+DESIGN_FILE_CAD_PDF   = 'cad_pdf'
+DESIGN_FILE_CAD_DWG   = 'cad_dwg'
+DESIGN_FILE_BOQ_EXCEL = 'boq_excel'
+DESIGN_FILE_BOQ_PDF   = 'boq_pdf'
+
+DESIGN_FILE_KIND_CHOICES = [
+    (DESIGN_FILE_CAD_PDF,   'CAD (PDF)'),
+    (DESIGN_FILE_CAD_DWG,   'CAD (DWG)'),
+    (DESIGN_FILE_BOQ_EXCEL, 'BOQ (Excel)'),
+    (DESIGN_FILE_BOQ_PDF,   'BOQ (PDF)'),
+]
+
+
+class DesignAssignment(models.Model):
+    """One per OPEX site — the container for all design work on that site.
+
+    OneToOne to Project rather than a new site entity: Program is the tender parent,
+    Project is the site, and this hangs off the existing site row.
+
+    SURVEY IS A FILE ONLY (settled decision 6): bucket + path, no structured fields.
+    Structured survey data arrives when the survey module is built. The designer can
+    return a survey as inadequate (survey_returned_*), which stops their clock — the
+    clock arithmetic itself belongs to a later part.
+
+    FILES STORE BUCKET AND PATH, NOT URLS (settled decision 8). Nothing here builds a
+    URL; the signed-URL helper is Part 2. This deliberately differs from the older
+    ProjectDocument / DesignSubmission three-field convention, which stores a
+    long-lived public file_url.
+    """
+
+    project = models.OneToOneField(
+        Project, on_delete=models.CASCADE, related_name='design_assignment',
+    )
+
+    # ── Survey (file only) ──────────────────────────────────────────────────
+    survey_file_bucket = models.CharField(max_length=100, blank=True, default='')
+    survey_file_path   = models.CharField(max_length=500, blank=True, default='')
+    survey_uploaded_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='uploaded_design_surveys',
+    )
+    survey_uploaded_at = models.DateTimeField(null=True, blank=True)
+    # Designer returns an inadequate survey; reason is free text.
+    survey_returned_at   = models.DateTimeField(null=True, blank=True)
+    survey_returned_by   = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='returned_design_surveys',
+    )
+    survey_return_reason = models.TextField(blank=True, default='')
+
+    # ── Allocation ──────────────────────────────────────────────────────────
+    assigned_to = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='design_assignments',
+    )
+    assigned_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='made_design_assignments',
+    )
+    assigned_at = models.DateTimeField(null=True, blank=True)
+
+    # 0 until the first attempt is opened; mirrors the highest DesignAttempt.attempt_number.
+    # Maintained by the transition logic in a later part, NOT by this model.
+    current_attempt_number = models.PositiveIntegerField(default=0)
+
+    status = models.CharField(
+        max_length=30, choices=DESIGN_ASSIGNMENT_STATUS_CHOICES,
+        default=DESIGN_AWAITING_SURVEY,
+    )
+
+    # ── Release ─────────────────────────────────────────────────────────────
+    released_at = models.DateTimeField(null=True, blank=True)
+    released_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='released_design_assignments',
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Design — {self.project.project_id} ({self.status})"
+
+
+class DueDateCommitment(models.Model):
+    """A two-sided due-date handshake (settled decision 5): the designer proposes,
+    the Design Head approves.
+
+    Approved dates are NEVER edited in place. A change creates a NEW commitment row
+    carrying its own change_reason, and the previous row is flipped to
+    is_current=False. The number of revisions is therefore derivable by counting rows
+    (count - 1), with no stored revision counter that can drift.
+
+    A row whose approved_by / approved_at are still null is a proposal awaiting approval.
+    """
+
+    assignment = models.ForeignKey(
+        DesignAssignment, on_delete=models.CASCADE, related_name='due_date_commitments',
+    )
+    proposed_date = models.DateField()
+    proposed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='proposed_due_dates',
+    )
+    proposed_at = models.DateTimeField(auto_now_add=True)
+
+    approved_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='approved_due_dates',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    # Required when this is NOT the first commitment for the assignment — see the
+    # conditional-requirement note at the top of this section.
+    change_reason = models.TextField(blank=True, default='')
+
+    is_current = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-proposed_at']
+        constraints = [
+            # Exactly one live commitment per assignment. Partial (condition=) so any
+            # number of superseded rows may coexist with is_current=False.
+            models.UniqueConstraint(
+                fields=['assignment'],
+                condition=models.Q(is_current=True),
+                name='uniq_current_due_date_per_assignment',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'approved' if self.approved_at else 'proposed'
+        return f"Due {self.proposed_date} ({state}) — assignment {self.assignment_id}"
+
+
+class DesignAttempt(models.Model):
+    """One pass at designing the site. A failed QC or a PM change request closes the
+    current attempt and opens a new one, with opened_reason recording WHICH of the two
+    loops caused it (settled decision 3).
+
+    qc_started_at opens the PM change request window — before QC starts there is
+    nothing settled to raise a change against.
+    """
+
+    assignment = models.ForeignKey(
+        DesignAssignment, on_delete=models.CASCADE, related_name='attempts',
+    )
+    attempt_number = models.PositiveIntegerField()
+    opened_reason = models.CharField(
+        max_length=20, choices=DESIGN_ATTEMPT_REASON_CHOICES,
+        default=ATTEMPT_REASON_INITIAL,
+    )
+    opened_at = models.DateTimeField(auto_now_add=True)
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    # ── QC ──────────────────────────────────────────────────────────────────
+    qc_verdict = models.CharField(
+        max_length=10, choices=QC_VERDICT_CHOICES, default=QC_PENDING,
+    )
+    # Required when qc_verdict is 'failed' — see the conditional-requirement note above.
+    qc_remarks = models.TextField(blank=True, default='')
+    qc_reviewed_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='qc_reviewed_attempts',
+    )
+    qc_reviewed_at = models.DateTimeField(null=True, blank=True)
+    # Opens the PM change request window.
+    qc_started_at = models.DateTimeField(null=True, blank=True)
+
+    # ── BOQ ─────────────────────────────────────────────────────────────────
+    # The design workflow RECORDS that a BOQ was submitted; it does not duplicate BOQ
+    # data (settled decision 7). The BOQ / BOQItem / BOQItemMaster models are used
+    # as-is and are not touched by this module.
+    boq_submitted_at = models.DateTimeField(null=True, blank=True)
+    boq_submitted_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='boq_submitted_attempts',
+    )
+
+    class Meta:
+        ordering        = ['assignment', 'attempt_number']
+        unique_together = ('assignment', 'attempt_number')
+
+    def __str__(self):
+        return f"Attempt {self.attempt_number} — assignment {self.assignment_id} ({self.qc_verdict})"
+
+
+class ArkaSubmission(models.Model):
+    """One Arka design submitted for Design Head approval, versioned within an attempt.
+
+    A rejected submission is superseded by a new version in the SAME attempt (a
+    rejected Arka is not itself a rework loop); is_current points at the live version.
+    """
+
+    attempt = models.ForeignKey(
+        DesignAttempt, on_delete=models.CASCADE, related_name='arka_submissions',
+    )
+    version     = models.PositiveIntegerField()
+    capacity_kw = models.DecimalField(max_digits=10, decimal_places=2)
+    # URLField(max_length=1000) matches the existing file_url / photo_url convention.
+    # This is an external Arka link, not a storage location, so it is a URL by nature
+    # and is not subject to settled decision 8 (which governs stored FILES).
+    arka_link   = models.URLField(max_length=1000)
+
+    submitted_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='arka_submissions',
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+
+    verdict = models.CharField(
+        max_length=10, choices=ARKA_VERDICT_CHOICES, default=ARKA_PENDING,
+    )
+    # Required when verdict is 'rejected' — see the conditional-requirement note above.
+    rejection_reason = models.TextField(blank=True, default='')
+    reviewed_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='reviewed_arka_submissions',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    is_current = models.BooleanField(default=True)
+
+    class Meta:
+        ordering        = ['attempt', 'version']
+        unique_together = ('attempt', 'version')
+        constraints = [
+            # Exactly one live Arka version per attempt; superseded rows coexist freely.
+            models.UniqueConstraint(
+                fields=['attempt'],
+                condition=models.Q(is_current=True),
+                name='uniq_current_arka_per_attempt',
+            ),
+        ]
+
+    def __str__(self):
+        return f"Arka v{self.version} — attempt {self.attempt_id} ({self.verdict})"
+
+
+class DesignFile(models.Model):
+    """A CAD or BOQ artifact uploaded against an attempt, versioned per kind.
+
+    ARTIFACT PAIRING (settled decision 4): derived_from_arka is NOT NULL. Every CAD
+    and BOQ artifact records which Arka version it was drawn against, so QC can never
+    review a CAD produced from a superseded layout. PROTECT on that FK, so an Arka
+    version that artifacts derive from cannot be deleted out from under them.
+
+    BUCKET AND PATH, NOT URLS (settled decision 8). No URL is stored or constructed
+    here; the signed-URL helper is Part 2.
+    """
+
+    attempt = models.ForeignKey(
+        DesignAttempt, on_delete=models.CASCADE, related_name='design_files',
+    )
+    kind    = models.CharField(max_length=20, choices=DESIGN_FILE_KIND_CHOICES)
+    version = models.PositiveIntegerField()
+
+    bucket = models.CharField(max_length=100)
+    path   = models.CharField(max_length=500)
+    original_filename = models.CharField(max_length=255, blank=True, default='')
+    size_bytes        = models.PositiveBigIntegerField(null=True, blank=True)
+    content_type      = models.CharField(max_length=100, blank=True, default='')
+
+    derived_from_arka = models.ForeignKey(
+        ArkaSubmission, on_delete=models.PROTECT, related_name='derived_files',
+    )
+
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='uploaded_design_files',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    is_current = models.BooleanField(default=True)
+    # Points at the DesignFile that replaced this one. SET_NULL so deleting the
+    # replacement never cascades away the row it superseded.
+    superseded_by = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='supersedes',
+    )
+
+    class Meta:
+        ordering        = ['attempt', 'kind', 'version']
+        unique_together = ('attempt', 'kind', 'version')
+
+    def __str__(self):
+        return f"{self.kind} v{self.version} — attempt {self.attempt_id}"
+
+
+class DesignChangeRequest(models.Model):
+    """A PM asking for a change after QC has started on an attempt.
+
+    This is the second of the two rework loops (settled decision 3). resulting_attempt
+    links to the attempt this request opened, so a change request and the rework it
+    caused stay associated; it is null until that attempt exists.
+    """
+
+    attempt = models.ForeignKey(
+        DesignAttempt, on_delete=models.CASCADE, related_name='change_requests',
+    )
+    # The site's assigned PM. PROTECT keeps the requester on the record.
+    requested_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='design_change_requests',
+    )
+    reason       = models.TextField()
+    requested_at = models.DateTimeField(auto_now_add=True)
+
+    resulting_attempt = models.ForeignKey(
+        DesignAttempt, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='caused_by_change_request',
+    )
+
+    class Meta:
+        ordering = ['-requested_at']
+
+    def __str__(self):
+        return f"Change request — attempt {self.attempt_id}"

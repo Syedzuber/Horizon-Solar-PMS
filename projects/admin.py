@@ -5,6 +5,8 @@ from .models import (
     NotificationLog, SystemSettings,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     Program,
+    DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
+    DesignFile, DesignChangeRequest,
 )
 
 
@@ -215,3 +217,74 @@ class SystemSettingsAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+# ---------------------------------------------------------------------------
+# OPEX Design Module — Part 1
+#
+# Registered for shell-and-admin VERIFICATION only; these are not user-facing
+# screens. Audit-trail models (attempts, Arka versions, files, change requests)
+# are append-only records of what happened, so their historical fields are
+# read-only here — the admin must not be a side door that rewrites design
+# history. Nothing below performs a status transition.
+# ---------------------------------------------------------------------------
+
+@admin.register(DesignAssignment)
+class DesignAssignmentAdmin(admin.ModelAdmin):
+    list_display  = ['project', 'status', 'assigned_to', 'current_attempt_number',
+                     'released_at', 'updated_at']
+    list_filter   = ['status']
+    search_fields = ['project__project_id', 'project__customer_name',
+                     'assigned_to__user__username']
+    raw_id_fields = ['project']
+    readonly_fields = ['current_attempt_number', 'created_at', 'updated_at']
+
+
+@admin.register(DueDateCommitment)
+class DueDateCommitmentAdmin(admin.ModelAdmin):
+    list_display  = ['assignment', 'proposed_date', 'proposed_by', 'approved_by',
+                     'approved_at', 'is_current']
+    list_filter   = ['is_current']
+    search_fields = ['assignment__project__project_id']
+    raw_id_fields = ['assignment']
+    readonly_fields = ['proposed_at']
+
+
+@admin.register(DesignAttempt)
+class DesignAttemptAdmin(admin.ModelAdmin):
+    list_display  = ['assignment', 'attempt_number', 'opened_reason', 'qc_verdict',
+                     'qc_started_at', 'qc_reviewed_at', 'closed_at']
+    list_filter   = ['opened_reason', 'qc_verdict']
+    search_fields = ['assignment__project__project_id']
+    raw_id_fields = ['assignment']
+    readonly_fields = ['opened_at']
+
+
+@admin.register(ArkaSubmission)
+class ArkaSubmissionAdmin(admin.ModelAdmin):
+    list_display  = ['attempt', 'version', 'capacity_kw', 'verdict',
+                     'submitted_by', 'reviewed_by', 'is_current']
+    list_filter   = ['verdict', 'is_current']
+    search_fields = ['attempt__assignment__project__project_id']
+    raw_id_fields = ['attempt']
+    readonly_fields = ['submitted_at']
+
+
+@admin.register(DesignFile)
+class DesignFileAdmin(admin.ModelAdmin):
+    list_display  = ['attempt', 'kind', 'version', 'derived_from_arka',
+                     'uploaded_by', 'uploaded_at', 'is_current']
+    list_filter   = ['kind', 'is_current']
+    search_fields = ['attempt__assignment__project__project_id', 'original_filename', 'path']
+    raw_id_fields = ['attempt', 'derived_from_arka', 'superseded_by']
+    # bucket/path identify a stored object; rewriting them here would orphan the file.
+    readonly_fields = ['bucket', 'path', 'original_filename', 'size_bytes',
+                       'content_type', 'uploaded_at']
+
+
+@admin.register(DesignChangeRequest)
+class DesignChangeRequestAdmin(admin.ModelAdmin):
+    list_display  = ['attempt', 'requested_by', 'requested_at', 'resulting_attempt']
+    search_fields = ['attempt__assignment__project__project_id', 'reason']
+    raw_id_fields = ['attempt', 'resulting_attempt']
+    readonly_fields = ['requested_at']
