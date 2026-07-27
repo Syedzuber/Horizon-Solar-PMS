@@ -164,9 +164,12 @@ def _user_holds_task_on_project(profile, project):
     """
     Return True if `profile` is assigned any task on `project`.
 
-    Extracted so the Design union means the SAME thing in both BOQ helpers below. The
-    relation traversal mirrors the one already used by user_can_view_project()'s Design
-    branch — reverse relations only, keeping this module import-free.
+    Used by the BOQ READ gate only. The BOQ WRITE gate is W-narrow and deliberately does
+    NOT call this — holding a task lets a designer read a BOQ, not author it. Do not
+    "restore symmetry" by adding it back to user_can_edit_project_boq(); see the WRITE
+    RULE note there. The relation traversal mirrors the one already used by
+    user_can_view_project()'s Design branch — reverse relations only, keeping this
+    module import-free.
     """
     return project.phases.filter(tasks__assigned_to=profile).exists()
 
@@ -243,13 +246,21 @@ def user_can_edit_project_boq(user, project):
       * Admin / CEO — portfolio-wide read, but authoring a BOQ is a design act, not an
         administrative one. They already reach every BOQ read surface.
 
-    WRITE RULE: this is W-broad — the union of assigned_design and task-holding, the same
-    union user_can_view_project_boq() reads on. Selected by the Part 0.6 precondition, which
-    measures what share of active projects have a null `assigned_design`: above 20% the FK
-    alone is too thin a relationship to gate writes on, because designers legitimately work
-    projects that were never stamped with an assigned_design. To narrow this to W-narrow
-    (`assigned_design` only) if that coverage improves, delete the task-holding fallback on
-    the last line — nothing else in this module or in views.py needs to change.
+    WRITE RULE: this is W-narrow — `assigned_design` on THIS project, and nothing else.
+    Selected by the Part 0.6 precondition, which measures what share of active projects
+    have a null `assigned_design`: above 20% the FK alone would be too thin a relationship
+    to gate writes on, because designers would legitimately be working projects never
+    stamped with an assigned_design. Measured on live Railway data: 25 active projects,
+    3 with a null assigned_design = 12%, below the threshold — so the FK is well-enough
+    populated to carry the write gate on its own.
+
+    This is NARROWER than user_can_view_project_boq()'s Design branch, deliberately: a
+    designer holding a task on a project can READ its BOQ but not author it. Only the
+    stamped assigned_design writes.
+
+    To widen back to W-broad if assigned_design coverage degrades past 20%, restore the
+    `_user_holds_task_on_project(profile, project)` fallback as the last line — nothing
+    else in this module or in views.py needs to change either way.
     """
     if project is None:
         return False
@@ -260,9 +271,7 @@ def user_can_edit_project_boq(user, project):
     if profile.role != 'Design':
         return False
 
-    if project.assigned_design_id == profile.pk:
-        return True
-    return _user_holds_task_on_project(profile, project)   # W-broad only — drop for W-narrow
+    return project.assigned_design_id == profile.pk   # W-narrow — no task-holding fallback
 
 
 def user_can_manage_program(user, program):
