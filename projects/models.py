@@ -512,11 +512,26 @@ class UserProfile(models.Model):
         ('Project Coordinator', 'Project Coordinator'),
         ('Site Engineer',       'Site Engineer'),
         ('Design',        'Design'),
-        # Design Head becomes a real role here (OPEX design module, Part 1). The
-        # is_design_head boolean below is NOT removed and no user is migrated onto this
-        # role in this session — both forms are accepted by permissions.user_can_view_project
-        # and user_can_view_project_boq, which already branch on either.
-        ('Design Head',   'Design Head'),
+        # 'Design Head' WAS HERE (added Part 1, migration 0048) AND WAS DELIBERATELY
+        # REMOVED (Part 6.5b, migration 0053). Do not add it back without reading
+        # DESIGN_HEAD_ROLE_MIGRATION_AUDIT.md first.
+        #
+        # It was never held by any user on either database, but it was assignable from
+        # five Admin surfaces, and assigning it broke an account in ways that named no
+        # cause: no @role_required decorator admits it, so the Design dashboard 302s
+        # away; it matches no Task.assigned_role, so the holder cannot change a task's
+        # status, its due date, or tick a checklist item; user_can_edit_project_boq()
+        # refuses it, so BOQ authorship is lost; six `role='Design'` querysets stop
+        # offering the user as a designer; and _SA_EDITABLE_ROLE_CHOICES omits it, so a
+        # System Admin cannot even edit that user's phone number afterwards.
+        #
+        # DESIGN HEAD AUTHORITY REMAINS `is_design_head` (below), which is what all
+        # eighteen design-module views actually gate on. The role would have added a
+        # SECOND authority mechanism beside a working one, not replaced it.
+        #
+        # The role-string branches in permissions.user_can_view_project() and
+        # user_can_view_project_boq() are deliberately LEFT IN PLACE — they are harmless,
+        # and a future phase may reintroduce the role on purpose.
         ('Finance',       'Finance'),
         ('SCM',           'SCM'),
         ('CEO',           'CEO'),

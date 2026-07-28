@@ -873,3 +873,131 @@ in.
 
 **Location:** `projects/models.py` — `BOQ.status`; `projects/design_views.py` —
 `site_group_lock`
+
+---
+
+## K. Found during Part 6.5a/6.5b (Design Head role audit and closure)
+
+Part 6.5b removed `'Design Head'` from `ROLE_CHOICES` (migration `0053`) and closed G4 by
+admitting the Head's deputy to `user_can_view_project_boq()`. Everything below was found
+by the 6.5a audit and deliberately left alone.
+
+### K1 — `tasks_drill_down` gives portfolio-wide task visibility to any unmatched role
+
+**This is a live widening, not a Design Head problem.** `tasks_drill_down` scopes its
+queryset with an if/elif chain and **no final else**:
+
+```python
+# projects/views.py:385-403
+    if role in ('PM', 'Project Coordinator'):
+        base_qs = base_qs.filter(...).distinct()
+    elif role == 'Design':
+        base_qs = base_qs.filter(...).distinct()
+    elif role == 'Site Engineer':
+        base_qs = base_qs.filter(assigned_to=profile)
+    # SCM and others: all active non-deleted projects
+```
+
+The trailing comment is honest about the consequence and wrong about who it applies to.
+"SCM and others" is every role that is not PM, Project Coordinator, Design or Site
+Engineer — which today is SCM, Finance, CEO, Admin, System Admin, BD **and a blank role**,
+and tomorrow is **any role added to `ROLE_CHOICES` without a matching branch here**. Such a
+role silently inherits portfolio-wide task visibility on `/tasks/due-today/`,
+`/tasks/due-soon/` and `/tasks/overdue/`, with no decision recorded anywhere.
+
+Measured during the 6.5a audit, by flipping one user's role inside a rolled-back
+transaction and re-rendering each screen:
+
+| screen | `role='Design'` | `role='Design Head'` |
+|---|---|---|
+| `/tasks/overdue/` | **2** project groups | **4** project groups |
+| `/tasks/due-today/` | 1 | 2 |
+| `/tasks/due-soon/` | 1 | 2 |
+
+Same user, same data, same session — the only change was the role string, and the screen
+went from their own work to the portfolio's.
+
+Not fixed here for two reasons. It is out of Part 6.5b's scope by instruction, and the fix
+is a product decision rather than a patch: an unmatched role should either fall through to
+**nothing** (safe, but silently empties three screens for SCM/CEO/Admin/Finance/BD, who may
+genuinely be meant to see everything) or fall through to portfolio-wide **explicitly**, via
+a named allowlist that a new role has to be added to on purpose. The second is the shape
+the rest of the codebase uses — `PORTFOLIO_VIEW_ROLES`, `BOQ_PORTFOLIO_READ_ROLES`,
+`EOD_DIGEST_EXCLUDED_ROLES` are all explicit sets — and this is the one place that decides
+the same class of question by omission.
+
+Note the same shape appears at `views.py:5595` (`gantt_can_view_client = role in
+('PM','Project Coordinator','CEO')`) but is *safe* there, because it is an allowlist whose
+default is denial. `tasks_drill_down`'s default is grant.
+
+**Location:** `projects/views.py:385-403` — `tasks_drill_down`
+
+### K2 — The `'Design Head'` role-string branches are now dead code, kept on purpose
+
+`user_can_view_project()` (permissions.py:119) and `user_can_view_project_boq()`
+(permissions.py:217) both accept `role == 'Design Head'`. With the choice removed from
+`ROLE_CHOICES`, no form or view can produce that value, so neither branch can fire in
+normal operation — `choices` is not enforced on `save()`, so only a shell, a fixture or a
+raw SQL write can reach them.
+
+Kept deliberately: they are harmless, they cost one string comparison, and a future phase
+may reintroduce the role on purpose. `tests_permissions.py` pins both
+(`test_role_string_still_grants_portfolio_view`, `test_design_head_role_string_also_reads`)
+so removing one is a decision somebody makes rather than a line somebody deletes while
+tidying.
+
+Recorded so that a future reader running a dead-code sweep finds the reasoning before the
+delete key.
+
+**Location:** `projects/permissions.py:119`, `projects/permissions.py:217`
+
+### K3 — `is_design_head` still confers authority independently of role, on any role
+
+`test_flag_is_independent_of_role` asserts the flag grants portfolio project view when set
+on `'Design'`, `'PM'`, `'Site Engineer'` **and a blank role**, and `models.py` documents it
+as deliberately role-independent. Part 6.5b did not change that, and the removal of the
+role choice makes the flag the sole Design Head mechanism permanently rather than
+transitionally.
+
+The consequence worth stating: an Admin can tick "Design Head" on a Finance or Site
+Engineer account through the user-edit form, and that account immediately gains
+portfolio-wide project view, portfolio-wide BOQ read, and every one of the eighteen
+design-module screens including QC verdicts and OPEX release. Nothing in the form warns
+that the checkbox does that, and its help text describes only task reassignment
+(`forms.py:155` — *"Can reassign any Design-role task, independent of role"*), which was
+accurate in Part 0 and has been an understatement since Part 2.
+
+Not fixed: constraining the flag to Design-role users, or rewriting the help text, both
+touch the user-edit surface, which was out of scope. The help text is the cheaper half.
+
+**Location:** `projects/models.py:530`, `projects/forms.py:152-156`,
+`projects/templates/projects/admin/user_edit.html:90-97`
+
+### K4 — Six `role='Design'` querysets decide who can be a designer, and none is shared
+
+`UserProfile.objects.filter(role='Design', is_active=True)` (or a `get_object_or_404`
+equivalent) appears at `views.py:718`, `views.py:2204`, `views.py:3700`, `views.py:3706`,
+`views.py:5362`, `views.py:5565`, plus `design_views.py:182` and `design_views.py:396`, and
+again as `limit_choices_to={'role': 'Design'}` at `models.py:75`. Nine copies of one rule —
+"who may be selected as a designer" — with no shared helper.
+
+They are all consistent today. They were also the single largest cluster the 6.5a audit had
+to enumerate by hand, and any future change to what counts as a designer has to find all
+nine. This is finding A5/C8 (role-string comparisons codebase-wide) narrowed to the one
+cluster that matters to this module.
+
+**Location:** `projects/views.py`, `projects/design_views.py`, `projects/models.py:75`
+
+### K5 — Four copies of `_PROFILE_TO_TASK_ROLE`, two of its inverse
+
+`_PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}` is redefined inline at `views.py:1967`,
+`views.py:3189`, `views.py:3786` and `views.py:5570`; `_TASK_TO_PROFILE_ROLE =
+{'BD / Sales': 'BD'}` at `views.py:3614` and `views.py:5554`. Six local dicts expressing one
+mapping between `UserProfile.role` and `Task.assigned_role`.
+
+This is the mechanism that decides whether a user may change a task's status, set its due
+date, or tick a checklist item. It is why a `'Design Head'` role holder could do none of
+those — and why any future role that needs to act on tasks must be added in six places, not
+one.
+
+**Location:** `projects/views.py` — six sites listed above

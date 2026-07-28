@@ -179,11 +179,12 @@ def user_can_view_project_boq(user, project):
     Return True if `user` may READ `project`'s BOQ. Read only — confers no authority to
     change it. For that, call user_can_edit_project_boq().
 
-    Access is the OR of four additive sources:
+    Access is the OR of five additive sources:
 
         PM / coordinator     — user_can_manage_project(), the one canonical path
         SCM / Admin / CEO    — portfolio-wide by remit (BOQ_PORTFOLIO_READ_ROLES)
         Design Head          — portfolio-wide read, no write (see below)
+        Design Head's deputy — portfolio-wide read, no write (Part 6.5b, closes G4)
         Design               — assigned_design on this project, OR holds a task on it
 
     The Design branch is the SAME union as user_can_view_project()'s Design branch
@@ -192,10 +193,30 @@ def user_can_view_project_boq(user, project):
     expressed here through _user_holds_task_on_project() rather than duplicated inline, so
     the two helpers in this pair cannot drift apart from each other.
 
-    Design Head accepts BOTH `is_design_head` and the role string 'Design Head', matching
-    the pattern at permissions.py:119-120, so the Phase 2 promotion of the flag to a role
-    needs no second edit here. Design Head gets portfolio-wide READ and no write — it is
-    deliberately absent from user_can_edit_project_boq().
+    Design Head accepts BOTH `is_design_head` and the role string 'Design Head'. The
+    string branch is kept even though Part 6.5b removed 'Design Head' from ROLE_CHOICES
+    (see the note there) — it is harmless, and a future phase may reintroduce the role
+    deliberately. Design Head gets portfolio-wide READ and no write — it is deliberately
+    absent from user_can_edit_project_boq().
+
+    THE DEPUTY BRANCH CLOSES FINDING G4, and it is the reason this function was modified
+    at all after three parts of being off-limits. A named deputy could open a QC screen
+    (user_can_view_design admits them) and, from Part 6, a procurement group screen whose
+    aggregated BOQ they could read — then got a 403 from the per-site BOQ link on that
+    very page. A QC reviewer who cannot see the BOQ is reviewing half a package, and an
+    aggregate you may read over sites you may not is worse than either.
+
+    It had to go HERE and could not be an AND at the caller, the way the Part 6 group
+    lock was: the lock only ever NARROWS, and a caller can narrow a True. Admitting a
+    deputy WIDENS, and no caller can widen a gate that has already returned False.
+
+    Deputy resolution is user_is_design_head_deputy() — the Part 4 helper, not a second
+    copy of the `deputy_for` query. Its rule (the naming profile must still be a Head)
+    therefore applies here too: clear a Head's flag and their deputy loses BOQ read in
+    the same instant they lose everything else.
+
+    READ ONLY, DELIBERATELY. user_can_edit_project_boq() is NOT modified and does not
+    admit a deputy. A deputy reviews a BOQ; they do not author one. W-narrow stands.
 
     Returns False rather than raising for a null `project` or a user with no UserProfile,
     matching user_can_manage_project()'s guard style.
@@ -215,6 +236,13 @@ def user_can_view_project_boq(user, project):
         return True
 
     if getattr(profile, 'is_design_head', False) or profile.role == 'Design Head':
+        return True
+
+    # Part 6.5b — the Head's named deputy, on the same terms as the Head: read, never
+    # write. Kept as its own branch rather than folded into the line above so that "is
+    # the Head" and "may act for the Head" stay tellable apart here, exactly as
+    # user_is_design_head() and user_has_design_head_authority() keep them apart.
+    if user_is_design_head_deputy(user):
         return True
 
     if profile.role == 'Design':
@@ -303,12 +331,29 @@ def user_can_manage_program(user, program):
 # Same rule as the rest of this file: no view compares a role string or an ownership
 # field inline. Every design-workflow authority question is answered here.
 #
-# DESIGN HEAD AUTHORITY IS THE `is_design_head` BOOLEAN, NOT THE ROLE STRING.
-# Part 1 added 'Design Head' to ROLE_CHOICES, but no user holds it and 56 existing
-# @role_required decorators still match 'Design' literally — switching now would lock
-# the real Design Head out of every screen he already uses. The role migration is its
-# own later part. Until then the flag is the single source of truth, and the role
-# string is deliberately NOT consulted anywhere in this section.
+# DESIGN HEAD AUTHORITY IS THE `is_design_head` BOOLEAN, AND THAT IS NOW PERMANENT.
+#
+# This comment previously said "56 existing @role_required decorators still match
+# 'Design' literally". THAT NUMBER WAS WRONG. Counted mechanically over every
+# non-migration module in `projects/`: 61 @role_required uses exist, and exactly ONE
+# lists 'Design' — dashboard_design at views.py:893. 56 was the total decorator count
+# when the comment was written, not the exposure.
+#
+# The correction did not change the conclusion; it changed the reason. Part 6.5a audited
+# the whole surface and Part 6.5b acted on it: 'Design Head' was REMOVED from
+# UserProfile.ROLE_CHOICES (migration 0053) rather than migrated to. Every one of the
+# eighteen views below gates on user_is_design_head(), which reads the boolean and has
+# no role-string branch, so the role would have added a SECOND authority mechanism
+# beside a working one rather than replacing it — while costing its holder BOQ write,
+# every Task.assigned_role match, and the ability to be edited by a System Admin.
+#
+# Full reasoning, measurements and the open decision points: see
+# DESIGN_HEAD_ROLE_MIGRATION_AUDIT.md in the repo root.
+#
+# The role string is still accepted by user_can_view_project() and
+# user_can_view_project_boq() above — deliberately left in place, harmless, and ready
+# if a future phase reintroduces the role on purpose. It is NOT consulted anywhere in
+# this section, and the flag is the single source of truth here.
 #
 # PART 4 ADDS THE DEPUTY. `design_head_deputy` on the Head's UserProfile names one
 # person who may act for him. Every Part 2 and Part 3 view that asked

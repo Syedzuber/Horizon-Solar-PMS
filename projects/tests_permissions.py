@@ -11,8 +11,16 @@ Structure:
                                  relationships (assigned PM / coordinator / unrelated).
   * AssignmentScopingTests     — the Site Engineer and Design assignment branches.
   * DesignHeadTests            — the flag-or-role forward-compatibility expression.
+  * BOQReadWriteTests          — the READ/WRITE split on the two BOQ helpers (Part 6.5b).
+  * DeputyBOQTests             — the deputy's BOQ read, and the absence of write (G4).
   * BDPortfolioPolicyTests     — BD's portfolio-wide read, asserted as POLICY.
   * GuardTests                 — null project / profile-less user do not raise.
+
+The two BOQ classes were added by Part 6.5b. Before them, `user_can_view_project_boq()`
+and `user_can_edit_project_boq()` had ZERO coverage — which is precisely where the 6.5a
+audit found this module's changes would land. The deputy fix modified the read helper
+after three parts of it being off-limits, so the split it enforces is now pinned:
+a deputy READS every BOQ and WRITES none.
 
 No migrations are involved. Run with:
     python manage.py test projects --settings=solarpms.test_settings
@@ -23,7 +31,10 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 
 from .models import Project, ProjectPhase, Task, UserProfile
-from .permissions import user_can_manage_project, user_can_view_project
+from .permissions import (
+    user_can_edit_project_boq, user_can_manage_project, user_can_view_project,
+    user_can_view_project_boq,
+)
 
 
 def _make_user(username, role, is_design_head=False):
@@ -250,11 +261,26 @@ class DesignHeadTests(TestCase):
                 user, _ = _make_user(f'dh_{role or "blank"}', role, is_design_head=True)
                 self.assertTrue(user_can_view_project(user, self.project))
 
-    def test_future_role_string_grants_portfolio_view(self):
-        """Phase 2 promotes Design Head to a role; the check must already accept it.
+    def test_role_string_still_grants_portfolio_view(self):
+        """The role-string branch must keep working even though the role is gone.
 
-        'Design Head' is not yet in UserProfile.ROLE_CHOICES, so this sets the field
-        directly. `choices` is not enforced on save(), only by form validation.
+        'Design Head' was added to UserProfile.ROLE_CHOICES by Part 1 (migration 0048)
+        and DELIBERATELY REMOVED by Part 6.5b (migration 0053) after the 6.5a audit — it
+        was never held by anyone, but it was assignable from five Admin surfaces and
+        broke an account in five ways that named no cause. Design Head authority is, and
+        stays, the `is_design_head` boolean.
+
+        So this test now pins the opposite of what its name used to promise. The role
+        string is NOT a supported value any more; the branches that accept it in
+        user_can_view_project() and user_can_view_project_boq() were left in place on
+        purpose — they are harmless, and a future phase may reintroduce the role
+        deliberately. This asserts they are still there, so that removing one is a
+        decision somebody makes rather than a line somebody deletes in passing.
+
+        Setting the field directly is what makes this possible: `choices` is not enforced
+        on save(), only by form validation. That was already true when the value WAS a
+        legal choice, and it is what lets the assertion outlive the choice's removal.
+        See DESIGN_HEAD_ROLE_MIGRATION_AUDIT.md.
         """
         user, profile = _make_user('dh_role', 'Design')
         profile.role = 'Design Head'
@@ -262,10 +288,216 @@ class DesignHeadTests(TestCase):
         profile.save(update_fields=['role', 'is_design_head'])
         self.assertTrue(user_can_view_project(user, self.project))
 
+    def test_design_head_role_is_not_an_assignable_choice(self):
+        """Part 6.5b removed it. If it comes back, that must be a deliberate act."""
+        self.assertNotIn(
+            'Design Head', [value for value, _ in UserProfile.ROLE_CHOICES],
+            "'Design Head' was removed from ROLE_CHOICES by Part 6.5b (migration 0053). "
+            "If this fails, read DESIGN_HEAD_ROLE_MIGRATION_AUDIT.md before 'fixing' it.",
+        )
+
     def test_design_head_gets_view_not_manage(self):
         user, _ = _make_user('dh_nomanage', 'Design', is_design_head=True)
         self.assertTrue(user_can_view_project(user, self.project))
         self.assertFalse(user_can_manage_project(user, self.project))
+
+
+class BOQReadWriteTests(TestCase):
+    """The READ/WRITE split on the two BOQ helpers. Added by Part 6.5b.
+
+    BOTH helpers had ZERO coverage before this class, which the 6.5a audit called out
+    as the sharpest gap in the module: they are the functions every design-module
+    session was forbidden to touch, and nothing verified what they did.
+
+    THE SPLIT IS THE POINT, and it is not symmetric by accident. READ is wide — five
+    additive sources. WRITE is W-narrow: `role == 'Design'` AND `assigned_design` on
+    THIS project, and nothing else. A role that reads every BOQ in the portfolio may
+    still author none of them, and each test below pins one side of that.
+    """
+
+    def setUp(self):
+        self.project = _make_project('BOQProject')
+        self.other = _make_project('OtherBOQProject')
+
+    # ── READ: portfolio-wide roles ──────────────────────────────────────────────
+    def test_portfolio_read_roles_read_any_boq(self):
+        """SCM / Admin / CEO — portfolio-wide by remit (BOQ_PORTFOLIO_READ_ROLES)."""
+        for role in ('SCM', 'Admin', 'CEO'):
+            with self.subTest(role=role):
+                user, _ = _make_user(f'boqread_{role.lower().replace(" ", "_")}', role)
+                self.assertTrue(user_can_view_project_boq(user, self.project))
+                self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_finance_and_bd_get_no_boq_read(self):
+        """Deliberately NOT PORTFOLIO_VIEW_ROLES — both see projects, neither sees BOQs.
+
+        Pinned because the two sets look interchangeable and are not: widening project
+        VISIBILITY must never widen BOQ access as a side effect.
+        """
+        for role in ('Finance', 'BD'):
+            with self.subTest(role=role):
+                user, _ = _make_user(f'boqnone_{role.lower()}', role)
+                self.assertTrue(user_can_view_project(user, self.project))
+                self.assertFalse(user_can_view_project_boq(user, self.project))
+                self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    # ── READ: management authority ──────────────────────────────────────────────
+    def test_assigned_pm_reads_but_does_not_write(self):
+        """A PM's lever is boq_request_revision(), not authorship."""
+        user, profile = _make_user('boq_pm', 'PM')
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.project.assigned_pm = profile
+        self.project.save(update_fields=['assigned_pm'])
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_coordinator_reads_but_does_not_write(self):
+        """Coordinators route through user_can_manage_project() like the PM."""
+        user, profile = _make_user('boq_coord', 'Project Coordinator')
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.project.coordinators.add(profile)
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    # ── The Design branch: read is broad, write is W-narrow ─────────────────────
+    def test_assigned_designer_reads_and_writes(self):
+        user, profile = _make_user('boq_des_fk', 'Design')
+        self.project.assigned_design = profile
+        self.project.save(update_fields=['assigned_design'])
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertTrue(user_can_edit_project_boq(user, self.project))
+
+    def test_unassigned_designer_gets_neither(self):
+        """A Design user with no relationship to this project is refused both."""
+        user, _ = _make_user('boq_des_none', 'Design')
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_task_holding_designer_reads_but_does_not_write(self):
+        """THE W-NARROW RULE, pinned. Holding a task lets a designer READ a BOQ, not
+        author it — the asymmetry permissions.py warns against "restoring symmetry" on.
+        """
+        user, profile = _make_user('boq_des_task', 'Design')
+        _assign_task(self.project, profile)
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_designer_write_is_scoped_to_the_assigned_project(self):
+        """assigned_design on one project confers nothing on another."""
+        user, profile = _make_user('boq_des_scope', 'Design')
+        self.project.assigned_design = profile
+        self.project.save(update_fields=['assigned_design'])
+        self.assertTrue(user_can_edit_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.other))
+        self.assertFalse(user_can_view_project_boq(user, self.other))
+
+    # ── Design Head: read, never write ──────────────────────────────────────────
+    def test_design_head_flag_reads_every_boq_and_writes_none(self):
+        """The flag confers oversight, not authorship — finding C9, asserted."""
+        user, _ = _make_user('boq_head', 'Design', is_design_head=True)
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertTrue(user_can_view_project_boq(user, self.other))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_design_head_role_string_also_reads(self):
+        """The kept role-string branch, on the BOQ helper this time. See
+        DesignHeadTests.test_role_string_still_grants_portfolio_view for why it stays."""
+        user, profile = _make_user('boq_head_role', 'Design')
+        profile.role = 'Design Head'
+        profile.is_design_head = False
+        profile.save(update_fields=['role', 'is_design_head'])
+        self.assertTrue(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    # ── Guards ──────────────────────────────────────────────────────────────────
+    def test_user_without_profile_is_refused_both(self):
+        """A superuser created via createsuperuser has no UserProfile."""
+        user = User.objects.create_user(username='boq_noprofile', password='pw12345')
+        UserProfile.objects.filter(user=user).delete()
+        user.refresh_from_db()
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_null_project_is_refused_both(self):
+        user, _ = _make_user('boq_nullproj', 'SCM')
+        self.assertFalse(user_can_view_project_boq(user, None))
+        self.assertFalse(user_can_edit_project_boq(user, None))
+
+    def test_blank_role_gets_neither(self):
+        """role='' is legal on the model (blank=True) and must grant nothing."""
+        user, _ = _make_user('boq_blank', '')
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+
+class DeputyBOQTests(TestCase):
+    """The deputy's BOQ read — finding G4, closed by Part 6.5b.
+
+    THE FAILURE THIS PINS: a named deputy could open a QC screen, and from Part 6 a
+    procurement group screen whose aggregated BOQ they could read, then got a 403 from
+    the per-site BOQ link on that same page. A QC reviewer who cannot see the BOQ is
+    reviewing half a package.
+
+    THE DEPUTY GETS READ AND NEVER WRITE. If a future change admits a deputy to
+    user_can_edit_project_boq(), test_deputy_cannot_write_any_boq fails — and that is a
+    product decision to confirm, not a test to update in passing.
+    """
+
+    def setUp(self):
+        self.project = _make_project('DeputyProject')
+        self.other = _make_project('DeputyOtherProject')
+        self.head_user, self.head = _make_user('dep_head', 'Design', is_design_head=True)
+        self.dep_user, self.deputy = _make_user('dep_deputy', 'Design')
+        self.head.design_head_deputy = self.deputy
+        self.head.save(update_fields=['design_head_deputy'])
+
+    def test_deputy_reads_every_boq(self):
+        """Portfolio-wide, on the same terms as the Head — including projects the
+        deputy has no relationship to at all, which is the G4 case exactly."""
+        self.assertTrue(user_can_view_project_boq(self.dep_user, self.project))
+        self.assertTrue(user_can_view_project_boq(self.dep_user, self.other))
+
+    def test_deputy_cannot_write_any_boq(self):
+        """user_can_edit_project_boq() was NOT modified. W-narrow stands."""
+        self.assertFalse(user_can_edit_project_boq(self.dep_user, self.project))
+        self.assertFalse(user_can_edit_project_boq(self.dep_user, self.other))
+
+    def test_deputy_read_is_revoked_when_the_head_loses_the_flag(self):
+        """user_is_design_head_deputy() re-checks is_design_head on the NAMING profile,
+        so clearing a Head's flag revokes their deputy in the same instant. The FK is
+        untouched — this is the rule, not a side effect."""
+        self.assertTrue(user_can_view_project_boq(self.dep_user, self.project))
+        self.head.is_design_head = False
+        self.head.save(update_fields=['is_design_head'])
+        self.assertFalse(user_can_view_project_boq(self.dep_user, self.project))
+        self.head.refresh_from_db()
+        self.assertEqual(self.head.design_head_deputy_id, self.deputy.pk)
+
+    def test_deputy_read_is_revoked_when_the_fk_is_cleared(self):
+        """Presence of the FK is the whole rule — clearing it ends the authority."""
+        self.assertTrue(user_can_view_project_boq(self.dep_user, self.project))
+        self.head.design_head_deputy = None
+        self.head.save(update_fields=['design_head_deputy'])
+        self.assertFalse(user_can_view_project_boq(self.dep_user, self.project))
+
+    def test_a_plain_designer_is_not_a_deputy(self):
+        """Guards against the branch admitting every Design user by accident."""
+        user, _ = _make_user('dep_plain', 'Design')
+        self.assertFalse(user_can_view_project_boq(user, self.project))
+        self.assertFalse(user_can_edit_project_boq(user, self.project))
+
+    def test_deputy_keeps_write_on_a_project_they_are_assigned_to(self):
+        """The deputy branch WIDENS read and must not narrow write. A deputy who is also
+        the site's assigned_design still authors that site's BOQ."""
+        self.project.assigned_design = self.deputy
+        self.project.save(update_fields=['assigned_design'])
+        self.assertTrue(user_can_edit_project_boq(self.dep_user, self.project))
+        self.assertFalse(user_can_edit_project_boq(self.dep_user, self.other))
+
+    def test_head_reads_but_does_not_write(self):
+        """Stated alongside the deputy so the pair cannot drift apart."""
+        self.assertTrue(user_can_view_project_boq(self.head_user, self.project))
+        self.assertFalse(user_can_edit_project_boq(self.head_user, self.project))
 
 
 class BDPortfolioPolicyTests(TestCase):
