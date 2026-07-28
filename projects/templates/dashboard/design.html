@@ -136,6 +136,70 @@
   </div>
 </div>
 
+{% comment %}
+Design Head strip (Part 4.5) — rendered only when `head_counts` is non-None, which
+design_views.design_head_dashboard_counts() returns only for a user holding Design Head
+authority (the is_design_head flag OR a named deputy, via the Part 4 helper). A plain
+designer never sees this block.
+
+FOUR COUNTS AND FOUR LINKS. No workload, no capacity, no overdue arithmetic, no sorting —
+those are Part 5. Each number is one COUNT over DesignAssignment and each is the size of a
+worklist that already exists as a screen, shown so the Head knows whether opening it is
+worth the click.
+{% endcomment %}
+{% if head_counts %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-body py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+      <span class="fw-semibold" style="color:#1a7a4a;">Design Head — tender work</span>
+      <a href="{% url 'design_qc_queue' %}" class="btn btn-sm text-white"
+         style="background-color:#1a7a4a;">Open QC queue</a>
+    </div>
+    <div class="row g-2 text-center">
+      <div class="col-6 col-lg-3">
+        <div class="design-stat-num {% if head_counts.awaiting_allocation %}text-warning{% else %}text-muted{% endif %}">
+          {{ head_counts.awaiting_allocation }}</div>
+        <div class="small text-muted">Awaiting allocation</div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="design-stat-num {% if head_counts.awaiting_arka %}text-warning{% else %}text-muted{% endif %}">
+          {{ head_counts.awaiting_arka }}</div>
+        <div class="small text-muted">Arka awaiting verdict</div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="design-stat-num {% if head_counts.awaiting_qc %}text-warning{% else %}text-muted{% endif %}">
+          {{ head_counts.awaiting_qc }}</div>
+        <div class="small text-muted">Awaiting QC</div>
+      </div>
+      <div class="col-6 col-lg-3">
+        <div class="design-stat-num {% if head_counts.in_qc %}text-primary{% else %}text-muted{% endif %}">
+          {{ head_counts.in_qc }}</div>
+        <div class="small text-muted">In QC</div>
+      </div>
+    </div>
+    {% comment %}
+    Tenders linked directly rather than through the Programs nav entry: program_list is
+    @role_required(['Admin','PM','CEO']) and the Design Head holds role='Design', so that
+    link 403s for him. Changing that decorator is out of scope this session.
+    {% endcomment %}
+    {% if head_counts.programs %}
+    <div class="small mt-3">
+      <span class="text-muted">Survey upload, allocation and due dates, per tender:</span>
+      <div class="d-flex flex-wrap gap-2 mt-1">
+        {% for prog in head_counts.programs %}
+          <a href="{% url 'design_head_sites' pk=prog.pk %}"
+             class="btn btn-sm btn-outline-secondary">
+            {{ prog.name }}{% if prog.short_tender_code %}
+              <span class="text-muted">· {{ prog.short_tender_code }}</span>{% endif %}
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── Empty state ──────────────────────────────────────────────────────────── #}
 {% if not project_rows %}
 <div class="card shadow-sm border-0">
@@ -273,6 +337,16 @@ the per-card x-data expand behaviour below is untouched.
         View BOQ
       </a>
     </div>
+
+    {% comment %}
+    OPEX design workflow (Part 4.5). `p.design` is populated by
+    design_views.designer_dashboard_context() for OPEX sites with a DesignAssignment and
+    is absent for every Residential project, so Residential cards render exactly as they
+    did before this block existed.
+    {% endcomment %}
+    {% if p.design %}
+      {% include "projects/design/_dashboard_design_block.html" %}
+    {% endif %}
 
   </div>{# /expanded body #}
 </div>{# /card #}

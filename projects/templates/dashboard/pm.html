@@ -70,6 +70,18 @@
       <div class="d-flex gap-2 flex-shrink-0">
         <a href="{% url 'project_overview' dp.project_id %}"
            class="btn btn-sm btn-outline-secondary">View</a>
+        {% comment %}
+        OPEX design change request (Part 4.5). OPEX sites are created Draft and stay
+        Draft, so this strip is where a PM actually meets them; the same button also sits
+        on the full progress card for any site that has been activated. Rendered only
+        while the change window is open — QC started, not yet released.
+        {% endcomment %}
+        {% if dp.can_request_design_change %}
+          <a href="{% url 'design_change_request_form' project_id=dp.project_id %}"
+             class="btn btn-sm btn-outline-warning">
+            <i class="bi bi-pencil-square me-1"></i>Design change
+          </a>
+        {% endif %}
         <button type="button"
                 class="btn btn-sm text-white"
                 style="background-color:#1a7a4a;"
@@ -309,6 +321,18 @@ dashboard looks exactly as it did before. Label only: no collapse/expand control
                 data-project-id="{{ row.project.project_id }}">
           <i class="bi bi-flag me-1"></i>Raise Issue
         </button>
+        {% comment %}
+        OPEX design change request (Part 4.5). Rendered only while the window is open —
+        QC has started on the live attempt and the site is not released — which is what
+        views.pm_change_request_targets() decides. Absent on every Residential card.
+        The endpoint re-checks user_can_manage_project() on POST regardless.
+        {% endcomment %}
+        {% if row.can_request_design_change %}
+          <a href="{% url 'design_change_request_form' project_id=row.project.project_id %}"
+             class="btn btn-outline-warning btn-sm">
+            <i class="bi bi-pencil-square me-1"></i>Request design change
+          </a>
+        {% endif %}
         <a href="{% url 'project_overview' row.project.project_id %}"
            class="btn btn-outline-primary btn-sm ms-auto">
           View full project &amp; comments <i class="bi bi-arrow-right ms-1"></i>

@@ -333,7 +333,22 @@ def design_survey_download(request, project_id):
 
 def _allocate_one(assignment, designer, actor):
     """Core allocation, shared by the single and bulk paths so their rules cannot drift.
-    Raises ValueError with a user-facing message; callers own the transaction."""
+    Raises ValueError with a user-facing message; callers own the transaction.
+
+    ALLOCATION ALSO STAMPS Project.assigned_design (Part 4.5, finding F1).
+    Two fields name the designer of a site and they used to be free to diverge:
+    `DesignAssignment.assigned_to`, which the design workflow allocates, and
+    `Project.assigned_design`, which `user_can_edit_project_boq()` gates BOQ authorship
+    on and which the Design dashboard keys its cards off. When they disagreed, the Head
+    could allocate a site to a designer who then could not enter its BOQ and never saw
+    the site on their own dashboard. Measured before this change: 3 of 5 allocated sites
+    had diverged.
+
+    Keeping them in step HERE, at the one moment a designer is chosen, is what makes the
+    dashboard integration and BOQ entry work for the allocated designer. The Part 0.6
+    BOQ helper is deliberately NOT modified — this feeds it the right value instead.
+    Migration 0050 backfilled the rows that had already diverged.
+    """
     if not assignment.survey_file_path:
         raise ValueError('cannot be allocated before its survey is uploaded')
     if assignment.status == DESIGN_SURVEY_RETURNED:
@@ -350,6 +365,13 @@ def _allocate_one(assignment, designer, actor):
     assignment.assigned_at = timezone.now()
     assignment.status = DESIGN_ALLOCATED
     assignment.save()
+
+    # OPEX ONLY. Residential projects carry assigned_design from project_activate and
+    # have no DesignAssignment row, so this can never touch one.
+    project = assignment.project
+    if project.assigned_design_id != designer.pk:
+        project.assigned_design = designer
+        project.save(update_fields=['assigned_design'])
 
     if previous and previous.pk != designer.pk:
         detail = (f'Site reallocated from {previous.user.get_full_name() or previous.user.username} '
@@ -1782,6 +1804,181 @@ def design_qc_review(request, project_id):
         'released':      assignment.status == DESIGN_RELEASED,
     })
     return render(request, 'projects/design/qc_review.html', ctx)
+
+
+# ---------------------------------------------------------------------------
+# 15. Dashboard integration (Part 4.5)
+#
+# The OPEX design workflow's screens were URL-reachable only through Parts 2-4, which
+# is unusable: nobody types a URL. These helpers give views.py the per-site context it
+# needs to render design state and ONE contextual action inside the tender card that
+# already exists on the Design dashboard.
+#
+# THEY COMPUTE CONTEXT AND NOTHING ELSE. No status is written, no row is created, no
+# permission is decided here — the action a helper offers is only ever a link or a form
+# pointing at a Part 2-4 endpoint that re-checks authority for itself. A button this
+# code chooses to render is a convenience; the view behind it is the gate.
+# ---------------------------------------------------------------------------
+
+# One primary action per assignment status, from the allocated designer's point of view.
+# `kind` tells the template what to render:
+#   'propose_due'  — inline date form posting to design_due_date_propose
+#   'link'         — a button to the screen carrying that step's form
+#   'none'         — nothing to do; `waiting` explains who is holding the ball
+#
+# EXACTLY ONE ACTION IS OFFERED AT A TIME. Showing every button always is what makes a
+# workflow screen unreadable, and the status already determines which single step is legal —
+# every other endpoint would refuse anyway.
+_DESIGNER_ACTIONS = {
+    DESIGN_AWAITING_SURVEY:     ('none', '', 'The Design Head has not uploaded the survey yet.'),
+    DESIGN_AWAITING_ALLOCATION: ('none', '', 'Waiting for the Design Head to allocate this site.'),
+    DESIGN_ALLOCATED:           ('propose_due', 'Propose due date', ''),
+    DESIGN_DUE_DATE_PROPOSED:   ('none', '', 'Waiting for the Design Head to approve your proposed date.'),
+    DESIGN_IN_DESIGN:           ('link', 'Submit Arka', ''),
+    DESIGN_ARKA_REJECTED:       ('link', 'Submit revised Arka', ''),
+    DESIGN_ARTIFACTS_UPLOADED:  ('none', '', 'Package complete — waiting for QC to start.'),
+    DESIGN_IN_QC:               ('none', '', 'In QC review with the Design Head.'),
+    DESIGN_RELEASED:            ('none', '', 'Design released. Nothing further to do.'),
+    DESIGN_SURVEY_RETURNED:     ('none', '', 'Blocked — waiting for a replacement survey.'),
+}
+
+
+def designer_dashboard_context(profile, projects):
+    """Per-site design context for the Design dashboard's tender cards.
+
+    `projects` is the queryset the dashboard already fetched — this issues no project
+    query of its own. Returns {project_pk: context_dict} covering ONLY OPEX sites that
+    have a DesignAssignment; every other project is absent from the mapping, so the
+    template renders nothing extra for Residential and the existing cards are untouched.
+
+    `profile` is the viewing user. Actions are offered only where they are the allocated
+    designer — a Design Head looking at somebody else's site gets the state and no
+    buttons.
+    """
+    out = {}
+    for project in projects:
+        if project.project_type != 'OPEX':
+            continue
+        assignment = getattr(project, 'design_assignment', None)
+        if assignment is None:
+            continue
+
+        is_designer = assignment.assigned_to_id == profile.pk
+        attempt     = _current_attempt(assignment)
+        arka        = _current_arka(attempt)
+        commitments = list(assignment.due_date_commitments.all())
+        current_due = next((c for c in commitments if c.is_current), None)
+
+        # `arka_submitted` is the one status whose next step depends on the Arka verdict
+        # rather than on the status alone, so it is resolved here instead of in the table.
+        kind, label, waiting = _DESIGNER_ACTIONS.get(
+            assignment.status, ('none', '', ''))
+        if assignment.status == DESIGN_ARKA_SUBMITTED:
+            if arka is not None and arka.verdict == ARKA_APPROVED:
+                has_cad = bool(attempt and attempt.design_files.filter(
+                    kind__in=CAD_KINDS, is_current=True).exists())
+                if not has_cad:
+                    kind, label, waiting = 'link', 'Upload CAD', ''
+                elif attempt.boq_submitted_at is None:
+                    kind, label, waiting = 'link', 'Enter BOQ', ''
+                else:
+                    kind, label, waiting = 'none', '', 'Package complete — waiting for QC.'
+            else:
+                kind, label, waiting = 'none', '', 'Waiting for the Design Head to approve your Arka.'
+
+        # The QC remarks the designer has to act on: the most recent FAILED attempt.
+        # Read off the attempts already loaded rather than re-querying per card.
+        last_failed = None
+        for a in sorted(assignment.attempts.all(), key=lambda a: a.attempt_number, reverse=True):
+            if a.qc_verdict == QC_FAILED and a.qc_remarks:
+                last_failed = a
+                break
+
+        out[project.pk] = {
+            'assignment':     assignment,
+            'status':         assignment.status,
+            'status_label':   assignment.get_status_display(),
+            'is_designer':    is_designer,
+            'designer':       assignment.assigned_to,
+            'attempt':        attempt,
+            'attempt_number': assignment.current_attempt_number,
+            # Only shown when the attempt is rework — an 'initial' attempt needs no label.
+            'attempt_reason': (attempt.get_opened_reason_display()
+                               if attempt and attempt.opened_reason != ATTEMPT_REASON_INITIAL
+                               else ''),
+            'arka':           arka,
+            'due_date':       current_due.proposed_date if current_due else None,
+            'due_approved':   bool(current_due and current_due.approved_at),
+            # Revisions are derived by counting commitment rows, exactly as Part 2 does —
+            # there is no stored counter to drift.
+            'due_revised':    max(len(commitments) - 1, 0),
+            'is_blocked':     assignment.status == DESIGN_SURVEY_RETURNED,
+            'block_reason':   assignment.survey_return_reason,
+            'qc_failed_attempt': last_failed,
+            'action_kind':    kind if is_designer else 'none',
+            'action_label':   label if is_designer else '',
+            'waiting':        waiting,
+            'can_mark_blocked': is_designer and assignment.status not in (
+                DESIGN_SURVEY_RETURNED, DESIGN_RELEASED, DESIGN_AWAITING_SURVEY,
+                DESIGN_AWAITING_ALLOCATION),
+        }
+    return out
+
+
+def design_head_dashboard_counts(user):
+    """The three queue sizes a Design Head can see for free — one COUNT each.
+
+    NOT METRICS. No workload, no capacity, no overdue arithmetic, no sorting, no
+    per-designer breakdown — that is Part 5 and is deliberately absent. These are the
+    sizes of three worklists that already exist as screens, shown so the Head knows
+    whether opening them is worth it.
+
+    Returns None for a user without Head authority, so the template can test one value.
+
+    It also carries the list of OPEX tenders, because the Head's per-tender screen
+    (design_head_sites) is where survey upload and allocation live and he has no other
+    way to reach it: `program_list` is @role_required(['Admin','PM','CEO']) and the real
+    Design Head holds role='Design', so that nav link 403s for him. Modifying that
+    decorator is out of scope, so the tenders are linked directly from here instead.
+    """
+    if not user_has_design_head_authority(user):
+        return None
+    base = DesignAssignment.objects.filter(project__is_deleted=False)
+    return {
+        'awaiting_allocation': base.filter(status=DESIGN_AWAITING_ALLOCATION).count(),
+        'awaiting_arka':       base.filter(status=DESIGN_ARKA_SUBMITTED,
+                                           attempts__arka_submissions__is_current=True,
+                                           attempts__arka_submissions__verdict=ARKA_PENDING
+                                           ).distinct().count(),
+        'awaiting_qc':         base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
+        'in_qc':               base.filter(status=DESIGN_IN_QC).count(),
+        'programs':            list(Program.objects.filter(is_deleted=False,
+                                                           program_type='OPEX')
+                                    .order_by('name')),
+    }
+
+
+def pm_change_request_targets(user, projects):
+    """Which of `projects` the PM may raise a design change request against right now.
+
+    Returns {project_pk: True} for OPEX sites where the change window is open — QC has
+    started on the current attempt and the site is not yet released (settled decision 3
+    of Part 4). Authority is re-decided by design_change_request() on POST; this only
+    decides whether to offer the link.
+    """
+    out = {}
+    for project in projects:
+        if project.project_type != 'OPEX':
+            continue
+        assignment = getattr(project, 'design_assignment', None)
+        if assignment is None or assignment.status == DESIGN_RELEASED:
+            continue
+        if not user_can_request_design_change(user, project):
+            continue
+        attempt = _current_attempt(assignment)
+        if attempt is not None and attempt.qc_started_at is not None:
+            out[project.pk] = True
+    return out
 
 
 @login_required

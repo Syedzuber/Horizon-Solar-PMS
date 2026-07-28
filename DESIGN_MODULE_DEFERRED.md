@@ -505,3 +505,108 @@ Whether "released" should be reversible, and by whom, is a real decision that be
 Part 6's BOQ locking rather than being invented here.
 
 **Location:** `projects/design_views.py` — `design_qc_pass`, `design_change_request`
+
+---
+
+## H. Found during Part 4.5 (dashboard integration)
+
+### H1 — OPEX sites are created `Draft` and nothing ever promotes them
+
+`create_opex_site()` hardcodes `site.status = 'Draft'` (`projects/views.py`, in the OPEX
+creation branch) and no OPEX code path moves it on. The only promotion route is
+`project_activate`, a manual per-project action that also attaches Residential milestone
+defaults. Measured: **11 of 12 OPEX sites were `Draft`**, the twelfth having been
+activated by hand.
+
+Part 4.5 worked around this rather than fixing it — the Design dashboard queryset and its
+`total_revisions` stat now exempt `project_type='OPEX'` from the Active/In Progress
+filter, because otherwise every site under design work was invisible to the designer
+doing it. **The workaround is scoped to that one dashboard.** Other surfaces still apply
+the plain status filter and therefore still hide Draft OPEX sites, most visibly:
+
+* `dashboard_pm`'s `projects_with_progress` — OPEX sites appear only in the thin
+  "Draft Projects — Awaiting Activation" strip, never as a full progress card. Part 4.5
+  put the PM's change-request button in **both** places for this reason.
+* `dashboard_pm`'s `active_projects` summary count.
+
+The real fix is a decision, not a patch: either OPEX sites should be born Active (they
+have no activation ceremony — a tender award is the activation), or `Draft` should stop
+meaning "hide this" across the product. Both are larger than a dashboard session.
+
+**Location:** `projects/views.py` — `create_opex_site`, `dashboard_pm`, `project_activate`
+
+### H2 — The two "designer of this site" fields are now synced forward but only backfilled once
+
+`_allocate_one()` now stamps `Project.assigned_design` alongside
+`DesignAssignment.assigned_to`, and migration `0051` repaired the two rows that had
+already diverged locally (`Test-Site-02`, `Test-Site-03`). That closes F1 for anything
+allocated through the design workflow from here on.
+
+What it does **not** close: `assigned_design` is still independently writable from
+`project_activate` and the project edit screens, with nothing to stop it being pointed at
+someone other than the allocated designer afterwards. There is no constraint, no
+validation and no periodic check — only the allocation path keeps them in step. If they
+diverge again the symptom is the same as before (designer 403s on the BOQ, site missing
+from their dashboard) and the repair is another one-off backfill.
+
+Making `assigned_design` derived rather than independently stored would be the durable
+fix, and it is a model change.
+
+**Location:** `projects/design_views.py` — `_allocate_one`; `projects/views.py` —
+`project_activate`, project edit paths
+
+### H3 — Section headers now appear on dashboards that previously had none
+
+`_apply_project_sections()` stamps "Tenders" / "EPC Residential" headers only when a
+user's row list contains **both** types. Because A1 made OPEX sites visible, designers who
+previously saw a single flat list of Residential cards now see two labelled sections.
+
+The Residential **cards** are byte-identical — verified by diffing the rendered HTML
+before and after, where the only non-CSRF change on a Residential card was the section
+count `(1)` → `(2)` on one user. But the page gains two headers it did not have. This is
+pre-existing behaviour of an existing function doing exactly what it was written to do,
+not a change Part 4.5 made to Residential rendering, and it is recorded here only so it is
+not later mistaken for one.
+
+**Location:** `projects/views.py` — `_apply_project_sections`
+
+### H4 — The Design Head reaches tenders by a bypass, not by the nav
+
+`program_list` is `@role_required(['Admin', 'PM', 'CEO'])` and the real Design Head holds
+`role='Design'` with `is_design_head=True`, so the **Programs** nav entry in `base.html`
+403s for him. Part 4.5 could not change that decorator (hard rule), so the Design Head
+strip on the design dashboard links each OPEX tender's design screen directly instead.
+
+That works, but it means there are now two different ways to reach tender screens
+depending on who you are, and the Head still cannot open the Programs list itself. The
+clean fix is the `'Design Head'` role migration that keeps being deferred — at which
+point the role tuple can simply include it.
+
+**Location:** `projects/views.py` — `program_list`; `projects/templates/base.html`
+
+### H5 — `/design/my-sites/` is now redundant for most designers
+
+The designer's allocated sites, their status, due date, attempt and next action are all on
+the Design dashboard as of this session. `/design/my-sites/` shows the same set with the
+same actions, and Part 4.5's settled decision 3 explicitly kept it working rather than
+removing it.
+
+It is not identical: `my-sites` has no project-status filter at all, so it would still show
+a site the dashboard's OPEX exemption somehow missed, and it carries the change-agreed-date
+form that the card does not. Whether to fold those into the card and retire the screen is a
+follow-up once the integrated path has been used in anger.
+
+**Location:** `projects/design_views.py` — `design_my_sites`
+
+### H6 — The deputy's BOQ 403 (G4) is now reachable by clicking, not just by typing
+
+Part 4 recorded that a deputy can open the QC screen but gets a 403 from the **View BOQ**
+button on it, because `user_can_view_project_boq()` was out of bounds to modify. That was
+a latent problem while the screens were URL-only. Now that the QC queue is linked from the
+Design Head strip on the dashboard, a deputy can reach that dead button in three clicks
+from their landing page.
+
+Nothing about the defect changed — only how easy it is to hit. It remains the single
+highest-value one-line fix outstanding in the design module.
+
+**Location:** `projects/permissions.py` — `user_can_view_project_boq`

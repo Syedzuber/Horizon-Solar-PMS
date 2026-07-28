@@ -47,6 +47,13 @@ from .utils import (
     get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
+# Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
+# they read design state and decide which single action to offer; every endpoint they
+# point at re-checks authority for itself. design_views does not import views, so this
+# direction of the dependency is safe.
+from .design_views import (
+    design_head_dashboard_counts, designer_dashboard_context, pm_change_request_targets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +618,27 @@ def dashboard_pm(request):
         for row in projects_with_progress:
             row['delivery_issues'] = _dc_issues_by_project.get(row['project'].project_id, [])
 
+    # OPEX design change requests (Part 4.5). True only for OPEX sites whose change
+    # window is currently open — QC has started on the live attempt and the site is not
+    # released. Residential rows are never in the map, so their cards are unchanged.
+    # design_change_request() re-decides authority on POST; this only offers the link.
+    #
+    # BOTH LISTS ARE ANNOTATED, and that is not belt-and-braces. `projects_with_progress`
+    # is filtered to Active/In Progress, but `create_opex_site()` hardcodes status='Draft'
+    # and nothing promotes it — so today every OPEX site reaches this PM through
+    # `draft_projects` instead, and annotating only the progress rows would put the button
+    # somewhere no OPEX site appears. Widening the progress queryset would move those
+    # sites from the draft strip into full progress cards, which is a reorganisation of
+    # the PM dashboard rather than an integration, so the flag is carried to both places
+    # and the button renders wherever the site actually is.
+    _cr_targets = pm_change_request_targets(
+        request.user,
+        [row['project'] for row in projects_with_progress] + draft_projects)
+    for row in projects_with_progress:
+        row['can_request_design_change'] = row['project'].pk in _cr_targets
+    for dp in draft_projects:
+        dp.can_request_design_change = dp.pk in _cr_targets
+
     # Group into Tenders / EPC Residential for display. Runs last, after every
     # per-row annotation and the sort above, so within-section order is exactly
     # the order this dashboard already produced. No query, no row added or lost.
@@ -872,13 +900,23 @@ def dashboard_design(request):
     # as the SE dashboard fix. assigned_design stays as the ownership field
     # (Phase 2 Design Head role will manage it); this only widens visibility.
     # Prefetch BOQ for each project — avoids N+1 when reading boq.status in loop.
+    #
+    # OPEX SITES ARE EXEMPT FROM THE STATUS FILTER (Part 4.5).
+    # `create_opex_site()` hardcodes status='Draft' and nothing in the OPEX flow ever
+    # promotes it — `project_activate` is a manual per-project action that also attaches
+    # Residential milestone defaults. Measured before this change: 11 of 12 OPEX sites
+    # were 'Draft', so the Active/In Progress filter hid EVERY site under design work
+    # from the designer doing it (5 of 5 allocated sites invisible). Residential
+    # behaviour is unchanged — Draft Residential projects are still excluded, exactly
+    # as before; the exemption is scoped to project_type='OPEX' and nothing else.
     projects_qs = (
         Project.objects.filter(
             Q(assigned_design=design_profile) |
             Q(phases__tasks__assigned_to=design_profile),
+            Q(status__in=['Active', 'In Progress']) | Q(project_type='OPEX'),
             is_deleted=False,
-            status__in=['Active', 'In Progress'],
         )
+        .select_related('program', 'design_assignment', 'design_assignment__assigned_to__user')
         .prefetch_related('boq')
         .distinct()
         .order_by('project_id')
@@ -886,10 +924,13 @@ def dashboard_design(request):
 
     # Summary totals — scoped to this Design user's visible portfolio (same
     # union as projects_qs, so the stat matches which cards are shown).
+    # The OPEX exemption is repeated here on purpose: this stat's whole claim is that it
+    # counts the same project set the cards show, and A1 would otherwise have made that
+    # false — a Draft OPEX site could render a card whose BOQ the number above ignored.
     total_revisions = BOQ.objects.filter(
         Q(project__assigned_design=design_profile) |
         Q(project__phases__tasks__assigned_to=design_profile),
-        project__status__in=['Active', 'In Progress'],
+        Q(project__status__in=['Active', 'In Progress']) | Q(project__project_type='OPEX'),
         status='Revision Requested',
     ).distinct().count()
 
@@ -973,6 +1014,15 @@ def dashboard_design(request):
     design_tasks_due_soon  = _design_task_base.filter(due_date__gt=today, due_date__lte=_d_soon, status__in=_d_active).count()
     design_tasks_overdue   = _design_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
 
+    # OPEX design state for the tender cards (Part 4.5). Computed in design_views so the
+    # workflow's own rules stay in the design module; this view only carries the result
+    # to the template. Keyed by project pk — Residential rows are absent from the map, so
+    # their cards render exactly as before.
+    design_ctx = designer_dashboard_context(
+        design_profile, [r['project'] for r in project_rows])
+    for row in project_rows:
+        row['design'] = design_ctx.get(row['project'].pk)
+
     return render(request, 'dashboard/design.html', {
         'design_first_name':    request.user.first_name,
         'total_revisions':      total_revisions,
@@ -983,6 +1033,8 @@ def dashboard_design(request):
         'tasks_due_today':      design_tasks_due_today,
         'tasks_due_soon':       design_tasks_due_soon,
         'tasks_overdue':        design_tasks_overdue,
+        # None unless this user holds Design Head authority (flag or named deputy).
+        'head_counts':          design_head_dashboard_counts(request.user),
     })
 
 

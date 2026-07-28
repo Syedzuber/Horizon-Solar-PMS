@@ -1,0 +1,140 @@
+{% comment %}
+OPEX design state and ONE contextual action, rendered inside the expanded tender card on
+the Design dashboard (Part 4.5).
+
+Included from dashboard/design.html as:  {% templatetag openblock %} if p.design {% templatetag closeblock %}
+so it renders for OPEX sites with a DesignAssignment and for nothing else. Residential
+cards never reach this file.
+
+It reuses the `.chip` pills the surrounding card already defines in its own extra_head —
+no new CSS, no new card type, no Tailwind. Context comes from
+design_views.designer_dashboard_context().
+
+EVERY ACTION HERE IS A LINK OR A FORM POINTING AT A PART 2-4 ENDPOINT. Those endpoints
+re-check authority on their own; nothing is authorised by having been rendered. A Design
+Head viewing somebody else's site gets `is_designer` False and sees state without buttons.
+{% endcomment %}
+
+<div class="border-top pt-2 mt-2">
+
+  {# ── Design status line ──────────────────────────────────────────────────── #}
+  <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+    {% if p.design.status == 'released' %}
+      <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+        Design: {{ p.design.status_label }}</span>
+    {% elif p.design.is_blocked %}
+      <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+        Design: {{ p.design.status_label }}</span>
+    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' %}
+      <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+        Design: {{ p.design.status_label }}</span>
+    {% elif p.design.status == 'arka_rejected' %}
+      <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+        Design: {{ p.design.status_label }}</span>
+    {% else %}
+      <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+        Design: {{ p.design.status_label }}</span>
+    {% endif %}
+
+    {# Due date, with a marker when it has been renegotiated #}
+    {% if p.design.due_date %}
+      <span class="chip {% if p.design.due_approved %}chip-green{% else %}chip-amber{% endif %}">
+        <span class="chip-dot {% if p.design.due_approved %}chip-dot-green{% else %}chip-dot-amber{% endif %}"></span>
+        Due {{ p.design.due_date|date:"d M Y" }}{% if not p.design.due_approved %} (proposed){% endif %}
+      </span>
+      {% if p.design.due_revised %}
+        <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+          Revised &times;{{ p.design.due_revised }}</span>
+      {% endif %}
+    {% endif %}
+
+    {# Attempt number, and why it opened when it is rework rather than the first pass #}
+    {% if p.design.attempt_number %}
+      <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+        Attempt {{ p.design.attempt_number }}{% if p.design.attempt_reason %}
+          · {{ p.design.attempt_reason }}{% endif %}</span>
+    {% endif %}
+
+    {% if not p.design.is_designer and p.design.designer %}
+      <span class="small text-muted">
+        designer: {{ p.design.designer.user.get_full_name|default:p.design.designer.user.username }}
+      </span>
+    {% endif %}
+  </div>
+
+  {# ── Things the designer must read before acting ─────────────────────────── #}
+  {% if p.design.is_blocked and p.design.block_reason %}
+    <div class="alert alert-warning py-2 px-2 small mb-2">
+      <strong>Blocked:</strong> {{ p.design.block_reason }}
+    </div>
+  {% endif %}
+
+  {% if p.design.status == 'arka_rejected' and p.design.arka.rejection_reason %}
+    <div class="alert alert-danger py-2 px-2 small mb-2">
+      <strong>Arka v{{ p.design.arka.version }} rejected:</strong>
+      {{ p.design.arka.rejection_reason }}
+    </div>
+  {% endif %}
+
+  {% if p.design.qc_failed_attempt %}
+    <div class="alert alert-danger py-2 px-2 small mb-2">
+      <strong>QC failed on attempt {{ p.design.qc_failed_attempt.attempt_number }}:</strong>
+      {{ p.design.qc_failed_attempt.qc_remarks }}
+    </div>
+  {% endif %}
+
+  {# ── The one contextual action for the current status ────────────────────── #}
+  <div class="d-flex flex-wrap align-items-center gap-2">
+
+    {% if p.design.action_kind == 'propose_due' %}
+      {% comment %}
+      Inline because it is a single date field, and the screen that otherwise carries it
+      (/design/my-sites/) is a list rather than a per-site page — sending the designer
+      there to act on THIS site would be a worse click than the form itself.
+      {% endcomment %}
+      <form method="post" action="{% url 'design_due_date_propose' project_id=p.project_id %}"
+            class="d-flex flex-wrap align-items-center gap-2">
+        {% csrf_token %}
+        <input type="date" name="proposed_date" class="form-control form-control-sm"
+               style="max-width:11rem;" required>
+        <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+          {{ p.design.action_label }}
+        </button>
+      </form>
+
+    {% elif p.design.action_kind == 'link' %}
+      <a href="{% url 'design_site_workspace' project_id=p.project_id %}"
+         class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        {{ p.design.action_label }}
+      </a>
+
+    {% elif p.design.waiting %}
+      <span class="small text-muted">{{ p.design.waiting }}</span>
+    {% endif %}
+
+    {# Always reachable: the full per-site screen with every version and artifact. #}
+    <a href="{% url 'design_site_workspace' project_id=p.project_id %}"
+       class="btn btn-sm btn-outline-secondary">Design workspace</a>
+
+    {% if p.design.can_mark_blocked %}
+      <button class="btn btn-sm btn-outline-danger" type="button"
+              data-bs-toggle="collapse" data-bs-target="#dashblk{{ p.project.pk }}">
+        Mark blocked
+      </button>
+    {% endif %}
+  </div>
+
+  {% if p.design.can_mark_blocked %}
+  <div class="collapse mt-2" id="dashblk{{ p.project.pk }}">
+    <form method="post" action="{% url 'design_mark_blocked' project_id=p.project_id %}"
+          class="d-flex flex-wrap align-items-center gap-2">
+      {% csrf_token %}
+      <input type="text" name="reason" class="form-control form-control-sm"
+             placeholder="What is inadequate about the survey? (required)"
+             style="max-width:26rem;" required>
+      <button class="btn btn-sm btn-outline-danger">Mark blocked</button>
+    </form>
+  </div>
+  {% endif %}
+
+</div>
