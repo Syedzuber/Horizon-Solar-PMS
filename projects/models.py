@@ -1989,3 +1989,125 @@ class DesignChangeRequest(models.Model):
 
     def __str__(self):
         return f"Change request — attempt {self.attempt_id}"
+
+
+# ---------------------------------------------------------------------------
+# Part 6 — site groups (grouped procurement)
+#
+# PROCUREMENT NEVER HAPPENS FOR A WHOLE TENDER. It happens for a manually formed
+# batch of released sites, and SCM forms it — they know order economics and lead
+# times, Design does not. A group is therefore a plain container with a two-state
+# lifecycle, not a stage of the design workflow.
+#
+# THE PER-SITE BOQ IS NOT REPLACED. Aggregation is a read — `BOQItem.boq_quantity`
+# summed over `item_master` across the member sites. Nothing here copies, snapshots
+# or supersedes a BOQ row, because per-site profitability and expense tracking
+# (out of scope for this version) need the per-site figures to stay intact.
+#
+# NO save() OVERRIDES AND NO SIGNALS, matching every prior part. Both transitions —
+# locking a group, and soft-removing a membership — live in the view layer next to
+# the permission check that authorises them.
+# ---------------------------------------------------------------------------
+
+SITE_GROUP_DRAFT  = 'draft'
+SITE_GROUP_LOCKED = 'locked'
+
+SITE_GROUP_STATUS_CHOICES = [
+    (SITE_GROUP_DRAFT,  'Draft'),
+    (SITE_GROUP_LOCKED, 'Locked'),
+]
+
+
+class SiteGroup(models.Model):
+    """A batch of released sites under one tender, procured together.
+
+    TWO STATES ONLY. `draft` gains and loses sites freely; `locked` is a deliberate
+    SCM action that freezes the member sites' BOQ quantities so the aggregate the
+    purchase order is raised against cannot move underneath it.
+
+    UNLOCKING IS NOT BUILT AND THAT IS DELIBERATE. A locked group is final. Once a
+    quantity has been committed to a vendor, the correction is a variance against the
+    order, not an edit to the BOQ it was raised from — and variance handling is a
+    separate feature. Recorded as a known gap rather than half-built here.
+    """
+
+    program = models.ForeignKey(
+        Program, on_delete=models.CASCADE, related_name='site_groups',
+    )
+    name   = models.CharField(max_length=120)
+    status = models.CharField(
+        max_length=10, choices=SITE_GROUP_STATUS_CHOICES, default=SITE_GROUP_DRAFT,
+    )
+
+    created_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='created_site_groups',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    locked_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='locked_site_groups',
+    )
+    locked_at = models.DateTimeField(null=True, blank=True)
+
+    notes = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} — {self.program.name} ({self.status})"
+
+
+class SiteGroupMembership(models.Model):
+    """One site's place in one group.
+
+    REMOVAL IS SOFT. The row stays with `removed_at` / `removed_by` / `removal_reason`
+    set, so "which sites were in this group, and why did one leave" stays answerable
+    afterwards. A hard delete would erase exactly the fact SCM needs when the aggregate
+    they were working from changes under them — most importantly when a PM change
+    request pulls a site out (settled decision 6).
+
+    The partial unique constraint is the real enforcement of "a site belongs to at most
+    one group at a time" (settled decision 2). The view checks it too, for a decent error
+    message, but the database is what makes it true — a view check alone loses to a
+    concurrent add.
+    """
+
+    group = models.ForeignKey(
+        SiteGroup, on_delete=models.CASCADE, related_name='memberships',
+    )
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='group_memberships',
+    )
+
+    added_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='added_group_memberships',
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    removed_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='removed_group_memberships',
+    )
+    removed_at     = models.DateTimeField(null=True, blank=True)
+    removal_reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['added_at']
+        constraints = [
+            # At most ONE live membership per project, across every group in the system.
+            # Partial (condition=) so any number of removed rows may coexist with it —
+            # the history is kept, the exclusivity is not weakened by keeping it.
+            models.UniqueConstraint(
+                fields=['project'],
+                condition=models.Q(removed_at__isnull=True),
+                name='uniq_active_site_group_membership',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'removed' if self.removed_at else 'active'
+        return f"{self.project.project_id} in {self.group_id} ({state})"

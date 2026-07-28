@@ -96,6 +96,20 @@ urlpatterns = [
     path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
 
     # ---------------------------------------------------------------------------
+    # OPEX site groups (Part 6) — grouped procurement, aggregated BOQ, BOQ lock.
+    # WRITE is role='SCM' alone (permissions.user_can_manage_site_groups); READ adds
+    # Admin and Design Head authority (user_can_view_site_groups). The group lock is
+    # enforced caller-side in views.boq_detail / boq_submit via
+    # permissions.project_boq_is_group_locked() — no Part 0.6 helper is modified.
+    # ---------------------------------------------------------------------------
+    path('programs/<int:pk>/site-groups/',        design_views.site_group_list,   name='site_group_list'),
+    path('programs/<int:pk>/site-groups/create/', design_views.site_group_create, name='site_group_create'),
+    path('site-groups/<int:pk>/',                 design_views.site_group_detail,      name='site_group_detail'),
+    path('site-groups/<int:pk>/add-sites/',       design_views.site_group_add_sites,   name='site_group_add_sites'),
+    path('site-groups/<int:pk>/remove-site/',     design_views.site_group_remove_site, name='site_group_remove_site'),
+    path('site-groups/<int:pk>/lock/',            design_views.site_group_lock,        name='site_group_lock'),
+
+    # ---------------------------------------------------------------------------
     # Projects — PM (own projects only), Admin, CEO
     # ---------------------------------------------------------------------------
     path('projects/',                                          views.project_list,          name='project_list'),

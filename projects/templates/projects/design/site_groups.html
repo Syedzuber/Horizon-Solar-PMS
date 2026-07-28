@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+{% comment %}
+SCM — procurement groups for ONE OPEX tender (Part 6).
+
+Two things share this page because they are two halves of one question. The GROUPS are
+what SCM has already committed to procuring; the POST-QC POOL is what has been released
+and picked up by nobody. Without the pool on the same screen, sites pass QC and
+accumulate silently while procurement receives nothing — the whole reason the pool has an
+owner and an age.
+
+WRITE controls render only for SCM (`can_manage`). Admin and the Design Head see the same
+page with no forms — the view refuses their POSTs regardless, this only stops the page
+offering a button that will 403.
+
+Bootstrap, matching dashboard/scm.html and the Part 5 tender dashboard. No Tailwind, no
+CDN. The `.chip` pills are the same set the design module already uses.
+{% endcomment %}
+
+{% block title %}Procurement Groups — {{ program.name }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+<style>
+  .pool-age-old { color: #991b1b; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">Procurement Groups — {{ program.name }}</h5>
+    <div class="text-muted small">
+      {{ program.client_name }}{% if program.short_tender_code %} · {{ program.short_tender_code }}{% endif %}
+      · <span class="fw-semibold">{{ released }} of {{ total_sites }}</span>
+      site{{ total_sites|pluralize }} in this tender {{ released|pluralize:"is,are" }} released
+      {% if not can_manage %}
+        <span class="chip chip-grey ms-1"><span class="chip-dot chip-dot-grey"></span>Read only</span>
+      {% endif %}
+    </div>
+  </div>
+  <a href="{% url 'site_group_list' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">Refresh</a>
+</div>
+
+{# ── Groups ──────────────────────────────────────────────────────────────── #}
+<div class="d-flex justify-content-between align-items-baseline mb-2">
+  <span class="fw-semibold" style="color:#1a7a4a;">Groups</span>
+  <span class="text-muted small">
+    {{ groups|length }} group{{ groups|length|pluralize }} · a site belongs to at most one
+  </span>
+</div>
+
+{% if not groups %}
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body text-center text-muted py-4">
+      No groups yet for this tender.
+      {% if can_manage %}Form one below from the released sites in the pool.{% endif %}
+    </div>
+  </div>
+{% else %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Group</th>
+          <th style="width:6rem;">Sites</th>
+          <th style="width:8rem;">Status</th>
+          <th style="width:14rem;">Created</th>
+          <th style="width:14rem;">Locked</th>
+          <th style="width:9rem;"></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in groups %}
+        <tr>
+          <td>
+            <a href="{% url 'site_group_detail' pk=g.pk %}" class="text-decoration-none fw-semibold">{{ g.name }}</a>
+            {% if g.notes %}<div class="text-muted small">{{ g.notes|truncatechars:90 }}</div>{% endif %}
+          </td>
+          <td>{{ g.member_count }}</td>
+          <td>
+            {% if g.status == 'locked' %}
+              <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>Locked</span>
+            {% else %}
+              <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>Draft</span>
+            {% endif %}
+          </td>
+          <td class="small text-muted">
+            {{ g.created_at|date:"d M Y" }}
+            {% if g.created_by %}· {{ g.created_by.user.get_full_name|default:g.created_by.user.username }}{% endif %}
+          </td>
+          <td class="small text-muted">
+            {% if g.locked_at %}
+              {{ g.locked_at|date:"d M Y" }}
+              {% if g.locked_by %}· {{ g.locked_by.user.get_full_name|default:g.locked_by.user.username }}{% endif %}
+            {% else %}—{% endif %}
+          </td>
+          <td class="text-end">
+            <a href="{% url 'site_group_detail' pk=g.pk %}" class="btn btn-sm btn-outline-secondary">Aggregated BOQ</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{# ── Post-QC pool ────────────────────────────────────────────────────────── #}
+{% comment %}
+Oldest first, and the age is in days since released_at. This is the queue that
+accumulates silently if nobody owns it — showing it sorted any other way would bury the
+oldest site, which is the one that matters.
+{% endcomment %}
+<div class="d-flex justify-content-between align-items-baseline mb-2">
+  <span class="fw-semibold" style="color:#1a7a4a;">Post-QC pool — released, in no group</span>
+  <span class="text-muted small">{{ pool|length }} site{{ pool|length|pluralize }} waiting</span>
+</div>
+
+<div class="card shadow-sm border-0 mb-4">
+  {% if not pool %}
+    <div class="card-body text-center text-muted py-4">
+      Nothing waiting — every released site in this tender is in a group.
+    </div>
+  {% else %}
+  <form method="post" action="{% url 'site_group_create' pk=program.pk %}">
+    {% csrf_token %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            {% if can_manage %}<th style="width:3rem;"></th>{% endif %}
+            <th>Site</th>
+            <th style="width:9rem;">Site code</th>
+            <th style="width:13rem;">Released</th>
+            <th style="width:8rem;">Waiting</th>
+            <th style="width:14rem;">Released by</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in pool %}
+          <tr>
+            {% if can_manage %}
+            <td><input type="checkbox" class="form-check-input" name="project_ids" value="{{ a.project.pk }}"></td>
+            {% endif %}
+            <td class="fw-semibold">{{ a.project.project_id }}</td>
+            <td class="small text-muted">{{ a.project.site_code|default:"—" }}</td>
+            <td class="small text-muted">{{ a.released_at|date:"d M Y, H:i"|default:"—" }}</td>
+            <td class="{% if a.age_days >= 14 %}pool-age-old{% endif %}">
+              {% if a.age_days is None %}—{% else %}{{ a.age_days }} day{{ a.age_days|pluralize }}{% endif %}
+            </td>
+            <td class="small text-muted">
+              {% if a.released_by %}{{ a.released_by.user.get_full_name|default:a.released_by.user.username }}{% else %}—{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if can_manage %}
+    <div class="card-body border-top">
+      <div class="fw-semibold mb-2">Form a group from the sites ticked above</div>
+      <div class="row g-2 align-items-end">
+        <div class="col-12 col-md-4">
+          <label class="form-label small mb-1">Group name <span class="text-danger">*</span></label>
+          <input type="text" name="name" class="form-control form-control-sm" required
+                 placeholder="e.g. Batch 1 — modules &amp; structure">
+        </div>
+        <div class="col-12 col-md-6">
+          <label class="form-label small mb-1">Notes</label>
+          <input type="text" name="notes" class="form-control form-control-sm"
+                 placeholder="Optional — why these sites go together">
+        </div>
+        <div class="col-12 col-md-2">
+          <button type="submit" class="btn btn-sm text-white w-100" style="background:#1a7a4a;">
+            Create group
+          </button>
+        </div>
+      </div>
+      <div class="text-muted small mt-2">
+        Only released sites can be grouped, and a site can be in one group at a time.
+        Sites can be added and removed while the group is a draft.
+      </div>
+    </div>
+    {% endif %}
+  </form>
+  {% endif %}
+</div>
+
+{% endblock %}

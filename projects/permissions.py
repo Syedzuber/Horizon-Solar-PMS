@@ -449,6 +449,82 @@ def user_can_view_design(user, project):
     return user_can_view_project(user, project) or user_has_design_head_authority(user)
 
 
+# ---------------------------------------------------------------------------
+# OPEX site groups (Part 6)
+#
+# Group formation is SCM's, not Design's and not the PM's (settled decision 3): SCM
+# knows order economics and lead times, and grouping is a commercial decision made off
+# the system and executed here. So the WRITE gate is the SCM role alone.
+#
+# READ is wider than write on purpose. Admin reaches every screen in the product, and
+# the Design Head has to be able to see which of his released sites have been picked up
+# for procurement and which are still sitting in the pool — but he must not be able to
+# form, change or lock a group, because he does not own the order.
+# ---------------------------------------------------------------------------
+
+def user_can_manage_site_groups(user):
+    """Return True if `user` may CREATE a group, add or remove sites, or lock it.
+
+    SCM and nobody else (settled decision 3). Admin is deliberately absent: Part 6's
+    §1 and §3 name `role='SCM'` for every write, and only §5 (the view) adds Admin. A
+    group is a commitment to a supplier, so the person who signs it is the person who
+    forms it.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role == 'SCM'
+
+
+def user_can_view_site_groups(user):
+    """Return True if `user` may SEE groups, their members and the aggregated BOQ.
+
+    Read only — confers no authority to change anything. For that, call
+    user_can_manage_site_groups(). SCM + Admin (Part 6 §5), plus Design Head authority
+    so the Head can see what happened to the sites he released. Head authority is the
+    Part 4 helper, so the deputy is admitted alongside him and the 'Design Head' role
+    string is not consulted here either.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if user_can_manage_site_groups(user):
+        return True
+    if profile.role == 'Admin':
+        return True
+    return user_has_design_head_authority(user)
+
+
+def project_boq_is_group_locked(project):
+    """Return True if `project` sits in a LOCKED site group, i.e. its BOQ quantities are
+    frozen.
+
+    THIS IS THE WHOLE GROUP-LOCK ENFORCEMENT MECHANISM, and it is deliberately a
+    SEPARATE predicate rather than a new term inside user_can_edit_project_boq().
+
+    The two answer different questions. `user_can_edit_project_boq()` asks "is this
+    person the site's designer" — an authority question about a user. This asks "has
+    this site's BOQ been committed to a purchase" — a state question about a site, with
+    no user in it at all. Folding the second into the first would mean a Part 0.6 helper
+    silently returning False for the right person, and the caller would have no way to
+    tell "you are not the designer" from "the BOQ is locked" in order to say so.
+
+    Callers AND the two together: see views.py boq_detail / boq_submit. Every BOQ WRITE
+    path takes this term; the SCM branch does NOT, because it writes `ordered_quantity`
+    and locking the group is precisely the signal for SCM to start ordering.
+
+    Reverse relation only (`Project.group_memberships` from SiteGroupMembership), keeping
+    this module import-free like the rest of it. A removed membership does not count —
+    a site that has left a group is free again, which is what makes settled decision 6
+    (a PM change request pulls the site out of a draft group) work at all.
+    """
+    if project is None:
+        return False
+    return project.group_memberships.filter(
+        removed_at__isnull=True, group__status='locked',
+    ).exists()
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:

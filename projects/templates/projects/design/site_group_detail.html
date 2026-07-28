@@ -1,0 +1,305 @@
+{% extends "base.html" %}
+{% comment %}
+SCM — one procurement group: members, aggregated BOQ, what left it, and the lock (Part 6).
+
+THE AGGREGATE IS QUALIFIED ON THE SAME SCREEN, DELIBERATELY. A consolidated quantity is
+only usable if you know how complete it is, so the release completeness ("X of Y sites in
+this tender are released") sits directly above the table, every line names the sites
+behind it, and any BOQ row that could not be aggregated is shown as a warning rather than
+dropped. A total that is silently short is worse than no total.
+
+WRITE controls render only for SCM (`can_manage`); Admin and the Design Head read the
+same page. The view refuses their POSTs either way.
+
+Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
+{% endcomment %}
+
+{% block title %}{{ group.name }} — Aggregated BOQ — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">
+      {{ group.name }}
+      {% if group.status == 'locked' %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>Locked</span>
+      {% else %}
+        <span class="chip chip-amber ms-1"><span class="chip-dot chip-dot-amber"></span>Draft</span>
+      {% endif %}
+    </h5>
+    <div class="text-muted small">
+      {{ program.name }}{% if program.short_tender_code %} · {{ program.short_tender_code }}{% endif %}
+      {% if group.notes %} · {{ group.notes }}{% endif %}
+    </div>
+  </div>
+  <a href="{% url 'site_group_list' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">← All groups</a>
+</div>
+
+{# ── Consolidated requirement header ─────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2">
+      <span class="fs-5 fw-bold">
+        {{ agg.site_count }} site{{ agg.site_count|pluralize }}, {{ agg.item_count }} item{{ agg.item_count|pluralize }}
+      </span>
+      <span class="text-muted small">
+        Completeness: <span class="fw-semibold">{{ released }} of {{ total_sites }}</span>
+        site{{ total_sites|pluralize }} in this tender {{ released|pluralize:"is,are" }} released
+        {% if released < total_sites %}
+          — this is a running total, not a final quantity.
+        {% else %}
+          — every site in the tender has been released.
+        {% endif %}
+      </span>
+    </div>
+    {% if group.status == 'locked' %}
+    <div class="text-muted small mt-2">
+      Locked {{ group.locked_at|date:"d M Y, H:i" }}
+      {% if group.locked_by %}by {{ group.locked_by.user.get_full_name|default:group.locked_by.user.username }}{% endif %}.
+      The BOQ of every member site is read-only. There is no unlock — a change now needs a
+      variance against the order.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Unaggregated rows warning ───────────────────────────────────────────── #}
+{% if agg.unlinked %}
+<div class="alert alert-warning">
+  <div class="fw-semibold mb-1">
+    {{ agg.unlinked|length }} BOQ row{{ agg.unlinked|length|pluralize }} could not be aggregated
+  </div>
+  <div class="small mb-2">
+    These rows carry a quantity but no catalogue item, so there is nothing to sum them
+    against. <strong>The totals below are short by these quantities.</strong>
+  </div>
+  <ul class="small mb-0">
+    {% for row in agg.unlinked %}
+    <li>{{ row.boq.project.project_id }} — #{{ row.serial_no }} {{ row.description|truncatechars:70 }}
+        ({{ row.boq_quantity }} {{ row.uom }})</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{# ── Aggregated BOQ ──────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-header fw-semibold py-2">Aggregated BOQ</div>
+  {% if not agg.lines %}
+    <div class="card-body text-center text-muted py-4">
+      No quantities to aggregate yet — no member site has a BOQ quantity entered.
+    </div>
+  {% else %}
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th style="width:7rem;">Code</th>
+          <th>Description</th>
+          <th style="width:5rem;">Unit</th>
+          <th style="width:9rem;" class="text-end">Total qty</th>
+          <th style="width:7rem;" class="text-center">Sites</th>
+          <th>Contributing sites</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for line in agg.lines %}
+        <tr>
+          <td class="small text-muted">{{ line.item_master__code }}</td>
+          <td>{{ line.item_master__description }}</td>
+          <td class="small text-muted">{{ line.item_master__unit }}</td>
+          <td class="text-end fw-semibold">{{ line.total_quantity }}</td>
+          <td class="text-center">{{ line.site_count }}</td>
+          <td class="small text-muted">
+            {% for pid, qty in line.contributions %}{{ pid }} ({{ qty }}){% if not forloop.last %}, {% endif %}{% endfor %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Members ─────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-header fw-semibold py-2 d-flex justify-content-between align-items-center">
+    <span>Sites in this group</span>
+    <span class="text-muted small fw-normal">{{ memberships|length }}</span>
+  </div>
+  {% if not memberships %}
+    <div class="card-body text-center text-muted py-4">
+      No sites in this group.{% if can_manage %} Add some below — a group with no sites cannot be locked.{% endif %}
+    </div>
+  {% else %}
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Site</th>
+          <th style="width:9rem;">Site code</th>
+          <th style="width:13rem;">Added</th>
+          <th style="width:9rem;">BOQ</th>
+          {% if can_manage and group.status == 'draft' %}<th style="width:22rem;">Remove</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in memberships %}
+        <tr>
+          <td class="fw-semibold">{{ m.project.project_id }}</td>
+          <td class="small text-muted">{{ m.project.site_code|default:"—" }}</td>
+          <td class="small text-muted">
+            {{ m.added_at|date:"d M Y" }}
+            {% if m.added_by %}· {{ m.added_by.user.get_full_name|default:m.added_by.user.username }}{% endif %}
+          </td>
+          <td>
+            <a href="{% url 'boq_detail' m.project.project_id %}"
+               class="btn btn-sm btn-outline-secondary py-0">View</a>
+          </td>
+          {% if can_manage and group.status == 'draft' %}
+          <td>
+            <form method="post" action="{% url 'site_group_remove_site' pk=group.pk %}"
+                  class="d-flex gap-1">
+              {% csrf_token %}
+              <input type="hidden" name="membership_id" value="{{ m.pk }}">
+              <input type="text" name="reason" class="form-control form-control-sm"
+                     placeholder="Reason">
+              <button type="submit" class="btn btn-sm btn-outline-danger"
+                      onclick="return confirm('Remove {{ m.project.project_id }} from this group? Its own BOQ is not changed.')">
+                Remove
+              </button>
+            </form>
+          </td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+{# ── Departures ──────────────────────────────────────────────────────────── #}
+{% comment %}
+Removal is soft, so this list is the record of what was in the group and why it left.
+The PM-change-request case is called out separately because SCM did not do it — the
+aggregate above changed underneath them and they need to see why.
+{% endcomment %}
+{% if removed %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-header fw-semibold py-2">Sites that left this group</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Site</th>
+          <th style="width:13rem;">Removed</th>
+          <th style="width:14rem;">By</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in removed %}
+        <tr>
+          <td class="fw-semibold">{{ m.project.project_id }}</td>
+          <td class="small text-muted">{{ m.removed_at|date:"d M Y, H:i" }}</td>
+          <td class="small text-muted">
+            {% if m.removed_by %}{{ m.removed_by.user.get_full_name|default:m.removed_by.user.username }}{% else %}—{% endif %}
+          </td>
+          <td class="small">
+            {% if m.removal_reason == change_request_reason %}
+              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>PM change request</span>
+              <span class="text-muted">— the PM raised a change, so the site left the group and went back to design.</span>
+            {% else %}
+              {{ m.removal_reason|default:"—" }}
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if group.status == 'draft' and can_manage %}
+
+{# ── Add more sites ──────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-header fw-semibold py-2">Add released, ungrouped sites</div>
+  {% if not pool %}
+    <div class="card-body text-center text-muted py-4">
+      Nothing available — every released site in this tender is already in a group.
+    </div>
+  {% else %}
+  <form method="post" action="{% url 'site_group_add_sites' pk=group.pk %}">
+    {% csrf_token %}
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th style="width:3rem;"></th>
+            <th>Site</th>
+            <th style="width:13rem;">Released</th>
+            <th style="width:8rem;">Waiting</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in pool %}
+          <tr>
+            <td><input type="checkbox" class="form-check-input" name="project_ids" value="{{ a.project.pk }}"></td>
+            <td class="fw-semibold">{{ a.project.project_id }}</td>
+            <td class="small text-muted">{{ a.released_at|date:"d M Y, H:i"|default:"—" }}</td>
+            <td>{% if a.age_days is None %}—{% else %}{{ a.age_days }} day{{ a.age_days|pluralize }}{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-body border-top py-2">
+      <button type="submit" class="btn btn-sm btn-outline-primary">Add ticked sites</button>
+    </div>
+  </form>
+  {% endif %}
+</div>
+
+{# ── Lock ────────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-5">
+  <div class="card-header fw-semibold py-2">Lock this group</div>
+  <div class="card-body">
+    {% if blockers %}
+      <div class="alert alert-warning py-2 small mb-3">
+        <span class="fw-semibold">Cannot lock yet.</span>
+        {{ blockers|length }} member site{{ blockers|length|pluralize }}
+        {{ blockers|length|pluralize:"has,have" }} an unresolved change request:
+        {% for b in blockers %}{{ b.attempt.assignment.project.project_id }}{% if not forloop.last %}, {% endif %}{% endfor %}.
+      </div>
+    {% endif %}
+    <p class="small text-muted mb-3">
+      Locking freezes the BOQ of every site in this group. Designers can no longer change
+      quantities, and a PM change request on a member site will be refused.
+      <strong>There is no unlock</strong> — once quantities are committed to a purchase, a
+      correction is a variance against the order, which this system does not handle yet.
+    </p>
+    <form method="post" action="{% url 'site_group_lock' pk=group.pk %}">
+      {% csrf_token %}
+      <button type="submit" class="btn text-white" style="background:#243a6b;"
+              {% if not memberships or blockers %}disabled{% endif %}
+              onclick="return confirm('Lock &quot;{{ group.name }}&quot;? The BOQ of every site in it becomes read-only and this cannot be undone.')">
+        Lock group
+      </button>
+      {% if not memberships %}
+        <span class="text-muted small ms-2">Add at least one site first.</span>
+      {% endif %}
+    </form>
+  </div>
+</div>
+
+{% endif %}
+
+{% endblock %}

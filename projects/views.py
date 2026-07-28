@@ -41,6 +41,7 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
+    project_boq_is_group_locked,
 )
 from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
@@ -53,6 +54,7 @@ from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NA
 # direction of the dependency is safe.
 from .design_views import (
     design_head_dashboard_counts, designer_dashboard_context, pm_change_request_targets,
+    scm_opex_tender_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -1486,6 +1488,18 @@ def dashboard_scm(request):
     scm_tasks_due_soon  = _scm_task_base.filter(due_date__gt=today, due_date__lte=_s_soon, status__in=_s_active).count()
     scm_tasks_overdue   = _scm_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
 
+    # ── OPEX tenders (Part 6) ──────────────────────────────────────────────────
+    # A SEPARATE QUERY SET, NOT A WIDENING OF THE ONE ABOVE. `active_projects` keeps its
+    # status__in=['Active','In Progress'] filter untouched; OPEX sites are `Draft` and
+    # would never appear there (deferred finding H1). This section keys off SiteGroup and
+    # DesignAssignment instead, exactly as Part 6's settled decision 9 requires, so nothing
+    # on the existing Residential half of this dashboard changes.
+    #
+    # Not context-filtered: the two-context switch (_context_filter) separates Residential
+    # from Tenders, and this section IS the tender half — filtering it by the Residential
+    # context would empty it.
+    opex_tender_rows = scm_opex_tender_rows()
+
     return render(request, 'dashboard/scm.html', {
         'summary': {
             'boq_awaiting':     boq_awaiting,
@@ -1496,6 +1510,7 @@ def dashboard_scm(request):
             'tasks_overdue':    scm_tasks_overdue,
         },
         'project_rows':         project_rows,
+        'opex_tender_rows':     opex_tender_rows,
         'delivery_issues':      delivery_issues,
         'today':                today,
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
@@ -4226,6 +4241,12 @@ def boq_detail(request, project_id):
     (or a portfolio-wide read role), and each write branch below re-checks edit authority
     separately. The read gate deliberately does not stand in for the write gate — they are
     different questions with different answers, so do not hoist a single check to the top.
+
+    PART 6 — GROUP LOCK. When this site sits in a locked SiteGroup its quantities have been
+    committed to a purchase and may not move. That is enforced HERE, at the caller, as a
+    second AND term beside user_can_edit_project_boq() — see project_boq_is_group_locked()
+    for why the two are separate predicates rather than one. Read is unaffected: a locked
+    BOQ is still fully visible, it is just no longer writable by Design.
     """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
@@ -4233,6 +4254,10 @@ def boq_detail(request, project_id):
 
     if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
+
+    # Computed once and reused by every Design write gate on this view, so the lock can
+    # never be applied to one branch and forgotten on another.
+    boq_group_locked = project_boq_is_group_locked(project)
 
     # Get or auto-create BOQ for users who may author one (others see 'no BOQ yet' state)
     try:
@@ -4243,8 +4268,9 @@ def boq_detail(request, project_id):
     if boq is None:
         # Seeding 53 catalogue rows is a WRITE, so it takes the write gate even though we
         # are on a GET. A reader with no authorship relationship to this project must not
-        # be able to bring a BOQ into existence just by loading the page.
-        if user_can_edit_project_boq(request.user, project):
+        # be able to bring a BOQ into existence just by loading the page — nor may one
+        # appear on a site whose group has already been locked.
+        if user_can_edit_project_boq(request.user, project) and not boq_group_locked:
             boq = BOQ.objects.create(project=project)
             # description is copied as a point-in-time snapshot; item_master carries the
             # stable catalogue link that quantity aggregation across sites joins on.
@@ -4273,7 +4299,24 @@ def boq_detail(request, project_id):
         # Computed once for the three Design write branches below. Replaces the bare
         # `role == 'Design'` test each of them used to carry: role alone let any Design user
         # write the BOQ of any project in the system.
-        _can_edit = user_can_edit_project_boq(request.user, project)
+        #
+        # The group-lock term is ANDed in here rather than inside user_can_edit_project_boq()
+        # — that Part 0.6 helper answers "is this person the designer" and is not modified.
+        # The SCM branch below deliberately does NOT take this term: it writes
+        # `ordered_quantity`, and locking the group is the signal to start ordering.
+        _can_edit = user_can_edit_project_boq(request.user, project) and not boq_group_locked
+
+        # Say WHY, rather than falling through to the bare redirect at the bottom. Without
+        # this the lock is enforced but silent: the POST no-ops and the page comes back
+        # looking identical, which reads as "my save did nothing" rather than "this BOQ is
+        # final". Only the four Design actions are answered — the SCM branch below is
+        # untouched by the lock and must not be intercepted here.
+        if boq_group_locked and action in ('save_design', 'submit_design',
+                                           'add_item', 'delete_item'):
+            messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                    'quantities are final and can no longer be changed. A '
+                                    'correction now needs a variance against the order.')
+            return redirect('boq_detail', project_id=project_id)
 
         if action in ('save_design', 'submit_design') and _can_edit and boq.status in _DESIGN_EDITABLE:
             boq.notes = request.POST.get('notes', '').strip() or None
@@ -4405,12 +4448,35 @@ def boq_detail(request, project_id):
     for item in items:
         items_by_category.setdefault(item.category, []).append(item)
 
+    # Whether the Design half of the page renders INPUTS or static values. One flag,
+    # because the template asked the same three-way status question in seven places and
+    # the group lock has to reach every one of them.
+    #
+    # The status tuple is spelled out rather than read from `_DESIGN_EDITABLE`: that
+    # constant is local to the POST branch above, and hoisting it to module scope is an
+    # edit to a constant Part 6 is told to leave alone. The duplication is deliberate and
+    # recorded in DESIGN_MODULE_DEFERRED.md — keep the two in step if either changes.
+    design_form_open = (boq.status in ('Draft', 'Revision Requested', 'Acknowledged')
+                        and not boq_group_locked)
+
+    # The locked group itself, for the banner. Only fetched when the lock is on, so the
+    # unlocked path (every Residential BOQ, always) costs no extra query.
+    locked_group = None
+    if boq_group_locked:
+        locked_membership = (project.group_memberships
+                             .filter(removed_at__isnull=True, group__status='locked')
+                             .select_related('group', 'group__locked_by__user').first())
+        locked_group = locked_membership.group if locked_membership else None
+
     return render(request, 'projects/boq_detail.html', {
         'project':             project,
         'boq':                 boq,
         'items':               items,
         'items_by_category':   items_by_category.items(),
         'role':                role,
+        'boq_group_locked':    boq_group_locked,
+        'locked_group':        locked_group,
+        'design_form_open':    design_form_open,
         'vendors_by_category': _build_vendors_by_category(),
         'category_choices':    BOQItem.CATEGORY_CHOICES,
         'uom_choices':         BOQItem.UOM_CHOICES,
@@ -4425,6 +4491,9 @@ def boq_submit(request, project_id):
     Validates at least one item has a quantity, snapshots the BOQ, and moves
     status to Submitted. Increments version on resubmission.
     Access: Design, on a project this user has a design relationship to. POST only.
+
+    PART 6: the group-lock term is ANDed in alongside the Part 0.6 authority helper, the
+    same way boq_detail does it, so this endpoint cannot become a way around the lock.
     """
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
@@ -4434,6 +4503,10 @@ def boq_submit(request, project_id):
 
     if not user_can_edit_project_boq(request.user, project):
         return HttpResponseForbidden()
+
+    if project_boq_is_group_locked(project):
+        return HttpResponseForbidden(
+            'This site is in a locked procurement group — its BOQ can no longer be changed.')
 
     # `project=project` scopes the BOQ to the project in the URL — a BOQ belonging to any
     # other project is unreachable through this endpoint.

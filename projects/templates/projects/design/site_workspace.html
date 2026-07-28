@@ -190,7 +190,15 @@ readable here.
       {% endif %}
     </div>
 
-    {% if is_designer and not can_edit_boq %}
+    {% if boq_group_locked %}
+      {# Part 6: not an authority problem — the quantities are final. Said first, because
+         otherwise the assigned_design warning below would blame the wrong thing. #}
+      <div class="alert alert-secondary py-2 small mt-2 mb-0">
+        This site is in a <strong>locked procurement group</strong>. Its BOQ quantities are
+        final and can no longer be changed — a correction now needs a variance against the
+        order, raised with SCM.
+      </div>
+    {% elif is_designer and not can_edit_boq %}
       <div class="alert alert-warning py-2 small mt-2 mb-0">
         You are allocated to this site, but its <code>assigned_design</code> names a
         different user, so the BOQ screen will refuse you. Ask the Design Head to point

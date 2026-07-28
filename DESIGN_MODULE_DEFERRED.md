@@ -717,3 +717,159 @@ Anyone using it for a performance conversation before roughly ten released sites
 designer is reading noise. Recorded because the number looks more authoritative than it is.
 
 **Location:** `projects/design_metrics.py` — `designer_workload`
+
+---
+
+## J. Found during Part 6 (site groups, aggregated BOQ, BOQ lock)
+
+### J1 — There is no unlock, and no variance process behind it
+
+**This is the deliberate gap Part 6 was told to leave, restated so nobody mistakes it for
+an oversight.** `site_group_lock()` sets `status='locked'` and there is no endpoint, form
+or admin action that reverses it. From that moment the member sites' BOQ quantities are
+frozen permanently: `boq_detail`'s four Design write branches and `boq_submit` all refuse,
+and a PM change request on a member site is refused with a message telling them a variance
+is required.
+
+The message is honest — the variance process it points at **does not exist**. Today the
+only recovery from a wrong lock is a Django-admin edit of `SiteGroup.status` or of the
+membership rows, by a superuser. That is an acceptable state for a first version (a locked
+group means a purchase order is going out, and reversing one is a commercial act, not a
+button) but it means:
+
+* a group locked by mistake needs a developer, and
+* a genuine post-lock change has nowhere to go inside the product.
+
+Whoever builds purchase orders owns this. It extends G8 ("release is a dead end") one stage
+further down the pipeline.
+
+**Location:** `projects/design_views.py` — `site_group_lock`
+
+### J2 — A released, ungrouped site still cannot have a change request; a released, grouped one can
+
+Part 6 §4 specifies three cases and they do not form a straight line:
+
+| site is… | change request |
+|---|---|
+| in a **locked** group | refused — variance required (new in Part 6) |
+| in a **draft** group | **allowed**, and the site leaves the group |
+| in **no** group | refused if `released` — unchanged from Part 4 |
+
+So a released site becomes change-requestable by being put into a draft group and stops
+being so again if SCM removes it. That is what the brief specifies and it is implemented
+exactly as written, but it is not a rule anyone would derive from first principles.
+
+The underlying cause is that Part 4 used `released` as a stand-in close condition
+(`CHANGE_REQUEST_STATUSES` excludes it, and `design_change_request()` refuses it
+explicitly) *because BOQ locking did not exist yet* — its own comment says so. Part 6
+replaces that stand-in only for grouped sites, because §4's third bullet preserves Part 4
+behaviour for ungrouped ones. The coherent end state is one of:
+
+* the window closes at the **lock** and nothing else, so a released ungrouped site is
+  change-requestable (widens Part 4 behaviour — a real decision), or
+* released stays a hard close and draft-group membership does not reopen it (contradicts
+  §4's second bullet).
+
+Neither was chosen here. `CHANGE_REQUEST_STATUSES` was **not** modified; the released
+status is admitted by a local `allowed_statuses` computed per request.
+
+**Location:** `projects/design_views.py` — `design_change_request`,
+`design_change_request_form`, `CHANGE_REQUEST_STATUSES`
+
+### J3 — The `_DESIGN_EDITABLE` status tuple is now spelled out twice in `boq_detail`
+
+`boq_detail`'s GET path computes `design_form_open` from a literal
+`('Draft', 'Revision Requested', 'Acknowledged')` rather than from `_DESIGN_EDITABLE`,
+because that constant is local to the `if request.method == 'POST'` block and hoisting it
+to module scope would be an edit to a constant Part 6 was told to leave alone.
+
+The two are in step today and both carry a comment pointing at the other, but they can
+drift, and if they do the symptom is a page that renders inputs which the POST handler
+then refuses (or the reverse). The fix is to hoist `_DESIGN_EDITABLE` to module scope —
+one line, no behaviour change — and it should be done by whoever next has a reason to
+touch that view.
+
+Note this also means A2/C2 (`'Acknowledged'` being editable at all) is now duplicated:
+fixing it requires editing both places.
+
+**Location:** `projects/views.py` — `boq_detail`
+
+### J4 — The SCM dashboard's OPEX section costs 5 queries per tender
+
+`scm_opex_tender_rows()` loops OPEX programs and runs five queries each (assignment count,
+released count, site count, groups, pool). Measured: `/dashboard/scm/` went from 20 to 30
+queries with two tenders on the local database.
+
+This is O(tenders), not O(sites), and tenders are counted in single digits, so it is not a
+problem now. It is recorded because the shape is a loop-of-queries and will need
+collapsing into grouped aggregates if the tender count grows — the same treatment
+`_get_ceo_dashboard_context()` already applies on the CEO dashboard. The group BOQ page
+itself is **flat**: 15 queries whether the group holds one site or two (measured by
+soft-removing a member and re-rendering).
+
+**Location:** `projects/design_views.py` — `scm_opex_tender_rows`
+
+### J5 — Group screens are reachable from the SCM dashboard only
+
+`/programs/<pk>/site-groups/` and `/site-groups/<pk>/` are linked from the new OPEX
+section of `/dashboard/scm/`, which is `@role_required(['SCM'])`. So:
+
+* **SCM** reaches them by clicking — fine.
+* **Admin** may view them (`user_can_view_site_groups`) but has no link anywhere; the
+  Admin dashboard was not touched.
+* the **Design Head** may view them too, and likewise has no link — and `program_list` still
+  403s for him (H4), so there is no Programs page to hang one off either.
+
+Both are URL-only, exactly as E1/F3 recorded for the Part 2 and 3 screens. Fixing it means
+editing `base.html` or another dashboard, which is the same standing blocker.
+
+**Location:** `projects/templates/base.html`, `projects/templates/dashboard/admin.html`
+
+### J6 — `SiteGroup.name` is not unique, and there is no group-level notes/audit beyond ActivityLog
+
+Two groups under the same tender may share a name. Nothing depends on the name being
+unique, but SCM will be reading it on a purchase order and two "Batch 1"s under one tender
+would be a genuine operational confusion. Not constrained because Part 6 did not specify
+it and a `unique_together` is a migration decision.
+
+Relatedly: group-level events are logged through `log_activity` against the **member
+sites**, because `ActivityLog.project` is a required FK and a group is not a project. So
+locking a five-site group writes five rows and there is no single row that says "group X
+was locked". Reconstructing group history means filtering `entity_type='SiteGroup'` /
+`'SiteGroupMembership'` on `entity_id`. That works, and it puts the event where a PM or
+designer will actually look, but it is not a group audit trail.
+
+**Location:** `projects/models.py` — `SiteGroup`; `projects/design_views.py` —
+`site_group_lock`
+
+### J7 — Ad-hoc BOQ rows are still invisible to the aggregate (B4, now load-bearing)
+
+`aggregate_group_boq()` joins on `item_master`, so a `BOQItem` created by `add_item`
+(free-text description, `item_master` null — finding B4) cannot be summed. Part 6 does not
+drop those rows silently: they are returned in `unlinked` and rendered as a warning
+listing site, row and quantity, with the totals explicitly described as short.
+
+But a warning is not a quantity. If designers start using ad-hoc rows on OPEX sites, SCM
+will be reading a consolidated requirement with a footnote instead of a number. Measured at
+build time: **0 unlinked rows across 185 OPEX `BOQItem` rows**, so this is latent, not
+live. The decision B4 flagged — force ad-hoc rows to pick a catalogue entry, or accept that
+they aggregate separately — is now overdue.
+
+**Location:** `projects/design_views.py` — `aggregate_group_boq`; `projects/views.py` —
+`boq_detail` `add_item` branch
+
+### J8 — Locking does not touch `BOQ.status`, so the two lock notions coexist
+
+A locked group freezes quantities via the caller-side check, while `BOQ.status` continues
+its own `Draft → Submitted → Acknowledged` life independently. On the verification data
+every locked site's `BOQ.status` was still `Draft` — the design workflow's
+`boq_submitted_at` stamp (F6) and the BOQ's own status were already unreconciled, and the
+group lock is now a third, separate notion of "this BOQ is done".
+
+Deliberate: writing `BOQ.status` would mean adding a status value or reusing one with a
+different meaning, and Part 6 is forbidden from touching either. But three overlapping
+"finished" signals on one BOQ is one too many, and whoever reconciles F6 should fold this
+in.
+
+**Location:** `projects/models.py` — `BOQ.status`; `projects/design_views.py` —
+`site_group_lock`

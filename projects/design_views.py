@@ -22,8 +22,8 @@ from decimal import Decimal, InvalidOperation
 from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.db import transaction
-from django.db.models import Max
+from django.db import IntegrityError, transaction
+from django.db.models import Count, Max, Q, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -35,8 +35,9 @@ from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
 )
 from .models import (
-    Program, Project, UserProfile, BOQ, DesignAssignment, DueDateCommitment,
+    Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
+    SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
@@ -48,9 +49,10 @@ from .models import (
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
 )
 from .permissions import (
-    user_can_edit_project_boq, user_can_qc_design, user_can_request_design_change,
-    user_can_view_design, user_has_design_head_authority, user_is_assigned_designer,
-    user_is_design_head, user_is_design_head_deputy,
+    project_boq_is_group_locked, user_can_edit_project_boq,
+    user_can_manage_site_groups, user_can_qc_design, user_can_request_design_change,
+    user_can_view_design, user_can_view_site_groups, user_has_design_head_authority,
+    user_is_assigned_designer, user_is_design_head, user_is_design_head_deputy,
 )
 
 logger = logging.getLogger(__name__)
@@ -907,6 +909,8 @@ def design_site_workspace(request, project_id):
         return HttpResponseForbidden('Only the allocated designer or the Design Head '
                                      'may open this site\'s design workspace.')
 
+    boq_group_locked = project_boq_is_group_locked(project)
+
     ctx = _workspace_context(project, assignment)
     ctx.update({
         'is_designer':  is_designer,
@@ -919,7 +923,12 @@ def design_site_workspace(request, project_id):
         # Surfaced rather than hidden: a designer allocated to a site whose
         # `assigned_design` names someone else is locked out of BOQ entry, and being
         # told so beats a bare 403 from boq_detail.
-        'can_edit_boq': user_can_edit_project_boq(request.user, project),
+        # Part 6: the same caller-side AND the BOQ views apply. A designer whose site has
+        # been picked up into a locked procurement group is not locked out by authority —
+        # the quantities are simply final, and the banner below says which group froze them.
+        'can_edit_boq': (user_can_edit_project_boq(request.user, project)
+                         and not boq_group_locked),
+        'boq_group_locked': boq_group_locked,
     })
     return render(request, 'projects/design/site_workspace.html', ctx)
 
@@ -1659,6 +1668,23 @@ def design_change_request(request, project_id):
     keeps `qc_verdict='pending'`: it was never judged, and marking it 'failed' would
     charge the designer with a rework loop the PM caused. That distinction is the reason
     both `opened_reason` values exist.
+
+    PART 6 — THE GROUP DECIDES, IN THREE CASES (Part 6 §4):
+
+      LOCKED group  -> REFUSED. This is where the real close condition finally lands. The
+                       quantities have been committed to a purchase; the correction is a
+                       variance against that order, which is a separate feature.
+      DRAFT group   -> the SITE LEAVES THE GROUP and the request proceeds. The group is not
+                       held hostage to one site, and SCM keeps procuring the rest. The
+                       removal is explicit and logged — never an invisible side effect —
+                       and it is what makes this branch reachable at all: a group member is
+                       `released` by construction, which Part 4 refuses outright.
+      NO group      -> unchanged from Part 4, including that refusal. A released ungrouped
+                       site is still a new scope of work, not a change request.
+
+    The resulting asymmetry (released-and-grouped is change-requestable, released-and-
+    ungrouped is not) is Part 6 §4 as specified; it is recorded in
+    DESIGN_MODULE_DEFERRED.md rather than resolved here.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
@@ -1684,7 +1710,23 @@ def design_change_request(request, project_id):
     if attempt is None:
         return _back(f'{project.project_id}: design has not started on this site yet.')
 
-    if assignment.status == DESIGN_RELEASED:
+    membership = active_group_membership(project)
+
+    if membership is not None and membership.group.status == SITE_GROUP_LOCKED:
+        return _back(f'{project.project_id}: the BOQ is locked — this site is in the '
+                     f'locked procurement group "{membership.group.name}" and its '
+                     f'quantities have been committed. A change now needs a variance '
+                     f'against the order, which this system does not handle yet. Raise it '
+                     f'with SCM directly.')
+
+    # A draft-group member is `released` by construction, so admitting it here means
+    # stepping past BOTH of Part 4's release guards — the explicit one below and the
+    # absence of `released` from CHANGE_REQUEST_STATUSES. Nothing else is relaxed.
+    in_draft_group = membership is not None
+    allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
+                        if in_draft_group else CHANGE_REQUEST_STATUSES)
+
+    if assignment.status == DESIGN_RELEASED and not in_draft_group:
         return _back(f'{project.project_id}: the design is already released — a change '
                      f'now is a new scope of work, not a change request.')
 
@@ -1694,13 +1736,19 @@ def design_change_request(request, project_id):
                      f'Design Head — a change at this stage does not need a formal '
                      f'request.')
 
-    if assignment.status not in CHANGE_REQUEST_STATUSES:
+    if assignment.status not in allowed_statuses:
         return _back(f'{project.project_id}: a change request cannot be raised at this '
                      f'stage (status "{assignment.get_status_display()}").')
 
     profile = request.user.profile
     was_in_qc = assignment.status == DESIGN_IN_QC
     with transaction.atomic():
+        # The removal shares the change request's transaction on purpose: a site that
+        # left a group without the request that pulled it out, or a request recorded
+        # against a site still counted in an aggregate, are both worse than neither.
+        if in_draft_group:
+            remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
+
         change = DesignChangeRequest.objects.create(
             attempt=attempt, requested_by=profile, reason=reason)
         log_activity(project, profile,
@@ -1722,6 +1770,10 @@ def design_change_request(request, project_id):
            f'{new_attempt.attempt_number} opened and the site is back with the designer.')
     if was_in_qc:
         msg += ' The QC review in progress was suspended without a verdict.'
+    if in_draft_group:
+        msg += (f' The site was removed from procurement group '
+                f'"{membership.group.name}" — its quantities are no longer in that '
+                f'group\'s aggregate.')
     return _back(msg, ok=True)
 
 
@@ -2057,9 +2109,19 @@ def design_change_request_form(request, project_id):
         raise Http404('Design has not started on this site yet.')
 
     attempt = _current_attempt(assignment)
+
+    # Part 6: the window the FORM offers must agree with the one design_change_request()
+    # enforces, or the PM gets a button that 403s or a missing button that would have
+    # worked. Same three cases, same order — see that view's docstring.
+    membership   = active_group_membership(project)
+    group_locked = membership is not None and membership.group.status == SITE_GROUP_LOCKED
+    in_draft_group = membership is not None and not group_locked
+    allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
+                        if in_draft_group else CHANGE_REQUEST_STATUSES)
+
     window_open = bool(attempt and attempt.qc_started_at
-                       and assignment.status in CHANGE_REQUEST_STATUSES
-                       and assignment.status != DESIGN_RELEASED)
+                       and assignment.status in allowed_statuses
+                       and not group_locked)
 
     return render(request, 'projects/design/change_request.html', {
         'project':     project,
@@ -2067,10 +2129,575 @@ def design_change_request_form(request, project_id):
         'attempt':     attempt,
         'history':     _attempt_history(assignment),
         'window_open': window_open,
-        'released':    assignment.status == DESIGN_RELEASED,
+        'group_locked':   group_locked,
+        'draft_group':    membership.group if in_draft_group else None,
+        'released':    assignment.status == DESIGN_RELEASED and not in_draft_group,
         'requests':    list(DesignChangeRequest.objects
                             .filter(attempt__assignment=assignment)
                             .select_related('requested_by__user', 'attempt',
                                             'resulting_attempt')
                             .order_by('-requested_at')),
     })
+
+
+# ===========================================================================
+# PART 6 — site groups, aggregated BOQ, BOQ lock, SCM handoff
+# ===========================================================================
+#
+# WHY A GROUP EXISTS AT ALL
+# -------------------------
+# Procurement never happens for a whole tender. A tender runs for months and its sites
+# release in dribs and drabs; an order placed for all of them would either wait for the
+# last site or be raised against quantities that are still moving. So SCM batches a set
+# of released sites, prices that batch, and orders it. The batch is this module's
+# SiteGroup, and forming one is a COMMERCIAL judgement — order economics, lead times,
+# what a vendor will quote for — which is why SCM forms it and Design does not.
+#
+# THE AGGREGATE IS COMPUTED, NEVER STORED
+# ---------------------------------------
+# Nothing here writes a BOQ row, copies one, or snapshots one. The aggregate is a Sum
+# over `BOQItem.boq_quantity` grouped by `item_master` across the member sites, run at
+# read time. That is not a performance compromise, it is the requirement: the per-site
+# BOQ has to survive intact underneath the aggregate for per-site profitability and
+# expense tracking later, and a stored roll-up is exactly how the two drift apart.
+#
+# THE LOCK IS ENFORCED AT THE CALLER, NOT IN THE PERMISSION HELPER
+# ---------------------------------------------------------------
+# `permissions.project_boq_is_group_locked()` is a separate predicate ANDed beside
+# `user_can_edit_project_boq()` at every BOQ write path. The Part 0.6 helper answers
+# "is this person the designer" and is NOT modified. See that predicate's docstring.
+#
+# NO save() OVERRIDES, NO SIGNALS. Both transitions — locking a group, soft-removing a
+# membership — are explicit assignments in the views below, inside a transaction, next
+# to the permission check that authorises them. Same rule as every prior part.
+# ---------------------------------------------------------------------------
+
+# The reason string stamped on a membership pulled out by a PM change request. A
+# constant because two places must agree on it exactly: the change-request view writes
+# it, and the group screen reads it back to explain to SCM why a site left.
+CHANGE_REQUEST_REMOVAL_REASON = 'PM change request'
+
+
+def active_group_membership(project):
+    """The site's one live membership, or None.
+
+    "One" is guaranteed by the partial unique constraint on
+    SiteGroupMembership, not by this query — `.first()` here is picking the only row
+    that can exist, not the first of several.
+    """
+    return (project.group_memberships
+            .filter(removed_at__isnull=True)
+            .select_related('group', 'group__program').first())
+
+
+def remove_from_group(membership, actor, reason):
+    """Soft-remove one membership and log it. THE ONLY PLACE A SITE LEAVES A GROUP.
+
+    Both callers — SCM removing a site by hand, and a PM change request pulling one out
+    (settled decision 6) — go through here, so the two cannot drift into disagreeing
+    about which fields get stamped or whether the departure is logged at all. A silent
+    removal would leave SCM reading an aggregate that quietly changed under them.
+
+    The caller owns the transaction. The change-request path has one open for its own
+    writes and the removal must share it.
+    """
+    membership.removed_at     = timezone.now()
+    membership.removed_by     = actor
+    membership.removal_reason = reason
+    membership.save(update_fields=['removed_at', 'removed_by', 'removal_reason'])
+    log_activity(membership.project, actor,
+                 f'Removed from procurement group "{membership.group.name}": {reason}',
+                 entity_type='SiteGroupMembership', entity_id=membership.pk,
+                 action_code='site_group_site_removed')
+    return membership
+
+
+def _group_member_ids(group):
+    """Primary keys of the sites currently in `group` — active memberships only."""
+    return list(group.memberships
+                .filter(removed_at__isnull=True)
+                .values_list('project_id', flat=True))
+
+
+def aggregate_group_boq(member_ids):
+    """Sum BOQ quantities across `member_ids`, grouped by catalogue item.
+
+    THE JOIN IS `item_master`, WHICH IS WHY BOQItemMaster EXISTS (Part 0.5). Every item
+    aggregates the same way — there is no per-item rule on the master and none is
+    invented here.
+
+    `boq_quantity__gt=0` mirrors the guard `boq_detail`'s submit branch and
+    `design_boq_complete()` both apply, so "a quantity was entered" means the same thing
+    on this screen as on the two that produced it. A null or zero row contributes
+    nothing to a sum, but counting it would inflate `site_count` into a claim that a site
+    contributed to a line when it did not.
+
+    UNLINKED ROWS ARE RETURNED, NOT DROPPED. A `BOQItem` with a null `item_master` cannot
+    join, so its quantity is missing from the total — and a total that is silently short
+    is worse than no total. They come back in `unlinked` for the template to shout about.
+    Measured at build time: 0 such rows on OPEX sites, 2 on legacy Residential ones
+    (deferred finding B1).
+
+    Returns a dict; `contributions` maps item_master_id -> [(project_id, quantity)] so the
+    per-line site count can be checked against the sites that produced it without a query
+    per line.
+    """
+    lines = list(
+        BOQItem.objects
+        .filter(boq__project_id__in=member_ids, boq_quantity__gt=0,
+                item_master__isnull=False)
+        .values('item_master', 'item_master__code', 'item_master__description',
+                'item_master__unit', 'item_master__sort_order')
+        .annotate(total_quantity=Sum('boq_quantity'),
+                  site_count=Count('boq__project', distinct=True))
+        .order_by('item_master__sort_order', 'item_master__code')
+    )
+
+    # Per-site breakdown, one query for the whole table. Lets the screen show WHICH sites
+    # are behind each line, which is what makes the aggregate auditable rather than a
+    # number SCM has to trust.
+    contributions = {}
+    for row in (BOQItem.objects
+                .filter(boq__project_id__in=member_ids, boq_quantity__gt=0,
+                        item_master__isnull=False)
+                .values('item_master', 'boq__project__project_id', 'boq_quantity')
+                .order_by('boq__project__project_id')):
+        contributions.setdefault(row['item_master'], []).append(
+            (row['boq__project__project_id'], row['boq_quantity']))
+    for line in lines:
+        line['contributions'] = contributions.get(line['item_master'], [])
+
+    unlinked = list(
+        BOQItem.objects
+        .filter(boq__project_id__in=member_ids, boq_quantity__gt=0,
+                item_master__isnull=True)
+        .select_related('boq__project')
+        .order_by('boq__project__project_id', 'serial_no')
+    )
+
+    return {
+        'lines':      lines,
+        'unlinked':   unlinked,
+        'item_count': len(lines),
+        'site_count': len(member_ids),
+    }
+
+
+def _age_days(stamp, now):
+    """Whole days between `stamp` and `now`, or None. Used for pool ageing only."""
+    if stamp is None:
+        return None
+    return (now - stamp).days
+
+
+def post_qc_pool(program, now=None):
+    """Released sites in this tender that are in NO group, oldest release first.
+
+    THIS QUEUE IS THE POINT OF THE SCREEN. Without it, sites pass QC and pile up while
+    procurement receives nothing — the failure is silent on both sides, because Design
+    has finished and SCM was never told. Age is days since `released_at`.
+
+    `.exclude(project__group_memberships__removed_at__isnull=True)` drops any site with a
+    LIVE membership; a site whose membership was removed is back in the pool, which is
+    what makes settled decision 6 recoverable — a change request returns the site to the
+    queue rather than losing it.
+    """
+    now = now or timezone.now()
+    rows = list(
+        DesignAssignment.objects
+        .filter(project__program=program, project__is_deleted=False,
+                status=DESIGN_RELEASED)
+        .exclude(project__group_memberships__removed_at__isnull=True)
+        .select_related('project', 'released_by__user')
+        .order_by('released_at')
+    )
+    for a in rows:
+        a.age_days = _age_days(a.released_at, now)
+    return rows
+
+
+def tender_release_completeness(program):
+    """(released, total) for a tender — 'X of Y sites are released'.
+
+    Shown beside every aggregate. SCM has to know whether they are looking at a final
+    quantity or a running total, and the aggregate itself cannot tell them: a group of
+    three sites looks identical whether the tender has three sites or thirty.
+
+    Counts DesignAssignment rows, never `Project.status` (settled decision 9) — OPEX
+    sites are `Draft` and stay `Draft`.
+    """
+    total = program.sites.filter(is_deleted=False).count()
+    released = DesignAssignment.objects.filter(
+        project__program=program, project__is_deleted=False,
+        status=DESIGN_RELEASED).count()
+    return released, total
+
+
+def unresolved_change_requests_for(member_ids):
+    """Change requests on these sites that never produced a new attempt.
+
+    Same definition as `_open_change_requests()` (Part 4): `resulting_attempt` is null.
+    Locking a group over one of these would freeze a BOQ that is already known to need
+    rework. Note the UI cannot currently produce such a row — `design_change_request()`
+    sets `resulting_attempt` in the same transaction that creates it (deferred finding
+    G6) — so in practice this guard fires against rows created in Django admin, by an
+    import, or by a future part that queues change requests for approval.
+    """
+    return list(DesignChangeRequest.objects
+                .filter(attempt__assignment__project_id__in=member_ids,
+                        resulting_attempt__isnull=True)
+                .select_related('attempt__assignment__project', 'requested_by__user'))
+
+
+def _group_rows(program):
+    """Every group under a tender with its member count and lock state, newest first."""
+    return list(
+        program.site_groups
+        .select_related('created_by__user', 'locked_by__user')
+        .annotate(member_count=Count(
+            'memberships', filter=Q(memberships__removed_at__isnull=True)))
+        .order_by('-created_at')
+    )
+
+
+def _tender_or_404(pk):
+    return get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+
+
+def _group_or_404(pk):
+    return get_object_or_404(
+        SiteGroup, pk=pk, program__is_deleted=False, program__program_type='OPEX')
+
+
+# ---------------------------------------------------------------------------
+# 17. Group formation
+# ---------------------------------------------------------------------------
+
+@login_required
+def site_group_list(request, pk):
+    """SCM's group screen for one tender: the groups, the post-QC pool, and the form
+    that creates the next group.
+
+    READ is SCM, Admin and Design Head authority; WRITE is SCM alone (Part 6 §1 and §3).
+    The Head can see what became of the sites he released and nothing more — he does not
+    own the order, so he does not form the batch.
+    """
+    if not user_can_view_site_groups(request.user):
+        return HttpResponseForbidden(
+            'Procurement groups are visible to SCM, Admin and the Design Head.')
+
+    program = _tender_or_404(pk)
+    released, total = tender_release_completeness(program)
+    pool = post_qc_pool(program)
+
+    return render(request, 'projects/design/site_groups.html', {
+        'program':      program,
+        'groups':       _group_rows(program),
+        'pool':         pool,
+        'released':     released,
+        'total_sites':  total,
+        'can_manage':   user_can_manage_site_groups(request.user),
+    })
+
+
+@login_required
+def site_group_create(request, pk):
+    """SCM creates a group under a tender and optionally seeds it with sites.
+
+    Sites are optional at creation — a named empty draft is a legitimate intermediate
+    state while SCM decides what goes in it. Locking an empty group is not (see
+    site_group_lock).
+    """
+    if not user_can_manage_site_groups(request.user):
+        return HttpResponseForbidden('Only SCM may create a procurement group.')
+    program = _tender_or_404(pk)
+    if request.method != 'POST':
+        return redirect('site_group_list', pk=program.pk)
+
+    name = (request.POST.get('name') or '').strip()
+    if not name:
+        messages.error(request, 'Give the group a name — SCM will be reading it on a '
+                                'purchase order.')
+        return redirect('site_group_list', pk=program.pk)
+
+    profile = request.user.profile
+    with transaction.atomic():
+        group = SiteGroup.objects.create(
+            program=program, name=name, status=SITE_GROUP_DRAFT,
+            created_by=profile, notes=(request.POST.get('notes') or '').strip())
+
+    added, refused = _add_sites(group, request.POST.getlist('project_ids'), profile)
+    messages.success(request, f'Group "{group.name}" created.'
+                              + (f' {len(added)} site(s) added.' if added else ''))
+    for line in refused:
+        messages.error(request, line)
+    return redirect('site_group_detail', pk=group.pk)
+
+
+def _add_sites(group, project_ids, actor):
+    """Add each id to `group`, one at a time. Returns (added, refused_messages).
+
+    PER-SITE, NOT BULK, AND EACH IN ITS OWN SAVEPOINT. Two reasons, both deliberate:
+
+      * SCM selects ten sites and one of them is already spoken for. Failing the whole
+        batch teaches them to add sites one at a time, which is worse than telling them
+        which one it was.
+      * The exclusivity rule is enforced by a PARTIAL UNIQUE CONSTRAINT in the database
+        (settled decision 2), not by the pre-check above it. The pre-check exists for the
+        error message; the `IntegrityError` catch is what makes the rule true under a
+        concurrent add. Without the savepoint, one IntegrityError would poison the whole
+        transaction and take the successful adds down with it.
+    """
+    added, refused = [], []
+    for raw in project_ids:
+        if not str(raw).isdigit():
+            continue
+        project = Project.objects.filter(pk=int(raw), is_deleted=False).first()
+        if project is None:
+            refused.append('One selected site no longer exists.')
+            continue
+
+        if project.program_id != group.program_id:
+            refused.append(f'{project.project_id}: belongs to a different tender.')
+            continue
+
+        assignment = getattr(project, 'design_assignment', None)
+        if assignment is None or assignment.status != DESIGN_RELEASED:
+            state = assignment.get_status_display() if assignment else 'design not started'
+            refused.append(f'{project.project_id}: not released ({state}) — only released '
+                           f'sites can be grouped for procurement.')
+            continue
+
+        existing = active_group_membership(project)
+        if existing is not None:
+            refused.append(f'{project.project_id}: already in group '
+                           f'"{existing.group.name}" ({existing.group.status}).')
+            continue
+
+        try:
+            with transaction.atomic():
+                membership = SiteGroupMembership.objects.create(
+                    group=group, project=project, added_by=actor)
+                log_activity(project, actor,
+                             f'Added to procurement group "{group.name}"',
+                             entity_type='SiteGroupMembership', entity_id=membership.pk,
+                             action_code='site_group_site_added')
+        except IntegrityError:
+            # The database refused it. Reachable when two adds race, or when the view's
+            # pre-check above is somehow bypassed — either way the constraint is the
+            # authority and this is the message that says so.
+            refused.append(f'{project.project_id}: refused by the database — a site may '
+                           f'be in only one group at a time.')
+            continue
+
+        added.append(project)
+    return added, refused
+
+
+@login_required
+def site_group_add_sites(request, pk):
+    """SCM adds released, ungrouped sites to a DRAFT group."""
+    if not user_can_manage_site_groups(request.user):
+        return HttpResponseForbidden('Only SCM may add sites to a procurement group.')
+    group = _group_or_404(pk)
+    if request.method != 'POST':
+        return redirect('site_group_detail', pk=group.pk)
+
+    if group.status != SITE_GROUP_DRAFT:
+        messages.error(request, f'"{group.name}" is locked — its membership is final.')
+        return redirect('site_group_detail', pk=group.pk)
+
+    added, refused = _add_sites(group, request.POST.getlist('project_ids'),
+                                request.user.profile)
+    if added:
+        messages.success(request, f'{len(added)} site(s) added to "{group.name}".')
+    for line in refused:
+        messages.error(request, line)
+    if not added and not refused:
+        messages.error(request, 'No sites were selected.')
+    return redirect('site_group_detail', pk=group.pk)
+
+
+@login_required
+def site_group_remove_site(request, pk):
+    """SCM removes one site from a DRAFT group, with a reason."""
+    if not user_can_manage_site_groups(request.user):
+        return HttpResponseForbidden('Only SCM may remove a site from a procurement group.')
+    group = _group_or_404(pk)
+    if request.method != 'POST':
+        return redirect('site_group_detail', pk=group.pk)
+
+    if group.status != SITE_GROUP_DRAFT:
+        messages.error(request, f'"{group.name}" is locked — its membership is final.')
+        return redirect('site_group_detail', pk=group.pk)
+
+    raw = request.POST.get('membership_id', '')
+    if not raw.isdigit():
+        messages.error(request, 'No site was selected.')
+        return redirect('site_group_detail', pk=group.pk)
+
+    # `group=group` scopes the membership to THIS group — an id from another group is a
+    # 404, not a silent no-op reported as success.
+    membership = get_object_or_404(
+        SiteGroupMembership, pk=int(raw), group=group, removed_at__isnull=True)
+    reason = (request.POST.get('reason') or '').strip() or 'Removed by SCM'
+
+    with transaction.atomic():
+        remove_from_group(membership, request.user.profile, reason)
+
+    messages.success(request, f'{membership.project.project_id} removed from '
+                              f'"{group.name}". Its own BOQ is unchanged.')
+    return redirect('site_group_detail', pk=group.pk)
+
+
+# ---------------------------------------------------------------------------
+# 18. Aggregated BOQ and the lock
+# ---------------------------------------------------------------------------
+
+@login_required
+def site_group_detail(request, pk):
+    """One group: its members, its aggregated BOQ, what left it and why, and the lock.
+
+    The consolidated requirement is what SCM raises an order against, so everything that
+    qualifies it is on the same screen — how complete the tender is, which sites are
+    behind each line, and any BOQ row that could not be aggregated.
+    """
+    if not user_can_view_site_groups(request.user):
+        return HttpResponseForbidden(
+            'Procurement groups are visible to SCM, Admin and the Design Head.')
+
+    group = _group_or_404(pk)
+    memberships = list(group.memberships
+                       .filter(removed_at__isnull=True)
+                       .select_related('project', 'project__design_assignment',
+                                       'added_by__user')
+                       .order_by('project__project_id'))
+    removed = list(group.memberships
+                   .filter(removed_at__isnull=False)
+                   .select_related('project', 'removed_by__user')
+                   .order_by('-removed_at'))
+
+    member_ids = [m.project_id for m in memberships]
+    agg = aggregate_group_boq(member_ids)
+    released, total = tender_release_completeness(group.program)
+
+    return render(request, 'projects/design/site_group_detail.html', {
+        'program':      group.program,
+        'group':        group,
+        'memberships':  memberships,
+        'removed':      removed,
+        'agg':          agg,
+        'released':     released,
+        'total_sites':  total,
+        'blockers':     (unresolved_change_requests_for(member_ids)
+                         if group.status == SITE_GROUP_DRAFT else []),
+        'pool':         (post_qc_pool(group.program)
+                         if group.status == SITE_GROUP_DRAFT else []),
+        'can_manage':   user_can_manage_site_groups(request.user),
+        'change_request_reason': CHANGE_REQUEST_REMOVAL_REASON,
+    })
+
+
+@login_required
+def site_group_lock(request, pk):
+    """SCM locks a group. The BOQ of every member site becomes read-only from here on.
+
+    THERE IS NO UNLOCK, DELIBERATELY. Once quantities are committed to a purchase, the
+    correction is a variance against the order, not an edit to the BOQ it was raised
+    from. Building half of a variance process as an "unlock" button would be worse than
+    the honest gap — it would let a quantity move after an order was placed against it
+    with nothing recording that it had.
+
+    Two refusals before the write, and both are about not freezing something meaningless:
+    an empty group locks nothing, and a member with an unresolved change request is
+    already known to need rework.
+    """
+    if not user_can_manage_site_groups(request.user):
+        return HttpResponseForbidden('Only SCM may lock a procurement group.')
+    group = _group_or_404(pk)
+    if request.method != 'POST':
+        return redirect('site_group_detail', pk=group.pk)
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect('site_group_detail', pk=group.pk)
+
+    if group.status == SITE_GROUP_LOCKED:
+        return _back(f'"{group.name}" is already locked.')
+
+    member_ids = _group_member_ids(group)
+    if not member_ids:
+        return _back(f'"{group.name}" has no sites — there is nothing to lock.')
+
+    blockers = unresolved_change_requests_for(member_ids)
+    if blockers:
+        sites = ', '.join(sorted({b.attempt.assignment.project.project_id
+                                  for b in blockers}))
+        return _back(f'"{group.name}" cannot be locked: {sites} '
+                     f'{"has" if len(blockers) == 1 else "have"} an unresolved change '
+                     f'request. Resolve it, or remove the site from the group first.')
+
+    profile = request.user.profile
+    now = timezone.now()
+    with transaction.atomic():
+        group.status    = SITE_GROUP_LOCKED
+        group.locked_by = profile
+        group.locked_at = now
+        group.save(update_fields=['status', 'locked_by', 'locked_at'])
+
+        # One log line per member site, on the site itself. The group is not a project, so
+        # ActivityLog cannot hang the event off it — and the site is where a PM or designer
+        # will look to find out why the BOQ stopped accepting edits.
+        for project in Project.objects.filter(pk__in=member_ids):
+            log_activity(project, profile,
+                         f'BOQ locked — site group "{group.name}" locked for procurement',
+                         entity_type='SiteGroup', entity_id=group.pk,
+                         action_code='site_group_locked')
+
+    return _back(f'"{group.name}" locked. The BOQ of {len(member_ids)} site(s) is now '
+                 f'read-only. There is no unlock — a later change needs a variance '
+                 f'against the order.', ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 19. SCM handoff — the OPEX section of the SCM dashboard
+# ---------------------------------------------------------------------------
+
+def scm_opex_tender_rows(now=None):
+    """Per-tender procurement rows for the SCM dashboard's OPEX section.
+
+    KEYED OFF SiteGroup AND DesignAssignment, NEVER `Project.status` (settled decision 9).
+    OPEX sites are created `Draft` and nothing promotes them (deferred finding H1), so a
+    status filter would return an empty section forever. No existing dashboard queryset is
+    read, widened or modified — this is its own query set from its own tables.
+
+    Returns one row per OPEX tender that has at least one design assignment, so tenders
+    where design has not started do not pad the section.
+    """
+    now = now or timezone.now()
+    rows = []
+    programs = (Program.objects
+                .filter(is_deleted=False, program_type='OPEX')
+                .order_by('name'))
+    for program in programs:
+        assignments = (DesignAssignment.objects
+                       .filter(project__program=program, project__is_deleted=False)
+                       .count())
+        if not assignments:
+            continue
+        released, total = tender_release_completeness(program)
+        groups = _group_rows(program)
+        pool = post_qc_pool(program, now)
+        rows.append({
+            'program':      program,
+            'total_sites':  total,
+            'in_design':    assignments,
+            'released':     released,
+            'groups':       groups,
+            'group_count':  len(groups),
+            'locked_count': sum(1 for g in groups if g.status == SITE_GROUP_LOCKED),
+            'pool':         pool,
+            'pool_count':   len(pool),
+            'oldest_pool_age': pool[0].age_days if pool else None,
+        })
+    return rows

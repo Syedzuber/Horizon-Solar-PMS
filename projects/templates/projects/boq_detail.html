@@ -27,6 +27,27 @@
   </div>
 </div>
 
+{# ── Procurement group lock (Part 6) ─────────────────────────────────────────
+   Shown to EVERY role, not just Design. A PM looking at a quantity that will not
+   change again should be able to see that from the page, and SCM needs to know
+   which group froze it before raising the order. `design_form_open` carries the
+   same fact into the seven Design input gates below. #}
+{% if boq_group_locked %}
+<div class="alert alert-secondary d-flex align-items-start gap-2 py-2">
+  <span class="fw-semibold">BOQ locked.</span>
+  <span class="small">
+    This site is in the locked procurement group
+    {% if locked_group %}
+      <strong>{{ locked_group.name }}</strong>{% if locked_group.locked_at %},
+      locked on {{ locked_group.locked_at|date:"d M Y, H:i" }}
+      {% if locked_group.locked_by %}by
+        {{ locked_group.locked_by.user.get_full_name|default:locked_group.locked_by.user.username }}{% endif %}{% endif %}.
+    {% endif %}
+    Quantities are final — a change now needs a variance against the order, not a BOQ edit.
+  </span>
+</div>
+{% endif %}
+
 {# ── No BOQ yet (non-Design roles) ── #}
 {% if not boq %}
   <div class="alert alert-info">BOQ not yet created by the Design team.</div>
@@ -36,7 +57,7 @@
 {# Out-of-table forms — associated via HTML form= attribute. #}
 
 {% if role == 'Design' %}
-  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+  {% if design_form_open %}
 
   {# Form 1: save/submit Design fields — action value comes from the clicked button #}
   <form id="saveDesignForm" method="post" action="{% url 'boq_detail' project.project_id %}">
@@ -74,7 +95,7 @@
 {% endif %}
 
 {# ── Notes ── #}
-{% if role == 'Design' and boq.status == 'Draft' or role == 'Design' and boq.status == 'Revision Requested' or role == 'Design' and boq.status == 'Acknowledged' %}
+{% if role == 'Design' and design_form_open %}
 <div class="mb-3">
   <label class="form-label fw-semibold">Notes</label>
   <textarea form="saveDesignForm" name="notes"
@@ -138,7 +159,7 @@
               <td class="align-middle">{{ item.description }}</td>
               <td class="align-middle small text-muted">{{ item.uom }}</td>
               <td class="align-middle">
-                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+                {% if design_form_open %}
                 <input form="saveDesignForm"
                        type="number" step="1" min="0"
                        name="boq_qty_{{ item.pk }}"
@@ -149,7 +170,7 @@
                 {% endif %}
               </td>
               <td class="align-middle">
-                {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+                {% if design_form_open %}
                 <select form="saveDesignForm"
                         name="make_pref_{{ item.pk }}"
                         class="form-select form-select-sm vendor-select"
@@ -165,7 +186,7 @@
               </td>
               <td class="align-middle text-center">
                 {% if not item.is_standard_item %}
-                  {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+                  {% if design_form_open %}
                   <button type="submit" form="delForm_{{ item.pk }}"
                           class="btn btn-outline-danger btn-sm py-0 px-1"
                           title="Delete row"
@@ -241,7 +262,7 @@
           {% endfor %}
         </tbody>
         {% if role == 'Design' %}
-          {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+          {% if design_form_open %}
         <tfoot>
           <tr>
             <td colspan="6" class="py-2 ps-3">
@@ -264,7 +285,7 @@
 {# ── Bottom action buttons ── #}
 <div class="d-flex gap-2 mt-2 mb-5">
   {% if role == 'Design' %}
-    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+    {% if design_form_open %}
     <button type="submit" form="saveDesignForm" name="action" value="save_design"
             class="btn btn-outline-secondary">Save Draft</button>
     <button type="submit" form="saveDesignForm" name="action" value="submit_design"
@@ -308,7 +329,7 @@
 {# ── Add Row modal ── #}
 {% if role == 'Design' %}
   {% if boq %}
-    {% if boq.status == 'Draft' or boq.status == 'Revision Requested' or boq.status == 'Acknowledged' %}
+    {% if design_form_open %}
 <div class="modal fade" id="addRowModal" tabindex="-1">
   <div class="modal-dialog">
     <div class="modal-content">

@@ -8,9 +8,12 @@ comparing assigned_pm itself.
 
 THE WINDOW. A change request is only a system action once QC has started on the current
 attempt; before that the form is replaced by an explanation, because a change at that
-stage is a conversation with the Design Head, not a record. After release the window is
-shut. (The real close condition is BOQ locking, which is a later part — release stands in
-for it today.)
+stage is a conversation with the Design Head, not a record.
+
+PART 6 CLOSES IT AT THE BOQ LOCK, which is what release was standing in for. Three cases,
+matching design_change_request(): a site in a LOCKED procurement group is refused and told
+a variance is needed; a site in a DRAFT group may still be changed and LEAVES THE GROUP
+when it is; a site in no group keeps Part 4's behaviour, release included.
 {% endcomment %}
 
 {% block title %}Change request — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -67,8 +70,21 @@ for it today.)
             <strong>QC is in progress on this package — raising a change suspends the
             review, and no verdict will be recorded on it.</strong>
           {% endif %}
+          {% if draft_group %}
+            <strong>This site is in procurement group "{{ draft_group.name }}". Raising a
+            change removes it from that group, so SCM's aggregated quantities drop this
+            site.</strong>
+          {% endif %}
         </div>
       </form>
+
+    {% elif group_locked %}
+      <div class="alert alert-secondary py-2 small mb-0">
+        The BOQ for this site is <strong>locked</strong> — it is in a locked procurement
+        group and its quantities have been committed to a purchase. A change now needs a
+        variance against the order, which this system does not handle yet. Raise it with
+        SCM directly.
+      </div>
 
     {% elif released %}
       <div class="alert alert-secondary py-2 small mb-0">

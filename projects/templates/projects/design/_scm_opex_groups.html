@@ -1,0 +1,154 @@
+{% comment %}
+SCM dashboard — OPEX tenders section (Part 6). Included from dashboard/scm.html.
+
+A PARTIAL RATHER THAN INLINE MARKUP so the change to the existing dashboard template is
+one include line. Nothing above or below it in scm.html is touched, and the Residential
+per-project cards render exactly as before.
+
+Renders nothing at all when there are no OPEX tenders with design work, so an
+all-Residential deployment sees no change whatsoever.
+
+THE POST-QC POOL IS THE REASON THIS SECTION EXISTS. Group counts are a status report;
+the pool is a queue with an age on it, and it is the number that goes wrong quietly —
+sites pass QC, nobody groups them, and procurement never hears. Oldest age is surfaced on
+the tender row so it is visible without opening anything.
+
+Bootstrap only, matching the cards around it.
+{% endcomment %}
+
+{% if opex_tender_rows %}
+<div class="d-flex justify-content-between align-items-baseline mb-2">
+  <h6 class="mb-0 fw-semibold">Tenders — grouped procurement</h6>
+  <span class="text-muted small">{{ opex_tender_rows|length }} tender{{ opex_tender_rows|length|pluralize }} with design work</span>
+</div>
+
+{% for row in opex_tender_rows %}
+<div class="card mb-2 shadow-sm border-0{% if row.oldest_pool_age >= 14 %} scm-card-amber{% endif %}">
+  <div class="card-header p-0 border-bottom-0" style="border-radius:.5rem;">
+    <div class="card-header-inner d-flex align-items-center">
+      <button class="card-collapse-btn btn btn-link flex-grow-1 min-w-0 text-start text-decoration-none text-dark py-2 px-3
+                     d-flex align-items-center gap-2 flex-wrap"
+              type="button"
+              data-bs-toggle="collapse"
+              data-bs-target="#scm-opex-{{ row.program.pk }}"
+              aria-expanded="false"
+              aria-controls="scm-opex-{{ row.program.pk }}">
+
+        <span class="flex-grow-1 overflow-hidden" style="min-width:9rem;">
+          <span class="fw-semibold">{{ row.program.name }}</span>
+          {% if row.program.short_tender_code %}
+            <span class="text-muted small ms-1">{{ row.program.short_tender_code }}</span>
+          {% endif %}
+        </span>
+
+        <span class="d-flex align-items-center gap-3 flex-wrap">
+          <span>
+            <div class="stage-label">Sites</div>
+            <span class="stage-badge bg-light text-dark border">{{ row.total_sites }}</span>
+          </span>
+          <span>
+            <div class="stage-label">Released</div>
+            <span class="stage-badge bg-light text-dark border">{{ row.released }} of {{ row.total_sites }}</span>
+          </span>
+          <span>
+            <div class="stage-label">Groups</div>
+            <span class="stage-badge bg-light text-dark border">
+              {{ row.group_count }}{% if row.locked_count %} · {{ row.locked_count }} locked{% endif %}
+            </span>
+          </span>
+          <span>
+            <div class="stage-label">Ungrouped</div>
+            <span class="stage-badge {% if row.pool_count %}bg-warning-subtle text-dark border{% else %}bg-light text-muted border{% endif %}">
+              {{ row.pool_count }}{% if row.oldest_pool_age is not None %} · oldest {{ row.oldest_pool_age }}d{% endif %}
+            </span>
+          </span>
+        </span>
+
+        <span class="collapse-icon text-muted small">&#9660;</span>
+      </button>
+      <a href="{% url 'site_group_list' pk=row.program.pk %}"
+         class="btn btn-sm btn-outline-secondary me-3">Groups</a>
+    </div>
+  </div>
+
+  <div class="collapse" id="scm-opex-{{ row.program.pk }}">
+    <div class="card-body pt-2">
+      <div class="row g-3">
+
+        {# Groups #}
+        <div class="col-12 col-lg-6">
+          <div class="stage-label mb-1">Groups</div>
+          {% if not row.groups %}
+            <div class="text-muted small">No groups formed yet.</div>
+          {% else %}
+          <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Group</th>
+                  <th style="width:5rem;">Sites</th>
+                  <th style="width:6rem;">Status</th>
+                  <th style="width:8rem;"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for g in row.groups %}
+                <tr>
+                  <td class="small">{{ g.name }}</td>
+                  <td class="small">{{ g.member_count }}</td>
+                  <td>
+                    <span class="stage-badge {% if g.status == 'locked' %}bg-primary-subtle text-dark{% else %}bg-warning-subtle text-dark{% endif %} border">
+                      {{ g.get_status_display }}
+                    </span>
+                  </td>
+                  <td class="text-end">
+                    <a href="{% url 'site_group_detail' pk=g.pk %}"
+                       class="btn btn-sm btn-outline-secondary py-0">BOQ</a>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+        </div>
+
+        {# Post-QC pool #}
+        <div class="col-12 col-lg-6">
+          <div class="stage-label mb-1">Post-QC pool — released, in no group</div>
+          {% if not row.pool %}
+            <div class="text-muted small">Nothing waiting.</div>
+          {% else %}
+          <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Site</th>
+                  <th style="width:11rem;">Released</th>
+                  <th style="width:7rem;">Waiting</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for a in row.pool %}
+                <tr>
+                  <td class="small fw-semibold">{{ a.project.project_id }}</td>
+                  <td class="small text-muted">{{ a.released_at|date:"d M Y"|default:"—" }}</td>
+                  <td class="small {% if a.age_days >= 14 %}text-danger fw-semibold{% endif %}">
+                    {% if a.age_days is None %}—{% else %}{{ a.age_days }} day{{ a.age_days|pluralize }}{% endif %}
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+<div class="mb-4"></div>
+{% endif %}
