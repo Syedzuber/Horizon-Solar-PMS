@@ -286,7 +286,7 @@ the per-card x-data expand behaviour below is untouched.
     <div class="d-flex flex-wrap gap-2 mb-3">
 
       {# Design Status chip — Trigger 2: derived from BOQ status (no dedicated field) #}
-      {% if p.design_status == 'submitted' %}
+      {% if not p.design %}{% if p.design_status == 'submitted' %}
       <span class="chip chip-green">
         <span class="chip-dot chip-dot-green"></span>Design: Submitted
       </span>
@@ -299,7 +299,7 @@ the per-card x-data expand behaviour below is untouched.
       <span class="chip chip-grey">
         <span class="chip-dot chip-dot-grey"></span>Design: Pending
       </span>
-      {% endif %}
+      {% endif %}{% endif %}
 
       {# BOQ Status chip — Trigger 3: 4 actual values, not 3 as originally assumed #}
       {% if p.boq_status == 'Acknowledged' %}
@@ -320,13 +320,13 @@ the per-card x-data expand behaviour below is untouched.
       <span class="chip chip-grey">
         <span class="chip-dot chip-dot-grey"></span>BOQ: Draft
       </span>
-      {% endif %}
+      {% endif %}{% if p.design %}{% include "projects/design/_dashboard_design_chips.html" %}{% endif %}
 
-      {% if p.revision_requested %}
+      {% if not p.design %}{% if p.revision_requested %}
       <span class="chip chip-red">
         <span class="chip-dot chip-dot-red"></span>Revision Requested
       </span>
-      {% endif %}
+      {% endif %}{% endif %}
 
     </div>{# /chips #}
 
@@ -340,18 +340,8 @@ the per-card x-data expand behaviour below is untouched.
       <a href="{% url 'boq_detail' p.project_id %}"
          class="btn btn-sm btn-outline-secondary">
         View BOQ
-      </a>
+      </a>{% if p.design %}{% include "projects/design/_dashboard_design_actions.html" %}{% endif %}
     </div>
-
-    {% comment %}
-    OPEX design workflow (Part 4.5). `p.design` is populated by
-    design_views.designer_dashboard_context() for OPEX sites with a DesignAssignment and
-    is absent for every Residential project, so Residential cards render exactly as they
-    did before this block existed.
-    {% endcomment %}
-    {% if p.design %}
-      {% include "projects/design/_dashboard_design_block.html" %}
-    {% endif %}
 
   </div>{# /expanded body #}
 </div>{# /card #}

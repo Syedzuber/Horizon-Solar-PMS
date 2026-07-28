@@ -1,0 +1,53 @@
+  {# ── The one contextual action for the current status ────────────────────── #}
+  <div class="d-flex flex-wrap align-items-center gap-2">
+
+    {% if p.design.action_kind == 'propose_due' %}
+      {% comment %}
+      Inline because it is a single date field, and the screen that otherwise carries it
+      (/design/my-sites/) is a list rather than a per-site page — sending the designer
+      there to act on THIS site would be a worse click than the form itself.
+      {% endcomment %}
+      <form method="post" action="{% url 'design_due_date_propose' project_id=p.project_id %}"
+            class="d-flex flex-wrap align-items-center gap-2">
+        {% csrf_token %}
+        <input type="date" name="proposed_date" class="form-control form-control-sm"
+               style="max-width:11rem;" required>
+        <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+          {{ p.design.action_label }}
+        </button>
+      </form>
+
+    {% elif p.design.action_kind == 'link' %}
+      <a href="{% url 'design_site_workspace' project_id=p.project_id %}"
+         class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        {{ p.design.action_label }}
+      </a>
+
+    {% elif p.design.waiting %}
+      <span class="small text-muted">{{ p.design.waiting }}</span>
+    {% endif %}
+
+    {# Always reachable: the full per-site screen with every version and artifact. #}
+    <a href="{% url 'design_site_workspace' project_id=p.project_id %}"
+       class="btn btn-sm btn-outline-secondary">Design workspace</a>
+
+    {% if p.design.can_mark_blocked %}
+      <button class="btn btn-sm btn-outline-danger" type="button"
+              data-bs-toggle="collapse" data-bs-target="#dashblk{{ p.project.pk }}">
+        Mark blocked
+      </button>
+    {% endif %}
+  </div>
+
+  {% if p.design.can_mark_blocked %}
+  <div class="collapse mt-2" id="dashblk{{ p.project.pk }}">
+    <form method="post" action="{% url 'design_mark_blocked' project_id=p.project_id %}"
+          class="d-flex flex-wrap align-items-center gap-2">
+      {% csrf_token %}
+      <input type="text" name="reason" class="form-control form-control-sm"
+             placeholder="What is inadequate about the survey? (required)"
+             style="max-width:26rem;" required>
+      <button class="btn btn-sm btn-outline-danger">Mark blocked</button>
+    </form>
+  </div>
+  {% endif %}
