@@ -83,6 +83,10 @@ urlpatterns = [
     # permissions.user_can_qc_design(). Change requests route through the untouched
     # user_can_manage_project(). Still no navigation links — Part 4.5 integrates.
     # ---------------------------------------------------------------------------
+    # Part 5 — the Design Head's read-only tender dashboard. Landing view for a tender;
+    # the Part 2 site list at /programs/<pk>/design/ is now the drill-down target.
+    path('programs/<int:pk>/design/dashboard/', design_views.design_tender_dashboard, name='design_tender_dashboard'),
+
     path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
     path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),
     path('design/<str:project_id>/qc/start/',       design_views.design_qc_start,        name='design_qc_start'),

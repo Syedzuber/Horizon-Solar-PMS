@@ -30,6 +30,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 
 from .decorators import login_required
+from .design_metrics import STAGE_LABELS, tender_metrics
 from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
 )
@@ -1979,6 +1980,66 @@ def pm_change_request_targets(user, projects):
         if attempt is not None and attempt.qc_started_at is not None:
             out[project.pk] = True
     return out
+
+
+# ---------------------------------------------------------------------------
+# 16. Design Head tender dashboard (Part 5) — READ ONLY
+#
+# A NEW SCREEN RATHER THAN AN EXTENSION OF design_head_sites().
+# Settled decision 8 rules out a per-site table as the landing view, and head_sites IS
+# that table — bolting metrics on top of it would make them an appendix to the thing the
+# decision forbids. So this becomes the landing view for a tender and drills DOWN into a
+# filtered list rendered on the same page; head_sites stays exactly as it was and remains
+# the full editable site list, linked from here.
+#
+# This view writes nothing. Every number comes from design_metrics, which holds no write
+# of any kind.
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_tender_dashboard(request, pk):
+    """The Design Head's operational view of one tender.
+
+    Permission is the Part 4 helper, so a named deputy gets in and the 'Design Head' role
+    string is not consulted. A designer is refused outright — the workload table shows
+    every designer's rework multiplier side by side, and on samples this small that number
+    is noisy enough that the first reaction to a bad one is to argue with the metric
+    rather than the work.
+
+    DRILL-DOWN, NOT A LANDING TABLE. `?stage=` and `?designer=` filter a compact list
+    rendered beneath the panels, from the rows already in memory — neither adds a query.
+    """
+    if not user_has_design_head_authority(request.user):
+        return HttpResponseForbidden(
+            'The tender design dashboard is for the Design Head or his named deputy.')
+
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    metrics = tender_metrics(program)
+
+    # Drill-down is filtered in Python over `metrics['sites']`, which is already loaded.
+    stage    = (request.GET.get('stage') or '').strip()
+    designer = (request.GET.get('designer') or '').strip()
+    drill, drill_label = [], ''
+    if stage in STAGE_LABELS:
+        drill = [s for s in metrics['sites'] if s['stage'] == stage]
+        drill_label = STAGE_LABELS[stage]
+    elif designer.isdigit():
+        did = int(designer)
+        drill = [s for s in metrics['sites']
+                 if s['designer'] and s['designer'].pk == did]
+        drill_label = (drill[0]['designer'].user.get_full_name()
+                       or drill[0]['designer'].user.username) if drill else 'designer'
+
+    return render(request, 'projects/design/tender_dashboard.html', {
+        'program':      program,
+        'm':            metrics,
+        'drill':        drill,
+        'drill_label':  drill_label,
+        'drill_stage':  stage if stage in STAGE_LABELS else '',
+        'drill_designer': designer if designer.isdigit() else '',
+        'is_deputy':    user_is_design_head_deputy(request.user)
+                        and not user_is_design_head(request.user),
+    })
 
 
 @login_required

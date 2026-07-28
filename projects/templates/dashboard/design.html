@@ -184,10 +184,15 @@ worth the click.
     {% endcomment %}
     {% if head_counts.programs %}
     <div class="small mt-3">
-      <span class="text-muted">Survey upload, allocation and due dates, per tender:</span>
+      {% comment %}
+      Part 5 made the per-tender dashboard the landing view for a tender, so these buttons
+      now point there; the Part 2 site list is one click further in, from that screen's
+      "Full site list" button.
+      {% endcomment %}
+      <span class="text-muted">Tender dashboards — stage counts, workload, capacity:</span>
       <div class="d-flex flex-wrap gap-2 mt-1">
         {% for prog in head_counts.programs %}
-          <a href="{% url 'design_head_sites' pk=prog.pk %}"
+          <a href="{% url 'design_tender_dashboard' pk=prog.pk %}"
              class="btn btn-sm btn-outline-secondary">
             {{ prog.name }}{% if prog.short_tender_code %}
               <span class="text-muted">· {{ prog.short_tender_code }}</span>{% endif %}

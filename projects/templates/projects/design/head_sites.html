@@ -17,9 +17,16 @@ capacity are Part 5.
     <h5 class="mb-0">Design — {{ program.name }}</h5>
     <div class="text-muted small">{{ program.client_name }} · {{ program.short_tender_code }}</div>
   </div>
-  <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
-    <i class="bi bi-arrow-left me-1"></i>Tender
-  </a>
+  <div class="d-flex gap-2">
+    {# Part 5: the metrics view is the landing screen for a tender; this list is its
+       drill-down. Linked both ways so neither is a dead end. #}
+    <a href="{% url 'design_tender_dashboard' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-speedometer2 me-1"></i>Dashboard
+    </a>
+    <a href="{% url 'program_detail' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>Tender
+    </a>
+  </div>
 </div>
 
 {% comment %}

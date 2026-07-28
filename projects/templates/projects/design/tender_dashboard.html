@@ -1,0 +1,432 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head — operational dashboard for ONE tender (Part 5). READ ONLY.
+
+There is not one button on this page that changes anything. Every link either filters this
+same page or opens an existing screen. That is deliberate: Phase 1 is information, and an
+inline approve button here would duplicate a permission gate that already lives in the QC
+and Arka views.
+
+Bootstrap, matching the existing dashboards. The `.design-stat-num` rule is the one
+dashboard/design.html defines in its own extra_head (line 47) and the `.chip` pills are the
+same set the design module already uses — both reproduced locally because importing them
+would mean editing dashboard/design.html, and promoting them to base.html would touch every
+screen in the product. Same reasoning as findings E3 and F4.
+
+NO AUTO-REFRESH (settled decision 7). The only way this page updates is the Refresh link.
+{% endcomment %}
+
+{% block title %}Design — {{ program.name }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+<style>
+  .design-stat-num { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+  /* Stage tiles are denser than the six-tile summary row they echo — eleven stages have
+     to fit without the page becoming a scroll. */
+  .stage-tile { text-decoration: none; display: block; }
+  .stage-tile .card { transition: box-shadow .15s ease; }
+  .stage-tile:hover .card { box-shadow: 0 .25rem .6rem rgba(0,0,0,.12) !important; }
+  .stage-num { font-size: 1.25rem; font-weight: 700; line-height: 1; }
+  .stage-zero { color: #adb5bd; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">Design — {{ program.name }}</h5>
+    <div class="text-muted small">
+      {{ program.client_name }}{% if program.short_tender_code %} · {{ program.short_tender_code }}{% endif %}
+      · {{ m.assigned_sites }} of {{ m.total_sites }} site{{ m.total_sites|pluralize }} in design
+      {% if is_deputy %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>Acting as deputy</span>
+      {% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    {# Manual refresh only — no polling, no auto-reload. #}
+    <a href="{% url 'design_tender_dashboard' pk=program.pk %}"
+       class="btn btn-sm btn-outline-secondary">Refresh</a>
+    <a href="{% url 'design_head_sites' pk=program.pk %}"
+       class="btn btn-sm text-white" style="background-color:#1a7a4a;">Full site list</a>
+  </div>
+</div>
+
+{# ── Release progress ─────────────────────────────────────────────────────── #}
+{% with released=m.stages|last %}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-baseline gap-2">
+      <span class="fw-semibold">{{ released.count }} of {{ m.total_sites }} sites released</span>
+      <span class="text-muted small">
+        {{ m.assigned_sites }} have design assignments{% if m.unassigned_sites %},
+        {{ m.unassigned_sites }} not yet started (no survey uploaded){% endif %}
+      </span>
+    </div>
+    <div class="progress mt-2" style="height:.5rem;">
+      <div class="progress-bar" role="progressbar"
+           style="width: {% widthratio released.count m.total_sites 100 %}%; background-color:#1a7a4a;"></div>
+    </div>
+  </div>
+</div>
+{% endwith %}
+
+{# ── 1. Stage counts ──────────────────────────────────────────────────────── #}
+{% comment %}
+Eleven separate numbers, never merged into one "pending" (settled decision 2). Stages the
+HEAD can clear himself are marked, because those are the ones he can act on today.
+{% endcomment %}
+<div class="d-flex justify-content-between align-items-baseline mb-2">
+  <span class="fw-semibold" style="color:#1a7a4a;">Where sites are</span>
+  <span class="text-muted small">
+    Tiles sum to {{ m.assigned_sites }} — every assignment is in exactly one stage.
+    <span class="chip chip-amber ms-1"><span class="chip-dot chip-dot-amber"></span>= your queue</span>
+  </span>
+</div>
+<div class="row g-2 mb-4">
+  {% for st in m.stages %}
+  <div class="col-6 col-md-4 col-lg-3 col-xl-2">
+    <a class="stage-tile" href="?stage={{ st.key }}">
+      <div class="card shadow-sm border-0 h-100 {% if drill_stage == st.key %}border-2{% endif %}"
+           {% if drill_stage == st.key %}style="outline:2px solid #1a7a4a;"{% endif %}>
+        <div class="card-body py-2 px-2 text-center">
+          <div class="stage-num {% if not st.count %}stage-zero{% elif st.is_head %}text-warning{% else %}text-dark{% endif %}">
+            {{ st.count }}
+          </div>
+          <div class="text-muted mt-1" style="font-size:.7rem; line-height:1.2;">
+            {{ st.label }}
+          </div>
+        </div>
+      </div>
+    </a>
+  </div>
+  {% endfor %}
+</div>
+
+<div class="row g-3">
+
+  {# ── 3. Capacity realisation ────────────────────────────────────────────── #}
+  <div class="col-12 col-lg-6">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-header bg-white py-2 fw-semibold small">Capacity realisation</div>
+      <div class="card-body py-3">
+
+        {% if not m.capacity.tendered_recorded %}
+          {% comment %}
+          Program.total_capacity is null for this tender. Show what IS known and say so
+          plainly — do NOT invent a target or extrapolate against planned_site_count.
+          {% endcomment %}
+          <div class="alert alert-secondary py-2 small mb-3">
+            <strong>Tendered capacity is not recorded for this tender.</strong>
+            Designed capacity is shown below; projected total and shortfall cannot be
+            calculated without a target.
+          </div>
+        {% endif %}
+
+        <div class="row g-2 text-center">
+          {% if m.capacity.tendered_recorded %}
+          <div class="col-6 col-lg-3">
+            <div class="design-stat-num">{{ m.capacity.tendered_kw|floatformat:0 }}</div>
+            <div class="small text-muted">Tendered kW</div>
+          </div>
+          {% endif %}
+          <div class="col-6 col-lg-3">
+            <div class="design-stat-num text-success">{{ m.capacity.designed_kw|floatformat:2 }}</div>
+            <div class="small text-muted">Designed so far (kW)</div>
+          </div>
+          {% if m.capacity.projected_kw %}
+          <div class="col-6 col-lg-3">
+            <div class="design-stat-num text-primary">{{ m.capacity.projected_kw|floatformat:0 }}</div>
+            <div class="small text-muted">Projected total (kW)</div>
+          </div>
+          {% endif %}
+          {% if m.capacity.shortfall_kw is not None %}
+          <div class="col-6 col-lg-3">
+            <div class="design-stat-num {% if m.capacity.shortfall_is_deficit %}text-danger{% else %}text-success{% endif %}">
+              {{ m.capacity.shortfall_kw|floatformat:0 }}
+            </div>
+            <div class="small text-muted">
+              {% if m.capacity.shortfall_is_deficit %}Shortfall (kW){% else %}Surplus (kW){% endif %}
+            </div>
+          </div>
+          {% endif %}
+        </div>
+
+        <div class="small text-muted mt-3">
+          Based on <strong>{{ m.capacity.contributing }}</strong> of
+          {{ m.capacity.total_sites }} site{{ m.capacity.total_sites|pluralize }}
+          with an approved Arka ({{ m.capacity.coverage_pct }}%),
+          averaging
+          {% if m.capacity.average_kw %}{{ m.capacity.average_kw|floatformat:2 }} kW{% else %}—{% endif %}
+          per site.
+          {% if m.capacity.projected_kw %}
+            <br>
+            <em>Projected total is an extrapolation</em> — the average above applied to all
+            {{ m.capacity.total_sites }} sites, not a measured figure. It moves as more
+            Arkas are approved.
+          {% endif %}
+          {% if m.capacity.tendered_recorded %}
+            <br>Tendered capacity is stored in MW ({{ program.total_capacity }} MW) and
+            converted here for comparison.
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── 4. Review queue age ────────────────────────────────────────────────── #}
+  <div class="col-12 col-lg-6">
+    <div class="card shadow-sm border-0 h-100">
+      <div class="card-header bg-white py-2 fw-semibold small">Your review queue</div>
+      <div class="card-body py-3">
+        <div class="row g-2 text-center">
+          <div class="col-6">
+            <div class="design-stat-num {% if m.queue.arka_count %}text-warning{% else %}text-muted{% endif %}">
+              {{ m.queue.arka_count }}
+            </div>
+            <div class="small text-muted">Arka awaiting your verdict</div>
+            {% if m.queue.arka_oldest_days is not None %}
+              <div class="small mt-1">
+                oldest <strong>{{ m.queue.arka_oldest_days }} day{{ m.queue.arka_oldest_days|pluralize }}</strong>
+                <div class="text-muted" style="font-size:.7rem;">{{ m.queue.arka_oldest_site.project_id }}</div>
+              </div>
+            {% endif %}
+          </div>
+          <div class="col-6">
+            <div class="design-stat-num {% if m.queue.qc_count %}text-warning{% else %}text-muted{% endif %}">
+              {{ m.queue.qc_count }}
+            </div>
+            <div class="small text-muted">Packages awaiting QC</div>
+            {% if m.queue.qc_oldest_days is not None %}
+              <div class="small mt-1">
+                oldest <strong>{{ m.queue.qc_oldest_days }} day{{ m.queue.qc_oldest_days|pluralize }}</strong>
+                <div class="text-muted" style="font-size:.7rem;">{{ m.queue.qc_oldest_site.project_id }}</div>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+        <div class="small text-muted mt-3">
+          You are the only approver at both gates, so a burst at the end of a phase lands
+          entirely here. <a href="{% url 'design_qc_queue' %}">Open the QC queue</a>.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── 2. Designer workload ─────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mt-3">
+  <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
+    <span class="fw-semibold small">Designer workload</span>
+    <span class="text-muted" style="font-size:.7rem;">
+      Sorted by kW. Sites and kW exclude released work.
+    </span>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0" id="workloadTable">
+      <thead class="table-light">
+        <tr>
+          {% comment %}
+          Client-side sorting only — the numbers are already on the page and re-querying
+          to reorder eleven rows would be absurd. Default order comes from the view.
+          {% endcomment %}
+          <th role="button" data-sort="0">Designer</th>
+          <th role="button" data-sort="1" class="text-end">Sites</th>
+          <th role="button" data-sort="2" class="text-end">kW</th>
+          <th role="button" data-sort="3" class="text-end">Overdue</th>
+          <th role="button" data-sort="4" class="text-end">Blocked</th>
+          <th role="button" data-sort="5" class="text-end">Rework</th>
+          <th>Split</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for w in m.workload %}
+        <tr>
+          <td>
+            <a href="?designer={{ w.designer.pk }}">
+              {{ w.designer.user.get_full_name|default:w.designer.user.username }}
+            </a>
+            {% if w.released %}
+              <div class="text-muted" style="font-size:.7rem;">{{ w.released }} released</div>
+            {% endif %}
+          </td>
+          <td class="text-end" data-v="{{ w.sites }}">{{ w.sites }}</td>
+          <td class="text-end" data-v="{{ w.capacity_kw|floatformat:2 }}">
+            {{ w.capacity_kw|floatformat:2 }}
+            {% if w.sites_no_capacity %}
+              {# Without this the 0.00 reads as "carrying nothing" when it means
+                 "carrying sites whose capacity is not yet approved". #}
+              <div class="text-muted" style="font-size:.7rem;"
+                   title="No approved Arka yet, so no designed capacity to count">
+                +{{ w.sites_no_capacity }} not yet designed
+              </div>
+            {% endif %}
+          </td>
+          <td class="text-end" data-v="{{ w.overdue }}">
+            {% if w.overdue %}<span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>{{ w.overdue }}</span>
+            {% else %}<span class="text-muted">0</span>{% endif %}
+          </td>
+          <td class="text-end" data-v="{{ w.blocked }}">
+            {% if w.blocked %}<span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>{{ w.blocked }}</span>
+            {% else %}<span class="text-muted">0</span>{% endif %}
+          </td>
+          <td class="text-end" data-v="{% if w.rework %}{{ w.rework }}{% else %}-1{% endif %}">
+            {% comment %}
+            '—' not '0' when there are no released sites: 0 would read as "no rework"
+            when it actually means "no data to divide by" (settled decision 5).
+            {% endcomment %}
+            {% if w.rework %}<strong>{{ w.rework }}&times;</strong>
+            {% else %}<span class="text-muted" title="No released sites yet — nothing to divide by">&mdash;</span>{% endif %}
+          </td>
+          <td style="font-size:.75rem;">
+            <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+              {{ w.qc_failed }} QC failed</span>
+            <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+              {{ w.pm_change_request }} PM change</span>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7" class="text-center text-muted small py-4">
+          No designer has been allocated a site on this tender yet.
+        </td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer bg-white small text-muted py-2">
+    Rework = total attempts &divide; released sites, split by cause. A high
+    <span class="text-danger">QC failed</span> count is an execution problem; a high
+    <span class="text-warning">PM change</span> count is a brief that keeps moving. They
+    are never added together.
+  </div>
+</div>
+
+{# ── 5. Attention list ────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mt-3">
+  <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
+    <span class="fw-semibold small">Needs attention</span>
+    <span class="text-muted" style="font-size:.7rem;">
+      Worst first, capped at {{ m.attention|length }} row{{ m.attention|length|pluralize }} — a work queue, not a report
+    </span>
+  </div>
+  {% if not m.attention %}
+    <div class="card-body py-3 text-muted small">
+      Nothing overdue, blocked, heavily revised, or waiting on you.
+    </div>
+  {% else %}
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead class="table-light">
+        <tr><th style="width:3rem;"></th><th>Site</th><th>Designer</th><th>Reason</th><th>Stage</th></tr>
+      </thead>
+      <tbody>
+      {% for row in m.attention %}
+        <tr>
+          <td>
+            <span class="badge bg-{{ row.marker }}{% if row.marker == 'warning' %} text-dark{% endif %}">
+              {% if row.marker == 'danger' %}!{% elif row.marker == 'warning' %}&bull;{% else %}&hellip;{% endif %}
+            </span>
+          </td>
+          <td class="small fw-semibold">
+            <a href="{% url 'design_qc_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
+          </td>
+          <td class="small">
+            {% if row.designer %}{{ row.designer.user.get_full_name|default:row.designer.user.username }}
+            {% else %}<span class="text-muted">unallocated</span>{% endif %}
+          </td>
+          <td class="small">{{ row.reason }}</td>
+          <td class="small text-muted">{{ row.stage }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if m.no_due_date %}
+  <div class="card-footer bg-white small text-muted py-2">
+    {{ m.no_due_date }} unreleased site{{ m.no_due_date|pluralize }} ha{{ m.no_due_date|pluralize:"s,ve" }}
+    no approved due date and therefore cannot be overdue — they are counted under their
+    stage above.
+  </div>
+  {% endif %}
+</div>
+
+{# ── Drill-down ───────────────────────────────────────────────────────────── #}
+{% if drill_stage or drill_designer %}
+<div class="card shadow-sm border-0 mt-3">
+  <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
+    <span class="fw-semibold small">{{ drill_label }} — {{ drill|length }} site{{ drill|length|pluralize }}</span>
+    <a href="{% url 'design_tender_dashboard' pk=program.pk %}" class="small">Clear filter</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead class="table-light">
+        <tr><th>Site</th><th>Designer</th><th>Stage</th><th>Due</th><th class="text-end">kW</th><th>Attempts</th><th></th></tr>
+      </thead>
+      <tbody>
+      {% for s in drill %}
+        <tr {% if s.overdue %}class="table-danger"{% elif s.blocked %}class="table-warning"{% endif %}>
+          <td class="small fw-semibold">{{ s.project.project_id }}</td>
+          <td class="small">
+            {% if s.designer %}{{ s.designer.user.get_full_name|default:s.designer.user.username }}
+            {% else %}<span class="text-muted">—</span>{% endif %}
+          </td>
+          <td class="small">{{ s.assignment.get_status_display }}</td>
+          <td class="small">
+            {% if s.commitment %}
+              {{ s.commitment.proposed_date|date:"d M Y" }}
+              {% if not s.has_approved_due %}<span class="text-muted">(proposed)</span>{% endif %}
+              {% if s.overdue %}<span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>{{ s.days_over }}d over</span>{% endif %}
+              {% if s.revisions %}<div class="text-muted" style="font-size:.7rem;">{{ s.revisions }} revision{{ s.revisions|pluralize }}</div>{% endif %}
+            {% else %}<span class="text-muted">none</span>{% endif %}
+          </td>
+          <td class="text-end small">
+            {% if s.capacity_kw %}{{ s.capacity_kw|floatformat:2 }}
+            {% else %}<span class="text-muted" title="No approved Arka — excluded from capacity">—</span>{% endif %}
+          </td>
+          <td class="small">{{ s.attempts|length }}</td>
+          <td class="text-end">
+            <a href="{% url 'design_qc_review' project_id=s.project.project_id %}"
+               class="btn btn-sm btn-outline-secondary">Open</a>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="7" class="text-center text-muted small py-4">No sites in this filter.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<script>
+// Client-side column sort for the workload table. Numeric columns carry data-v so the
+// sort is on the value, not the rendered chip markup. No request is made.
+(function () {
+  var table = document.getElementById('workloadTable');
+  if (!table) return;
+  var dir = {};
+  table.querySelectorAll('th[data-sort]').forEach(function (th) {
+    th.style.cursor = 'pointer';
+    th.addEventListener('click', function () {
+      var col = +th.dataset.sort;
+      dir[col] = !dir[col];
+      var body = table.tBodies[0];
+      Array.from(body.rows)
+        .sort(function (a, b) {
+          var av = a.cells[col].dataset.v, bv = b.cells[col].dataset.v;
+          if (av !== undefined && bv !== undefined) {
+            return (dir[col] ? 1 : -1) * (parseFloat(av) - parseFloat(bv));
+          }
+          return (dir[col] ? 1 : -1) *
+                 a.cells[col].innerText.trim().localeCompare(b.cells[col].innerText.trim());
+        })
+        .forEach(function (r) { body.appendChild(r); });
+    });
+  });
+})();
+</script>
+
+{% endblock %}

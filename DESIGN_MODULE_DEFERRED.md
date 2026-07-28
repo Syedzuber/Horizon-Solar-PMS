@@ -610,3 +610,110 @@ Nothing about the defect changed — only how easy it is to hit. It remains the 
 highest-value one-line fix outstanding in the design module.
 
 **Location:** `projects/permissions.py` — `user_can_view_project_boq`
+
+---
+
+## I. Found during Part 5 (Design Head tender dashboard)
+
+### I1 — `Program.total_capacity` is MEGAWATTS; every design capacity is KILOWATTS
+
+```python
+# models.py:204
+total_capacity = models.DecimalField(..., help_text='Total planned capacity in MW (storage only).')
+# vs
+ArkaSubmission.capacity_kw   # kW
+Project.capacity_kw          # kW
+```
+
+Nothing in the schema, the form or the admin stops these being compared directly, and doing
+so is wrong by a factor of 1000. Part 5 routes every comparison through one
+`_mw_to_kw()` helper in `design_metrics.py` and names every value it returns `*_kw`, but
+that is a local discipline — the next surface to touch both fields can still get it wrong.
+
+`Program.total_capacity` is also **nullable and unevenly populated**: of the two OPEX
+tenders on the local database, the one with design work had no capacity recorded and the
+one with 20 MW recorded had no design work. The capacity panel therefore needs a
+"tendered not recorded" branch permanently, not as a transitional state.
+
+The durable fix is to store one unit — most cheaply by renaming the field to
+`total_capacity_mw` so a reader cannot miss it. That is a migration.
+
+**Location:** `projects/models.py:204`; `projects/design_metrics.py` — `_mw_to_kw`
+
+### I2 — `ArkaSubmission.is_current` is unique per ATTEMPT, not per assignment
+
+This caught my own verification query before it caught anything else, which is why it is
+worth writing down. `is_current=True` is enforced by a partial unique constraint scoped to
+`attempt`, so:
+
+```python
+ArkaSubmission.objects.filter(attempt__assignment=a, is_current=True)   # returns ONE ROW PER ATTEMPT
+```
+
+On a site with three attempts that returns three "current" Arkas, one of which is current
+in any meaningful sense. Summing their `capacity_kw` overstated designed capacity by 113%
+on the local data (559.25 kW against the correct 262.25 kW).
+
+Any capacity, reporting or export code must scope to the assignment's
+`current_attempt_number` first, as `tender_metrics()` does. A queryset that reads
+`is_current=True` alone and looks correct on single-attempt sites will silently break the
+moment a site is reworked.
+
+**Location:** `projects/models.py` — `ArkaSubmission.Meta.constraints`
+
+### I3 — Blocked duration is still only readable for the current block (E4, now load-bearing)
+
+Part 5 shows "blocked N days" on the attention list, computed from
+`DesignAssignment.survey_returned_at`. That field is single-valued and overwritten on each
+new block, so the figure is **the current block only** — a site blocked three times shows
+the duration of the third, and the first two are invisible to every metric.
+
+Part 5 deliberately shows no cumulative or historical blocked time for this reason. But the
+dashboard now makes the gap visible in a way it was not before: a Head looking at
+"blocked 2 days" has no way to know the site has actually been blocked for three weeks
+across four episodes. Full history is reconstructable from `ActivityLog`
+(`design_blocked` / `design_survey_unblocked`) but is not queryable as a duration.
+
+Settled decision 3 says blocked time must never silently extend a due date, and Part 5
+honours that — blocked sites are counted as blocked AND as overdue, both shown. Cumulative
+blocked time would be reporting, not an adjustment, and needs a block-history row.
+
+**Location:** `projects/models.py` — `DesignAssignment.survey_returned_at`
+
+### I4 — Workload kW reads as "no load" for a designer whose sites have no approved Arka
+
+`kW` sums the current approved Arka capacity of a designer's **non-released** sites, per the
+Part 5 spec. A designer holding two sites that have not yet reached an approved Arka
+therefore shows `0.00 kW` while genuinely carrying two sites.
+
+Part 5 mitigates this by rendering "+N not yet designed" under the figure, so the number is
+never read as an empty queue. The underlying tension is real though: kW is the better unit
+of load, and it is unavailable for exactly the early-stage sites where allocation decisions
+are actually being made. Using `Project.capacity_kw` (the tendered per-site figure, set at
+site creation) as a fallback would give an estimate for those sites — but it is a different
+number with different meaning, and mixing the two silently would be worse than showing zero.
+
+**Location:** `projects/design_metrics.py` — `designer_workload`
+
+### I5 — The dashboard is per tender, so a Head with many tenders has no roll-up
+
+Every panel is scoped to one `Program`. A Design Head running six tenders must open six
+dashboards to see his own total review queue, and the Part 4.5 head strip on
+`/dashboard/design/` gives portfolio-wide counts but no capacity, workload or attention
+list. Deliberate — a cross-tender roll-up needs a decision about whether designers are
+compared across tenders at all, which is a management question rather than a technical one.
+
+**Location:** `projects/design_views.py` — `design_tender_dashboard`
+
+### I6 — Rework denominator is released sites, which is unstable on small samples
+
+`rework = total attempts ÷ released sites`. With one released site, a single QC failure
+moves a designer from 1.0× to 2.0× — a 100% swing driven by one event. The dashboard shows
+the raw `qc_failed` and `pm_change_request` counts beside the multiplier precisely so the
+sample size is visible, and shows `—` rather than `0` when there are no released sites.
+
+It is still a ratio over a denominator that will sit at 1 or 2 for months on a new tender.
+Anyone using it for a performance conversation before roughly ten released sites per
+designer is reading noise. Recorded because the number looks more authoritative than it is.
+
+**Location:** `projects/design_metrics.py` — `designer_workload`
