@@ -256,8 +256,10 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
           <td class="text-end" data-v="{{ w.capacity_kw|floatformat:2 }}">
             {{ w.capacity_kw|floatformat:2 }}
             {% if w.sites_no_capacity %}
-              {# Without this the 0.00 reads as "carrying nothing" when it means
-                 "carrying sites whose capacity is not yet approved". #}
+              {% comment %}
+              Without this the 0.00 reads as "carrying nothing" when it means
+              "carrying sites whose capacity is not yet approved".
+              {% endcomment %}
               <div class="text-muted" style="font-size:.7rem;"
                    title="No approved Arka yet, so no designed capacity to count">
                 +{{ w.sites_no_capacity }} not yet designed

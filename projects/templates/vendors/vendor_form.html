@@ -31,9 +31,11 @@
             {% endif %}
           </div>
 
-          {# Make / Brand — multiple entries, each optionally scoped to one supply category.
-             Submitted as parallel lists: make_brand[] and brand_category[].
-             The + button clones the template row; × removes a row (keeps at least one). #}
+          {% comment %}
+          Make / Brand — multiple entries, each optionally scoped to one supply category.
+          Submitted as parallel lists: make_brand[] and brand_category[].
+          The + button clones the template row; × removes a row (keeps at least one).
+          {% endcomment %}
           <div class="mb-3">
             <label class="form-label fw-semibold">Make / Brand</label>
             <div id="brand-rows">

@@ -27,11 +27,13 @@
   </div>
 </div>
 
-{# ── Procurement group lock (Part 6) ─────────────────────────────────────────
-   Shown to EVERY role, not just Design. A PM looking at a quantity that will not
-   change again should be able to see that from the page, and SCM needs to know
-   which group froze it before raising the order. `design_form_open` carries the
-   same fact into the seven Design input gates below. #}
+{% comment %}
+── Procurement group lock (Part 6) ─────────────────────────────────────────
+Shown to EVERY role, not just Design. A PM looking at a quantity that will not
+change again should be able to see that from the page, and SCM needs to know
+which group froze it before raising the order. `design_form_open` carries the
+same fact into the seven Design input gates below.
+{% endcomment %}
 {% if boq_group_locked %}
 <div class="alert alert-secondary d-flex align-items-start gap-2 py-2">
   <span class="fw-semibold">BOQ locked.</span>

@@ -191,8 +191,10 @@ readable here.
     </div>
 
     {% if boq_group_locked %}
-      {# Part 6: not an authority problem — the quantities are final. Said first, because
-         otherwise the assigned_design warning below would blame the wrong thing. #}
+      {% comment %}
+      Part 6: not an authority problem — the quantities are final. Said first, because
+      otherwise the assigned_design warning below would blame the wrong thing.
+      {% endcomment %}
       <div class="alert alert-secondary py-2 small mt-2 mb-0">
         This site is in a <strong>locked procurement group</strong>. Its BOQ quantities are
         final and can no longer be changed — a correction now needs a variance against the

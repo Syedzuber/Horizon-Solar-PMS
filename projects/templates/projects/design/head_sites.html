@@ -18,8 +18,10 @@ capacity are Part 5.
     <div class="text-muted small">{{ program.client_name }} · {{ program.short_tender_code }}</div>
   </div>
   <div class="d-flex gap-2">
-    {# Part 5: the metrics view is the landing screen for a tender; this list is its
-       drill-down. Linked both ways so neither is a dead end. #}
+    {% comment %}
+    Part 5: the metrics view is the landing screen for a tender; this list is its
+    drill-down. Linked both ways so neither is a dead end.
+    {% endcomment %}
     <a href="{% url 'design_tender_dashboard' pk=program.pk %}" class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-speedometer2 me-1"></i>Dashboard
     </a>
