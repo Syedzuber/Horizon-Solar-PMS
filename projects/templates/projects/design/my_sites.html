@@ -7,6 +7,12 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
 {% endcomment %}
 {% block content %}
 
+<div class="mb-2">
+  <a href="{% url 'dashboard_design' %}" class="text-decoration-none small">
+    <i class="bi bi-arrow-left me-1"></i>Design dashboard
+  </a>
+</div>
+
 <h5 class="mb-3">My design sites</h5>
 
 {% if not rows %}
@@ -60,6 +66,11 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
     {% endif %}
 
     <div class="d-flex flex-wrap gap-2 mt-2">
+      <a class="btn btn-sm text-white" style="background-color:#1a7a4a;"
+         href="{% url 'design_site_workspace' project_id=row.site.project_id %}">
+        Design workspace
+      </a>
+
       {% if row.assignment.survey_file_path %}
         <a class="btn btn-sm btn-outline-secondary"
            href="{% url 'design_survey_download' project_id=row.site.project_id %}"
