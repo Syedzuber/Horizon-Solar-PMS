@@ -34,6 +34,7 @@ def log_user_login(sender, request, user, **kwargs):
             project=None,
             actor=profile,
             action=f"User logged in from {ip}",
+            action_code='user_login',   # machine-readable key so digests can exclude auth noise
             entity_type='User',
             entity_id=user.id,
         )
@@ -49,6 +50,7 @@ def log_user_logout(sender, request, user, **kwargs):
                 project=None,
                 actor=user.profile,
                 action="User logged out",
+                action_code='user_logout',   # machine-readable key so digests can exclude auth noise
                 entity_type='User',
                 entity_id=user.id,
             )

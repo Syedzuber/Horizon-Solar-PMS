@@ -362,17 +362,64 @@ class Command(BaseCommand):
             totals[CODE_TO_METRIC[row['action_code']]] = row['c']
         return totals
 
+    def _ceo_extra_metrics(self, today):
+        """CEO-only additions to the aggregate: two payment-milestone figures (invoiced vs
+        received today — kept SEPARATE, they are distinct DateFields), material deliveries
+        received today, and the single most-active user today. Pure queries against existing
+        dated fields (see CEO metrics audit) — no schema change. 'Orders placed' is
+        deliberately absent: no PO/procurement model exists and a BOQ proxy would mislabel."""
+        from projects.models import PaymentMilestone, DeliveryChallan, ActivityLog, UserProfile
+
+        # A/B — invoiced today vs received (paid) today. Separate DateFields, not conflated.
+        invoiced = PaymentMilestone.objects.filter(invoice_date=today).count()
+        paid     = PaymentMilestone.objects.filter(received_date=today).count()
+
+        # C — distinct Delivery Challans with at least one line item received (GRN) today.
+        # Count DISTINCT challans, NOT line items (line items inflate the number).
+        deliveries = (
+            DeliveryChallan.objects
+            .filter(line_items__grn_date=today)
+            .distinct()
+            .count()
+        )
+
+        # E — most active user today = most logged actions, excluding login/logout auth noise
+        # (now carry action_code user_login/user_logout) and system rows (actor NULL). Uses
+        # Count('pk') = every action, NOT distinct entity_id (that dedup is the individual
+        # digest's goal, not this one).
+        top = (
+            ActivityLog.objects
+            .filter(timestamp__date=today, actor__isnull=False)
+            .exclude(action_code__in=['user_login', 'user_logout'])
+            .values('actor')
+            .annotate(c=Count('pk'))
+            .order_by('-c')
+            .first()
+        )
+        most_active = None
+        if top:
+            prof = (UserProfile.objects.select_related('user')
+                    .filter(pk=top['actor']).first())
+            if prof:
+                most_active = {
+                    'name':  prof.user.get_full_name() or prof.user.username,
+                    'count': top['c'],
+                }
+
+        return {
+            'invoiced_today':   invoiced,
+            'paid_today':       paid,
+            'deliveries_today': deliveries,
+            'most_active':      most_active,   # None -> template shows "No activity recorded today"
+        }
+
     def _run_aggregate(self, today, date_str, app_url, dry_run):
         from django.contrib.auth.models import User
+        from projects.models import UserProfile
         from projects.notifications import send_aggregate_email
 
         admin_email = (getattr(settings, 'ADMIN_DIGEST_EMAIL', '') or '').strip()
         hr_email    = (getattr(settings, 'HR_DIGEST_EMAIL', '') or '').strip()
-        recipients = [
-    ('Admin', admin_email, admin_email),
-    ('HR', hr_email, hr_email),
-        ]
-        
 
         totals = self._company_totals(today)
         self.stdout.write(
@@ -381,7 +428,10 @@ class Command(BaseCommand):
             f"raised={totals['issues_raised']} resolved={totals['issues_resolved']}"
         )
 
-        ctx = {
+        # Base context = the SAME 5-metric email Admin/HR have always received. CEO reuses it
+        # and only ADDS a flag + extra data; the extra sections in the template gate on
+        # `show_ceo_sections`, which Admin/HR never set, so their bodies are byte-identical.
+        base_ctx = {
             'recipient_name': 'Team',
             'heading':        'Company-wide EOD Summary',
             'intro':          "Here is the whole team's activity today (IST).",
@@ -391,40 +441,100 @@ class Command(BaseCommand):
             'metrics':        totals,
             'app_url':        app_url,
         }
-        html_body = render_to_string('projects/email/eod_digest.html', ctx)
-        text_body = render_to_string('projects/email/eod_digest.txt', ctx)
+        base_html = render_to_string('projects/email/eod_digest.html', base_ctx)
+        base_text = render_to_string('projects/email/eod_digest.txt', base_ctx)
 
-        placeholder = [cname for _label, cname, val in recipients if 'REPLACE_WITH' in val]
+        # CEO variant: base + the three extra sections.
+        ceo = self._ceo_extra_metrics(today)
+        ma = ceo['most_active']
+        self.stdout.write(
+            f"[aggregate][ceo] invoiced_today~={ceo['invoiced_today']} "
+            f"paid_today={ceo['paid_today']} deliveries_today={ceo['deliveries_today']} "
+            f"most_active={(ma['name'] + ' (' + str(ma['count']) + ')') if ma else '(none)'}"
+        )
+        ceo_ctx = dict(base_ctx)
+        ceo_ctx['show_ceo_sections'] = True
+        ceo_ctx['ceo'] = ceo
+        ceo_html = render_to_string('projects/email/eod_digest.html', ceo_ctx)
+        ceo_text = render_to_string('projects/email/eod_digest.txt', ceo_ctx)
+
+        # (label, email, text_body, html_body, profile). Admin/HR are FIXED addresses sharing
+        # the base body. CEO recipients are resolved DYNAMICALLY from role='CEO' (CEO is its
+        # own UserProfile.role and CEO accounts already exist) — supports multiple CEOs, each
+        # gets the richer CEO body. CEO-role users are already excluded from the INDIVIDUAL
+        # digest (EOD_DIGEST_EXCLUDED_ROLES), so this aggregate is their only EOD email.
+        core = [
+            ('Admin', admin_email, base_text, base_html, None),
+            ('HR',    hr_email,    base_text, base_html, None),
+        ]
+        # Admin/HR keep their existing contract: a placeholder in EITHER aborts the aggregate.
+        core_placeholder = [label for label, email, *_ in core if 'REPLACE_WITH' in email]
+
+        ceo_profiles = (
+            UserProfile.objects
+            .filter(role='CEO', is_active=True, user__is_active=True)
+            .select_related('user')
+            .order_by('user__first_name', 'user__username')
+        )
+        ceo_recipients, seen_ceo = [], set()
+        for p in ceo_profiles:
+            email = (p.user.email or '').strip()
+            key = email.lower()
+            if not email or key in seen_ceo:
+                continue   # skip CEOs with no email, and de-dup a shared address
+            seen_ceo.add(key)
+            label = f"CEO {p.user.get_full_name() or p.user.username}"
+            ceo_recipients.append((label, email, ceo_text, ceo_html, p))
 
         if dry_run:
-            for label, _cname, val in recipients:
-                self.stdout.write(f"[aggregate][dry-run] would send to {label}: {val or '(unset)'}")
-            if placeholder:
+            for label, email, *_ in core:
+                self.stdout.write(f"[aggregate][dry-run] would send to {label}: {email or '(unset)'}")
+            if ceo_recipients:
+                for label, email, *_ in ceo_recipients:
+                    self.stdout.write(f"[aggregate][dry-run] would send to {label}: {email} (with CEO extra sections)")
+            else:
                 self.stdout.write(
-                    f"[aggregate][dry-run] WARNING: {', '.join(placeholder)} still contain "
+                    "[aggregate][dry-run] no active CEO-role user with an email — CEO digest "
+                    "skipped (Admin/HR unaffected)."
+                )
+            if core_placeholder:
+                self.stdout.write(
+                    f"[aggregate][dry-run] WARNING: {', '.join(core_placeholder)} still contain "
                     f"a placeholder — a real run would ABORT the aggregate send here."
                 )
             return
 
-        # Real run: refuse to send while a placeholder remains. Raised AFTER the individual
-        # digests, so only the aggregate portion is aborted (per spec).
-        if placeholder:
+        # Real run: refuse to send while an Admin/HR placeholder remains. Raised AFTER the
+        # individual digests, so only the aggregate portion is aborted (per spec).
+        if core_placeholder:
             raise CommandError(
-                f"Aggregate digest NOT sent — {', '.join(placeholder)} still contain "
+                f"Aggregate digest NOT sent — {', '.join(core_placeholder)} still contain "
                 f"'REPLACE_WITH'. Set the real address(es) in settings/env. Individual "
                 f"digests were already processed and are unaffected."
             )
 
+        if not ceo_recipients:
+            self.stdout.write("[aggregate] no active CEO-role user with an email — CEO digest skipped (Admin/HR sent normally).")
+
+        # Merge by email so a CEO who happens to share the Admin/HR address gets ONE email —
+        # the richer CEO body (CEO entries are appended last, so they win the dict key).
+        send_map = {}
+        for label, email, text_body, html_body, prof in core + ceo_recipients:
+            e = (email or '').strip()
+            if e:
+                send_map[e.lower()] = (label, e, text_body, html_body, prof)
+
         subject = f'Company-wide Horizon Solar EOD Summary — {date_str}'
-        for label, _cname, val in recipients:
+        for label, val, text_body, html_body, prof in send_map.values():
             # Resolve the address to a UserProfile (by email) so the send lands in
             # NotificationLog; if there's no matching account, it still sends but is
-            # recorded only in the application log (see send_aggregate_email).
-            prof = None
-            u = (User.objects.filter(email__iexact=val, is_active=True)
-                 .select_related('profile').first())
-            if u is not None:
-                prof = getattr(u, 'profile', None)
+            # recorded only in the application log (see send_aggregate_email). CEO entries
+            # already carry their profile, so no lookup is needed for those.
+            if prof is None:
+                u = (User.objects.filter(email__iexact=val, is_active=True)
+                     .select_related('profile').first())
+                if u is not None:
+                    prof = getattr(u, 'profile', None)
             send_aggregate_email(
                 to_email=val, subject=subject, text_body=text_body, html_body=html_body,
                 log_recipient=prof, template_name='eod_digest_aggregate',

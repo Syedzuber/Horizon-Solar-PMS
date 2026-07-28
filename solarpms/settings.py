@@ -149,6 +149,9 @@ ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonre
 # should match a real user account's email (see notifications.send_aggregate_email).
 ADMIN_DIGEST_EMAIL = config('ADMIN_DIGEST_EMAIL', default='REPLACE_WITH_ACTUAL_ADMIN_EMAIL')
 HR_DIGEST_EMAIL    = config('HR_DIGEST_EMAIL',    default='REPLACE_WITH_ACTUAL_HR_EMAIL')
+# NOTE: CEO is NOT a fixed digest address. CEO is its own UserProfile.role, and CEO accounts
+# already exist in the system, so send_eod_digest resolves CEO aggregate recipients DYNAMICALLY
+# from role='CEO' active users (supports multiple CEOs). No CEO_DIGEST_EMAIL config needed.
 
 # EOD individual-digest hard role exclusions (UserProfile.role stored values). These roles
 # never receive a personal digest regardless of activity — they already get the company-wide

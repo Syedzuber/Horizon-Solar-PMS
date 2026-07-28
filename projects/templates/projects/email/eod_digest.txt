@@ -12,7 +12,13 @@ Hi {{ recipient_name }},
 - Tasks closed today         : {{ metrics.closed }}
 - Issues raised today        : {{ metrics.issues_raised }}
 - Issues resolved today      : {{ metrics.issues_resolved }}
-
+{% if show_ceo_sections %}
+Executive snapshot (today):
+- Payment milestones invoiced today : ~{{ ceo.invoiced_today }}  (approximate — may undercount; not all invoicing paths are date-stamped yet)
+- Payments received today           : {{ ceo.paid_today }}
+- Delivery challans received today  : {{ ceo.deliveries_today }}
+- Most active user today            : {% if ceo.most_active %}{{ ceo.most_active.name }} ({{ ceo.most_active.count }} action{{ ceo.most_active.count|pluralize }}){% else %}No activity recorded today{% endif %}
+{% endif %}
 {% if footer_note %}{{ footer_note }}{% else %}These figures reflect your own actions today.{% endif %}
 {% if app_url %}
 Open Horizon Solar: {{ app_url }}
