@@ -22,7 +22,13 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     {% elif p.design.is_blocked %}
       <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
         Design: {{ p.design.status_label }}</span>
-    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' %}
+    {% comment %}
+    PART 9 added the two waiting-room statuses to this branch. They are "in review" in
+    exactly the same sense as `in_qc` — the package is with a reviewer and the designer
+    has nothing to do — so they take the same navy chip. The label itself names which
+    reviewer, which is the part that actually differs.
+    {% endcomment %}
+    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'awaiting_head_arka' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: {{ p.design.status_label }}</span>
     {% elif p.design.status == 'arka_rejected' %}
@@ -77,16 +83,32 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     </div>
   {% endif %}
 
-  {% if p.design.status == 'arka_rejected' and p.design.arka.rejection_reason %}
+  {% comment %}
+  PART 9 — A REJECTION OR FAILURE CAN COME FROM EITHER GATE, and only one of the two
+  fields is ever populated on a given row. The Head branch is tested first: where he has
+  ruled, his is the verdict that stands. Reading only the Design QC field would leave a
+  designer whose work the HEAD sent back with a reopened site and no reason on the card.
+  {% endcomment %}
+  {% if p.design.status == 'arka_rejected' and p.design.arka.head_rejection_reason %}
     <div class="alert alert-danger py-2 px-2 small mb-2">
-      <strong>Arka v{{ p.design.arka.version }} rejected:</strong>
+      <strong>Arka v{{ p.design.arka.version }} rejected by the Design Head:</strong>
+      {{ p.design.arka.head_rejection_reason }}
+    </div>
+  {% elif p.design.status == 'arka_rejected' and p.design.arka.rejection_reason %}
+    <div class="alert alert-danger py-2 px-2 small mb-2">
+      <strong>Arka v{{ p.design.arka.version }} rejected at Design QC:</strong>
       {{ p.design.arka.rejection_reason }}
     </div>
   {% endif %}
 
   {% if p.design.qc_failed_attempt %}
     <div class="alert alert-danger py-2 px-2 small mb-2">
-      <strong>QC failed on attempt {{ p.design.qc_failed_attempt.attempt_number }}:</strong>
-      {{ p.design.qc_failed_attempt.qc_remarks }}
+      {% if p.design.qc_failed_attempt.head_remarks %}
+        <strong>Design Head failed attempt {{ p.design.qc_failed_attempt.attempt_number }}:</strong>
+        {{ p.design.qc_failed_attempt.head_remarks }}
+      {% else %}
+        <strong>Design QC failed attempt {{ p.design.qc_failed_attempt.attempt_number }}:</strong>
+        {{ p.design.qc_failed_attempt.qc_remarks }}
+      {% endif %}
     </div>
   {% endif %}

@@ -446,6 +446,88 @@ def user_can_qc_design(user, assignment):
     return not user_is_assigned_designer(user, assignment)
 
 
+# ---------------------------------------------------------------------------
+# OPEX design module — the SECOND gate (Part 9)
+#
+# TWO GATES, TWO PREDICATES, ONE SHARED EXCLUSION.
+#
+#   user_can_qc_gate_design()    gate 1 — Design QC.   is_design_qc AND not the designer
+#   user_can_head_gate_design()  gate 2 — Design Head. Head authority AND not the designer
+#
+# Both are narrowings of a flag by the SAME self-review exclusion, because settled
+# decision 3 is absolute: the assigned designer records no verdict on their own site at
+# either gate, whatever flags they hold.
+#
+# WHAT THESE DELIBERATELY DO NOT ANSWER: whether this particular actor has already
+# recorded the OTHER gate's verdict on THIS artifact (settled decision 2). That is a
+# question about a row, not about a user, and it needs the ArkaSubmission or DesignAttempt
+# in hand — so it lives in design_views._other_gate_actor_conflict(), applied by all four
+# verdict endpoints. Splitting it that way keeps this module free of model imports, which
+# is the property that has kept it stable across nine parts.
+#
+# THE DEPUTY IS GATE 2 ONLY (settled decision 9). A Design Head's deputy acts for the
+# Head; there is no deputy for Design QC in this session, so user_can_qc_gate_design()
+# consults `is_design_qc` and nothing else.
+# ---------------------------------------------------------------------------
+
+def user_is_design_qc(user):
+    """Return True if `user` holds the Design QC flag — the flag itself, nothing more.
+
+    The gate-1 counterpart of user_is_design_head(), and kept just as narrow. "Holds the
+    flag" and "may record a QC verdict on this site" are different questions; the second
+    one is user_can_qc_gate_design() and additionally refuses the assigned designer.
+
+    Reads UserProfile.is_design_qc only, and returns False rather than raising for a user
+    with no profile, matching every other helper in this module.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return bool(profile.is_design_qc)
+
+
+def user_can_qc_gate_design(user, assignment):
+    """Return True if `user` may record the DESIGN QC (first-gate) verdict on `assignment`.
+
+        the is_design_qc flag
+        AND NOT the designer this site is allocated to
+
+    The Design Head does NOT satisfy this by virtue of being the Head — the two flags are
+    independent, and a Head who has not been given `is_design_qc` reviews at gate 2 only.
+    That is the whole point of a second gate: two people, not one person twice.
+    """
+    if assignment is None:
+        return False
+    if not user_is_design_qc(user):
+        return False
+    return not user_is_assigned_designer(user, assignment)
+
+
+def user_can_head_gate_design(user, assignment):
+    """Return True if `user` may record the DESIGN HEAD (second-gate) verdict.
+
+    This is the Part 4 rule under its Part 9 name, and it delegates to
+    user_can_qc_design() rather than restating it — the rule has not changed, only what we
+    call the gate it guards. Kept as a named function anyway so that gate 1 and gate 2 read
+    symmetrically at every call site, instead of one of them reaching for a helper whose
+    name still says "qc" and means "head".
+    """
+    return user_can_qc_design(user, assignment)
+
+
+def user_can_view_design_qc_dashboard(user):
+    """Return True if `user` may open the Design QC dashboard (Part 9 §6).
+
+    Design QC OR Design Head authority. The Head is admitted because the QC dashboard is a
+    strict SUBSET of his own — refusing him a narrower view of data he already sees in
+    full would be an access rule with nothing behind it.
+
+    Read only. It confers no authority to record any verdict; both gates are decided
+    per site by the two predicates above.
+    """
+    return user_is_design_qc(user) or user_has_design_head_authority(user)
+
+
 def user_can_request_design_change(user, project):
     """Return True if `user` may raise a PM change request against `project`.
 

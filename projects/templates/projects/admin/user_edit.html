@@ -97,6 +97,18 @@
             </label>
           </div>
 
+          <!-- Design QC (Part 9) — the FIRST of the two OPEX design review gates -->
+          <div class="col-span-2 flex items-center gap-2 pt-1">
+            <input type="checkbox" name="is_design_qc" id="id_is_design_qc"
+                   {% if form.is_design_qc.value %}checked{% endif %}
+                   class="form-check-input">
+            <label for="id_is_design_qc" class="text-sm text-gray-700">
+              Design QC — reviews OPEX designs before the Design Head, independent of role.
+              Both flags may be held, but one person can never record both verdicts on the
+              same site.
+            </label>
+          </div>
+
         </div>
       </div>
 

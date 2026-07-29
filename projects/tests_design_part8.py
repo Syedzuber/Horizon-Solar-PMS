@@ -408,10 +408,15 @@ class ProgressionRuleTests(Part8Base):
         self.a.save()
         self.attempt = DesignAttempt.objects.create(
             assignment=self.a, attempt_number=1, opened_reason='initial')
+        # PART 9: an Arka is "approved" for artifact purposes only once BOTH gates have
+        # passed it — _approved_arka() tests head_verdict, not verdict. This fixture sets
+        # both because the progression rule under test is Part 8's and needs a fully
+        # approved Arka to fire; setting only `verdict` would now leave the Arka sitting
+        # at gate 2 and the rule would correctly refuse to advance.
         self.arka = ArkaSubmission.objects.create(
             attempt=self.attempt, version=1, capacity_kw=Decimal('100'),
             arka_link='https://example.com/a', submitted_by=self.designer,
-            verdict=ARKA_APPROVED, is_current=True)
+            verdict=ARKA_APPROVED, head_verdict=ARKA_APPROVED, is_current=True)
         self.attempt.boq_submitted_at = timezone.now()
         self.attempt.boq_submitted_by = self.designer
         self.attempt.save()

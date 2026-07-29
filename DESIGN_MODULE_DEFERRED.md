@@ -1096,3 +1096,83 @@ one (a preview, a thumbnailer, an aggregated download). Whatever does that must 
 its own limit while reading, not trust this check.
 
 **Location:** `projects/design_storage.py:validate_cad_zip`
+
+---
+
+## Part 9 — Design QC role, dual approval gates, error categories
+
+### M1 — The System Admin user edit reads flags straight off the POST body
+
+`subadmin_departments`' `edit_user` branch sets both design flags from
+`request.POST.get(...) == 'on'`. An unchecked checkbox posts nothing, which is
+indistinguishable from a field the form never rendered — so any edit form that omits
+either checkbox silently CLEARS that flag on every save. Part 9 added the `is_design_qc`
+checkbox to `subadmin/departments.html` for exactly this reason, and the coupling is now
+noted in a comment at both ends, but the underlying fragility is unchanged: the next flag
+added here will have the same trap.
+
+The robust shape is a real Form with `BooleanField(required=False)` per flag, as the Admin
+panel path already uses (`AdminUserEditForm`). Converting the System Admin path to a Form
+was out of scope this session.
+
+**Location:** `projects/views.py` (`subadmin_departments`, `edit_user` branch),
+`projects/templates/projects/subadmin/departments.html`
+
+### M2 — `user_can_qc_design()` now guards the HEAD gate, and its name says "qc"
+
+Part 4 named the Head-or-deputy-minus-designer predicate `user_can_qc_design()`, when
+there was one gate and it was the Head's. Part 9 made that gate the SECOND one and added
+`user_can_head_gate_design()` as its Part 9 name — a thin delegator, so the rule still
+lives in exactly one place and no existing caller changed.
+
+The cost is two names for one predicate, one of which reads as gate 1 and means gate 2.
+Renaming it is a mechanical change across Part 4's call sites and was not worth the churn
+inside a session that was already moving both gates. If a Part 10 touches these helpers,
+fold `user_can_qc_design` into `user_can_head_gate_design` and delete the alias.
+
+**Location:** `projects/permissions.py`
+
+### M3 — Pre-Part-9 rework attempts have no error category, and are counted as designer error
+
+Every attempt opened by a QC failure before Part 9 carries no failure category, because
+the field did not exist. `classify_attempt_causes()` labels those `CAUSE_UNCATEGORISED`
+and counts them in the DESIGNER's multiplier rather than dropping them — dropping them
+would have quietly shrunk every historical designer's number the day Part 9 shipped, which
+is the more misleading of the two errors. The reasoning is that before Part 9 a QC failure
+had no other meaning: a bad survey went through the Design Hold path and a moved brief
+through a PM change request.
+
+It is still an assumption, and the count is surfaced as its own chip on the workload table
+so the mixture is visible. It decays on its own as new categorised failures accumulate.
+
+**Location:** `projects/design_metrics.py:classify_attempt_causes`, `designer_workload`
+
+### M4 — The failure category is not CHECK-constrained, unlike the reason and remarks
+
+`qc_failure_category` / `head_failure_category` are plain `CharField`s with `choices`.
+Django does not enforce `choices` at the database level, and a CHECK constraint would have
+to encode all sixteen literals — meaning a migration every time the category list changes.
+The list will change; the requirement will not.
+
+So the view is the only enforcement: `_posted_error_category()` refuses a missing or
+unrecognised value, and every one of the four verdict endpoints calls it. A writer that
+bypasses the views (a shell script, a data fix, a future importer) can still store a blank
+or bogus category, and `error_category_group()` returns `None` for both — which the rework
+multiplier treats as "not a designer error", i.e. it fails safe rather than misattributing.
+
+**Location:** `projects/models.py` (`DesignAttempt.head_failure_category` and siblings),
+`projects/design_views.py:_posted_error_category`
+
+### M5 — No deputy for Design QC
+
+Settled decision 9 for this session: a Design Head's deputy acts for the HEAD gate only.
+`user_can_qc_gate_design()` consults `is_design_qc` and nothing else, so if the single QC
+reviewer is away, gate 1 stops and every Arka and package queues behind it. There is no
+cover mechanism.
+
+Deliberate, and the smaller risk while there is one QC reviewer to begin with. If a second
+QC reviewer is appointed, the flag can simply be held by both; if cover is wanted without
+that, it is a `design_qc_deputy` FK mirroring `design_head_deputy` and its own resolution
+helper.
+
+**Location:** `projects/permissions.py:user_can_qc_gate_design`

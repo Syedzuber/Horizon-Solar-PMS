@@ -1,0 +1,33 @@
+{% comment %}
+Part 9 — the error category select, rendered identically at all four verdict gates.
+
+ONE PARTIAL, FOUR CALL SITES. The category is mandatory on every rejection and every
+failure, at both gates, and the four forms must offer exactly the same list in exactly the
+same order — a reviewer who sees a different set of options depending on which screen they
+are on produces data that cannot be compared across gates.
+
+`error_categories` is models.DESIGN_ERROR_CATEGORY_CHOICES, an optgroup structure. The
+group labels are shown deliberately: they say which failures count as designer rework and
+which do not, and a reviewer who can see the accountability split is far likelier to pick
+the honest category.
+
+`required` on the element is a convenience, not the enforcement. The view refuses a
+missing or unrecognised value through _posted_error_category() regardless of what the
+browser did.
+
+Caller must set `cat_id` to keep the label/select pair unique when two forms share a page.
+{% endcomment %}
+<label for="{{ cat_id }}" class="form-label small mb-1">Error category <span class="text-danger">*</span></label>
+<select name="error_category" id="{{ cat_id }}" class="form-select form-select-sm" required>
+  <option value="">Choose the primary cause…</option>
+  {% for group_label, entries in error_categories %}
+    <optgroup label="{{ group_label }}">
+      {% for value, label in entries %}
+        <option value="{{ value }}">{{ label }}</option>
+      {% endfor %}
+    </optgroup>
+  {% endfor %}
+</select>
+<div class="text-muted mt-1" style="font-size:.7rem;">
+  One primary cause. Input problems and brief changes are not counted as designer rework.
+</div>

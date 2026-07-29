@@ -186,7 +186,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             <div class="design-stat-num {% if m.queue.arka_count %}text-warning{% else %}text-muted{% endif %}">
               {{ m.queue.arka_count }}
             </div>
-            <div class="small text-muted">Arka awaiting your verdict</div>
+            <div class="small text-muted">Arka awaiting your approval</div>
             {% if m.queue.arka_oldest_days is not None %}
               <div class="small mt-1">
                 oldest <strong>{{ m.queue.arka_oldest_days }} day{{ m.queue.arka_oldest_days|pluralize }}</strong>
@@ -198,7 +198,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             <div class="design-stat-num {% if m.queue.qc_count %}text-warning{% else %}text-muted{% endif %}">
               {{ m.queue.qc_count }}
             </div>
-            <div class="small text-muted">Packages awaiting QC</div>
+            <div class="small text-muted">Packages awaiting your review</div>
             {% if m.queue.qc_oldest_days is not None %}
               <div class="small mt-1">
                 oldest <strong>{{ m.queue.qc_oldest_days }} day{{ m.queue.qc_oldest_days|pluralize }}</strong>
@@ -207,9 +207,15 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             {% endif %}
           </div>
         </div>
+        {% comment %}
+        PART 9 REPOINTED THIS PANEL. It counts what Design QC has passed UP to you —
+        `awaiting_head_arka` and `awaiting_head_qc` — not the whole review backlog. Sites
+        still with Design QC are counted under their own stage tiles above, and are not
+        yours to clear.
+        {% endcomment %}
         <div class="small text-muted mt-3">
-          You are the only approver at both gates, so a burst at the end of a phase lands
-          entirely here. <a href="{% url 'design_qc_queue' %}">Open the QC queue</a>.
+          Your queue is what Design QC has already passed. Items still with Design QC are
+          under their own stage tiles. <a href="{% url 'design_qc_queue' %}">Open the review queue</a>.
         </div>
       </div>
     </div>
@@ -237,7 +243,14 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
           <th role="button" data-sort="2" class="text-end">kW</th>
           <th role="button" data-sort="3" class="text-end">Overdue</th>
           <th role="button" data-sort="4" class="text-end">Design Hold</th>
+          {% comment %}
+          PART 9 — THREE FIGURES, THREE COLUMNS, NEVER ADDED TOGETHER. "Rework" is the
+          designer's own; "Input" is bad surveys and moved briefs, which are explicitly
+          not their error (settled decision 8); "PM change" keeps its own count exactly as
+          in Part 5. A single merged multiplier would charge a designer for all three.
+          {% endcomment %}
           <th role="button" data-sort="5" class="text-end">Rework</th>
+          <th role="button" data-sort="6" class="text-end">Input</th>
           <th>Split</th>
         </tr>
       </thead>
@@ -282,15 +295,37 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             {% if w.rework %}<strong>{{ w.rework }}&times;</strong>
             {% else %}<span class="text-muted" title="No released sites yet — nothing to divide by">&mdash;</span>{% endif %}
           </td>
+          <td class="text-end" data-v="{% if w.input_quality %}{{ w.input_quality }}{% else %}-1{% endif %}">
+            {% comment %}
+            Input quality — attempts caused by a Group B or C failure. Deliberately shown
+            beside the designer's figure rather than buried: a team whose Input column is
+            high has a survey or requirements problem, and coaching the designer for it
+            would be both useless and unfair.
+            {% endcomment %}
+            {% if w.input_quality %}<strong class="text-warning">{{ w.input_quality }}&times;</strong>
+            {% else %}<span class="text-muted" title="No released sites yet, or no input-caused rework">&mdash;</span>{% endif %}
+          </td>
           <td style="font-size:.75rem;">
             <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
-              {{ w.qc_failed }} QC failed</span>
+              {{ w.designer_error_attempts }} designer</span>
+            <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+              {{ w.input_problem_attempts }} input/brief</span>
             <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
               {{ w.pm_change_request }} PM change</span>
+            {% if w.uncategorised_attempts %}
+              {% comment %}
+              Pre-Part-9 QC failures, which carry no category because the field did not
+              exist. Counted into the designer figure and shown here so the mixture is
+              visible rather than implied — see classify_attempt_causes().
+              {% endcomment %}
+              <span class="chip chip-grey" title="Pre-Part-9 failures with no recorded category">
+                <span class="chip-dot chip-dot-grey"></span>
+                {{ w.uncategorised_attempts }} uncategorised</span>
+            {% endif %}
           </td>
         </tr>
       {% empty %}
-        <tr><td colspan="7" class="text-center text-muted small py-4">
+        <tr><td colspan="8" class="text-center text-muted small py-4">
           No designer has been allocated a site on this tender yet.
         </td></tr>
       {% endfor %}
@@ -298,10 +333,12 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
     </table>
   </div>
   <div class="card-footer bg-white small text-muted py-2">
-    Rework = total attempts &divide; released sites, split by cause. A high
-    <span class="text-danger">QC failed</span> count is an execution problem; a high
-    <span class="text-warning">PM change</span> count is a brief that keeps moving. They
-    are never added together.
+    <strong>Rework</strong> = attempts caused by a designer error (Group A) &divide;
+    released sites. <strong>Input</strong> = attempts caused by a bad survey or a changed
+    brief (Groups B and C) &divide; released sites — <em>not</em> the designer's error, and
+    excluded from Rework. <strong>PM change</strong> is counted separately again. The three
+    are never added together: they call for coaching, better surveys, and a pinned-down
+    customer respectively.
   </div>
 </div>
 

@@ -155,6 +155,14 @@ class AdminUserEditForm(forms.Form):
         help_text='Can reassign any Design-role task, independent of role.',
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
+    is_design_qc = forms.BooleanField(
+        required=False,
+        label='Design QC',
+        help_text=('Reviews OPEX designs at the FIRST gate, before the Design Head. '
+                   'Independent of role. Holding both flags is allowed, but one person '
+                   'can never record both verdicts on the same site.'),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
     new_password = forms.CharField(
         min_length=8,
         required=False,

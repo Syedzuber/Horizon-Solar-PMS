@@ -70,8 +70,14 @@ urlpatterns = [
     path('design/<str:project_id>/work/',           design_views.design_site_workspace,  name='design_site_workspace'),
     path('design/<str:project_id>/review/',         design_views.design_head_review,     name='design_head_review'),
     path('design/<str:project_id>/arka/submit/',    design_views.design_arka_submit,     name='design_arka_submit'),
+    # PART 9 — the Arka now passes two gates. The two ORIGINAL routes are unchanged in
+    # name and path and are now GATE 1 (Design QC), because the fields they write are the
+    # Design QC verdict; the two head/ routes are GATE 2. Keeping the old names means
+    # every existing link and reverse() still resolves, and what changed is who may POST.
     path('design/<str:project_id>/arka/approve/',   design_views.design_arka_approve,    name='design_arka_approve'),
     path('design/<str:project_id>/arka/reject/',    design_views.design_arka_reject,     name='design_arka_reject'),
+    path('design/<str:project_id>/arka/head/approve/', design_views.design_arka_head_approve, name='design_arka_head_approve'),
+    path('design/<str:project_id>/arka/head/reject/',  design_views.design_arka_head_reject,  name='design_arka_head_reject'),
     path('design/<str:project_id>/artifact/upload/', design_views.design_artifact_upload, name='design_artifact_upload'),
     path('design/<str:project_id>/artifact/<int:pk>/', design_views.design_file_download, name='design_file_download'),
     path('design/<str:project_id>/boq/complete/',   design_views.design_boq_complete,    name='design_boq_complete'),
@@ -87,11 +93,19 @@ urlpatterns = [
     # the Part 2 site list at /programs/<pk>/design/ is now the drill-down target.
     path('programs/<int:pk>/design/dashboard/', design_views.design_tender_dashboard, name='design_tender_dashboard'),
 
+    # Part 9 — the Design QC dashboard: a strict subset of the Head's, above.
+    path('programs/<int:pk>/design/qc-dashboard/', design_views.design_qc_dashboard, name='design_qc_dashboard'),
+
     path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
     path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),
     path('design/<str:project_id>/qc/start/',       design_views.design_qc_start,        name='design_qc_start'),
+    # Gate 1 — Design QC. Same routes and names as Part 4; the fields they write are the
+    # Design QC verdict, so they keep their URLs and change who may POST to them.
     path('design/<str:project_id>/qc/pass/',        design_views.design_qc_pass,         name='design_qc_pass'),
     path('design/<str:project_id>/qc/fail/',        design_views.design_qc_fail,         name='design_qc_fail'),
+    # Gate 2 — the Design Head. Release now happens here, not at qc/pass/.
+    path('design/<str:project_id>/qc/head/pass/',   design_views.design_head_qc_pass,    name='design_head_qc_pass'),
+    path('design/<str:project_id>/qc/head/fail/',   design_views.design_head_qc_fail,    name='design_head_qc_fail'),
     path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),
     path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
 

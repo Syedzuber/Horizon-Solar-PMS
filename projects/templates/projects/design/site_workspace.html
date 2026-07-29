@@ -51,14 +51,38 @@ it is the one thing a designer with a rejected Arka needs to read first. The rej
 submission stays is_current until the replacement is submitted, which is what keeps it
 readable here.
 {% endcomment %}
-{% if arka and arka.verdict == 'rejected' %}
+{% comment %}
+PART 9 — A REJECTION CAN COME FROM EITHER GATE, and the designer has to be shown the one
+that actually happened. Reading only `verdict` here would leave a designer whose Arka the
+Design HEAD rejected staring at a reopened site with no reason on screen at all, because
+`verdict` is still 'approved' on that row — Design QC did pass it.
+
+The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
+{% endcomment %}
+{% if arka and arka.head_verdict == 'rejected' %}
 <div class="alert alert-danger py-2">
   <div class="fw-semibold small mb-1">
-    Arka v{{ arka.version }} was rejected
+    Arka v{{ arka.version }} was rejected by the Design Head
+    {% if arka.head_reviewed_by %}({{ arka.head_reviewed_by.user.get_full_name|default:arka.head_reviewed_by.user.username }}){% endif %}
+    {% if arka.head_reviewed_at %}on {{ arka.head_reviewed_at|date:"d M Y H:i" }}{% endif %}
+  </div>
+  <div class="small">{{ arka.head_rejection_reason }}</div>
+  {% if arka.head_failure_category %}
+    <div class="text-muted small">Category: {{ arka.get_head_failure_category_display }}</div>
+  {% endif %}
+  <div class="text-muted small mt-1">Submit a corrected Arka below as v{{ arka.version|add:1 }}.</div>
+</div>
+{% elif arka and arka.verdict == 'rejected' %}
+<div class="alert alert-danger py-2">
+  <div class="fw-semibold small mb-1">
+    Arka v{{ arka.version }} was rejected at Design QC
     {% if arka.reviewed_by %}by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}{% endif %}
     {% if arka.reviewed_at %}on {{ arka.reviewed_at|date:"d M Y H:i" }}{% endif %}
   </div>
   <div class="small">{{ arka.rejection_reason }}</div>
+  {% if arka.qc_failure_category %}
+    <div class="text-muted small">Category: {{ arka.get_qc_failure_category_display }}</div>
+  {% endif %}
   <div class="text-muted small mt-1">Submit a corrected Arka below as v{{ arka.version|add:1 }}.</div>
 </div>
 {% endif %}
@@ -95,8 +119,16 @@ readable here.
       </form>
     {% elif arka and arka.verdict == 'pending' %}
       <div class="small text-muted">
-        Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) is with the Design Head.
-        CAD and BOQ unlock once it is approved.
+        Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) is with Design QC.
+        It then goes to the Design Head; CAD and BOQ unlock once <em>he</em> approves it.
+      </div>
+    {% elif arka and arka.verdict == 'approved' and arka.head_verdict == 'pending' %}
+      {# Half-way through the gates. Naming who holds it matters — otherwise the designer
+         chases the wrong person, or assumes the approval they can see is the one that
+         unlocks upload. It is not. #}
+      <div class="small text-muted">
+        Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) passed Design QC and is now
+        with the Design Head. CAD and BOQ unlock once he approves it.
       </div>
     {% elif arka_approved %}
       <div class="small">
@@ -216,7 +248,8 @@ readable here.
 
     {% if not arka_approved %}
       <div class="text-muted small mt-2">
-        The BOQ can only be marked complete once the current Arka is approved.
+        The BOQ can only be marked complete once the current Arka has been approved by
+        <strong>both</strong> Design QC and the Design Head.
       </div>
     {% endif %}
   </div>

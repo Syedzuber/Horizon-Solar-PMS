@@ -125,25 +125,63 @@ stored anywhere (settled decision 8).
               by {{ a.submitted_by.user.get_full_name|default:a.submitted_by.user.username }}
             </div>
           </div>
+          {# PART 9 — one chip per gate. See _attempt_history.html for why they are never
+             merged: an Arka QC passed and the Head rejected must not render as a plain
+             "Rejected", which would hide the disagreement entirely. #}
           <div class="text-end">
             {% if a.verdict == 'approved' %}
-              <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>Approved</span>
+              <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>QC approved</span>
             {% elif a.verdict == 'rejected' %}
-              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>Rejected</span>
+              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>QC rejected</span>
             {% else %}
-              <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>Pending</span>
+              <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>QC pending</span>
             {% endif %}
+
+            {% if a.verdict == 'approved' %}
+              {% if a.head_verdict == 'approved' %}
+                <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>Head approved</span>
+              {% elif a.head_verdict == 'rejected' %}
+                <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>Head rejected</span>
+              {% else %}
+                <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>Awaiting Head</span>
+              {% endif %}
+            {% endif %}
+
+            {% if a.head_overturned_qc %}
+              <div><span class="badge bg-danger-subtle text-danger-emphasis mt-1">
+                Head overturned Design QC
+              </span></div>
+            {% endif %}
+
             {% if a.reviewed_at %}
               <div class="text-muted" style="font-size:.7rem;">
-                {{ a.reviewed_at|date:"d M Y H:i" }}
+                QC {{ a.reviewed_at|date:"d M Y H:i" }}
                 by {{ a.reviewed_by.user.get_full_name|default:a.reviewed_by.user.username }}
+              </div>
+            {% endif %}
+            {% if a.head_reviewed_at %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Head {{ a.head_reviewed_at|date:"d M Y H:i" }}
+                {% if a.head_reviewed_by %}by {{ a.head_reviewed_by.user.get_full_name|default:a.head_reviewed_by.user.username }}
+                {% else %}— reviewer not recorded (pre-Part-9){% endif %}
               </div>
             {% endif %}
           </div>
         </div>
         {% if a.rejection_reason %}
           <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
-            <strong>Rejection reason:</strong> {{ a.rejection_reason }}
+            <strong>Design QC rejection:</strong> {{ a.rejection_reason }}
+            {% if a.qc_failure_category %}
+              <div style="font-size:.7rem;">Category: {{ a.get_qc_failure_category_display }}</div>
+            {% endif %}
+          </div>
+        {% endif %}
+        {% if a.head_rejection_reason %}
+          <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
+            <strong>Design Head rejection:</strong> {{ a.head_rejection_reason }}
+            {% if a.head_failure_category %}
+              <div style="font-size:.7rem;">Category: {{ a.get_head_failure_category_display }}</div>
+            {% endif %}
           </div>
         {% endif %}
       </li>

@@ -10,6 +10,13 @@ Note the PM-change-request rows show "not judged" rather than a verdict: that at
 closed without QC ever ruling on it, and its qc_verdict stays 'pending' forever by design.
 Rendering that as "pending" alone would read like a review still in progress.
 
+PART 9 ADDED THE SECOND GATE, so each attempt now carries up to two verdicts and they are
+rendered as two chips side by side. The Head's chip appears only where Design QC PASSED —
+a QC failure ends the attempt and the Head never sees it, so head_verdict stays 'pending'
+on those rows meaning "not judged", exactly as qc_verdict does on a change-request row.
+A `head_reviewed_at` with no `head_reviewed_by` is a pre-Part-9 row carried forward by
+migration 0055 and says so on screen rather than showing a blank name.
+
 Shared by qc_review.html, change_request.html and site_workspace.html, so the designer,
 the Head and the PM all read the same history in the same shape.
 {% endcomment %}
@@ -56,7 +63,15 @@ the Head and the PM all read the same history in the same shape.
             </div>
           </div>
 
+          {% comment %}
+          PART 9 — TWO VERDICTS PER ATTEMPT, SHOWN AS TWO CHIPS. Design QC's outcome and
+          the Design Head's are separate facts and are never collapsed into one: an
+          attempt that QC passed and the Head failed is the single most interesting row on
+          this screen, and a merged chip would render it identically to one QC failed on
+          its own.
+          {% endcomment %}
           <div class="text-end">
+            {# Gate 1 #}
             {% if a.qc_verdict == 'passed' %}
               <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>QC passed</span>
             {% elif a.qc_verdict == 'failed' %}
@@ -69,10 +84,35 @@ the Head and the PM all read the same history in the same shape.
             {% else %}
               <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>QC not started</span>
             {% endif %}
+
+            {# Gate 2 — only once gate 1 has passed, since the Head never sees a failure #}
+            {% if a.qc_verdict == 'passed' %}
+              {% if a.head_verdict == 'passed' %}
+                <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>Head passed</span>
+              {% elif a.head_verdict == 'failed' %}
+                <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>Head failed</span>
+              {% else %}
+                <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>Awaiting Head</span>
+              {% endif %}
+            {% endif %}
+
+            {% if a.head_overturned_qc %}
+              <div><span class="badge bg-danger-subtle text-danger-emphasis mt-1">
+                Head overturned Design QC
+              </span></div>
+            {% endif %}
+
             {% if a.qc_reviewed_at %}
               <div class="text-muted" style="font-size:.7rem;">
-                {{ a.qc_reviewed_at|date:"d M Y H:i" }}
+                QC {{ a.qc_reviewed_at|date:"d M Y H:i" }}
                 by {{ a.qc_reviewed_by.user.get_full_name|default:a.qc_reviewed_by.user.username }}
+              </div>
+            {% endif %}
+            {% if a.head_reviewed_at %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Head {{ a.head_reviewed_at|date:"d M Y H:i" }}
+                {% if a.head_reviewed_by %}by {{ a.head_reviewed_by.user.get_full_name|default:a.head_reviewed_by.user.username }}
+                {% else %}— reviewer not recorded (pre-Part-9){% endif %}
               </div>
             {% endif %}
           </div>
@@ -80,7 +120,23 @@ the Head and the PM all read the same history in the same shape.
 
         {% if a.qc_remarks %}
           <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
-            <strong>QC remarks:</strong> {{ a.qc_remarks }}
+            <strong>Design QC remarks:</strong> {{ a.qc_remarks }}
+            {% if a.qc_failure_category %}
+              <div style="font-size:.7rem;">
+                Category: {{ a.get_qc_failure_category_display }}
+              </div>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if a.head_remarks %}
+          <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
+            <strong>Design Head remarks:</strong> {{ a.head_remarks }}
+            {% if a.head_failure_category %}
+              <div style="font-size:.7rem;">
+                Category: {{ a.get_head_failure_category_display }}
+              </div>
+            {% endif %}
           </div>
         {% endif %}
 

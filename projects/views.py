@@ -53,8 +53,8 @@ from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NA
 # point at re-checks authority for itself. design_views does not import views, so this
 # direction of the dependency is safe.
 from .design_views import (
-    design_head_dashboard_counts, designer_dashboard_context, pm_change_request_targets,
-    scm_opex_tender_rows,
+    design_head_dashboard_counts, design_qc_dashboard_counts, designer_dashboard_context,
+    pm_change_request_targets, scm_opex_tender_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -1037,6 +1037,10 @@ def dashboard_design(request):
         'tasks_overdue':        design_tasks_overdue,
         # None unless this user holds Design Head authority (flag or named deputy).
         'head_counts':          design_head_dashboard_counts(request.user),
+        # None unless this user holds `is_design_qc` (Part 9). A user holding BOTH flags
+        # gets both strips, which is correct — they are two jobs, and the whole point of
+        # settled decision 2 is that doing one on a site rules them out of the other.
+        'qc_counts':            design_qc_dashboard_counts(request.user),
     })
 
 
@@ -7995,6 +7999,7 @@ def admin_user_edit(request, user_id):
             profile.role            = cd['role']
             profile.phone_number    = cd['phone_number']
             profile.is_design_head  = cd['is_design_head']
+            profile.is_design_qc    = cd['is_design_qc']
             profile.save()
 
             log_activity(
@@ -8025,6 +8030,7 @@ def admin_user_edit(request, user_id):
                 'phone_number': profile.phone_number,
                 'role':         profile.role,
                 'is_design_head': profile.is_design_head,
+                'is_design_qc':   profile.is_design_qc,
             },
             instance_user=target_user,
         )
@@ -9046,6 +9052,10 @@ def subadmin_departments(request):
 
             target_user.profile.phone_number   = request.POST.get('phone_number', target_user.profile.phone_number).strip()
             target_user.profile.is_design_head = request.POST.get('is_design_head') == 'on'
+            # Part 9. Both flags are read the same way, so the edit form MUST render both
+            # checkboxes — an unchecked box posts nothing, which is indistinguishable from
+            # a missing field and would clear the flag on every save.
+            target_user.profile.is_design_qc   = request.POST.get('is_design_qc') == 'on'
             if old_role != new_role:
                 target_user.profile.role = new_role
             target_user.profile.save()

@@ -39,8 +39,10 @@ from .models import (
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     ARKA_APPROVED, ARKA_PENDING,
     ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
+    ERROR_GROUP_A, error_category_group,
 )
 
 KW_PER_MW = Decimal('1000')
@@ -174,10 +176,12 @@ STAGE_ORDER = [
     ('allocated',           'Allocated, no date proposed'),
     ('due_date_proposed',   'Date proposed, awaiting approval'),
     ('in_design',           'In design, awaiting Arka'),
-    ('arka_submitted',      'Arka awaiting verdict'),
+    ('arka_submitted',      'Arka awaiting Design QC'),
+    ('awaiting_head_arka',  'Arka awaiting Design Head'),
     ('arka_approved',       'Arka approved, artifacts incomplete'),
-    ('artifacts_uploaded',  'Awaiting QC'),
-    ('in_qc',               'In QC'),
+    ('artifacts_uploaded',  'Awaiting Design QC'),
+    ('in_qc',               'In Design QC'),
+    ('awaiting_head_qc',    'Package awaiting Design Head'),
     # KEY STAYS 'blocked', LABEL BECOMES 'Design Hold' (Part 8). The key is not cosmetic:
     # the dashboard's drill-down puts it in the query string as ?stage=blocked, so
     # renaming it would break every link and bookmark already pointing at that filter for
@@ -187,10 +191,18 @@ STAGE_ORDER = [
 ]
 STAGE_LABELS = dict(STAGE_ORDER)
 
-# Stages where the ball is in the DESIGN HEAD's court. Used by the attention list and the
-# review-queue panel — these are the only ones he can clear himself.
-HEAD_ACTION_STAGES = ('awaiting_allocation', 'due_date_proposed', 'arka_submitted',
-                      'artifacts_uploaded')
+# PART 9 SPLIT THE OLD `HEAD_ACTION_STAGES` IN TWO, because the two reviewers now hold
+# different parts of what used to be one queue. Merging them again would put a Design QC
+# backlog on the Head's attention list as though it were his to clear, which is the exact
+# misattribution the second gate exists to make visible.
+#
+# Stages where the ball is in the DESIGN HEAD's court.
+HEAD_ACTION_STAGES = ('awaiting_allocation', 'due_date_proposed',
+                      'awaiting_head_arka', 'awaiting_head_qc')
+
+# Stages where the ball is in DESIGN QC's court. Allocation and due dates are absent —
+# those are the Head's alone and Part 9 does not move them.
+QC_ACTION_STAGES = ('arka_submitted', 'artifacts_uploaded', 'in_qc')
 
 
 def _classify(assignment, current_arka):
@@ -199,9 +211,12 @@ def _classify(assignment, current_arka):
     if status == DESIGN_SURVEY_RETURNED:
         return 'blocked'
     if status == DESIGN_ARKA_SUBMITTED:
-        # Approved Arka means the Head has done his part and the designer owes artifacts;
-        # pending means the Head owes a verdict. Same status, opposite bottleneck.
-        if current_arka is not None and current_arka.verdict == ARKA_APPROVED:
+        # PART 9: the test is head_verdict, not verdict. `arka_submitted` carrying a
+        # head-approved Arka means BOTH gates are done and the designer owes artifacts;
+        # anything else at this status means Design QC still owes a verdict. (An Arka that
+        # QC has passed but the Head has not sits at `awaiting_head_arka` and never
+        # reaches this branch.) Same status, opposite bottleneck.
+        if current_arka is not None and current_arka.head_verdict == ARKA_APPROVED:
             return 'arka_approved'
         return 'arka_submitted'
     if status in (DESIGN_ARKA_REJECTED, DESIGN_QC_FAILED):
@@ -284,7 +299,10 @@ def tender_metrics(program, today=None):
         arka = current_arka.get(a.pk)
         commitment = effective_by_assignment.get(a.pk)
         pending    = pending_by_assignment.get(a.pk)
-        approved_arka = arka if (arka is not None and arka.verdict == ARKA_APPROVED) else None
+        # PART 9: "approved" for capacity purposes means BOTH gates passed. A capacity
+        # only Design QC has signed off is not a number the tender may be reported on.
+        approved_arka = arka if (arka is not None
+                                 and arka.head_verdict == ARKA_APPROVED) else None
         overdue = is_overdue(a, commitment, today)
         sites.append({
             'assignment':    a,
@@ -322,6 +340,14 @@ def tender_metrics(program, today=None):
         'capacity':      capacity_panel(program, sites, total_sites),
         'queue':         review_queue_age(sites, today),
         'attention':     attention_list(sites, today),
+        # PART 9 — the Design QC counterparts of the two panels above. Computed here
+        # rather than in a second entry point so the QC dashboard is genuinely a SUBSET of
+        # this one: same batched reads, same `sites` list, same functions with different
+        # stage tuples. The Head's dashboard does not render these; the QC dashboard picks
+        # these two and leaves `workload` and `capacity` behind entirely.
+        'qc_queue':      qc_review_queue_age(sites, today),
+        'qc_attention':  attention_list(sites, today, own_stages=QC_ACTION_STAGES,
+                                        own_only=True),
         'no_due_date':   sum(1 for s in sites if not s['has_approved_due'] and not s['released']),
     }
 
@@ -346,6 +372,64 @@ def stage_counts(sites):
     ]
 
 
+# ---------------------------------------------------------------------------
+# PART 9 — WHAT CAUSED AN ATTEMPT TO EXIST
+# ---------------------------------------------------------------------------
+# THE CAUSE OF ATTEMPT N+1 IS RECORDED ON ATTEMPT N, and that is the one thing to
+# understand before reading the rework numbers.
+#
+# `opened_reason` says WHICH LOOP opened an attempt (a QC failure, or a PM change
+# request). It does not say whose fault the loop was — that lives in the failure category
+# on the attempt that FAILED, one row earlier. So classifying attempt N+1 means reading
+# attempt N's category and asking error_category_group() which group it falls in.
+#
+# This costs NO extra query. `tender_metrics()` already loads every attempt for the tender
+# in one batched read, and the walk below is over that list.
+
+CAUSE_PM_CHANGE   = 'pm'      # the brief moved
+CAUSE_UNCATEGORISED = 'legacy'  # a pre-Part-9 QC failure, which carries no category
+
+
+def classify_attempt_causes(attempts):
+    """Map {attempt_number: cause} over one assignment's attempts.
+
+    Cause is one of:
+        None                  the initial attempt — not rework at all
+        'A' / 'B' / 'C'       opened by a failure in that error group
+        CAUSE_PM_CHANGE       opened by a PM change request
+        CAUSE_UNCATEGORISED   opened by a QC failure that recorded no category
+
+    CAUSE_UNCATEGORISED IS REPORTED, NOT DISCARDED. Every attempt opened by a QC failure
+    before Part 9 has no category, because the field did not exist. Silently dropping
+    those would quietly shrink every historical designer's rework multiplier the day this
+    ships, which is the most misleading thing this module could do. They are counted into
+    the designer's figure — before Part 9 a QC failure had no other meaning, since a bad
+    survey went through the Design Hold path and a moved brief through a change request —
+    and the count is surfaced separately so the mixture is visible rather than implied.
+
+    The category is read from the Head's field first, then Design QC's. Exactly one of the
+    two is ever populated on a given attempt: if Design QC failed it the Head never saw
+    it, and if the Head failed it Design QC had already passed it.
+    """
+    ordered   = sorted(attempts, key=lambda t: t.attempt_number)
+    by_number = {t.attempt_number: t for t in ordered}
+    causes    = {}
+    for t in ordered:
+        if t.opened_reason == ATTEMPT_REASON_PM_CHANGE_REQUEST:
+            causes[t.attempt_number] = CAUSE_PM_CHANGE
+        elif t.opened_reason == ATTEMPT_REASON_QC_FAILED:
+            previous = by_number.get(t.attempt_number - 1)
+            category = ''
+            if previous is not None:
+                category = (previous.head_failure_category
+                            or previous.qc_failure_category)
+            causes[t.attempt_number] = (error_category_group(category)
+                                        or CAUSE_UNCATEGORISED)
+        else:
+            causes[t.attempt_number] = None
+    return causes
+
+
 def designer_workload(sites, today=None):
     """One row per designer holding at least one assignment on this tender.
 
@@ -353,13 +437,27 @@ def designer_workload(sites, today=None):
     allocating by count alone hands one designer six ground mounts and another six
     rooftops and calls them balanced.
 
-    REWORK IS SPLIT AND NEVER MERGED (settled decision 5). `qc_failed` is the design
-    being wrong; `pm_change_request` is the brief moving. A team with a high first number
-    needs coaching; a team with a high second number needs the customer pinned down, and
-    coaching them would be both useless and unfair. The multiplier is
-    total attempts ÷ released sites — undefined with no released sites, and reported as
-    None (rendered '—') rather than 0, which would read as "no rework" when it means
+    REWORK IS SPLIT AND NEVER MERGED. Part 5 split it two ways; PART 9 SPLITS IT THREE,
+    and the three are reported as separate figures that must not be added together:
+
+        rework           attempts caused by a GROUP A failure — the design was wrong.
+                         This is the designer's number, and the only one that should
+                         ever drive coaching.
+        input_quality    attempts caused by a GROUP B or C failure — the survey was
+                         wrong, or the brief moved after work started. NOT the
+                         designer's error (settled decision 8). A team with a high
+                         figure here needs better surveys or a pinned-down customer;
+                         coaching the designer would be useless and unfair.
+        pm_change_request  attempts opened by a formal PM change request, exactly as in
+                         Part 5 and deliberately unchanged.
+
+    Both multipliers are ÷ released sites — undefined with no released sites, and reported
+    as None (rendered '—') rather than 0, which would read as "no rework" when it means
     "no data".
+
+    THE DENOMINATOR IS THE SAME FOR BOTH so the two are comparable at a glance. Only the
+    numerator differs, and Group B and C attempts are excluded from `rework` — that
+    exclusion is the whole point of the change.
     """
     by_designer = {}
     for s in sites:
@@ -371,6 +469,10 @@ def designer_workload(sites, today=None):
             'sites_no_capacity': 0,
             'overdue': 0, 'blocked': 0, 'released': 0,
             'attempts': 0, 'qc_failed': 0, 'pm_change_request': 0,
+            # Part 9 — the three-way split of what those attempts were caused BY.
+            'designer_error_attempts': 0,
+            'input_problem_attempts':  0,
+            'uncategorised_attempts':  0,
         })
         if s['released']:
             row['released'] += 1
@@ -391,16 +493,35 @@ def designer_workload(sites, today=None):
             row['blocked'] += 1
         # Rework counts every attempt the designer has worked, released or not.
         row['attempts'] += len(s['attempts'])
+        causes = classify_attempt_causes(s['attempts'])
         for t in s['attempts']:
             if t.opened_reason == ATTEMPT_REASON_QC_FAILED:
                 row['qc_failed'] += 1
             elif t.opened_reason == ATTEMPT_REASON_PM_CHANGE_REQUEST:
                 row['pm_change_request'] += 1
 
+            cause = causes.get(t.attempt_number)
+            if cause == ERROR_GROUP_A:
+                row['designer_error_attempts'] += 1
+            elif cause in ('B', 'C'):
+                row['input_problem_attempts'] += 1
+            elif cause == CAUSE_UNCATEGORISED:
+                row['uncategorised_attempts'] += 1
+
     rows = []
     for row in by_designer.values():
-        row['rework'] = (round(row['attempts'] / row['released'], 1)
-                         if row['released'] else None)
+        released = row['released']
+        # THE PART 9 EXCLUSION, and the only change to how this number is computed:
+        # attempts opened by a Group B or C failure come out of the numerator entirely.
+        # Everything else Part 5 counted is still counted.
+        designer_attempts = row['attempts'] - row['input_problem_attempts']
+        row['rework'] = (round(designer_attempts / released, 1) if released else None)
+        row['input_quality'] = (round(row['input_problem_attempts'] / released, 1)
+                                if released else None)
+        # Reported as its own figure rather than folded into either multiplier — a PM
+        # change request is neither a design error nor an input problem.
+        row['pm_change_multiplier'] = (round(row['pm_change_request'] / released, 1)
+                                       if released else None)
         rows.append(row)
     # Default order is kW descending — the load that matters, not the row count.
     rows.sort(key=lambda r: (r['capacity_kw'], r['sites']), reverse=True)
@@ -448,34 +569,57 @@ def capacity_panel(program, sites, total_sites):
     }
 
 
-def review_queue_age(sites, today=None):
-    """How long the Head's OWN queue has been waiting.
+def _queue_age(sites, arka_stage, package_stage, today=None):
+    """How long ONE reviewer's queue has been waiting. Shared by both gates.
 
-    He is the single approver at both gates, so a burst at the end of a tender phase
-    lands entirely on him. Ages are measured from the moment the item entered his queue —
-    Arka submitted_at, and qc_started_at is deliberately NOT used for the QC figure
-    because a package awaiting QC has not started it yet; `updated_at` on the assignment
-    is when it reached artifacts_uploaded.
+    PART 9 MADE THIS PARAMETRIC RATHER THAN COPYING IT. The arithmetic is identical for
+    Design QC and the Design Head; only which two stages count as "mine" differs. Two
+    copies would drift the moment one of them gained a special case, and the whole reason
+    the Part 9 dashboard is a subset of the Part 5 one is that they share this code.
+
+    Ages are measured from the moment the item entered THIS queue. For an Arka that is its
+    own `submitted_at`; for a package it is `updated_at` on the assignment, which is when
+    it last changed status — deliberately not `qc_started_at`, because an item waiting for
+    a review has not started it yet.
     """
     today = today or timezone.localdate()
 
-    pending_arka = [s for s in sites if s['stage'] == 'arka_submitted' and s['arka']]
-    awaiting_qc  = [s for s in sites if s['stage'] == 'artifacts_uploaded']
+    pending_arka = [s for s in sites if s['stage'] == arka_stage and s['arka']]
+    awaiting_pkg = [s for s in sites if s['stage'] == package_stage]
 
     def _age_days(dt):
         return (today - timezone.localtime(dt).date()).days if dt else 0
 
     oldest_arka = min(pending_arka, key=lambda s: s['arka'].submitted_at, default=None)
-    oldest_qc   = min(awaiting_qc, key=lambda s: s['assignment'].updated_at, default=None)
+    oldest_pkg  = min(awaiting_pkg, key=lambda s: s['assignment'].updated_at, default=None)
 
     return {
         'arka_count':      len(pending_arka),
         'arka_oldest_days': _age_days(oldest_arka['arka'].submitted_at) if oldest_arka else None,
         'arka_oldest_site': oldest_arka['project'] if oldest_arka else None,
-        'qc_count':        len(awaiting_qc),
-        'qc_oldest_days':  _age_days(oldest_qc['assignment'].updated_at) if oldest_qc else None,
-        'qc_oldest_site':  oldest_qc['project'] if oldest_qc else None,
+        'qc_count':        len(awaiting_pkg),
+        'qc_oldest_days':  _age_days(oldest_pkg['assignment'].updated_at) if oldest_pkg else None,
+        'qc_oldest_site':  oldest_pkg['project'] if oldest_pkg else None,
     }
+
+
+def review_queue_age(sites, today=None):
+    """The DESIGN HEAD's own queue: Arkas and packages Design QC has passed up to him.
+
+    PART 9 REPOINTED THIS. In Part 5 the Head was the single approver and this counted
+    `arka_submitted` / `artifacts_uploaded`. Those are now Design QC's queue; the Head's
+    is what QC has passed. Keeping the old stages here would have shown him a backlog he
+    cannot clear and hidden the one he can.
+    """
+    return _queue_age(sites, 'awaiting_head_arka', 'awaiting_head_qc', today)
+
+
+def qc_review_queue_age(sites, today=None):
+    """DESIGN QC's own queue: Arkas awaiting a first verdict, packages awaiting review.
+
+    The gate-1 counterpart of review_queue_age(), and the same function underneath.
+    """
+    return _queue_age(sites, 'arka_submitted', 'artifacts_uploaded', today)
 
 
 # Severity bands for the attention list. Lower sorts first.
@@ -487,12 +631,24 @@ _SEV_HEAD     = 3
 ATTENTION_LIMIT = 10
 
 
-def attention_list(sites, today=None, limit=ATTENTION_LIMIT):
+def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
+                   own_stages=HEAD_ACTION_STAGES, own_only=False):
     """At most ten rows, worst first. A work queue, not a report (settled decision 8).
 
     Ordering is by severity band, then by the magnitude that makes a row urgent within
     its band — days overdue, then days blocked, then revision count, then queue age. A
     site can qualify on several grounds; it appears ONCE, under its worst.
+
+    PART 9 PARAMETRISED THE LAST BAND rather than forking the function.
+
+      `own_stages`  which stages count as "waiting on you". Defaults to the Head's, so
+                    every Part 5 caller is unchanged; the Design QC dashboard passes
+                    QC_ACTION_STAGES.
+      `own_only`    when True, ONLY that last band is produced — no overdue, no Design
+                    Hold, no due-date revisions. Design QC's dashboard sets this: those
+                    three bands are about how the tender is being RUN, which is the Head's
+                    remit, and putting them on a reviewer's screen would hand them a list
+                    of things they have no authority to fix.
     """
     today = today or timezone.localdate()
     rows = []
@@ -509,38 +665,43 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT):
             'stage': STAGE_LABELS.get(site['stage'], site['stage']),
         })
 
-    for s in sorted((x for x in sites if x['overdue']),
-                    key=lambda x: x['days_over'], reverse=True):
-        attempt_no = s['assignment'].current_attempt_number or 1
-        _add(s, _SEV_OVERDUE, s['days_over'],
-             f'{s["days_over"]} day(s) past the agreed date, on attempt {attempt_no}',
-             'danger')
+    if not own_only:
+        for s in sorted((x for x in sites if x['overdue']),
+                        key=lambda x: x['days_over'], reverse=True):
+            attempt_no = s['assignment'].current_attempt_number or 1
+            _add(s, _SEV_OVERDUE, s['days_over'],
+                 f'{s["days_over"]} day(s) past the agreed date, on attempt {attempt_no}',
+                 'danger')
 
-    for s in sites:
-        if not s['blocked']:
-            continue
-        started = s['assignment'].survey_returned_at
-        days = (today - timezone.localtime(started).date()).days if started else 0
-        reason = (s['assignment'].survey_return_reason or '').strip() or 'no reason recorded'
-        _add(s, _SEV_BLOCKED, days, f'Design Hold {days} day(s) — {reason}', 'warning')
+        for s in sites:
+            if not s['blocked']:
+                continue
+            started = s['assignment'].survey_returned_at
+            days = (today - timezone.localtime(started).date()).days if started else 0
+            reason = (s['assignment'].survey_return_reason or '').strip() or 'no reason recorded'
+            _add(s, _SEV_BLOCKED, days, f'Design Hold {days} day(s) — {reason}', 'warning')
 
-    for s in sorted((x for x in sites if x['revisions'] >= 3 and not x['released']),
-                    key=lambda x: x['revisions'], reverse=True):
-        _add(s, _SEV_REVISED, s['revisions'],
-             f'Due date revised {s["revisions"]} times', 'warning')
+        for s in sorted((x for x in sites if x['revisions'] >= 3 and not x['released']),
+                        key=lambda x: x['revisions'], reverse=True):
+            _add(s, _SEV_REVISED, s['revisions'],
+                 f'Due date revised {s["revisions"]} times', 'warning')
 
-    # Longest-waiting items in the Head's own queue, so his backlog is on the same list
-    # as the designers' — he is a bottleneck like any other.
+    # Longest-waiting items in the VIEWER's own queue, so their backlog is on the same
+    # list as the designers' — a reviewer is a bottleneck like any other.
     #
     # An Arka's wait is dated from ITS OWN submitted_at, not from assignment.updated_at,
-    # so this agrees with review_queue_age() above. They diverge in practice: updated_at
-    # moves on any assignment save, while submitted_at is when the item actually entered
-    # the queue, and two panels reporting different ages for the same item is worse than
+    # so this agrees with the queue-age panel. They diverge in practice: updated_at moves
+    # on any assignment save, while submitted_at is when the item actually entered the
+    # queue, and two panels reporting different ages for the same item is worse than
     # either number being slightly off.
-    head_waiting = [s for s in sites if s['stage'] in HEAD_ACTION_STAGES]
+    head_waiting = [s for s in sites if s['stage'] in own_stages]
 
     def _waiting_since(site):
-        if site['stage'] == 'arka_submitted' and site['arka'] is not None:
+        # Both Arka stages date from the submission itself. `awaiting_head_arka` is the
+        # same physical Arka that `arka_submitted` was, handed on rather than resubmitted,
+        # so its clock does not restart when Design QC passes it — the designer has been
+        # waiting since they submitted, whoever currently holds it.
+        if site['stage'] in ('arka_submitted', 'awaiting_head_arka') and site['arka'] is not None:
             return site['arka'].submitted_at
         return site['assignment'].updated_at
 

@@ -543,6 +543,17 @@ class UserProfile(models.Model):
     phone_number            = models.CharField(max_length=10, blank=True)
     is_active               = models.BooleanField(default=True)  # Soft deactivation — keeps history without deleting the user
     is_design_head          = models.BooleanField(default=False)  # Grants Design-task reassignment via task_assign_design_head, independent of role
+    # PART 9 — the FIRST of the two design review gates. A FLAG, NOT A ROLE, for exactly
+    # the reasons the 6.5a audit established for `is_design_head` above: a new
+    # ROLE_CHOICES value costs its holder every Task.assigned_role match, BOQ write, the
+    # System Admin edit path, and portfolio-wide task visibility. This sits on a
+    # role='Design' user and costs none of that.
+    #
+    # HOLDING BOTH FLAGS IS ALLOWED BUT DOES NOT LET ONE PERSON CLEAR A SITE: settled
+    # decision 2 refuses the second verdict on the same artifact from the same person, so
+    # a dual-flag holder may record either gate's verdict and never both. Enforced in
+    # design_views, not here — a flag says what you may be, not what you may do next.
+    is_design_qc            = models.BooleanField(default=False)
     # Names a deputy who may act for the Design Head during absence. STORAGE ONLY in this
     # session — nothing reads this field yet; the acting-for rules are Part 4. Self-FK so
     # the deputy is itself a UserProfile; SET_NULL so deactivating the deputy's profile
@@ -1609,6 +1620,14 @@ DESIGN_IN_QC               = 'in_qc'
 DESIGN_QC_FAILED           = 'qc_failed'
 DESIGN_RELEASED            = 'released'
 
+# PART 9 — the two waiting rooms between the gates. Design QC has passed the artifact
+# and the Design Head has not yet ruled on it. They are separate statuses rather than a
+# flag on the existing ones because the BOTTLENECK IS DIFFERENT: `arka_submitted` means
+# the QC reviewer owes a verdict, `awaiting_head_arka` means the Head does, and a
+# dashboard that cannot tell them apart cannot say who is holding the tender up.
+DESIGN_AWAITING_HEAD_ARKA  = 'awaiting_head_arka'
+DESIGN_AWAITING_HEAD_QC    = 'awaiting_head_qc'
+
 # Order below is the LINEAR workflow order, corrected in Part 2. The Design Head
 # receives the survey when a tender starts, uploads it, and only then allocates the
 # site — so allocation follows survey upload rather than preceding it:
@@ -1638,9 +1657,11 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_DUE_DATE_PROPOSED,   'Due date proposed'),
     (DESIGN_IN_DESIGN,           'In design'),
     (DESIGN_ARKA_SUBMITTED,      'Arka submitted'),
+    (DESIGN_AWAITING_HEAD_ARKA,  'Arka — awaiting Design Head'),
     (DESIGN_ARKA_REJECTED,       'Arka rejected'),
     (DESIGN_ARTIFACTS_UPLOADED,  'Artifacts uploaded'),
     (DESIGN_IN_QC,               'In QC'),
+    (DESIGN_AWAITING_HEAD_QC,    'QC passed — awaiting Design Head'),
     (DESIGN_QC_FAILED,           'QC failed'),
     (DESIGN_RELEASED,            'Released'),
     (DESIGN_SURVEY_RETURNED,     'Design Hold — survey inadequate'),
@@ -1679,6 +1700,144 @@ ARKA_VERDICT_CHOICES = [
     (ARKA_APPROVED, 'Approved'),
     (ARKA_REJECTED, 'Rejected'),
 ]
+
+# ===========================================================================
+# PART 9 — DESIGN ERROR CATEGORIES
+# ===========================================================================
+# ONE category per rejection or failure, at BOTH gates, and it is MANDATORY. Multi-select
+# was considered and rejected: a rejection tagged with four categories cannot be counted
+# under any of them, so a multi-select field produces a report nobody can act on. Free
+# text stays available ALONGSIDE the category, not instead of it — the category is what
+# is countable, the text is what is readable.
+#
+# THE GROUP IS THE POINT, not the category. Three groups, and the split decides whether a
+# rework loop is charged to the designer:
+#
+#   A  Designer execution   the design was wrong          -> COUNTS as designer rework
+#   B  Input problem        the survey was wrong          -> does NOT count
+#   C  Brief change         the requirement moved         -> does NOT count
+#
+# Charging a designer for rework caused by a bad survey or a changed brief is the exact
+# unfairness the Part 5 comment about `pm_change_request` already warns against; this
+# extends the same principle to failures that arrive through the QC gate rather than
+# through a PM change request.
+#
+# Group membership lives HERE and is read through error_category_group(). Do not hardcode
+# a group's members anywhere else — a category added to the wrong tuple in a second copy
+# would silently move rework between the designer's column and the input-quality column,
+# and nothing would fail.
+
+# ── Group A — designer execution ──────────────────────────────────────────
+ERR_LAYOUT               = 'layout_error'
+ERR_SHADING              = 'shading'
+ERR_CAPACITY             = 'capacity_error'
+ERR_STRUCTURAL_CONSTRAINT = 'structural_constraint'
+ERR_ACCESS_SETBACK       = 'access_setback'
+ERR_STRUCTURAL_DESIGN    = 'structural_design'
+ERR_ELECTRICAL_DESIGN    = 'electrical_design'
+ERR_EARTHING_LIGHTNING   = 'earthing_lightning'
+ERR_DRAWING_INCOMPLETE   = 'drawing_incomplete'
+ERR_STANDARDS            = 'standards'
+ERR_BOQ_QUANTITY         = 'boq_quantity'
+ERR_BOQ_SPECIFICATION    = 'boq_specification'
+
+# ── Group B — input problem ───────────────────────────────────────────────
+ERR_SURVEY_INADEQUATE    = 'survey_inadequate'
+ERR_SITE_DIFFERS         = 'site_differs'
+
+# ── Group C — brief change ────────────────────────────────────────────────
+ERR_REQUIREMENT_CHANGED  = 'requirement_changed'
+ERR_SCOPE_REVISED        = 'scope_revised'
+
+ERROR_GROUP_A = 'A'
+ERROR_GROUP_B = 'B'
+ERROR_GROUP_C = 'C'
+
+#: category -> group. THE SINGLE SOURCE OF GROUP MEMBERSHIP.
+_ERROR_CATEGORY_GROUPS = {
+    ERR_LAYOUT:                ERROR_GROUP_A,
+    ERR_SHADING:               ERROR_GROUP_A,
+    ERR_CAPACITY:              ERROR_GROUP_A,
+    ERR_STRUCTURAL_CONSTRAINT: ERROR_GROUP_A,
+    ERR_ACCESS_SETBACK:        ERROR_GROUP_A,
+    ERR_STRUCTURAL_DESIGN:     ERROR_GROUP_A,
+    ERR_ELECTRICAL_DESIGN:     ERROR_GROUP_A,
+    ERR_EARTHING_LIGHTNING:    ERROR_GROUP_A,
+    ERR_DRAWING_INCOMPLETE:    ERROR_GROUP_A,
+    ERR_STANDARDS:             ERROR_GROUP_A,
+    ERR_BOQ_QUANTITY:          ERROR_GROUP_A,
+    ERR_BOQ_SPECIFICATION:     ERROR_GROUP_A,
+    ERR_SURVEY_INADEQUATE:     ERROR_GROUP_B,
+    ERR_SITE_DIFFERS:          ERROR_GROUP_B,
+    ERR_REQUIREMENT_CHANGED:   ERROR_GROUP_C,
+    ERR_SCOPE_REVISED:         ERROR_GROUP_C,
+}
+
+# Rendered as one <select> at both gates. Grouped so the reviewer sees WHICH KIND of
+# problem they are recording — the optgroup label is the accountability split, and a
+# reviewer who can see it is far likelier to pick the honest category.
+DESIGN_ERROR_CATEGORY_CHOICES = [
+    ('Designer execution', [
+        (ERR_LAYOUT,                'Layout error: module placement, row spacing, orientation'),
+        (ERR_SHADING,               'Shading or obstruction not accounted for'),
+        (ERR_CAPACITY,              'Capacity error: designed capacity wrong for available area'),
+        (ERR_STRUCTURAL_CONSTRAINT, 'Roof or structural constraint violated'),
+        (ERR_ACCESS_SETBACK,        'Access, walkway, or setback non-compliance'),
+        (ERR_STRUCTURAL_DESIGN,     'Structural design error: foundation, mounting, wind load'),
+        (ERR_ELECTRICAL_DESIGN,     'Electrical design error: string sizing, inverter matching, cable sizing'),
+        (ERR_EARTHING_LIGHTNING,    'Earthing or lightning protection error'),
+        (ERR_DRAWING_INCOMPLETE,    'Drawing incomplete: missing views, dimensions, annotations'),
+        (ERR_STANDARDS,             'Standards non-compliance: MNRE, IS, DISCOM norms'),
+        (ERR_BOQ_QUANTITY,          'BOQ quantity error'),
+        (ERR_BOQ_SPECIFICATION,     'BOQ item or specification error'),
+    ]),
+    ('Input problem — not designer rework', [
+        (ERR_SURVEY_INADEQUATE,     'Survey data inadequate or incorrect'),
+        (ERR_SITE_DIFFERS,          'Site conditions differ from survey'),
+    ]),
+    ('Brief change — not designer rework', [
+        (ERR_REQUIREMENT_CHANGED,   'Client or PM requirement changed'),
+        (ERR_SCOPE_REVISED,         'Scope or capacity revised after design started'),
+    ]),
+]
+
+#: Flat {value: label}, for rendering a stored category outside a form.
+DESIGN_ERROR_CATEGORY_LABELS = {
+    value: label
+    for _group_label, entries in DESIGN_ERROR_CATEGORY_CHOICES
+    for value, label in entries
+}
+
+#: Every valid category value. Used by the views to validate a posted category.
+DESIGN_ERROR_CATEGORIES = tuple(DESIGN_ERROR_CATEGORY_LABELS)
+
+
+def error_category_group(category):
+    """Return 'A', 'B' or 'C' for an error category, or None if it has none.
+
+    THE ONLY PLACE GROUP MEMBERSHIP IS DECIDED. Every consumer — the rework multiplier,
+    the dashboards, any future quality report — asks this function rather than testing
+    membership of its own tuple. Adding a category therefore means one edit, in
+    _ERROR_CATEGORY_GROUPS above, and every consumer is correct immediately.
+
+    Returns None for '' (the blank default on every non-rejected row) and for any value
+    not in the map, so callers can treat "no category recorded" and "unrecognised
+    category" identically — neither is a designer error, and neither should silently be
+    counted as one.
+    """
+    if not category:
+        return None
+    return _ERROR_CATEGORY_GROUPS.get(category)
+
+
+def category_counts_as_designer_rework(category):
+    """True only for Group A. The one predicate the rework multiplier is built on.
+
+    Group B (bad input) and Group C (moved brief) are NOT the designer's error, so an
+    attempt opened by one of them is excluded from the designer's multiplier and counted
+    under input quality instead — settled decision 8.
+    """
+    return error_category_group(category) == ERROR_GROUP_A
 
 DESIGN_FILE_CAD_ZIP   = 'cad_zip'
 DESIGN_FILE_BOQ_EXCEL = 'boq_excel'
@@ -1841,6 +2000,29 @@ class DesignAttempt(models.Model):
 
     qc_started_at opens the PM change request window — before QC starts there is
     nothing settled to raise a change against.
+
+    PART 9 — WHICH FIELD IS WHICH GATE. READ THIS BEFORE TOUCHING EITHER.
+
+        qc_verdict / qc_remarks / qc_reviewed_by / qc_reviewed_at
+            THE DESIGN QC GATE — the FIRST reviewer. These fields are unchanged in name
+            and in type; only their meaning is narrowed, from "the review" to "the first
+            review". Renaming them was rejected: it is a schema churn with no user-visible
+            benefit that would also invalidate the migration-0049 CHECK constraint, which
+            continues to guard exactly the right thing (a QC failure must carry remarks).
+
+        head_verdict / head_remarks / head_reviewed_by / head_reviewed_at
+            THE DESIGN HEAD GATE — the SECOND reviewer, added by Part 9.
+
+    THE GATES ARE SERIAL, NOT PARALLEL. `head_verdict` cannot leave 'pending' while
+    `qc_verdict` is still 'pending'; the Head reviews what QC has already passed, or he
+    reviews nothing. A QC FAILURE ENDS THE ATTEMPT — the Head never sees it — so a row
+    with qc_verdict='failed' keeps head_verdict='pending' forever, exactly as a row closed
+    by a PM change request keeps qc_verdict='pending' forever. In both cases 'pending'
+    means NOT JUDGED, never "judged and undecided".
+
+    head_started_at is stamped when the package reaches the Head's queue (QC passed), and
+    is the Head-side counterpart of qc_started_at. It does NOT open a second change
+    request window; qc_started_at remains the only thing that does.
     """
 
     assignment = models.ForeignKey(
@@ -1854,7 +2036,7 @@ class DesignAttempt(models.Model):
     opened_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
 
-    # ── QC ──────────────────────────────────────────────────────────────────
+    # ── GATE 1: Design QC ───────────────────────────────────────────────────
     qc_verdict = models.CharField(
         max_length=10, choices=QC_VERDICT_CHOICES, default=QC_PENDING,
     )
@@ -1867,6 +2049,51 @@ class DesignAttempt(models.Model):
     qc_reviewed_at = models.DateTimeField(null=True, blank=True)
     # Opens the PM change request window.
     qc_started_at = models.DateTimeField(null=True, blank=True)
+    # Required when qc_verdict is 'failed' (Part 9). Enforced in the view rather than by a
+    # CHECK constraint — see the note on head_failure_category below.
+    qc_failure_category = models.CharField(
+        max_length=30, choices=DESIGN_ERROR_CATEGORY_CHOICES, blank=True, default='',
+    )
+
+    # ── GATE 2: Design Head ─────────────────────────────────────────────────
+    head_verdict = models.CharField(
+        max_length=10, choices=QC_VERDICT_CHOICES, default=QC_PENDING,
+    )
+    # Required when head_verdict is 'failed' — CHECK constraint below, mirroring 0049.
+    head_remarks = models.TextField(blank=True, default='')
+    head_reviewed_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='head_reviewed_attempts',
+    )
+    head_reviewed_at = models.DateTimeField(null=True, blank=True)
+    # Stamped when Design QC passes and the package enters the Head's queue. The Head-side
+    # counterpart of qc_started_at; it opens NO change request window of its own.
+    head_started_at = models.DateTimeField(null=True, blank=True)
+    # CATEGORY IS NOT CHECK-CONSTRAINED, deliberately, and this is the one asymmetry with
+    # the remarks fields. A CHECK can only read its own row's columns, which is enough for
+    # "failed implies remarks non-empty" — but a category must ALSO be one of a known set,
+    # and encoding sixteen literals into a database constraint means a migration every
+    # time the list changes. The list will change; the requirement will not. So the view
+    # enforces both halves (present AND valid) and the column stays a plain CharField.
+    head_failure_category = models.CharField(
+        max_length=30, choices=DESIGN_ERROR_CATEGORY_CHOICES, blank=True, default='',
+    )
+
+    # ── Overturn signal (Part 9, settled decision 6) ─────────────────────────
+    # STORED AT WRITE TIME, not derived. Set True when the Head's outcome differs from
+    # Design QC's on this attempt — QC passed and the Head failed, or QC failed and the
+    # Head passed (unreachable today, since a QC failure closes the attempt, but the
+    # field does not assume that).
+    #
+    # WHY STORED RATHER THAN A PROPERTY: the requirement is that it be COUNTABLE per QC
+    # reviewer and per tender. A Python property cannot be aggregated in a queryset, so
+    # every consumer would have to reconstruct the pair comparison in its own Q object —
+    # which is the same "hardcoded in a second place" failure the category group helper
+    # exists to prevent. One boolean column answers it in one term:
+    #
+    #   DesignAttempt.objects.filter(head_overturned_qc=True).values('qc_reviewed_by')
+    #   ...filter(assignment__project__program=tender, head_overturned_qc=True).count()
+    head_overturned_qc = models.BooleanField(default=False)
 
     # ── BOQ ─────────────────────────────────────────────────────────────────
     # The design workflow RECORDS that a BOQ was submitted; it does not duplicate BOQ
@@ -1889,6 +2116,12 @@ class DesignAttempt(models.Model):
                 condition=~models.Q(qc_verdict=QC_FAILED) | ~models.Q(qc_remarks=''),
                 name='qc_remarks_required_when_qc_failed',
             ),
+            # PART 9 — the same rule at the Head gate. Identical shape to the one above,
+            # deliberately: a failure with no remarks is not a review at either gate.
+            models.CheckConstraint(
+                condition=~models.Q(head_verdict=QC_FAILED) | ~models.Q(head_remarks=''),
+                name='head_remarks_required_when_head_failed',
+            ),
         ]
 
     def __str__(self):
@@ -1896,10 +2129,30 @@ class DesignAttempt(models.Model):
 
 
 class ArkaSubmission(models.Model):
-    """One Arka design submitted for Design Head approval, versioned within an attempt.
+    """One Arka design submitted for approval, versioned within an attempt.
 
     A rejected submission is superseded by a new version in the SAME attempt (a
     rejected Arka is not itself a rework loop); is_current points at the live version.
+
+    PART 9 — WHICH FIELD IS WHICH GATE. READ THIS BEFORE TOUCHING EITHER.
+
+        verdict / rejection_reason / reviewed_by / reviewed_at
+            THE DESIGN QC GATE — the FIRST reviewer. Unchanged in name and type; the
+            meaning narrows from "the review" to "the first review". Not renamed, for the
+            same reason as on DesignAttempt: the migration-0049 CHECK constraint
+            `rejection_reason_required_when_rejected` already guards exactly this field
+            and continues to be correct.
+
+        head_verdict / head_rejection_reason / head_reviewed_by / head_reviewed_at
+            THE DESIGN HEAD GATE — the SECOND reviewer, added by Part 9.
+
+    THE GATES ARE SERIAL. `head_verdict` cannot leave 'pending' while `verdict` is
+    'pending'. A QC REJECTION ENDS THE VERSION — the Head never sees it — so a row with
+    verdict='rejected' keeps head_verdict='pending' forever. 'pending' means NOT JUDGED.
+
+    CAD AND BOQ UPLOAD NOW GATE ON head_verdict='approved', NOT verdict='approved'
+    (design_views._require_approved_arka). An Arka that only Design QC has passed is not
+    yet a layout anybody may build against.
     """
 
     attempt = models.ForeignKey(
@@ -1917,6 +2170,7 @@ class ArkaSubmission(models.Model):
     )
     submitted_at = models.DateTimeField(auto_now_add=True)
 
+    # ── GATE 1: Design QC ───────────────────────────────────────────────────
     verdict = models.CharField(
         max_length=10, choices=ARKA_VERDICT_CHOICES, default=ARKA_PENDING,
     )
@@ -1927,6 +2181,32 @@ class ArkaSubmission(models.Model):
         related_name='reviewed_arka_submissions',
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    # Required when verdict is 'rejected' (Part 9). View-enforced, not CHECK-constrained —
+    # see the note on DesignAttempt.head_failure_category.
+    qc_failure_category = models.CharField(
+        max_length=30, choices=DESIGN_ERROR_CATEGORY_CHOICES, blank=True, default='',
+    )
+
+    # ── GATE 2: Design Head ─────────────────────────────────────────────────
+    head_verdict = models.CharField(
+        max_length=10, choices=ARKA_VERDICT_CHOICES, default=ARKA_PENDING,
+    )
+    # Required when head_verdict is 'rejected' — CHECK constraint below, mirroring 0049.
+    head_rejection_reason = models.TextField(blank=True, default='')
+    head_reviewed_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='head_reviewed_arka_submissions',
+    )
+    head_reviewed_at = models.DateTimeField(null=True, blank=True)
+    head_failure_category = models.CharField(
+        max_length=30, choices=DESIGN_ERROR_CATEGORY_CHOICES, blank=True, default='',
+    )
+
+    # ── Overturn signal (Part 9, settled decision 6) ─────────────────────────
+    # Stored at write time; see the long note on DesignAttempt.head_overturned_qc for why
+    # this is a column rather than a property. True when the Head's outcome differs from
+    # Design QC's on this Arka version — QC approved and the Head rejected, or the reverse.
+    head_overturned_qc = models.BooleanField(default=False)
 
     is_current = models.BooleanField(default=True)
 
@@ -1945,6 +2225,12 @@ class ArkaSubmission(models.Model):
             models.CheckConstraint(
                 condition=~models.Q(verdict=ARKA_REJECTED) | ~models.Q(rejection_reason=''),
                 name='rejection_reason_required_when_rejected',
+            ),
+            # PART 9 — the same rule at the Head gate.
+            models.CheckConstraint(
+                condition=(~models.Q(head_verdict=ARKA_REJECTED)
+                           | ~models.Q(head_rejection_reason='')),
+                name='head_rejection_reason_required_when_head_rejected',
             ),
         ]
 

@@ -1,13 +1,19 @@
 {% extends "base.html" %}
 {% comment %}
-Design Head / deputy — sites waiting for QC and sites currently in review.
+Design QC / Design Head / deputy — the package review worklist.
 
 THIS IS NOT THE DESIGN HEAD DASHBOARD. No metrics, no workload, no capacity rollup, no
 overdue logic — those are Part 5 and are explicitly out of scope here. This is a worklist
-of two statuses and nothing else.
+of three statuses and nothing else.
+
+PART 9 — ONE QUEUE, TWO AUDIENCES. Design QC and the Head see the SAME rows, because
+knowing what is stacked up at the other gate is exactly what a reviewer needs in order to
+know whether their own backlog is the problem. What differs is which row each can act on:
+`can_qc` is gate 1, `can_head` is gate 2, and both are computed per row because the
+self-review exclusion and the one-person-two-verdicts rule are both per site.
 
 Bootstrap extending base.html with the shared chip pills, same as every other screen in
-this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
+this module.
 {% endcomment %}
 
 {% block title %}QC queue — SolarPMS{% endblock %}
@@ -20,10 +26,19 @@ this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
   <div>
     <h5 class="mb-0">Design QC queue</h5>
     <div class="text-muted small">
-      Packages awaiting review and reviews in progress.
+      Packages awaiting review, reviews in progress, and packages Design QC has passed up
+      to the Design Head.
       {% if is_deputy %}
         <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
           Acting as deputy</span>
+      {% endif %}
+      {% if is_design_qc %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
+          Design QC</span>
+      {% endif %}
+      {% if has_head_authority %}
+        <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
+          Design Head</span>
       {% endif %}
     </div>
   </div>
@@ -53,10 +68,14 @@ this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
         </div>
       </div>
       <div class="text-end">
-        {% if row.in_qc %}
-          <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>In QC</span>
+        {% if row.awaiting_head %}
+          <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+            Awaiting Design Head</span>
+        {% elif row.in_qc %}
+          <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>In Design QC</span>
         {% else %}
-          <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>Awaiting QC</span>
+          <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+            Awaiting Design QC</span>
         {% endif %}
         {% if row.attempt %}
           <div class="text-muted" style="font-size:.7rem;">
@@ -79,7 +98,7 @@ this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
     {% if row.open_crs %}
       <div class="alert alert-warning py-2 small mt-2 mb-0">
         {{ row.open_crs|length }} unresolved PM change request{{ row.open_crs|length|pluralize }}
-        on this attempt — a QC verdict is blocked until actioned.
+        on this attempt — a verdict at either gate is blocked until actioned.
       </div>
     {% endif %}
 
@@ -89,13 +108,23 @@ this module. URL-reachable only (/design/qc/) — Part 4.5 integrates.
         Open package
       </a>
 
-      {% if not row.can_qc %}
-        {% comment %}
-        Self-QC. The button is absent AND the endpoint refuses — the server-side rule in
-        user_can_qc_design() is the enforcement point; this only explains why.
-        {% endcomment %}
+      {% comment %}
+      Every message below EXPLAINS a refusal; none of them enforces one. The endpoints
+      re-check the flag, the self-review exclusion and the two-verdict rule on POST.
+      {% endcomment %}
+      {% if row.blocked_own %}
         <span class="align-self-center text-muted small">
-          You are the designer allocated to this site, so you cannot QC it.
+          You passed this package through Design QC yourself — the Design Head verdict
+          has to come from somebody else.
+        </span>
+      {% elif row.awaiting_head and not row.can_head %}
+        <span class="align-self-center text-muted small">
+          With the Design Head. Nothing for you to do on this one.
+        </span>
+      {% elif not row.awaiting_head and not row.can_qc %}
+        <span class="align-self-center text-muted small">
+          You cannot review this site — either you are its allocated designer, or you do
+          not hold the Design QC flag.
         </span>
       {% endif %}
     </div>

@@ -19,21 +19,36 @@ designer's screen and the Head's screen can never disagree about the state.
   {% elif status == 'arka_submitted' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
       Design: Arka submitted</span>
+  {% elif status == 'awaiting_head_arka' or status == 'awaiting_head_qc' %}
+    <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+      Design: {{ assignment.get_status_display }}</span>
   {% else %}
     <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
       Design: {{ assignment.get_status_display }}</span>
   {% endif %}
 
-  {# Arka verdict — the gate that unlocks CAD and BOQ #}
+  {% comment %}
+  Arka verdict — THE GATE THAT UNLOCKS CAD AND BOQ, which Part 9 moved to the SECOND
+  gate. `arka_approved` is _approved_arka() and now tests head_verdict, so the green pill
+  means both reviewers have signed off. An Arka Design QC has passed but the Head has not
+  gets its own amber pill naming who is holding it — showing green there would tell the
+  designer to upload files the view would then refuse.
+  {% endcomment %}
   {% if arka_approved %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
       Arka v{{ arka.version }}: Approved</span>
+  {% elif arka and arka.head_verdict == 'rejected' %}
+    <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
+      Arka v{{ arka.version }}: Rejected by Design Head</span>
   {% elif arka and arka.verdict == 'rejected' %}
     <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
-      Arka v{{ arka.version }}: Rejected</span>
+      Arka v{{ arka.version }}: Rejected at Design QC</span>
+  {% elif arka and arka.verdict == 'approved' %}
+    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+      Arka v{{ arka.version }}: Passed QC, awaiting Design Head</span>
   {% elif arka %}
     <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
-      Arka v{{ arka.version }}: Awaiting approval</span>
+      Arka v{{ arka.version }}: Awaiting Design QC</span>
   {% else %}
     <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
       Arka: Not submitted</span>

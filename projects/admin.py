@@ -152,8 +152,8 @@ class MilestoneAdmin(admin.ModelAdmin):
 
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display  = ['user', 'role', 'phone_number', 'is_active', 'is_design_head', 'whatsapp_notifications', 'email_notifications', 'created_by']
-    list_filter   = ['role', 'is_active', 'is_design_head']
+    list_display  = ['user', 'role', 'phone_number', 'is_active', 'is_design_head', 'is_design_qc', 'whatsapp_notifications', 'email_notifications', 'created_by']
+    list_filter   = ['role', 'is_active', 'is_design_head', 'is_design_qc']
     search_fields = ['user__username', 'user__first_name', 'user__last_name']
 
 
@@ -252,9 +252,9 @@ class DueDateCommitmentAdmin(admin.ModelAdmin):
 
 @admin.register(DesignAttempt)
 class DesignAttemptAdmin(admin.ModelAdmin):
-    list_display  = ['assignment', 'attempt_number', 'opened_reason', 'qc_verdict',
+    list_display  = ['assignment', 'attempt_number', 'opened_reason', 'qc_verdict', 'head_verdict',
                      'qc_started_at', 'qc_reviewed_at', 'closed_at']
-    list_filter   = ['opened_reason', 'qc_verdict']
+    list_filter   = ['opened_reason', 'qc_verdict', 'head_verdict', 'head_overturned_qc']
     search_fields = ['assignment__project__project_id']
     raw_id_fields = ['assignment']
     readonly_fields = ['opened_at']
@@ -262,9 +262,9 @@ class DesignAttemptAdmin(admin.ModelAdmin):
 
 @admin.register(ArkaSubmission)
 class ArkaSubmissionAdmin(admin.ModelAdmin):
-    list_display  = ['attempt', 'version', 'capacity_kw', 'verdict',
-                     'submitted_by', 'reviewed_by', 'is_current']
-    list_filter   = ['verdict', 'is_current']
+    list_display  = ['attempt', 'version', 'capacity_kw', 'verdict', 'head_verdict',
+                     'submitted_by', 'reviewed_by', 'head_reviewed_by', 'is_current']
+    list_filter   = ['verdict', 'head_verdict', 'head_overturned_qc', 'is_current']
     search_fields = ['attempt__assignment__project__project_id']
     raw_id_fields = ['attempt']
     readonly_fields = ['submitted_at']

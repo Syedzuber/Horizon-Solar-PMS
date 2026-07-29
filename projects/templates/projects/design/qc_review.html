@@ -82,9 +82,14 @@ request is unresolved is a convenience; design_qc_pass() refuses the POST regard
       <div class="small">
         <span class="ver-tag">Arka v{{ arka.version }}</span>
         · <strong>{{ arka.capacity_kw }} kW</strong> designed
-        {% if arka.verdict == 'approved' %}
-          · approved {{ arka.reviewed_at|date:"d M Y H:i" }}
-          by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }}
+        {% if arka.head_verdict == 'approved' %}
+          · approved at both gates
+          {% if arka.head_reviewed_at %}{{ arka.head_reviewed_at|date:"d M Y H:i" }}{% endif %}
+          {% if arka.head_reviewed_by %}by {{ arka.head_reviewed_by.user.get_full_name|default:arka.head_reviewed_by.user.username }}{% endif %}
+        {% elif arka.verdict == 'approved' %}
+          · passed Design QC {{ arka.reviewed_at|date:"d M Y H:i" }}
+          by {{ arka.reviewed_by.user.get_full_name|default:arka.reviewed_by.user.username }},
+          awaiting the Design Head
         {% endif %}
       </div>
       <div class="small mt-1">
@@ -109,60 +114,148 @@ request is unresolved is a convenience; design_qc_pass() refuses the POST regard
   </div>
 </div>
 
-{# ── QC actions ───────────────────────────────────────────────────────────── #}
-{% if can_qc %}
+{# ── Review actions — gate 1 (Design QC) or gate 2 (Design Head) ──────────── #}
+{% comment %}
+PART 9. The two gates share this card and never appear together: gate 1's forms need
+status `in_qc`, gate 2's need `awaiting_head_qc`. `can_qc` covers the gate-1 audience,
+`can_head_verdict` / `blocked_by_own_qc_verdict` the gate-2 one, so the card renders for
+whichever reviewer is looking at it.
+
+RELEASE MOVED. In Part 4 "Pass" released the site; it now hands the package to the Design
+Head, and release happens at design_head_qc_pass. The button labels say so, because a
+reviewer who thinks they have released a site and has not is the one mistake this screen
+must not allow.
+{% endcomment %}
+{% if can_qc or can_head_verdict or blocked_by_own_qc_verdict %}
 <div class="card shadow-sm mb-3">
-  <div class="card-header bg-white py-2 fw-semibold small">QC decision</div>
+  <div class="card-header bg-white py-2 fw-semibold small d-flex justify-content-between">
+    <span>Review decision</span>
+    {% if can_verdict or can_start_qc %}<span class="badge bg-primary-subtle text-primary-emphasis">Gate 1 · Design QC</span>
+    {% elif can_head_verdict %}<span class="badge bg-info-subtle text-info-emphasis">Gate 2 · Design Head</span>
+    {% endif %}
+  </div>
   <div class="card-body py-3">
 
     {% if can_start_qc %}
       <form method="post" action="{% url 'design_qc_start' project_id=project.project_id %}">
         {% csrf_token %}
-        <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">Start QC</button>
+        <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">Start Design QC</button>
         <div class="text-muted small mt-1">
           Starting QC opens the PM change request window on this package.
         </div>
       </form>
 
     {% elif can_verdict %}
-      <div class="d-flex flex-wrap align-items-start gap-3">
-        <form method="post" action="{% url 'design_qc_pass' project_id=project.project_id %}">
-          {% csrf_token %}
-          <button class="btn btn-sm btn-success">Pass &amp; release</button>
-          <div class="text-muted mt-1" style="font-size:.7rem;">
-            Closes the attempt and marks the site design-complete.
-          </div>
-        </form>
+      {# ── GATE 1 — Design QC. A pass sends the package UP, it does not release. ── #}
+      <div class="row g-3">
+        <div class="col-md-4">
+          <form method="post" action="{% url 'design_qc_pass' project_id=project.project_id %}">
+            {% csrf_token %}
+            <button class="btn btn-sm btn-success">Pass QC</button>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              Sends the package to the Design Head. The site is <strong>not</strong>
+              released until he passes it too.
+            </div>
+          </form>
+        </div>
 
         {% comment %}
-        Fail: remarks are REQUIRED. The view refuses an empty value with a message and the
-        Part 1 CHECK constraint qc_remarks_required_when_qc_failed enforces the same rule
-        at the database level for anything that bypasses the view.
+        Fail: remarks AND category are BOTH required. The view refuses either one missing,
+        and the Part 1 CHECK constraint qc_remarks_required_when_qc_failed enforces the
+        remarks at the database level for anything that bypasses the view.
         {% endcomment %}
-        <form method="post" action="{% url 'design_qc_fail' project_id=project.project_id %}"
-              class="d-flex flex-wrap align-items-start gap-2">
-          {% csrf_token %}
-          <div>
-            <textarea name="qc_remarks" class="form-control form-control-sm" rows="2"
-                      style="min-width:26rem;" required
-                      placeholder="What is wrong with the package? (required)"></textarea>
-            <div class="text-muted mt-1" style="font-size:.7rem;">
-              The designer sees this verbatim; a new attempt opens for the rework.
+        <div class="col-md-8">
+          <form method="post" action="{% url 'design_qc_fail' project_id=project.project_id %}">
+            {% csrf_token %}
+            <div class="row g-2">
+              <div class="col-md-6">
+                {% include "projects/design/_error_category_select.html" with cat_id="qc_pkg_cat" %}
+              </div>
+              <div class="col-md-6">
+                <label for="qc_pkg_remarks" class="form-label small mb-1">
+                  Remarks <span class="text-danger">*</span>
+                </label>
+                <textarea name="qc_remarks" id="qc_pkg_remarks" rows="2" required
+                          class="form-control form-control-sm"
+                          placeholder="What is wrong with the package?"></textarea>
+                <div class="text-muted mt-1" style="font-size:.7rem;">
+                  The designer sees this verbatim; a new attempt opens for the rework.
+                </div>
+              </div>
             </div>
-          </div>
-          <button class="btn btn-sm btn-outline-danger">Fail</button>
-        </form>
+            <button class="btn btn-sm btn-outline-danger mt-2">Fail at Design QC</button>
+          </form>
+        </div>
       </div>
 
-    {% elif assignment.status == 'in_qc' %}
+    {% elif can_head_verdict %}
+      {# ── GATE 2 — the Design Head. THIS is where release happens. ── #}
+      <div class="small mb-3">
+        Passed Design QC
+        {% if attempt.qc_reviewed_by %}by {{ attempt.qc_reviewed_by.user.get_full_name|default:attempt.qc_reviewed_by.user.username }}{% endif %}
+        {% if attempt.qc_reviewed_at %}on {{ attempt.qc_reviewed_at|date:"d M Y H:i" }}{% endif %}.
+      </div>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <form method="post" action="{% url 'design_head_qc_pass' project_id=project.project_id %}">
+            {% csrf_token %}
+            <button class="btn btn-sm btn-success">Pass &amp; release</button>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              Closes the attempt and marks the site design-complete.
+            </div>
+          </form>
+        </div>
+
+        <div class="col-md-8">
+          <form method="post" action="{% url 'design_head_qc_fail' project_id=project.project_id %}">
+            {% csrf_token %}
+            <div class="row g-2">
+              <div class="col-md-6">
+                {% include "projects/design/_error_category_select.html" with cat_id="head_pkg_cat" %}
+              </div>
+              <div class="col-md-6">
+                <label for="head_pkg_remarks" class="form-label small mb-1">
+                  Remarks <span class="text-danger">*</span>
+                </label>
+                <textarea name="head_remarks" id="head_pkg_remarks" rows="2" required
+                          class="form-control form-control-sm"
+                          placeholder="What is wrong with the package?"></textarea>
+                <div class="text-muted mt-1" style="font-size:.7rem;">
+                  Recorded as overturning the Design QC pass.
+                </div>
+              </div>
+            </div>
+            <button class="btn btn-sm btn-outline-danger mt-2">Fail as Design Head</button>
+          </form>
+        </div>
+      </div>
+
+    {% elif blocked_by_own_qc_verdict %}
+      <div class="alert alert-warning small mb-0 py-2">
+        <strong>You passed attempt {{ attempt.attempt_number }} through Design QC yourself.</strong>
+        The Design Head verdict on the same package has to come from somebody else — two
+        verdicts by one person is not a second review.
+      </div>
+
+    {% elif open_crs %}
+      {# The ONLY reason a verdict form is withheld from an otherwise-eligible reviewer at
+         either gate. Kept above the awaiting-Head branch so the real cause is named. #}
       <div class="small text-muted">
         A verdict is blocked while a PM change request on this attempt is unresolved.
       </div>
+    {% elif awaiting_head %}
+      {# Design QC looking at a package they have already passed on. Not a refusal —
+         there is simply nothing left for gate 1 to do here. #}
+      <div class="small text-muted">
+        Design QC passed this package
+        {% if attempt.qc_reviewed_at %}on {{ attempt.qc_reviewed_at|date:"d M Y H:i" }}{% endif %}.
+        It is now with the Design Head.
+      </div>
     {% elif released %}
-      <div class="small text-muted">This site is released — QC is complete.</div>
+      <div class="small text-muted">This site is released — both gates are complete.</div>
     {% else %}
       <div class="small text-muted">
-        Nothing to review yet. QC starts once the package is complete
+        Nothing to review yet. Design QC starts once the package is complete
         (status &ldquo;{{ assignment.get_status_display }}&rdquo;).
       </div>
     {% endif %}

@@ -46,18 +46,23 @@ from .models import (
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
     DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_RELEASED,
+    DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
     DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
+    DESIGN_ERROR_CATEGORIES, DESIGN_ERROR_CATEGORY_CHOICES,
+    DESIGN_ERROR_CATEGORY_LABELS,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
     user_can_manage_site_groups, user_can_qc_design, user_can_request_design_change,
     user_can_view_design, user_can_view_site_groups, user_has_design_head_authority,
     user_is_assigned_designer, user_is_design_head, user_is_design_head_deputy,
+    user_can_qc_gate_design, user_can_head_gate_design, user_is_design_qc,
+    user_can_view_design_qc_dashboard,
 )
 
 logger = logging.getLogger(__name__)
@@ -124,9 +129,47 @@ KIND_LABELS = dict(DESIGN_FILE_KIND_CHOICES)
 # `qc_failed` is included: the package is back with the designer, and a PM who spots a
 # requirement change at that moment should not have to wait for the next QC round to
 # say so. `released` is excluded, which is the close condition standing in for the lock.
+#
+# PART 9 added the two waiting-room statuses. `awaiting_head_qc` genuinely needs to be
+# here: the package has passed Design QC and is sitting with the Head, `qc_started_at` is
+# set and the site is not released, so the window is open by every term of the rule above.
+# `awaiting_head_arka` is included for completeness and is unreachable in practice —
+# `qc_started_at` is still null at the Arka stage, so the check below refuses it first.
 CHANGE_REQUEST_STATUSES = (DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_IN_DESIGN,
                            DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED,
-                           DESIGN_ARTIFACTS_UPLOADED)
+                           DESIGN_ARTIFACTS_UPLOADED,
+                           DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC)
+
+
+# ── Part 9 ─────────────────────────────────────────────────────────────────────
+# THE TWO GATES, AND THE FOUR CHECKS EVERY VERDICT ENDPOINT MAKES.
+#
+# Design QC reviews first, the Design Head second. Both the Arka and the QC package go
+# through both gates, and all four verdict endpoints enforce the same four conditions
+# server-side, so a direct POST is refused exactly as a hidden button would have been:
+#
+#   1. the actor holds the correct FLAG for that gate      permissions.user_can_*_gate_design
+#   2. the actor is not assignment.assigned_to             (same helpers — decision 3)
+#   3. the actor did not record the OTHER gate's verdict   _other_gate_actor_conflict()
+#      on THIS artifact                                    (decision 2)
+#   4. the PRECEDING gate has passed                       the per-artifact target resolvers
+#
+# Checks 1 and 2 are about a user and live in permissions.py. Checks 3 and 4 are about a
+# ROW and live here, because they need the ArkaSubmission or DesignAttempt in hand.
+#
+# WHY CHECK 3 EXISTS AT ALL: one person holding both flags could otherwise clear a site
+# with two clicks, and two clicks by one person is not a second gate. The refusal is per
+# ARTIFACT, not per user — a dual-flag holder may still record the Head verdict on a site
+# whose QC verdict somebody else recorded, which is the normal way a Head with the QC flag
+# actually works.
+#
+# STATUS AFTER A HEAD ARKA APPROVAL IS `arka_submitted`, NOT a new value. Part 3 settled
+# that there is no status for "Arka approved, artifacts outstanding" — the verdict on the
+# current Arka disambiguates, and design_metrics._classify() already splits the two. Part 9
+# keeps that exactly: QC approval moves the site to `awaiting_head_arka`, and the Head's
+# approval returns it to `arka_submitted`, now carrying head_verdict='approved'. The site
+# is not going backwards; `awaiting_head_arka` means strictly "the Head has not ruled", so
+# the site must leave it the moment he does.
 
 
 # ---------------------------------------------------------------------------
@@ -973,21 +1016,33 @@ def _current_arka(attempt):
 
 
 def _approved_arka(attempt):
-    """The current Arka ONLY IF it has been approved. This is the object CAD and BOQ
+    """The current Arka ONLY IF it has cleared BOTH gates. This is the object CAD and BOQ
     artifacts pair to — deliberately not "the most recently approved version", so a
-    superseded approval can never become the parent of a new artifact."""
+    superseded approval can never become the parent of a new artifact.
+
+    PART 9 MOVED THE TEST FROM `verdict` TO `head_verdict`, and that is the whole change
+    to the Part 3 gate. `verdict='approved'` now means only that Design QC passed it; an
+    Arka the Head has not yet approved is not a layout anybody may build against, so CAD
+    and BOQ stay locked until the second gate clears. Because the serial rule guarantees
+    head_verdict can only be 'approved' after verdict is, testing the Head field alone is
+    sufficient and there is no need to test both.
+    """
     arka = _current_arka(attempt)
-    if arka is not None and arka.verdict == ARKA_APPROVED:
+    if arka is not None and arka.head_verdict == ARKA_APPROVED:
         return arka
     return None
 
 
 def _require_approved_arka(attempt):
-    """Return the approved current Arka, or raise ValueError with the message the
+    """Return the fully approved current Arka, or raise ValueError with the message the
     designer needs to see.
 
-    Single chokepoint for settled decision 1. Every artifact write path calls this;
-    none of them re-derives the rule, so the three call sites cannot drift.
+    Single chokepoint for settled decision 1. Every artifact write path calls this; none
+    of them re-derives the rule, so the call sites cannot drift.
+
+    The messages name WHICH gate is outstanding, because "waiting for approval" is not
+    actionable when there are two approvers — the designer needs to know whether to chase
+    Design QC or the Design Head.
     """
     if attempt is None:
         raise ValueError('no design attempt has been opened yet — submit an Arka first')
@@ -996,12 +1051,66 @@ def _require_approved_arka(attempt):
         raise ValueError('no Arka has been submitted yet. CAD and BOQ can only be '
                          'uploaded against an approved Arka')
     if arka.verdict == ARKA_PENDING:
-        raise ValueError(f'Arka v{arka.version} is still awaiting the Design Head\'s '
-                         f'approval. CAD and BOQ cannot be uploaded until it is approved')
+        raise ValueError(f'Arka v{arka.version} is still awaiting the Design QC review. '
+                         f'CAD and BOQ cannot be uploaded until it is approved')
     if arka.verdict == ARKA_REJECTED:
-        raise ValueError(f'Arka v{arka.version} was rejected. Submit a new Arka version '
-                         f'and have it approved before uploading CAD or BOQ')
+        raise ValueError(f'Arka v{arka.version} was rejected at Design QC. Submit a new '
+                         f'Arka version and have it approved before uploading CAD or BOQ')
+    if arka.head_verdict == ARKA_PENDING:
+        raise ValueError(f'Arka v{arka.version} passed Design QC but is still awaiting '
+                         f'the Design Head\'s approval. CAD and BOQ cannot be uploaded '
+                         f'until the Head has approved it')
+    if arka.head_verdict == ARKA_REJECTED:
+        raise ValueError(f'Arka v{arka.version} was rejected by the Design Head. Submit a '
+                         f'new Arka version and have it approved before uploading CAD or BOQ')
     return arka
+
+
+# ---------------------------------------------------------------------------
+# Part 9 — shared gate enforcement
+# ---------------------------------------------------------------------------
+
+def _other_gate_actor_conflict(profile, other_gate_reviewer_id):
+    """Settled decision 2: one person cannot record BOTH verdicts on the same artifact.
+
+    `other_gate_reviewer_id` is the *_reviewed_by_id already stored by the opposite gate
+    on this exact row. Returns True if it is this same person, which is the refusal case.
+
+    PER ARTIFACT, NOT PER USER. Somebody holding both flags is entirely legitimate and is
+    refused only the SECOND verdict on an artifact they have already ruled on — they may
+    record either gate's verdict on any other site, and may record the Head verdict here
+    if a different person passed it through Design QC. A flag says what you may be; this
+    says what you may not do twice.
+
+    A null reviewer (no verdict recorded at that gate yet, or a historical row backfilled
+    by migration 0055 with head_reviewed_by left null) compares False and admits the
+    actor — correct in both cases, because no person is being asked to agree with
+    themselves.
+    """
+    if profile is None or other_gate_reviewer_id is None:
+        return False
+    return other_gate_reviewer_id == profile.pk
+
+
+def _posted_error_category(request):
+    """Return (category, error_message). The category is MANDATORY on every rejection and
+    every failure, at BOTH gates (settled decision 7).
+
+    Validated against DESIGN_ERROR_CATEGORIES rather than trusted, because the field is
+    not CHECK-constrained (see the note on DesignAttempt.head_failure_category) — this
+    function is the only thing standing between a hand-crafted POST and an uncountable
+    value in a column the rework multiplier reads.
+
+    ONE category, never several. A multi-select would let a reviewer tag a rejection with
+    four causes, and a rejection with four causes cannot be counted under any of them.
+    """
+    category = (request.POST.get('error_category') or '').strip()
+    if not category:
+        return '', ('an error category is required — "rejected" on its own cannot be '
+                    'counted, coached against, or told apart from a bad survey')
+    if category not in DESIGN_ERROR_CATEGORIES:
+        return '', 'that error category is not recognised — please choose one from the list'
+    return category, ''
 
 
 def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
@@ -1079,7 +1188,8 @@ def _workspace_context(project, assignment):
         'arka':           arka,
         'arka_approved':  _approved_arka(attempt) is not None,
         'arka_history':   (list(attempt.arka_submissions.select_related(
-                               'submitted_by__user', 'reviewed_by__user')
+                               'submitted_by__user', 'reviewed_by__user',
+                               'head_reviewed_by__user')
                                .order_by('-version')) if attempt else []),
         'files':          files,
         # Reports the PROGRESSION rule, not "any CAD-ish file exists" — a chip saying
@@ -1142,24 +1252,63 @@ def design_site_workspace(request, project_id):
 
 @login_required
 def design_head_review(request, project_id):
-    """The Design Head's Arka review screen for one site: the pending Arka with its
-    capacity and link, the approve and reject-with-reason actions, the full version
-    history, and the artifacts submitted so far."""
-    project = _opex_site(project_id)
-    if not user_has_design_head_authority(request.user):
-        return HttpResponseForbidden('Design Head only.')
+    """The Arka review screen for one site, serving BOTH gates (Part 9).
 
+    One screen rather than two, because the reviewers are looking at exactly the same
+    thing — the Arka, its capacity, its link and its version history. What differs is
+    which action they may take, and that is decided per gate below and rendered as at most
+    one action block. A user with neither authority gets the read-only view if they can
+    see the site at all.
+
+    `can_qc_verdict` and `can_head_verdict` are mutually exclusive by construction: they
+    require different statuses. Each additionally carries the settled-decision-2 check, so
+    a dual-flag holder who recorded gate 1 sees no gate-2 form — the refusal is visible
+    before the click, and re-checked server-side when it happens anyway.
+    """
+    project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         raise Http404('No design assignment for this site.')
 
+    can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
+    can_head_gate = user_can_head_gate_design(request.user, assignment)
+    if not (can_qc_gate or can_head_gate or user_has_design_head_authority(request.user)):
+        return HttpResponseForbidden(
+            'The Arka review screen is for Design QC, the Design Head, or his named deputy.')
+
     ctx = _workspace_context(project, assignment)
     arka = ctx['arka']
-    ctx['can_verdict'] = bool(
-        arka is not None
+    profile = getattr(request.user, 'profile', None)
+
+    # Gate 1 — Design QC owes a verdict.
+    ctx['can_qc_verdict'] = bool(
+        can_qc_gate
+        and arka is not None
         and arka.verdict == ARKA_PENDING
         and assignment.status == DESIGN_ARKA_SUBMITTED
+        and not _other_gate_actor_conflict(profile, arka.head_reviewed_by_id)
     )
+    # Gate 2 — the Head owes a verdict on what QC passed.
+    ctx['can_head_verdict'] = bool(
+        can_head_gate
+        and arka is not None
+        and arka.verdict == ARKA_APPROVED
+        and arka.head_verdict == ARKA_PENDING
+        and assignment.status == DESIGN_AWAITING_HEAD_ARKA
+        and not _other_gate_actor_conflict(profile, arka.reviewed_by_id)
+    )
+    # Rendered as an explanation when the Head is looking at an Arka he passed through
+    # Design QC himself. Without it the screen simply shows no buttons and he has no way
+    # to tell "already decided" from "you are refused, and here is why".
+    ctx['blocked_by_own_qc_verdict'] = bool(
+        can_head_gate
+        and arka is not None
+        and assignment.status == DESIGN_AWAITING_HEAD_ARKA
+        and arka.head_verdict == ARKA_PENDING
+        and _other_gate_actor_conflict(profile, arka.reviewed_by_id)
+    )
+    ctx['error_categories'] = DESIGN_ERROR_CATEGORY_CHOICES
+    ctx['is_design_qc']     = can_qc_gate
     return render(request, 'projects/design/head_review.html', ctx)
 
 
@@ -1251,40 +1400,74 @@ def design_arka_submit(request, project_id):
 # ---------------------------------------------------------------------------
 
 def _verdict_target(request, project):
-    """The Arka a verdict may be recorded against, or a (None, message) pair.
+    """The Arka a DESIGN QC (gate 1) verdict may be recorded against, or an error message.
 
-    Shared by approve and reject so the two cannot disagree about which submission is
-    reviewable. The designer cannot reach either endpoint: both are gated on
-    `user_has_design_head_authority` by their callers, so nobody can approve their own Arka.
+    Shared by the QC approve and reject views so the two cannot disagree about which
+    submission is reviewable. The designer cannot reach either endpoint: both are gated on
+    `user_can_qc_gate_design`, which refuses the assigned designer.
     """
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         return None, None, f'{project.project_id}: no design assignment for this site.'
     if assignment.status != DESIGN_ARKA_SUBMITTED:
-        return None, None, (f'{project.project_id}: there is no Arka awaiting a verdict '
-                            f'(status "{assignment.get_status_display()}").')
+        return None, None, (f'{project.project_id}: there is no Arka awaiting a Design QC '
+                            f'verdict (status "{assignment.get_status_display()}").')
     attempt = _current_attempt(assignment)
     arka = _current_arka(attempt)
     if arka is None:
         return None, None, f'{project.project_id}: no current Arka submission found.'
     if arka.verdict != ARKA_PENDING:
         return None, None, (f'{project.project_id}: Arka v{arka.version} has already '
-                            f'been {arka.get_verdict_display().lower()}.')
+                            f'been {arka.get_verdict_display().lower()} by Design QC.')
+    return assignment, arka, None
+
+
+def _head_verdict_target(request, project):
+    """The Arka a DESIGN HEAD (gate 2) verdict may be recorded against, or an error message.
+
+    THIS IS WHERE THE SERIAL RULE IS ENFORCED for the Arka. The status test does the work:
+    `awaiting_head_arka` is reachable only from a Design QC approval, so a Head arriving
+    before QC has ruled finds the site still at `arka_submitted` and is refused with a
+    message naming what he is waiting for. The explicit `verdict != ARKA_APPROVED` test
+    below is a belt-and-braces re-check against the row itself rather than the cached
+    status, in the same spirit as _package_is_complete().
+    """
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return None, None, f'{project.project_id}: no design assignment for this site.'
+    if assignment.status != DESIGN_AWAITING_HEAD_ARKA:
+        return None, None, (
+            f'{project.project_id}: there is no Arka awaiting your verdict — Design QC '
+            f'must approve it first (status "{assignment.get_status_display()}").')
+    attempt = _current_attempt(assignment)
+    arka = _current_arka(attempt)
+    if arka is None:
+        return None, None, f'{project.project_id}: no current Arka submission found.'
+    if arka.verdict != ARKA_APPROVED:
+        return None, None, (f'{project.project_id}: Arka v{arka.version} has not been '
+                            f'approved by Design QC, so there is nothing for you to '
+                            f'countersign.')
+    if arka.head_verdict != ARKA_PENDING:
+        return None, None, (f'{project.project_id}: Arka v{arka.version} has already '
+                            f'been {arka.get_head_verdict_display().lower()} by the '
+                            f'Design Head.')
     return assignment, arka, None
 
 
 @login_required
 def design_arka_approve(request, project_id):
-    """The Design HEAD approves the current Arka version.
+    """GATE 1 — DESIGN QC approves the current Arka version.
 
-    Status deliberately STAYS at `arka_submitted`: approval unlocks CAD and BOQ upload,
-    it does not complete the package. The next status is `artifacts_uploaded` and it is
-    reached by _maybe_advance_to_artifacts_uploaded(), not here — no new status value
-    is invented for "Arka approved, artifacts outstanding".
+    Moves the site to `awaiting_head_arka`. It does NOT unlock CAD and BOQ upload: that
+    now needs head_verdict='approved' (see _approved_arka), which is the Part 9 change to
+    the Part 3 gate.
     """
     project = _opex_site(project_id)
-    if not user_has_design_head_authority(request.user):
-        return HttpResponseForbidden('Design Head only.')
+    assignment_pre = getattr(project, 'design_assignment', None)
+    if not user_can_qc_gate_design(request.user, assignment_pre):
+        return HttpResponseForbidden(
+            'The Arka Design QC review is for a Design QC reviewer, and never for the '
+            'designer allocated to this site.')
     if request.method != 'POST':
         return redirect('design_head_review', project_id=project.project_id)
 
@@ -1294,17 +1477,150 @@ def design_arka_approve(request, project_id):
         return redirect('design_head_review', project_id=project.project_id)
 
     profile = request.user.profile
+    # Decision 2, gate 1 side: refuse if this same person already recorded the HEAD
+    # verdict on this Arka. Unreachable through the UI (the Head verdict cannot be first)
+    # but checked anyway — every gate enforces the rule from its own side, so neither
+    # depends on the other having run.
+    if _other_gate_actor_conflict(profile, arka.head_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you have already recorded the '
+                                f'Design Head verdict on Arka v{arka.version}. Two '
+                                f'verdicts by one person is not a second review.')
+        return redirect('design_head_review', project_id=project.project_id)
+
     with transaction.atomic():
         arka.verdict     = ARKA_APPROVED
         arka.reviewed_by = profile
         arka.reviewed_at = timezone.now()
         arka.save(update_fields=['verdict', 'reviewed_by', 'reviewed_at'])
+        assignment.status = DESIGN_AWAITING_HEAD_ARKA
+        assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
-                     f'Arka v{arka.version} approved ({arka.capacity_kw} kW)',
+                     f'Arka v{arka.version} passed Design QC ({arka.capacity_kw} kW) — '
+                     f'awaiting Design Head approval',
                      entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_approved')
-        # A re-approval on an attempt that already carries CAD and a submitted BOQ
-        # would otherwise leave the status behind; evaluating here costs one query.
+                     action_code='design_arka_qc_approved')
+
+    messages.success(request, f'{project.project_id}: Arka v{arka.version} passed Design '
+                              f'QC — it now needs the Design Head\'s approval before the '
+                              f'designer can upload CAD or enter the BOQ.')
+    return redirect('design_head_review', project_id=project.project_id)
+
+
+@login_required
+def design_arka_reject(request, project_id):
+    """GATE 1 — DESIGN QC rejects the current Arka version.
+
+    A reason AND an error category are both MANDATORY (settled decision 7). The reason is
+    checked here so the designer gets a usable message, and the Part 1 CHECK constraint
+    `rejection_reason_required_when_rejected` enforces the same rule at the database level
+    for any writer that bypasses this view. The category is view-enforced only — see the
+    note on DesignAttempt.head_failure_category for why it is not a CHECK.
+
+    The rejected submission stays is_current=True — it is the record of what was
+    rejected — and is stood down only when the designer submits the replacement.
+    """
+    project = _opex_site(project_id)
+    assignment_pre = getattr(project, 'design_assignment', None)
+    if not user_can_qc_gate_design(request.user, assignment_pre):
+        return HttpResponseForbidden(
+            'The Arka Design QC review is for a Design QC reviewer, and never for the '
+            'designer allocated to this site.')
+    if request.method != 'POST':
+        return redirect('design_head_review', project_id=project.project_id)
+
+    assignment, arka, error = _verdict_target(request, project)
+    if error:
+        messages.error(request, error)
+        return redirect('design_head_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, arka.head_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you have already recorded the '
+                                f'Design Head verdict on Arka v{arka.version}. Two '
+                                f'verdicts by one person is not a second review.')
+        return redirect('design_head_review', project_id=project.project_id)
+
+    reason = (request.POST.get('rejection_reason') or '').strip()
+    if not reason:
+        messages.error(request, f'{project.project_id}: a rejection reason is required '
+                                f'— the designer cannot act on "rejected" alone.')
+        return redirect('design_head_review', project_id=project.project_id)
+
+    category, cat_error = _posted_error_category(request)
+    if cat_error:
+        messages.error(request, f'{project.project_id}: {cat_error}.')
+        return redirect('design_head_review', project_id=project.project_id)
+
+    with transaction.atomic():
+        arka.verdict             = ARKA_REJECTED
+        arka.rejection_reason    = reason
+        arka.qc_failure_category = category
+        arka.reviewed_by         = profile
+        arka.reviewed_at         = timezone.now()
+        arka.save(update_fields=['verdict', 'rejection_reason', 'qc_failure_category',
+                                 'reviewed_by', 'reviewed_at'])
+        assignment.status = DESIGN_ARKA_REJECTED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Arka v{arka.version} rejected at Design QC '
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
+                     entity_type='ArkaSubmission', entity_id=arka.pk,
+                     action_code='design_arka_qc_rejected')
+
+    messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected at '
+                              f'Design QC — the designer has been asked to submit a new '
+                              f'version.')
+    return redirect('design_head_review', project_id=project.project_id)
+
+
+@login_required
+def design_arka_head_approve(request, project_id):
+    """GATE 2 — the DESIGN HEAD approves an Arka that Design QC has already passed.
+
+    THIS is the approval that unlocks CAD and BOQ upload. Status returns to
+    `arka_submitted`, which carries head_verdict='approved' and therefore classifies as
+    "Arka approved, artifacts incomplete" — see the Part 9 note at the top of this module
+    for why no new status is invented for that state.
+    """
+    project = _opex_site(project_id)
+    assignment_pre = getattr(project, 'design_assignment', None)
+    if not user_can_head_gate_design(request.user, assignment_pre):
+        return HttpResponseForbidden(
+            'The Design Head Arka review is for the Design Head or his named deputy, and '
+            'never for the designer allocated to this site.')
+    if request.method != 'POST':
+        return redirect('design_head_review', project_id=project.project_id)
+
+    assignment, arka, error = _head_verdict_target(request, project)
+    if error:
+        messages.error(request, error)
+        return redirect('design_head_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, arka.reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you recorded the Design QC verdict '
+                                f'on Arka v{arka.version} yourself, so you cannot also '
+                                f'countersign it as Design Head. It needs a second pair '
+                                f'of eyes.')
+        return redirect('design_head_review', project_id=project.project_id)
+
+    with transaction.atomic():
+        arka.head_verdict     = ARKA_APPROVED
+        arka.head_reviewed_by = profile
+        arka.head_reviewed_at = timezone.now()
+        # QC approved and the Head approved — the gates agree, so no overturn.
+        arka.head_overturned_qc = False
+        arka.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
+                                 'head_overturned_qc'])
+        assignment.status = DESIGN_ARKA_SUBMITTED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Arka v{arka.version} approved by the Design Head '
+                     f'({arka.capacity_kw} kW)',
+                     entity_type='ArkaSubmission', entity_id=arka.pk,
+                     action_code='design_arka_head_approved')
+        # A re-approval on an attempt that already carries CAD and a submitted BOQ would
+        # otherwise leave the status behind; evaluating here costs one query.
         _maybe_advance_to_artifacts_uploaded(
             assignment, _current_attempt(assignment), profile)
 
@@ -1314,26 +1630,37 @@ def design_arka_approve(request, project_id):
 
 
 @login_required
-def design_arka_reject(request, project_id):
-    """The Design HEAD rejects the current Arka version. A reason is MANDATORY.
+def design_arka_head_reject(request, project_id):
+    """GATE 2 — the DESIGN HEAD rejects an Arka that Design QC passed.
 
-    The reason is checked here so the designer gets a usable message, and the Part 1
-    CHECK constraint `rejection_reason_required_when_rejected` enforces the same rule
-    at the database level for any writer that bypasses this view. Both were verified
-    this session.
+    Reason and category are both mandatory, exactly as at gate 1, and the site returns to
+    the designer identically (settled decision 5). The two rejections are RECORDED
+    distinctly — different columns, different action_code — so "how often does the Head
+    reject what QC passed" stays answerable.
 
-    The rejected submission stays is_current=True — it is the record of what was
-    rejected — and is stood down only when the designer submits the replacement.
+    THIS IS THE OVERTURN CASE for an Arka: QC approved it and the Head did not, so
+    head_overturned_qc is set. See the note on the field for why it is stored rather than
+    derived.
     """
     project = _opex_site(project_id)
-    if not user_has_design_head_authority(request.user):
-        return HttpResponseForbidden('Design Head only.')
+    assignment_pre = getattr(project, 'design_assignment', None)
+    if not user_can_head_gate_design(request.user, assignment_pre):
+        return HttpResponseForbidden(
+            'The Design Head Arka review is for the Design Head or his named deputy, and '
+            'never for the designer allocated to this site.')
     if request.method != 'POST':
         return redirect('design_head_review', project_id=project.project_id)
 
-    assignment, arka, error = _verdict_target(request, project)
+    assignment, arka, error = _head_verdict_target(request, project)
     if error:
         messages.error(request, error)
+        return redirect('design_head_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, arka.reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you recorded the Design QC verdict '
+                                f'on Arka v{arka.version} yourself, so you cannot also '
+                                f'rule on it as Design Head. It needs a second pair of eyes.')
         return redirect('design_head_review', project_id=project.project_id)
 
     reason = (request.POST.get('rejection_reason') or '').strip()
@@ -1342,23 +1669,35 @@ def design_arka_reject(request, project_id):
                                 f'— the designer cannot act on "rejected" alone.')
         return redirect('design_head_review', project_id=project.project_id)
 
-    profile = request.user.profile
+    category, cat_error = _posted_error_category(request)
+    if cat_error:
+        messages.error(request, f'{project.project_id}: {cat_error}.')
+        return redirect('design_head_review', project_id=project.project_id)
+
     with transaction.atomic():
-        arka.verdict          = ARKA_REJECTED
-        arka.rejection_reason = reason
-        arka.reviewed_by      = profile
-        arka.reviewed_at      = timezone.now()
-        arka.save(update_fields=['verdict', 'rejection_reason',
-                                 'reviewed_by', 'reviewed_at'])
+        arka.head_verdict           = ARKA_REJECTED
+        arka.head_rejection_reason  = reason
+        arka.head_failure_category  = category
+        arka.head_reviewed_by       = profile
+        arka.head_reviewed_at       = timezone.now()
+        # QC approved, the Head rejected — the gates disagree. This is the signal
+        # settled decision 6 exists to capture.
+        arka.head_overturned_qc     = True
+        arka.save(update_fields=['head_verdict', 'head_rejection_reason',
+                                 'head_failure_category', 'head_reviewed_by',
+                                 'head_reviewed_at', 'head_overturned_qc'])
         assignment.status = DESIGN_ARKA_REJECTED
         assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
-                     f'Arka v{arka.version} rejected: {reason}',
+                     f'Arka v{arka.version} rejected by the Design Head, overturning '
+                     f'Design QC '
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
                      entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_rejected')
+                     action_code='design_arka_head_rejected')
 
-    messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected — '
-                              f'the designer has been asked to submit a new version.')
+    messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected — the '
+                              f'designer has been asked to submit a new version, and the '
+                              f'Design QC approval has been recorded as overturned.')
     return redirect('design_head_review', project_id=project.project_id)
 
 
@@ -1671,40 +2010,55 @@ def _package_is_complete(attempt):
 # 12. QC review
 # ---------------------------------------------------------------------------
 
-def _qc_guard(request, project, required_statuses):
-    """Shared entry checks for the three QC endpoints.
+def _qc_guard(request, project, required_statuses, gate='qc'):
+    """Shared entry checks for the five package-review endpoints, at either gate.
 
     Returns (assignment, attempt, error), where `error` is:
-        None  -> refuse with 403. The caller has no QC authority here.
+        None  -> refuse with 403. The caller has no authority at this gate.
         ''    -> proceed.
         str   -> refuse with this message and a redirect. Authorised, wrong state.
 
+    `gate` selects the predicate: 'qc' -> user_can_qc_gate_design (the is_design_qc flag),
+    'head' -> user_can_head_gate_design (Head authority or named deputy). Both refuse the
+    assigned designer, so a designer reviewing their own package is refused identically at
+    all five endpoints regardless of what flags they hold.
+
     ORDER IS DELIBERATE: authority is decided FIRST, before anything about the site's
-    state is revealed. A user with no QC authority gets an identical 403 whether the
-    site is mid-review, already released, or has no design assignment at all — the
+    state is revealed. A user with no authority at this gate gets an identical 403 whether
+    the site is mid-review, already released, or has no design assignment at all — the
     refusal never doubles as a state oracle.
 
-    The authority question is asked through user_can_qc_design(), which is where the
-    self-QC exclusion lives, so a designer reviewing their own site is refused
-    identically at all three endpoints — including when that designer is the Head or
-    his named deputy.
+    The SERIAL RULE is carried by `required_statuses`, not by a separate test: the Head's
+    endpoints require `awaiting_head_qc`, which is reachable only from a Design QC pass.
     """
     assignment = getattr(project, 'design_assignment', None)
 
-    # `assignment` may be None here; user_can_qc_design() returns False for that, which
-    # is the correct answer — there is nothing to QC and nobody may QC it.
-    if not user_can_qc_design(request.user, assignment):
+    # `assignment` may be None here; both predicates return False for that, which is the
+    # correct answer — there is nothing to review and nobody may review it.
+    allowed = (user_can_head_gate_design(request.user, assignment) if gate == 'head'
+               else user_can_qc_gate_design(request.user, assignment))
+    if not allowed:
         return None, None, None
     if assignment.status not in required_statuses:
         return assignment, None, (
-            f'{project.project_id}: QC is not available at this stage '
+            f'{project.project_id}: this review is not available at this stage '
             f'(status "{assignment.get_status_display()}").')
     return assignment, _current_attempt(assignment), ''
 
 
+#: The 403 text for each gate. Kept together so the two refusals stay parallel and neither
+#: leaks which gate the site is actually sitting at.
+_GATE_FORBIDDEN = {
+    'qc':   ('Package Design QC is for a Design QC reviewer, and never for the designer '
+             'allocated to this site.'),
+    'head': ('The Design Head package review is for the Design Head or his named deputy, '
+             'and never for the designer allocated to this site.'),
+}
+
+
 @login_required
 def design_qc_start(request, project_id):
-    """Head or deputy takes a completed package into review.
+    """GATE 1 — a DESIGN QC reviewer takes a completed package into review.
 
     `artifacts_uploaded` -> `in_qc`, and `qc_started_at` is stamped on the attempt.
 
@@ -1719,9 +2073,7 @@ def design_qc_start(request, project_id):
     project = _opex_site(project_id)
     assignment, attempt, error = _qc_guard(request, project, (DESIGN_ARTIFACTS_UPLOADED,))
     if error is None:
-        return HttpResponseForbidden(
-            'QC is for the Design Head or his named deputy, and never for the designer '
-            'allocated to this site.')
+        return HttpResponseForbidden(_GATE_FORBIDDEN['qc'])
     if request.method != 'POST':
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
@@ -1751,88 +2103,112 @@ def design_qc_start(request, project_id):
     return redirect('design_qc_review', project_id=project.project_id)
 
 
+def _blocking_change_request(project, attempt):
+    """The refusal message if an unresolved PM change request blocks a verdict, else ''.
+
+    An unresolved change request means this package is already known to need rework, so
+    judging it would record a verdict about a design nobody intends to build. Applies
+    identically at BOTH gates, which is why it is a function rather than four copies.
+    """
+    if _open_change_requests(attempt).exists():
+        return (f'{project.project_id}: a PM change request on this attempt is still '
+                f'unresolved — it must be actioned before a verdict can be recorded.')
+    return ''
+
+
 @login_required
 def design_qc_pass(request, project_id):
-    """QC passes: the attempt closes, the site is released.
+    """GATE 1 — DESIGN QC passes the package. THE SITE IS NOT RELEASED BY THIS.
 
-    Release sets `released_at` / `released_by` on the assignment and moves it to
-    `released`. THAT IS ALL IT DOES (settled decision 9). It does not lock, group or
-    hand over the BOQ — those are Part 6 and reading anything into `released` beyond
-    "design is finished" would pre-empt decisions that have not been made.
+    PART 9 CHANGED WHAT THIS DOES. In Part 4 a QC pass released the site; it now hands the
+    package to the Design Head. `in_qc` -> `awaiting_head_qc`, `head_started_at` is
+    stamped, and release happens at design_head_qc_pass() or not at all.
+
+    The attempt is deliberately NOT closed here. It is still live — the Head has not
+    ruled — and closing it would make the package look finished to every surface that
+    reads closed_at.
     """
     project = _opex_site(project_id)
     assignment, attempt, error = _qc_guard(request, project, (DESIGN_IN_QC,))
     if error is None:
-        return HttpResponseForbidden(
-            'QC is for the Design Head or his named deputy, and never for the designer '
-            'allocated to this site.')
+        return HttpResponseForbidden(_GATE_FORBIDDEN['qc'])
     if request.method != 'POST':
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
         return redirect('design_qc_queue')
 
-    # An unresolved change request means this package is already known to need rework.
-    # Judging it anyway would record a verdict about a design nobody intends to build.
-    open_crs = _open_change_requests(attempt)
-    if open_crs.exists():
-        messages.error(request, f'{project.project_id}: a PM change request on this '
-                                f'attempt is still unresolved — it must be actioned '
-                                f'before a QC verdict can be recorded.')
+    blocked = _blocking_change_request(project, attempt)
+    if blocked:
+        messages.error(request, blocked)
         return redirect('design_qc_review', project_id=project.project_id)
 
     profile = request.user.profile
+    # Decision 2, gate 1 side. Unreachable through the UI but enforced from both sides.
+    if _other_gate_actor_conflict(profile, attempt.head_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you have already recorded the '
+                                f'Design Head verdict on attempt {attempt.attempt_number}.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
     now = timezone.now()
     with transaction.atomic():
         attempt.qc_verdict     = QC_PASSED
         attempt.qc_reviewed_by = profile
         attempt.qc_reviewed_at = now
-        attempt.closed_at      = now
+        attempt.head_started_at = now
         attempt.save(update_fields=['qc_verdict', 'qc_reviewed_by', 'qc_reviewed_at',
-                                    'closed_at'])
-        assignment.released_at = now
-        assignment.released_by = profile
-        assignment.status      = DESIGN_RELEASED
-        assignment.save(update_fields=['released_at', 'released_by', 'status', 'updated_at'])
+                                    'head_started_at'])
+        assignment.status = DESIGN_AWAITING_HEAD_QC
+        assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
-                     f'QC passed on attempt {attempt.attempt_number} — design released',
+                     f'Design QC passed attempt {attempt.attempt_number} — awaiting '
+                     f'Design Head review',
                      entity_type='DesignAttempt', entity_id=attempt.pk,
                      action_code='design_qc_passed')
 
-    messages.success(request, f'{project.project_id}: QC passed — design released on '
-                              f'attempt {attempt.attempt_number}.')
+    messages.success(request, f'{project.project_id}: Design QC passed on attempt '
+                              f'{attempt.attempt_number} — the package now needs the '
+                              f'Design Head\'s review before the site can be released.')
     return redirect('design_qc_review', project_id=project.project_id)
 
 
 @login_required
 def design_qc_fail(request, project_id):
-    """QC fails: the attempt closes with remarks, and attempt N+1 opens for rework.
+    """GATE 1 — DESIGN QC fails the package: the attempt closes and N+1 opens for rework.
 
-    `qc_remarks` is mandatory. Checked here so the reviewer gets a usable message, and
-    enforced underneath by the Part 1 CHECK constraint
-    `qc_remarks_required_when_qc_failed` for any writer that bypasses this view. A
-    failure with no remarks is not a review — the designer has nothing to act on.
+    `qc_remarks` AND `qc_failure_category` are both mandatory (settled decision 7). The
+    remarks are checked here so the reviewer gets a usable message, and enforced
+    underneath by the Part 1 CHECK constraint `qc_remarks_required_when_qc_failed` for any
+    writer that bypasses this view. The category is view-enforced only.
 
-    The new attempt starts at `in_design` and the designer resubmits an Arka. Allocation,
-    survey and the approved due date are all preserved (settled decision 2) — see
-    _open_next_attempt().
+    A QC FAILURE ENDS THE ATTEMPT — the Head never sees it, and head_verdict stays
+    'pending' forever on this row, meaning "not judged" exactly as it does on an attempt
+    closed by a PM change request.
+
+    THE CATEGORY'S GROUP DECIDES WHOSE REWORK THIS IS. A Group A failure counts toward the
+    designer's multiplier; Group B and C do not (settled decision 8). Nothing is computed
+    here — the category is stored, and design_metrics reads it back through
+    error_category_group().
     """
     project = _opex_site(project_id)
     assignment, attempt, error = _qc_guard(request, project, (DESIGN_IN_QC,))
     if error is None:
-        return HttpResponseForbidden(
-            'QC is for the Design Head or his named deputy, and never for the designer '
-            'allocated to this site.')
+        return HttpResponseForbidden(_GATE_FORBIDDEN['qc'])
     if request.method != 'POST':
         return redirect('design_qc_review', project_id=project.project_id)
     if error:
         messages.error(request, error)
         return redirect('design_qc_queue')
 
-    if _open_change_requests(attempt).exists():
-        messages.error(request, f'{project.project_id}: a PM change request on this '
-                                f'attempt is still unresolved — it must be actioned '
-                                f'before a QC verdict can be recorded.')
+    blocked = _blocking_change_request(project, attempt)
+    if blocked:
+        messages.error(request, blocked)
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, attempt.head_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you have already recorded the '
+                                f'Design Head verdict on attempt {attempt.attempt_number}.')
         return redirect('design_qc_review', project_id=project.project_id)
 
     remarks = (request.POST.get('qc_remarks') or '').strip()
@@ -1841,30 +2217,177 @@ def design_qc_fail(request, project_id):
                                 f'a package — the designer cannot act on "failed" alone.')
         return redirect('design_qc_review', project_id=project.project_id)
 
-    profile = request.user.profile
+    category, cat_error = _posted_error_category(request)
+    if cat_error:
+        messages.error(request, f'{project.project_id}: {cat_error}.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
     now = timezone.now()
     with transaction.atomic():
-        attempt.qc_verdict     = QC_FAILED
-        attempt.qc_remarks     = remarks
-        attempt.qc_reviewed_by = profile
-        attempt.qc_reviewed_at = now
-        attempt.save(update_fields=['qc_verdict', 'qc_remarks', 'qc_reviewed_by',
-                                    'qc_reviewed_at'])
+        attempt.qc_verdict          = QC_FAILED
+        attempt.qc_remarks          = remarks
+        attempt.qc_failure_category = category
+        attempt.qc_reviewed_by      = profile
+        attempt.qc_reviewed_at      = now
+        attempt.save(update_fields=['qc_verdict', 'qc_remarks', 'qc_failure_category',
+                                    'qc_reviewed_by', 'qc_reviewed_at'])
         # Status passes THROUGH qc_failed on its way back to in_design. Recorded as its
         # own log line so the failure is visible in the trail even though the stored
         # status moves straight on to the new attempt's in_design.
         assignment.status = DESIGN_QC_FAILED
         assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
-                     f'QC failed on attempt {attempt.attempt_number}: {remarks}',
+                     f'Design QC failed attempt {attempt.attempt_number} '
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {remarks}',
                      entity_type='DesignAttempt', entity_id=attempt.pk,
                      action_code='design_qc_failed')
 
         new_attempt = _open_next_attempt(
             assignment, ATTEMPT_REASON_QC_FAILED, profile,
-            f'QC failure on attempt {attempt.attempt_number}')
+            f'Design QC failure on attempt {attempt.attempt_number}')
 
-    messages.success(request, f'{project.project_id}: QC failed — attempt '
+    messages.success(request, f'{project.project_id}: Design QC failed — attempt '
+                              f'{new_attempt.attempt_number} opened and the site is back '
+                              f'with the designer.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+@login_required
+def design_head_qc_pass(request, project_id):
+    """GATE 2 — the DESIGN HEAD passes a package Design QC has already passed. RELEASE.
+
+    Release sets `released_at` / `released_by` on the assignment and moves it to
+    `released`. THAT IS ALL IT DOES (Part 4 settled decision 9). It does not lock, group
+    or hand over the BOQ — those are Part 6, and reading anything into `released` beyond
+    "design is finished" would pre-empt decisions that have not been made.
+
+    This is where the attempt finally closes, and where Part 4's release behaviour now
+    lives unchanged apart from which gate triggers it.
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_AWAITING_HEAD_QC,),
+                                           gate='head')
+    if error is None:
+        return HttpResponseForbidden(_GATE_FORBIDDEN['head'])
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_queue')
+
+    blocked = _blocking_change_request(project, attempt)
+    if blocked:
+        messages.error(request, blocked)
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, attempt.qc_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you passed attempt '
+                                f'{attempt.attempt_number} through Design QC yourself, so '
+                                f'you cannot also release it as Design Head. It needs a '
+                                f'second pair of eyes.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    now = timezone.now()
+    with transaction.atomic():
+        attempt.head_verdict     = QC_PASSED
+        attempt.head_reviewed_by = profile
+        attempt.head_reviewed_at = now
+        attempt.closed_at        = now
+        # Both gates passed — they agree, so no overturn.
+        attempt.head_overturned_qc = False
+        attempt.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
+                                    'closed_at', 'head_overturned_qc'])
+        assignment.released_at = now
+        assignment.released_by = profile
+        assignment.status      = DESIGN_RELEASED
+        assignment.save(update_fields=['released_at', 'released_by', 'status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Design Head passed attempt {attempt.attempt_number} — design released',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_head_qc_passed')
+
+    messages.success(request, f'{project.project_id}: both review gates passed — design '
+                              f'released on attempt {attempt.attempt_number}.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+@login_required
+def design_head_qc_fail(request, project_id):
+    """GATE 2 — the DESIGN HEAD fails a package Design QC passed. THE OVERTURN CASE.
+
+    Remarks and category are both mandatory, and the attempt closes and reopens exactly as
+    a gate-1 failure does (settled decision 5) — the designer's experience is identical.
+    What differs is where it is recorded: head_remarks / head_failure_category, a distinct
+    action_code, and `head_overturned_qc=True`.
+
+    THAT FLAG IS THE POINT OF THE SECOND GATE (settled decision 6). If after two tenders
+    the Head never overturns Design QC, the second gate is a formality and this column is
+    the only thing that will say so. It cannot be reconstructed later from the verdicts
+    alone once the attempt has been superseded, which is why it is written now.
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_AWAITING_HEAD_QC,),
+                                           gate='head')
+    if error is None:
+        return HttpResponseForbidden(_GATE_FORBIDDEN['head'])
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_queue')
+
+    blocked = _blocking_change_request(project, attempt)
+    if blocked:
+        messages.error(request, blocked)
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    if _other_gate_actor_conflict(profile, attempt.qc_reviewed_by_id):
+        messages.error(request, f'{project.project_id}: you passed attempt '
+                                f'{attempt.attempt_number} through Design QC yourself, so '
+                                f'you cannot also rule on it as Design Head. It needs a '
+                                f'second pair of eyes.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    remarks = (request.POST.get('head_remarks') or '').strip()
+    if not remarks:
+        messages.error(request, f'{project.project_id}: remarks are required to fail a '
+                                f'package — the designer cannot act on "failed" alone.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    category, cat_error = _posted_error_category(request)
+    if cat_error:
+        messages.error(request, f'{project.project_id}: {cat_error}.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    now = timezone.now()
+    with transaction.atomic():
+        attempt.head_verdict          = QC_FAILED
+        attempt.head_remarks          = remarks
+        attempt.head_failure_category = category
+        attempt.head_reviewed_by      = profile
+        attempt.head_reviewed_at      = now
+        # Design QC passed this package and the Head did not. Recorded, countable.
+        attempt.head_overturned_qc    = True
+        attempt.save(update_fields=['head_verdict', 'head_remarks', 'head_failure_category',
+                                    'head_reviewed_by', 'head_reviewed_at',
+                                    'head_overturned_qc'])
+        assignment.status = DESIGN_QC_FAILED
+        assignment.save(update_fields=['status', 'updated_at'])
+        log_activity(project, profile,
+                     f'Design Head failed attempt {attempt.attempt_number}, overturning '
+                     f'Design QC '
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {remarks}',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_head_qc_failed')
+
+        new_attempt = _open_next_attempt(
+            assignment, ATTEMPT_REASON_QC_FAILED, profile,
+            f'Design Head failure on attempt {attempt.attempt_number}')
+
+    messages.success(request, f'{project.project_id}: the Design Head failed the package, '
+                              f'overturning Design QC — attempt '
                               f'{new_attempt.attempt_number} opened and the site is back '
                               f'with the designer.')
     return redirect('design_qc_review', project_id=project.project_id)
@@ -1962,7 +2485,12 @@ def design_change_request(request, project_id):
                      f'stage (status "{assignment.get_status_display()}").')
 
     profile = request.user.profile
-    was_in_qc = assignment.status == DESIGN_IN_QC
+    # PART 9: a review is "in flight" at EITHER gate. A package sitting at
+    # `awaiting_head_qc` has passed Design QC and is with the Head, and pulling it back
+    # suspends his review exactly as it used to suspend the single one — so the message
+    # must say so. The outgoing attempt keeps whatever verdicts it had: qc_verdict
+    # 'passed' and head_verdict 'pending' is the honest record of what actually happened.
+    was_in_qc = assignment.status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)
     with transaction.atomic():
         # The removal shares the change request's transaction on purpose: a site that
         # left a group without the request that pulled it out, or a request recorded
@@ -2007,7 +2535,8 @@ def _attempt_history(assignment):
     closed each one. The two rework loops must be tellable apart at a glance, which is
     what `opened_reason` renders as on the screens."""
     return list(assignment.attempts
-                .select_related('qc_reviewed_by__user', 'boq_submitted_by__user')
+                .select_related('qc_reviewed_by__user', 'head_reviewed_by__user',
+                                'boq_submitted_by__user')
                 .prefetch_related('change_requests__requested_by__user',
                                   'arka_submissions')
                 .order_by('attempt_number'))
@@ -2018,36 +2547,58 @@ def design_qc_queue(request):
     """Head / deputy: every site waiting for QC, plus everything currently in review.
 
     Deliberately NOT the Design Head dashboard — no metrics, no workload, no capacity,
-    no overdue logic. It is a worklist of sites at `artifacts_uploaded` and `in_qc`, and
-    nothing else; the dashboard is Part 5.
+    no overdue logic. It is a worklist of sites at `artifacts_uploaded`, `in_qc` and
+    `awaiting_head_qc`, and nothing else; the dashboard is Part 5.
+
+    PART 9 — ONE QUEUE, TWO AUDIENCES. Design QC and the Head share this screen and see
+    the same rows, because knowing what is stacked up at the other gate is exactly the
+    information a reviewer needs. What differs is which row each of them can ACT on, and
+    that is `can_qc_gate` / `can_head_gate` per row — computed per site because both the
+    self-review exclusion and the one-person-two-verdicts rule are per site.
     """
-    if not user_has_design_head_authority(request.user):
-        return HttpResponseForbidden('Design Head or named deputy only.')
+    if not user_can_view_design_qc_dashboard(request.user):
+        return HttpResponseForbidden('Design QC, Design Head or named deputy only.')
 
     assignments = (DesignAssignment.objects
-                   .filter(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC),
+                   .filter(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
+                                       DESIGN_AWAITING_HEAD_QC),
                            project__is_deleted=False)
                    .select_related('project', 'project__program', 'assigned_to__user')
                    .order_by('status', 'project__project_id'))
 
+    profile = getattr(request.user, 'profile', None)
     rows = []
     for assignment in assignments:
         attempt = _current_attempt(assignment)
+        awaiting_head = assignment.status == DESIGN_AWAITING_HEAD_QC
+        can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
+        can_head_gate = user_can_head_gate_design(request.user, assignment)
         rows.append({
             'assignment':  assignment,
             'site':        assignment.project,
             'attempt':     attempt,
             'arka':        _current_arka(attempt),
             'in_qc':       assignment.status == DESIGN_IN_QC,
+            'awaiting_head': awaiting_head,
             'open_crs':    list(_open_change_requests(attempt)),
-            # Self-QC is refused per site, so the button state has to be per row: the
-            # deputy may QC most sites but not the ones allocated to them.
-            'can_qc':      user_can_qc_design(request.user, assignment),
+            # Gate 1 actions: start review, then pass/fail. Not offered once the package
+            # has moved past Design QC.
+            'can_qc':      can_qc_gate and not awaiting_head,
+            # Gate 2 actions. Withheld when this user recorded the QC verdict themselves —
+            # settled decision 2, shown as a disabled state rather than a silent absence.
+            'can_head':    (can_head_gate and awaiting_head and attempt is not None
+                            and not _other_gate_actor_conflict(
+                                profile, attempt.qc_reviewed_by_id)),
+            'blocked_own': (can_head_gate and awaiting_head and attempt is not None
+                            and _other_gate_actor_conflict(
+                                profile, attempt.qc_reviewed_by_id)),
         })
 
     return render(request, 'projects/design/qc_queue.html', {
         'rows':      rows,
         'is_deputy': user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
+        'is_design_qc': user_is_design_qc(request.user),
+        'has_head_authority': user_has_design_head_authority(request.user),
     })
 
 
@@ -2059,23 +2610,42 @@ def design_qc_review(request, project_id):
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         raise Http404('No design assignment for this site.')
-    if not user_has_design_head_authority(request.user):
-        return HttpResponseForbidden('Design Head or named deputy only.')
+    if not user_can_view_design_qc_dashboard(request.user):
+        return HttpResponseForbidden('Design QC, Design Head or named deputy only.')
 
     ctx = _workspace_context(project, assignment)
-    attempt = ctx['attempt']
+    attempt  = ctx['attempt']
     open_crs = list(_open_change_requests(attempt))
-    can_qc = user_can_qc_design(request.user, assignment)
+    profile  = getattr(request.user, 'profile', None)
+
+    can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
+    can_head_gate = user_can_head_gate_design(request.user, assignment)
+    awaiting_head = assignment.status == DESIGN_AWAITING_HEAD_QC
+
+    # Settled decision 2, evaluated once and reused: did this actor record the OTHER
+    # gate's verdict on this exact attempt?
+    own_qc_verdict = bool(attempt is not None and _other_gate_actor_conflict(
+        profile, attempt.qc_reviewed_by_id))
+
     ctx.update({
         'history':       _attempt_history(assignment),
         'open_crs':      open_crs,
-        'can_qc':        can_qc,
-        'can_start_qc':  can_qc and assignment.status == DESIGN_ARTIFACTS_UPLOADED
+        'can_qc':        can_qc_gate,
+        'can_start_qc':  can_qc_gate and assignment.status == DESIGN_ARTIFACTS_UPLOADED
                          and _package_is_complete(attempt),
-        'can_verdict':   can_qc and assignment.status == DESIGN_IN_QC and not open_crs,
+        # Gate 1 verdict form.
+        'can_verdict':   can_qc_gate and assignment.status == DESIGN_IN_QC and not open_crs,
+        # Gate 2 verdict form. Mutually exclusive with the above by status.
+        'can_head_verdict': (can_head_gate and awaiting_head and not open_crs
+                             and not own_qc_verdict),
+        # Why the gate-2 form is absent, when it is absent for this reason and not
+        # because of the status. An empty screen explains nothing.
+        'blocked_by_own_qc_verdict': can_head_gate and awaiting_head and own_qc_verdict,
+        'awaiting_head': awaiting_head,
         'is_self_qc':    user_is_assigned_designer(request.user, assignment),
         'is_deputy':     user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'released':      assignment.status == DESIGN_RELEASED,
+        'error_categories': DESIGN_ERROR_CATEGORY_CHOICES,
     })
     return render(request, 'projects/design/qc_review.html', ctx)
 
@@ -2110,10 +2680,16 @@ _DESIGNER_ACTIONS = {
     DESIGN_DUE_DATE_PROPOSED:   ('none', '', 'Waiting for the Design Head to approve your proposed date.'),
     DESIGN_IN_DESIGN:           ('link', 'Submit Arka', ''),
     DESIGN_ARKA_REJECTED:       ('link', 'Submit revised Arka', ''),
-    DESIGN_ARTIFACTS_UPLOADED:  ('none', '', 'Package complete — waiting for QC to start.'),
-    DESIGN_IN_QC:               ('none', '', 'In QC review with the Design Head.'),
+    DESIGN_ARTIFACTS_UPLOADED:  ('none', '', 'Package complete — waiting for Design QC to start.'),
+    DESIGN_IN_QC:               ('none', '', 'In review with Design QC.'),
     DESIGN_RELEASED:            ('none', '', 'Design released. Nothing further to do.'),
     DESIGN_SURVEY_RETURNED:     ('none', '', 'Design Hold — waiting for a replacement survey.'),
+    # PART 9 — the two waiting rooms. Both name WHICH reviewer is holding the ball, which
+    # is the entire reason they are separate statuses rather than a flag.
+    DESIGN_AWAITING_HEAD_ARKA:  ('none', '', 'Arka passed Design QC — waiting for the '
+                                             'Design Head to approve it.'),
+    DESIGN_AWAITING_HEAD_QC:    ('none', '', 'Package passed Design QC — waiting for the '
+                                             'Design Head\'s review.'),
 }
 
 
@@ -2151,8 +2727,11 @@ def designer_dashboard_context(profile, projects):
         # rather than on the status alone, so it is resolved here instead of in the table.
         kind, label, waiting = _DESIGNER_ACTIONS.get(
             assignment.status, ('none', '', ''))
+        # PART 9: the unlock is head_verdict, not verdict — an Arka that only Design QC
+        # has passed does not let the designer upload anything, so telling them to
+        # "Upload CAD" at that point would send them into a refusal.
         if assignment.status == DESIGN_ARKA_SUBMITTED:
-            if arka is not None and arka.verdict == ARKA_APPROVED:
+            if arka is not None and arka.head_verdict == ARKA_APPROVED:
                 has_cad = bool(attempt and attempt.design_files.filter(
                     kind__in=CAD_KINDS, is_current=True).exists())
                 if not has_cad:
@@ -2160,15 +2739,19 @@ def designer_dashboard_context(profile, projects):
                 elif attempt.boq_submitted_at is None:
                     kind, label, waiting = 'link', 'Enter BOQ', ''
                 else:
-                    kind, label, waiting = 'none', '', 'Package complete — waiting for QC.'
+                    kind, label, waiting = 'none', '', 'Package complete — waiting for Design QC.'
             else:
-                kind, label, waiting = 'none', '', 'Waiting for the Design Head to approve your Arka.'
+                kind, label, waiting = 'none', '', 'Waiting for Design QC to review your Arka.'
 
-        # The QC remarks the designer has to act on: the most recent FAILED attempt.
+        # The remarks the designer has to act on: the most recent FAILED attempt, at
+        # EITHER gate. Part 9 made this two fields — a package failed by the Head carries
+        # head_remarks and an empty qc_remarks, and reading only the QC field would leave
+        # the designer with a reopened attempt and no visible reason for it.
         # Read off the attempts already loaded rather than re-querying per card.
         last_failed = None
         for a in sorted(assignment.attempts.all(), key=lambda a: a.attempt_number, reverse=True):
-            if a.qc_verdict == QC_FAILED and a.qc_remarks:
+            if ((a.qc_verdict == QC_FAILED and a.qc_remarks)
+                    or (a.head_verdict == QC_FAILED and a.head_remarks)):
                 last_failed = a
                 break
 
@@ -2227,15 +2810,55 @@ def design_head_dashboard_counts(user):
     base = DesignAssignment.objects.filter(project__is_deleted=False)
     return {
         'awaiting_allocation': base.filter(status=DESIGN_AWAITING_ALLOCATION).count(),
+        # Gate 1's Arka queue — still keyed on the QC verdict, which is what `verdict`
+        # now means. The status term alone would be enough; the verdict term is kept as
+        # the same belt-and-braces re-check it has always been.
         'awaiting_arka':       base.filter(status=DESIGN_ARKA_SUBMITTED,
                                            attempts__arka_submissions__is_current=True,
                                            attempts__arka_submissions__verdict=ARKA_PENDING
                                            ).distinct().count(),
+        # PART 9 — gate 2's two queues, counted separately from gate 1's. Merging them
+        # would tell the Head how much work exists without telling him how much is his.
+        'awaiting_head_arka':  base.filter(status=DESIGN_AWAITING_HEAD_ARKA).count(),
+        'awaiting_head_qc':    base.filter(status=DESIGN_AWAITING_HEAD_QC).count(),
         'awaiting_qc':         base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
         'in_qc':               base.filter(status=DESIGN_IN_QC).count(),
         'programs':            list(Program.objects.filter(is_deleted=False,
                                                            program_type='OPEX')
                                     .order_by('name')),
+    }
+
+
+def design_qc_dashboard_counts(user):
+    """The two queue sizes a DESIGN QC reviewer can see for free — one COUNT each.
+
+    THE GATE-1 COUNTERPART OF design_head_dashboard_counts(), and it exists for the reason
+    Part 4.5 gives for that one: a screen that is URL-reachable only is unusable, because
+    nobody types a URL. Without this the Design QC dashboard and review queue would have no
+    entry point anywhere in the product.
+
+    Returns None for a user who does not hold `is_design_qc`, so the template can test one
+    value — and deliberately NOT for a Head who lacks the QC flag, since his own strip
+    already carries every number this one would.
+
+    NOT METRICS. Two counts and a tender list; the dashboard is design_qc_dashboard().
+    """
+    if not user_is_design_qc(user):
+        return None
+    base = DesignAssignment.objects.filter(project__is_deleted=False)
+    return {
+        'awaiting_arka': base.filter(status=DESIGN_ARKA_SUBMITTED,
+                                     attempts__arka_submissions__is_current=True,
+                                     attempts__arka_submissions__verdict=ARKA_PENDING
+                                     ).distinct().count(),
+        'awaiting_qc':   base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
+        'in_qc':         base.filter(status=DESIGN_IN_QC).count(),
+        # Same reason as the Head's strip: `program_list` is
+        # @role_required(['Admin','PM','CEO']) and a Design QC reviewer holds
+        # role='Design', so that nav link 403s for them. Tenders are linked from here.
+        'programs':      list(Program.objects.filter(is_deleted=False,
+                                                     program_type='OPEX')
+                              .order_by('name')),
     }
 
 
@@ -2319,6 +2942,74 @@ def design_tender_dashboard(request, pk):
         'drill_designer': designer if designer.isdigit() else '',
         'is_deputy':    user_is_design_head_deputy(request.user)
                         and not user_is_design_head(request.user),
+    })
+
+
+# ---------------------------------------------------------------------------
+# 17. Design QC tender dashboard (Part 9 §6) — READ ONLY, AND A STRICT SUBSET
+#
+# A SUBSET OF design_tender_dashboard(), NOT A SECOND DASHBOARD. It calls the same
+# tender_metrics() — same batched reads, same `sites` list — and then passes THREE of its
+# keys to the template. What it deliberately does not pass is the point of the screen:
+#
+#   workload     per-designer rework multipliers. PERFORMANCE DATA, HEAD ONLY. Part 5
+#                already refuses designers this table because on samples this small the
+#                first reaction to a bad number is to argue with the metric; a QC reviewer
+#                holding their colleagues' multipliers is the same problem with a
+#                reporting line attached.
+#   capacity     designed-versus-tendered. COMMERCIAL, HEAD ONLY. A reviewer's job is
+#                whether this design is right, not whether the tender is profitable.
+#   attention    the full list, which leads on overdue sites, Design Holds and due-date
+#                revisions — all of which are about how the tender is being RUN. QC gets
+#                `qc_attention` instead: only items awaiting a QC action.
+#
+# The exclusion is enforced HERE, by not putting the data in the context, rather than by a
+# template `{% if %}`. A key that is absent cannot be rendered by a future template edit;
+# a key that is present and conditionally hidden can.
+# ---------------------------------------------------------------------------
+
+@login_required
+def design_qc_dashboard(request, pk):
+    """Design QC's operational view of one tender: stage counts, their own queue, and the
+    items awaiting a QC action.
+
+    The Design Head is admitted too — he sees everything Design QC sees plus his own full
+    dashboard, so refusing him a narrower view of his own data would be an access rule
+    with nothing behind it. A designer, PM, SCM or Site Engineer is refused outright.
+    """
+    if not user_can_view_design_qc_dashboard(request.user):
+        return HttpResponseForbidden(
+            'The Design QC dashboard is for Design QC, the Design Head, or his named deputy.')
+
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    metrics = tender_metrics(program)
+
+    # Same drill-down mechanism as the Head's dashboard, filtered in Python over rows
+    # already in memory. The `designer=` filter is deliberately NOT offered: browsing a
+    # tender by designer is the workload table by another route.
+    stage = (request.GET.get('stage') or '').strip()
+    drill, drill_label = [], ''
+    if stage in STAGE_LABELS:
+        drill = [s for s in metrics['sites'] if s['stage'] == stage]
+        drill_label = STAGE_LABELS[stage]
+
+    return render(request, 'projects/design/qc_dashboard.html', {
+        'program':     program,
+        # A DELIBERATELY NARROWED dict, not `metrics`. See the section note above.
+        'm': {
+            'program':          metrics['program'],
+            'today':            metrics['today'],
+            'total_sites':      metrics['total_sites'],
+            'assigned_sites':   metrics['assigned_sites'],
+            'unassigned_sites': metrics['unassigned_sites'],
+            'stages':           metrics['stages'],
+            'queue':            metrics['qc_queue'],
+            'attention':        metrics['qc_attention'],
+        },
+        'drill':       drill,
+        'drill_label': drill_label,
+        'drill_stage': stage if stage in STAGE_LABELS else '',
+        'is_head':     user_has_design_head_authority(request.user),
     })
 
 
