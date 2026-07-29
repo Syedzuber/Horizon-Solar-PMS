@@ -1616,10 +1616,18 @@ DESIGN_RELEASED            = 'released'
 #   awaiting_survey -> awaiting_allocation -> allocated -> due_date_proposed -> in_design
 #
 # `survey_returned` is NOT part of that line any more. It is repurposed as an
-# off-sequence BLOCKED FLAG: the assigned designer marks the site blocked on an
+# off-sequence DESIGN HOLD FLAG: the assigned designer puts the site on hold over an
 # inadequate survey, which stops their clock and surfaces to the Head. It is listed
 # last for that reason. (A designer cannot "return" a survey to the Head who both
 # supplied it and approves the work — there is no independent party to return it to.)
+#
+# PART 8 NAMING. The user-facing name is "Design Hold"; it was "Blocked" until Part 8.
+# The STORED VALUE is `survey_returned` and always has been — there has never been a
+# stored string `blocked` to rename, so the Part 8 rename is label-only and carries no
+# risk to existing rows. The model fields (`survey_returned_at`, `survey_returned_by`,
+# `survey_return_reason`) keep their names deliberately: renaming them is a schema
+# change with no user-visible benefit. The mismatch is recorded in
+# DESIGN_MODULE_DEFERRED.md so the next reader is not surprised by it.
 #
 # Values are UNCHANGED — this is ordering and labelling only, so the migration is an
 # AlterField on choices with no data operation.
@@ -1635,7 +1643,7 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_IN_QC,               'In QC'),
     (DESIGN_QC_FAILED,           'QC failed'),
     (DESIGN_RELEASED,            'Released'),
-    (DESIGN_SURVEY_RETURNED,     'Blocked — survey inadequate'),
+    (DESIGN_SURVEY_RETURNED,     'Design Hold — survey inadequate'),
 ]
 
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
@@ -1672,17 +1680,34 @@ ARKA_VERDICT_CHOICES = [
     (ARKA_REJECTED, 'Rejected'),
 ]
 
-DESIGN_FILE_CAD_PDF   = 'cad_pdf'
-DESIGN_FILE_CAD_DWG   = 'cad_dwg'
+DESIGN_FILE_CAD_ZIP   = 'cad_zip'
 DESIGN_FILE_BOQ_EXCEL = 'boq_excel'
 DESIGN_FILE_BOQ_PDF   = 'boq_pdf'
 
+# LEGACY, Part 8. CAD used to be uploaded as two separate files. It is now ONE zip
+# holding both, so nothing new is ever written with these two kinds. They stay in the
+# choices — and MUST stay — because rows already carry them: removing a value that
+# exists in the table makes get_kind_display() fall back to the raw string and makes
+# those rows fail full_clean(). They are not migrated and not deleted; the designer
+# can no longer create them, and the QC screen still lists and downloads them.
+DESIGN_FILE_CAD_PDF   = 'cad_pdf'
+DESIGN_FILE_CAD_DWG   = 'cad_dwg'
+
 DESIGN_FILE_KIND_CHOICES = [
-    (DESIGN_FILE_CAD_PDF,   'CAD (PDF)'),
-    (DESIGN_FILE_CAD_DWG,   'CAD (DWG)'),
+    (DESIGN_FILE_CAD_ZIP,   'CAD (zip)'),
     (DESIGN_FILE_BOQ_EXCEL, 'BOQ (Excel)'),
     (DESIGN_FILE_BOQ_PDF,   'BOQ (PDF)'),
+    (DESIGN_FILE_CAD_PDF,   'CAD (PDF) — legacy'),
+    (DESIGN_FILE_CAD_DWG,   'CAD (DWG) — legacy'),
 ]
+
+#: Kinds that are no longer offered for upload but must remain readable.
+DESIGN_FILE_LEGACY_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG)
+
+#: Every kind that counts as a CAD artifact, current or legacy. Read paths (listing,
+#: download, history) use this; the progression rule deliberately does NOT — see
+#: design_views._maybe_advance_to_artifacts_uploaded.
+DESIGN_FILE_CAD_KINDS = (DESIGN_FILE_CAD_ZIP,) + DESIGN_FILE_LEGACY_KINDS
 
 
 class DesignAssignment(models.Model):
@@ -1950,6 +1975,20 @@ class DesignFile(models.Model):
     original_filename = models.CharField(max_length=255, blank=True, default='')
     size_bytes        = models.PositiveBigIntegerField(null=True, blank=True)
     content_type      = models.CharField(max_length=100, blank=True, default='')
+
+    # ARCHIVE LISTING (Part 8). A zip hides what is inside it: without this the QC
+    # reviewer downloads the file and only then finds out a sheet is missing. Read
+    # from the zip CENTRAL DIRECTORY at upload — the archive is never extracted to
+    # disk — and rendered on the artifacts panel so the contents are visible without
+    # downloading anything.
+    #
+    #   [{"name": "01-layout.pdf", "size": 482113}, ...]
+    #
+    # `size` is the UNCOMPRESSED size of that entry. Empty list for every non-archive
+    # kind and for every pre-existing cad_pdf/cad_dwg row, which reads correctly as
+    # "this is not an archive" rather than "this archive is empty" — nothing else in
+    # the codebase asks an empty listing to mean anything more than that.
+    archive_listing = models.JSONField(default=list, blank=True)
 
     derived_from_arka = models.ForeignKey(
         ArkaSubmission, on_delete=models.PROTECT, related_name='derived_files',

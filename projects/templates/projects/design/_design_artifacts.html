@@ -58,6 +58,27 @@ stored anywhere (settled decision 8).
               {% if f.size_bytes %}
                 <div class="text-muted" style="font-size:.7rem;">{{ f.size_bytes|filesizeformat }}</div>
               {% endif %}
+              {% comment %}
+              THE ARCHIVE LISTING (Part 8). This is the whole reason the listing is
+              stored: without it a reviewer has to download the zip to find out whether
+              the DWG is in there. Empty for every non-archive row, including every
+              legacy cad_pdf/cad_dwg, so nothing renders for those.
+              {% endcomment %}
+              {% if f.archive_listing %}
+                <details class="mt-1">
+                  <summary class="text-muted" style="font-size:.7rem; cursor:pointer;">
+                    {{ f.archive_listing|length }} file(s) inside
+                  </summary>
+                  <ul class="list-unstyled mb-0 mt-1 ms-2" style="font-size:.7rem;">
+                    {% for entry in f.archive_listing %}
+                      <li class="text-muted">
+                        {{ entry.name }}
+                        <span class="ms-1">({{ entry.size|filesizeformat }})</span>
+                      </li>
+                    {% endfor %}
+                  </ul>
+                </details>
+              {% endif %}
             </td>
             <td class="small">
               {{ f.uploaded_at|date:"d M Y H:i" }}

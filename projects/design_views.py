@@ -1,4 +1,4 @@
-"""
+﻿"""
 OPEX design workflow views — Part 2: survey upload, allocation, due-date handshake,
 and the blocked flag. Part 3: Arka submission and verdict, CAD upload, BOQ entry
 and the artifact-pairing rules that bind them together. Part 4: QC review, the
@@ -30,9 +30,13 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 
 from .decorators import login_required
-from .design_metrics import STAGE_LABELS, tender_metrics
+from .design_metrics import (
+    STAGE_LABELS, effective_commitment, pending_extension, tender_metrics,
+)
+from .utils import design_due_date
 from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
+    validate_cad_zip,
 )
 from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
@@ -45,8 +49,9 @@ from .models import (
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
-    DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
+    DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
+    DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
@@ -59,8 +64,19 @@ logger = logging.getLogger(__name__)
 
 # Statuses at which the site has not yet started design work. Reallocation is allowed
 # only while the assignment is still in one of these — see design_allocate().
+#
+# PART 8 ADDED `in_design`, and it is not optional. Allocation now lands a site straight
+# in `in_design`, so without it the Head would lose the ability to correct a
+# mis-allocation the instant he made one: every allocated site would be past the
+# reallocation gate before he could see the result. `in_design` means work is under way
+# with no Arka submitted yet, so nothing is orphaned by moving the site to a different
+# designer. `arka_submitted` and everything after it remain closed — reallocating once an
+# Arka exists would leave artifacts pointing at another designer's layout.
+#
+# `allocated` and `due_date_proposed` are kept here for the rows that already carry them;
+# no new row can reach either. See DESIGN_MODULE_DEFERRED.md.
 REALLOCATABLE_STATUSES = (DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
-                          DESIGN_DUE_DATE_PROPOSED)
+                          DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN)
 
 # ── Part 3 ─────────────────────────────────────────────────────────────────────
 # The two statuses from which a designer may submit an Arka version: the first one
@@ -73,14 +89,28 @@ REALLOCATABLE_STATUSES = (DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
 # first. See design_arka_submit().
 ARKA_SUBMITTABLE_STATUSES = (DESIGN_IN_DESIGN, DESIGN_ARKA_REJECTED)
 
-# The two CAD kinds. At least one is required before an attempt can reach
-# `artifacts_uploaded`; the BOQ kinds are optional attachments and never count.
-CAD_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG)
+# Every CAD kind, current and legacy. READ PATHS ONLY — listing, download, history.
+# The progression rule deliberately does NOT use this; see PROGRESSION_CAD_KINDS.
+CAD_KINDS = DESIGN_FILE_CAD_KINDS
+
+# What satisfies "CAD is present" for the move to `artifacts_uploaded` (Part 8).
+#
+# Part 3's rule was "at least one CAD file present", which the two-file world made
+# reasonable. It is now a VALID cad_zip and nothing else. A legacy cad_pdf on its own no
+# longer advances an attempt: the whole point of the zip is that QC gets the PDF and the
+# DWG together, validated at upload, and accepting a lone legacy file would reopen the
+# gap the zip closes. Legacy rows stay readable — they just do not satisfy this gate,
+# and no attempt still in flight has one, since the legacy kinds can no longer be
+# uploaded.
+PROGRESSION_CAD_KINDS = (DESIGN_FILE_CAD_ZIP,)
 
 # Every kind design_artifact_upload() accepts. A `kind` outside this tuple is refused
 # rather than silently defaulted — the whitelist is the enforcement point, not the
 # select element in the template.
-UPLOADABLE_KINDS = (DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
+#
+# The legacy CAD kinds are ABSENT: they are readable but no longer uploadable, which is
+# enforced here rather than by hiding the option in the template.
+UPLOADABLE_KINDS = (DESIGN_FILE_CAD_ZIP,
                     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF)
 
 KIND_LABELS = dict(DESIGN_FILE_KIND_CHOICES)
@@ -122,21 +152,27 @@ def _get_or_create_assignment(project):
 
 
 def _status_after_unblock(assignment):
-    """Status to restore when the Head clears a block by uploading a replacement survey.
+    """Status to restore when the Head clears a Design Hold by uploading a replacement
+    survey.
 
     DERIVED, not stored — Part 2 adds no schema. The prior state is recoverable from the
     rows that already exist: no designer means the site never left the allocation queue;
-    an approved current commitment means design was under way; an unapproved one means
-    the handshake was mid-flight.
+    an APPROVED commitment means design was under way.
+
+    PART 8 reads the approved commitment rather than the `is_current` one. A site can now
+    be on hold with an extension request pending, and `is_current` would then be the
+    unapproved row — restoring such a site to `due_date_proposed` would drop it back to a
+    pre-design stage it had long since left. An approved date is the evidence design had
+    started, and a pending request does not undo it.
     """
     if assignment.assigned_to_id is None:
         return DESIGN_AWAITING_ALLOCATION
-    current = assignment.due_date_commitments.filter(is_current=True).first()
-    if current is None:
-        return DESIGN_ALLOCATED
-    if current.approved_at is not None:
+    if _effective_commitment(assignment) is not None:
         return DESIGN_IN_DESIGN
-    return DESIGN_DUE_DATE_PROPOSED
+    # No approved date has ever existed for this site — it was allocated under the Part 2
+    # handshake and never got past it. Those rows are the only ones that can still land
+    # here; nothing allocated under Part 8 can reach this line.
+    return DESIGN_ALLOCATED
 
 
 def _deny(request, message, redirect_to):
@@ -163,15 +199,19 @@ def design_head_sites(request, pk):
     rows = []
     for site in sites:
         assignment = getattr(site, 'design_assignment', None)
-        current = None
+        current = pending = None
         if assignment is not None:
-            current = assignment.due_date_commitments.filter(is_current=True).first()
+            # The AGREED date, not the is_current row — a pending extension must not
+            # change what this screen says the site is committed to (Part 8).
+            current = _effective_commitment(assignment)
+            pending = _pending_extension(assignment)
         rows.append({
             'site':          site,
             'assignment':    assignment,
             'status':        assignment.status if assignment else DESIGN_AWAITING_SURVEY,
             'has_survey':    bool(assignment and assignment.survey_file_path),
             'current_due':   current,
+            'pending_extension': pending,
             'revisions':     (assignment.due_date_commitments.count() - 1) if assignment else 0,
             'is_blocked':    bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED),
             'allocatable':   bool(assignment and assignment.survey_file_path
@@ -203,13 +243,19 @@ def design_my_sites(request):
 
     rows = []
     for assignment in assignments:
-        current = assignment.due_date_commitments.filter(is_current=True).first()
+        current = _effective_commitment(assignment)
+        pending = _pending_extension(assignment)
         rows.append({
             'assignment':  assignment,
             'site':        assignment.project,
             'current_due': current,
-            'can_propose': assignment.status == DESIGN_ALLOCATED,
-            'awaiting':    assignment.status == DESIGN_DUE_DATE_PROPOSED,
+            'pending_extension': pending,
+            # PART 8: the designer asks for an EXTENSION, and only once there is an
+            # agreed date to extend, no request already in flight, and the site is
+            # still live.
+            'can_request_extension': bool(current is not None and pending is None
+                                          and assignment.status != DESIGN_RELEASED),
+            'awaiting':    pending is not None,
             'is_blocked':  assignment.status == DESIGN_SURVEY_RETURNED,
             'revisions':   assignment.due_date_commitments.count() - 1,
         })
@@ -254,7 +300,7 @@ def design_survey_upload(request, project_id):
         messages.error(
             request,
             f'{project.project_id}: the survey cannot be replaced after allocation '
-            f'unless the designer has marked the site blocked.')
+            f'unless the designer has placed the site on Design Hold.')
         return redirect('design_head_sites', pk=project.program_id)
 
     path = build_design_path(project.project_id, 'survey', upload.name)
@@ -279,7 +325,7 @@ def design_survey_upload(request, project_id):
             # LEFT IN PLACE: together with survey_uploaded_at they are the record of how
             # long the clock was stopped, without adding a schema field this session.
             assignment.status = _status_after_unblock(assignment)
-            action = (f'Blocked flag cleared by replacement survey; status restored to '
+            action = (f'Design Hold cleared by replacement survey; status restored to '
                       f'{assignment.status}')
             code = 'design_survey_unblocked'
         elif assignment.status == DESIGN_AWAITING_SURVEY:
@@ -297,7 +343,7 @@ def design_survey_upload(request, project_id):
 
     if was_blocked:
         messages.success(request, f'{project.project_id}: replacement survey uploaded, '
-                                  f'block cleared ({assignment.get_status_display()}).')
+                                  f'Design Hold cleared ({assignment.get_status_display()}).')
     elif replacing:
         messages.success(request, f'{project.project_id}: survey replaced.')
     else:
@@ -334,9 +380,28 @@ def design_survey_download(request, project_id):
 # 3. Allocation
 # ---------------------------------------------------------------------------
 
-def _allocate_one(assignment, designer, actor):
+def _allocate_one(assignment, designer, actor, allocated_on=None):
     """Core allocation, shared by the single and bulk paths so their rules cannot drift.
     Raises ValueError with a user-facing message; callers own the transaction.
+
+    PART 8 — THE DUE DATE IS SET HERE, AUTOMATICALLY, AND IS ALREADY APPROVED.
+    This inverts the Part 2 handshake. The designer no longer proposes the initial date
+    and the Head no longer approves it; the date is computed from the allocation date
+    (`utils.design_due_date` — +2 calendar days, rolled to the next working day) and
+    written as a DueDateCommitment that is approved at the moment it is created, with the
+    allocating Head as both proposer and approver. The Head IS the approving authority,
+    so recording him on both sides is accurate rather than a fudge — the alternative,
+    leaving `approved_by` null, would make the row indistinguishable from a pending
+    extension request everywhere downstream.
+
+    The status therefore goes `awaiting_allocation` -> `in_design` DIRECTLY, skipping
+    `allocated` and `due_date_proposed` entirely on the initial path.
+
+    `allocated_on` is the date the due date is computed from. Bulk allocation passes ONE
+    timestamp for the whole batch so every site in it gets the same date; a batch that
+    straddles midnight would otherwise silently split across two due dates.
+
+    ALLOCATION ALSO STAMPS Project.assigned_design (Part 4.5, finding F1).
 
     ALLOCATION ALSO STAMPS Project.assigned_design (Part 4.5, finding F1).
     Two fields name the designer of a site and they used to be free to diverge:
@@ -355,19 +420,33 @@ def _allocate_one(assignment, designer, actor):
     if not assignment.survey_file_path:
         raise ValueError('cannot be allocated before its survey is uploaded')
     if assignment.status == DESIGN_SURVEY_RETURNED:
-        raise ValueError('is blocked on an inadequate survey — upload a replacement first')
+        raise ValueError('is on Design Hold over an inadequate survey — '
+                         'upload a replacement first')
     if assignment.status not in REALLOCATABLE_STATUSES:
         # Reallocation after work has started is out of scope for Part 2.
         raise ValueError(
             f'has already started design work (status {assignment.status}); '
             f'reallocation at this stage is not supported yet')
 
+    now = timezone.now()
+    allocated_on = allocated_on or timezone.localdate(now)
+    due = design_due_date(allocated_on)
+
     previous = assignment.assigned_to
     assignment.assigned_to = designer
     assignment.assigned_by = actor
-    assignment.assigned_at = timezone.now()
-    assignment.status = DESIGN_ALLOCATED
+    assignment.assigned_at = now
+    assignment.status = DESIGN_IN_DESIGN
     assignment.save()
+
+    # The auto-approved commitment. Any earlier row is stood down first — reallocation
+    # of an already-allocated site re-runs this, and the partial unique constraint
+    # (one is_current row per assignment) rejects the insert otherwise.
+    assignment.due_date_commitments.filter(is_current=True).update(is_current=False)
+    DueDateCommitment.objects.create(
+        assignment=assignment, proposed_date=due,
+        proposed_by=actor, approved_by=actor, approved_at=now,
+        is_current=True)
 
     # OPEX ONLY. Residential projects carry assigned_design from project_activate and
     # have no DesignAssignment row, so this can never touch one.
@@ -383,8 +462,9 @@ def _allocate_one(assignment, designer, actor):
     else:
         detail = f'Site allocated to {designer.user.get_full_name() or designer.user.username}'
         code = 'design_allocated'
-    log_activity(assignment.project, actor, detail,
+    log_activity(assignment.project, actor, f'{detail}; due {due}',
                  entity_type='DesignAssignment', entity_id=assignment.pk, action_code=code)
+    return due
 
 
 def _resolve_designer(raw_id):
@@ -421,13 +501,14 @@ def design_allocate(request, project_id):
 
     try:
         with transaction.atomic():
-            _allocate_one(assignment, designer, request.user.profile)
+            due = _allocate_one(assignment, designer, request.user.profile)
     except ValueError as exc:
         messages.error(request, f'{project.project_id} {exc}.')
         return redirect('design_head_sites', pk=project.program_id)
 
     messages.success(request, f'{project.project_id} allocated to '
-                              f'{designer.user.get_full_name() or designer.user.username}.')
+                              f'{designer.user.get_full_name() or designer.user.username} — '
+                              f'due {due}.')
     return redirect('design_head_sites', pk=project.program_id)
 
 
@@ -457,9 +538,14 @@ def design_bulk_allocate(request, pk):
         return redirect('design_head_sites', pk=program.pk)
 
     actor = request.user.profile
+    # ONE allocation date for the whole batch (Part 8). Computed before the loop, not
+    # per site: a bulk run that crossed midnight would otherwise hand the first sites a
+    # different due date from the last, and the Head has no way to see that happened.
+    batch_date = timezone.localdate()
     try:
         with transaction.atomic():
             allocated = []
+            due = None
             for project_id in project_ids:
                 site = get_object_or_404(
                     Project, project_id=project_id, is_deleted=False,
@@ -468,7 +554,7 @@ def design_bulk_allocate(request, pk):
                 if assignment is None or not assignment.survey_file_path:
                     raise ValueError(f'{site.project_id} cannot be allocated before its '
                                      f'survey is uploaded')
-                _allocate_one(assignment, designer, actor)
+                due = _allocate_one(assignment, designer, actor, allocated_on=batch_date)
                 allocated.append(site.project_id)
     except ValueError as exc:
         messages.error(request, f'Nothing was allocated — {exc}.')
@@ -477,7 +563,8 @@ def design_bulk_allocate(request, pk):
     messages.success(
         request,
         f'{len(allocated)} site(s) allocated to '
-        f'{designer.user.get_full_name() or designer.user.username}: {", ".join(allocated)}.')
+        f'{designer.user.get_full_name() or designer.user.username}, due {due}: '
+        f'{", ".join(allocated)}.')
     return redirect('design_head_sites', pk=program.pk)
 
 
@@ -486,55 +573,127 @@ def design_bulk_allocate(request, pk):
 # ---------------------------------------------------------------------------
 
 def _current_commitment(assignment):
+    """The row the approve/reject views act on — i.e. the pending extension request.
+
+    NOT the date the site is committed to. Use `_effective_commitment` for that; see the
+    effective/pending note at the top of design_metrics.
+    """
     return assignment.due_date_commitments.filter(is_current=True).first()
 
 
+def _effective_commitment(assignment):
+    """The APPROVED due date in force, ignoring any pending extension request.
+
+    Every read surface must use this. Ordering matches design_metrics.effective_commitment
+    — most recently approved wins, pk as the tiebreak.
+    """
+    return (assignment.due_date_commitments
+            .filter(approved_at__isnull=False)
+            .order_by('-approved_at', '-pk')
+            .first())
+
+
+def _pending_extension(assignment):
+    """The extension request awaiting a verdict, or None."""
+    current = _current_commitment(assignment)
+    return current if (current is not None and current.approved_at is None) else None
+
+
+# ---------------------------------------------------------------------------
+# PART 8 — the due-date views are now the EXTENSION flow
+# ---------------------------------------------------------------------------
+# The initial date is no longer proposed by anybody: `_allocate_one` computes it and
+# approves it in the same breath. What remains for these views to do is the case that
+# still needs two parties — the designer needs MORE TIME than the automatic date gave
+# them, and the Head has to agree before the commitment moves.
+#
+# The views are repurposed rather than replaced, deliberately: the propose/approve/reject
+# trio already implements exactly this shape (insert a proposal, stand the old row down,
+# let the Head rule on it), and their URLs are already linked from the designer and Head
+# screens. Rewriting them would have meant new URLs and new templates for behaviour that
+# was already correct.
+
 @login_required
 def design_due_date_propose(request, project_id):
-    """The DESIGNER proposes a due date. Only the assigned designer — not the Head.
+    """The DESIGNER requests an EXTENSION to the agreed due date (Part 8).
 
-    One half of the two-sided handshake: if the Head could propose, approving his own
-    proposal would make the handshake meaningless.
+    Only the assigned designer. The Head does not request extensions from himself — he
+    holds the approving authority, so a Head-initiated change is `design_due_date_change`.
+
+    A REASON IS MANDATORY. The automatic date was already granted without anyone asking
+    for it; the only thing that justifies moving it is why, and an extension with a blank
+    reason is unauditable a month later when the Head is asked why a site slipped.
+
+    THE APPROVED DATE DOES NOT MOVE HERE. This inserts an unapproved row and takes over
+    `is_current`, but every surface reads `_effective_commitment` — the site stays
+    committed to, and overdue against, the previously approved date until the Head rules.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None or not user_is_assigned_designer(request.user, assignment):
-        return HttpResponseForbidden('Only the designer allocated to this site may propose a due date.')
+        return HttpResponseForbidden('Only the designer allocated to this site may '
+                                     'request an extension.')
     if request.method != 'POST':
         return redirect('design_my_sites')
 
-    if assignment.status != DESIGN_ALLOCATED:
-        return _deny(request, f'{project.project_id}: a due date can only be proposed '
-                              f'while the site is allocated and not yet agreed.',
+    approved = _effective_commitment(assignment)
+    if approved is None:
+        return _deny(request, f'{project.project_id}: there is no agreed due date to extend.',
                      'design_my_sites')
+    if _pending_extension(assignment) is not None:
+        return _deny(request, f'{project.project_id}: an extension request is already '
+                              f'awaiting the Design Head.', 'design_my_sites')
+    if assignment.status == DESIGN_RELEASED:
+        return _deny(request, f'{project.project_id}: this site is released — its due date '
+                              f'can no longer be changed.', 'design_my_sites')
+
+    reason = (request.POST.get('change_reason') or '').strip()
+    if not reason:
+        return _deny(request, f'{project.project_id}: a reason is required to request an '
+                              f'extension.', 'design_my_sites')
 
     proposed = parse_date((request.POST.get('proposed_date') or '').strip())
     if proposed is None:
         return _deny(request, 'Please provide a valid date.', 'design_my_sites')
     if proposed < timezone.localdate():
-        return _deny(request, 'The proposed due date cannot be in the past.', 'design_my_sites')
+        return _deny(request, 'The requested due date cannot be in the past.', 'design_my_sites')
+    if proposed <= approved.proposed_date:
+        return _deny(request, f'{project.project_id}: {proposed} is not later than the '
+                              f'agreed date {approved.proposed_date} — an extension must '
+                              f'move the date out.', 'design_my_sites')
 
     profile = request.user.profile
     with transaction.atomic():
         # The partial unique constraint permits only one is_current row per assignment,
-        # so any previous one is stood down first, in the same transaction.
+        # so the approved one is stood down first, in the same transaction. It keeps
+        # approved_at, which is what makes it findable as the effective date meanwhile.
         assignment.due_date_commitments.filter(is_current=True).update(is_current=False)
         DueDateCommitment.objects.create(
             assignment=assignment, proposed_date=proposed,
-            proposed_by=profile, is_current=True)
-        assignment.status = DESIGN_DUE_DATE_PROPOSED
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile, f'Due date {proposed} proposed',
+            proposed_by=profile, change_reason=reason, is_current=True)
+        # STATUS IS NOT TOUCHED. The site stays in whatever stage the work is actually in;
+        # an extension request is not a workflow stage. Moving it to due_date_proposed
+        # here would rewind a site that is mid-Arka back to a pre-design stage.
+        log_activity(project, profile,
+                     f'Extension requested to {proposed} (agreed {approved.proposed_date}): {reason}',
                      entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code='design_due_date_proposed')
+                     action_code='design_due_date_extension_requested')
 
-    messages.success(request, f'{project.project_id}: due date {proposed} proposed for approval.')
+    messages.success(request, f'{project.project_id}: extension to {proposed} requested — '
+                              f'the agreed date {approved.proposed_date} stands until the '
+                              f'Design Head approves.')
     return redirect('design_my_sites')
 
 
 @login_required
 def design_due_date_approve(request, project_id):
-    """The HEAD approves the current proposal. Completes the handshake."""
+    """The HEAD approves the pending extension. The new date becomes effective.
+
+    Approving stamps `approved_at` on the pending row, which is what promotes it past the
+    previously approved row in `_effective_commitment`'s ordering. Nothing else has to
+    move for the new date to take effect everywhere, and the superseded row keeps its own
+    `approved_at` so the history of what was agreed and when stays intact.
+    """
     project = _opex_site(project_id)
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
@@ -543,13 +702,16 @@ def design_due_date_approve(request, project_id):
 
     assignment = getattr(project, 'design_assignment', None)
     back = project.program_id
-    if assignment is None or assignment.status != DESIGN_DUE_DATE_PROPOSED:
-        messages.error(request, f'{project.project_id}: there is no due date awaiting approval.')
+    if assignment is None:
+        messages.error(request, f'{project.project_id}: no design assignment.')
         return redirect('design_head_sites', pk=back)
 
-    commitment = _current_commitment(assignment)
+    # Gated on a pending ROW, not on a status: an extension can be requested from any
+    # working stage, so there is no one status that means "awaiting a due-date verdict".
+    commitment = _pending_extension(assignment)
     if commitment is None:
-        messages.error(request, f'{project.project_id}: no current due date commitment found.')
+        messages.error(request, f'{project.project_id}: there is no extension request '
+                                f'awaiting approval.')
         return redirect('design_head_sites', pk=back)
 
     profile = request.user.profile
@@ -557,22 +719,30 @@ def design_due_date_approve(request, project_id):
         commitment.approved_by = profile
         commitment.approved_at = timezone.now()
         commitment.save(update_fields=['approved_by', 'approved_at'])
-        assignment.status = DESIGN_IN_DESIGN
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile, f'Due date {commitment.proposed_date} approved',
+        # STATUS IS NOT TOUCHED — see design_due_date_propose. Part 2 moved the site to
+        # in_design here because approval was what STARTED the design; under Part 8 the
+        # design started at allocation and is already somewhere further on.
+        log_activity(project, profile,
+                     f'Extension to {commitment.proposed_date} approved',
                      entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code='design_due_date_approved')
+                     action_code='design_due_date_extension_approved')
 
-    messages.success(request, f'{project.project_id}: due date {commitment.proposed_date} '
-                              f'approved — design can start.')
+    messages.success(request, f'{project.project_id}: extension approved — the due date is '
+                              f'now {commitment.proposed_date}.')
     return redirect('design_head_sites', pk=back)
 
 
 @login_required
 def design_due_date_reject(request, project_id):
-    """The HEAD rejects the proposal, returning the site to `allocated` so the designer
-    proposes again. The rejected commitment is stood down, not deleted — the history of
-    what was proposed and refused stays on the record."""
+    """The HEAD refuses the extension. The PREVIOUS commitment is restored as current.
+
+    The refused row is stood down, not deleted — the record of what was asked for and
+    turned down is the point. Restoring the previously approved row to `is_current` is
+    not strictly required for the date to be right (`_effective_commitment` already
+    ignores `is_current`), but leaving no current row at all would break the partial
+    unique constraint's usefulness as "the row under discussion" and would make the next
+    extension request harder to reason about. The two are flipped in one transaction.
+    """
     project = _opex_site(project_id)
     if not user_has_design_head_authority(request.user):
         return HttpResponseForbidden('Design Head only.')
@@ -581,63 +751,88 @@ def design_due_date_reject(request, project_id):
 
     assignment = getattr(project, 'design_assignment', None)
     back = project.program_id
-    if assignment is None or assignment.status != DESIGN_DUE_DATE_PROPOSED:
-        messages.error(request, f'{project.project_id}: there is no due date awaiting approval.')
+    if assignment is None:
+        messages.error(request, f'{project.project_id}: no design assignment.')
+        return redirect('design_head_sites', pk=back)
+
+    commitment = _pending_extension(assignment)
+    if commitment is None:
+        messages.error(request, f'{project.project_id}: there is no extension request '
+                                f'awaiting approval.')
         return redirect('design_head_sites', pk=back)
 
     reason = (request.POST.get('reason') or '').strip()
     profile = request.user.profile
     with transaction.atomic():
-        commitment = _current_commitment(assignment)
+        restored = _effective_commitment(assignment)
+        # Stand the refused row down BEFORE restoring, or the two would momentarily both
+        # be current and the partial unique constraint would reject the second write.
         assignment.due_date_commitments.filter(is_current=True).update(is_current=False)
-        assignment.status = DESIGN_ALLOCATED
-        assignment.save(update_fields=['status', 'updated_at'])
+        if restored is not None:
+            DueDateCommitment.objects.filter(pk=restored.pk).update(is_current=True)
         log_activity(
             project, profile,
-            f'Due date {commitment.proposed_date if commitment else ""} rejected'
-            + (f': {reason}' if reason else ''),
+            f'Extension to {commitment.proposed_date} rejected'
+            + (f': {reason}' if reason else '')
+            + (f' — due date remains {restored.proposed_date}' if restored else ''),
             entity_type='DesignAssignment', entity_id=assignment.pk,
-            action_code='design_due_date_rejected')
+            action_code='design_due_date_extension_rejected')
 
-    messages.success(request, f'{project.project_id}: due date rejected — the designer '
-                              f'has been asked to propose another.')
+    messages.success(
+        request,
+        f'{project.project_id}: extension rejected — the due date remains '
+        f'{restored.proposed_date}.' if restored else
+        f'{project.project_id}: extension rejected.')
     return redirect('design_head_sites', pk=back)
 
 
 @login_required
 def design_due_date_change(request, project_id):
-    """Change an ALREADY-APPROVED due date.
+    """The HEAD revises the agreed due date directly. Auto-approved (Part 8).
 
     Never an in-place edit: a new DueDateCommitment is inserted with a mandatory
     change_reason and the previous row is stood down in the same transaction. The
     revision count is therefore `commitments - 1`, derived by counting rows — there is
     no counter field to drift.
 
-    Either party may initiate, and the new date is a proposal: status returns to
-    due_date_proposed so the Head must approve it, exactly like the first one.
+    PART 8 CHANGED WHO MAY USE THIS AND WHAT IT PRODUCES.
+
+    Under Part 2 either party could initiate and the result was a proposal the Head then
+    approved. Both halves of that are wrong now. The Head holds the approving authority,
+    so routing his own revision through a pending state means he approves his own request
+    — a handshake with one hand. And leaving the designer on this path would give the
+    system TWO ways to create a pending row, which the partial unique constraint forbids:
+    the second would fail with an integrity error rather than a message. So:
+
+        Head      -> here. The new date is approved on creation and takes effect at once.
+        Designer  -> design_due_date_propose, which requests an extension for a verdict.
+
+    Unlike an extension this may move the date EARLIER — pulling a date in is a decision
+    the Head is entitled to make, and nothing downstream requires dates to be monotonic.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         raise Http404('No design assignment for this site.')
 
-    is_head     = user_has_design_head_authority(request.user)
-    is_designer = user_is_assigned_designer(request.user, assignment)
-    if not (is_head or is_designer):
-        return HttpResponseForbidden('Only the Design Head or the allocated designer may '
-                                     'change an agreed due date.')
-    fallback = 'design_head_sites' if is_head else 'design_my_sites'
+    if not user_has_design_head_authority(request.user):
+        if user_is_assigned_designer(request.user, assignment):
+            return _deny(request, f'{project.project_id}: request an extension instead — '
+                                  f'the Design Head approves any change to the agreed date.',
+                         'design_my_sites')
+        return HttpResponseForbidden('Only the Design Head may revise an agreed due date.')
     if request.method != 'POST':
-        return (redirect(fallback, pk=project.program_id) if is_head
-                else redirect(fallback))
+        return redirect('design_head_sites', pk=project.program_id)
 
     def _back(msg, ok=False):
         (messages.success if ok else messages.error)(request, msg)
-        return (redirect('design_head_sites', pk=project.program_id) if is_head
-                else redirect('design_my_sites'))
+        return redirect('design_head_sites', pk=project.program_id)
 
-    if assignment.status != DESIGN_IN_DESIGN:
-        return _back(f'{project.project_id}: only an agreed due date can be changed this way.')
+    if assignment.status == DESIGN_RELEASED:
+        return _back(f'{project.project_id}: this site is released — its due date can no '
+                     f'longer be changed.')
+    if _effective_commitment(assignment) is None:
+        return _back(f'{project.project_id}: there is no agreed due date to revise.')
 
     reason = (request.POST.get('change_reason') or '').strip()
     if not reason:
@@ -650,22 +845,23 @@ def design_due_date_change(request, project_id):
         return _back('The new due date cannot be in the past.')
 
     profile = request.user.profile
+    now = timezone.now()
     with transaction.atomic():
         # Stand the old row down BEFORE inserting, or the partial unique constraint
-        # (one is_current row per assignment) rejects the insert.
+        # (one is_current row per assignment) rejects the insert. If an extension request
+        # was pending, this supersedes it — the Head has ruled on the date by setting it.
         assignment.due_date_commitments.filter(is_current=True).update(is_current=False)
         DueDateCommitment.objects.create(
             assignment=assignment, proposed_date=proposed, proposed_by=profile,
+            approved_by=profile, approved_at=now,
             change_reason=reason, is_current=True)
-        assignment.status = DESIGN_DUE_DATE_PROPOSED
-        assignment.save(update_fields=['status', 'updated_at'])
+        # Status untouched: the site stays in whatever stage the work is actually in.
         log_activity(project, profile,
                      f'Agreed due date changed to {proposed}: {reason}',
                      entity_type='DesignAssignment', entity_id=assignment.pk,
                      action_code='design_due_date_changed')
 
-    return _back(f'{project.project_id}: new due date {proposed} proposed — '
-                 f'awaiting Design Head approval.', ok=True)
+    return _back(f'{project.project_id}: due date is now {proposed}.', ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +885,7 @@ def design_mark_blocked(request, project_id):
         return redirect('design_my_sites')
 
     if assignment.status == DESIGN_SURVEY_RETURNED:
-        return _deny(request, f'{project.project_id} is already flagged as blocked.',
+        return _deny(request, f'{project.project_id} is already on Design Hold.',
                      'design_my_sites')
 
     reason = (request.POST.get('reason') or '').strip()
@@ -704,11 +900,11 @@ def design_mark_blocked(request, project_id):
         assignment.survey_return_reason  = reason
         assignment.status = DESIGN_SURVEY_RETURNED
         assignment.save()
-        log_activity(project, profile, f'Site flagged blocked — survey inadequate: {reason}',
+        log_activity(project, profile, f'Site placed on Design Hold — survey inadequate: {reason}',
                      entity_type='DesignAssignment', entity_id=assignment.pk,
                      action_code='design_blocked')
 
-    messages.success(request, f'{project.project_id} flagged as blocked. The Design Head '
+    messages.success(request, f'{project.project_id} placed on Design Hold. The Design Head '
                               f'can see the reason and your clock is stopped.')
     return redirect('design_my_sites')
 
@@ -812,7 +1008,12 @@ def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
     """Section 5 — evaluate the progression rule after every Part 3 write.
 
     The attempt moves `arka_submitted` -> `artifacts_uploaded` once it has ALL THREE:
-    an approved current Arka, at least one current CAD file, and boq_submitted_at set.
+    an approved current Arka, a current cad_zip, and boq_submitted_at set.
+
+    PART 8 TIGHTENED THE CAD CONDITION from "at least one CAD file" to "a valid cad_zip".
+    Validity is established at upload — a row of kind cad_zip only exists because
+    `_validate_cad_zip` accepted it — so this is a presence check, not a re-validation.
+    A legacy cad_pdf/cad_dwg does NOT satisfy it; see PROGRESSION_CAD_KINDS.
 
     Called explicitly at the end of each action rather than wired to a signal, so the
     transition is visible next to the write that could have caused it. Idempotent —
@@ -825,7 +1026,8 @@ def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
         return False
     if attempt is None or _approved_arka(attempt) is None:
         return False
-    if not attempt.design_files.filter(kind__in=CAD_KINDS, is_current=True).exists():
+    if not attempt.design_files.filter(
+            kind__in=PROGRESSION_CAD_KINDS, is_current=True).exists():
         return False
     if attempt.boq_submitted_at is None:
         return False
@@ -880,7 +1082,12 @@ def _workspace_context(project, assignment):
                                'submitted_by__user', 'reviewed_by__user')
                                .order_by('-version')) if attempt else []),
         'files':          files,
-        'has_cad':        any(f.kind in CAD_KINDS and f.is_current for f in files),
+        # Reports the PROGRESSION rule, not "any CAD-ish file exists" — a chip saying
+        # "CAD: Uploaded" while the gate still refuses to advance would be a lie the
+        # designer cannot debug. Legacy files still LIST above; they just do not tick
+        # this chip. See PROGRESSION_CAD_KINDS.
+        'has_cad':        any(f.kind in PROGRESSION_CAD_KINDS and f.is_current
+                              for f in files),
         'boq':            boq,
         'boq_complete':   bool(attempt and attempt.boq_submitted_at),
         'cad_kinds':      [(k, KIND_LABELS[k]) for k in UPLOADABLE_KINDS],
@@ -1205,6 +1412,16 @@ def design_artifact_upload(request, project_id):
     except ValueError as exc:
         return _back(f'{project.project_id}: {exc}.')
 
+    # ARCHIVE VALIDATION BEFORE STORAGE (Part 8). A zip that is unreadable, oversized
+    # when expanded, or missing a PDF or a DWG is refused here — so a rejected archive
+    # never reaches the bucket and never leaves an orphaned object behind.
+    listing = []
+    if kind == DESIGN_FILE_CAD_ZIP:
+        try:
+            listing = validate_cad_zip(upload)
+        except DesignStorageError as exc:
+            return _back(f'{project.project_id}: {exc}')
+
     # `kind` is whitelisted above, so it is safe as a storage path segment.
     path = build_design_path(project.project_id, kind, upload.name)
     try:
@@ -1224,6 +1441,7 @@ def design_artifact_upload(request, project_id):
             original_filename=(upload.name or '')[:255],
             size_bytes=getattr(upload, 'size', None),
             content_type=(getattr(upload, 'content_type', '') or '')[:100],
+            archive_listing=listing,
             derived_from_arka=arka,
             uploaded_by=profile, is_current=True,
         )
@@ -1430,18 +1648,21 @@ def _open_change_requests(attempt):
 
 
 def _package_is_complete(attempt):
-    """Whether an attempt actually has a reviewable package: approved current Arka, at
-    least one current CAD file, and a BOQ marked complete.
+    """Whether an attempt actually has a reviewable package: approved current Arka, a
+    current cad_zip, and a BOQ marked complete.
 
     Same three conditions Part 3's _maybe_advance_to_artifacts_uploaded() evaluates,
     re-checked here at QC start rather than trusting the status alone — the status is a
-    cached conclusion, these rows are the evidence.
+    cached conclusion, these rows are the evidence. It must use the SAME kind tuple as
+    that function or the two would disagree and a package could pass the gate that let it
+    in and then fail the gate at QC.
     """
     if attempt is None:
         return False
     if _approved_arka(attempt) is None:
         return False
-    if not attempt.design_files.filter(kind__in=CAD_KINDS, is_current=True).exists():
+    if not attempt.design_files.filter(
+            kind__in=PROGRESSION_CAD_KINDS, is_current=True).exists():
         return False
     return attempt.boq_submitted_at is not None
 
@@ -1892,7 +2113,7 @@ _DESIGNER_ACTIONS = {
     DESIGN_ARTIFACTS_UPLOADED:  ('none', '', 'Package complete — waiting for QC to start.'),
     DESIGN_IN_QC:               ('none', '', 'In QC review with the Design Head.'),
     DESIGN_RELEASED:            ('none', '', 'Design released. Nothing further to do.'),
-    DESIGN_SURVEY_RETURNED:     ('none', '', 'Blocked — waiting for a replacement survey.'),
+    DESIGN_SURVEY_RETURNED:     ('none', '', 'Design Hold — waiting for a replacement survey.'),
 }
 
 
@@ -1920,7 +2141,11 @@ def designer_dashboard_context(profile, projects):
         attempt     = _current_attempt(assignment)
         arka        = _current_arka(attempt)
         commitments = list(assignment.due_date_commitments.all())
-        current_due = next((c for c in commitments if c.is_current), None)
+        # PART 8: the dashboard shows the AGREED date. Reading the is_current row here
+        # would blank the due date on every card the moment its designer asked for an
+        # extension — and would show the requested date as though it had been granted.
+        current_due = effective_commitment(commitments)
+        pending_due = pending_extension(commitments)
 
         # `arka_submitted` is the one status whose next step depends on the Arka verdict
         # rather than on the status alone, so it is resolved here instead of in the table.
@@ -1962,6 +2187,9 @@ def designer_dashboard_context(profile, projects):
             'arka':           arka,
             'due_date':       current_due.proposed_date if current_due else None,
             'due_approved':   bool(current_due and current_due.approved_at),
+            # The requested date, shown as a pending chip beside the agreed one. It is
+            # NOT what 'due_date' reports and never feeds an overdue calculation.
+            'due_extension_requested': (pending_due.proposed_date if pending_due else None),
             # Revisions are derived by counting commitment rows, exactly as Part 2 does —
             # there is no stored counter to drift.
             'due_revised':    max(len(commitments) - 1, 0),

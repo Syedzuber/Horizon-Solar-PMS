@@ -81,7 +81,9 @@ DAY: 3 of 24
 COMPLETED TODAY:
 - duration_days, task_type fields on Task model
 - assigned_to ForeignKey (PM/SE pre-assigned on activation)
-- add_workdays() — calendar days, no weekend skip
+- add_calendar_days() — calendar days, no weekend skip (renamed from add_workdays in Part 8)
+- is_working_day() / next_working_day() / design_due_date() — the ONE working-day
+  definition: Sunday off, 2nd + 4th Saturday off, no public-holiday calendar
 - calculate_due_dates() — chain from activation date
 - Recalculate Due Dates button (backfills existing projects)
 - PM dashboard — 4 summary cards, internal/external split

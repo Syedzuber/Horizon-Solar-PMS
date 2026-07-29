@@ -39,14 +39,22 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
           {{ row.assignment.get_status_display }}
         </span>
         {% if row.current_due %}
+          {% comment %}
+          `current_due` is the AGREED date. A pending extension is shown beside it as a
+          separate line, never in place of it — the site is still committed to this date
+          until the Head rules on the request.
+          {% endcomment %}
           <div class="small mt-1">
             Due {{ row.current_due.proposed_date|date:"d M Y" }}
-            {% if row.current_due.approved_at %}
-              <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
-            {% else %}
-              <span class="badge bg-info-subtle text-info-emphasis">awaiting approval</span>
-            {% endif %}
+            <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
           </div>
+          {% if row.pending_extension %}
+            <div class="small">
+              <span class="badge bg-info-subtle text-info-emphasis">
+                extension to {{ row.pending_extension.proposed_date|date:"d M Y" }} requested
+              </span>
+            </div>
+          {% endif %}
           {% if row.revisions %}
             <div class="text-muted" style="font-size:.7rem;">{{ row.revisions }} revision(s)</div>
           {% endif %}
@@ -57,7 +65,7 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
     {% if row.is_blocked %}
       <div class="alert alert-warning py-2 my-2 small">
         <i class="bi bi-exclamation-triangle me-1"></i>
-        You flagged this site as blocked on {{ row.assignment.survey_returned_at|date:"d M Y H:i" }} —
+        You placed this site on Design Hold on {{ row.assignment.survey_returned_at|date:"d M Y H:i" }} —
         {{ row.assignment.survey_return_reason }}
         <div class="text-muted mt-1">
           Your clock is stopped until the Design Head uploads a replacement survey.
@@ -79,57 +87,47 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
         </a>
       {% endif %}
 
-      {% if row.can_propose %}
-        <button class="btn btn-sm btn-primary" type="button"
-                data-bs-toggle="collapse" data-bs-target="#prop{{ row.site.pk }}">
-          Propose due date
-        </button>
-      {% endif %}
-
-      {% if row.assignment.status == 'in_design' %}
+      {% comment %}
+      PART 8: the designer no longer proposes the initial date — it is set automatically
+      at allocation. The only date action left to them is asking for MORE TIME, which the
+      Head must approve. The old "Change agreed date" button is gone from this screen for
+      the same reason: that view is now the Head's own path.
+      {% endcomment %}
+      {% if row.can_request_extension %}
         <button class="btn btn-sm btn-outline-warning" type="button"
-                data-bs-toggle="collapse" data-bs-target="#chg{{ row.site.pk }}">
-          Change agreed date
+                data-bs-toggle="collapse" data-bs-target="#ext{{ row.site.pk }}">
+          Request extension
         </button>
       {% endif %}
 
       {% if not row.is_blocked %}
         <button class="btn btn-sm btn-outline-danger" type="button"
                 data-bs-toggle="collapse" data-bs-target="#blk{{ row.site.pk }}">
-          Mark blocked
+          Place on Design Hold
         </button>
       {% endif %}
 
       {% if row.awaiting %}
         <span class="align-self-center text-muted small">
-          Waiting for the Design Head to approve your proposed date.
+          Waiting for the Design Head to rule on your extension request —
+          the agreed date stands until then.
         </span>
       {% endif %}
     </div>
 
-    {% if row.can_propose %}
-    <div class="collapse mt-2" id="prop{{ row.site.pk }}">
+    {% if row.can_request_extension %}
+    <div class="collapse mt-2" id="ext{{ row.site.pk }}">
       <form method="post" action="{% url 'design_due_date_propose' project_id=row.site.project_id %}"
             class="d-flex flex-wrap align-items-center gap-2">
         {% csrf_token %}
         <input type="date" name="proposed_date" class="form-control form-control-sm"
                style="max-width:12rem;" required>
-        <button class="btn btn-sm btn-primary">Propose</button>
-        <span class="text-muted small">The Design Head must approve before design starts.</span>
-      </form>
-    </div>
-    {% endif %}
-
-    {% if row.assignment.status == 'in_design' %}
-    <div class="collapse mt-2" id="chg{{ row.site.pk }}">
-      <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
-            class="d-flex flex-wrap align-items-center gap-2">
-        {% csrf_token %}
-        <input type="date" name="proposed_date" class="form-control form-control-sm"
-               style="max-width:12rem;" required>
         <input type="text" name="change_reason" class="form-control form-control-sm"
-               placeholder="Reason for the change (required)" style="max-width:22rem;" required>
-        <button class="btn btn-sm btn-warning">Propose new date</button>
+               placeholder="Why do you need longer? (required)" style="max-width:22rem;" required>
+        <button class="btn btn-sm btn-warning">Request extension</button>
+        <span class="text-muted small">
+          The agreed date stays in force until the Design Head approves.
+        </span>
       </form>
     </div>
     {% endif %}
@@ -142,7 +140,7 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
         <input type="text" name="reason" class="form-control form-control-sm"
                placeholder="What is inadequate about the survey? (required)"
                style="max-width:28rem;" required>
-        <button class="btn btn-sm btn-outline-danger">Mark blocked</button>
+        <button class="btn btn-sm btn-outline-danger">Place on Design Hold</button>
         <span class="text-muted small">Stops your clock and notifies the Head on his screen.</span>
       </form>
     </div>

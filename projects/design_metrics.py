@@ -1,4 +1,4 @@
-"""
+﻿"""
 Read-only metrics for the Design Head's per-tender dashboard (Part 5).
 
 NOTHING IN THIS MODULE WRITES. No save(), no create(), no update(), no delete() — every
@@ -56,6 +56,59 @@ def _mw_to_kw(value_mw):
 
 
 # ---------------------------------------------------------------------------
+# 0. Which commitment counts — the effective / pending split (Part 8)
+# ---------------------------------------------------------------------------
+# Part 2 had one notion of "the" commitment: the `is_current` row. That was enough
+# because a site had either no agreed date or exactly one, and a proposal in flight
+# meant there was no agreed date yet.
+#
+# Part 8 breaks that. The date is now auto-approved AT ALLOCATION, so a site always
+# has an approved date, and the designer can afterwards request an EXTENSION — a new
+# row that takes over `is_current` while sitting unapproved. If the surfaces kept
+# reading `is_current`, requesting an extension would make the approved date vanish
+# from every screen and, worse, drop the site out of the overdue count: `is_overdue`
+# returns False for an unapproved commitment, so a designer could clear their own
+# overdue flag simply by asking for more time. That is the failure this split exists
+# to prevent.
+#
+# So the two questions are answered by two different functions:
+#
+#   effective_commitment()  what the site is ACTUALLY committed to. The most recently
+#                           approved row, whether or not it is current. Every read
+#                           surface uses this — due-date display, overdue, dashboard.
+#   pending_extension()     the unapproved request awaiting a verdict, if any. Used
+#                           only to render "extension requested" and to drive the
+#                           Head's approve/reject buttons.
+#
+# `is_current` keeps its original job: it marks the row the approve/reject views act
+# on, and the partial unique constraint still guarantees there is at most one.
+
+def effective_commitment(rows):
+    """The approved due date in force, from an already-loaded list of commitments.
+
+    Ordered by `approved_at` rather than `is_current` so a pending extension cannot
+    displace it, and by pk as a tiebreak so two rows approved in the same transaction
+    still order deterministically.
+    """
+    approved = [c for c in rows if c.approved_at is not None]
+    if not approved:
+        return None
+    return max(approved, key=lambda c: (c.approved_at, c.pk))
+
+
+def pending_extension(rows):
+    """The extension request awaiting a verdict, or None.
+
+    An unapproved row that is NOT current is a request that was already rejected and
+    stood down; it is history, not a pending request, so `is_current` is required here.
+    """
+    current = next((c for c in rows if c.is_current), None)
+    if current is not None and current.approved_at is None:
+        return current
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 1. The overdue rule — ONE definition, used by every surface
 # ---------------------------------------------------------------------------
 
@@ -78,6 +131,12 @@ def is_overdue(assignment, current_commitment, today=None):
         `stage_counts()` reports how many are in that position.
       * It does not treat a PROPOSED-but-unapproved date as a commitment. The handshake
         is two-sided (Part 2); one side proposing is not an agreement.
+
+    PART 8. Callers must pass the EFFECTIVE commitment — `effective_commitment(rows)`,
+    the most recently approved row — NOT the `is_current` one. A pending extension
+    request is current but unapproved, and passing it here would return False and quietly
+    remove an overdue site from the count the moment its designer asked for more time.
+    The `approved_at is None` guard below is kept as a backstop for exactly that mistake.
 
     `current_commitment` is passed in rather than looked up so callers that already hold
     the row do not re-query per site — this function is called once per assignment in a
@@ -119,7 +178,11 @@ STAGE_ORDER = [
     ('arka_approved',       'Arka approved, artifacts incomplete'),
     ('artifacts_uploaded',  'Awaiting QC'),
     ('in_qc',               'In QC'),
-    ('blocked',             'Blocked'),
+    # KEY STAYS 'blocked', LABEL BECOMES 'Design Hold' (Part 8). The key is not cosmetic:
+    # the dashboard's drill-down puts it in the query string as ?stage=blocked, so
+    # renaming it would break every link and bookmark already pointing at that filter for
+    # no gain — nobody sees the key.
+    ('blocked',             'Design Hold'),
     ('released',            'Released'),
 ]
 STAGE_LABELS = dict(STAGE_ORDER)
@@ -205,16 +268,22 @@ def tender_metrics(program, today=None):
     commitments_by_assignment = {}
     for c in commitments:
         commitments_by_assignment.setdefault(c.assignment_id, []).append(c)
-    current_commitment = {}
+    # PART 8: the APPROVED date drives every number on this page, and a pending
+    # extension is carried alongside it rather than replacing it. See the
+    # effective/pending note at the top of this module.
+    effective_by_assignment = {}
+    pending_by_assignment   = {}
     for a in assignments:
         rows = commitments_by_assignment.get(a.pk, [])
-        current_commitment[a.pk] = next((c for c in rows if c.is_current), None)
+        effective_by_assignment[a.pk] = effective_commitment(rows)
+        pending_by_assignment[a.pk]   = pending_extension(rows)
 
     # ---- per-site facts every panel reuses --------------------------------------
     sites = []
     for a in assignments:
         arka = current_arka.get(a.pk)
-        commitment = current_commitment.get(a.pk)
+        commitment = effective_by_assignment.get(a.pk)
+        pending    = pending_by_assignment.get(a.pk)
         approved_arka = arka if (arka is not None and arka.verdict == ARKA_APPROVED) else None
         overdue = is_overdue(a, commitment, today)
         sites.append({
@@ -226,6 +295,9 @@ def tender_metrics(program, today=None):
             'approved_arka': approved_arka,
             'capacity_kw':   approved_arka.capacity_kw if approved_arka else None,
             'commitment':    commitment,
+            # The extension awaiting a verdict, if any. Rendered as a chip beside the
+            # due date; it deliberately does NOT feed `overdue` or `commitment`.
+            'pending_extension': pending,
             'has_approved_due': bool(commitment and commitment.approved_at),
             'overdue':       overdue,
             'days_over':     days_overdue(commitment, today) if overdue else 0,
@@ -450,7 +522,7 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT):
         started = s['assignment'].survey_returned_at
         days = (today - timezone.localtime(started).date()).days if started else 0
         reason = (s['assignment'].survey_return_reason or '').strip() or 'no reason recorded'
-        _add(s, _SEV_BLOCKED, days, f'Blocked {days} day(s) — {reason}', 'warning')
+        _add(s, _SEV_BLOCKED, days, f'Design Hold {days} day(s) — {reason}', 'warning')
 
     for s in sorted((x for x in sites if x['revisions'] >= 3 and not x['released']),
                     key=lambda x: x['revisions'], reverse=True):

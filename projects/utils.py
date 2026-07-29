@@ -1,4 +1,4 @@
-from datetime import timedelta
+﻿from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
@@ -43,12 +43,100 @@ def generate_project_id(project_type):
     return f"HRP-{prefix}-{year}-{highest + 1:03d}"
 
 
-def add_workdays(start_date, days):
+def add_calendar_days(start_date, days):
     """
     Advance start_date by N calendar days. days=0 returns start_date unchanged.
-    NOTE: uses calendar days, not business days — weekends are not skipped.
+    Weekends are NOT skipped — every calendar day counts.
+
+    RENAMED from `add_workdays` in Part 8. The old name claimed to do working-day
+    arithmetic and did not, which was harmless while nothing else in the system had
+    a real definition of a working day. Part 8 adds one (`is_working_day` below), so
+    two functions would have sat in this module both sounding like working-day maths
+    while meaning different things. The rename is identifier-only: no call site's
+    behaviour changes and no stored date moves. The Residential task cascade and the
+    Gantt engine still get plain calendar arithmetic, which is what they always got.
     """
     return start_date + timedelta(days=days)
+
+
+# ---------------------------------------------------------------------------
+# WORKING DAYS — the single definition for the whole system (Part 8)
+# ---------------------------------------------------------------------------
+# Horizon Renewable Power's working week:
+#   * every Sunday is off
+#   * the 2nd and 4th Saturday of each month are off
+#   * the 1st, 3rd and 5th Saturdays are WORKING days
+#
+# "2nd Saturday" means the second Saturday to fall in that calendar month, which is
+# what the company means by it — not "14 days after the first". Because the Nth-ness
+# is counted within the month, it is derived from the day-of-month alone: days 1-7
+# hold the 1st Saturday, 8-14 the 2nd, and so on. That is why the nth calculation
+# below is `(day - 1) // 7 + 1` and needs no calendar lookup.
+#
+# NO PUBLIC HOLIDAY CALENDAR. Deliberately out of scope for Part 8 and recorded as a
+# known gap in DESIGN_MODULE_DEFERRED.md — a due date that lands on Diwali will not
+# roll. Adding one later means changing `is_working_day` only; every caller rolls
+# forward through whatever this function reports, so no caller needs to change.
+
+SATURDAY = 5
+SUNDAY   = 6
+
+#: Saturdays that are NOT working days, counted within the calendar month.
+NON_WORKING_SATURDAYS = (2, 4)
+
+
+def is_working_day(d):
+    """
+    True if `d` is a working day under the company calendar described above.
+
+    Public holidays are NOT considered — see DESIGN_MODULE_DEFERRED.md.
+    """
+    weekday = d.weekday()
+    if weekday == SUNDAY:
+        return False
+    if weekday == SATURDAY:
+        nth_saturday_of_month = (d.day - 1) // 7 + 1
+        return nth_saturday_of_month not in NON_WORKING_SATURDAYS
+    return True
+
+
+def next_working_day(d):
+    """
+    Return `d` if it is a working day, otherwise the first working day after it.
+
+    Rolls FORWARD only. A due date is a commitment to the site, so a date that lands
+    on a day nobody works becomes the next day somebody does — never an earlier one,
+    which would silently shorten the designer's window.
+
+    The loop terminates because at most two consecutive non-working days can occur
+    (a 2nd/4th Saturday followed by its Sunday); the bound is not relied upon.
+    """
+    while not is_working_day(d):
+        d += timedelta(days=1)
+    return d
+
+
+#: Calendar days a designer gets between allocation and the due date, before the
+#: non-working-day roll-forward is applied.
+DESIGN_DUE_DATE_OFFSET_DAYS = 2
+
+
+def design_due_date(allocation_date, offset_days=DESIGN_DUE_DATE_OFFSET_DAYS):
+    """
+    The due date for an OPEX design site allocated on `allocation_date`.
+
+    Allocation date + 2 CALENDAR days, then rolled forward to the next working day.
+
+    The offset is calendar days, not working days, on purpose: the commitment the
+    business makes is "two days from allocation", and only the landing day is
+    adjusted so it isn't a day nobody is in. Counting the offset in working days
+    instead would push a Thursday allocation to the following Tuesday, which is not
+    what was asked for.
+
+    `allocation_date` must be a `date` — callers holding a datetime should pass
+    `timezone.localdate(dt)` so the day is the one the office was actually in.
+    """
+    return next_working_day(allocation_date + timedelta(days=offset_days))
 
 
 def recalculate_from_task(project, anchor_task, new_date, user=None):
@@ -105,7 +193,7 @@ def recalculate_from_task(project, anchor_task, new_date, user=None):
             # External tasks run in parallel with the current internal position
             new_d = prev_internal_due
         else:
-            new_d = add_workdays(prev_internal_due, task.duration_days)
+            new_d = add_calendar_days(prev_internal_due, task.duration_days)
             prev_internal_due = new_d  # advance the internal chain
         task.due_date = new_d
         if old_d != new_d:
@@ -154,7 +242,7 @@ def calculate_due_dates(project, user=None):
             # External tasks shadow the current internal chain date
             task.due_date = previous_internal_due
         else:
-            task.due_date = add_workdays(previous_internal_due, task.duration_days)
+            task.due_date = add_calendar_days(previous_internal_due, task.duration_days)
             previous_internal_due = task.due_date
         task.save()
         count += 1
@@ -222,14 +310,14 @@ def compute_gantt_schedule(project, buffer_days=0, external_min_days=0):
         dur = task.duration_days or 0
         if task.task_type == Task.EXTERNAL:
             raw_start = cursor
-            raw_end = add_workdays(cursor, max(dur, external_min_days))
+            raw_end = add_calendar_days(cursor, max(dur, external_min_days))
             is_marker, is_external = False, True
         elif dur == 0:
             raw_start = raw_end = task.due_date if task.due_date is not None else cursor
             is_marker, is_external = True, False
         else:
             raw_start = cursor
-            raw_end = task.due_date if task.due_date is not None else add_workdays(cursor, dur)
+            raw_end = task.due_date if task.due_date is not None else add_calendar_days(cursor, dur)
             if raw_end < raw_start:            # guard a manually-inverted due date
                 raw_end = raw_start
             cursor = raw_end                   # chain off the actual end (stored or computed)

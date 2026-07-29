@@ -112,7 +112,116 @@ def validate_design_file(file_obj):
     # these types, so that is accepted rather than rejected.
     if expected and actual and actual not in (expected, 'application/octet-stream'):
         raise DesignStorageError('File content type does not match its extension.')
+
     return ext
+
+
+# ---------------------------------------------------------------------------
+# CAD ARCHIVE VALIDATION (Part 8)
+# ---------------------------------------------------------------------------
+# CAD used to arrive as two files and the system could see both. It now arrives as one
+# zip, which hides its own contents: without validation here the QC reviewer downloads
+# the archive and only THEN discovers the DWG is missing, having already queued the
+# package for review. So the archive is opened and checked at upload, and its listing is
+# recorded on the row so the contents are visible without downloading anything.
+#
+# THE ARCHIVE IS NEVER EXTRACTED TO DISK. Everything below reads the zip CENTRAL
+# DIRECTORY — the index at the end of the file — which gives names and declared sizes
+# without decompressing a single byte.
+
+#: Largest cad_zip accepted, as it arrives over the wire.
+MAX_CAD_ZIP_BYTES = 25 * 1024 * 1024              # 25 MB — same as any design file
+
+#: Largest TOTAL UNCOMPRESSED size the archive may declare.
+#
+# This is the zip-bomb guard and it is the reason the check exists at all. A 25 MB zip of
+# highly compressible data can declare hundreds of gigabytes uncompressed; anything that
+# later decompresses it — a preview, a virus scanner, the reviewer's own machine —
+# exhausts memory or disk. 200 MB is comfortably above a real CAD package (a heavy DWG
+# plus drawing sheets runs to tens of MB) and far below anything that could hurt.
+MAX_CAD_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024   # 200 MB
+
+#: Ceiling on the number of entries, so a listing cannot itself become the payload.
+MAX_CAD_ZIP_ENTRIES = 500
+
+#: What a CAD archive must contain, by extension. Case-insensitive.
+REQUIRED_CAD_ZIP_EXTENSIONS = ('pdf', 'dwg')
+
+
+def validate_cad_zip(file_obj):
+    """Validate a cad_zip upload and return its listing.
+
+    Returns ``[{'name': str, 'size': int}, ...]`` — `size` is the entry's UNCOMPRESSED
+    size as declared in the central directory. Raises DesignStorageError with a message
+    naming exactly what is wrong.
+
+    Checks, in order:
+      1. it is a readable zip archive (not merely a file named .zip)
+      2. it declares no more than MAX_CAD_ZIP_ENTRIES entries
+      3. its total uncompressed size is within MAX_CAD_ZIP_UNCOMPRESSED_BYTES
+      4. it contains at least one .pdf AND at least one .dwg
+
+    The size check runs BEFORE the content check on purpose: a hostile archive should be
+    rejected on the cheapest possible evidence, and summing the central directory never
+    decompresses anything.
+    """
+    import zipfile
+
+    size = getattr(file_obj, 'size', 0) or 0
+    if size > MAX_CAD_ZIP_BYTES:
+        raise DesignStorageError(
+            f'Archive is {size / 1024 / 1024:.1f} MB — the limit is '
+            f'{MAX_CAD_ZIP_BYTES // 1024 // 1024} MB.')
+
+    # Read from the start regardless of what an earlier validator left the pointer on.
+    try:
+        file_obj.seek(0)
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        archive = zipfile.ZipFile(file_obj)
+        # testzip() would decompress every entry; namelist() reads the index only.
+        infos = archive.infolist()
+    except zipfile.BadZipFile:
+        raise DesignStorageError(
+            'That file is not a readable zip archive. Upload the CAD package as a '
+            'single .zip containing the PDF and the DWG.')
+    except Exception:
+        raise DesignStorageError('The zip archive could not be read.')
+    finally:
+        try:
+            file_obj.seek(0)
+        except (AttributeError, OSError):
+            pass
+
+    if len(infos) > MAX_CAD_ZIP_ENTRIES:
+        raise DesignStorageError(
+            f'Archive declares {len(infos)} entries — the limit is '
+            f'{MAX_CAD_ZIP_ENTRIES}.')
+
+    total_uncompressed = sum(i.file_size for i in infos)
+    if total_uncompressed > MAX_CAD_ZIP_UNCOMPRESSED_BYTES:
+        raise DesignStorageError(
+            f'Archive expands to {total_uncompressed / 1024 / 1024:.0f} MB uncompressed '
+            f'— the limit is {MAX_CAD_ZIP_UNCOMPRESSED_BYTES // 1024 // 1024} MB. '
+            f'Upload only the drawings for this site.')
+
+    # Directory entries carry a trailing slash and a zero size; they are not contents.
+    entries = [i for i in infos if not i.is_dir()]
+    if not entries:
+        raise DesignStorageError('The zip archive is empty.')
+
+    present = {name.rsplit('.', 1)[-1].lower()
+               for name in (i.filename for i in entries) if '.' in name}
+    missing = [ext for ext in REQUIRED_CAD_ZIP_EXTENSIONS if ext not in present]
+    if missing:
+        raise DesignStorageError(
+            'The CAD archive is missing '
+            + ' and '.join(f'a .{ext.upper()} file' for ext in missing)
+            + '. It must contain at least one PDF and at least one DWG.')
+
+    return [{'name': i.filename, 'size': i.file_size} for i in entries]
 
 
 def upload_design_file(file_obj, path):

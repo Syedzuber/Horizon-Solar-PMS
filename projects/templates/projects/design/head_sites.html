@@ -105,8 +105,8 @@ page, and any markup named inside it becomes real elements.
                 <div class="small text-dark mt-1">
                   <i class="bi bi-exclamation-triangle me-1"></i>{{ row.assignment.survey_return_reason }}
                   <div class="text-muted" style="font-size:.7rem;">
-                    flagged {{ row.assignment.survey_returned_at|date:"d M Y H:i" }}
-                    by {{ row.assignment.survey_returned_by.user.get_full_name }}
+                    on Design Hold since {{ row.assignment.survey_returned_at|date:"d M Y H:i" }},
+                    placed by {{ row.assignment.survey_returned_by.user.get_full_name }}
                   </div>
                 </div>
               {% endif %}
@@ -117,12 +117,21 @@ page, and any markup named inside it becomes real elements.
               {% else %}<span class="text-muted">—</span>{% endif %}
             </td>
             <td class="small">
+              {% comment %}
+              The AGREED date, always. A pending extension appears underneath it as its
+              own chip — it never replaces this figure, because the site is still
+              committed to (and counted overdue against) the agreed date until the Head
+              approves the request.
+              {% endcomment %}
               {% if row.current_due %}
                 {{ row.current_due.proposed_date|date:"d M Y" }}
-                {% if row.current_due.approved_at %}
-                  <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
-                {% else %}
-                  <span class="badge bg-info-subtle text-info-emphasis">proposed</span>
+                <span class="badge bg-success-subtle text-success-emphasis">agreed</span>
+                {% if row.pending_extension %}
+                  <div class="mt-1">
+                    <span class="badge bg-info-subtle text-info-emphasis">
+                      extension to {{ row.pending_extension.proposed_date|date:"d M Y" }} requested
+                    </span>
+                  </div>
                 {% endif %}
                 {% if row.revisions %}
                   <div class="text-muted" style="font-size:.7rem;">{{ row.revisions }} revision(s)</div>
@@ -151,14 +160,20 @@ page, and any markup named inside it becomes real elements.
                         data-bs-toggle="collapse" data-bs-target="#al{{ row.site.pk }}">Allocate</button>
               {% endif %}
 
-              {# Approve / reject a proposed date #}
-              {% if row.assignment.status == 'due_date_proposed' %}
+              {% comment %}
+              PART 8: these gate on the ROWS, not on a status. An extension can be
+              requested from any working stage, so there is no single status that means
+              "a due-date verdict is owed" — `pending_extension` is that fact.
+              {% endcomment %}
+
+              {# Approve / reject a pending extension request #}
+              {% if row.pending_extension %}
                 <button class="btn btn-sm btn-success" type="button"
-                        data-bs-toggle="collapse" data-bs-target="#ap{{ row.site.pk }}">Due date</button>
+                        data-bs-toggle="collapse" data-bs-target="#ap{{ row.site.pk }}">Extension</button>
               {% endif %}
 
-              {# Change an agreed date #}
-              {% if row.assignment.status == 'in_design' %}
+              {# Revise an agreed date directly — Head only, takes effect at once #}
+              {% if row.current_due and row.assignment.status != 'released' %}
                 <button class="btn btn-sm btn-outline-warning" type="button"
                         data-bs-toggle="collapse" data-bs-target="#ch{{ row.site.pk }}">Change date</button>
               {% endif %}
@@ -177,7 +192,7 @@ page, and any markup named inside it becomes real elements.
                 <button class="btn btn-sm btn-primary">Upload</button>
                 <span class="text-muted small">
                   Private bucket. Max 25 MB. pdf, doc(x), xls(x), jpg, png, dwg, zip.
-                  {% if row.is_blocked %}Uploading a replacement clears the blocked flag.{% endif %}
+                  {% if row.is_blocked %}Uploading a replacement clears the Design Hold.{% endif %}
                 </span>
               </form>
             </td>
@@ -204,15 +219,23 @@ page, and any markup named inside it becomes real elements.
           </tr>
           {% endif %}
 
-          {% if row.assignment.status == 'due_date_proposed' %}
+          {% if row.pending_extension %}
           <tr class="collapse" id="ap{{ row.site.pk }}">
             <td colspan="7" class="bg-light">
               <div class="d-flex flex-wrap align-items-center gap-3 py-2">
                 <span class="small">
-                  Proposed <strong>{{ row.current_due.proposed_date|date:"d M Y" }}</strong>
-                  by {{ row.current_due.proposed_by.user.get_full_name }}
-                  {% if row.current_due.change_reason %}
-                    <span class="text-muted">— {{ row.current_due.change_reason }}</span>
+                  Extension to
+                  <strong>{{ row.pending_extension.proposed_date|date:"d M Y" }}</strong>
+                  requested by {{ row.pending_extension.proposed_by.user.get_full_name }}
+                  {% if row.current_due %}
+                    <span class="text-muted">
+                      — agreed date is {{ row.current_due.proposed_date|date:"d M Y" }}
+                    </span>
+                  {% endif %}
+                  {% if row.pending_extension.change_reason %}
+                    <div class="text-muted" style="font-size:.75rem;">
+                      {{ row.pending_extension.change_reason }}
+                    </div>
                   {% endif %}
                 </span>
                 <form method="post" action="{% url 'design_due_date_approve' project_id=row.site.project_id %}">
@@ -231,7 +254,7 @@ page, and any markup named inside it becomes real elements.
           </tr>
           {% endif %}
 
-          {% if row.assignment.status == 'in_design' %}
+          {% if row.current_due and row.assignment.status != 'released' %}
           <tr class="collapse" id="ch{{ row.site.pk }}">
             <td colspan="7" class="bg-light">
               <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
@@ -241,8 +264,10 @@ page, and any markup named inside it becomes real elements.
                        style="max-width:12rem;" required>
                 <input type="text" name="change_reason" class="form-control form-control-sm"
                        placeholder="Reason for the change (required)" style="max-width:22rem;" required>
-                <button class="btn btn-sm btn-warning">Propose new date</button>
-                <span class="text-muted small">Creates a new commitment; the old one is superseded.</span>
+                <button class="btn btn-sm btn-warning">Set new date</button>
+                <span class="text-muted small">
+                  Takes effect immediately; the old commitment is superseded, not deleted.
+                </span>
               </form>
             </td>
           </tr>

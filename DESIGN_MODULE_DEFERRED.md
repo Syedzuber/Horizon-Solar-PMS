@@ -1001,3 +1001,98 @@ those — and why any future role that needs to act on tasks must be added in si
 one.
 
 **Location:** `projects/views.py` — six sites listed above
+
+---
+
+## Part 8 — deferred findings
+
+### L1 — The Design Hold model fields are still named `survey_returned_*`
+
+The user-facing name of the off-sequence hold is **Design Hold** as of Part 8. The stored
+status value is `survey_returned` and the three fields that carry the hold are
+`DesignAssignment.survey_returned_at`, `survey_returned_by` and `survey_return_reason`.
+
+Neither the value nor the field names were renamed, deliberately:
+
+* The stored value has never been `blocked`, so there was nothing to migrate — the Part 8
+  rename was label-only and touched no row.
+* Renaming the three fields is a schema change with no user-visible benefit. It would
+  require a migration, and every read site would have to move in the same commit.
+
+The mismatch is real and will confuse the next reader: a field called
+`survey_return_reason` holds what the UI calls the Design Hold reason. Anyone renaming
+these later must also update `_status_after_unblock`, `design_mark_blocked`,
+`design_survey_upload`'s unblock branch, `design_metrics._classify`, the `blocked` stage
+key, and the four templates that read `is_blocked`.
+
+**Location:** `projects/models.py` (`DesignAssignment`), `projects/design_views.py`,
+`projects/design_metrics.py`
+
+### L2 — No public holiday calendar
+
+`utils.is_working_day()` knows about Sundays and the 2nd and 4th Saturday of each month.
+It knows nothing about public holidays. A design due date that lands on Diwali, Holi or
+Independence Day is treated as a working day and does not roll.
+
+This was explicitly out of scope for Part 8. The fix is contained: add the holiday check
+to `is_working_day()` and every caller inherits it, because they all roll forward through
+that one function. What is NOT contained is where the holiday list lives — a hardcoded
+tuple will rot annually, and a model plus an admin screen is a feature, not a helper.
+
+**Location:** `projects/utils.py:is_working_day`
+
+### L3 — `allocated` and `due_date_proposed` are now unreachable for new rows
+
+Part 8 sends allocation straight from `awaiting_allocation` to `in_design`, so no new
+`DesignAssignment` can enter either status.
+
+* **`allocated`** is genuinely dead for new rows. Nothing sets it any more. The one
+  remaining writer is `_status_after_unblock`, and only on the branch that requires an
+  assignment with a designer and no approved commitment ever — a shape only Part 2 rows
+  can have.
+* **`due_date_proposed`** is dead as a *status*, but the state it described is alive: an
+  extension request awaiting a verdict. That state is now carried by a `DueDateCommitment`
+  row with `approved_at IS NULL` rather than by the assignment's status, because an
+  extension can be requested from any working stage and moving the status would rewind a
+  site that is mid-Arka to a pre-design stage.
+
+Neither value was removed, per the Part 8 hard rules, and rows on Railway still carry
+them. Before either is dropped, migrate the existing rows: `allocated` rows want
+`in_design` plus an approved commitment, `due_date_proposed` rows want whatever stage
+their work is actually at.
+
+**Location:** `projects/models.py:DESIGN_ASSIGNMENT_STATUS_CHOICES`,
+`projects/design_views.py:REALLOCATABLE_STATUSES`
+
+### L4 — `design_blocked` / `design_survey_unblocked` action codes keep the old wording
+
+`ActivityLog.action_code` still uses `design_blocked` and `design_survey_unblocked`, and
+the URL name is still `design_mark_blocked`. These are machine-readable identifiers, not
+display text, and renaming them would strand every historical row and any report keyed on
+them. Left as-is on purpose; only the human-readable `detail` text was updated.
+
+**Location:** `projects/design_views.py`, `projects/urls.py`
+
+### L5 — Reallocation resets the due date
+
+`_allocate_one` recomputes the due date every time it runs, so reallocating an already
+allocated site issues a fresh allocation-date + 2 working days commitment and stands the
+old one down. That is defensible — a new designer starting today should not inherit
+yesterday's clock — but it is a silent reset: the Head gets no warning that reallocating
+moved the date, and the superseded commitment is the only evidence.
+
+**Location:** `projects/design_views.py:_allocate_one`
+
+### L6 — Archive validation trusts the zip central directory
+
+`validate_cad_zip()` reads declared uncompressed sizes from the central directory rather
+than decompressing, which is what keeps it cheap and what keeps a zip bomb from being
+expanded in the first place. A hand-crafted archive can lie in that header: it can declare
+1 MB and expand to far more.
+
+Nothing in this system decompresses a `cad_zip` — it is stored and served as an opaque
+object — so the lie has no consumer today. It would matter the moment anything extracts
+one (a preview, a thumbnailer, an aggregated download). Whatever does that must enforce
+its own limit while reading, not trust this check.
+
+**Location:** `projects/design_storage.py:validate_cad_zip`

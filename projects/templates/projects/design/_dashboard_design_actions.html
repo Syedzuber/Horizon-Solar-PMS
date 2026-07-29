@@ -1,4 +1,4 @@
-  {# ── The one contextual action for the current status ────────────────────── #}
+﻿  {# ── The one contextual action for the current status ────────────────────── #}
   <div class="d-flex flex-wrap align-items-center gap-2">
 
     {% if p.design.action_kind == 'propose_due' %}
@@ -34,7 +34,7 @@
     {% if p.design.can_mark_blocked %}
       <button class="btn btn-sm btn-outline-danger" type="button"
               data-bs-toggle="collapse" data-bs-target="#dashblk{{ p.project.pk }}">
-        Mark blocked
+        Place on Design Hold
       </button>
     {% endif %}
   </div>
@@ -47,7 +47,7 @@
       <input type="text" name="reason" class="form-control form-control-sm"
              placeholder="What is inadequate about the survey? (required)"
              style="max-width:26rem;" required>
-      <button class="btn btn-sm btn-outline-danger">Mark blocked</button>
+      <button class="btn btn-sm btn-outline-danger">Place on Design Hold</button>
     </form>
   </div>
   {% endif %}

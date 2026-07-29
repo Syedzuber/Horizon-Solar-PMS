@@ -1,4 +1,4 @@
-{% comment %}
+﻿{% comment %}
 OPEX design state and ONE contextual action, rendered inside the expanded tender card on
 the Design dashboard (Part 4.5).
 
@@ -33,12 +33,23 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
         Design: {{ p.design.status_label }}</span>
     {% endif %}
 
-    {# Due date, with a marker when it has been renegotiated #}
+    {% comment %}
+    Due date, with a marker when it has been renegotiated.
+
+    PART 8: `due_date` is the AGREED date and is always approved — it is set and approved
+    at allocation, so the old "(proposed)" variant is unreachable and has been dropped. A
+    request for more time gets its own amber chip NEXT TO the agreed one, never instead
+    of it: showing the requested date here would tell the designer they had been granted
+    time the Head has not yet agreed to.
+    {% endcomment %}
     {% if p.design.due_date %}
-      <span class="chip {% if p.design.due_approved %}chip-green{% else %}chip-amber{% endif %}">
-        <span class="chip-dot {% if p.design.due_approved %}chip-dot-green{% else %}chip-dot-amber{% endif %}"></span>
-        Due {{ p.design.due_date|date:"d M Y" }}{% if not p.design.due_approved %} (proposed){% endif %}
+      <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+        Due {{ p.design.due_date|date:"d M Y" }}
       </span>
+      {% if p.design.due_extension_requested %}
+        <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+          Extension to {{ p.design.due_extension_requested|date:"d M Y" }} requested</span>
+      {% endif %}
       {% if p.design.due_revised %}
         <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
           Revised &times;{{ p.design.due_revised }}</span>
@@ -62,7 +73,7 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
   {# ── Things the designer must read before acting ─────────────────────────── #}
   {% if p.design.is_blocked and p.design.block_reason %}
     <div class="alert alert-warning py-2 px-2 small mb-2">
-      <strong>Blocked:</strong> {{ p.design.block_reason }}
+      <strong>Design Hold:</strong> {{ p.design.block_reason }}
     </div>
   {% endif %}
 

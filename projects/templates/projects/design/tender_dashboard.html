@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+﻿{% extends "base.html" %}
 {% comment %}
 Design Head — operational dashboard for ONE tender (Part 5). READ ONLY.
 
@@ -236,7 +236,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
           <th role="button" data-sort="1" class="text-end">Sites</th>
           <th role="button" data-sort="2" class="text-end">kW</th>
           <th role="button" data-sort="3" class="text-end">Overdue</th>
-          <th role="button" data-sort="4" class="text-end">Blocked</th>
+          <th role="button" data-sort="4" class="text-end">Design Hold</th>
           <th role="button" data-sort="5" class="text-end">Rework</th>
           <th>Split</th>
         </tr>
@@ -315,7 +315,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
   </div>
   {% if not m.attention %}
     <div class="card-body py-3 text-muted small">
-      Nothing overdue, blocked, heavily revised, or waiting on you.
+      Nothing overdue, on Design Hold, heavily revised, or waiting on you.
     </div>
   {% else %}
   <div class="table-responsive">
