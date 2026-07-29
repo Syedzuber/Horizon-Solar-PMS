@@ -2297,17 +2297,35 @@ def post_qc_pool(program, now=None):
     procurement receives nothing — the failure is silent on both sides, because Design
     has finished and SCM was never told. Age is days since `released_at`.
 
-    `.exclude(project__group_memberships__removed_at__isnull=True)` drops any site with a
-    LIVE membership; a site whose membership was removed is back in the pool, which is
-    what makes settled decision 6 recoverable — a change request returns the site to the
-    queue rather than losing it.
+    Sites with a LIVE membership are dropped; a site whose membership was REMOVED is back
+    in the pool, which is what makes settled decision 6 recoverable — a change request
+    returns the site to the queue rather than losing it.
+
+    THE EXCLUSION IS AN EXPLICIT SUBQUERY ON project_id, NOT
+    `.exclude(project__group_memberships__removed_at__isnull=True)`. That spelling is
+    wrong and silently empties this screen. Django compiles it to
+
+        NOT EXISTS (SELECT 1 FROM project U1
+                    LEFT OUTER JOIN sitegroupmembership U2 ON U1.id = U2.project_id
+                    WHERE U2.removed_at IS NULL AND U1.id = assignment.project_id)
+
+    — a LEFT JOIN, so a project with NO membership rows still produces one phantom row
+    whose U2.removed_at is NULL. The condition matches it, EXISTS is true, and the
+    project is excluded. The result is a pool that omits precisely the sites it exists to
+    show: every released site that has never been in a group. It only ever returned the
+    sites that had once been grouped and removed, which is why it looked correct against
+    data that had exactly that shape.
+
+    Filtering `SiteGroupMembership` directly and excluding on `project__in` compiles to a
+    plain subquery over rows that actually exist, with no outer join and no phantom row.
     """
     now = now or timezone.now()
     rows = list(
         DesignAssignment.objects
         .filter(project__program=program, project__is_deleted=False,
                 status=DESIGN_RELEASED)
-        .exclude(project__group_memberships__removed_at__isnull=True)
+        .exclude(project__in=SiteGroupMembership.objects
+                 .filter(removed_at__isnull=True).values('project_id'))
         .select_related('project', 'released_by__user')
         .order_by('released_at')
     )
