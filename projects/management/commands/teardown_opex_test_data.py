@@ -82,7 +82,7 @@ class Command(BaseCommand):
         from projects.models import (
             Program, Project, ProjectPhase, Task, BOQ, BOQItem, BOQRevision,
             DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
-            DesignFile, DesignChangeRequest,
+            DesignFile, DesignChangeRequest, SiteGroup, SiteGroupMembership,
         )
 
         confirm = options['confirm']
@@ -131,7 +131,17 @@ class Command(BaseCommand):
 
         # Ordered so that every entry's PROTECT/CASCADE dependencies are already gone
         # by the time it is deleted. DesignFile MUST precede ArkaSubmission.
+        #
+        # SITE GROUPS (Part 6) are listed FIRST and deleted explicitly even though both
+        # FKs are CASCADE and would go anyway — the point is the inventory. Without these
+        # two rows the dry run silently under-reports what a --confirm is about to remove,
+        # which is the one thing this command exists to be trusted about. Memberships
+        # precede groups; a membership can also hang off a Test- site that belongs to a
+        # group under a NON-Test program, so it is filtered by project, not by group.
         steps = [
+            ('SiteGroupMembership', SiteGroupMembership.objects.filter(
+                                        project__in=target_projects)),
+            ('SiteGroup',           SiteGroup.objects.filter(program__in=programs)),
             ('DesignFile',          DesignFile.objects.filter(attempt__in=attempts)),
             ('ArkaSubmission',      ArkaSubmission.objects.filter(attempt__in=attempts)),
             ('DesignChangeRequest', DesignChangeRequest.objects.filter(attempt__in=attempts)),
