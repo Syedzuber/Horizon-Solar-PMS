@@ -16,7 +16,7 @@ Bootstrap extending base.html with the shared chip pills, same as every other sc
 this module.
 {% endcomment %}
 
-{% block title %}QC queue — SolarPMS{% endblock %}
+{% block title %}Design review queue — SolarPMS{% endblock %}
 
 {% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
 
@@ -24,10 +24,10 @@ this module.
 
 <div class="d-flex justify-content-between align-items-start mb-3">
   <div>
-    <h5 class="mb-0">Design QC queue</h5>
+    <h5 class="mb-0">Design review queue</h5>
     <div class="text-muted small">
-      Packages awaiting review, reviews in progress, and packages Design QC has passed up
-      to the Design Head.
+      Arkas and packages awaiting review, reviews in progress, and everything Design QC has
+      passed up to the Design Head.
       {% if is_deputy %}
         <span class="chip chip-navy ms-1"><span class="chip-dot chip-dot-navy"></span>
           Acting as deputy</span>
@@ -44,11 +44,93 @@ this module.
   </div>
 </div>
 
-{% if not rows %}
+{% comment %}
+ARKA SECTION FIRST, because it is the first thing either reviewer sees. Until Part 9 the
+only route to design_head_review was the Head's per-tender site list, which a Design QC
+reviewer cannot open — so without this section their dashboard could report Arkas awaiting
+their verdict with nowhere to click.
+{% endcomment %}
+{% if arka_rows %}
+<h6 class="text-muted small text-uppercase mb-2" style="letter-spacing:.03em;">
+  Arka review — {{ arka_rows|length }} site{{ arka_rows|length|pluralize }}
+</h6>
+{% for row in arka_rows %}
+<div class="card shadow-sm mb-2">
+  <div class="card-body py-3">
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+      <div>
+        <div class="fw-semibold">{{ row.site.project_id }}</div>
+        <div class="text-muted small">
+          {{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}
+          {% if row.assignment.assigned_to %}
+            · designer {{ row.assignment.assigned_to.user.get_full_name|default:row.assignment.assigned_to.user.username }}
+          {% endif %}
+        </div>
+        <div class="small mt-2">
+          <span class="ver-tag">Arka v{{ row.arka.version }}</span>
+          · {{ row.arka.capacity_kw }} kW designed
+          <a href="{{ row.arka.arka_link }}" target="_blank" rel="noopener" class="ms-1">open the Arka</a>
+        </div>
+      </div>
+      <div class="text-end">
+        {% if row.awaiting_head %}
+          <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+            Awaiting Design Head</span>
+        {% else %}
+          <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+            Awaiting Design QC</span>
+        {% endif %}
+        <div class="text-muted" style="font-size:.7rem;">
+          submitted {{ row.arka.submitted_at|date:"d M Y H:i" }}
+          {% if row.attempt %}· attempt {{ row.attempt.attempt_number }}{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      <a href="{% url 'design_head_review' project_id=row.site.project_id %}"
+         class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        {% if row.can_qc or row.can_head %}Review Arka{% else %}Open Arka{% endif %}
+      </a>
+      {% if row.blocked_own %}
+        <span class="align-self-center text-muted small">
+          You passed this Arka through Design QC yourself — the Design Head verdict has to
+          come from somebody else.
+        </span>
+      {% elif row.awaiting_head and not row.can_head %}
+        <span class="align-self-center text-muted small">
+          With the Design Head. Nothing for you to do on this one.
+        </span>
+      {% elif not row.awaiting_head and not row.can_qc %}
+        <span class="align-self-center text-muted small">
+          You cannot review this site — either you are its allocated designer, or you do
+          not hold the Design QC flag.
+        </span>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endif %}
+
+{% if rows %}
+<h6 class="text-muted small text-uppercase mb-2 mt-4" style="letter-spacing:.03em;">
+  Package review — {{ rows|length }} site{{ rows|length|pluralize }}
+</h6>
+{% endif %}
+
+{% if not rows and not arka_rows %}
   <div class="card shadow-sm">
     <div class="card-body text-center text-muted small py-4">
-      Nothing is waiting for QC. Sites appear here once the designer has an approved Arka,
-      at least one CAD file and a completed BOQ.
+      Nothing is waiting for review. Arkas appear here as soon as a designer submits one;
+      packages appear once a site has an approved Arka, a CAD file and a completed BOQ.
+    </div>
+  </div>
+{% elif not rows %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center text-muted small py-4">
+      No packages are waiting for review. Sites appear here once the designer has an Arka
+      approved at both gates, at least one CAD file and a completed BOQ.
     </div>
   </div>
 {% endif %}

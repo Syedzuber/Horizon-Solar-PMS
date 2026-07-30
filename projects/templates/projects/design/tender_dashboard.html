@@ -369,7 +369,12 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             </span>
           </td>
           <td class="small fw-semibold">
-            <a href="{% url 'design_qc_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
+            {# Part 9 — Arka stages live on a different screen from packages. #}
+            {% if row.stage_key == 'arka_submitted' or row.stage_key == 'awaiting_head_arka' %}
+              <a href="{% url 'design_head_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
+            {% else %}
+              <a href="{% url 'design_qc_review' project_id=row.project.project_id %}">{{ row.project.project_id }}</a>
+            {% endif %}
           </td>
           <td class="small">
             {% if row.designer %}{{ row.designer.user.get_full_name|default:row.designer.user.username }}
@@ -427,8 +432,13 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
           </td>
           <td class="small">{{ s.attempts|length }}</td>
           <td class="text-end">
-            <a href="{% url 'design_qc_review' project_id=s.project.project_id %}"
-               class="btn btn-sm btn-outline-secondary">Open</a>
+            {% if s.stage == 'arka_submitted' or s.stage == 'awaiting_head_arka' %}
+              <a href="{% url 'design_head_review' project_id=s.project.project_id %}"
+                 class="btn btn-sm btn-outline-secondary">Open Arka</a>
+            {% else %}
+              <a href="{% url 'design_qc_review' project_id=s.project.project_id %}"
+                 class="btn btn-sm btn-outline-secondary">Open</a>
+            {% endif %}
           </td>
         </tr>
       {% empty %}

@@ -2544,21 +2544,75 @@ def _attempt_history(assignment):
 
 @login_required
 def design_qc_queue(request):
-    """Head / deputy: every site waiting for QC, plus everything currently in review.
+    """The review worklist for BOTH artifacts and BOTH gates.
 
-    Deliberately NOT the Design Head dashboard — no metrics, no workload, no capacity,
-    no overdue logic. It is a worklist of sites at `artifacts_uploaded`, `in_qc` and
-    `awaiting_head_qc`, and nothing else; the dashboard is Part 5.
+    Deliberately NOT the Design Head dashboard — no metrics, no workload, no capacity, no
+    overdue logic. It is a worklist of the five reviewable statuses and nothing else; the
+    dashboards are Part 5 and Part 9 §6.
 
-    PART 9 — ONE QUEUE, TWO AUDIENCES. Design QC and the Head share this screen and see
-    the same rows, because knowing what is stacked up at the other gate is exactly the
-    information a reviewer needs. What differs is which row each of them can ACT on, and
-    that is `can_qc_gate` / `can_head_gate` per row — computed per site because both the
-    self-review exclusion and the one-person-two-verdicts rule are per site.
+    PART 9 — ONE QUEUE, TWO AUDIENCES, TWO ARTIFACTS.
+
+    Design QC and the Head share this screen and see the same rows, because knowing what is
+    stacked up at the other gate is exactly the information a reviewer needs. What differs
+    is which row each can ACT on, and that is computed PER ROW because both the self-review
+    exclusion and the one-person-two-verdicts rule are per site.
+
+    IT CARRIES ARKAS AS WELL AS PACKAGES, and it has to. The Arka is the FIRST thing
+    Design QC reviews, and until Part 9 the only route to `design_head_review` was the
+    Head's per-tender site list — a screen a Design QC reviewer cannot open, because it is
+    gated on Head authority. Without the Arka section here, a QC reviewer's dashboard could
+    correctly report "2 Arka awaiting your verdict" with nowhere to click, which is exactly
+    the failure Part 4.5 called out about screens reachable only by typing a URL.
+
+    Two querysets rather than one: the two artifacts live at different statuses, need
+    different verdict URLs, and read better as separate sections than as one list where
+    half the rows have no package to open.
     """
     if not user_can_view_design_qc_dashboard(request.user):
         return HttpResponseForbidden('Design QC, Design Head or named deputy only.')
 
+    profile = getattr(request.user, 'profile', None)
+
+    # ── Arkas: awaiting gate 1, or passed gate 1 and awaiting gate 2 ──────────
+    arka_assignments = (DesignAssignment.objects
+                        .filter(status__in=(DESIGN_ARKA_SUBMITTED,
+                                            DESIGN_AWAITING_HEAD_ARKA),
+                                project__is_deleted=False)
+                        .select_related('project', 'project__program', 'assigned_to__user')
+                        .order_by('status', 'project__project_id'))
+
+    arka_rows = []
+    for assignment in arka_assignments:
+        attempt = _current_attempt(assignment)
+        arka = _current_arka(attempt)
+        if arka is None:
+            continue
+        # A site at `arka_submitted` whose Arka the Head has ALREADY approved is not in
+        # anybody's review queue — it is with the designer, owing CAD and BOQ. See the
+        # Part 9 status note: that combination is the "artifacts outstanding" state.
+        if arka.head_verdict == ARKA_APPROVED:
+            continue
+        awaiting_head = assignment.status == DESIGN_AWAITING_HEAD_ARKA
+        can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
+        can_head_gate = user_can_head_gate_design(request.user, assignment)
+        own_qc_verdict = _other_gate_actor_conflict(profile, arka.reviewed_by_id)
+        arka_rows.append({
+            'assignment':    assignment,
+            'site':          assignment.project,
+            'attempt':       attempt,
+            'arka':          arka,
+            'awaiting_head': awaiting_head,
+            'can_qc':        (can_qc_gate and not awaiting_head
+                              and arka.verdict == ARKA_PENDING),
+            'can_head':      (can_head_gate and awaiting_head
+                              and arka.head_verdict == ARKA_PENDING
+                              and not own_qc_verdict),
+            'blocked_own':   (can_head_gate and awaiting_head
+                              and arka.head_verdict == ARKA_PENDING
+                              and own_qc_verdict),
+        })
+
+    # ── Packages: awaiting gate 1, in gate 1, or awaiting gate 2 ──────────────
     assignments = (DesignAssignment.objects
                    .filter(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
                                        DESIGN_AWAITING_HEAD_QC),
@@ -2566,7 +2620,6 @@ def design_qc_queue(request):
                    .select_related('project', 'project__program', 'assigned_to__user')
                    .order_by('status', 'project__project_id'))
 
-    profile = getattr(request.user, 'profile', None)
     rows = []
     for assignment in assignments:
         attempt = _current_attempt(assignment)
@@ -2595,6 +2648,7 @@ def design_qc_queue(request):
         })
 
     return render(request, 'projects/design/qc_queue.html', {
+        'arka_rows': arka_rows,
         'rows':      rows,
         'is_deputy': user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'is_design_qc': user_is_design_qc(request.user),

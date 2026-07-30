@@ -663,6 +663,11 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
             'severity': severity, 'magnitude': magnitude,
             'reason': reason, 'marker': marker,
             'stage': STAGE_LABELS.get(site['stage'], site['stage']),
+            # PART 9: the KEY as well as the label, because the two artifacts live on two
+            # different screens. An Arka-stage row has to link to design_head_review; the
+            # package screen would tell the reviewer there is nothing to review yet, which
+            # is true of the package and useless to somebody holding an Arka verdict.
+            'stage_key': site['stage'],
         })
 
     if not own_only:

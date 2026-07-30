@@ -662,6 +662,94 @@ class DesignQcDashboardTests(Part9Base):
         self.assertEqual(self.client.get(head_url).status_code, 403)
 
 
+class ReviewQueueReachabilityTests(Part9Base):
+    """The queue must carry ARKAS, not just packages.
+
+    Regression test for a real defect found by using the product: a Design QC reviewer's
+    dashboard correctly reported "2 Arka awaiting your verdict" while the review queue
+    showed nothing, because the queue listed only the three package statuses. The only
+    route to design_head_review was the Head's per-tender site list, which is gated on Head
+    authority — so the number was true and unclickable.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.site, self.a = self._site('P9-REACH')
+        self.attempt, self.arka = self._submit_arka(self.a)
+        self.url = reverse('design_qc_queue')
+
+    def test_a_submitted_arka_appears_in_the_design_qc_queue(self):
+        self._login(self.qc)
+        r = self.client.get(self.url)
+        self.assertEqual(r.status_code, 200)
+        codes = [row['site'].project_id for row in r.context['arka_rows']]
+        self.assertIn('P9-REACH', codes)
+        # And it is actionable by this reviewer, with a link to the Arka screen.
+        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
+        self.assertTrue(row['can_qc'])
+        self.assertFalse(row['can_head'])
+        self.assertContains(
+            r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
+
+    def test_an_arka_awaiting_the_head_appears_and_is_his_to_act_on(self):
+        self._login(self.qc)
+        self._post('design_arka_approve', self.site)
+
+        self._login(self.head)
+        r = self.client.get(self.url)
+        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
+        self.assertTrue(row['awaiting_head'])
+        self.assertTrue(row['can_head'])
+        self.assertFalse(row['can_qc'])
+
+        # Design QC still SEES it — knowing what is stacked at the other gate is the point
+        # — but can no longer act on it.
+        self._login(self.qc)
+        r = self.client.get(self.url)
+        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
+        self.assertFalse(row['can_qc'])
+        self.assertFalse(row['can_head'])
+
+    def test_a_fully_approved_arka_leaves_the_queue(self):
+        """It is with the DESIGNER, owing CAD and BOQ — not in anybody's review queue."""
+        self._login(self.qc)
+        self._post('design_arka_approve', self.site)
+        self._login(self.head)
+        self._post('design_arka_head_approve', self.site)
+
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)   # the "artifacts outstanding" state
+        r = self.client.get(self.url)
+        codes = [row['site'].project_id for row in r.context['arka_rows']]
+        self.assertNotIn('P9-REACH', codes,
+                         'a both-gates-approved Arka is still sitting in a review queue')
+
+    def test_a_dual_flag_holder_sees_its_own_qc_verdict_blocking_the_head_row(self):
+        self._login(self.both)
+        self._post('design_arka_approve', self.site)
+        r = self.client.get(self.url)
+        row = [x for x in r.context['arka_rows'] if x['site'].project_id == 'P9-REACH'][0]
+        self.assertFalse(row['can_head'])
+        self.assertTrue(row['blocked_own'])
+        # Phrase chosen to sit on ONE source line in the template — the surrounding
+        # sentence is wrapped, and a substring spanning the wrap would never match.
+        self.assertContains(r, 'through Design QC yourself')
+
+    def test_the_attention_list_links_arka_stages_to_the_arka_screen(self):
+        """A package link on an Arka-stage row leads to 'nothing to review yet'."""
+        m = tender_metrics(self.program)
+        rows = [r for r in m['qc_attention']
+                if r['project'].project_id == 'P9-REACH']
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['stage_key'], 'arka_submitted')
+
+        self._login(self.qc)
+        r = self.client.get(reverse('design_qc_dashboard',
+                                    kwargs={'pk': self.program.pk}))
+        self.assertContains(
+            r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
+
+
 class RoleExclusionTests(Part9Base):
     """VERIFICATION 14 — every excluded role, every gate endpoint, by direct POST."""
 
