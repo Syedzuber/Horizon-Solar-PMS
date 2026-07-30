@@ -50,7 +50,21 @@ NO AUTO-REFRESH (settled decision 7). The only way this page updates is the Refr
     <a href="{% url 'design_tender_dashboard' pk=program.pk %}"
        class="btn btn-sm btn-outline-secondary">Refresh</a>
     <a href="{% url 'design_head_sites' pk=program.pk %}"
-       class="btn btn-sm text-white" style="background-color:#1a7a4a;">Full site list</a>
+       class="btn btn-sm btn-outline-secondary">Full site list</a>
+    {% comment %}
+    THE PRIMARY ACTION ON THIS PAGE, and it was missing. Everything else here is a number;
+    this is the one link that leads somewhere a verdict can be recorded. Until Part 9 the
+    only route to it was a text link buried in the review-queue panel further down, which
+    on a tall dashboard is below the fold — so the Head could read "2 Arka awaiting your
+    approval" and have no visible way to go and clear them.
+    {% endcomment %}
+    <a href="{% url 'design_qc_queue' %}"
+       class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+      Review queue
+      {% if m.queue.arka_count or m.queue.qc_count %}
+        <span class="badge bg-white text-dark ms-1">{{ m.queue.arka_count|add:m.queue.qc_count }}</span>
+      {% endif %}
+    </a>
   </div>
 </div>
 

@@ -125,9 +125,11 @@ stored anywhere (settled decision 8).
               by {{ a.submitted_by.user.get_full_name|default:a.submitted_by.user.username }}
             </div>
           </div>
-          {# PART 9 — one chip per gate. See _attempt_history.html for why they are never
-             merged: an Arka QC passed and the Head rejected must not render as a plain
-             "Rejected", which would hide the disagreement entirely. #}
+          {% comment %}
+          PART 9 — one chip per gate. See _attempt_history.html for why they are never
+          merged: an Arka QC passed and the Head rejected must not render as a plain
+          "Rejected", which would hide the disagreement entirely.
+          {% endcomment %}
           <div class="text-end">
             {% if a.verdict == 'approved' %}
               <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>QC approved</span>

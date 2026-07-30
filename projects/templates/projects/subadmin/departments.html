@@ -294,9 +294,11 @@
             Design Head — can reassign any Design-role task, independent of role
           </label>
         </div>
-        {# Part 9. This checkbox MUST exist wherever the edit POST is handled: the view
-           reads `is_design_qc == 'on'`, and an unchecked box posts nothing, so a form
-           without it would silently clear the flag on every save. #}
+        {% comment %}
+        Part 9. This checkbox MUST exist wherever the edit POST is handled: the view reads
+        `is_design_qc == 'on'`, and an unchecked box posts nothing, so a form without it
+        would silently clear the flag on every save.
+        {% endcomment %}
         <div class="flex items-center gap-2">
           <input type="checkbox" name="is_design_qc" id="editIsDesignQc" x-model="editIsDesignQc"
                  class="form-check-input">

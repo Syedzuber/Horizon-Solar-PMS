@@ -123,9 +123,11 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
         It then goes to the Design Head; CAD and BOQ unlock once <em>they</em> approve it.
       </div>
     {% elif arka and arka.verdict == 'approved' and arka.head_verdict == 'pending' %}
-      {# Half-way through the gates. Naming who holds it matters — otherwise the designer
-         chases the wrong person, or assumes the approval they can see is the one that
-         unlocks upload. It is not. #}
+      {% comment %}
+      Half-way through the gates. Naming who holds it matters — otherwise the designer
+      chases the wrong person, or assumes the approval they can see is the one that
+      unlocks upload. It is not.
+      {% endcomment %}
       <div class="small text-muted">
         Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) passed Design QC and is now
         with the Design Head. CAD and BOQ unlock once they approve it.

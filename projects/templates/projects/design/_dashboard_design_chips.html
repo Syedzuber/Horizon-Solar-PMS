@@ -31,6 +31,17 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'awaiting_head_arka' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: {{ p.design.status_label }}</span>
+    {% comment %}
+    `arka_submitted` covers BOTH "waiting on Design QC" and "approved at both gates, CAD and
+    BOQ outstanding" — see the long note in _design_status_chips.html. The stored label says
+    "Arka submitted" for both, which reads as still-waiting on a site nobody is waiting for.
+    {% endcomment %}
+    {% elif p.design.status == 'arka_submitted' and p.design.arka.head_verdict == 'approved' %}
+      <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+        Design: Arka approved — CAD and BOQ outstanding</span>
+    {% elif p.design.status == 'arka_submitted' %}
+      <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
+        Design: Arka awaiting Design QC</span>
     {% elif p.design.status == 'arka_rejected' %}
       <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
         Design: {{ p.design.status_label }}</span>

@@ -238,14 +238,18 @@ must not allow.
       </div>
 
     {% elif open_crs %}
-      {# The ONLY reason a verdict form is withheld from an otherwise-eligible reviewer at
-         either gate. Kept above the awaiting-Head branch so the real cause is named. #}
+      {% comment %}
+      The ONLY reason a verdict form is withheld from an otherwise-eligible reviewer at
+      either gate. Kept above the awaiting-Head branch so the real cause is named.
+      {% endcomment %}
       <div class="small text-muted">
         A verdict is blocked while a PM change request on this attempt is unresolved.
       </div>
     {% elif awaiting_head %}
-      {# Design QC looking at a package they have already passed on. Not a refusal —
-         there is simply nothing left for gate 1 to do here. #}
+      {% comment %}
+      Design QC looking at a package they have already passed on. Not a refusal — there is
+      simply nothing left for gate 1 to do here.
+      {% endcomment %}
       <div class="small text-muted">
         Design QC passed this package
         {% if attempt.qc_reviewed_at %}on {{ attempt.qc_reviewed_at|date:"d M Y H:i" }}{% endif %}.

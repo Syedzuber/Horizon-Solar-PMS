@@ -724,6 +724,34 @@ class ReviewQueueReachabilityTests(Part9Base):
         self.assertNotIn('P9-REACH', codes,
                          'a both-gates-approved Arka is still sitting in a review queue')
 
+    def test_a_both_gates_approved_site_does_not_claim_to_be_awaiting_anybody(self):
+        """`arka_submitted` means two different things and must not render as one.
+
+        The stored status is the same before Design QC has looked at the Arka and after the
+        Head has approved it. A chip reading "Arka submitted" in the second case sent a
+        Design Head hunting a site he had already cleared.
+        """
+        self._login(self.qc)
+        self._post('design_arka_approve', self.site)
+        self._login(self.head)
+        self._post('design_arka_head_approve', self.site)
+
+        r = self.client.get(reverse('design_head_review',
+                                    kwargs={'project_id': 'P9-REACH'}))
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, 'CAD and BOQ outstanding')
+        self.assertNotContains(r, 'awaiting Design Head')
+        self.assertNotContains(r, 'Arka awaiting Design QC')
+
+    def test_a_site_still_at_gate_1_says_so(self):
+        """The other half of the same chip — it must not read as approved either."""
+        r = None
+        self._login(self.qc)
+        r = self.client.get(reverse('design_head_review',
+                                    kwargs={'project_id': 'P9-REACH'}))
+        self.assertContains(r, 'Arka awaiting Design QC')
+        self.assertNotContains(r, 'CAD and BOQ outstanding')
+
     def test_a_dual_flag_holder_sees_its_own_qc_verdict_blocking_the_head_row(self):
         self._login(self.both)
         self._post('design_arka_approve', self.site)
@@ -748,6 +776,40 @@ class ReviewQueueReachabilityTests(Part9Base):
                                     kwargs={'pk': self.program.pk}))
         self.assertContains(
             r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
+
+
+class TemplateCommentSyntaxTests(TestCase):
+    """No multi-line `{# ... #}` comment anywhere in the template tree.
+
+    REGRESSION TEST FOR A BUG THE COMPILE CHECK CANNOT SEE. Django's lexer matches
+    comments with `{#.*?#}` and NO re.DOTALL, so a `{#` whose closing `#}` is on a later
+    line is never recognised as a comment — the entire block renders as literal page text,
+    in the middle of the UI, and the template still "compiles" perfectly.
+
+    Seven of these shipped in the first Part 9 commit and one was visible on the Arka
+    review screen. `get_template()` passing proves nothing here, which is why this walks
+    the source instead. Multi-line comments must use {% comment %}.
+    """
+
+    def test_no_multiline_hash_comments_in_any_template(self):
+        import glob
+        import os
+        import re
+
+        root = os.path.join(os.path.dirname(__file__), 'templates')
+        offenders = []
+        for path in glob.glob(os.path.join(root, '**', '*.html'), recursive=True):
+            with open(path, encoding='utf-8') as fh:
+                for lineno, line in enumerate(fh, start=1):
+                    for match in re.finditer(r'\{#', line):
+                        if '#}' not in line[match.end():]:
+                            rel = os.path.relpath(path, root).replace(os.sep, '/')
+                            offenders.append(f'{rel}:{lineno}  {line.strip()[:70]}')
+
+        self.assertEqual(
+            offenders, [],
+            'Multi-line {# #} comments render as visible page text — use '
+            '{% comment %} instead:\n  ' + '\n  '.join(offenders))
 
 
 class RoleExclusionTests(Part9Base):

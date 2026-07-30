@@ -9,16 +9,33 @@ designer's screen and the Head's screen can never disagree about the state.
 {% endcomment %}
 <div class="d-flex flex-wrap gap-2 mb-3">
 
-  {# Where the site is in the sequence — one pill, driven by DesignAssignment.status #}
+  {% comment %}
+  Where the site is in the sequence — one pill, driven by DesignAssignment.status.
+
+  `arka_submitted` IS TWO DIFFERENT STATES AND MUST NOT RENDER AS ONE. Part 3 settled that
+  no status value is invented for "Arka approved, artifacts outstanding": the site stays at
+  `arka_submitted` and the VERDICT disambiguates. Part 9 kept that, so a site whose Arka has
+  cleared both gates still stores `arka_submitted` — and a chip reading "Arka submitted"
+  there is actively misleading. It tells a Design Head the Arka is still waiting on somebody
+  when he has already approved it, which is exactly how a reviewer ends up hunting a site
+  that is in fact sitting with the designer.
+
+  So the label follows what design_metrics._classify() computes for the same site rather
+  than the raw status: `arka_approved` when head_verdict is approved, `arka_submitted`
+  otherwise. Both surfaces now say the same thing about the same row.
+  {% endcomment %}
   {% if status == 'artifacts_uploaded' %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
       Design: Package complete</span>
   {% elif status == 'arka_rejected' %}
     <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
       Design: Arka rejected</span>
+  {% elif status == 'arka_submitted' and arka_approved %}
+    <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+      Design: Arka approved — CAD and BOQ outstanding</span>
   {% elif status == 'arka_submitted' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
-      Design: Arka submitted</span>
+      Design: Arka awaiting Design QC</span>
   {% elif status == 'awaiting_head_arka' or status == 'awaiting_head_qc' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
       Design: {{ assignment.get_status_display }}</span>

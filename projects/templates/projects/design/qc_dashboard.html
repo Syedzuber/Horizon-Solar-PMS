@@ -59,11 +59,19 @@ NO AUTO-REFRESH. The only way this page updates is the Refresh link.
   <div class="d-flex gap-2">
     <a href="{% url 'design_qc_dashboard' pk=program.pk %}"
        class="btn btn-sm btn-outline-secondary">Refresh</a>
+    {# The primary action — the one link on this page that leads to a verdict. #}
     <a href="{% url 'design_qc_queue' %}"
-       class="btn btn-sm text-white" style="background-color:#1a7a4a;">Review queue</a>
+       class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+      Review queue
+      {% if m.queue.arka_count or m.queue.qc_count %}
+        <span class="badge bg-white text-dark ms-1">{{ m.queue.arka_count|add:m.queue.qc_count }}</span>
+      {% endif %}
+    </a>
     {% if is_head %}
-      {# Only offered to somebody who can actually open it — the Head's dashboard 403s
-         for a Design QC reviewer, and a link that always fails is worse than no link. #}
+      {% comment %}
+      Only offered to somebody who can actually open it — the Head's dashboard 403s for a
+      Design QC reviewer, and a link that always fails is worse than no link.
+      {% endcomment %}
       <a href="{% url 'design_tender_dashboard' pk=program.pk %}"
          class="btn btn-sm btn-outline-secondary">Full Head dashboard</a>
     {% endif %}

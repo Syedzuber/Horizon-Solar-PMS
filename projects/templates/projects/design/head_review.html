@@ -77,8 +77,10 @@ URL is refused exactly as a hidden button would have prevented.
     {% endif %}
 
     {% if can_qc_verdict %}
-      {# ── GATE 1 — Design QC. Approval hands the Arka to the Head; it does NOT
-           unlock CAD or BOQ, which now need head_verdict='approved'. ── #}
+      {% comment %}
+      GATE 1 — Design QC. Approval hands the Arka to the Head; it does NOT unlock CAD or
+      BOQ, which now need head_verdict='approved'.
+      {% endcomment %}
       <div class="row g-3">
         <div class="col-md-4">
           <form method="post" action="{% url 'design_arka_approve' project_id=project.project_id %}">
