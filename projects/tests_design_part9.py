@@ -778,6 +778,78 @@ class ReviewQueueReachabilityTests(Part9Base):
             r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
 
 
+class ReviewerCanOpenWhatTheyReviewTests(Part9Base):
+    """Design QC must be able to OPEN the artifacts it is asked to judge.
+
+    REGRESSION TEST FOR A REPORTED BUG, and finding G4 repeating for the new role. Part
+    6.5b hit exactly this with the Head's deputy: they could reach the QC screen and then
+    got a 403 from the BOQ link ON THAT SCREEN. Part 9 shipped Design QC with the same
+    hole — the reviewer saw the package listing and could open none of it.
+
+    A Design QC reviewer is a plain `role='Design'` user who is by construction NOT the
+    site's `assigned_design`, since the assigned designer is the one person forbidden from
+    reviewing it. So `user_can_view_project()`'s Design branch refuses them every time,
+    and both surfaces needed their own additive branch.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.site, self.a = self._site('P9-OPEN')
+        # `assigned_design` names the DESIGNER, never the reviewer — this is the exact
+        # shape that made the Design branch return False for Design QC.
+        self.site.assigned_design = self.designer
+        self.site.save()
+
+    def test_design_qc_may_read_the_boq(self):
+        self._login(self.qc)
+        r = self.client.get(reverse('boq_detail', kwargs={'project_id': 'P9-OPEN'}))
+        self.assertEqual(r.status_code, 200,
+                         'Design QC cannot open the BOQ it is asked to judge')
+
+    def test_design_qc_may_reach_the_design_file_download_gate(self):
+        """The visibility gate must admit them; a missing file is then a 404, not a 403."""
+        from .permissions import user_can_view_design
+        self.assertTrue(user_can_view_design(self.qc.user, self.site))
+
+        self._login(self.qc)
+        r = self.client.get(reverse('design_file_download',
+                                    kwargs={'project_id': 'P9-OPEN', 'pk': 99999}))
+        self.assertNotEqual(r.status_code, 403,
+                            'Design QC is refused the CAD download on a site it reviews')
+        self.assertEqual(r.status_code, 404)
+
+    def test_design_qc_still_cannot_WRITE_the_boq(self):
+        """Read was widened; write was not. A reviewer reads a BOQ, they do not author one."""
+        from .permissions import user_can_edit_project_boq
+        self.assertFalse(user_can_edit_project_boq(self.qc.user, self.site))
+
+    def test_a_design_qc_read_does_not_bring_a_boq_into_existence(self):
+        """The auto-create-and-seed on GET takes the WRITE gate, which still refuses them."""
+        from .models import BOQ
+        before = BOQ.objects.filter(project=self.site).count()
+        self._login(self.qc)
+        self.client.get(reverse('boq_detail', kwargs={'project_id': 'P9-OPEN'}))
+        self.assertEqual(BOQ.objects.filter(project=self.site).count(), before,
+                         'a read-only reviewer seeded a BOQ just by loading the page')
+
+    def test_a_plain_designer_on_another_site_is_still_refused(self):
+        """The widening is Design QC only — it must not leak to every Design user."""
+        other = _profile('other9', 'Design')
+        self._login(other)
+        r = self.client.get(reverse('boq_detail', kwargs={'project_id': 'P9-OPEN'}))
+        self.assertEqual(r.status_code, 403)
+
+        from .permissions import user_can_view_design
+        self.assertFalse(user_can_view_design(other.user, self.site))
+
+    def test_a_pm_scm_or_site_engineer_gains_nothing(self):
+        from .permissions import user_can_view_project_boq
+        for profile in (self.scm,):          # SCM is portfolio-wide by remit — still True
+            self.assertTrue(user_can_view_project_boq(profile.user, self.site))
+        for profile in (self.se,):
+            self.assertFalse(user_can_view_project_boq(profile.user, self.site))
+
+
 class TemplateCommentSyntaxTests(TestCase):
     """No multi-line `{# ... #}` comment anywhere in the template tree.
 

@@ -185,6 +185,7 @@ def user_can_view_project_boq(user, project):
         SCM / Admin / CEO    — portfolio-wide by remit (BOQ_PORTFOLIO_READ_ROLES)
         Design Head          — portfolio-wide read, no write (see below)
         Design Head's deputy — portfolio-wide read, no write (Part 6.5b, closes G4)
+        Design QC            — portfolio-wide read, no write (Part 9, closes G4 again)
         Design               — assigned_design on this project, OR holds a task on it
 
     The Design branch is the SAME union as user_can_view_project()'s Design branch
@@ -215,8 +216,25 @@ def user_can_view_project_boq(user, project):
     therefore applies here too: clear a Head's flag and their deputy loses BOQ read in
     the same instant they lose everything else.
 
-    READ ONLY, DELIBERATELY. user_can_edit_project_boq() is NOT modified and does not
-    admit a deputy. A deputy reviews a BOQ; they do not author one. W-narrow stands.
+    PART 9 ADDS DESIGN QC, AND IT IS G4 ALL OVER AGAIN. The QC gate reviews the BOQ — two
+    of the sixteen error categories are `boq_quantity` and `boq_specification`, so a
+    reviewer who cannot open the BOQ cannot record the failure the system asks them for.
+    Reported from live use: Design QC reached the QC screen, and the "View BOQ" button on
+    that very screen returned 403.
+
+    It has to go HERE for the same reason the deputy branch did: this WIDENS, and no
+    caller can widen a gate that has already returned False. A Design QC reviewer is a
+    plain `role='Design'` user who is by construction NOT the site's `assigned_design` —
+    the assigned designer is the one person forbidden from reviewing it — so the Design
+    branch below refuses them every time.
+
+    Kept as its own branch rather than folded into the deputy line above, so "is the
+    Head", "acts for the Head" and "is the other gate" stay tellable apart here exactly as
+    they do in the Part 9 helpers.
+
+    READ ONLY, DELIBERATELY. user_can_edit_project_boq() is NOT modified and admits
+    neither a deputy nor Design QC. A reviewer reads a BOQ; they do not author one.
+    W-narrow stands.
 
     Returns False rather than raising for a null `project` or a user with no UserProfile,
     matching user_can_manage_project()'s guard style.
@@ -243,6 +261,12 @@ def user_can_view_project_boq(user, project):
     # the Head" and "may act for the Head" stay tellable apart here, exactly as
     # user_is_design_head() and user_has_design_head_authority() keep them apart.
     if user_is_design_head_deputy(user):
+        return True
+
+    # Part 9 — the FIRST review gate, on the same terms again: read, never write. Two of
+    # the error categories a QC reviewer must choose between are about the BOQ, so this
+    # is the difference between reviewing a package and guessing at one.
+    if user_is_design_qc(user):
         return True
 
     if profile.role == 'Design':
@@ -572,8 +596,18 @@ def user_can_view_design(user, project):
     is not a review, it is a rubber stamp. The Head already reaches every site through
     his own branch in user_can_view_project(); this widens the same design surfaces to
     whoever he has named, and nothing else. user_can_view_project() itself is untouched.
+
+    PART 9 ADDS DESIGN QC on exactly the same grounds, and for exactly the same reason the
+    deputy branch exists. A Design QC reviewer is a plain `role='Design'` user who is NOT
+    the site's `assigned_design` — by construction, since the assigned designer is the one
+    person forbidden from reviewing it. So user_can_view_project()'s Design branch refuses
+    them, and without this branch they could open the QC screen and then get "You do not
+    have access to this site" from the CAD download link ON THAT SCREEN. Reported from
+    live use: gate 1 could see the package listing and open none of it.
     """
-    return user_can_view_project(user, project) or user_has_design_head_authority(user)
+    return (user_can_view_project(user, project)
+            or user_has_design_head_authority(user)
+            or user_is_design_qc(user))
 
 
 # ---------------------------------------------------------------------------
