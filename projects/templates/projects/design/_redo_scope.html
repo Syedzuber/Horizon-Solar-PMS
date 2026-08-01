@@ -1,0 +1,48 @@
+{% comment %}
+Part 9.1 — "what does the designer actually have to redo?", on both fail forms.
+
+WHY THIS EXISTS. Until now a failed attempt reset everything: the designer resubmitted an
+Arka nobody disputed, re-uploaded a byte-identical archive, and BOTH gates re-approved the
+same Arka — four verdicts to fix a BOQ line. The error category tells us what went wrong,
+so anything the reviewer does not tick here is carried forward into the next attempt with
+its approvals intact.
+
+THE BOXES ARE PRE-TICKED FROM THE CATEGORY AND ARE FULLY OVERRIDABLE. The mapping is
+models.DEFAULT_REDO_BY_CATEGORY, passed in as `redo_defaults_json` and read by the script
+at the bottom — it is a starting point, never a rule. Only the reviewer knows whether a
+layout error is fixable in CAD alone.
+
+`redo_scope_submitted` is a hidden marker so the view can tell "this form carried the
+checkboxes and the reviewer unticked them all" from "this POST predates the feature".
+Without it an empty selection is ambiguous, and the two cases need opposite answers.
+
+ARKA IMPLIES CAD, enforced in the view AND mirrored here so the reviewer sees it happen
+rather than being refused after submitting: every drawing records the Arka version it was
+made from, so a CAD carried across a new Arka would be paired to a superseded layout.
+
+Caller must set `scope_id` to keep ids unique when both gates' forms share a page.
+{% endcomment %}
+<input type="hidden" name="redo_scope_submitted" value="1">
+<label class="form-label small mb-1">Designer must redo <span class="text-danger">*</span></label>
+<div class="d-flex flex-wrap gap-3" data-redo-group="{{ scope_id }}">
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" name="redo" value="arka"
+           id="{{ scope_id }}_arka" data-redo="arka" checked>
+    <label class="form-check-label small" for="{{ scope_id }}_arka">Arka</label>
+  </div>
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" name="redo" value="cad"
+           id="{{ scope_id }}_cad" data-redo="cad" checked>
+    <label class="form-check-label small" for="{{ scope_id }}_cad">CAD (zip)</label>
+  </div>
+  <div class="form-check">
+    <input class="form-check-input" type="checkbox" name="redo" value="boq"
+           id="{{ scope_id }}_boq" data-redo="boq" checked>
+    <label class="form-check-label small" for="{{ scope_id }}_boq">BOQ</label>
+  </div>
+</div>
+<div class="text-muted mt-1" style="font-size:.7rem;">
+  Ticked from the category — change it if you disagree. Anything left unticked is carried
+  forward to the next attempt with its approvals, so the designer does not re-make it and
+  neither gate re-approves it.
+</div>

@@ -43,6 +43,7 @@ from .models import (
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     ERROR_GROUP_A, ERROR_GROUP_B, ERROR_GROUP_C,
     ERR_LAYOUT, ERR_SURVEY_INADEQUATE, ERR_REQUIREMENT_CHANGED, ERR_BOQ_QUANTITY,
+    ERR_BOQ_SPECIFICATION,
     DESIGN_ERROR_CATEGORIES,
     error_category_group, category_counts_as_designer_rework,
 )
@@ -776,6 +777,192 @@ class ReviewQueueReachabilityTests(Part9Base):
                                     kwargs={'pk': self.program.pk}))
         self.assertContains(
             r, reverse('design_head_review', kwargs={'project_id': 'P9-REACH'}))
+
+
+class ScopedReworkTests(Part9Base):
+    """Part 9.1 — a failure sends back only what actually failed.
+
+    Part 4 reset everything on a failed attempt, which was the only safe answer while the
+    system had no idea WHAT had failed. Reported from live use: a `boq_specification`
+    failure made the designer resubmit an Arka approved at both gates and re-upload a
+    byte-identical archive, and put that same Arka back through BOTH gates — four verdicts
+    to fix a BOQ line.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.site, self.a = self._site('P9-REDO')
+        self.attempt, self.arka = self._submit_arka(self.a)
+        # Both gates approve the Arka, CAD is uploaded, BOQ is marked complete.
+        self.arka.verdict = ARKA_APPROVED
+        self.arka.reviewed_by = self.qc
+        self.arka.reviewed_at = timezone.now()
+        self.arka.head_verdict = ARKA_APPROVED
+        self.arka.head_reviewed_by = self.head
+        self.arka.head_reviewed_at = timezone.now()
+        self.arka.save()
+        from .models import DesignFile, DESIGN_FILE_CAD_ZIP
+        self.cad = DesignFile.objects.create(
+            attempt=self.attempt, kind=DESIGN_FILE_CAD_ZIP, version=1,
+            bucket='b', path='P9-REDO/cad_zip/abc.zip', original_filename='MB-004.zip',
+            size_bytes=716900, archive_listing=[{'name': 'a.pdf', 'size': 10},
+                                                {'name': 'a.dwg', 'size': 20}],
+            derived_from_arka=self.arka, uploaded_by=self.designer, is_current=True)
+        self.attempt.boq_submitted_at = timezone.now()
+        self.attempt.boq_submitted_by = self.designer
+        self.attempt.qc_started_at = timezone.now()
+        self.attempt.save()
+        self.a.status = DESIGN_IN_QC
+        self.a.save()
+
+    def _fail_qc(self, category, redo=None, remarks='fix it'):
+        data = {'qc_remarks': remarks, 'error_category': category}
+        if redo is not None:
+            data['redo_scope_submitted'] = '1'
+            data['redo'] = redo
+        self._login(self.qc)
+        return self._post('design_qc_fail', self.site, **data)
+
+    def _new_attempt(self):
+        self.a.refresh_from_db()
+        return self.a.attempts.order_by('attempt_number').last()
+
+    def test_a_boq_only_failure_carries_the_arka_and_the_cad_forward(self):
+        """THE REPORTED CASE."""
+        self._fail_qc(ERR_BOQ_SPECIFICATION, redo=['boq'])
+
+        n1 = self._new_attempt()
+        self.assertEqual(n1.attempt_number, 2)
+
+        carried_arka = n1.arka_submissions.filter(is_current=True).first()
+        self.assertIsNotNone(carried_arka, 'the designer must resubmit an approved Arka')
+        self.assertEqual(carried_arka.verdict, ARKA_APPROVED)
+        self.assertEqual(carried_arka.head_verdict, ARKA_APPROVED)
+        self.assertEqual(carried_arka.carried_forward_from_id, self.arka.pk)
+        self.assertEqual(carried_arka.capacity_kw, self.arka.capacity_kw)
+
+        carried_cad = n1.design_files.filter(is_current=True).first()
+        self.assertIsNotNone(carried_cad, 'the designer must re-upload the same archive')
+        self.assertEqual(carried_cad.path, self.cad.path, 'the stored object is shared')
+        self.assertEqual(carried_cad.carried_forward_from_id, self.cad.pk)
+        # The carried CAD pairs to the carried Arka, on THIS attempt — never across.
+        self.assertEqual(carried_cad.derived_from_arka_id, carried_arka.pk)
+
+        # Only the BOQ is outstanding.
+        self.assertIsNone(n1.boq_submitted_at)
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED,
+                         'the designer should be able to go straight to the BOQ')
+
+    def test_the_reviewers_choice_is_recorded_on_the_failing_attempt(self):
+        self._fail_qc(ERR_BOQ_SPECIFICATION, redo=['boq'])
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.redo_required, ['boq'])
+
+    def test_redoing_everything_reproduces_the_part_4_behaviour(self):
+        self._fail_qc(ERR_LAYOUT, redo=['arka', 'cad', 'boq'])
+        n1 = self._new_attempt()
+        self.assertEqual(n1.arka_submissions.count(), 0)
+        self.assertEqual(n1.design_files.count(), 0)
+        self.assertIsNone(n1.boq_submitted_at)
+        self.a.refresh_from_db()
+        self.assertEqual(self.a.status, DESIGN_IN_DESIGN)
+
+    def test_carrying_everything_reopens_a_complete_package(self):
+        """A failure fixed entirely in the BOQ line items redoes nothing structural."""
+        # design_boq_complete refuses an empty BOQ, so give this site a real one — the
+        # line items are project-scoped and survive the new attempt, which is the point.
+        from .models import BOQ, BOQItem
+        boq = BOQ.objects.create(project=self.site)
+        BOQItem.objects.create(boq=boq, serial_no=1, description='Module',
+                               uom='Nos', boq_quantity=10)
+
+        self._fail_qc(ERR_BOQ_QUANTITY, redo=['boq'])
+        n1 = self._new_attempt()
+        # Now the designer re-marks the BOQ and the package is complete again.
+        self._login(self.designer)
+        self._post('design_boq_complete', self.site)
+        self.a.refresh_from_db()
+        n1.refresh_from_db()
+        self.assertIsNotNone(n1.boq_submitted_at)
+        self.assertEqual(self.a.status, DESIGN_ARTIFACTS_UPLOADED,
+                         'the package should be back in the QC queue without a new Arka')
+
+    def test_redoing_the_arka_forces_redoing_the_cad(self):
+        """A CAD carried across a new Arka would be paired to a superseded layout."""
+        self._fail_qc(ERR_LAYOUT, redo=['arka', 'boq'])
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.qc_verdict, QC_PENDING, 'the failure was recorded')
+        self.assertEqual(self.a.attempts.count(), 1, 'an attempt was opened anyway')
+
+    def test_redoing_nothing_is_refused(self):
+        self._fail_qc(ERR_BOQ_QUANTITY, redo=[])
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.qc_verdict, QC_PENDING)
+        self.assertEqual(self.a.attempts.count(), 1)
+
+    def test_a_post_without_the_scope_marker_falls_back_to_the_category_defaults(self):
+        """An older form, or a bare POST, must not be read as 'redo nothing'."""
+        self._fail_qc(ERR_BOQ_SPECIFICATION, redo=None)
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.qc_verdict, QC_FAILED)
+        self.assertEqual(self.attempt.redo_required, ['boq'])
+
+    def test_the_head_gate_scopes_rework_the_same_way(self):
+        # Reset to a package awaiting the Head.
+        self.attempt.qc_verdict = QC_PASSED
+        self.attempt.qc_reviewed_by = self.qc
+        self.attempt.qc_reviewed_at = timezone.now()
+        self.attempt.head_started_at = timezone.now()
+        self.attempt.save()
+        self.a.status = DESIGN_AWAITING_HEAD_QC
+        self.a.save()
+
+        self._login(self.head)
+        self._post('design_head_qc_fail', self.site,
+                   head_remarks='BOQ spec wrong', error_category=ERR_BOQ_SPECIFICATION,
+                   redo_scope_submitted='1', redo=['boq'])
+
+        self.attempt.refresh_from_db()
+        self.assertEqual(self.attempt.head_verdict, QC_FAILED)
+        self.assertEqual(self.attempt.redo_required, ['boq'])
+        self.assertTrue(self.attempt.head_overturned_qc)
+
+        n1 = self._new_attempt()
+        self.assertIsNotNone(n1.arka_submissions.filter(is_current=True).first())
+        self.assertIsNotNone(n1.design_files.filter(is_current=True).first())
+
+    def test_a_pm_change_request_still_resets_everything(self):
+        """The brief moved — nothing drawn against the old brief can be assumed to hold."""
+        self.pm_site = self.site
+        self.site.assigned_pm = self.pm
+        self.site.save()
+        self._login(self.pm)
+        self._post('design_change_request', self.site, reason='client changed the roof')
+
+        n1 = self._new_attempt()
+        self.assertEqual(n1.opened_reason, ATTEMPT_REASON_PM_CHANGE_REQUEST)
+        self.assertEqual(n1.arka_submissions.count(), 0,
+                         'a change request carried an Arka forward')
+        self.assertEqual(n1.design_files.count(), 0)
+        self.assertIsNone(n1.boq_submitted_at)
+
+    def test_the_category_defaults_map_covers_every_category(self):
+        from .models import DESIGN_ERROR_CATEGORIES, default_redo_for_category
+        for category in DESIGN_ERROR_CATEGORIES:
+            defaults = default_redo_for_category(category)
+            self.assertTrue(defaults, category)
+            self.assertTrue(set(defaults) <= {'arka', 'cad', 'boq'}, category)
+            # The coupling the view enforces must hold for every default too, or the form
+            # would open pre-ticked into a state the server refuses.
+            if 'arka' in defaults:
+                self.assertIn('cad', defaults,
+                              f'{category} defaults to a new Arka with a carried CAD')
+
+    def test_an_unknown_category_defaults_to_redoing_everything(self):
+        from .models import default_redo_for_category
+        self.assertEqual(default_redo_for_category('not_a_category'),
+                         ['arka', 'boq', 'cad'])
 
 
 class ReviewerCanOpenWhatTheyReviewTests(Part9Base):

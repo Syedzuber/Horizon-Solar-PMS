@@ -182,6 +182,9 @@ must not allow.
                   The designer sees this verbatim; a new attempt opens for the rework.
                 </div>
               </div>
+              <div class="col-12">
+                {% include "projects/design/_redo_scope.html" with scope_id="qc_pkg_redo" %}
+              </div>
             </div>
             <button class="btn btn-sm btn-outline-danger mt-2">Fail at Design QC</button>
           </form>
@@ -223,6 +226,9 @@ must not allow.
                 <div class="text-muted mt-1" style="font-size:.7rem;">
                   Recorded as overturning the Design QC pass.
                 </div>
+              </div>
+              <div class="col-12">
+                {% include "projects/design/_redo_scope.html" with scope_id="head_pkg_redo" %}
               </div>
             </div>
             <button class="btn btn-sm btn-outline-danger mt-2">Fail as Design Head</button>
@@ -275,5 +281,71 @@ must not allow.
   Designer's view of this site:
   <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
 </div>
+
+{% if can_verdict or can_head_verdict %}
+{{ redo_defaults_json|json_script:"redoDefaults" }}
+<script>
+/*
+ * Part 9.1 — pre-tick the redo checkboxes from the chosen error category, and keep the
+ * Arka-implies-CAD rule visible.
+ *
+ * CONVENIENCE ONLY. design_views._posted_redo_scope() re-derives and re-validates both
+ * rules on POST, so a reviewer with JavaScript disabled gets the category's defaults and
+ * a hand-crafted POST is refused exactly as a click would be. Nothing here is a gate.
+ *
+ * The mapping is NOT duplicated in this file: it is read from the json_script block
+ * above, which the view serialises from models.DEFAULT_REDO_BY_CATEGORY. One home.
+ */
+(function () {
+  var defaults;
+  try {
+    defaults = JSON.parse(document.getElementById('redoDefaults').textContent);
+  } catch (e) { return; }
+
+  document.querySelectorAll('form').forEach(function (form) {
+    var category = form.querySelector('select[name="error_category"]');
+    var group    = form.querySelector('[data-redo-group]');
+    if (!category || !group) return;
+
+    var boxes = {};
+    group.querySelectorAll('input[data-redo]').forEach(function (box) {
+      boxes[box.dataset.redo] = box;
+    });
+
+    /* A new Arka means new CAD — the drawing records which Arka it was made from. */
+    function coupleArkaToCad() {
+      if (boxes.arka && boxes.cad && boxes.arka.checked) {
+        boxes.cad.checked  = true;
+        boxes.cad.disabled = true;
+      } else if (boxes.cad) {
+        boxes.cad.disabled = false;
+      }
+      /* A disabled checkbox posts nothing, so mirror it into a hidden field. */
+      var mirror = form.querySelector('input[data-redo-mirror]');
+      if (mirror) mirror.remove();
+      if (boxes.cad && boxes.cad.disabled && boxes.cad.checked) {
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'redo';
+        hidden.value = 'cad';
+        hidden.setAttribute('data-redo-mirror', '1');
+        form.appendChild(hidden);
+      }
+    }
+
+    category.addEventListener('change', function () {
+      var wanted = defaults[category.value] || ['arka', 'cad', 'boq'];
+      Object.keys(boxes).forEach(function (key) {
+        boxes[key].checked = wanted.indexOf(key) !== -1;
+      });
+      coupleArkaToCad();
+    });
+
+    if (boxes.arka) boxes.arka.addEventListener('change', coupleArkaToCad);
+    coupleArkaToCad();
+  });
+}());
+</script>
+{% endif %}
 
 {% endblock %}

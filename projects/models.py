@@ -1839,6 +1839,72 @@ def category_counts_as_designer_rework(category):
     """
     return error_category_group(category) == ERROR_GROUP_A
 
+
+# ===========================================================================
+# WHAT A FAILURE ACTUALLY SENDS BACK (Part 9.1)
+# ===========================================================================
+# Part 4 reset EVERYTHING on a failed attempt: the designer resubmitted the Arka,
+# re-uploaded the CAD and re-marked the BOQ, and both gates re-approved an Arka nobody
+# had disputed. That was the only safe answer while the system had no idea WHAT had
+# failed — a BOQ typo and a wrong roof layout were indistinguishable.
+#
+# Part 9 records the cause, so "redo everything" stopped being the only option. A failure
+# now names the three artifacts independently, and whatever is not named CARRIES FORWARD
+# into the next attempt with its approvals intact.
+#
+# THE REVIEWER DECIDES, NOT THIS TABLE. The map below only pre-ticks the boxes on the
+# fail form; the reviewer can tick or untick any of them before submitting, and the view
+# stores what they actually chose. That is deliberate: the reviewer is the only person who
+# knows whether a `layout_error` is fixable in CAD alone or needs the whole layout redone,
+# and no fixed mapping can answer that. Treat these as sensible starting points, never as
+# a rule.
+
+REDO_ARKA = 'arka'
+REDO_CAD  = 'cad'
+REDO_BOQ  = 'boq'
+
+DESIGN_REDO_CHOICES = (REDO_ARKA, REDO_CAD, REDO_BOQ)
+
+#: Which boxes start ticked, per error category. See the note above — DEFAULTS ONLY.
+DEFAULT_REDO_BY_CATEGORY = {
+    # BOQ-scoped: the layout and the drawings were fine.
+    ERR_BOQ_QUANTITY:          frozenset({REDO_BOQ}),
+    ERR_BOQ_SPECIFICATION:     frozenset({REDO_BOQ}),
+
+    # Drawing-scoped: the design is right, its expression on the sheet is not.
+    ERR_DRAWING_INCOMPLETE:    frozenset({REDO_CAD}),
+
+    # Engineering inside an accepted layout — the Arka stands, the detail does not.
+    ERR_STRUCTURAL_DESIGN:     frozenset({REDO_CAD, REDO_BOQ}),
+    ERR_ELECTRICAL_DESIGN:     frozenset({REDO_CAD, REDO_BOQ}),
+    ERR_EARTHING_LIGHTNING:    frozenset({REDO_CAD, REDO_BOQ}),
+    ERR_STANDARDS:             frozenset({REDO_CAD, REDO_BOQ}),
+
+    # The LAYOUT itself is wrong, so the Arka goes first and everything follows it.
+    ERR_LAYOUT:                frozenset(DESIGN_REDO_CHOICES),
+    ERR_SHADING:               frozenset(DESIGN_REDO_CHOICES),
+    ERR_CAPACITY:              frozenset(DESIGN_REDO_CHOICES),
+    ERR_STRUCTURAL_CONSTRAINT: frozenset(DESIGN_REDO_CHOICES),
+    ERR_ACCESS_SETBACK:        frozenset(DESIGN_REDO_CHOICES),
+
+    # Group B and C — the inputs or the brief moved, so nothing that was drawn against
+    # them can be assumed to still hold.
+    ERR_SURVEY_INADEQUATE:     frozenset(DESIGN_REDO_CHOICES),
+    ERR_SITE_DIFFERS:          frozenset(DESIGN_REDO_CHOICES),
+    ERR_REQUIREMENT_CHANGED:   frozenset(DESIGN_REDO_CHOICES),
+    ERR_SCOPE_REVISED:         frozenset(DESIGN_REDO_CHOICES),
+}
+
+
+def default_redo_for_category(category):
+    """Which artifacts a failure of `category` suggests redoing, as a sorted list.
+
+    Falls back to ALL THREE for an unrecognised or blank category, which is the safe
+    direction: a reviewer who sees too much ticked unticks a box, whereas one who sees too
+    little may not notice something is missing until QC fails again.
+    """
+    return sorted(DEFAULT_REDO_BY_CATEGORY.get(category, frozenset(DESIGN_REDO_CHOICES)))
+
 DESIGN_FILE_CAD_ZIP   = 'cad_zip'
 DESIGN_FILE_BOQ_EXCEL = 'boq_excel'
 DESIGN_FILE_BOQ_PDF   = 'boq_pdf'
@@ -2105,6 +2171,20 @@ class DesignAttempt(models.Model):
         related_name='boq_submitted_attempts',
     )
 
+    # ── What the failing reviewer sent back (Part 9.1) ───────────────────────
+    # The artifacts the reviewer ticked on the fail form, as a sorted JSON list of
+    # DESIGN_REDO_CHOICES values. Recorded on the attempt that FAILED, and it describes
+    # what the NEXT attempt must redo; anything absent was carried forward.
+    #
+    # STORED RATHER THAN RE-DERIVED FROM THE CATEGORY, because the reviewer can override
+    # the category's suggestion and their choice is the fact that matters. Re-deriving it
+    # from DEFAULT_REDO_BY_CATEGORY later would silently rewrite history the first time
+    # somebody edited that map.
+    #
+    # Empty list on every attempt that was not failed, and on every pre-Part-9.1 row —
+    # which reads as "no scoped rework was recorded", not "nothing had to be redone".
+    redo_required = models.JSONField(default=list, blank=True)
+
     class Meta:
         ordering        = ['assignment', 'attempt_number']
         unique_together = ('assignment', 'attempt_number')
@@ -2208,6 +2288,24 @@ class ArkaSubmission(models.Model):
     # Design QC's on this Arka version — QC approved and the Head rejected, or the reverse.
     head_overturned_qc = models.BooleanField(default=False)
 
+    # ── Carried forward (Part 9.1) ──────────────────────────────────────────
+    # Set when this row was COPIED onto a new attempt because the failure that opened that
+    # attempt did not name the Arka as needing rework. Points at the row it was copied
+    # from, on the previous attempt.
+    #
+    # THE COPY CARRIES THE VERDICTS, AND THIS FIELD IS WHY THAT IS HONEST. Without it the
+    # new attempt would show an Arka approved at both gates with no way to tell that
+    # nobody reviewed it during THIS attempt — the audit trail would silently claim two
+    # verdicts that were never recorded. Every surface that renders a verdict checks this
+    # and says "carried forward from attempt N" instead.
+    #
+    # SET_NULL rather than PROTECT: a carried copy must never be able to block the
+    # deletion of the attempt it came from.
+    carried_forward_from = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='carried_forward_to',
+    )
+
     is_current = models.BooleanField(default=True)
 
     class Meta:
@@ -2291,6 +2389,19 @@ class DesignFile(models.Model):
     superseded_by = models.ForeignKey(
         'self', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='supersedes',
+    )
+
+    # ── Carried forward (Part 9.1) ──────────────────────────────────────────
+    # Set when this row was COPIED onto a new attempt because the failure that opened that
+    # attempt did not name CAD as needing rework. Points at the row it was copied from.
+    #
+    # THE COPY SHARES THE STORED OBJECT. `bucket` and `path` are copied verbatim, so the
+    # designer does not re-upload a file that was never in question and no second copy of
+    # a 25 MB archive is written. Both rows address the same object, which is safe because
+    # nothing in this module ever deletes one.
+    carried_forward_from = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='carried_forward_to',
     )
 
     class Meta:

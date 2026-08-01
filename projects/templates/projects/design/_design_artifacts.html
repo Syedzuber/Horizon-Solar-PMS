@@ -45,6 +45,16 @@ stored anywhere (settled decision 8).
                   <div style="font-size:.7rem;">by v{{ f.superseded_by.version }}</div>
                 {% endif %}
               {% endif %}
+              {% comment %}
+              Part 9.1 — this row is a copy of a file uploaded on an earlier attempt,
+              addressing the same stored object. Said plainly so a reviewer does not read
+              the upload date as evidence the designer re-made it.
+              {% endcomment %}
+              {% if f.carried_forward_from %}
+                <div><span class="badge bg-secondary-subtle text-secondary-emphasis">
+                  carried forward from attempt {{ f.carried_forward_from.attempt.attempt_number }}
+                </span></div>
+              {% endif %}
             </td>
             <td>
               {# derived_from_arka is NOT NULL — there is always a version to name here. #}
@@ -155,6 +165,16 @@ stored anywhere (settled decision 8).
               </span></div>
             {% endif %}
 
+            {% comment %}
+            PART 9.1 — a carried-forward Arka shows the verdicts it was approved under,
+            and MUST say they were not recorded on this attempt. Without this the panel
+            would claim two reviews that nobody performed here.
+            {% endcomment %}
+            {% if a.carried_forward_from %}
+              <div><span class="badge bg-secondary-subtle text-secondary-emphasis mt-1">
+                Carried forward from attempt {{ a.carried_forward_from.attempt.attempt_number }}
+              </span></div>
+            {% endif %}
             {% if a.reviewed_at %}
               <div class="text-muted" style="font-size:.7rem;">
                 QC {{ a.reviewed_at|date:"d M Y H:i" }}

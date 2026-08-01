@@ -140,6 +140,20 @@ the Head and the PM all read the same history in the same shape.
           </div>
         {% endif %}
 
+        {% comment %}
+        Part 9.1 — what the failing reviewer actually sent back. Empty on every attempt
+        that was not failed and on every pre-9.1 row, so nothing renders for those.
+        {% endcomment %}
+        {% if a.redo_required %}
+          <div class="text-muted mt-1" style="font-size:.7rem;">
+            Sent back to redo:
+            {% for item in a.redo_required %}
+              <span class="badge bg-danger-subtle text-danger-emphasis">{{ item }}</span>
+            {% endfor %}
+            — everything else was carried forward to attempt {{ a.attempt_number|add:1 }}.
+          </div>
+        {% endif %}
+
         {% for cr in a.change_requests.all %}
           <div class="alert alert-warning py-2 px-2 my-2 small mb-0">
             <strong>PM change request</strong>

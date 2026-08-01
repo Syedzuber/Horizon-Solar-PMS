@@ -16,6 +16,7 @@ OPEX ONLY. Every entry point re-checks `project_type == 'OPEX'`; Residential des
 continues to run on its six design Task rows with PM-owned approval and is not reachable
 from here.
 """
+import json
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -55,6 +56,8 @@ from .models import (
     DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
     DESIGN_ERROR_CATEGORIES, DESIGN_ERROR_CATEGORY_CHOICES,
     DESIGN_ERROR_CATEGORY_LABELS,
+    REDO_ARKA, REDO_CAD, REDO_BOQ, DESIGN_REDO_CHOICES,
+    DEFAULT_REDO_BY_CATEGORY, default_redo_for_category,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
@@ -1113,6 +1116,59 @@ def _posted_error_category(request):
     return category, ''
 
 
+#: Human-readable names for the three redo targets, for messages and log lines.
+_REDO_LABELS = {REDO_ARKA: 'the Arka', REDO_CAD: 'the CAD', REDO_BOQ: 'the BOQ'}
+
+
+def _redo_phrase(redo):
+    """"the Arka, the CAD and the BOQ" — the designer's side of a scoped failure."""
+    names = [_REDO_LABELS[value] for value in DESIGN_REDO_CHOICES if value in redo]
+    if len(names) <= 1:
+        return names[0] if names else 'nothing'
+    return f'{", ".join(names[:-1])} and {names[-1]}'
+
+
+def _posted_redo_scope(request, attempt):
+    """Return (redo_set, error_message) — what the failing reviewer says must be redone.
+
+    Part 9.1. The checkboxes are the reviewer's answer to "what does the designer actually
+    have to make again?", pre-ticked from the error category and freely overridable. Two
+    rules are enforced server-side, because a hand-crafted POST must not be able to reach
+    a state the UI cannot produce:
+
+    AT LEAST ONE. A failure that requires nothing to be redone is not a failure — the
+    designer would receive a reopened attempt with nothing to do and no way to progress it.
+
+    REDOING THE ARKA FORCES REDOING THE CAD. Every artifact records the Arka version it
+    was drawn against (DesignFile.derived_from_arka), and the whole point of that field is
+    that QC never reviews a CAD produced from a superseded layout. Carrying a CAD across a
+    new Arka would create exactly that. So the pair is coupled, and it is coupled here
+    rather than left to the reviewer to remember.
+
+    A missing checkbox set (an old form, a bare POST) falls back to the category's
+    defaults rather than to nothing — the safe direction, and identical to what the form
+    would have submitted untouched.
+    """
+    if 'redo_scope_submitted' not in request.POST:
+        category = (request.POST.get('error_category') or '').strip()
+        return set(default_redo_for_category(category)), ''
+
+    redo = {value for value in request.POST.getlist('redo')
+            if value in DESIGN_REDO_CHOICES}
+
+    if not redo:
+        return set(), ('say what the designer has to redo — a failure that requires '
+                       'nothing to be re-made leaves them with a reopened attempt and '
+                       'nothing to act on')
+
+    if REDO_ARKA in redo and REDO_CAD not in redo:
+        return set(), ('a new Arka means new CAD too — every drawing records the Arka '
+                       'version it was made from, and QC must never review a CAD drawn '
+                       'against a layout that has been replaced')
+
+    return redo, ''
+
+
 def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
     """Section 5 — evaluate the progression rule after every Part 3 write.
 
@@ -1930,7 +1986,83 @@ def design_boq_complete(request, project_id):
 # 11. Attempt lifecycle — the one place a new attempt is opened
 # ---------------------------------------------------------------------------
 
-def _open_next_attempt(assignment, reason, actor, detail):
+def _carry_forward_artifacts(old_attempt, new_attempt, redo):
+    """Copy onto `new_attempt` whatever `redo` did NOT name — Part 9.1.
+
+    `redo` is the set of artifacts the failing reviewer ticked. Anything absent from it
+    survived the review, so re-making it is pure churn: the designer re-submits an Arka
+    nobody disputed, re-uploads a byte-identical archive, and BOTH gates re-approve an
+    Arka they already approved. Four verdicts to fix a BOQ line.
+
+    ROWS ARE COPIED, NEVER RE-POINTED. Moving the original row onto the new attempt would
+    erase what attempt N actually contained, and attempt N is the row a failed QC verdict
+    is recorded against. So each carried artifact is a NEW row on the new attempt with
+    `carried_forward_from` pointing back at its original, which is what lets every screen
+    say "carried forward from attempt N" instead of implying a verdict was recorded twice.
+
+    THE CAD COPY SHARES THE STORED OBJECT — `bucket` and `path` verbatim. Nothing is
+    re-uploaded and no second copy of a 25 MB archive is written.
+
+    Returns a list of the human-readable things carried, for the log line.
+    """
+    carried = []
+
+    old_arka = _current_arka(old_attempt)
+    arka_for_new = None
+
+    if REDO_ARKA not in redo and old_arka is not None:
+        arka_for_new = ArkaSubmission.objects.create(
+            attempt=new_attempt, version=1,
+            capacity_kw=old_arka.capacity_kw, arka_link=old_arka.arka_link,
+            submitted_by=old_arka.submitted_by,
+            # Both gates' verdicts travel with it. `carried_forward_from` is what keeps
+            # that honest — see the note on the field.
+            verdict=old_arka.verdict,
+            rejection_reason=old_arka.rejection_reason,
+            qc_failure_category=old_arka.qc_failure_category,
+            reviewed_by=old_arka.reviewed_by, reviewed_at=old_arka.reviewed_at,
+            head_verdict=old_arka.head_verdict,
+            head_rejection_reason=old_arka.head_rejection_reason,
+            head_failure_category=old_arka.head_failure_category,
+            head_reviewed_by=old_arka.head_reviewed_by,
+            head_reviewed_at=old_arka.head_reviewed_at,
+            head_overturned_qc=old_arka.head_overturned_qc,
+            carried_forward_from=old_arka, is_current=True,
+        )
+        carried.append(f'Arka v{old_arka.version}')
+
+    # CAD can only be carried if the Arka was: `derived_from_arka` must point at an Arka
+    # on the SAME attempt, and a CAD paired to a superseded layout is precisely what that
+    # field exists to prevent. The view refuses the combination before reaching here; this
+    # guard is the backstop.
+    if REDO_CAD not in redo and arka_for_new is not None:
+        for old_file in old_attempt.design_files.filter(is_current=True):
+            DesignFile.objects.create(
+                attempt=new_attempt, kind=old_file.kind, version=1,
+                bucket=old_file.bucket, path=old_file.path,
+                original_filename=old_file.original_filename,
+                size_bytes=old_file.size_bytes, content_type=old_file.content_type,
+                archive_listing=old_file.archive_listing,
+                derived_from_arka=arka_for_new,
+                uploaded_by=old_file.uploaded_by,
+                carried_forward_from=old_file, is_current=True,
+            )
+            carried.append(f'{KIND_LABELS.get(old_file.kind, old_file.kind)}'
+                           f' ({old_file.original_filename or "file"})')
+
+    # The BOQ's line items are project-scoped and never reset; what carries here is the
+    # per-attempt COMPLETION STAMP, so the designer does not have to re-tick a BOQ that
+    # was not in question.
+    if REDO_BOQ not in redo and old_attempt.boq_submitted_at is not None:
+        new_attempt.boq_submitted_at = old_attempt.boq_submitted_at
+        new_attempt.boq_submitted_by = old_attempt.boq_submitted_by
+        new_attempt.save(update_fields=['boq_submitted_at', 'boq_submitted_by'])
+        carried.append('BOQ completion')
+
+    return carried
+
+
+def _open_next_attempt(assignment, reason, actor, detail, redo=None):
     """Close the current attempt and open the next one. THE ONLY PLACE THIS HAPPENS.
 
     Both rework loops call this with a different `reason`; the mechanics are identical
@@ -1949,6 +2081,19 @@ def _open_next_attempt(assignment, reason, actor, detail):
         Rework does not reopen the allocation or renegotiate the due date; the site
         goes back to the same designer under the same commitment (settled decision 2).
 
+    PART 9.1 — `redo` SCOPES THE REWORK. Pass the set of artifacts the failing reviewer
+    ticked and everything else is carried forward with its approvals; pass None (the
+    default) and the attempt starts empty, which is Part 4's behaviour exactly.
+
+    A PM CHANGE REQUEST PASSES None ON PURPOSE. The brief moved, so nothing drawn against
+    the old brief can be assumed to still hold — carrying an Arka forward there would
+    preserve work against a requirement that no longer exists.
+
+    THE OPENING STATUS FOLLOWS THE ARKA. With no carried Arka the site returns to
+    `in_design` and the designer submits one. With an Arka carried forward and approved at
+    both gates, the site opens at `arka_submitted` — Part 3's "artifacts outstanding"
+    state — so the designer can go straight to whatever actually failed.
+
     Returns the new DesignAttempt.
     """
     now = timezone.now()
@@ -1962,15 +2107,33 @@ def _open_next_attempt(assignment, reason, actor, detail):
         assignment=assignment, attempt_number=next_number, opened_reason=reason,
     )
 
+    carried = []
+    if redo is not None and current is not None:
+        carried = _carry_forward_artifacts(current, new_attempt, redo)
+
+    carried_arka = _current_arka(new_attempt)
+    opening_status = (DESIGN_ARKA_SUBMITTED
+                      if (carried_arka is not None
+                          and carried_arka.head_verdict == ARKA_APPROVED)
+                      else DESIGN_IN_DESIGN)
+
     assignment.current_attempt_number = next_number
-    assignment.status = DESIGN_IN_DESIGN
+    assignment.status = opening_status
     assignment.save(update_fields=['current_attempt_number', 'status', 'updated_at'])
 
+    detail_suffix = f' — carried forward: {", ".join(carried)}' if carried else ''
     log_activity(assignment.project, actor,
                  f'Attempt {next_number} opened ({new_attempt.get_opened_reason_display()}): '
-                 f'{detail}',
+                 f'{detail}{detail_suffix}',
                  entity_type='DesignAttempt', entity_id=new_attempt.pk,
                  action_code=f'design_attempt_opened_{reason}')
+
+    # Everything may have carried forward — a failure whose fix was entirely inside the
+    # BOQ line items, for instance. Evaluate the progression rule so the new attempt does
+    # not sit at `arka_submitted` with a complete package waiting for a nudge.
+    if carried:
+        _maybe_advance_to_artifacts_uploaded(assignment, new_attempt, actor)
+
     return new_attempt
 
 
@@ -2222,6 +2385,11 @@ def design_qc_fail(request, project_id):
         messages.error(request, f'{project.project_id}: {cat_error}.')
         return redirect('design_qc_review', project_id=project.project_id)
 
+    redo, redo_error = _posted_redo_scope(request, attempt)
+    if redo_error:
+        messages.error(request, f'{project.project_id}: {redo_error}.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
     now = timezone.now()
     with transaction.atomic():
         attempt.qc_verdict          = QC_FAILED
@@ -2229,26 +2397,28 @@ def design_qc_fail(request, project_id):
         attempt.qc_failure_category = category
         attempt.qc_reviewed_by      = profile
         attempt.qc_reviewed_at      = now
+        attempt.redo_required       = sorted(redo)
         attempt.save(update_fields=['qc_verdict', 'qc_remarks', 'qc_failure_category',
-                                    'qc_reviewed_by', 'qc_reviewed_at'])
-        # Status passes THROUGH qc_failed on its way back to in_design. Recorded as its
+                                    'qc_reviewed_by', 'qc_reviewed_at', 'redo_required'])
+        # Status passes THROUGH qc_failed on its way to the new attempt. Recorded as its
         # own log line so the failure is visible in the trail even though the stored
-        # status moves straight on to the new attempt's in_design.
+        # status moves straight on.
         assignment.status = DESIGN_QC_FAILED
         assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
                      f'Design QC failed attempt {attempt.attempt_number} '
-                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {remarks}',
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}] '
+                     f'— redo: {", ".join(sorted(redo))}: {remarks}',
                      entity_type='DesignAttempt', entity_id=attempt.pk,
                      action_code='design_qc_failed')
 
         new_attempt = _open_next_attempt(
             assignment, ATTEMPT_REASON_QC_FAILED, profile,
-            f'Design QC failure on attempt {attempt.attempt_number}')
+            f'Design QC failure on attempt {attempt.attempt_number}', redo=redo)
 
     messages.success(request, f'{project.project_id}: Design QC failed — attempt '
                               f'{new_attempt.attempt_number} opened and the site is back '
-                              f'with the designer.')
+                              f'with the designer to redo {_redo_phrase(redo)}.')
     return redirect('design_qc_review', project_id=project.project_id)
 
 
@@ -2361,6 +2531,11 @@ def design_head_qc_fail(request, project_id):
         messages.error(request, f'{project.project_id}: {cat_error}.')
         return redirect('design_qc_review', project_id=project.project_id)
 
+    redo, redo_error = _posted_redo_scope(request, attempt)
+    if redo_error:
+        messages.error(request, f'{project.project_id}: {redo_error}.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
     now = timezone.now()
     with transaction.atomic():
         attempt.head_verdict          = QC_FAILED
@@ -2370,26 +2545,28 @@ def design_head_qc_fail(request, project_id):
         attempt.head_reviewed_at      = now
         # Design QC passed this package and the Head did not. Recorded, countable.
         attempt.head_overturned_qc    = True
+        attempt.redo_required         = sorted(redo)
         attempt.save(update_fields=['head_verdict', 'head_remarks', 'head_failure_category',
                                     'head_reviewed_by', 'head_reviewed_at',
-                                    'head_overturned_qc'])
+                                    'head_overturned_qc', 'redo_required'])
         assignment.status = DESIGN_QC_FAILED
         assignment.save(update_fields=['status', 'updated_at'])
         log_activity(project, profile,
                      f'Design Head failed attempt {attempt.attempt_number}, overturning '
                      f'Design QC '
-                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {remarks}',
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}] '
+                     f'— redo: {", ".join(sorted(redo))}: {remarks}',
                      entity_type='DesignAttempt', entity_id=attempt.pk,
                      action_code='design_head_qc_failed')
 
         new_attempt = _open_next_attempt(
             assignment, ATTEMPT_REASON_QC_FAILED, profile,
-            f'Design Head failure on attempt {attempt.attempt_number}')
+            f'Design Head failure on attempt {attempt.attempt_number}', redo=redo)
 
     messages.success(request, f'{project.project_id}: the Design Head failed the package, '
                               f'overturning Design QC — attempt '
                               f'{new_attempt.attempt_number} opened and the site is back '
-                              f'with the designer.')
+                              f'with the designer to redo {_redo_phrase(redo)}.')
     return redirect('design_qc_review', project_id=project.project_id)
 
 
@@ -2700,6 +2877,16 @@ def design_qc_review(request, project_id):
         'is_deputy':     user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'released':      assignment.status == DESIGN_RELEASED,
         'error_categories': DESIGN_ERROR_CATEGORY_CHOICES,
+        # Part 9.1 — drives the checkbox pre-ticking on the two fail forms. Serialised
+        # here rather than assembled in the template so the mapping has exactly one home
+        # (models.DEFAULT_REDO_BY_CATEGORY) and the JS reads it rather than repeating it.
+        'redo_defaults_json': json.dumps(
+            {category: default_redo_for_category(category)
+             for category in DESIGN_ERROR_CATEGORIES}),
+        # What is actually available to carry, so the form can say "carried forward"
+        # against a real artifact rather than offering an empty promise.
+        'has_approved_arka_to_carry': bool(
+            ctx['arka'] is not None and ctx['arka'].head_verdict == ARKA_APPROVED),
     })
     return render(request, 'projects/design/qc_review.html', ctx)
 
