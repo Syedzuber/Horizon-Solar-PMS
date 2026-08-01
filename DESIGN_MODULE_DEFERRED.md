@@ -1176,3 +1176,30 @@ that, it is a `design_qc_deputy` FK mirroring `design_head_deputy` and its own r
 helper.
 
 **Location:** `projects/permissions.py:user_can_qc_gate_design`
+
+### M6 — The general uploader still has the narrow MIME check that broke CAD upload
+
+`design_storage.validate_design_file()` was rejecting every `.zip` uploaded from Chrome on
+Windows, which sends `application/x-zip-compressed` (it reads the type from the HKCR
+registry entry) rather than `application/zip`. Design QC could not receive a CAD archive
+at all. Fixed by replacing the one-string-per-extension map with
+`DESIGN_ACCEPTED_MIME_TYPES`, a set of the types real browsers actually send, kept
+separate from `DESIGN_MIME_TYPE_MAP` — what we ACCEPT is wide, what we STORE is the one
+canonical value.
+
+`views._validate_and_upload()` (views.py:5873) still has the original narrow form. It was
+deliberately NOT changed:
+
+  * its extension set is documents and photos only — pdf, doc, docx, xls, xlsx, jpg, jpeg,
+    png — and modern browsers send the canonical type for all of them. `.zip` and `.dwg`
+    were the genuinely broken pair precisely because Windows resolves those from the
+    registry and CAD software registers its own;
+  * it is the upload path for task attachments, project documents and site photos across
+    the entire product, so a change there has a far wider blast radius than the reported
+    bug justifies.
+
+If a `.jpg` from a very old client (`image/pjpeg`) or a legacy `.doc` ever gets refused,
+the fix is to import `GENERIC_BINARY_MIME_TYPES` and an accepted-types map from
+`design_storage` rather than to write a second copy of the same table.
+
+**Location:** `projects/views.py:_validate_and_upload`, `projects/design_storage.py`

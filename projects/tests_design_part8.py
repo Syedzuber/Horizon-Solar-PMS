@@ -28,7 +28,8 @@ from .design_metrics import (
     effective_commitment, is_overdue, pending_extension, tender_metrics,
 )
 from .design_storage import (
-    DesignStorageError, MAX_CAD_ZIP_UNCOMPRESSED_BYTES, validate_cad_zip,
+    DESIGN_ACCEPTED_MIME_TYPES, DESIGN_MIME_TYPE_MAP, DesignStorageError,
+    MAX_CAD_ZIP_UNCOMPRESSED_BYTES, validate_cad_zip, validate_design_file,
 )
 from .design_views import (
     PROGRESSION_CAD_KINDS, _allocate_one, _effective_commitment, _pending_extension,
@@ -314,6 +315,61 @@ class ExtensionFlowTests(Part8Base):
 # ===========================================================================
 # 9-13. CAD zip
 # ===========================================================================
+
+class BrowserMimeTypeTests(TestCase):
+    """validate_design_file() must accept the content types real browsers actually send.
+
+    REGRESSION TEST FOR A REPORTED BUG. `.zip` was mapped to the single string
+    `application/zip`, but Chrome on Windows reads the type from the HKCR registry entry
+    and sends `application/x-zip-compressed`. Every Windows Chrome user — which is most of
+    them — got "File content type does not match its extension" and could not upload a CAD
+    archive at all. The file was valid; the check was too narrow.
+
+    These are typo guards, not security controls: `content_type` comes from the client and
+    is trivially forged. The real protections are the extension whitelist, the size limit,
+    and validate_cad_zip(), which opens the archive rather than trusting any header.
+    """
+
+    def _check(self, filename, content_type):
+        return validate_design_file(
+            SimpleUploadedFile(filename, b'x' * 64, content_type=content_type))
+
+    def test_windows_chrome_zip_type_is_accepted(self):
+        """The exact string that was being refused."""
+        self.assertEqual(self._check('MB-004.zip', 'application/x-zip-compressed'), 'zip')
+
+    def test_every_common_zip_type_is_accepted(self):
+        for ct in ('application/zip', 'application/x-zip-compressed', 'application/x-zip',
+                   'application/x-compressed', 'multipart/x-zip',
+                   'application/octet-stream'):
+            self.assertEqual(self._check('cad.zip', ct), 'zip', ct)
+
+    def test_dwg_types_in_the_wild_are_accepted(self):
+        for ct in ('application/acad', 'image/vnd.dwg', 'application/x-dwg',
+                   'drawing/dwg', 'application/octet-stream'):
+            self.assertEqual(self._check('model.dwg', ct), 'dwg', ct)
+
+    def test_a_missing_content_type_is_accepted(self):
+        """Some clients send none; refusing would block a valid file over nothing."""
+        self.assertEqual(self._check('sheet.pdf', ''), 'pdf')
+
+    def test_the_check_still_catches_a_genuine_mismatch(self):
+        with self.assertRaises(DesignStorageError) as ctx:
+            self._check('sheet.pdf', 'image/png')
+        # The message names BOTH sides, so the uploader can see what went wrong.
+        self.assertIn('.pdf', str(ctx.exception))
+        self.assertIn('image/png', str(ctx.exception))
+
+    def test_the_extension_whitelist_still_bites(self):
+        with self.assertRaises(DesignStorageError):
+            self._check('payload.exe', 'application/octet-stream')
+
+    def test_stored_type_is_the_canonical_one_not_what_the_browser_claimed(self):
+        """What we ACCEPT is wide; what we STORE is the one correct value."""
+        self.assertEqual(DESIGN_MIME_TYPE_MAP['zip'], 'application/zip')
+        self.assertIn('application/x-zip-compressed', DESIGN_ACCEPTED_MIME_TYPES['zip'])
+        self.assertNotIn('application/x-zip-compressed', DESIGN_MIME_TYPE_MAP.values())
+
 
 class CadZipValidationTests(TestCase):
 

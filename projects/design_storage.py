@@ -38,6 +38,8 @@ ALLOWED_DESIGN_EXTENSIONS = ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'jpg', 'jpeg',
                              'dwg', 'zip']
 MAX_DESIGN_FILE_BYTES = 25 * 1024 * 1024   # 25 MB
 
+# The CANONICAL type per extension. This is what gets STORED on the object in Supabase,
+# so it must be the one correct value — never whatever the browser happened to claim.
 DESIGN_MIME_TYPE_MAP = {
     'pdf':  'application/pdf',
     'doc':  'application/msword',
@@ -50,6 +52,50 @@ DESIGN_MIME_TYPE_MAP = {
     'dwg':  'application/acad',
     'zip':  'application/zip',
 }
+
+# What we ACCEPT from the browser per extension, which is a much wider set than what we
+# store. THERE IS NO SINGLE CORRECT MIME TYPE FOR MOST OF THESE, and the value arrives
+# from the client, not from inspecting the bytes:
+#
+#   .zip  Chrome on Windows sends `application/x-zip-compressed` — it reads the type from
+#         the HKCR registry entry, and that is what Windows puts there. Firefox and every
+#         browser on macOS/Linux send `application/zip`. Accepting only the latter meant
+#         .zip upload was broken for every Windows Chrome user, which is most of them.
+#         This is exactly the bug that was reported.
+#   .dwg  has no registered IANA type at all; `application/acad`, `image/vnd.dwg`,
+#         `application/x-dwg` and friends are all in the wild depending on what CAD
+#         software is installed.
+#   .doc/.xls  the legacy Office types are frequently reported as their modern
+#         counterparts or as octet-stream.
+#
+# THIS CHECK IS A TYPO GUARD, NOT A SECURITY CONTROL, and widening it costs nothing in
+# safety. `content_type` is supplied by the client and is trivially forged — a hostile
+# uploader would simply send the expected string. What actually protects the system is
+# the extension whitelist above, the size limit, and for archives validate_cad_zip(),
+# which OPENS the file and reads its central directory rather than trusting any header.
+DESIGN_ACCEPTED_MIME_TYPES = {
+    'pdf':  frozenset({'application/pdf'}),
+    'doc':  frozenset({'application/msword'}),
+    'docx': frozenset({'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                       'application/msword'}),
+    'xls':  frozenset({'application/vnd.ms-excel'}),
+    'xlsx': frozenset({'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                       'application/vnd.ms-excel'}),
+    'jpg':  frozenset({'image/jpeg', 'image/pjpeg'}),
+    'jpeg': frozenset({'image/jpeg', 'image/pjpeg'}),
+    'png':  frozenset({'image/png', 'image/x-png'}),
+    'dwg':  frozenset({'application/acad', 'application/x-acad',
+                       'application/autocad_dwg', 'application/dwg', 'application/x-dwg',
+                       'application/x-autocad', 'image/vnd.dwg', 'image/x-dwg',
+                       'drawing/dwg'}),
+    'zip':  frozenset({'application/zip', 'application/x-zip-compressed',
+                       'application/x-zip', 'application/x-compressed',
+                       'multipart/x-zip'}),
+}
+
+# Sent by browsers for anything they cannot classify, and by several for .dwg and .zip.
+# Accepted for every extension rather than listed in each set above.
+GENERIC_BINARY_MIME_TYPES = frozenset({'application/octet-stream', 'binary/octet-stream'})
 
 
 class DesignStorageError(Exception):
@@ -106,12 +152,14 @@ def validate_design_file(file_obj):
     if size == 0:
         raise DesignStorageError('File is empty.')
 
-    expected = DESIGN_MIME_TYPE_MAP.get(ext, '')
-    actual = (getattr(file_obj, 'content_type', '') or '').split(';')[0].strip()
-    # Same tolerance as the existing uploader: browsers send octet-stream for many of
-    # these types, so that is accepted rather than rejected.
-    if expected and actual and actual not in (expected, 'application/octet-stream'):
-        raise DesignStorageError('File content type does not match its extension.')
+    accepted = DESIGN_ACCEPTED_MIME_TYPES.get(ext, frozenset())
+    actual = (getattr(file_obj, 'content_type', '') or '').split(';')[0].strip().lower()
+    # An empty content_type is accepted: some clients send none at all, and refusing on a
+    # missing header would block a valid file over something the uploader cannot control.
+    if accepted and actual and actual not in accepted | GENERIC_BINARY_MIME_TYPES:
+        raise DesignStorageError(
+            f'This does not look like a .{ext} file — the browser described it as '
+            f'"{actual}". If the file really is a .{ext}, re-save it and try again.')
 
     return ext
 
