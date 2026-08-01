@@ -122,12 +122,21 @@ class Command(BaseCommand):
         Mirrors what boq_detail does on first GET for an authorised designer: seed every
         active BOQItemMaster row, carrying `item_master` so the quantities can aggregate.
         Quantities are SET, not added, so a re-run is idempotent.
+
+        PART 11 — the masters lookup is scoped to Residential for the same reason
+        boq_detail's is: three descriptions now exist in both catalogues, and unscoped the
+        OPEX row would win the key. This command seeds ITM- codes, so scoping keeps it
+        producing what it always produced. That it seeds a RESIDENTIAL template onto OPEX
+        test sites is a pre-existing mismatch with Part 11's picker, recorded in
+        DESIGN_MODULE_DEFERRED.md rather than changed here.
         """
         from projects.models import BOQ, BOQItem, BOQItemMaster, get_standard_boq_items
 
         boq, created = BOQ.objects.get_or_create(project=site)
         if created or not boq.items.exists():
-            masters = {m.description: m for m in BOQItemMaster.objects.filter(is_active=True)}
+            masters = {m.description: m
+                       for m in BOQItemMaster.objects.filter(is_active=True,
+                                                             project_type='Residential')}
             BOQItem.objects.bulk_create([
                 BOQItem(boq=boq, item_master=masters.get(d['description']), **d)
                 for d in get_standard_boq_items()

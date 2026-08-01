@@ -1203,3 +1203,94 @@ the fix is to import `GENERIC_BINARY_MIME_TYPES` and an accepted-types map from
 `design_storage` rather than to write a second copy of the same table.
 
 **Location:** `projects/views.py:_validate_and_upload`, `projects/design_storage.py`
+
+---
+
+## N. Found during Part 11 (OPEX BOQ item master and picker-based entry)
+
+### N1 — `BOQItem.CATEGORY_CHOICES` and `UOM_CHOICES` do not cover the OPEX vocabulary
+
+The OPEX catalogue needs 16 categories (`Module`, `DCDB`, `MMS`, `ACDB`, `DC Cable`,
+`AC Cable`, `Pin Type Lug`, `Ring Type Lug`, `Conduit`, `Cable Tray`, `Earthing`,
+`Solar Meter + CT`, `Data Logger+ WMS`, `Civil`, plus `Inverter` and `BOS` which already
+exist) and the units `Meter`, `Set`, `KWp`, `Pair`. `BOQItem.CATEGORY_CHOICES` lists five
+values and `UOM_CHOICES` seven, and neither list contains most of those.
+
+**Not a defect in the stored data.** Django does not enforce `choices` at the database
+level, both values fit their `max_length` (16 ≤ 20 and 5 ≤ 10), and the picker writes the
+real catalogue value — an OPEX BOQ row genuinely reads `category='Ring Type Lug'`,
+`uom='Meter'`. `get_FOO_display()` returns the raw value when it is not in the list, so
+every screen shows the right text. What is missing is the metadata: a `full_clean()` would
+reject these rows, and the Residential ad-hoc-row dropdowns on `boq_detail` do not offer
+them.
+
+Widening the two lists was the alternative and was rejected for this session: it needs a
+migration on `BOQItem` and it changes the category and unit dropdowns on the Residential
+BOQ entry screen, which Part 11 is told not to touch. If the ad-hoc row form is ever wanted
+on the OPEX side, widen them then — nothing stored has to change.
+
+**Location:** `projects/models.py` (`BOQItem.CATEGORY_CHOICES`, `BOQItem.UOM_CHOICES`)
+
+### N2 — OPEX BOQ submission to SCM (`BOQ.status` Draft → Submitted) has no UI on the picker
+
+Before Part 11 an OPEX designer reached `boq_detail`, which carries a "Submit to SCM"
+button driving `BOQ.status`. They are now redirected to the picker, whose actions are the
+two the brief specifies — Save draft and Mark BOQ complete — so that transition is no
+longer reachable from the designer's screens. `boq_submit` still exists and still works;
+nothing was removed.
+
+Deliberately left. OPEX handoff to SCM runs through the Part 6 site-group lock, not through
+`BOQ.status`: `aggregate_group_boq()` reads `boq_quantity` regardless of status, and
+`design_boq_complete()` gates on quantities rather than on the BOQ being Submitted. The
+`Submitted` values on the seeded IPGCL sites come from generic seeding, not from an OPEX
+workflow that needs them. Adding the action would mean deciding where a BOQ submission sits
+relative to the two design gates and the group lock, which is a change to the handoff flow
+this session is told not to make.
+
+**Location:** `projects/views.py:boq_detail` (the OPEX redirect), `projects/templates/projects/opex_boq_entry.html`
+
+### N3 — 14 pre-Part-11 OPEX BOQs carry Residential catalogue rows
+
+Local DB at the time of the session: 14 OPEX sites with a BOQ, 519 `BOQItem` rows, all
+seeded from the 37-row Residential template by the shared `boq_detail` before the picker
+existed. Roughly 50 of them carry a quantity.
+
+Left exactly as they are, on the instruction that these are sample sites and Part 11
+applies to BOQs going forward. They are not hidden: the picker renders them in a
+"Not in the OPEX catalogue" group with a quantity box and a remove control, and the review
+panel shows them under their own heading. They are never offered back by the picker's
+search, so nobody can add one by accident.
+
+The same shape will occur on a genuinely new OPEX site only if a row's catalogue entry is
+deactivated after it was added, which is the intended behaviour of `is_active`.
+
+**Location:** `projects/views.py:opex_boq_entry`, `projects/models.py:split_opex_boq_rows`
+
+### N4 — `seed_scm_handoff_data` seeds a Residential template onto OPEX test sites
+
+`_ensure_boq()` builds every seeded site's BOQ from `get_standard_boq_items()`, which is
+now Residential-scoped, and the sites it creates are OPEX. Its `codes_to_qty` mapping is
+written in `ITM-` codes, so it keeps working — but the data it produces is exactly the
+pre-Part-11 shape described in N3 rather than what the picker would produce.
+
+Part 11 changed only the master lookup inside it (see the note there): the dict is keyed by
+description, and scoping it to Residential was required for correctness, not cosmetic.
+Rewriting the command to seed `OPX-` codes would change every quantity in the Part 6
+handoff fixtures and the expectations built on them, which is out of scope here.
+
+**Location:** `projects/management/commands/seed_scm_handoff_data.py:_ensure_boq`
+
+### N5 — "search inverter returns 15" is 18 on the real catalogue
+
+The brief's verification item 7 expects 15. The picker's search matches description,
+category and code, and three items outside the `Inverter` category legitimately mention an
+inverter: `OPX-178` and `OPX-179` (`Solar Meter + CT` — "Below/Above 20KW Inverter CT
+is …") and `OPX-194` (`BOS` — "Fasteners for Inverter/DCDB/ACDB Mounting"). 15 is the size
+of the `Inverter` category, which is what the category dropdown returns.
+
+The search was NOT narrowed to make the number match — a designer looking for the inverter
+mounting fasteners should find them by typing "inverter", and hiding three genuine hits to
+satisfy a count would be the worse screen. Both figures are pinned in
+`tests_design_part11.test_07` so the distinction stays visible.
+
+**Location:** `projects/templates/projects/opex_boq_entry.html` (the `renderResults` filter)

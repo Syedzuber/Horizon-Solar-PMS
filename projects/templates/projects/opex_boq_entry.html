@@ -1,0 +1,446 @@
+{% extends "base.html" %}
+{% comment %}
+OPEX BOQ entry (Part 11) — the search-and-add picker.
+
+Bootstrap extending base.html. No Tailwind and no new CDN: Tailwind loads only inside
+projects/admin/admin_base.html, and adding a CDN to base.html is out of scope. Same
+reasoning as site_workspace.html.
+
+WHY THIS SCREEN EXISTS RATHER THAN A MODE OF boq_detail. The OPEX catalogue is 207 items
+across 16 categories; a site uses a few dozen. Pre-populating all 207 per site, the way the
+37-item Residential template is pre-populated, would mean scrolling past roughly 160
+irrelevant rows on every site in a tender. The sheet starts empty and the designer adds
+what the site uses. Residential BOQ entry is untouched — it is still boq_detail.
+
+THE JS HOLDS A DRAFT, THE FORM IS THE TRUTH. Adding and removing rows is client-side so it
+is instant, and the sheet is written to hidden inputs inside one form. Nothing is saved
+until Save draft or Mark BOQ complete posts that form, which is why the unload guard below
+exists. Every control here is decoration over a server-side rule: opex_boq_entry() re-checks
+authority and both locks on the POST regardless of what this template chose to render.
+{% endcomment %}
+
+{% block title %}BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+<style>
+  .boq-panel      { background:#fff; border:1px solid #dee2e6; border-radius:.5rem; }
+  .boq-desc       { font-size:.83rem; line-height:1.3; }
+  .boq-muted      { color:#6c757d; font-size:.78rem; }
+  .boq-cat-hdr    { background:#f1f3f5; }
+  .boq-qty        { width:100px; text-align:right; }
+  .boq-pick:hover { background:#f1f8f4; cursor:pointer; }
+  .boq-results    { max-height:460px; overflow:auto; }
+  .boq-sheet      { max-height:520px; overflow:auto; }
+  .boq-bar        { position:sticky; bottom:0; background:#fff;
+                    border-top:2px solid #1a7a4a; z-index:5; }
+  .boq-chip       { display:inline-block; padding:.1rem .45rem; border-radius:.25rem;
+                    font-size:.7rem; background:#e9ecef; color:#495057; }
+  .boq-chip-empty { background:#fff3cd; color:#7a5b00; }
+  .boq-chip-fill  { background:#1a7a4a; color:#fff; }
+  mark            { background:#fff3cd; padding:0; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">BOQ — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.customer_name }}{% if project.city %} · {{ project.city }}{% endif %}
+      {% if project.program %} · {{ project.program.name }}
+        ({{ project.program.short_tender_code }}){% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="{% url 'design_site_workspace' project_id=project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>Design workspace
+    </a>
+    {% if boq %}
+      <a href="{% url 'boq_history' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary">History</a>
+    {% endif %}
+  </div>
+</div>
+
+{% if lock_reason %}
+  {% comment %}
+  Why the screen is read-only, said once and at the top. An entry screen with its inputs
+  silently missing reads as a bug; naming the lock is the difference between "this is
+  final" and "my page is broken".
+  {% endcomment %}
+  <div class="alert {% if can_edit %}alert-secondary{% else %}alert-warning{% endif %} py-2 small">
+    {{ lock_reason }}
+  </div>
+{% endif %}
+
+<form method="post" id="boqForm">
+  {% csrf_token %}
+  <input type="hidden" name="action" id="boqAction" value="save_draft">
+
+  <div class="row g-3">
+
+    {# ── Left: the catalogue ─────────────────────────────────────────────── #}
+    <div class="col-lg-5">
+      <div class="boq-panel p-2">
+        <div class="fw-semibold mb-2 px-1">
+          Catalogue
+          <span class="text-muted fw-normal small">{{ catalogue_count }} items</span>
+        </div>
+
+        {% if can_edit %}
+          <input class="form-control form-control-sm mb-2" id="boqSearch" autocomplete="off"
+                 placeholder="Search: inverter, 6sqmm, ACDB…">
+          <select class="form-select form-select-sm mb-2" id="boqCat"></select>
+          <div class="boq-results border-top" id="boqResults"></div>
+        {% else %}
+          <div class="p-4 text-center boq-muted">
+            The catalogue is not available while this BOQ is read-only.
+          </div>
+        {% endif %}
+      </div>
+
+      {% if can_edit %}
+        {% comment %}
+        Settled decision 7 — the empty-category indicator. A designer cannot remember which
+        of sixteen categories they have never opened, and the cost of missing one is a BOQ
+        that omits a whole class of material. Rendered server-side from what is actually
+        saved, and re-rendered by the JS as items are added, so it tracks the draft too.
+        {% endcomment %}
+        <div class="boq-panel p-2 mt-3">
+          <div class="small fw-semibold mb-2">
+            Categories with nothing added yet
+            <span class="boq-muted fw-normal">— check before marking complete</span>
+          </div>
+          <div id="boqEmptyCats" class="d-flex flex-wrap gap-1"></div>
+        </div>
+      {% endif %}
+    </div>
+
+    {# ── Right: this site's BOQ ──────────────────────────────────────────── #}
+    <div class="col-lg-7">
+      <div class="boq-panel p-2">
+        <div class="fw-semibold mb-2 px-1 d-flex align-items-center">
+          <span>This site's BOQ</span>
+          <span class="text-muted fw-normal small ms-2" id="boqCount"></span>
+        </div>
+        <div class="boq-sheet" id="boqSheet"></div>
+
+        {% if added_off %}
+          {% comment %}
+          Rows that are not in the OPEX catalogue: sites created before Part 11 were seeded
+          from the Residential template, and an ad-hoc row has no catalogue link at all.
+          They are shown rather than hidden — a quantity the designer cannot see on the
+          screen they were sent to is worse than an untidy panel — and they can be removed,
+          but the picker never offers them back.
+          {% endcomment %}
+          <div class="border-top mt-2 pt-2">
+            <div class="small fw-semibold px-1 mb-1">
+              Not in the OPEX catalogue
+              <span class="boq-muted fw-normal">— {{ added_off_count }} row{{ added_off_count|pluralize }}
+                carried over from before this catalogue existed</span>
+            </div>
+            <table class="table table-sm mb-0">
+              <tbody>
+                {% for category, rows in added_off %}
+                  <tr><td colspan="4" class="boq-cat-hdr fw-semibold py-1 small">
+                    {{ category|default:"Uncategorised" }}</td></tr>
+                  {% for row in rows %}
+                    <tr id="offRow{{ row.pk }}">
+                      <td class="boq-desc">{{ row.description }}</td>
+                      <td class="boq-muted" style="width:64px">{{ row.uom }}</td>
+                      <td style="width:112px">
+                        {% if can_edit %}
+                          <input class="form-control form-control-sm boq-qty" type="number"
+                                 min="0" step="any" name="qty_row_{{ row.pk }}"
+                                 value="{{ row.boq_quantity|default_if_none:'' }}">
+                          <input type="hidden" name="keep_row" value="{{ row.pk }}">
+                        {% else %}
+                          <span class="small">{{ row.boq_quantity|default_if_none:"—" }}</span>
+                        {% endif %}
+                      </td>
+                      <td style="width:38px">
+                        {% if can_edit %}
+                          <button type="button" class="btn btn-sm btn-link text-danger p-0"
+                                  onclick="boqDropOffRow({{ row.pk }})"
+                                  title="Remove this row">&times;</button>
+                        {% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      </div>
+
+      {% if can_edit %}
+        <div class="boq-bar d-flex align-items-center gap-3 mt-2 rounded px-3 py-2 border">
+          <span class="small"><strong id="boqTotal">0</strong>
+            <span class="text-muted">items on this BOQ</span></span>
+          <button type="submit" class="btn btn-sm text-white ms-auto"
+                  style="background-color:#1a7a4a;" onclick="boqSetAction('save_draft')">
+            Save draft
+          </button>
+          {% comment %}
+          Mark BOQ complete posts THIS form, so unsaved quantities are saved on the way
+          through. The view saves and then delegates to design_boq_complete(), which owns
+          the attempt stamp and refuses if the Arka is not approved at both gates or no
+          quantity has been entered.
+          {% endcomment %}
+          <button type="submit" class="btn btn-sm btn-outline-secondary"
+                  onclick="boqSetAction('mark_complete')">
+            Mark BOQ complete
+          </button>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</form>
+
+<script id="boqCatalogueData" type="application/json">{{ catalogue_json|safe }}</script>
+<script id="boqAddedData" type="application/json">{{ added_json|safe }}</script>
+
+<script>
+(function () {
+  var CATALOGUE = JSON.parse(document.getElementById('boqCatalogueData').textContent);
+  var CAN_EDIT  = {% if can_edit %}true{% else %}false{% endif %};
+  var CAP       = {{ result_cap }};
+
+  // Category order is CATALOGUE order — first appearance by sort_order, which is
+  // spreadsheet order. Derived here from the same ordered array the server sent, so the
+  // picker, the sheet and the reviewer's read-only panel all agree.
+  var CATS = [];
+  var BY_ID = {};
+  CATALOGUE.forEach(function (item) {
+    BY_ID[item.id] = item;
+    if (CATS.indexOf(item.cat) === -1) { CATS.push(item.cat); }
+  });
+
+  // The draft: master id -> quantity string. Seeded from what is saved.
+  var chosen = {};
+  var order  = [];
+  JSON.parse(document.getElementById('boqAddedData').textContent).forEach(function (row) {
+    chosen[row.id] = row.qty;
+    order.push(row.id);
+  });
+
+  var offRows = {{ added_off_count }};
+  var dirty   = false;
+
+  var elSearch  = document.getElementById('boqSearch');
+  var elCat     = document.getElementById('boqCat');
+  var elResults = document.getElementById('boqResults');
+  var elSheet   = document.getElementById('boqSheet');
+  var elCount   = document.getElementById('boqCount');
+  var elTotal   = document.getElementById('boqTotal');
+  var elEmpty   = document.getElementById('boqEmptyCats');
+
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c];
+    });
+  }
+
+  // Highlight the matched run. Case-insensitive, first occurrence only — enough to show
+  // WHY a row matched, which is the whole job.
+  function hl(text, query) {
+    if (!query) { return esc(text); }
+    var i = text.toLowerCase().indexOf(query.toLowerCase());
+    if (i < 0) { return esc(text); }
+    return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + query.length)) +
+           '</mark>' + esc(text.slice(i + query.length));
+  }
+
+  function usedCats() {
+    var used = {};
+    order.forEach(function (id) { used[BY_ID[id].cat] = true; });
+    return used;
+  }
+
+  function renderResults() {
+    if (!CAN_EDIT) { return; }
+    var query = elSearch.value.trim();
+    var cat   = elCat.value;
+    var lower = query.toLowerCase();
+
+    var matches = CATALOGUE.filter(function (item) {
+      if (item.id in chosen) { return false; }          // already on the sheet
+      if (cat !== '__all' && item.cat !== cat) { return false; }
+      if (!query) { return true; }
+      return item.desc.toLowerCase().indexOf(lower) >= 0 ||
+             item.cat.toLowerCase().indexOf(lower) >= 0 ||
+             item.code.toLowerCase().indexOf(lower) >= 0;
+    });
+
+    var html = matches.slice(0, CAP).map(function (item) {
+      return '<div class="boq-pick px-2 py-1 border-bottom d-flex gap-2 align-items-start" ' +
+             'data-add="' + item.id + '">' +
+             '<span class="boq-muted" style="min-width:66px">' + esc(item.code) + '</span>' +
+             '<span class="boq-desc flex-grow-1">' + hl(item.desc, query) +
+             '<div class="boq-muted">' + hl(item.cat, query) + ' · ' + esc(item.unit) +
+             '</div></span><span class="text-success fw-bold">+</span></div>';
+    }).join('');
+
+    if (matches.length > CAP) {
+      html += '<div class="p-2 boq-muted text-center">' + (matches.length - CAP) +
+              ' more — keep typing to narrow</div>';
+    }
+    if (!matches.length) {
+      html = '<div class="p-3 boq-muted text-center">Nothing left to add here.</div>';
+    }
+    elResults.innerHTML = html;
+  }
+
+  function renderSheet() {
+    var total = order.length + offRows;
+    elCount.textContent = total + ' item' + (total === 1 ? '' : 's');
+    if (elTotal) { elTotal.textContent = total; }
+
+    if (!order.length) {
+      elSheet.innerHTML = offRows
+        ? '<div class="p-3 boq-muted text-center">No catalogue items yet — ' +
+          'search on the left and add what this site needs.</div>'
+        : '<div class="p-4 text-center boq-muted">Nothing on this BOQ yet.<br>' +
+          'Search the catalogue on the left and add the items this site uses.</div>';
+      renderEmptyCats();
+      return;
+    }
+
+    // Group by category in catalogue order; within a category, catalogue order too, so
+    // the sheet reads like the source document rather than like a click history.
+    var byCat = {};
+    order.forEach(function (id) {
+      var item = BY_ID[id];
+      (byCat[item.cat] = byCat[item.cat] || []).push(item);
+    });
+
+    var html = '<table class="table table-sm mb-0"><tbody>';
+    CATS.forEach(function (cat) {
+      var items = byCat[cat];
+      if (!items) { return; }
+      items.sort(function (a, b) { return a.code < b.code ? -1 : 1; });
+      html += '<tr><td colspan="5" class="boq-cat-hdr fw-semibold py-1 small">' +
+              esc(cat) + ' <span class="boq-chip">' + items.length + '</span></td></tr>';
+      items.forEach(function (item) {
+        html += '<tr><td class="boq-muted ps-3" style="width:74px">' + esc(item.code) +
+                '</td><td class="boq-desc">' + esc(item.desc) +
+                '</td><td class="boq-muted" style="width:60px">' + esc(item.unit) + '</td>' +
+                '<td style="width:112px">' +
+                (CAN_EDIT
+                  ? '<input class="form-control form-control-sm boq-qty" type="number" ' +
+                    'min="0" step="any" data-qty="' + item.id + '" value="' +
+                    esc(chosen[item.id] || '') + '">' +
+                    '<input type="hidden" name="item" value="' + item.id + '">' +
+                    '<input type="hidden" name="qty_' + item.id + '" data-qtyfield="' +
+                    item.id + '" value="' + esc(chosen[item.id] || '') + '">'
+                  : '<span class="small">' + esc(chosen[item.id] || '—') + '</span>') +
+                '</td><td style="width:38px">' +
+                (CAN_EDIT
+                  ? '<button type="button" class="btn btn-sm btn-link text-danger p-0" ' +
+                    'data-del="' + item.id + '" title="Remove">&times;</button>'
+                  : '') +
+                '</td></tr>';
+      });
+    });
+    html += '</tbody></table>';
+    elSheet.innerHTML = html;
+    renderEmptyCats();
+  }
+
+  function renderEmptyCats() {
+    if (!elEmpty) { return; }
+    var used = usedCats();
+    var empties = CATS.filter(function (c) { return !used[c]; });
+    if (!empties.length) {
+      elEmpty.innerHTML = '<span class="boq-chip boq-chip-fill">' +
+                          'Every category has at least one item</span>';
+      return;
+    }
+    elEmpty.innerHTML = empties.map(function (c) {
+      return '<span class="boq-chip boq-chip-empty">' + esc(c) + '</span>';
+    }).join('');
+  }
+
+  function add(id) {
+    if (id in chosen) { return; }
+    chosen[id] = '';
+    order.push(id);
+    dirty = true;
+    renderResults();
+    renderSheet();
+  }
+
+  function remove(id) {
+    delete chosen[id];
+    order = order.filter(function (x) { return x !== id; });
+    dirty = true;
+    renderResults();
+    renderSheet();
+  }
+
+  // A removed off-catalogue row drops its keep_row marker, which is what tells the server
+  // to delete it. Hidden rather than detached so an accidental click is undoable by
+  // reloading without saving.
+  window.boqDropOffRow = function (pk) {
+    var row = document.getElementById('offRow' + pk);
+    if (!row) { return; }
+    row.querySelectorAll('input').forEach(function (input) { input.disabled = true; });
+    row.style.display = 'none';
+    offRows -= 1;
+    dirty = true;
+    renderSheet();
+  };
+
+  window.boqSetAction = function (action) {
+    document.getElementById('boqAction').value = action;
+    dirty = false;   // we are submitting; the unload guard must not fire
+  };
+
+  if (CAN_EDIT) {
+    elCat.innerHTML = '<option value="__all">All categories</option>' +
+      CATS.map(function (c) {
+        var n = CATALOGUE.filter(function (i) { return i.cat === c; }).length;
+        return '<option value="' + esc(c) + '">' + esc(c) + ' (' + n + ')</option>';
+      }).join('');
+
+    elSearch.addEventListener('input', renderResults);
+    elCat.addEventListener('change', renderResults);
+
+    elResults.addEventListener('click', function (event) {
+      var target = event.target.closest('[data-add]');
+      if (target) { add(parseInt(target.getAttribute('data-add'), 10)); }
+    });
+
+    elSheet.addEventListener('click', function (event) {
+      var target = event.target.closest('[data-del]');
+      if (target) { remove(parseInt(target.getAttribute('data-del'), 10)); }
+    });
+
+    // Keep the draft and the hidden field in step as the designer types, so a re-render
+    // triggered by an add or a remove does not discard a quantity they just entered.
+    elSheet.addEventListener('input', function (event) {
+      var target = event.target.closest('[data-qty]');
+      if (!target) { return; }
+      var id = parseInt(target.getAttribute('data-qty'), 10);
+      chosen[id] = target.value;
+      dirty = true;
+      var field = elSheet.querySelector('[data-qtyfield="' + id + '"]');
+      if (field) { field.value = target.value; }
+    });
+
+    window.addEventListener('beforeunload', function (event) {
+      if (!dirty) { return; }
+      event.preventDefault();
+      event.returnValue = '';
+    });
+  }
+
+  renderResults();
+  renderSheet();
+})();
+</script>
+
+{% endblock %}

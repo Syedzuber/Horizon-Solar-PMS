@@ -686,6 +686,62 @@ def project_boq_is_group_locked(project):
     ).exists()
 
 
+def project_boq_is_design_locked(project):
+    """Return True if `project`'s BOQ is frozen by the DESIGN review loop — the designer
+    has handed it to review and has not been sent back.
+
+    PART 11. THE SECOND OF TWO LOCKS, AND THE REVERSIBLE ONE. It is a third separate
+    predicate for exactly the reason project_boq_is_group_locked() is a second: the Part
+    0.6 helpers answer "is this person the designer", and this answers "has this site's
+    BOQ been submitted for review" — a state question about a site with no user in it.
+    Folding it into user_can_edit_project_boq() would make a load-bearing Residential
+    helper return False for the right person, and the caller could no longer tell "you are
+    not the designer" from "the BOQ is with QC" in order to say which.
+
+    THE CONDITION IS ONE FIELD: the CURRENT attempt's `boq_submitted_at`. That single test
+    produces every row of the Part 11 lock progression, because the Part 9 rework loop
+    already maintains that stamp exactly as the progression describes:
+
+        designer saving drafts        stamp null      -> editable
+        marks BOQ complete            stamp set       -> frozen
+        Design QC rejects             new attempt     -> reopens (see below)
+        Design QC approves            same attempt    -> stays frozen
+        Design Head rejects           new attempt     -> reopens
+        Design Head approves          same attempt    -> DESIGN LOCK
+        PM change request             new attempt     -> reopens
+
+    REOPENING IS TOTAL, NOT QUANTITY-ONLY. Nothing here is per-row: when the stamp clears,
+    the whole entry screen comes back with its picker, so the designer can add an item that
+    was never on the sheet. That is the point — 14 of the 16 error categories map to a redo
+    set containing REDO_BOQ, and the two BOQ-specific ones (`boq_quantity`,
+    `boq_specification`) are precisely the failures that may need a NEW line rather than a
+    corrected number. Restoring only the quantity fields would leave the designer unable to
+    fix the thing they were failed for.
+
+    A REJECTION THAT WAS NOT ABOUT THE BOQ LEAVES IT FROZEN, and that is deliberate rather
+    than a gap. Part 9.1 scopes rework: `_carry_forward_artifacts()` carries the completion
+    stamp to the new attempt when REDO_BOQ is not in the reviewer's redo set. Only
+    `drawing_incomplete` does that, and a designer redoing a drawing has not been asked to
+    touch the bill. Reopening it anyway would overrule the reviewer's own scoping.
+
+    Reverse relations only, keeping this module import-free like the rest of it.
+
+    ALWAYS FALSE FOR RESIDENTIAL, structurally: a DesignAssignment only ever exists on an
+    OPEX site (design_views._opex_site 404s everything else), so a Residential project has
+    no `design_assignment` and returns at the first guard. That is what makes it safe to
+    AND this term into the shared boq_detail write gate.
+    """
+    if project is None:
+        return False
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None or not assignment.current_attempt_number:
+        return False
+    return assignment.attempts.filter(
+        attempt_number=assignment.current_attempt_number,
+        boq_submitted_at__isnull=False,
+    ).exists()
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:

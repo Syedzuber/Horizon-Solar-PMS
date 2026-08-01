@@ -9,12 +9,18 @@
   <div>
     <h1 class="text-xl font-semibold text-gray-900">BOQ Item Master</h1>
     <p class="text-sm text-gray-500 mt-1">
-      The catalogue every BOQ line item references. Active entries, in sort order, form the
-      standard BOQ template applied to new projects. Editing an entry here never changes a
+      The catalogue every BOQ line item references. Editing an entry here never changes a
       BOQ that was already created — those keep the description they were created with.
     </p>
     <p class="text-sm text-gray-500 mt-1">
-      {{ active_count }} active of {{ total_count }} total.
+      {# Part 11: two independent templates live in one table, and they behave differently. #}
+      <strong>Residential</strong> items, in sort order, are pre-populated onto every new
+      Residential BOQ. <strong>OPEX</strong> items are not pre-populated at all — they are
+      offered in the OPEX BOQ picker, where the designer searches and adds what a site uses.
+    </p>
+    <p class="text-sm text-gray-500 mt-1">
+      {{ active_count }} active of {{ total_count }} total —
+      {% for value, label, count in type_counts %}{% if count %}{{ count }} {{ label }}{% if not forloop.last %}, {% endif %}{% endif %}{% endfor %}.
     </p>
   </div>
   <a href="{% url 'admin_boq_item_create' %}"
@@ -25,14 +31,24 @@
   </a>
 </div>
 
-<div class="mb-4 flex items-center gap-2 text-sm">
-  <span class="text-gray-500">Show:</span>
-  <a href="{% url 'admin_boq_items' %}"
+<div class="mb-2 flex items-center gap-2 text-sm">
+  <span class="text-gray-500 w-16">Show:</span>
+  <a href="{% url 'admin_boq_items' %}?type={{ type_filter }}"
      class="px-3 py-1 rounded border {% if not active_filter %}bg-green-50 border-green-300 text-green-800{% else %}border-gray-300 text-gray-600 hover:bg-gray-50{% endif %}">All</a>
-  <a href="{% url 'admin_boq_items' %}?active=1"
+  <a href="{% url 'admin_boq_items' %}?active=1&type={{ type_filter }}"
      class="px-3 py-1 rounded border {% if active_filter == '1' %}bg-green-50 border-green-300 text-green-800{% else %}border-gray-300 text-gray-600 hover:bg-gray-50{% endif %}">Active</a>
-  <a href="{% url 'admin_boq_items' %}?active=0"
+  <a href="{% url 'admin_boq_items' %}?active=0&type={{ type_filter }}"
      class="px-3 py-1 rounded border {% if active_filter == '0' %}bg-green-50 border-green-300 text-green-800{% else %}border-gray-300 text-gray-600 hover:bg-gray-50{% endif %}">Inactive</a>
+</div>
+
+<div class="mb-4 flex items-center gap-2 text-sm">
+  <span class="text-gray-500 w-16">Type:</span>
+  <a href="{% url 'admin_boq_items' %}?active={{ active_filter }}"
+     class="px-3 py-1 rounded border {% if not type_filter %}bg-green-50 border-green-300 text-green-800{% else %}border-gray-300 text-gray-600 hover:bg-gray-50{% endif %}">All</a>
+  {% for value, label, count in type_counts %}
+    <a href="{% url 'admin_boq_items' %}?active={{ active_filter }}&type={{ value }}"
+       class="px-3 py-1 rounded border {% if type_filter == value %}bg-green-50 border-green-300 text-green-800{% else %}border-gray-300 text-gray-600 hover:bg-gray-50{% endif %}">{{ label }} ({{ count }})</a>
+  {% endfor %}
 </div>
 
 <table class="w-full bg-white border border-gray-200 rounded-lg overflow-hidden text-sm">
@@ -40,6 +56,7 @@
     <tr class="bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
       <th class="px-4 py-2 w-16 text-center">Sort</th>
       <th class="px-4 py-2 w-28">Code</th>
+      <th class="px-4 py-2 w-28">Type</th>
       <th class="px-4 py-2">Description</th>
       <th class="px-4 py-2 w-20">Unit</th>
       <th class="px-4 py-2 w-36">Category</th>
@@ -53,6 +70,12 @@
     <tr class="hover:bg-gray-50 transition-colors {% if not item.is_active %}bg-gray-50/60{% endif %}">
       <td class="px-4 py-3 text-center text-gray-500">{{ item.sort_order }}</td>
       <td class="px-4 py-3 font-mono text-xs text-gray-700">{{ item.code }}</td>
+      <td class="px-4 py-3">
+        <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+          {% if item.project_type == 'OPEX' %}bg-blue-100 text-blue-700
+          {% elif item.project_type == 'CAPEX' %}bg-amber-100 text-amber-700
+          {% else %}bg-gray-100 text-gray-600{% endif %}">{{ item.project_type }}</span>
+      </td>
       <td class="px-4 py-3 text-gray-800">
         <a href="{% url 'admin_boq_item_edit' item.pk %}" class="text-green-700 hover:underline">{{ item.description }}</a>
       </td>
@@ -83,7 +106,7 @@
       </td>
     </tr>
     {% empty %}
-    <tr><td colspan="8" class="px-4 py-8 text-center text-gray-400">No catalogue items. Add one above.</td></tr>
+    <tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">No catalogue items match this filter.</td></tr>
     {% endfor %}
   </tbody>
 </table>

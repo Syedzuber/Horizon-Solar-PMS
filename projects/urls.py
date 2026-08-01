@@ -160,6 +160,11 @@ urlpatterns = [
     # BOQ (Bill of Quantities) — Design, SCM, PM, Admin
     # ---------------------------------------------------------------------------
     path('projects/<str:project_id>/boq/',                   views.boq_detail,           name='boq_detail'),
+    # PART 11 — OPEX BOQ entry. A separate screen, not a mode of boq_detail: the OPEX
+    # catalogue is 207 items and is searched and added to, where the 37-item Residential
+    # one is pre-populated. 404s on a Residential site; boq_detail redirects the OPEX
+    # designer here, and everyone else on an OPEX site still reads the sheet on boq_detail.
+    path('projects/<str:project_id>/boq/entry/',             views.opex_boq_entry,       name='opex_boq_entry'),        # OPEX Design only
     path('projects/<str:project_id>/boq/submit/',            views.boq_submit,           name='boq_submit'),            # Design only
     path('projects/<str:project_id>/boq/acknowledge/',       views.boq_acknowledge,      name='boq_acknowledge'),       # SCM only
     path('projects/<str:project_id>/boq/request-revision/',  views.boq_request_revision, name='boq_request_revision'),  # PM only

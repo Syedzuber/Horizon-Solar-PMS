@@ -114,6 +114,95 @@ request is unresolved is a convenience; design_qc_pass() refuses the POST regard
   </div>
 </div>
 
+{# ── The BOQ, read-only (Part 11) ─────────────────────────────────────────── #}
+{% comment %}
+ONLY THE ITEMS THE DESIGNER ADDED — never the full 207-item OPEX catalogue. Two of the
+sixteen error categories are `boq_quantity` and `boq_specification`, so a reviewer has to
+be able to read the bill to record the failure the system asks them for; making them
+click through to boq_detail to do it was the gap this closes.
+
+Read-only by construction, not by a flag: there is no form, no input and no action here.
+Grouped by category in catalogue order, the same order the entry screen used, so the
+reviewer and the designer are looking at the same document in the same sequence.
+{% endcomment %}
+{% if boq %}
+<div class="card shadow-sm mb-3">
+  <div class="card-header bg-white py-2 fw-semibold small d-flex align-items-center">
+    <span>The BOQ</span>
+    <span class="text-muted fw-normal ms-2">
+      {{ boq_row_count }} item{{ boq_row_count|pluralize }} on this site's bill
+      {% if boq_quantity_count != boq_row_count %}
+        · {{ boq_quantity_count }} with a quantity
+      {% endif %}
+    </span>
+    <a href="{% url 'boq_detail' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary ms-auto py-0">Open full BOQ</a>
+  </div>
+  <div class="card-body p-0">
+    {% if boq_by_category or boq_off_catalogue %}
+      <table class="table table-sm mb-0">
+        <thead class="table-light">
+          <tr class="small">
+            <th style="width:80px">Code</th>
+            <th>Description</th>
+            <th style="width:70px">Unit</th>
+            <th style="width:90px" class="text-end">Qty</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for category, rows in boq_by_category %}
+            <tr><td colspan="4" class="fw-semibold py-1 small" style="background:#f1f3f5;">
+              {{ category }}
+              <span class="text-muted fw-normal">{{ rows|length }}</span>
+            </td></tr>
+            {% for row in rows %}
+              <tr class="small">
+                <td class="text-muted">{{ row.item_master.code }}</td>
+                <td style="line-height:1.3">{{ row.description }}</td>
+                <td class="text-muted">{{ row.uom }}</td>
+                <td class="text-end">
+                  {% if row.boq_quantity %}<strong>{{ row.boq_quantity|floatformat:"-2" }}</strong>
+                  {% else %}<span class="text-danger">—</span>{% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          {% endfor %}
+
+          {% if boq_off_catalogue %}
+            {% comment %}
+            Rows with no OPEX catalogue link — a site seeded before Part 11, or an ad-hoc
+            row. Shown, and shown as what they are: a reviewer judging completeness must
+            not be handed a bill that quietly omits lines that are on it.
+            {% endcomment %}
+            {% for category, rows in boq_off_catalogue %}
+              <tr><td colspan="4" class="fw-semibold py-1 small" style="background:#fff3cd;">
+                {{ category|default:"Uncategorised" }}
+                <span class="text-muted fw-normal">— not in the OPEX catalogue</span>
+              </td></tr>
+              {% for row in rows %}
+                <tr class="small">
+                  <td class="text-muted">—</td>
+                  <td style="line-height:1.3">{{ row.description }}</td>
+                  <td class="text-muted">{{ row.uom }}</td>
+                  <td class="text-end">
+                    {% if row.boq_quantity %}<strong>{{ row.boq_quantity|floatformat:"-2" }}</strong>
+                    {% else %}<span class="text-danger">—</span>{% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            {% endfor %}
+          {% endif %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="p-3 small text-muted">
+        This BOQ has no line items. Nothing has been added from the catalogue yet.
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── Review actions — gate 1 (Design QC) or gate 2 (Design Head) ──────────── #}
 {% comment %}
 PART 9. The two gates share this card and never appear together: gate 1's forms need

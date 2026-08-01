@@ -483,16 +483,28 @@ class BOQItemMasterForm(forms.ModelForm):
 
     class Meta:
         model  = BOQItemMaster
-        fields = ['code', 'description', 'unit', 'category', 'is_active', 'sort_order']
+        fields = ['code', 'project_type', 'description', 'unit', 'category',
+                  'is_active', 'sort_order']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for name, field in self.fields.items():
             if isinstance(field.widget, forms.CheckboxInput):
                 field.widget.attrs.setdefault('class', 'form-check-input')
+            elif isinstance(field.widget, forms.Select):
+                field.widget.attrs.setdefault('class', 'form-select')
             else:
                 field.widget.attrs.setdefault('class', 'form-control')
-        self.fields['category'].help_text = 'Display grouping only — leave blank if not needed.'
+        # PART 11: without this field on the form, every item an admin created would land
+        # on the Residential template by default, whatever they meant.
+        self.fields['project_type'].help_text = (
+            'Which template this item belongs to. Residential items are pre-populated onto '
+            'every new Residential BOQ; OPEX items are offered in the OPEX BOQ picker.'
+        )
+        self.fields['category'].help_text = (
+            'Residential: display grouping only. OPEX: groups the picker and the saved '
+            'sheet, so it should match an existing OPEX category exactly.'
+        )
         self.fields['unit'].help_text     = 'e.g. Nos, Mtr, Kg, Set, Lot. Required — quantities cannot be summed across sites without it.'
         self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
 

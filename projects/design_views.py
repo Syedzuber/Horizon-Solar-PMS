@@ -58,6 +58,10 @@ from .models import (
     DESIGN_ERROR_CATEGORY_LABELS,
     REDO_ARKA, REDO_CAD, REDO_BOQ, DESIGN_REDO_CHOICES,
     DEFAULT_REDO_BY_CATEGORY, default_redo_for_category,
+    # Part 11 — the OPEX catalogue helpers, so the read-only BOQ panel on the review
+    # screen groups the sheet exactly the way the entry screen does.
+    get_opex_boq_catalogue, opex_catalogue_category_order,
+    split_opex_boq_rows, group_boq_rows_by_category,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
@@ -1224,6 +1228,35 @@ def _designer_boq(project):
         return project.boq
     except BOQ.DoesNotExist:
         return None
+
+
+def _boq_review_panel(boq):
+    """Read-only context for the BOQ panel on the Part 9 package review screen (Part 11).
+
+    ONLY WHAT THE DESIGNER ADDED. The reviewer sees this site's bill, not the 207-item
+    catalogue it was drawn from — the point of the picker is that the sheet is short and
+    every row on it is deliberate, and the review has to show that same thing.
+
+    A READ, LIKE EVERYTHING ELSE IN THIS MODULE. It builds no form and writes nothing;
+    settled decision 4 stands. It borrows the entry screen's own grouping helpers from
+    models rather than re-deriving category order, so the reviewer's copy of the sheet
+    cannot list categories in a different order from the designer's.
+    """
+    if boq is None:
+        return {'boq_by_category': [], 'boq_off_catalogue': [],
+                'boq_row_count': 0, 'boq_quantity_count': 0}
+
+    category_order = opex_catalogue_category_order()
+    catalogue_ids  = {m.pk for m in get_opex_boq_catalogue()}
+    on_rows, off_rows = split_opex_boq_rows(boq, catalogue_ids)
+
+    return {
+        'boq_by_category':    group_boq_rows_by_category(on_rows, category_order),
+        'boq_off_catalogue':  group_boq_rows_by_category(off_rows, category_order),
+        'boq_row_count':      len(on_rows) + len(off_rows),
+        'boq_quantity_count': sum(1 for row in on_rows + off_rows
+                                  if row.boq_quantity and row.boq_quantity > 0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2888,6 +2921,7 @@ def design_qc_review(request, project_id):
         'has_approved_arka_to_carry': bool(
             ctx['arka'] is not None and ctx['arka'].head_verdict == ARKA_APPROVED),
     })
+    ctx.update(_boq_review_panel(ctx['boq']))
     return render(request, 'projects/design/qc_review.html', ctx)
 
 

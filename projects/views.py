@@ -24,6 +24,8 @@ from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
     Vendor, VendorCategory, VendorBrand,
     BOQ, BOQItem, BOQItemMaster, BOQRevision, Notification, get_standard_boq_items,
+    get_opex_boq_catalogue, opex_catalogue_category_order,
+    split_opex_boq_rows, group_boq_rows_by_category,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
@@ -41,7 +43,7 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
-    project_boq_is_group_locked,
+    project_boq_is_group_locked, project_boq_is_design_locked,
 )
 from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
@@ -4251,6 +4253,22 @@ def boq_detail(request, project_id):
     second AND term beside user_can_edit_project_boq() — see project_boq_is_group_locked()
     for why the two are separate predicates rather than one. Read is unaffected: a locked
     BOQ is still fully visible, it is just no longer writable by Design.
+
+    PART 11 — THIS IS NOW THE RESIDENTIAL ENTRY SCREEN, AND EVERY OTHER ROLE'S READ SCREEN.
+    OPEX authorship moved to the picker (opex_boq_entry): the OPEX catalogue is 207 items
+    and pre-populating them per site is unusable. Two things follow, and both are narrow:
+
+      * A designer opening an OPEX BOQ is REDIRECTED to the picker, before the seeding
+        block below. This is the load-bearing branch — get_standard_boq_items() is now
+        Residential-scoped, so without it an OPEX site would be seeded with 37 Residential
+        rows, which is the exact pre-population Part 11 exists to remove.
+      * The three Design write branches take a third AND term, the design lock. It is
+        structurally False on every Residential project (see project_boq_is_design_locked),
+        so it cannot change Residential behaviour, and it is applied here as well as in the
+        picker so a hand-crafted POST to this older endpoint is not a way around it.
+
+    NOTHING ELSE CHANGES FOR EITHER TYPE. SCM still acknowledges an OPEX BOQ here, PM and
+    Admin still read one here, and the Residential path — seeding included — is untouched.
     """
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
@@ -4259,9 +4277,17 @@ def boq_detail(request, project_id):
     if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
 
-    # Computed once and reused by every Design write gate on this view, so the lock can
+    # Computed once and reused by every Design write gate on this view, so the locks can
     # never be applied to one branch and forgotten on another.
-    boq_group_locked = project_boq_is_group_locked(project)
+    boq_group_locked  = project_boq_is_group_locked(project)
+    boq_design_locked = project_boq_is_design_locked(project)
+
+    # PART 11: send the OPEX author to the OPEX screen. Only the author — SCM, PM, Admin
+    # and the two QC reviewers have no picker to use and read the sheet right here. The
+    # locks are deliberately NOT consulted: a locked OPEX BOQ still belongs on the picker,
+    # which renders it read-only and says which lock is holding it.
+    if project.project_type == 'OPEX' and user_can_edit_project_boq(request.user, project):
+        return redirect('opex_boq_entry', project_id=project_id)
 
     # Get or auto-create BOQ for users who may author one (others see 'no BOQ yet' state)
     try:
@@ -4278,9 +4304,19 @@ def boq_detail(request, project_id):
             boq = BOQ.objects.create(project=project)
             # description is copied as a point-in-time snapshot; item_master carries the
             # stable catalogue link that quantity aggregation across sites joins on.
+            #
+            # PART 11 — THE project_type TERM IS REQUIRED, NOT COSMETIC. This dict is keyed
+            # by description, and three descriptions now exist in BOTH catalogues:
+            # "PVC Elbow 25MM" (ITM-015 / OPX-131), "PVC Tee 25MM" (ITM-016 / OPX-132) and
+            # "Silver Spray Paint" (ITM-024 Nos / OPX-193 Kg). Unscoped, the OPEX row wins
+            # the key — it sorts later — and a Residential BOQ line would silently carry an
+            # `item_master` pointing at an OPEX catalogue row, which is the join Part 6
+            # aggregation runs on. It restores the pre-Part-11 result exactly: before the
+            # 207 rows existed, `is_active=True` returned only Residential rows.
             masters = {
                 m.description: m
-                for m in BOQItemMaster.objects.filter(is_active=True)
+                for m in BOQItemMaster.objects.filter(is_active=True,
+                                                      project_type='Residential')
             }
             BOQItem.objects.bulk_create([
                 BOQItem(boq=boq, item_master=masters.get(item_data['description']), **item_data)
@@ -4308,18 +4344,35 @@ def boq_detail(request, project_id):
         # — that Part 0.6 helper answers "is this person the designer" and is not modified.
         # The SCM branch below deliberately does NOT take this term: it writes
         # `ordered_quantity`, and locking the group is the signal to start ordering.
-        _can_edit = user_can_edit_project_boq(request.user, project) and not boq_group_locked
+        #
+        # PART 11 adds the design-lock term. It is False on every Residential project by
+        # construction, so this line is unchanged in effect for Residential; on an OPEX
+        # site it stops a direct POST to this endpoint from editing a BOQ that is sitting
+        # with Design QC, the Design Head, or released.
+        _can_edit = (user_can_edit_project_boq(request.user, project)
+                     and not boq_group_locked
+                     and not boq_design_locked)
 
         # Say WHY, rather than falling through to the bare redirect at the bottom. Without
         # this the lock is enforced but silent: the POST no-ops and the page comes back
         # looking identical, which reads as "my save did nothing" rather than "this BOQ is
         # final". Only the four Design actions are answered — the SCM branch below is
         # untouched by the lock and must not be intercepted here.
+        #
+        # The two locks answer separately and in that order: the procurement lock is the
+        # final one, so if both are on it is the one worth naming.
         if boq_group_locked and action in ('save_design', 'submit_design',
                                            'add_item', 'delete_item'):
             messages.error(request, 'This site is in a locked procurement group — its BOQ '
                                     'quantities are final and can no longer be changed. A '
                                     'correction now needs a variance against the order.')
+            return redirect('boq_detail', project_id=project_id)
+
+        if boq_design_locked and action in ('save_design', 'submit_design',
+                                            'add_item', 'delete_item'):
+            messages.error(request, 'This BOQ has been marked complete and is with design '
+                                    'review — it cannot be changed until a reviewer sends '
+                                    'it back or a change request opens a new attempt.')
             return redirect('boq_detail', project_id=project_id)
 
         if action in ('save_design', 'submit_design') and _can_edit and boq.status in _DESIGN_EDITABLE:
@@ -4461,7 +4514,8 @@ def boq_detail(request, project_id):
     # edit to a constant Part 6 is told to leave alone. The duplication is deliberate and
     # recorded in DESIGN_MODULE_DEFERRED.md — keep the two in step if either changes.
     design_form_open = (boq.status in ('Draft', 'Revision Requested', 'Acknowledged')
-                        and not boq_group_locked)
+                        and not boq_group_locked
+                        and not boq_design_locked)
 
     # The locked group itself, for the banner. Only fetched when the lock is on, so the
     # unlocked path (every Residential BOQ, always) costs no extra query.
@@ -4488,6 +4542,239 @@ def boq_detail(request, project_id):
     })
 
 
+# ---------------------------------------------------------------------------
+# PART 11 — OPEX BOQ entry (the picker)
+#
+# The Residential BOQ is 37 items and is pre-populated: the designer opens the screen and
+# every row it could ever have is already there, waiting for a quantity. The OPEX
+# catalogue is 207 items across 16 categories, and a real site uses a few dozen of them.
+# Pre-populating that would mean scrolling past ~160 irrelevant rows on every one of
+# potentially 200 sites in a tender, so THE OPEX SHEET STARTS EMPTY and the designer
+# searches the catalogue and adds what the site actually uses.
+#
+# WHAT THIS SCREEN IS NOT. It is not a fork of boq_detail and it does not reimplement the
+# workflow. It writes BOQItem rows and quantities, and that is the whole of it:
+#   * "Mark BOQ complete" delegates to design_boq_complete(), which already owns the
+#     attempt stamp and its four preconditions. This view saves first and then calls it,
+#     so one click cannot lose unsaved quantities and the guards live in one place.
+#   * BOQ.status, submission to SCM, revisions and acknowledgement stay with boq_detail.
+#     An OPEX BOQ still reaches SCM the way it always did.
+#   * Authority is user_can_edit_project_boq() unchanged, ANDed with the two locks — the
+#     same three-term gate boq_detail applies, spelled the same way.
+#
+# ROWS THAT ARE NOT IN THE OPEX CATALOGUE still render, in their own group, with a
+# quantity box and a remove control. Sites seeded before Part 11 carry Residential
+# catalogue rows, and an ad-hoc row has no item_master at all. Hiding them would leave a
+# quantity on the sheet that the designer cannot see on the screen they were sent to;
+# deleting them automatically would throw away somebody's data on a page load. They are
+# shown, they are removable, and they are not offered by the picker.
+# ---------------------------------------------------------------------------
+
+#: How many catalogue matches the picker renders before it stops and says how many more
+#: there are. The cap is on the RENDERED list only — the count is always the true total,
+#: so "N more" never lies about how much is hidden.
+OPEX_PICKER_RESULT_CAP = 60
+
+
+@login_required
+def opex_boq_entry(request, project_id):
+    """OPEX BOQ entry — search the catalogue, add what this site uses, enter quantities.
+
+    GET renders the two-panel screen. POST takes one of two actions, both of which save
+    the sheet first:
+
+        save_draft    — save and come back here
+        mark_complete — save, then hand off to design_boq_complete()
+
+    THE SAVE IS A FULL RECONCILIATION of the posted sheet against the stored one, not an
+    append. Rows the designer removed are gone from the POST, so they are deleted here;
+    rows they added arrive as catalogue pks and are created. Doing it any other way would
+    make "remove" a second round trip that could half-apply.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('The BOQ picker is for OPEX sites. Residential BOQs are entered on '
+                      'the standard BOQ screen.')
+
+    # Read gate first and separately from the write gate, exactly as boq_detail does: they
+    # are different questions and one must not stand in for the other.
+    if not user_can_view_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    boq_group_locked  = project_boq_is_group_locked(project)
+    boq_design_locked = project_boq_is_design_locked(project)
+    can_author        = user_can_edit_project_boq(request.user, project)
+    can_edit          = can_author and not boq_group_locked and not boq_design_locked
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    catalogue      = get_opex_boq_catalogue()
+    category_order = opex_catalogue_category_order()
+    catalogue_by_id = {m.pk: m for m in catalogue}
+
+    if request.method == 'POST':
+        action = request.POST.get('action', '')
+
+        if not can_author:
+            return HttpResponseForbidden()
+        if boq_group_locked:
+            messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                    'quantities are final and can no longer be changed. A '
+                                    'correction now needs a variance against the order.')
+            return redirect('opex_boq_entry', project_id=project_id)
+        if boq_design_locked:
+            messages.error(request, 'This BOQ has been marked complete and is with design '
+                                    'review — it cannot be changed until a reviewer sends '
+                                    'it back or a change request opens a new attempt.')
+            return redirect('opex_boq_entry', project_id=project_id)
+        if action not in ('save_draft', 'mark_complete'):
+            return redirect('opex_boq_entry', project_id=project_id)
+
+        # The chosen catalogue rows, in the order the sheet lists them. Anything that is
+        # not an active OPEX master pk is dropped rather than trusted — this is a POST.
+        chosen = []
+        for raw in request.POST.getlist('item'):
+            if raw.isdigit() and int(raw) in catalogue_by_id and int(raw) not in chosen:
+                chosen.append(int(raw))
+        chosen_set = set(chosen)
+
+        # Off-catalogue rows are identified by BOQItem pk, not master pk — an ad-hoc row
+        # has no master. Only rows on THIS BOQ are addressable.
+        keep_off = {int(raw) for raw in request.POST.getlist('keep_row') if raw.isdigit()}
+
+        def _quantity(field, current=None):
+            """The posted quantity for one row.
+
+            AN ABSENT FIELD MEANS UNCHANGED; an EMPTY one means cleared. The browser always
+            sends the input, so clearing a box still clears the value — but a partial or
+            hand-built POST that names a row without naming its quantity must not silently
+            wipe a number the designer entered on a previous save.
+
+            A malformed or negative value is treated as no quantity rather than rejected:
+            the same forgiving read boq_detail applies, and the "at least one quantity"
+            guard on marking complete is what actually stops an unusable BOQ.
+            """
+            if field not in request.POST:
+                return current
+            raw = (request.POST.get(field) or '').strip()
+            if not raw:
+                return None
+            try:
+                value = Decimal(raw)
+            except InvalidOperation:
+                return None
+            return value if value >= 0 else None
+
+        with transaction.atomic():
+            if boq is None:
+                # Created on first save, never on GET — a page load must not bring a BOQ
+                # row into existence on a site nobody has entered anything for.
+                boq = BOQ.objects.create(project=project)
+
+            existing_on, existing_off = split_opex_boq_rows(boq, set(catalogue_by_id))
+            by_master = {row.item_master_id: row for row in existing_on}
+
+            # Removed catalogue rows, and removed off-catalogue rows.
+            for master_id, row in by_master.items():
+                if master_id not in chosen_set:
+                    row.delete()
+            for row in existing_off:
+                if row.pk not in keep_off:
+                    row.delete()
+
+            # Added and updated catalogue rows. serial_no comes from the catalogue's
+            # sort_order, the same rule the Residential template uses, so a row's number is
+            # stable regardless of the order it was added in.
+            for master_id in chosen:
+                master = catalogue_by_id[master_id]
+                row    = by_master.get(master_id)
+                if row is None:
+                    BOQItem.objects.create(
+                        boq=boq, item_master=master, serial_no=master.sort_order,
+                        category=master.category, description=master.description,
+                        uom=master.unit, boq_quantity=_quantity(f'qty_{master_id}'),
+                        is_standard_item=True,
+                    )
+                else:
+                    row.boq_quantity = _quantity(f'qty_{master_id}', row.boq_quantity)
+                    row.save(update_fields=['boq_quantity'])
+
+            # Surviving off-catalogue rows keep their quantity editable.
+            for row in existing_off:
+                if row.pk in keep_off:
+                    row.boq_quantity = _quantity(f'qty_row_{row.pk}', row.boq_quantity)
+                    row.save(update_fields=['boq_quantity'])
+
+        if action == 'mark_complete':
+            # design_boq_complete owns the attempt stamp and every precondition on it —
+            # the assignment status, an approved Arka, "not already stamped", and at least
+            # one quantity. Called rather than duplicated so the two cannot disagree. It
+            # redirects to the site workspace and messages for itself.
+            from .design_views import design_boq_complete
+            return design_boq_complete(request, project_id)
+
+        messages.success(request, 'BOQ saved.')
+        return redirect('opex_boq_entry', project_id=project_id)
+
+    # ---- GET ----
+    added_on, added_off = split_opex_boq_rows(boq, set(catalogue_by_id))
+
+    # The catalogue, as the picker's JS consumes it. Items already on the sheet are still
+    # sent — the JS filters them out of the results and needs them to render the sheet
+    # after an add or a remove without a round trip.
+    catalogue_json = json.dumps([
+        {'id': m.pk, 'code': m.code, 'cat': m.category,
+         'desc': m.description, 'unit': m.unit}
+        for m in catalogue
+    ])
+    added_json = json.dumps([
+        {'id': row.item_master_id, 'qty': ('' if row.boq_quantity is None
+                                           else f'{row.boq_quantity.normalize():f}')}
+        for row in added_on
+    ])
+
+    # Which categories the designer has never put anything in (settled decision 7). The
+    # picker shows this per category so "I have not looked at Earthing yet" is visible at
+    # a glance rather than something they have to remember.
+    used_categories = {row.category for row in added_on}
+    empty_categories = [c for c in category_order if c not in used_categories]
+
+    # Why the screen is read-only, when it is. Most specific first: the procurement lock is
+    # final, the design lock is not, and "you are not the designer" is neither.
+    lock_reason = ''
+    if boq_group_locked:
+        lock_reason = ('This site is in a locked procurement group. Its BOQ quantities are '
+                       'final — a correction now needs a variance against the order, raised '
+                       'with SCM.')
+    elif boq_design_locked:
+        lock_reason = ('This BOQ is marked complete and is with design review. It reopens, '
+                       'with the full catalogue, if a reviewer sends it back or a change '
+                       'request opens a new attempt.')
+    elif not can_author:
+        lock_reason = ('Only the designer named in this site\'s assigned_design may enter '
+                       'its BOQ.')
+
+    return render(request, 'projects/opex_boq_entry.html', {
+        'project':          project,
+        'boq':              boq,
+        'catalogue_count':  len(catalogue),
+        'catalogue_json':   catalogue_json,
+        'added_json':       added_json,
+        'added_off':        group_boq_rows_by_category(added_off, category_order),
+        'added_off_count':  len(added_off),
+        'added_count':      len(added_on) + len(added_off),
+        'category_order':   category_order,
+        'empty_categories': empty_categories,
+        'can_edit':         can_edit,
+        'lock_reason':      lock_reason,
+        'result_cap':       OPEX_PICKER_RESULT_CAP,
+    })
+
+
 @login_required
 def boq_submit(request, project_id):
     """
@@ -4498,6 +4785,10 @@ def boq_submit(request, project_id):
 
     PART 6: the group-lock term is ANDed in alongside the Part 0.6 authority helper, the
     same way boq_detail does it, so this endpoint cannot become a way around the lock.
+
+    PART 11: and the design lock likewise, for the same reason — it is False on every
+    Residential project, and on an OPEX site this is the other endpoint a direct POST
+    could otherwise reach.
     """
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
@@ -4511,6 +4802,11 @@ def boq_submit(request, project_id):
     if project_boq_is_group_locked(project):
         return HttpResponseForbidden(
             'This site is in a locked procurement group — its BOQ can no longer be changed.')
+
+    if project_boq_is_design_locked(project):
+        return HttpResponseForbidden(
+            'This BOQ has been marked complete and is with design review — it cannot be '
+            'changed until a reviewer sends it back.')
 
     # `project=project` scopes the BOQ to the project in the URL — a BOQ belonging to any
     # other project is unreachable through this endpoint.
@@ -8716,8 +9012,16 @@ def admin_checklist_link_delete(request, checklist_id, link_id):
 @role_required(['Admin'])
 def admin_boq_items(request):
     """List all BOQItemMaster entries in template order, with an optional active filter
-    and the count of BOQ rows linked to each. Access: Admin only."""
-    items = BOQItemMaster.objects.annotate(linked_count=Count('boq_items'))
+    and the count of BOQ rows linked to each. Access: Admin only.
+
+    PART 11 added the project_type filter and the explicit ordering. The catalogue holds
+    two independent templates now (37 Residential, 207 OPEX), and `sort_order` restarts at
+    1 for each — so the model's default ordering interleaves them here, and only here.
+    Ordering by type first keeps each template contiguous and in its own order.
+    """
+    items = (BOQItemMaster.objects
+             .annotate(linked_count=Count('boq_items'))
+             .order_by('project_type', 'sort_order', 'code'))
 
     active_filter = request.GET.get('active', '')
     if active_filter == '1':
@@ -8725,9 +9029,18 @@ def admin_boq_items(request):
     elif active_filter == '0':
         items = items.filter(is_active=False)
 
+    type_filter = request.GET.get('type', '')
+    if type_filter in dict(Project.PROJECT_TYPE_CHOICES):
+        items = items.filter(project_type=type_filter)
+
     return render(request, 'projects/admin/boq_items.html', {
         'items':         items,
         'active_filter': active_filter,
+        'type_filter':   type_filter,
+        'type_choices':  Project.PROJECT_TYPE_CHOICES,
+        'type_counts':   [(value, label,
+                           BOQItemMaster.objects.filter(project_type=value).count())
+                          for value, label in Project.PROJECT_TYPE_CHOICES],
         'active_count':  BOQItemMaster.objects.filter(is_active=True).count(),
         'total_count':   BOQItemMaster.objects.count(),
     })

@@ -201,11 +201,16 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
   <div class="card-header bg-white py-2 fw-semibold small">3 · BOQ</div>
   <div class="card-body py-3">
     {% comment %}
-    Quantities are entered on the EXISTING BOQ screen (boq_detail) — this workflow
-    does not duplicate the BOQ, it links to it and records that the step is done.
+    Quantities are entered on the BOQ screen — this workflow does not duplicate the BOQ,
+    it links to it and records that the step is done.
+
+    PART 11: for OPEX that screen is now the picker (opex_boq_entry), because the OPEX
+    catalogue is 207 items and is searched rather than pre-populated. Linking straight
+    there rather than via boq_detail's redirect saves a hop; boq_detail redirects anyway,
+    so an old bookmark still lands in the right place.
     {% endcomment %}
     <div class="d-flex flex-wrap gap-2 align-items-center">
-      <a href="{% url 'boq_detail' project.project_id %}"
+      <a href="{% url 'opex_boq_entry' project.project_id %}"
          class="btn btn-sm btn-outline-secondary">
         Enter BOQ quantities
       </a>

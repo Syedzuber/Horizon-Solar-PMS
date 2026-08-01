@@ -662,18 +662,46 @@ class BOQItemMaster(models.Model):
 
     Rows are deactivated via is_active, never deleted — BOQItem.item_master is
     SET_NULL, so a delete would silently break the aggregation join.
+
+    PART 11 SCOPES THE CATALOGUE BY PROJECT TYPE. Residential and OPEX buy different
+    things: the 37 Residential rows (ITM-001..ITM-037, Part 0.5) describe a rooftop
+    house system, and the 207 OPEX rows (OPX-001..OPX-207) are the design team's tender
+    catalogue. ONE TABLE, scoped by `project_type` — not two tables, because everything
+    downstream of a BOQ row joins on `item_master`, and a second master table would mean
+    a second join in aggregate_group_boq(), the admin catalogue screen and every future
+    reader of a BOQ line.
+
+    `category` STOPS BEING DECORATIVE HERE. On the Residential side it remains a display
+    grouping. On the OPEX side it groups the picker and the saved sheet, and its ORDER
+    matters — it must match the source spreadsheet, which it does because category order
+    is derived from `sort_order` (first row of each category wins) rather than stored.
     """
 
-    code        = models.CharField(max_length=32, unique=True)   # Short stable identifier, e.g. ITM-001
+    code        = models.CharField(max_length=32, unique=True)   # Short stable identifier, e.g. ITM-001 / OPX-001
     description = models.CharField(max_length=255)
     unit        = models.CharField(max_length=20)                # Required — quantities cannot be aggregated across sites without a consistent unit
-    category    = models.CharField(max_length=64, blank=True)    # Display grouping only; carries no logic
+    category    = models.CharField(max_length=64, blank=True)    # Residential: display grouping. OPEX: groups the picker and the sheet (Part 11)
+    # Which kind of project this catalogue row serves. Defaults to Residential so the 37
+    # pre-Part-11 rows are correctly scoped by the default alone; migration 0057 also sets
+    # them explicitly rather than relying on it. Reuses Project.PROJECT_TYPE_CHOICES so the
+    # vocabulary cannot drift from the value that is actually compared against it.
+    project_type = models.CharField(
+        max_length=20,
+        choices=Project.PROJECT_TYPE_CHOICES,
+        default='Residential',
+        db_index=True,
+    )
     is_active   = models.BooleanField(default=True)
     sort_order  = models.PositiveIntegerField(default=0)         # Also becomes BOQItem.serial_no on creation
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 
     class Meta:
+        # DELIBERATELY UNCHANGED by Part 11. `sort_order` now repeats across types (both
+        # ITM and OPX start at 1), so the unfiltered default ordering interleaves them —
+        # which is fine, because every functional query filters by project_type first and
+        # the one screen that does not (the admin catalogue) orders explicitly. Adding
+        # project_type here would silently reorder aggregate_group_boq()'s output.
         ordering = ['sort_order', 'code']
 
     def __str__(self):
@@ -690,10 +718,17 @@ def get_standard_boq_items():
 
     Raises RuntimeError on an empty catalogue rather than falling back to a literal
     list: a silent fallback would hide a migration that never ran.
+
+    PART 11 ADDED THE `project_type` TERM AND NOTHING ELSE. Name, signature and return
+    shape are unchanged, and so is every value it returns: the 37 rows this has always
+    produced are precisely the rows migration 0057 stamps 'Residential'. The filter is
+    now required rather than merely correct — without it this would hand a Residential
+    project the 207 OPEX tender items as well. OPEX has its own entry screen and reads
+    the catalogue through get_opex_boq_catalogue().
     """
     rows = list(
         BOQItemMaster.objects
-        .filter(is_active=True)
+        .filter(is_active=True, project_type='Residential')
         .order_by('sort_order', 'code')
         .values('sort_order', 'category', 'description', 'unit')
     )
@@ -711,6 +746,84 @@ def get_standard_boq_items():
         }
         for r in rows
     ]
+
+
+def get_opex_boq_catalogue():
+    """The active OPEX catalogue, in spreadsheet order — what the Part 11 picker offers.
+
+    Returns model instances, not dicts, because the picker needs the pk: a chosen row is
+    recorded as BOQItem.item_master, which is the join Part 6 aggregation runs on. That is
+    the whole reason the picker writes catalogue rows rather than free text.
+
+    NO PRE-POPULATION. Unlike get_standard_boq_items(), nothing calls this to seed a BOQ.
+    At 207 items a designer would scroll past ~160 irrelevant rows on every one of
+    potentially 200 sites, so the sheet starts empty and they add what the site uses.
+
+    Returns [] on an empty catalogue rather than raising, unlike its Residential
+    counterpart: an empty picker renders as "nothing to add", which is a legible screen,
+    whereas the Residential path would silently create a BOQ with no rows at all.
+    """
+    return list(
+        BOQItemMaster.objects
+        .filter(is_active=True, project_type='OPEX')
+        .order_by('sort_order', 'code')
+    )
+
+
+def opex_catalogue_category_order():
+    """OPEX category names in CATALOGUE order — the order of first appearance by
+    sort_order, which is spreadsheet order.
+
+    DERIVED, NOT STORED (settled decision 5). A stored per-category rank would be a second
+    thing to keep in step with sort_order, and the two would eventually disagree. Used to
+    group both halves of the picker and the read-only review panel, so the catalogue, the
+    saved sheet and the reviewer's copy all list categories the same way.
+    """
+    seen = []
+    for category in (BOQItemMaster.objects
+                     .filter(is_active=True, project_type='OPEX')
+                     .order_by('sort_order', 'code')
+                     .values_list('category', flat=True)):
+        if category not in seen:
+            seen.append(category)
+    return seen
+
+
+def split_opex_boq_rows(boq, catalogue_ids):
+    """Split a BOQ's rows into (catalogue rows, off-catalogue rows).
+
+    `catalogue_ids` is the set of ACTIVE OPEX master pks. A row whose master was
+    deactivated after it was added counts as off-catalogue — it is still a real quantity on
+    a real sheet, so it renders and can be removed, it just cannot be re-added.
+
+    OFF-CATALOGUE ROWS ARE NOT AN ERROR CONDITION. OPEX sites created before Part 11 were
+    seeded from the Residential template by the shared boq_detail, and an ad-hoc row has no
+    `item_master` at all. Both are real data; both are shown wherever the sheet is shown.
+
+    Lives here rather than in views.py because BOTH the entry screen and the Part 9 review
+    screen need it, and design_views must not import views.
+    """
+    on, off = [], []
+    if boq is None:
+        return on, off
+    for item in boq.items.select_related('item_master').order_by('serial_no', 'pk'):
+        (on if item.item_master_id in catalogue_ids else off).append(item)
+    return on, off
+
+
+def group_boq_rows_by_category(rows, category_order):
+    """Group BOQ rows by category in CATALOGUE order — [(category, [rows]), ...].
+
+    Categories the sheet does not use do not appear. A category the sheet uses but the
+    catalogue no longer lists is appended at the end rather than dropped: the row exists,
+    so it has to be somewhere.
+    """
+    buckets = {}
+    for row in rows:
+        buckets.setdefault(row.category, []).append(row)
+    ordered = [(c, buckets.pop(c)) for c in category_order if c in buckets]
+    ordered.extend(sorted(buckets.items()))
+    return ordered
 
 
 class BOQ(models.Model):
