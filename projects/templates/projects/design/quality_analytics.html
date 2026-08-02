@@ -1,0 +1,546 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head — quality analytics (Part 10).
+
+READ ONLY EXCEPT THE SELECTOR. Every panel below renders numbers computed in
+design_analytics.py from rows other parts created. The only two forms on the page save and
+reset which optional metrics appear, and they post to their own endpoints.
+
+NO LEADERBOARD, ANYWHERE. Every per-person table on this page is sorted BY NAME, never by
+the metric. Sorting a designer table by failure rate IS a ranked designer list whatever the
+column header says, and the hard rules for this session forbid one. That ordering is
+enforced in design_analytics._person_rows(), not here, so a template edit cannot undo it.
+
+NO TARGETS, NO THRESHOLDS, NO RATINGS. There is not a single red/amber/green cue on this
+page and that is deliberate. The one colour rule is the low-confidence marker, which
+describes the SAMPLE and says nothing about whether a number is good.
+
+THE SAMPLE-SIZE GUARD IS RENDERED BY ONE INCLUDE. `_metric_figure` below is the only place
+a rate or ratio becomes text, so a denominator under 5 cannot reach the screen as a
+percentage through some panel that forgot the rule.
+
+Bootstrap, matching tender_dashboard.html. The `.design-stat-num` rule and the chip pills
+are the same locally-reproduced set that file uses, for the same reason: importing them
+would mean editing dashboard/design.html and promoting them to base.html would touch every
+screen in the product.
+
+NO AUTO-REFRESH. The only way this page updates is the Refresh link.
+{% endcomment %}
+
+{% block title %}Design quality{% if program %} — {{ program.name }}{% endif %} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+{% include "projects/design/_design_chips.html" %}
+<style>
+  .design-stat-num { font-size: 1.5rem; font-weight: 700; line-height: 1; }
+  .qa-figure   { font-size: 1.35rem; font-weight: 700; line-height: 1; }
+  .qa-none     { font-size: .9rem; font-weight: 600; color: #8a6d3b; }
+  .qa-den      { font-size: .75rem; color: #6c757d; }
+  .qa-low      { font-size: .7rem; font-weight: 600; color: #8a6d3b;
+                 background: #fff8e6; border: 1px solid #f0dca8;
+                 border-radius: .6rem; padding: .05rem .4rem; white-space: nowrap; }
+  .qa-caveat   { font-size: .78rem; color: #6c5b3e; background: #fbf7ee;
+                 border-left: 3px solid #d9c48f; padding: .4rem .6rem; }
+  .qa-why      { font-size: .78rem; color: #495057; }
+  .qa-lock     { font-size: .68rem; font-weight: 600; letter-spacing: .02em;
+                 color: #14532d; background: #e3f3e9; border: 1px solid #b7ddc6;
+                 border-radius: .6rem; padding: .05rem .4rem; }
+  .qa-group-h  { font-size: .72rem; font-weight: 700; letter-spacing: .06em;
+                 text-transform: uppercase; color: #6c757d; }
+  .qa-table td, .qa-table th { padding: .35rem .5rem; vertical-align: middle; }
+</style>
+{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h5 class="mb-0">
+      Design quality{% if program %} — {{ program.name }}{% else %} — all OPEX tenders{% endif %}
+    </h5>
+    <div class="text-muted small">
+      {% if program %}
+        {{ program.client_name }}{% if program.short_tender_code %} · {{ program.short_tender_code }}{% endif %} ·
+      {% else %}
+        {{ programs|length }} tender{{ programs|length|pluralize }} ·
+      {% endif %}
+      {{ site_count }} site{{ site_count|pluralize }} in design ·
+      {{ released_count }} released · {{ attempt_count }} attempt{{ attempt_count|pluralize }}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="{% if program %}{% url 'design_quality_analytics_tender' pk=program.pk %}{% else %}{% url 'design_quality_analytics' %}{% endif %}"
+       class="btn btn-sm btn-outline-secondary">Refresh</a>
+    {% if program %}
+      <a href="{% url 'design_tender_dashboard' pk=program.pk %}"
+         class="btn btn-sm btn-outline-secondary">Tender dashboard</a>
+    {% endif %}
+  </div>
+</div>
+
+{# ── Scope ────────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+    <span class="qa-group-h me-1">Scope</span>
+    <a href="{% url 'design_quality_analytics' %}"
+       class="btn btn-sm {% if all_tenders %}text-white{% else %}btn-outline-secondary{% endif %}"
+       {% if all_tenders %}style="background-color:#1a7a4a;"{% endif %}>All OPEX tenders</a>
+    {% for t in tender_choices %}
+      <a href="{% url 'design_quality_analytics_tender' pk=t.pk %}"
+         class="btn btn-sm {% if program and program.pk == t.pk %}text-white{% else %}btn-outline-secondary{% endif %}"
+         {% if program and program.pk == t.pk %}style="background-color:#1a7a4a;"{% endif %}>{{ t.name }}</a>
+    {% endfor %}
+  </div>
+</div>
+
+{# ── The selector ─────────────────────────────────────────────────────────── #}
+{% comment %}
+Collapsed by default. The Head configures this rarely and reads it often, and an
+always-open twenty-checkbox panel pushes every number below the fold.
+
+CORE METRICS RENDER AS A DISABLED CHECKED BOX WITH THE REASON BESIDE IT, not as a hidden
+row. Telling somebody a control is locked without saying why invites them to look for the
+way around it; the one-line `why` is the whole argument for each of the five.
+{% endcomment %}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-2">
+    <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <a class="text-decoration-none fw-semibold" data-bs-toggle="collapse"
+         href="#metricSelector" role="button" aria-expanded="false" aria-controls="metricSelector">
+        Choose metrics
+        <span class="text-muted fw-normal small">
+          — {{ optional_on }} of {{ optional_total }} optional on, plus 5 locked core metrics
+        </span>
+      </a>
+      <form method="post" action="{% url 'design_analytics_reset' %}" class="m-0">
+        {% csrf_token %}
+        <input type="hidden" name="scope" value="{{ scope_pk|default_if_none:'' }}">
+        <button type="submit" class="btn btn-sm btn-outline-secondary">Reset to core only</button>
+      </form>
+    </div>
+
+    <div class="collapse mt-3" id="metricSelector">
+      <form method="post" action="{% url 'design_analytics_configure' %}">
+        {% csrf_token %}
+        <input type="hidden" name="scope" value="{{ scope_pk|default_if_none:'' }}">
+        <div class="row g-3">
+          {% for group in catalogue %}
+            <div class="col-12 col-lg-6">
+              <div class="qa-group-h mb-1">{{ group.key }} — {{ group.label }}</div>
+              <div class="text-muted small mb-2">{{ group.blurb }}</div>
+              {% for entry in group.metrics %}
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="checkbox" name="metrics"
+                         value="{{ entry.metric.key }}"
+                         id="m_{{ entry.metric.key }}"
+                         {% if entry.on %}checked{% endif %}
+                         {% if entry.locked %}disabled{% endif %}>
+                  <label class="form-check-label" for="m_{{ entry.metric.key }}">
+                    {{ entry.metric.label }}
+                    {% if entry.locked %}<span class="qa-lock ms-1">ALWAYS ON</span>{% endif %}
+                  </label>
+                  <div class="text-muted small">{{ entry.metric.description }}</div>
+                  {% if entry.locked %}
+                    <div class="qa-why mt-1">{{ entry.metric.why }}</div>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+          {% endfor %}
+        </div>
+        <div class="mt-3 d-flex gap-2">
+          <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+            Save selection
+          </button>
+          <span class="text-muted small align-self-center">
+            The five locked metrics are always on. They measure the process and the
+            reviewers as well as the designers, which is what keeps the rest of these
+            numbers worth reading.
+          </span>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{# ── Sample-size legend ───────────────────────────────────────────────────── #}
+<div class="card shadow-sm border-0 mb-3">
+  <div class="card-body py-2 small text-muted">
+    <span class="fw-semibold text-dark">Every rate shows its denominator.</span>
+    Under 5 released sites or reviews, no figure is shown at all —
+    <span class="qa-none">Insufficient data (n=N)</span>.
+    Between 5 and 14 the figure carries <span class="qa-low">low confidence</span>.
+    One failure in two sites is not a 50% failure rate, it is noise, and a number like that
+    gets repeated in a review as fact.
+  </div>
+</div>
+
+{% comment %}
+── The panels ──
+`panels` arrives in catalogue order, which is already grouped A, B, C, D — so a plain
+regroup gives the four headings without the template holding its own copy of that order.
+A group with nothing selected produces no heading at all.
+{% endcomment %}
+{% regroup panels by group as panel_groups %}
+{% for pg in panel_groups %}
+  {% for g in groups %}
+    {% if g.0 == pg.grouper %}
+      <div class="mt-4 mb-2">
+        <div class="qa-group-h">{{ g.0 }} — {{ g.1 }}</div>
+        <div class="text-muted small">{{ g.2 }}</div>
+      </div>
+    {% endif %}
+  {% endfor %}
+
+  {% for panel in pg.list %}
+  <div class="card shadow-sm border-0 mb-3">
+    <div class="card-body">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2">
+        <div>
+          <div class="fw-semibold">
+            {{ panel.metric.label }}
+            {% if panel.metric.core %}<span class="qa-lock ms-1">ALWAYS ON</span>{% endif %}
+          </div>
+          <div class="text-muted small">{{ panel.metric.description }}</div>
+        </div>
+      </div>
+
+      {% if panel.metric.caveat %}
+        <div class="qa-caveat mb-3">{{ panel.metric.caveat }}</div>
+      {% endif %}
+
+      {# ─────────────── A — designer execution ─────────────── #}
+      {% if panel.metric.key == 'first_pass_rate' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">Team-wide</span>
+          {% include "projects/design/_qa_figure.html" with f=panel.data.team %}
+        </div>
+        {% include "projects/design/_qa_person_table.html" with rows=panel.data.rows who="Designer" col="First-pass rate" %}
+
+      {% elif panel.metric.key == 'rework_multiplier' %}
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Designer</th>
+            <th class="small text-muted">Attempts per released site</th>
+            <th class="small text-muted text-end">Uncategorised</th>
+            <th class="small text-muted text-end">Excluded (B / C / PM change)</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td>{{ r.label }}</td>
+              <td>{% include "projects/design/_qa_figure.html" with f=r.figure %}</td>
+              <td class="text-end small">{{ r.uncategorised }}</td>
+              <td class="text-end small">{{ r.excluded }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-muted small">No designers hold sites in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="text-muted small mt-2">
+          Uncategorised attempts are pre-Part-9 QC failures, which carried no category.
+          They are counted in the multiplier and shown here so the mixture is visible.
+        </div>
+
+      {% elif panel.metric.key == 'arka_iterations' %}
+        {% include "projects/design/_qa_person_table.html" with rows=panel.data.rows who="Designer" col="Versions per attempt" %}
+
+      {% elif panel.metric.key == 'qc_failure_rate' or panel.metric.key == 'head_failure_rate' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">Team-wide</span>
+          {% include "projects/design/_qa_figure.html" with f=panel.data.team %}
+        </div>
+        {% include "projects/design/_qa_person_table.html" with rows=panel.data.rows who="Designer" col="Failure rate" %}
+
+      {% elif panel.metric.key == 'error_distribution' %}
+        <div class="row g-3">
+          <div class="col-12 col-lg-6">
+            <div class="qa-group-h mb-2">Team-wide — {{ panel.data.total }} Group A failure{{ panel.data.total|pluralize }}</div>
+            <table class="table table-sm qa-table mb-0">
+              <tbody>
+              {% for c in panel.data.team %}
+                <tr><td class="small">{{ c.label }}</td>
+                    <td class="text-end fw-semibold" style="width:4rem;">{{ c.count }}</td></tr>
+              {% empty %}
+                <tr><td class="text-muted small">No Group A failures recorded in this scope.</td></tr>
+              {% endfor %}
+              </tbody>
+            </table>
+            <div class="text-muted small mt-2">
+              {{ panel.data.by_source.package }} from package failures ·
+              {{ panel.data.by_source.arka }} from Arka rejections.
+              Group B and Group C failures are counted in their own panels and never here.
+            </div>
+          </div>
+          <div class="col-12 col-lg-6">
+            <div class="qa-group-h mb-2">Per designer</div>
+            {% for r in panel.data.rows %}
+              <div class="mb-2">
+                <div class="small fw-semibold">{{ r.label }} <span class="text-muted fw-normal">— {{ r.total }}</span></div>
+                {% for c in r.counts %}
+                  <div class="small text-muted">{{ c.label }} — {{ c.count }}</div>
+                {% endfor %}
+              </div>
+            {% empty %}
+              <div class="text-muted small">Nothing recorded against any designer in this scope.</div>
+            {% endfor %}
+          </div>
+        </div>
+
+      {% elif panel.metric.key == 'capacity_throughput' %}
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Designer</th>
+            <th class="small text-muted text-end">kW released</th>
+            <th class="small text-muted text-end">Sites</th>
+            <th class="small text-muted text-end">No approved capacity</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td>{{ r.label }}</td>
+              <td class="text-end fw-semibold">{{ r.kw|floatformat:2 }}</td>
+              <td class="text-end small">{{ r.sites }}</td>
+              <td class="text-end small">{{ r.no_capacity }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-muted small">Nothing released in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+          <tfoot><tr>
+            <td class="small text-muted">Total</td>
+            <td class="text-end fw-semibold">{{ panel.data.total_kw|floatformat:2 }}</td>
+            <td colspan="2"></td>
+          </tr></tfoot>
+        </table>
+
+      {# ─────────────── B — input quality ─────────────── #}
+      {% elif panel.metric.key == 'hold_rate' %}
+        <div class="d-flex flex-wrap align-items-center gap-3">
+          {% include "projects/design/_qa_figure.html" with f=panel.data.figure %}
+          <span class="text-muted small">
+            {{ panel.data.held }} of {{ panel.data.allocated }} allocated site{{ panel.data.allocated|pluralize }}
+            were placed on Design Hold at some point{% if panel.data.currently_held %},
+            {{ panel.data.currently_held }} still held{% endif %}.
+          </span>
+        </div>
+        <div class="text-muted small mt-2">
+          Team-wide only, and deliberately: this measures the survey the site arrived with,
+          not the designer who received it.
+        </div>
+
+      {% elif panel.metric.key == 'group_b_failures' or panel.metric.key == 'group_c_failures' %}
+        <div class="qa-figure mb-2">{{ panel.data.total }}</div>
+        <table class="table table-sm qa-table mb-0">
+          <tbody>
+          {% for c in panel.data.counts %}
+            <tr><td class="small">{{ c.label }}</td>
+                <td class="text-end fw-semibold" style="width:4rem;">{{ c.count }}</td></tr>
+          {% empty %}
+            <tr><td class="text-muted small">None recorded in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+
+      {% elif panel.metric.key == 'hold_duration' %}
+        {% include "projects/design/_qa_spread.html" with s=panel.data.spread unit="working days" %}
+        <div class="text-muted small mt-2">
+          {{ panel.data.completed }} completed hold{{ panel.data.completed|pluralize }} ·
+          {{ panel.data.still_open }} still open and excluded ·
+          {{ panel.data.events }} log event{{ panel.data.events|pluralize }} read.
+        </div>
+
+      {# ─────────────── C — brief stability ─────────────── #}
+      {% elif panel.metric.key == 'change_request_rate' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">All PMs</span>
+          {% include "projects/design/_qa_figure.html" with f=panel.data.team %}
+        </div>
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Requesting PM</th>
+            <th class="small text-muted">Accepted per released site</th>
+            <th class="small text-muted text-end">Accepted</th>
+            <th class="small text-muted text-end">Released sites</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td>{{ r.label }}</td>
+              <td>{% include "projects/design/_qa_figure.html" with f=r.figure %}</td>
+              <td class="text-end small">{{ r.accepted }}</td>
+              <td class="text-end small">{{ r.released }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-muted small">No sites in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="text-muted small mt-2">
+          Counted against the PM who raised the request, never against the designer who
+          had to redo the work.
+        </div>
+
+      {% elif panel.metric.key == 'cr_rejection_rate' %}
+        <div class="d-flex flex-wrap align-items-center gap-3">
+          {% include "projects/design/_qa_figure.html" with f=panel.data.figure %}
+          <span class="text-muted small">
+            {{ panel.data.rejected }} rejected · {{ panel.data.accepted }} accepted ·
+            {{ panel.data.pending }} still untriaged, of {{ panel.data.total }} raised.
+          </span>
+        </div>
+        <div class="text-muted small mt-2">
+          A rate near zero means the Head's triage refuses nothing. An untriaged backlog
+          depresses it for a different reason, which is why the pending count sits beside it.
+        </div>
+
+      {% elif panel.metric.key == 'cr_by_stage' %}
+        <div class="row g-3">
+          <div class="col-12 col-md-6">
+            <div class="qa-group-h mb-2">Derived from gate timestamps</div>
+            {% for s in panel.data.stages %}
+              <div class="d-flex justify-content-between small border-bottom py-1">
+                <span>{{ s.label }}</span><span class="fw-semibold">{{ s.count }}</span>
+              </div>
+            {% endfor %}
+          </div>
+          <div class="col-12 col-md-6">
+            <div class="qa-group-h mb-2">By attempt number — exact</div>
+            {% for a in panel.data.by_attempt %}
+              <div class="d-flex justify-content-between small border-bottom py-1">
+                <span>Raised during attempt {{ a.attempt }}</span><span class="fw-semibold">{{ a.count }}</span>
+              </div>
+            {% empty %}
+              <div class="text-muted small">No change requests in this scope.</div>
+            {% endfor %}
+          </div>
+        </div>
+
+      {# ─────────────── D — process and reviewer consistency ─────────────── #}
+      {% elif panel.metric.key == 'overturn_rate' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">Overall</span>
+          {% include "projects/design/_qa_figure.html" with f=panel.data.team %}
+        </div>
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Design QC reviewer</th>
+            <th class="small text-muted">Overturn rate</th>
+            <th class="small text-muted text-end">Packages</th>
+            <th class="small text-muted text-end">Arkas</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td>{{ r.label }}</td>
+              <td>{% include "projects/design/_qa_figure.html" with f=r.figure %}</td>
+              <td class="text-end small">{{ r.pkg }}</td>
+              <td class="text-end small">{{ r.arka }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-muted small">Nothing has reached the Head gate in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <div class="qa-caveat mt-2">
+          Read this the right way round. A rate near zero does not mean the reviewers
+          agree — it means the Head's gate is changing no outcomes, and a second gate that
+          changes nothing is not earning its cost.
+        </div>
+
+      {% elif panel.metric.key == 'on_time_delivery' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">Team-wide</span>
+          {% include "projects/design/_qa_figure.html" with f=panel.data.team %}
+        </div>
+        {% include "projects/design/_qa_person_table.html" with rows=panel.data.rows who="Designer" col="On time" %}
+        <div class="text-muted small mt-2">
+          Measured against the APPROVED due date. A pending extension request does not
+          move it{% if panel.data.no_due_date %} · {{ panel.data.no_due_date }} released
+          site{{ panel.data.no_due_date|pluralize }} had no approved date and
+          {{ panel.data.no_due_date|pluralize:"is,are" }} excluded{% endif %}.
+        </div>
+
+      {% elif panel.metric.key == 'extension_rate' %}
+        <div class="d-flex flex-wrap align-items-center gap-3">
+          {% include "projects/design/_qa_figure.html" with f=panel.data.figure %}
+          <span class="text-muted small">
+            {{ panel.data.extended }} of {{ panel.data.with_any }} assignment{{ panel.data.with_any|pluralize }}
+            with a due date carry more than one commitment.
+          </span>
+        </div>
+
+      {% elif panel.metric.key == 'cycle_time' %}
+        <div class="mb-2">
+          <span class="text-muted small me-2">Team-wide</span>
+          {% include "projects/design/_qa_spread.html" with s=panel.data.team unit="working days" %}
+        </div>
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Designer</th>
+            <th class="small text-muted">Median</th>
+            <th class="small text-muted text-end">Range</th>
+            <th class="small text-muted text-end">Sites</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td>{{ r.label }}</td>
+              <td>{% if r.spread.median is None %}<span class="qa-none">—</span>
+                  {% else %}<span class="fw-semibold">{{ r.spread.median }}</span>
+                  {% if r.spread.state == 'insufficient' or r.spread.state == 'low' %}
+                    <span class="qa-low ms-1">low confidence</span>{% endif %}{% endif %}</td>
+              <td class="text-end small">{% if r.spread.n %}{{ r.spread.min }}–{{ r.spread.max }}{% else %}—{% endif %}</td>
+              <td class="text-end small">{{ r.spread.n }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="text-muted small">Nothing released in this scope.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+
+      {% elif panel.metric.key == 'stage_dwell' or panel.metric.key == 'queue_latency' %}
+        <table class="table table-sm qa-table mb-0">
+          <thead><tr>
+            <th class="small text-muted">Interval</th>
+            <th class="small text-muted">Median working days</th>
+            <th class="small text-muted text-end">Range</th>
+            <th class="small text-muted text-end">Samples</th>
+          </tr></thead>
+          <tbody>
+          {% for r in panel.data.rows %}
+            <tr>
+              <td class="small">{{ r.label }}{% if r.blurb %}<div class="text-muted" style="font-size:.72rem;">{{ r.blurb }}</div>{% endif %}</td>
+              <td>{% if r.spread.median is None %}<span class="qa-none">no data</span>
+                  {% else %}<span class="fw-semibold">{{ r.spread.median }}</span>
+                  {% if r.spread.state == 'insufficient' or r.spread.state == 'low' %}
+                    <span class="qa-low ms-1">low confidence</span>{% endif %}{% endif %}</td>
+              <td class="text-end small">{% if r.spread.n %}{{ r.spread.min }}–{{ r.spread.max }}{% else %}—{% endif %}</td>
+              <td class="text-end small">{{ r.spread.n }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% if panel.metric.key == 'stage_dwell' %}
+          <div class="text-muted small mt-2">
+            These six do not sum to the cycle time and are not meant to. The time between
+            an Arka being approved and the package being complete has no timestamp at
+            either end, so it is not on this table and cannot be.
+          </div>
+        {% endif %}
+      {% endif %}
+
+    </div>
+  </div>
+  {% endfor %}
+{% endfor %}
+
+<div class="text-muted small mb-4">
+  <span class="fw-semibold">Deliberate gap:</span> there is no export on this page — no CSV,
+  no PDF, no scheduled report. A downloadable file of per-person performance data leaves
+  this screen's access rules behind the moment it is saved, and that is a different
+  decision from showing the numbers here.
+</div>
+
+{% endblock %}

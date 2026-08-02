@@ -1,0 +1,25 @@
+{% comment %}
+THE ONLY PLACE A RATE OR RATIO BECOMES TEXT (Part 10).
+
+Every figure on the quality analytics page renders through this partial. That is the whole
+point of it: the minimum-denominator rule cannot be skipped by a panel that forgets to
+check the state, because no panel formats a number itself.
+
+`f` is the dict returned by design_analytics.rate() or ratio():
+
+    n         the denominator, ALWAYS displayed
+    value     None whenever the figure must not be shown
+    state     'insufficient' (n < 5) · 'low' (5-14) · 'ok' (15+)
+    is_pct    append % or not
+
+BELOW 5 THERE IS NO NUMBER, not a greyed-out one and not a zero. On a small tender a
+designer with one failure in two released sites reads as 50%, and that figure will be
+repeated in a review as fact. `Insufficient data (n=2)` cannot be misread that way.
+{% endcomment %}
+{% if f.state == 'insufficient' %}
+  <span class="qa-none">Insufficient data (n={{ f.n }})</span>
+{% else %}
+  <span class="qa-figure">{{ f.value }}{% if f.is_pct %}%{% endif %}</span>
+  <span class="qa-den ms-1">n={{ f.n }}</span>
+  {% if f.state == 'low' %}<span class="qa-low ms-1">low confidence</span>{% endif %}
+{% endif %}

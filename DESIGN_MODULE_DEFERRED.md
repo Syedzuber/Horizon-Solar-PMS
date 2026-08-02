@@ -1341,3 +1341,142 @@ the codes the migration does not. Not done here because the hard rules for this 
 forbid fixing unrelated findings.
 
 **Location:** `projects/tests_design_part11.py:98`
+
+---
+
+## Q. Found during Part 10 (quality analytics)
+
+Part 10 reads only. Every item below was found by trying to compute a metric from existing
+rows, and every one was **reported rather than fixed** — the hard rules for that session
+forbid adding a field to any design model to make a metric possible.
+
+### Q1 — no per-status entry timestamp, so stage dwell time is not answerable
+
+The design module stamps the ENDS of things and not the STARTS of statuses. What exists:
+
+    DesignAssignment   created_at · survey_uploaded_at · survey_returned_at
+                       assigned_at · released_at · updated_at
+    DesignAttempt      opened_at · closed_at · qc_started_at · qc_reviewed_at
+                       head_started_at · head_reviewed_at
+    ArkaSubmission     submitted_at · reviewed_at · head_reviewed_at
+    DesignFile         uploaded_at
+
+Nothing stamps entry into `in_design`, `arka_rejected`, `artifacts_uploaded`, `in_qc`,
+`awaiting_head_arka`, `awaiting_head_qc` or `qc_failed`. "Where is the time actually
+spent", per status, cannot be answered.
+
+What shipped instead: `design_analytics.m_stage_dwell()` reports the six intervals those
+terminal stamps define, names each one, and says on screen that they do not sum to the
+cycle time. The unmeasured gap — Arka approved to package complete — has a timestamp at
+neither end.
+
+`design_metrics._queue_age()` already leans on `assignment.updated_at` as a proxy for
+"when it last changed status". That proxy was deliberately NOT extended into dwell
+arithmetic: `updated_at` moves on any save, not only a status change, so averaging over it
+would produce a number that looks like dwell time and is not.
+
+**The fix, if it is ever wanted:** a `DesignStatusEvent(assignment, from_status,
+to_status, at, actor)` append-only table written by the ~14 transitions in
+`design_views.py`. That is a schema change plus an edit to every transition, which is a
+session of its own and is a workflow change, not a reporting one.
+
+**Location:** `projects/design_analytics.py` — `m_stage_dwell`, `DWELL_INTERVALS`
+
+### Q2 — `DesignChangeRequest` does not record the stage it was raised at
+
+The row stores `attempt`, `requested_at`, `requested_by` and the Part 4.6 verdict fields.
+It does not store the assignment's status at the moment the PM raised it, so "how late in
+the process do briefs change" is derived rather than read.
+
+What shipped: `m_cr_by_stage()` buckets by comparing `requested_at` against that attempt's
+own `qc_started_at` / `head_started_at`, and prints the attempt-number distribution beside
+it — that one needs no inference and is exact. The derived half is labelled as derived on
+screen.
+
+**Location:** `projects/design_analytics.py` — `m_cr_by_stage`
+
+### Q3 — Design Hold duration is only recoverable from the activity log
+
+Confirms and extends finding E4. `DesignAssignment` carries ONE `survey_returned_at` /
+`_by` / `_reason` triple, overwritten on each hold, and the unblock path in
+`design_survey_upload()` deliberately leaves it in place rather than adding a field. From
+the model alone, only the most recent interval is available, and only if that hold was
+cleared.
+
+Both ends of every hold ARE logged with a stable `action_code` (`design_blocked` on entry,
+`design_survey_unblocked` on exit), so pairing them per project recovers the full history
+without a schema change. That is what `m_hold_duration()` does, with three limits stated
+on screen:
+
+  * `log_activity()` swallows its own exceptions, so a missing row is silently absent;
+  * a hold with no matching exit is counted as OPEN, not measured against today — the
+    alternative grows every time the page is refreshed;
+  * a second `design_blocked` with no exit between the two is treated as a continuation
+    of the same hold, not a new one.
+
+**The fix, if it is ever wanted:** a `DesignHold(assignment, started_at, started_by,
+reason, cleared_at, cleared_by)` table, which is the same schema-change-plus-transitions
+shape as Q1.
+
+**Location:** `projects/design_analytics.py` — `m_hold_duration`
+
+### Q4 — no period control on the analytics screen
+
+The Part 10 catalogue asks for "kW released per designer **over the period**". There is no
+period selector in that session's scope (per-tender and all-tenders only) and no period
+field to bind one to. `m_capacity_throughput()` computes over every released site in
+scope and says so.
+
+Adding one is cheap — `released_at` is already stored — but it is a scope decision about
+what the default window should be, not a data gap.
+
+**Location:** `projects/design_analytics.py` — `m_capacity_throughput`
+
+### Q5 — two different numbers are both called "rework multiplier"
+
+`design_metrics.designer_workload()['rework']` (Part 5, narrowed by Part 9) excludes Group
+B and C attempts from the numerator but KEEPS attempts opened by a PM change request.
+`design_analytics.m_rework_multiplier()` (Part 10) additionally excludes those, because a
+hard rule for Part 10 is that no cause outside Group A may reach a designer figure and a
+moved brief is not the designer's error.
+
+Both are correct for what they name and the two screens will show different numbers for
+the same designer. Part 10's panel carries a caveat saying so. Not reconciled here because
+changing the Part 5 figure would alter a shipped dashboard, which is outside a read-only
+session's remit.
+
+**Location:** `projects/design_metrics.py:534-551` · `projects/design_analytics.py` —
+`m_rework_multiplier`
+
+### Q6 — `head_started_at` is null on most rows that reached the Head gate
+
+Part 9 added `DesignAttempt.head_started_at`, so every attempt the Head ruled on BEFORE
+that migration has it null. On the local database it is set on 2 attempts against 12
+recorded Head verdicts.
+
+Consequence for anything that measures the Head's gate: `head_started_at__isnull=False` is
+not the population that reached the gate, and using it as a denominator reports over a
+sixth of the real one. Part 10 reads `head_verdict != 'pending'` for membership and falls
+back to `qc_reviewed_at` where a START instant is needed — the two are the same moment on
+rows written since Part 9.
+
+Not backfilled, because the correct value for a historical row is `qc_reviewed_at` and
+writing that into a workflow column would manufacture an audit fact that was never
+recorded.
+
+**Location:** `projects/design_analytics.py` — `m_head_failure_rate`, `m_stage_dwell`,
+`m_queue_latency`
+
+### Q7 — no export, and that is a decision rather than an omission
+
+Part 10 ships no CSV, no PDF and no scheduled report, deliberately. A downloadable file of
+per-person performance data leaves the screen's access rules behind the moment it is
+saved: the page is refused to designers, Design QC, PMs and even the Head's named deputy,
+and a spreadsheet in an inbox is refused to nobody.
+
+Whether to build one is a separate decision with different consequences, and it should be
+taken with the retention and circulation questions answered rather than as a convenience
+feature bolted onto a reporting screen. `tests_design_part10.test_no_export_route_exists`
+pins the absence so it cannot be added without someone noticing.
+
+**Location:** `projects/design_views.py` — Part 10 section

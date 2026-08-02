@@ -32,6 +32,10 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 
 from .decorators import login_required
+from .design_analytics import (
+    METRIC_GROUPS, OPTIONAL_METRICS, catalogue_for_display,
+    compute as compute_analytics, selected_metric_keys,
+)
 from .design_metrics import (
     STAGE_LABELS, effective_commitment, pending_extension, tender_metrics,
 )
@@ -44,6 +48,8 @@ from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
     SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
+    # Part 10 — the ONLY row this session's screen writes.
+    DesignAnalyticsPreference,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
@@ -4132,3 +4138,158 @@ def scm_opex_tender_rows(now=None):
             'oldest_pool_age': pool[0].age_days if pool else None,
         })
     return rows
+
+
+# ---------------------------------------------------------------------------
+# 20. Part 10 — the Design Head's quality analytics
+#
+# READ-ONLY EXCEPT FOR THE SELECTION. The GET view runs arithmetic over rows other parts
+# created and writes nothing; the two POST endpoints write one DesignAnalyticsPreference
+# row and nothing else. No workflow model is touched by any of the three.
+#
+# HEAD ONLY, AND user_is_design_head() RATHER THAN user_has_design_head_authority().
+# Every other screen in this module calls the wider helper so a named deputy can act. This
+# one deliberately does not, and the reason is what is on the page: per-person error rates
+# for named designers, and an overturn rate for named QC reviewers. The deputy field is a
+# plain FK to any UserProfile — a Head can and often would name a senior DESIGNER as
+# deputy so review queues keep moving during an absence. That is the right person to clear
+# an Arka queue and the wrong person to hold their colleagues' failure rates, and settled
+# decision 3 says no designer sees another designer's figures. Covering QC for a week does
+# not carry the team's performance data with it.
+#
+# So: Design QC is refused, designers are refused, PMs are refused, the deputy is refused,
+# and a Django superuser without the flag is refused too — the flag is the rule, exactly as
+# it is for the eighteen other design views, and there is no second authority path.
+# ---------------------------------------------------------------------------
+
+#: Where an unauthorised caller is told to go. One string, so the GET view and both POST
+#: endpoints refuse identically — a probe must not be able to tell them apart.
+_ANALYTICS_FORBIDDEN = ('Design quality analytics is for the Design Head only.')
+
+
+def _analytics_scope(pk):
+    """The tenders in scope: one OPEX tender, or every OPEX tender combined.
+
+    `pk=None` is the all-tenders view. Both paths return a LIST, so compute() and every
+    metric below it are identical for the two — there is no "all tenders" branch anywhere
+    past this function, and therefore no way for the two views to drift apart.
+    """
+    if pk is None:
+        return list(Program.objects
+                    .filter(is_deleted=False, program_type='OPEX')
+                    .order_by('name')), None
+    program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
+    return [program], program
+
+
+def _analytics_preference(user):
+    """The caller's stored selection, or None. Does NOT create a row.
+
+    A Head who has never opened the selector has no row, and that is indistinguishable
+    from a row holding the default. get_or_create() here would write on a GET, which is
+    exactly what verification item 13 checks does not happen.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return None
+    return DesignAnalyticsPreference.objects.filter(profile=profile).first()
+
+
+@login_required
+def design_quality_analytics(request, pk=None):
+    """Quality analytics for one tender, or for every OPEX tender combined.
+
+    READS ONLY. Nothing on this page writes, including the preference row — the selector
+    posts to design_analytics_configure() below.
+    """
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_ANALYTICS_FORBIDDEN)
+
+    programs, program = _analytics_scope(pk)
+    preference = _analytics_preference(request.user)
+    selected   = selected_metric_keys(preference)
+    result     = compute_analytics(programs, selected)
+
+    return render(request, 'projects/design/quality_analytics.html', {
+        'program':      program,
+        'programs':     programs,
+        'all_tenders':  program is None,
+        # The selector's own list of tenders, which is every OPEX tender regardless of
+        # what is currently in scope.
+        'tender_choices': (programs if program is None else
+                           list(Program.objects
+                                .filter(is_deleted=False, program_type='OPEX')
+                                .order_by('name'))),
+        'selected':     selected,
+        'catalogue':    catalogue_for_display(selected),
+        'groups':       METRIC_GROUPS,
+        'panels':       result['panels'],
+        'site_count':   result['site_count'],
+        'released_count': result['released_count'],
+        'attempt_count':  result['attempt_count'],
+        'optional_on':  sum(1 for k in selected if k in OPTIONAL_METRICS),
+        'optional_total': len(OPTIONAL_METRICS),
+        'scope_pk':     pk,
+    })
+
+
+def _analytics_redirect(request):
+    """Back to whichever scope the selector was posted from.
+
+    The scope travels in the POST body rather than being remembered server-side: it is a
+    property of the page the Head was looking at, not of the Head, and storing it would
+    mean a second piece of state to keep in step with the URL.
+    """
+    scope = (request.POST.get('scope') or '').strip()
+    if scope.isdigit():
+        return redirect('design_quality_analytics_tender', pk=int(scope))
+    return redirect('design_quality_analytics')
+
+
+@login_required
+def design_analytics_configure(request):
+    """Store which OPTIONAL metrics this Head wants. THE ONLY WRITE IN PART 10.
+
+    CORE KEYS ARE DISCARDED, not stored, even if the browser posts them. They are always
+    on, so a stored core key would be a row that could later be edited to switch one off —
+    through the admin, an import, or a view that forgets the rule. What is never written
+    cannot be unset. Anything outside OPTIONAL_METRICS is dropped for the same reason the
+    error category is validated at the gates rather than trusted: the checkbox names come
+    from the client.
+    """
+    if request.method != 'POST':
+        return redirect('design_quality_analytics')
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_ANALYTICS_FORBIDDEN)
+
+    chosen = [k for k in request.POST.getlist('metrics') if k in OPTIONAL_METRICS]
+    # Deduplicated and ordered by the catalogue, so the stored list is stable no matter
+    # what order the form serialised the boxes in.
+    chosen = [k for k in OPTIONAL_METRICS if k in set(chosen)]
+
+    DesignAnalyticsPreference.objects.update_or_create(
+        profile=request.user.profile, defaults={'metrics': chosen},
+    )
+    messages.success(
+        request,
+        f'Metric selection saved — {len(chosen)} optional metric'
+        f'{"" if len(chosen) == 1 else "s"} on, plus the locked core set.')
+    return _analytics_redirect(request)
+
+
+@login_required
+def design_analytics_reset(request):
+    """Back to the default: core metrics only.
+
+    Deletes the row rather than storing an empty list. Both read identically through
+    selected_metric_keys(), and deleting means "this Head has never configured the page"
+    stays the same state as "this Head reset it", which is what the word reset means.
+    """
+    if request.method != 'POST':
+        return redirect('design_quality_analytics')
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_ANALYTICS_FORBIDDEN)
+
+    DesignAnalyticsPreference.objects.filter(profile=request.user.profile).delete()
+    messages.success(request, 'Metric selection reset to the core set.')
+    return _analytics_redirect(request)

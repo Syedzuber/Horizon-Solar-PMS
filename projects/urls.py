@@ -96,6 +96,20 @@ urlpatterns = [
     # Part 9 — the Design QC dashboard: a strict subset of the Head's, above.
     path('programs/<int:pk>/design/qc-dashboard/', design_views.design_qc_dashboard, name='design_qc_dashboard'),
 
+    # ---------------------------------------------------------------------------
+    # Part 10 — quality analytics. DESIGN HEAD ONLY (the flag itself, deputy excluded —
+    # see the note above design_quality_analytics). Two routes onto ONE view: the same
+    # screen scoped to one tender or to every OPEX tender combined, so there is no
+    # second code path for the combined view to drift down.
+    #
+    # The two POST endpoints are the only writes in Part 10 and they write one
+    # DesignAnalyticsPreference row. Neither touches a workflow model.
+    # ---------------------------------------------------------------------------
+    path('design/analytics/',                       design_views.design_quality_analytics, name='design_quality_analytics'),
+    path('programs/<int:pk>/design/analytics/',     design_views.design_quality_analytics, name='design_quality_analytics_tender'),
+    path('design/analytics/configure/',            design_views.design_analytics_configure, name='design_analytics_configure'),
+    path('design/analytics/reset/',                design_views.design_analytics_reset,     name='design_analytics_reset'),
+
     path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
     path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),
     path('design/<str:project_id>/qc/start/',       design_views.design_qc_start,        name='design_qc_start'),

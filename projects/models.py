@@ -2748,3 +2748,49 @@ class SiteGroupMembership(models.Model):
     def __str__(self):
         state = 'removed' if self.removed_at else 'active'
         return f"{self.project.project_id} in {self.group_id} ({state})"
+
+
+# ---------------------------------------------------------------------------
+# Part 10 — the Design Head's quality analytics selection
+#
+# THE ONLY THING THIS SESSION WRITES. Every number on the analytics screen is
+# arithmetic over rows some other part created; this table holds one person's choice
+# of which of those numbers they want on screen, and nothing else.
+#
+# A SEPARATE TABLE RATHER THAN A COLUMN ON UserProfile, deliberately. UserProfile is
+# carried by every user of the product — PMs, SCM, Finance, Site Engineers — and a
+# design-module reporting preference on that row would be a column nine roles out of ten
+# never read. Keeping it here also means the design module's only piece of stored state
+# outside the workflow can be dropped in one migration if the screen is ever withdrawn.
+#
+# CORE METRICS ARE NEVER STORED HERE. They are always on, so writing them into `metrics`
+# would create a row that CAN be edited to switch one off — through the admin, a data
+# import, or a later view that forgets the rule. What is not stored cannot be unset. See
+# design_analytics.CORE_METRICS and selected_metric_keys().
+# ---------------------------------------------------------------------------
+
+
+class DesignAnalyticsPreference(models.Model):
+    """Which OPTIONAL quality metrics one Design Head has switched on.
+
+    One row per profile, created lazily on the first configuration POST — a Head who has
+    never touched the selector has no row, which is indistinguishable from a row holding
+    the default (core metrics only) and costs nothing to store.
+
+    `metrics` is a list of metric keys from design_analytics.METRIC_CATALOGUE. It is
+    VALIDATED ON BOTH SIDES: the view refuses to store a key that is not an optional
+    metric, and the reader drops any key it does not recognise. Either alone would be
+    enough today; both together mean that renaming a metric in a later part degrades to
+    "that one comes back off", not to a 500 on somebody's dashboard.
+    """
+
+    profile = models.OneToOneField(
+        UserProfile, on_delete=models.CASCADE,
+        related_name='design_analytics_preference',
+    )
+    #: Optional metric keys only. Core keys are never written here — see the note above.
+    metrics    = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Design analytics selection — {self.profile.user.username}"

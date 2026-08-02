@@ -1,0 +1,30 @@
+{% comment %}
+A per-person figure table (Part 10). `rows`, `who` (the first column's header) and `col`
+(the figure column's header).
+
+SORTED BY NAME, and the sorting is not done here — design_analytics._person_rows() does it
+before the rows reach the template. Sorting this table by the figure would produce a ranked
+designer list, which the hard rules for this session forbid, and doing it in the template
+would put that rule one `dictsort` away from being undone.
+
+NO TARGET COLUMN, NO RATING, NO COLOUR ON THE FIGURE. The only styled state is the
+low-confidence marker, which describes the sample and not the person.
+{% endcomment %}
+<table class="table table-sm qa-table mb-0">
+  <thead>
+    <tr>
+      <th class="small text-muted">{{ who }}</th>
+      <th class="small text-muted">{{ col }}</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.label }}</td>
+        <td>{% include "projects/design/_qa_figure.html" with f=r.figure %}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="2" class="text-muted small">Nothing to measure in this scope.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>

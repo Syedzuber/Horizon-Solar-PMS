@@ -1,0 +1,22 @@
+{% comment %}
+A median with the range around it (Part 10). `s` is design_analytics._spread(), `unit` is
+the label for the number.
+
+A DURATION IS NOT A RATE, so this does not refuse to render below 5 samples the way
+_qa_figure.html does — a median of three real intervals is a fact about those three, not a
+misleading percentage. It DOES carry the low-confidence marker at the same threshold, so a
+median over a handful of sites is not read as typical, and the sample count is always
+shown beside it.
+
+An empty sample renders "no data", never 0 — zero working days means instant, and that is
+a very different claim from having nothing to measure.
+{% endcomment %}
+{% if s.median is None %}
+  <span class="qa-none">no data</span>
+{% else %}
+  <span class="qa-figure">{{ s.median }}</span>
+  <span class="qa-den ms-1">{{ unit }} · range {{ s.min }}–{{ s.max }} · n={{ s.n }}</span>
+  {% if s.state == 'insufficient' or s.state == 'low' %}
+    <span class="qa-low ms-1">low confidence</span>
+  {% endif %}
+{% endif %}
