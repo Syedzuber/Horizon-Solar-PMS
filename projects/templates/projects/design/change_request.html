@@ -65,10 +65,13 @@ when it is; a site in no group keeps Part 4's behaviour, release included.
                   placeholder="Describe the change (required). The designer sees this verbatim."></textarea>
         <button class="btn btn-sm btn-warning">Raise change request</button>
         <div class="text-muted small mt-2">
-          This sends the site back to the designer on a new attempt straight away.
+          This goes to the <strong>Design Head</strong>, who decides whether it becomes
+          rework. Nothing moves until he does: no new attempt is opened and the designer
+          stays on what they are doing. If he rejects it he must say why the current
+          version stands, and you will see that reason here.
           {% if assignment.status == 'in_qc' %}
             <strong>QC is in progress on this package — raising a change suspends the
-            review, and no verdict will be recorded on it.</strong>
+            review, and no verdict can be recorded until he rules.</strong>
           {% endif %}
           {% if draft_group %}
             <strong>This site is in procurement group "{{ draft_group.name }}". Raising a
@@ -120,15 +123,46 @@ when it is; a site in no group keeps Part 4's behaviour, release included.
         </div>
         <div class="text-end">
           <div class="text-muted" style="font-size:.7rem;">{{ cr.requested_at|date:"d M Y H:i" }}</div>
-          {% if cr.resulting_attempt %}
+          {% comment %}
+          PART 4.6 — THE VERDICT, NOT `resulting_attempt`. A rejected request resolves
+          with that field still null, so reading it would show a settled decision as
+          "unresolved" forever.
+          {% endcomment %}
+          {% if cr.verdict == 'accepted' %}
             <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
-              Opened attempt {{ cr.resulting_attempt.attempt_number }}</span>
+              Accepted{% if cr.resulting_attempt %} — attempt {{ cr.resulting_attempt.attempt_number }}{% endif %}</span>
+          {% elif cr.verdict == 'rejected' %}
+            <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+              Rejected</span>
           {% else %}
             <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
-              Unresolved</span>
+              Awaiting the Design Head</span>
+          {% endif %}
+          {% if cr.decided_at %}
+            <div class="text-muted" style="font-size:.7rem;">
+              {{ cr.decided_at|date:"d M Y H:i" }}
+              {% if cr.decided_by %}
+                by {{ cr.decided_by.user.get_full_name|default:cr.decided_by.user.username }}
+              {% endif %}
+            </div>
           {% endif %}
         </div>
       </div>
+
+      {% comment %}
+      THE REJECTION REASON IS SHOWN TO THE PM IN FULL. It is the justification for why the
+      current version stands, and a rejection the requester cannot read the reasoning for
+      is a rubber stamp with extra steps.
+      {% endcomment %}
+      {% if cr.verdict == 'rejected' %}
+        <div class="alert alert-secondary py-2 px-2 mt-2 mb-0 small">
+          <strong>Rejected — the current version stands.</strong>
+          <div>{{ cr.rejection_reason }}</div>
+          <div class="text-muted mt-1" style="font-size:.7rem;">
+            Nothing was reopened. If the change is still needed, raise a new request.
+          </div>
+        </div>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>

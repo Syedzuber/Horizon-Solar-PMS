@@ -642,7 +642,14 @@ class DesignLockTests(Part11Base):
             Decimal('40'))
 
     def test_14_pm_change_request_reopens_with_the_full_picker(self):
-        """VERIFICATION 14 — a new attempt clears the stamp, so the picker returns."""
+        """VERIFICATION 14 — a new attempt clears the stamp, so the picker returns.
+
+        PART 4.6 moved the attempt-opening from the raise to the Design Head's acceptance.
+        The sheet must therefore STAY LOCKED while the request is pending — an untriaged
+        request is not permission to start editing — and unlock only on acceptance. Both
+        halves are asserted below.
+        """
+        from .models import DesignChangeRequest
         self._mark_complete()
         self._to_qc()
         self.assertTrue(project_boq_is_design_locked(self.site))
@@ -654,6 +661,17 @@ class DesignLockTests(Part11Base):
                     kwargs={'project_id': self.site.project_id}),
             {'reason': 'Client moved the array to the north shed.'})
         self.assertEqual(response.status_code, 302)
+
+        # Pending: nothing has moved and the sheet is still locked.
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.current_attempt_number, 1)
+        self.assertTrue(project_boq_is_design_locked(self.site))
+
+        change = DesignChangeRequest.objects.get(attempt__assignment=self.assignment)
+        self.client.logout()
+        self._login(self.head)
+        self.client.post(reverse('design_change_request_accept',
+                                 kwargs={'pk': change.pk}))
 
         self.assignment.refresh_from_db()
         self.assertEqual(self.assignment.current_attempt_number, 2)

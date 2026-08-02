@@ -2525,12 +2525,47 @@ class DesignFile(models.Model):
         return f"{self.kind} v{self.version} — attempt {self.attempt_id}"
 
 
+# PART 4.6 — A CHANGE REQUEST IS TRIAGED, NOT OBEYED.
+#
+# Part 4 let a raised request open a new attempt immediately. That gave any assigned PM
+# the power to push rework into the design queue at will, while the Design Head — who
+# owns that queue, its due dates and its workload — had no say in work being added to it.
+# Every other route into the queue already goes past him; this was the one that did not.
+#
+# So `verdict` is the whole amendment. A raised request is `pending` and does NOTHING:
+# no attempt, no status change. Only the Head (or his named deputy) moves it on.
+#
+#   pending    raised, untriaged. SUSPENDS a review at both gates and blocks a group lock.
+#   accepted   the Head agreed. THIS is what opens attempt N+1, and `resulting_attempt`
+#              points at it — the same field Part 4 used, now set one step later.
+#   rejected   the current version stands, and `rejection_reason` says why. Nothing
+#              reopens; the suspended review resumes on the SAME attempt. There is
+#              deliberately no appeal path — the PM may simply raise a new request.
+#
+# `resulting_attempt` IS NO LONGER A PROXY FOR "RESOLVED". It was, under Part 4, because
+# it was set in the same transaction as the row. A rejected request resolves with it still
+# null, so every guard that used to read `resulting_attempt__isnull=True` now reads
+# `verdict='pending'`. The old rows are unambiguous — anything with `resulting_attempt`
+# set was accepted, and migration 0058 says so.
+
+CHANGE_REQUEST_PENDING  = 'pending'
+CHANGE_REQUEST_ACCEPTED = 'accepted'
+CHANGE_REQUEST_REJECTED = 'rejected'
+
+CHANGE_REQUEST_VERDICT_CHOICES = [
+    (CHANGE_REQUEST_PENDING,  'Pending'),
+    (CHANGE_REQUEST_ACCEPTED, 'Accepted'),
+    (CHANGE_REQUEST_REJECTED, 'Rejected'),
+]
+
+
 class DesignChangeRequest(models.Model):
     """A PM asking for a change after QC has started on an attempt.
 
     This is the second of the two rework loops (settled decision 3). resulting_attempt
     links to the attempt this request opened, so a change request and the rework it
-    caused stay associated; it is null until that attempt exists.
+    caused stay associated; it is null until the Design Head ACCEPTS the request and that
+    attempt exists — see the Part 4.6 note above.
     """
 
     attempt = models.ForeignKey(
@@ -2548,8 +2583,46 @@ class DesignChangeRequest(models.Model):
         related_name='caused_by_change_request',
     )
 
+    # ── Part 4.6 — the Design Head's triage ──────────────────────────────────
+    verdict = models.CharField(
+        max_length=10, choices=CHANGE_REQUEST_VERDICT_CHOICES,
+        default=CHANGE_REQUEST_PENDING,
+    )
+    # SET_NULL, not PROTECT: the verdict is a fact about the request and must survive
+    # the triager's profile being removed. Left null on rows migrated from Part 4, where
+    # nobody triaged anything.
+    decided_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='triaged_design_change_requests',
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    # Required on rejection, by the CHECK constraint below. A rejection that does not
+    # justify why the current version stands is a rubber stamp, and the whole point of
+    # putting a person in front of this queue is that it is not one.
+    rejection_reason = models.TextField(blank=True, default='')
+
     class Meta:
         ordering = ['-requested_at']
+        constraints = [
+            # Same shape as migration 0049's Arka and QC constraints: expressed as the
+            # VALID case, self-contained to this row, so it holds against admin edits,
+            # imports and a future view that forgets the check.
+            models.CheckConstraint(
+                condition=(~models.Q(verdict=CHANGE_REQUEST_REJECTED)
+                           | ~models.Q(rejection_reason='')),
+                name='cr_rejection_reason_required_when_rejected',
+            ),
+            # At most one UNTRIAGED request per attempt. Partial (condition=) so any
+            # number of decided rows may coexist with it — a PM whose request was
+            # rejected may raise another, and the history of both is kept. Enforced
+            # here rather than only in the view because two pending requests would give
+            # the Head two verdicts to record against one suspension.
+            models.UniqueConstraint(
+                fields=['attempt'],
+                condition=models.Q(verdict=CHANGE_REQUEST_PENDING),
+                name='uniq_pending_change_request_per_attempt',
+            ),
+        ]
 
     def __str__(self):
         return f"Change request — attempt {self.attempt_id}"

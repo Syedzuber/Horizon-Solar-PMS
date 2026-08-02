@@ -34,7 +34,8 @@ from decimal import Decimal
 from django.utils import timezone
 
 from .models import (
-    ArkaSubmission, DesignAssignment, DesignAttempt, DueDateCommitment,
+    ArkaSubmission, DesignAssignment, DesignAttempt, DesignChangeRequest,
+    DueDateCommitment, CHANGE_REQUEST_PENDING,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
@@ -260,6 +261,16 @@ def tender_metrics(program, today=None):
     commitments = list(
         DueDateCommitment.objects.filter(assignment_id__in=assignment_ids)
     )
+    # PART 4.6 — the Head's triage queue. One more batched read, on the same `__in` shape
+    # as the four above, so the fixed query budget is kept. Ordered oldest first here so
+    # both the queue panel and the attention band inherit it without re-sorting.
+    pending_crs = list(
+        DesignChangeRequest.objects
+        .filter(attempt__assignment_id__in=assignment_ids,
+                verdict=CHANGE_REQUEST_PENDING)
+        .select_related('attempt', 'requested_by__user')
+        .order_by('requested_at')
+    )
     total_sites = program.sites.filter(is_deleted=False).count()
 
     # ---- index in Python; no further queries ------------------------------------
@@ -275,6 +286,11 @@ def tender_metrics(program, today=None):
             if t.attempt_number == a.current_attempt_number:
                 current_attempt_id[a.pk] = t.pk
                 break
+
+    # `cr.attempt` is select_related, so reading assignment_id off it costs no query.
+    pending_cr_by_assignment = {}
+    for cr in pending_crs:
+        pending_cr_by_assignment.setdefault(cr.attempt.assignment_id, []).append(cr)
 
     arka_by_attempt = {k.attempt_id: k for k in arkas}
     current_arka = {a.pk: arka_by_attempt.get(current_attempt_id.get(a.pk))
@@ -323,6 +339,10 @@ def tender_metrics(program, today=None):
             'revisions':     max(len(commitments_by_assignment.get(a.pk, [])) - 1, 0),
             'attempts':      attempts_by_assignment.get(a.pk, []),
             'released':      a.status == DESIGN_RELEASED,
+            # PART 4.6 — the oldest untriaged PM change request on this site, or None.
+            # A list is carried rather than a bool because the queue panel needs the row
+            # itself and the attention band needs its age.
+            'pending_crs':   pending_cr_by_assignment.get(a.pk, []),
         })
 
     return {
@@ -340,6 +360,9 @@ def tender_metrics(program, today=None):
         'capacity':      capacity_panel(program, sites, total_sites),
         'queue':         review_queue_age(sites, today),
         'attention':     attention_list(sites, today),
+        # PART 4.6 — the Head's own triage queue, oldest first. Not passed to the Design
+        # QC dashboard: deciding whether the brief may move is the Head's, not QC's.
+        'change_requests': change_request_queue(sites, today),
         # PART 9 — the Design QC counterparts of the two panels above. Computed here
         # rather than in a second entry point so the QC dashboard is genuinely a SUBSET of
         # this one: same batched reads, same `sites` list, same functions with different
@@ -622,11 +645,47 @@ def qc_review_queue_age(sites, today=None):
     return _queue_age(sites, 'arka_submitted', 'artifacts_uploaded', today)
 
 
+def change_request_queue(sites, today=None):
+    """PART 4.6 — every PM change request awaiting the Design Head, oldest first.
+
+    OLDEST FIRST AND NOT CAPPED. This is not a "top ten worst" panel like the attention
+    list; it is a queue the Head must empty. Every row in it is a suspended review and a
+    designer who cannot be given a verdict, so hiding the eleventh would hide exactly the
+    one that has been waiting longest to be noticed.
+
+    `age_days` is from `requested_at`, which is when the suspension started — not from
+    `assignment.updated_at`, which moves on any save and would understate the wait.
+    """
+    today = today or timezone.localdate()
+    rows = []
+    for s in sites:
+        for cr in s['pending_crs']:
+            rows.append({
+                'change_request': cr,
+                'project':        s['project'],
+                'designer':       s['designer'],
+                'requested_by':   cr.requested_by,
+                'reason':         cr.reason,
+                'attempt_number': cr.attempt.attempt_number,
+                'requested_at':   cr.requested_at,
+                'age_days':       (today - timezone.localtime(cr.requested_at).date()).days,
+                'stage':          STAGE_LABELS.get(s['stage'], s['stage']),
+            })
+    rows.sort(key=lambda r: r['requested_at'])
+    return rows
+
+
 # Severity bands for the attention list. Lower sorts first.
+#
+# PART 4.6 INSERTED A BAND at position 1 rather than appending one. An untriaged change
+# request is second only to a missed date: it has stopped a review, and unlike a Design
+# Hold the person who can clear it is the person reading this list. The relative order of
+# every pre-existing band is unchanged.
 _SEV_OVERDUE  = 0
-_SEV_BLOCKED  = 1
-_SEV_REVISED  = 2
-_SEV_HEAD     = 3
+_SEV_CHANGE   = 1
+_SEV_BLOCKED  = 2
+_SEV_REVISED  = 3
+_SEV_HEAD     = 4
 
 ATTENTION_LIMIT = 10
 
@@ -677,6 +736,18 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
             _add(s, _SEV_OVERDUE, s['days_over'],
                  f'{s["days_over"]} day(s) past the agreed date, on attempt {attempt_no}',
                  'danger')
+
+        # PART 4.6 — an untriaged change request. Nothing else on any screen makes one
+        # visible, and while it sits there a review is suspended and a designer is
+        # waiting on a verdict nobody may record. Excluded from the `own_only` list on
+        # purpose: triage is the Head's, and Design QC cannot clear this row.
+        for s in sorted((x for x in sites if x['pending_crs']),
+                        key=lambda x: x['pending_crs'][0].requested_at):
+            cr = s['pending_crs'][0]
+            days = (today - timezone.localtime(cr.requested_at).date()).days
+            _add(s, _SEV_CHANGE, days,
+                 f'PM change request awaiting your decision — {days} day(s), '
+                 f'attempt {cr.attempt.attempt_number}', 'danger')
 
         for s in sites:
             if not s['blocked']:

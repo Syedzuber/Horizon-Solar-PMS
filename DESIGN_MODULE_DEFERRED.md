@@ -482,6 +482,13 @@ nobody should mistake it for a reachable code path today.
 **Location:** `projects/design_views.py` — `_open_change_requests`, `design_qc_pass`,
 `design_qc_fail`
 
+> **CLOSED by Part 4.6.** Change requests gained exactly the approval step this finding
+> anticipated. A raised request is `pending` until the Design Head triages it, so the guard
+> is now an ordinary, routinely-exercised code path rather than a backstop. The guard also
+> moved off `resulting_attempt` and onto `verdict` — `_pending_change_requests()` — because
+> a REJECTED request resolves with `resulting_attempt` still null and would otherwise have
+> suspended the review permanently.
+
 ### G7 — Nothing tells the Head, the designer or the PM that anything happened
 
 Extends F7 across the whole Part 4 surface. A package reaching `artifacts_uploaded` does
@@ -1294,3 +1301,43 @@ satisfy a count would be the worse screen. Both figures are pinned in
 `tests_design_part11.test_07` so the distinction stays visible.
 
 **Location:** `projects/templates/projects/opex_boq_entry.html` (the `renderResults` filter)
+
+### P1 — the Part 6 draft-group removal fires on RAISE, not on ACCEPTANCE (Part 4.6)
+
+`design_change_request()` pulls a site out of a DRAFT procurement group in the same
+transaction that creates the change request, and Part 4.6 deliberately left that on the
+RAISE rather than moving it to the Head's acceptance.
+
+The reasoning: SCM must not be left aggregating quantities for a site whose BOQ is under
+dispute while the Head thinks about it, and the removal is explicit, logged and reversible
+(the site stays `released`, so `_add_sites()` accepts it back).
+
+The consequence, recorded rather than resolved: when the Head REJECTS the request, the
+site does not rejoin the group by itself. SCM has to re-add it. Nothing is lost or
+silently wrong — the removal carries the reason `PM change request` and the group screen
+reads it back — but the round trip is manual, and an automatic re-add on rejection would
+need to decide what happens if the group was locked in the meantime, which is a variance
+problem and out of scope here.
+
+**Location:** `projects/design_views.py` — `design_change_request`,
+`design_change_request_reject`
+
+### P2 — `tests_design_part11` collides with migration 0047's catalogue seed
+
+`Part11Base.setUp()` bulk-creates `ITM-001..ITM-037`, but migration 0047 already seeds
+those exact codes into every freshly-created test database. Every test in that file
+therefore errors in `setUp` with
+
+    duplicate key value violates unique constraint "projects_boqitemmaster_code_key"
+
+**This pre-dates Part 4.6 and is not caused by it.** Verified this session by running
+`projects.tests_design_part11.CatalogueTests` — a class Part 4.6 never touched — from a
+clean `git worktree` at HEAD `cc387ee`: identical failure. Part 4.6 edited exactly one
+test in that file (`test_14_pm_change_request_reopens_with_the_full_picker`, which now
+accepts the request before asserting the new attempt) and could not reach the others.
+
+The fix is a one-line `get_or_create`/`ignore_conflicts` in that setUp, or seeding only
+the codes the migration does not. Not done here because the hard rules for this session
+forbid fixing unrelated findings.
+
+**Location:** `projects/tests_design_part11.py:98`

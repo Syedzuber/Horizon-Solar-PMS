@@ -179,8 +179,9 @@ their verdict with nowhere to click.
 
     {% if row.open_crs %}
       <div class="alert alert-warning py-2 small mt-2 mb-0">
-        {{ row.open_crs|length }} unresolved PM change request{{ row.open_crs|length|pluralize }}
-        on this attempt — a verdict at either gate is blocked until actioned.
+        {{ row.open_crs|length }} PM change request{{ row.open_crs|length|pluralize }}
+        on this attempt awaiting the Design Head — a verdict at either gate is blocked
+        until he accepts or rejects it.
       </div>
     {% endif %}
 

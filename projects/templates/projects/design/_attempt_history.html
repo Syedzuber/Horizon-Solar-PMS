@@ -154,19 +154,42 @@ the Head and the PM all read the same history in the same shape.
           </div>
         {% endif %}
 
+        {% comment %}
+        PART 4.6 — THREE STATES, READ OFF `verdict` AND NOT OFF `resulting_attempt`.
+        This partial is the DESIGNER's only sight of a change request (it is included by
+        site_workspace.html), so each state has to say what the designer must do:
+
+          accepted   the brief moved and this is why the next attempt exists — the reason
+                     is the designer's actual instruction, so it is shown in full.
+          pending    a review on this attempt is suspended. Not the designer's to clear,
+                     but they need to know why nothing is coming back from QC.
+          rejected   NO DESIGNER ACTION. Displayed for the record, deliberately in the
+                     quietest styling on the page, so it does not read as a task.
+        {% endcomment %}
         {% for cr in a.change_requests.all %}
-          <div class="alert alert-warning py-2 px-2 my-2 small mb-0">
+          <div class="alert {% if cr.verdict == 'rejected' %}alert-secondary{% else %}alert-warning{% endif %} py-2 px-2 my-2 small mb-0">
             <strong>PM change request</strong>
             — {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
             {{ cr.requested_at|date:"d M Y H:i" }}
             <div>{{ cr.reason }}</div>
-            {% if cr.resulting_attempt %}
+            {% if cr.verdict == 'accepted' %}
               <div class="text-muted" style="font-size:.7rem;">
-                Resolved — opened attempt {{ cr.resulting_attempt.attempt_number }}.
+                Accepted by the Design Head{% if cr.decided_by %}
+                  ({{ cr.decided_by.user.get_full_name|default:cr.decided_by.user.username }}){% endif %}{% if cr.resulting_attempt %}
+                  — opened attempt {{ cr.resulting_attempt.attempt_number }}{% endif %}.
               </div>
+            {% elif cr.verdict == 'rejected' %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Rejected by the Design Head{% if cr.decided_by %}
+                  ({{ cr.decided_by.user.get_full_name|default:cr.decided_by.user.username }}){% endif %}
+                — the current version stands and nothing was reopened.
+                <em>No action needed.</em>
+              </div>
+              <div class="text-muted" style="font-size:.7rem;">{{ cr.rejection_reason }}</div>
             {% else %}
               <div class="fw-semibold" style="font-size:.7rem;">
-                Unresolved — blocks a QC verdict on this attempt.
+                Awaiting the Design Head — a verdict on this attempt is suspended until he
+                accepts or rejects it.
               </div>
             {% endif %}
           </div>

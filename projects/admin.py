@@ -284,7 +284,12 @@ class DesignFileAdmin(admin.ModelAdmin):
 
 @admin.register(DesignChangeRequest)
 class DesignChangeRequestAdmin(admin.ModelAdmin):
-    list_display  = ['attempt', 'requested_by', 'requested_at', 'resulting_attempt']
-    search_fields = ['attempt__assignment__project__project_id', 'reason']
-    raw_id_fields = ['attempt', 'resulting_attempt']
+    # Part 4.6 — `verdict` leads, because `resulting_attempt` is no longer a proxy for
+    # "resolved": a rejected request is settled with that column still empty.
+    list_display  = ['attempt', 'requested_by', 'requested_at', 'verdict',
+                     'decided_by', 'decided_at', 'resulting_attempt']
+    list_filter   = ['verdict']
+    search_fields = ['attempt__assignment__project__project_id', 'reason',
+                     'rejection_reason']
+    raw_id_fields = ['attempt', 'resulting_attempt', 'decided_by']
     readonly_fields = ['requested_at']

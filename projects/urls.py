@@ -109,6 +109,12 @@ urlpatterns = [
     path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),
     path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
 
+    # Part 4.6 — the Design Head triages what the PM raised. Keyed by the request's own
+    # pk, not by the site: the row is the thing being decided, and a site can carry more
+    # than one over its life.
+    path('design/change-request/<int:pk>/accept/', design_views.design_change_request_accept, name='design_change_request_accept'),
+    path('design/change-request/<int:pk>/reject/', design_views.design_change_request_reject, name='design_change_request_reject'),
+
     # ---------------------------------------------------------------------------
     # OPEX site groups (Part 6) — grouped procurement, aggregated BOQ, BOQ lock.
     # WRITE is role='SCM' alone (permissions.user_can_manage_site_groups); READ adds

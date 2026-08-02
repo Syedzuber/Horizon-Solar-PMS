@@ -933,12 +933,27 @@ class ScopedReworkTests(Part9Base):
         self.assertIsNotNone(n1.design_files.filter(is_current=True).first())
 
     def test_a_pm_change_request_still_resets_everything(self):
-        """The brief moved — nothing drawn against the old brief can be assumed to hold."""
+        """The brief moved — nothing drawn against the old brief can be assumed to hold.
+
+        PART 4.6: the raise no longer opens the attempt; the Head's ACCEPTANCE does. What
+        this test is about — that an accepted change request carries nothing forward — is
+        unchanged, so the acceptance step is added and the assertions stand.
+        """
+        from .models import DesignChangeRequest
         self.pm_site = self.site
         self.site.assigned_pm = self.pm
         self.site.save()
         self._login(self.pm)
         self._post('design_change_request', self.site, reason='client changed the roof')
+
+        self.assertEqual(self.a.attempts.count(), 1,
+                         'raising a change request opened an attempt')
+
+        change = DesignChangeRequest.objects.get(attempt__assignment=self.a)
+        self.client.logout()
+        self._login(self.head)
+        self.client.post(reverse('design_change_request_accept',
+                                 kwargs={'pk': change.pk}))
 
         n1 = self._new_attempt()
         self.assertEqual(n1.opened_reason, ATTEMPT_REASON_PM_CHANGE_REQUEST)

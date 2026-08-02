@@ -1,11 +1,14 @@
 ﻿{% extends "base.html" %}
 {% comment %}
-Design Head — operational dashboard for ONE tender (Part 5). READ ONLY.
+Design Head — operational dashboard for ONE tender (Part 5).
 
-There is not one button on this page that changes anything. Every link either filters this
-same page or opens an existing screen. That is deliberate: Phase 1 is information, and an
-inline approve button here would duplicate a permission gate that already lives in the QC
-and Arka views.
+READ ONLY EXCEPT FOR ONE PANEL. Part 5 had not a single button here that changed anything,
+deliberately: an inline approve button would duplicate a permission gate that already lives
+in the QC and Arka views. PART 4.6 ADDS THE ONE EXCEPTION — the PM change-request triage
+queue — and it is an exception because there is nowhere else for it to live. Accepting or
+rejecting a change request is not a review of a package, so it does not belong on the QC
+screens; and every hour it sits untriaged is a suspended review and a stalled designer.
+Everything else on this page still only filters the page or opens an existing screen.
 
 Bootstrap, matching the existing dashboards. The `.design-stat-num` rule is the one
 dashboard/design.html defines in its own extra_head (line 47) and the `.chip` pills are the
@@ -354,6 +357,92 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
     are never added together: they call for coaching, better surveys, and a pinned-down
     customer respectively.
   </div>
+</div>
+
+{# ── 4. PM change requests awaiting triage (Part 4.6) ─────────────────────── #}
+{% comment %}
+THE ONLY PANEL ON THIS PAGE THAT ACTS. Oldest first and uncapped — see
+change_request_queue(). Each row is a review that cannot record a verdict and a designer
+who cannot be told what to do next, so the age column is the point of the panel.
+
+Reject requires a reason in the form AND in the database (CHECK constraint
+cr_rejection_reason_required_when_rejected). `next` posts the Head back to this dashboard
+rather than to the site's QC screen, because he is working a queue, not one site.
+{% endcomment %}
+<div class="card shadow-sm border-0 mt-3">
+  <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
+    <span class="fw-semibold small">
+      PM change requests awaiting your decision
+      {% if m.change_requests %}
+        <span class="badge bg-danger ms-1">{{ m.change_requests|length }}</span>
+      {% endif %}
+    </span>
+    <span class="text-muted" style="font-size:.7rem;">
+      Oldest first — each one suspends a review
+    </span>
+  </div>
+  {% if not m.change_requests %}
+    <div class="card-body py-3 text-muted small">
+      Nothing awaiting triage. A PM change request lands here and opens no attempt until
+      you accept it.
+    </div>
+  {% else %}
+    <ul class="list-group list-group-flush">
+      {% for row in m.change_requests %}
+      <li class="list-group-item py-3">
+        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+          <div class="small">
+            <a href="{% url 'design_qc_review' project_id=row.project.project_id %}"
+               class="fw-semibold">{{ row.project.project_id }}</a>
+            <span class="text-muted">· attempt {{ row.attempt_number }} · {{ row.stage }}</span>
+            <div class="mt-1">
+              Raised by
+              <strong>{{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}</strong>
+              {% if row.designer %}
+                · designer {{ row.designer.user.get_full_name|default:row.designer.user.username }}
+              {% endif %}
+            </div>
+            <div class="mt-1">{{ row.reason }}</div>
+          </div>
+          <div class="text-end">
+            <span class="badge {% if row.age_days >= 3 %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+              {{ row.age_days }} day{{ row.age_days|pluralize }} waiting
+            </span>
+            <div class="text-muted" style="font-size:.7rem;">
+              {{ row.requested_at|date:"d M Y H:i" }}
+            </div>
+          </div>
+        </div>
+
+        <div class="d-flex flex-wrap gap-2 align-items-start">
+          <form method="post"
+                action="{% url 'design_change_request_accept' pk=row.change_request.pk %}">
+            {% csrf_token %}
+            <input type="hidden" name="next"
+                   value="{% url 'design_tender_dashboard' pk=program.pk %}">
+            <button class="btn btn-sm btn-warning">Accept — open a new attempt</button>
+          </form>
+
+          <form method="post" class="d-flex flex-wrap gap-2 flex-grow-1"
+                action="{% url 'design_change_request_reject' pk=row.change_request.pk %}">
+            {% csrf_token %}
+            <input type="hidden" name="next"
+                   value="{% url 'design_tender_dashboard' pk=program.pk %}">
+            <input type="text" name="rejection_reason" required
+                   class="form-control form-control-sm flex-grow-1" style="min-width:14rem;"
+                   placeholder="Why the current version stands (required)">
+            <button class="btn btn-sm btn-outline-secondary">Reject</button>
+          </form>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    <div class="card-footer bg-white small text-muted py-2">
+      Accepting opens attempt N+1 and sends the site back to the designer. Rejecting opens
+      nothing — the current version stands and any suspended review resumes on the same
+      attempt. Neither marks the current attempt failed: it was interrupted, not judged.
+    </div>
+  {% endif %}
 </div>
 
 {# ── 5. Attention list ────────────────────────────────────────────────────── #}

@@ -27,6 +27,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Q, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 
@@ -51,6 +52,8 @@ from .models import (
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
+    # Part 4.6 — the Design Head's triage verdict on a PM change request.
+    CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
     DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
     DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
@@ -2170,16 +2173,23 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None):
     return new_attempt
 
 
-def _open_change_requests(attempt):
-    """Change requests on this attempt that have not yet produced a new attempt.
+def _pending_change_requests(attempt):
+    """Change requests on this attempt that the Design Head has not yet triaged.
 
-    An unresolved change request is one whose `resulting_attempt` is still null. It
-    blocks a QC verdict: judging a package that is already known to need rework wastes
-    the review and produces a verdict about a design nobody intends to build.
+    PART 4.6 REDEFINED "UNRESOLVED". It used to mean `resulting_attempt__isnull=True`,
+    which worked only because Part 4 set that field in the same transaction as the row.
+    A REJECTED request resolves with `resulting_attempt` still null, so reading that
+    field would suspend a review forever over a request the Head has already refused.
+    The verdict is now the authority and this is the one query that says so.
+
+    A pending request blocks a verdict at BOTH gates: judging a package that may be about
+    to be reworked wastes the review and produces a verdict about a design nobody has
+    decided to build. The suspension lifts either way — acceptance opens a new attempt to
+    review instead, rejection lets this one resume.
     """
     if attempt is None:
         return DesignChangeRequest.objects.none()
-    return attempt.change_requests.filter(resulting_attempt__isnull=True)
+    return attempt.change_requests.filter(verdict=CHANGE_REQUEST_PENDING)
 
 
 def _package_is_complete(attempt):
@@ -2260,7 +2270,8 @@ def design_qc_start(request, project_id):
 
     STAMPING qc_started_at IS WHAT OPENS THE PM CHANGE REQUEST WINDOW (settled
     decision 3). Before this moment a PM asking for a change is a conversation; after
-    it, it is a system action that suspends the review and opens a new attempt.
+    it, it is a system action that suspends this review and goes to the Design Head, who
+    decides whether it opens a new attempt (Part 4.6).
 
     The three package conditions are re-checked from the rows rather than inferred from
     the status — a site could reach `artifacts_uploaded` and then have its only CAD file
@@ -2300,15 +2311,18 @@ def design_qc_start(request, project_id):
 
 
 def _blocking_change_request(project, attempt):
-    """The refusal message if an unresolved PM change request blocks a verdict, else ''.
+    """The refusal message if a PENDING PM change request blocks a verdict, else ''.
 
-    An unresolved change request means this package is already known to need rework, so
-    judging it would record a verdict about a design nobody intends to build. Applies
-    identically at BOTH gates, which is why it is a function rather than four copies.
+    Part 4.6: a pending request means the Design Head has not yet decided whether this
+    package is about to be reworked, so judging it would record a verdict about a design
+    nobody has committed to. Applies identically at BOTH gates, which is why it is a
+    function rather than four copies. An accepted or rejected request blocks nothing —
+    acceptance moved the review to a new attempt, rejection settled that this one stands.
     """
-    if _open_change_requests(attempt).exists():
-        return (f'{project.project_id}: a PM change request on this attempt is still '
-                f'unresolved — it must be actioned before a verdict can be recorded.')
+    if _pending_change_requests(attempt).exists():
+        return (f'{project.project_id}: a PM change request on this attempt is awaiting '
+                f'the Design Head\'s decision — the review is suspended until he accepts '
+                f'or rejects it.')
     return ''
 
 
@@ -2611,17 +2625,27 @@ def design_head_qc_fail(request, project_id):
 def design_change_request(request, project_id):
     """The site's assigned PM (or a coordinator) requests a change.
 
-    WINDOW: `qc_started_at` must be set on the current attempt, and the site must not be
-    released (settled decision 3). Before QC starts there is nothing settled to raise a
-    change against and the request is refused with a message; after release the design is
-    finished. The real close condition is BOQ locking, which is Part 6 — until it exists,
-    release stands in for it.
+    PART 4.6 — RAISING A REQUEST NOW DOES ONE THING: IT CREATES A PENDING ROW.
 
-    IF QC IS IN FLIGHT, IT IS SUSPENDED (settled decision 4). The site returns to the
-    designer immediately and no verdict is recorded. Critically, the outgoing attempt
-    keeps `qc_verdict='pending'`: it was never judged, and marking it 'failed' would
-    charge the designer with a rework loop the PM caused. That distinction is the reason
-    both `opened_reason` values exist.
+    No attempt is opened, no status moves, the designer is not pulled off anything. The
+    Design Head triages it (design_change_request_accept / _reject) and only ACCEPTANCE
+    opens attempt N+1. Part 4 opened it here, automatically, which meant any assigned PM
+    could push rework into a queue the Head owns without the Head being consulted.
+
+    WINDOW: unchanged. `qc_started_at` must be set on the current attempt, and the site
+    must not be released (settled decision 3). Before QC starts there is nothing settled
+    to raise a change against and the request is refused with a message; after release
+    the design is finished. The real close condition is BOQ locking, which is Part 6.
+
+    ONE PENDING REQUEST PER ATTEMPT. A second raise while one is untriaged is refused
+    here with a message, and by a partial unique constraint underneath — two pending
+    requests would give the Head two verdicts to record against one suspension.
+
+    IF QC IS IN FLIGHT, IT IS SUSPENDED (settled decision 4), but the package STAYS at the
+    gate it was at. The attempt keeps whatever verdicts it had; no verdict may be recorded
+    while the request is pending, and if the Head rejects it the review resumes on the
+    same attempt. Marking anything 'failed' here would charge the designer with a rework
+    loop the PM caused, which is the reason both `opened_reason` values exist.
 
     PART 6 — THE GROUP DECIDES, IN THREE CASES (Part 6 §4):
 
@@ -2694,46 +2718,228 @@ def design_change_request(request, project_id):
         return _back(f'{project.project_id}: a change request cannot be raised at this '
                      f'stage (status "{assignment.get_status_display()}").')
 
+    # PART 4.6 — one untriaged request at a time. The message is here; the partial unique
+    # constraint underneath is what makes the rule true against a double submit or a
+    # second PM posting concurrently, and its IntegrityError is caught below.
+    existing = _pending_change_requests(attempt).first()
+    if existing is not None:
+        return _back(f'{project.project_id}: a change request raised by '
+                     f'{existing.requested_by.user.get_full_name() or existing.requested_by.user.username} '
+                     f'on {timezone.localtime(existing.requested_at):%d %b %Y} is already '
+                     f'with the Design Head. Wait for his decision before raising another.')
+
     profile = request.user.profile
     # PART 9: a review is "in flight" at EITHER gate. A package sitting at
-    # `awaiting_head_qc` has passed Design QC and is with the Head, and pulling it back
-    # suspends his review exactly as it used to suspend the single one — so the message
-    # must say so. The outgoing attempt keeps whatever verdicts it had: qc_verdict
-    # 'passed' and head_verdict 'pending' is the honest record of what actually happened.
+    # `awaiting_head_qc` has passed Design QC and is with the Head, so the request
+    # suspends his review exactly as it suspends gate 1's — the message must say so.
     was_in_qc = assignment.status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)
-    with transaction.atomic():
-        # The removal shares the change request's transaction on purpose: a site that
-        # left a group without the request that pulled it out, or a request recorded
-        # against a site still counted in an aggregate, are both worse than neither.
-        if in_draft_group:
-            remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
+    try:
+        with transaction.atomic():
+            # PART 6, AND STILL ON RAISE. The removal shares the request's transaction on
+            # purpose: a site that left a group without the request that pulled it out, or
+            # a request recorded against a site still counted in an aggregate, are both
+            # worse than neither. Part 4.6 deliberately did NOT move this to acceptance —
+            # SCM must not be left aggregating a site whose BOQ is under dispute while the
+            # Head thinks about it. If the Head rejects, SCM re-adds the site; it is still
+            # `released`, so `_add_sites()` accepts it back.
+            if in_draft_group:
+                remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
 
-        change = DesignChangeRequest.objects.create(
-            attempt=attempt, requested_by=profile, reason=reason)
-        log_activity(project, profile,
-                     f'PM change request on attempt {attempt.attempt_number}: {reason}'
-                     + (' (QC in progress — review suspended)' if was_in_qc else ''),
-                     entity_type='DesignChangeRequest', entity_id=change.pk,
-                     action_code='design_change_requested')
+            change = DesignChangeRequest.objects.create(
+                attempt=attempt, requested_by=profile, reason=reason,
+                verdict=CHANGE_REQUEST_PENDING)
+            log_activity(project, profile,
+                         f'PM change request raised on attempt '
+                         f'{attempt.attempt_number} — awaiting the Design Head: {reason}'
+                         + (' (review in progress — suspended)' if was_in_qc else ''),
+                         entity_type='DesignChangeRequest', entity_id=change.pk,
+                         action_code='design_change_requested')
+    except IntegrityError:
+        # The database refused it — two raises raced past the pre-check above. The
+        # constraint is the authority and this is the message that says so.
+        return _back(f'{project.project_id}: refused by the database — only one change '
+                     f'request at a time may await the Design Head on an attempt.')
 
-        # The outgoing attempt's qc_verdict is deliberately left at 'pending' — see the
-        # docstring. _open_next_attempt() sets closed_at and nothing else on it.
-        new_attempt = _open_next_attempt(
-            assignment, ATTEMPT_REASON_PM_CHANGE_REQUEST, profile,
-            f'change requested on attempt {attempt.attempt_number}')
-
-        change.resulting_attempt = new_attempt
-        change.save(update_fields=['resulting_attempt'])
-
-    msg = (f'{project.project_id}: change request recorded — attempt '
-           f'{new_attempt.attempt_number} opened and the site is back with the designer.')
+    # NOTHING ELSE HAPPENED, and the message must not imply otherwise. No attempt was
+    # opened and the site did not move; the designer is still on whatever they were on.
+    msg = (f'{project.project_id}: change request raised on attempt '
+           f'{attempt.attempt_number} and sent to the Design Head. No new attempt has '
+           f'been opened — he decides whether this becomes rework.')
     if was_in_qc:
-        msg += ' The QC review in progress was suspended without a verdict.'
+        msg += (' The review in progress is suspended: no verdict can be recorded until '
+                'he rules.')
     if in_draft_group:
         msg += (f' The site was removed from procurement group '
                 f'"{membership.group.name}" — its quantities are no longer in that '
                 f'group\'s aggregate.')
     return _back(msg, ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 13b. Design Head triage of PM change requests (Part 4.6)
+#
+# THE HEAD OWNS THE QUEUE, SO THE HEAD OWNS WHAT ENTERS IT. Every other route into the
+# design queue — allocation, a QC failure, a due-date extension — already passes through
+# him. A PM change request was the one that did not, and "any PM may force rework at will"
+# is not a workload model.
+#
+# DESIGN QC IS NOT ADMITTED. QC judges whether a package is right; it does not decide
+# whether the brief may move or who absorbs the rework. Permission is the Part 4
+# head-authority helper, deputy included, and nothing else.
+#
+# BOTH ACTIONS RE-READ THE VERDICT INSIDE THE TRANSACTION. Two Heads on the same request,
+# or a double-submitted form, must not produce two decisions — the second finds it already
+# triaged and is told so.
+# ---------------------------------------------------------------------------
+
+def _change_request_or_404(pk):
+    return get_object_or_404(
+        DesignChangeRequest.objects.select_related(
+            'attempt__assignment__project', 'requested_by__user'),
+        pk=pk, attempt__assignment__project__is_deleted=False)
+
+
+def _triage_guard(request, change):
+    """Shared front half of both triage views: permission and method.
+
+    Returns (project, refusal_response_or_None). Written once because the two views must
+    refuse identically — a reject endpoint that admits somebody the accept endpoint
+    refuses is the same hole either way round.
+    """
+    project = change.attempt.assignment.project
+    if not user_has_design_head_authority(request.user):
+        return project, HttpResponseForbidden(
+            'Only the Design Head or his named deputy may action a PM change request.')
+    if request.method != 'POST':
+        return project, redirect('design_qc_review', project_id=project.project_id)
+    return project, None
+
+
+def _triage_redirect(request, project):
+    """Where a triage action lands. `next` is honoured so the Head working the dashboard
+    queue stays on it, but ONLY if it is a local path — a POSTed absolute URL is an open
+    redirect, and this endpoint is reachable by anyone with head authority."""
+    target = (request.POST.get('next') or '').strip()
+    if target.startswith('/') and not target.startswith('//'):
+        return target
+    return reverse('design_qc_review', kwargs={'project_id': project.project_id})
+
+
+@login_required
+def design_change_request_accept(request, pk):
+    """The Head agrees the brief moved. THIS is what opens attempt N+1.
+
+    It calls `_open_next_attempt()` — the one shared attempt-opening function, the same
+    one both QC-failure loops use — with `opened_reason='pm_change_request'` and `redo`
+    left at None. None is correct and deliberate: the brief moved, so nothing drawn
+    against the old brief can be assumed to still hold, and carrying an Arka forward
+    would preserve work against a requirement that no longer exists.
+
+    THE CLOSED ATTEMPT KEEPS BOTH VERDICTS AT 'pending'. It was interrupted, not judged.
+    Writing 'failed' at either gate would charge the designer with a rework loop the PM
+    caused and inflate the QC failure rate with work nobody found fault in — the exact
+    corruption `opened_reason` exists to prevent.
+    """
+    change = _change_request_or_404(pk)
+    project, refusal = _triage_guard(request, change)
+    if refusal is not None:
+        return refusal
+
+    assignment = change.attempt.assignment
+    profile = request.user.profile
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect(_triage_redirect(request, project))
+
+    with transaction.atomic():
+        # Re-read under the transaction; the row may have been triaged since the page
+        # that rendered this button was drawn.
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt__assignment').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_PENDING:
+            return _back(f'{project.project_id}: that change request has already been '
+                         f'{change.get_verdict_display().lower()}.')
+
+        change.verdict    = CHANGE_REQUEST_ACCEPTED
+        change.decided_by = profile
+        change.decided_at = timezone.now()
+        change.save(update_fields=['verdict', 'decided_by', 'decided_at'])
+
+        # The outgoing attempt's verdicts are deliberately untouched — see the docstring.
+        # _open_next_attempt() sets closed_at and nothing else on it.
+        new_attempt = _open_next_attempt(
+            assignment, ATTEMPT_REASON_PM_CHANGE_REQUEST, profile,
+            f'change request accepted on attempt {change.attempt.attempt_number}')
+
+        change.resulting_attempt = new_attempt
+        change.save(update_fields=['resulting_attempt'])
+
+        log_activity(project, profile,
+                     f'PM change request accepted — attempt '
+                     f'{new_attempt.attempt_number} opened: {change.reason}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_accepted')
+
+    return _back(f'{project.project_id}: change request accepted — attempt '
+                 f'{new_attempt.attempt_number} opened and the site is back with the '
+                 f'designer.', ok=True)
+
+
+@login_required
+def design_change_request_reject(request, pk):
+    """The Head refuses: the current version stands, and he says why.
+
+    THE REASON IS MANDATORY, and enforced by a CHECK constraint as well as by this view.
+    A rejection without a justification is a rubber stamp, and a rubber stamp is worse
+    than no triage at all — it adds a step and removes nothing.
+
+    NOTHING REOPENS. No attempt, no status change, no appeal path. If the PM still wants
+    the change they raise a new request, which is a fresh row with a fresh reason rather
+    than an escalation of this one. A review that was suspended by this request may now
+    resume on the SAME attempt — `_pending_change_requests()` stops matching it, so both
+    gates unblock by themselves.
+    """
+    change = _change_request_or_404(pk)
+    project, refusal = _triage_guard(request, change)
+    if refusal is not None:
+        return refusal
+
+    profile = request.user.profile
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect(_triage_redirect(request, project))
+
+    reason = (request.POST.get('rejection_reason') or '').strip()
+    if not reason:
+        return _back(f'{project.project_id}: say why the current version stands — a '
+                     f'rejection reason is required.')
+
+    with transaction.atomic():
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt__assignment').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_PENDING:
+            return _back(f'{project.project_id}: that change request has already been '
+                         f'{change.get_verdict_display().lower()}.')
+
+        change.verdict          = CHANGE_REQUEST_REJECTED
+        change.rejection_reason = reason
+        change.decided_by       = profile
+        change.decided_at       = timezone.now()
+        change.save(update_fields=['verdict', 'rejection_reason',
+                                   'decided_by', 'decided_at'])
+
+        log_activity(project, profile,
+                     f'PM change request rejected on attempt '
+                     f'{change.attempt.attempt_number} — the current version stands: '
+                     f'{reason}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_rejected')
+
+    return _back(f'{project.project_id}: change request rejected — the current version '
+                 f'stands and no new attempt was opened. Any review suspended by it can '
+                 f'now resume.', ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2748,6 +2954,11 @@ def _attempt_history(assignment):
                 .select_related('qc_reviewed_by__user', 'head_reviewed_by__user',
                                 'boq_submitted_by__user')
                 .prefetch_related('change_requests__requested_by__user',
+                                  # Part 4.6 — the partial renders the triager and the
+                                  # attempt an acceptance opened; both would be N+1
+                                  # queries per change request without this.
+                                  'change_requests__decided_by__user',
+                                  'change_requests__resulting_attempt',
                                   'arka_submissions')
                 .order_by('attempt_number'))
 
@@ -2843,7 +3054,7 @@ def design_qc_queue(request):
             'arka':        _current_arka(attempt),
             'in_qc':       assignment.status == DESIGN_IN_QC,
             'awaiting_head': awaiting_head,
-            'open_crs':    list(_open_change_requests(attempt)),
+            'open_crs':    list(_pending_change_requests(attempt)),
             # Gate 1 actions: start review, then pass/fail. Not offered once the package
             # has moved past Design QC.
             'can_qc':      can_qc_gate and not awaiting_head,
@@ -2879,7 +3090,7 @@ def design_qc_review(request, project_id):
 
     ctx = _workspace_context(project, assignment)
     attempt  = ctx['attempt']
-    open_crs = list(_open_change_requests(attempt))
+    open_crs = list(_pending_change_requests(attempt))
     profile  = getattr(request.user, 'profile', None)
 
     can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
@@ -2907,6 +3118,10 @@ def design_qc_review(request, project_id):
         'blocked_by_own_qc_verdict': can_head_gate and awaiting_head and own_qc_verdict,
         'awaiting_head': awaiting_head,
         'is_self_qc':    user_is_assigned_designer(request.user, assignment),
+        # Part 4.6 — drives the triage buttons on the pending-change-request banner.
+        # Head authority, NOT gate-2 authority: triaging a change request is not a review
+        # of the package, so the self-QC and one-person-two-verdicts rules do not apply.
+        'has_head_authority': user_has_design_head_authority(request.user),
         'is_deputy':     user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'released':      assignment.status == DESIGN_RELEASED,
         'error_categories': DESIGN_ERROR_CATEGORY_CHOICES,
@@ -3329,7 +3544,7 @@ def design_change_request_form(request, project_id):
         'requests':    list(DesignChangeRequest.objects
                             .filter(attempt__assignment=assignment)
                             .select_related('requested_by__user', 'attempt',
-                                            'resulting_attempt')
+                                            'resulting_attempt', 'decided_by__user')
                             .order_by('-requested_at')),
     })
 
@@ -3545,19 +3760,22 @@ def tender_release_completeness(program):
     return released, total
 
 
-def unresolved_change_requests_for(member_ids):
-    """Change requests on these sites that never produced a new attempt.
+def pending_change_requests_for(member_ids):
+    """Change requests on these sites still awaiting the Design Head's decision.
 
-    Same definition as `_open_change_requests()` (Part 4): `resulting_attempt` is null.
-    Locking a group over one of these would freeze a BOQ that is already known to need
-    rework. Note the UI cannot currently produce such a row — `design_change_request()`
-    sets `resulting_attempt` in the same transaction that creates it (deferred finding
-    G6) — so in practice this guard fires against rows created in Django admin, by an
-    import, or by a future part that queues change requests for approval.
+    Same definition as `_pending_change_requests()` (Part 4.6): `verdict='pending'`.
+    Locking a group over one of these would freeze a BOQ that may be about to be
+    reworked, and the Head has not yet said whether it will be.
+
+    PART 4.6 MADE THIS GUARD REACHABLE. Part 4 set `resulting_attempt` in the same
+    transaction that created the row, so no unresolved request could exist and this fired
+    only against rows made in Django admin (deferred finding G6). A pending request is now
+    an ordinary state that lasts as long as the Head takes to triage it. A REJECTED
+    request no longer blocks anything — the current version stands, so its BOQ is settled.
     """
     return list(DesignChangeRequest.objects
                 .filter(attempt__assignment__project_id__in=member_ids,
-                        resulting_attempt__isnull=True)
+                        verdict=CHANGE_REQUEST_PENDING)
                 .select_related('attempt__assignment__project', 'requested_by__user'))
 
 
@@ -3801,7 +4019,7 @@ def site_group_detail(request, pk):
         'agg':          agg,
         'released':     released,
         'total_sites':  total,
-        'blockers':     (unresolved_change_requests_for(member_ids)
+        'blockers':     (pending_change_requests_for(member_ids)
                          if group.status == SITE_GROUP_DRAFT else []),
         'pool':         (post_qc_pool(group.program)
                          if group.status == SITE_GROUP_DRAFT else []),
@@ -3841,13 +4059,14 @@ def site_group_lock(request, pk):
     if not member_ids:
         return _back(f'"{group.name}" has no sites — there is nothing to lock.')
 
-    blockers = unresolved_change_requests_for(member_ids)
+    blockers = pending_change_requests_for(member_ids)
     if blockers:
         sites = ', '.join(sorted({b.attempt.assignment.project.project_id
                                   for b in blockers}))
         return _back(f'"{group.name}" cannot be locked: {sites} '
-                     f'{"has" if len(blockers) == 1 else "have"} an unresolved change '
-                     f'request. Resolve it, or remove the site from the group first.')
+                     f'{"has" if len(blockers) == 1 else "have"} a change request '
+                     f'awaiting the Design Head. Wait for his decision, or remove the '
+                     f'site from the group first.')
 
     profile = request.user.profile
     now = timezone.now()
