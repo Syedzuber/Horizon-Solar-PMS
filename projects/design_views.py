@@ -268,12 +268,12 @@ def design_head_sites(request, pk):
             'site':          site,
             'assignment':    assignment,
             'status':        assignment.status if assignment else DESIGN_AWAITING_SURVEY,
-            'has_survey':    bool(assignment and assignment.survey_file_path),
+            'has_survey':    bool(assignment and assignment.has_survey_file),
             'current_due':   current,
             'pending_extension': pending,
             'revisions':     (assignment.due_date_commitments.count() - 1) if assignment else 0,
             'is_blocked':    bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED),
-            'allocatable':   bool(assignment and assignment.survey_file_path
+            'allocatable':   bool(assignment and assignment.survey_ready
                                   and assignment.status in REALLOCATABLE_STATUSES),
         })
 
@@ -476,7 +476,7 @@ def _allocate_one(assignment, designer, actor, allocated_on=None):
     BOQ helper is deliberately NOT modified — this feeds it the right value instead.
     Migration 0050 backfilled the rows that had already diverged.
     """
-    if not assignment.survey_file_path:
+    if not assignment.survey_ready:
         raise ValueError('cannot be allocated before its survey is uploaded')
     if assignment.status == DESIGN_SURVEY_RETURNED:
         raise ValueError('is on Design Hold over an inadequate survey — '
@@ -553,7 +553,7 @@ def design_allocate(request, project_id):
         return redirect('design_head_sites', pk=project.program_id)
 
     assignment = getattr(project, 'design_assignment', None)
-    if assignment is None or not assignment.survey_file_path:
+    if assignment is None or not assignment.survey_ready:
         messages.error(request, f'{project.project_id} cannot be allocated before its '
                                 f'survey is uploaded.')
         return redirect('design_head_sites', pk=project.program_id)
@@ -610,7 +610,7 @@ def design_bulk_allocate(request, pk):
                     Project, project_id=project_id, is_deleted=False,
                     project_type='OPEX', program=program)
                 assignment = getattr(site, 'design_assignment', None)
-                if assignment is None or not assignment.survey_file_path:
+                if assignment is None or not assignment.survey_ready:
                     raise ValueError(f'{site.project_id} cannot be allocated before its '
                                      f'survey is uploaded')
                 due = _allocate_one(assignment, designer, actor, allocated_on=batch_date)

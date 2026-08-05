@@ -79,7 +79,7 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
         Design workspace
       </a>
 
-      {% if row.assignment.survey_file_path %}
+      {% if row.assignment.has_survey_file %}
         <a class="btn btn-sm btn-outline-secondary"
            href="{% url 'design_survey_download' project_id=row.site.project_id %}"
            target="_blank" rel="noopener">

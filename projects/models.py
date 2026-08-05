@@ -2085,6 +2085,30 @@ class DesignAssignment(models.Model):
     )
     survey_return_reason = models.TextField(blank=True, default='')
 
+    @property
+    def has_survey_file(self):
+        """True when a survey FILE is stored for this site.
+
+        This answers 'is there a file' — it drives the download link, the
+        Upload/Replace button label, the replace-lock and the download 404 guard.
+        It is NOT the allocation gate. See survey_ready.
+        """
+        return bool(self.survey_file_path)
+
+    @property
+    def survey_ready(self):
+        """True when this site's survey precondition for ALLOCATION is satisfied.
+
+        This is the single allocation gate. It is deliberately defined in terms of
+        has_survey_file so that the two questions — 'is there a file' and 'may this
+        site be allocated' — are separable even while their answers coincide.
+
+        This property does NOT carry the Design Hold or reallocation-stage rules.
+        Those remain separate checks at their existing call sites; do not fold them
+        in here.
+        """
+        return self.has_survey_file
+
     # ── Allocation ──────────────────────────────────────────────────────────
     assigned_to = models.ForeignKey(
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
