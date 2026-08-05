@@ -2085,6 +2085,20 @@ class DesignAssignment(models.Model):
     )
     survey_return_reason = models.TextField(blank=True, default='')
 
+    # ── Survey (folder link — parallel to the file above) ───────────────────
+    # An EXTERNAL link to the site's survey folder, not a storage location, so it is a
+    # URL by nature and is not subject to settled decision 8 (which governs stored
+    # FILES). Same reasoning as ArkaSubmission.arka_link.
+    #
+    # blank=True, default='' rather than null=True: one falsy state, so the predicate
+    # below stays a plain truthiness test matching survey_file_path's.
+    survey_folder_url    = models.URLField(max_length=1000, blank=True, default='')
+    survey_link_added_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='linked_design_surveys',
+    )
+    survey_link_added_at = models.DateTimeField(null=True, blank=True)
+
     @property
     def has_survey_file(self):
         """True when a survey FILE is stored for this site.
@@ -2096,18 +2110,28 @@ class DesignAssignment(models.Model):
         return bool(self.survey_file_path)
 
     @property
+    def has_survey_link(self):
+        """True when a survey folder LINK is recorded for this site."""
+        return bool(self.survey_folder_url)
+
+    @property
     def survey_ready(self):
         """True when this site's survey precondition for ALLOCATION is satisfied.
 
-        This is the single allocation gate. It is deliberately defined in terms of
-        has_survey_file so that the two questions — 'is there a file' and 'may this
-        site be allocated' — are separable even while their answers coincide.
+        This is the single allocation gate. EITHER route satisfies it — an uploaded
+        survey file or a recorded survey folder link — and the two may coexist on the
+        same site. There is no mutual exclusion and no ordering between them.
+
+        Keeping this separate from has_survey_file is what lets the two questions
+        diverge: 'is there a file' still drives the download link, the Upload/Replace
+        button label, the replace-lock and the 404 guard, none of which a link may
+        satisfy.
 
         This property does NOT carry the Design Hold or reallocation-stage rules.
         Those remain separate checks at their existing call sites; do not fold them
         in here.
         """
-        return self.has_survey_file
+        return self.has_survey_file or self.has_survey_link
 
     # ── Allocation ──────────────────────────────────────────────────────────
     assigned_to = models.ForeignKey(

@@ -237,7 +237,8 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     search_fields = ['project__project_id', 'project__customer_name',
                      'assigned_to__user__username']
     raw_id_fields = ['project']
-    readonly_fields = ['current_attempt_number', 'created_at', 'updated_at']
+    readonly_fields = ['current_attempt_number', 'survey_link_added_at',
+                       'created_at', 'updated_at']
 
 
 @admin.register(DueDateCommitment)

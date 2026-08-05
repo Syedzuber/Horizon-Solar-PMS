@@ -139,10 +139,22 @@ page, and any markup named inside it becomes real elements.
               {% else %}<span class="text-muted">—</span>{% endif %}
             </td>
             <td class="small">
+              {% comment %}
+              FOUR states, because a file and a folder link are independent and either
+              satisfies the allocation gate: neither, file only, link only, or both.
+              When both exist BOTH indicators show — one is not a fallback for the other.
+              {% endcomment %}
               {% if row.has_survey %}
                 <a href="{% url 'design_survey_download' project_id=row.site.project_id %}"
                    target="_blank" rel="noopener">View</a>
-              {% else %}<span class="text-muted">none</span>{% endif %}
+              {% endif %}
+              {% if row.has_survey and row.has_link %}<span class="text-muted mx-1">·</span>{% endif %}
+              {% if row.has_link %}
+                <a href="{{ row.survey_folder_url }}" target="_blank" rel="noopener">Folder ↗</a>
+              {% endif %}
+              {% if not row.has_survey and not row.has_link %}
+                <span class="text-muted">none</span>
+              {% endif %}
             </td>
             <td class="text-end" style="min-width:19rem;">
 
@@ -151,6 +163,17 @@ page, and any markup named inside it becomes real elements.
                 <button class="btn btn-sm btn-outline-secondary" type="button"
                         data-bs-toggle="collapse" data-bs-target="#up{{ row.site.pk }}">
                   {% if row.has_survey %}Replace survey{% else %}Upload survey{% endif %}
+                </button>
+              </div>
+
+              {# Add / edit the survey FOLDER LINK — the parallel route to the upload
+                 beside it. Either satisfies the allocation gate; both may coexist, so
+                 this is a sibling control and not an alternative to the button above.
+                 Its own collapse target (#lk), distinct from the upload's (#up). #}
+              <div class="d-inline-block">
+                <button class="btn btn-sm btn-outline-secondary" type="button"
+                        data-bs-toggle="collapse" data-bs-target="#lk{{ row.site.pk }}">
+                  {% if row.has_link %}Edit link{% else %}Add link{% endif %}
                 </button>
               </div>
 
@@ -193,6 +216,25 @@ page, and any markup named inside it becomes real elements.
                 <span class="text-muted small">
                   Private bucket. Max 25 MB. pdf, doc(x), xls(x), jpg, png, dwg, zip.
                   {% if row.is_blocked %}Uploading a replacement clears the Design Hold.{% endif %}
+                </span>
+              </form>
+            </td>
+          </tr>
+
+          <tr class="collapse" id="lk{{ row.site.pk }}">
+            <td colspan="7" class="bg-light">
+              <form method="post"
+                    action="{% url 'design_survey_link_set' project_id=row.site.project_id %}"
+                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                {% csrf_token %}
+                <input type="url" name="survey_folder_url" class="form-control form-control-sm"
+                       style="max-width:32rem;" required
+                       placeholder="https://drive.google.com/drive/folders/…"
+                       value="{{ row.survey_folder_url }}">
+                <button class="btn btn-sm btn-primary">Save link</button>
+                <span class="text-muted small">
+                  One folder per site. Google Drive, OneDrive, SharePoint or Dropbox.
+                  {% if row.is_blocked %}Saving a link clears the Design Hold.{% endif %}
                 </span>
               </form>
             </td>

@@ -19,6 +19,7 @@ from here.
 import json
 import logging
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 
 from django.contrib import messages
 from django.core.exceptions import ValidationError
@@ -98,6 +99,21 @@ logger = logging.getLogger(__name__)
 # no new row can reach either. See DESIGN_MODULE_DEFERRED.md.
 REALLOCATABLE_STATUSES = (DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
                           DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN)
+
+# Hosts a survey folder link may point at. A survey folder is shared corporate storage,
+# and an arbitrary URL here would be a link nobody can open, a tracking redirect, or a
+# phishing target sitting on the Head's own screen — so the set is closed rather than
+# merely validated as well-formed.
+#
+# Matched on the URL's HOST, suffix-wise, so tenant sub-domains work without listing
+# every one: `horizon.sharepoint.com` ends with `sharepoint.com`. The suffix test is
+# anchored on a leading dot (or a whole-host equality) so `evilsharepoint.com` does NOT
+# match — see _survey_link_host_allowed().
+SURVEY_LINK_ALLOWED_HOSTS = (
+    'drive.google.com', 'docs.google.com',
+    'onedrive.live.com', '1drv.ms', 'sharepoint.com',
+    'dropbox.com',
+)
 
 # ── Part 3 ─────────────────────────────────────────────────────────────────────
 # The two statuses from which a designer may submit an Arka version: the first one
@@ -269,6 +285,10 @@ def design_head_sites(request, pk):
             'assignment':    assignment,
             'status':        assignment.status if assignment else DESIGN_AWAITING_SURVEY,
             'has_survey':    bool(assignment and assignment.has_survey_file),
+            'has_link':      bool(assignment and assignment.has_survey_link),
+            # Exposed on the row rather than reached through row.assignment in the
+            # template, so the Survey cell and the edit form read one source.
+            'survey_folder_url': (assignment.survey_folder_url if assignment else ''),
             'current_due':   current,
             'pending_extension': pending,
             'revisions':     (assignment.due_date_commitments.count() - 1) if assignment else 0,
@@ -407,6 +427,127 @@ def design_survey_upload(request, project_id):
         messages.success(request, f'{project.project_id}: survey replaced.')
     else:
         messages.success(request, f'{project.project_id}: survey uploaded — ready to allocate.')
+    return redirect('design_head_sites', pk=project.program_id)
+
+
+def _survey_link_host_allowed(url):
+    """True when `url`'s host is one of SURVEY_LINK_ALLOWED_HOSTS.
+
+    The suffix test is anchored on a leading dot, so `sharepoint.com` admits a tenant
+    sub-domain like `horizon.sharepoint.com` but NOT the look-alike `evilsharepoint.com`
+    that a bare `endswith` would let through. `urlparse().hostname` is already lower-cased
+    and already excludes any port and any `user:pass@` prefix, so a crafted authority
+    cannot smuggle an allowed name past this.
+    """
+    host = (urlparse(url).hostname or '').lower()
+    return any(host == allowed or host.endswith('.' + allowed)
+               for allowed in SURVEY_LINK_ALLOWED_HOSTS)
+
+
+@login_required
+def design_survey_link_set(request, project_id):
+    """Design Head records (or edits) the survey FOLDER LINK for an OPEX site.
+
+    The sibling of design_survey_upload. EITHER route satisfies the allocation gate
+    (DesignAssignment.survey_ready); both may coexist on one site and neither supersedes
+    the other. Everything below mirrors the upload view deliberately — same guards in the
+    same order, same lazy row creation, same transaction boundary, same status transition
+    and the same hold-clearing — so the two paths cannot drift. The differences are
+    confined to URL-vs-file handling.
+
+    THE HOLD-CLEARING EVENT MATTERS. Clearing a Design Hold emits `design_survey_unblocked`
+    exactly as a replacement upload does. Hold duration is reconstructed by pairing
+    `design_blocked` with `design_survey_unblocked` (design_analytics.m_hold_duration), so
+    a link that cleared a hold under any other code would leave that hold counted as open
+    forever.
+
+    THE OTHER TWO CODES DELIBERATELY DIFFER from the upload's `design_survey_uploaded` /
+    `design_survey_replaced`: nothing reads either of those, and logging "uploaded" for a
+    link nobody uploaded would put a false statement in the one record that exists to be
+    audited.
+
+    NO REMOVAL PATH (v1), matching uploads: a wrong link is edited, subject to the
+    replace-lock below.
+    """
+    project = _opex_site(project_id)
+    if not user_has_design_head_authority(request.user):
+        return HttpResponseForbidden('Design Head only.')
+    if request.method != 'POST':
+        return redirect('design_head_sites', pk=project.program_id)
+
+    url = (request.POST.get('survey_folder_url') or '').strip()
+    if not url:
+        messages.error(request, 'Please enter the survey folder link.')
+        return redirect('design_head_sites', pk=project.program_id)
+    try:
+        URLValidator()(url)
+    except ValidationError:
+        messages.error(request, f'{project.project_id}: please enter a valid survey '
+                                f'folder link (a full URL, including https://).')
+        return redirect('design_head_sites', pk=project.program_id)
+    if not _survey_link_host_allowed(url):
+        messages.error(
+            request,
+            f'{project.project_id}: the survey folder link must point at Google Drive, '
+            f'OneDrive, SharePoint or Dropbox.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    assignment = getattr(project, 'design_assignment', None)
+    was_blocked = bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED)
+
+    # Allocation locks the link EXCEPT when clearing a block — the same rule the file
+    # carries, for the same reason: the folder a designer is working from must not change
+    # underneath them once they have started.
+    #
+    # Keyed on survey_folder_url, NOT on survey_ready. Adding a FIRST link to a site that
+    # already has a file is not a replace and must not be locked — nothing is being taken
+    # away from the designer.
+    if (assignment and assignment.survey_folder_url and not was_blocked
+            and assignment.status not in (DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION)):
+        messages.error(
+            request,
+            f'{project.project_id}: the survey folder link cannot be changed after '
+            f'allocation unless the designer has placed the site on Design Hold.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    profile = request.user.profile
+    with transaction.atomic():
+        assignment = _get_or_create_assignment(project)
+        replacing = bool(assignment.survey_folder_url)
+
+        assignment.survey_folder_url    = url
+        assignment.survey_link_added_by = profile
+        assignment.survey_link_added_at = timezone.now()
+
+        if was_blocked:
+            # Clearing the block. survey_returned_at / _by / _reason are deliberately
+            # LEFT IN PLACE, exactly as the upload path leaves them: together with
+            # survey_link_added_at they are the record of how long the clock was stopped.
+            assignment.status = _status_after_unblock(assignment)
+            action = (f'Design Hold cleared by survey folder link; status restored to '
+                      f'{assignment.status}')
+            code = 'design_survey_unblocked'
+        elif assignment.status == DESIGN_AWAITING_SURVEY:
+            assignment.status = DESIGN_AWAITING_ALLOCATION
+            action = 'Survey folder link added; site ready for allocation'
+            code = 'design_survey_link_added'
+        else:
+            action = 'Survey folder link updated'
+            code = 'design_survey_link_updated'
+
+        assignment.save()
+        log_activity(project, profile, action,
+                     entity_type='DesignAssignment', entity_id=assignment.pk,
+                     action_code=code)
+
+    if was_blocked:
+        messages.success(request, f'{project.project_id}: survey folder link saved, '
+                                  f'Design Hold cleared ({assignment.get_status_display()}).')
+    elif replacing:
+        messages.success(request, f'{project.project_id}: survey folder link updated.')
+    else:
+        messages.success(request, f'{project.project_id}: survey folder link added — '
+                                  f'ready to allocate.')
     return redirect('design_head_sites', pk=project.program_id)
 
 
@@ -3170,7 +3311,7 @@ def design_qc_review(request, project_id):
 # workflow screen unreadable, and the status already determines which single step is legal —
 # every other endpoint would refuse anyway.
 _DESIGNER_ACTIONS = {
-    DESIGN_AWAITING_SURVEY:     ('none', '', 'The Design Head has not uploaded the survey yet.'),
+    DESIGN_AWAITING_SURVEY:     ('none', '', 'The Design Head has not provided the survey yet.'),
     DESIGN_AWAITING_ALLOCATION: ('none', '', 'Waiting for the Design Head to allocate this site.'),
     DESIGN_ALLOCATED:           ('propose_due', 'Propose due date', ''),
     DESIGN_DUE_DATE_PROPOSED:   ('none', '', 'Waiting for the Design Head to approve your proposed date.'),

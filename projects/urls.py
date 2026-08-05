@@ -54,6 +54,7 @@ urlpatterns = [
     path('programs/<int:pk>/design/allocate/', design_views.design_bulk_allocate, name='design_bulk_allocate'),
     path('design/my-sites/',                 design_views.design_my_sites,     name='design_my_sites'),
     path('design/<str:project_id>/survey/upload/',   design_views.design_survey_upload,   name='design_survey_upload'),
+    path('design/<str:project_id>/survey/link/',     design_views.design_survey_link_set,  name='design_survey_link_set'),
     path('design/<str:project_id>/survey/',          design_views.design_survey_download, name='design_survey_download'),
     path('design/<str:project_id>/allocate/',        design_views.design_allocate,        name='design_allocate'),
     path('design/<str:project_id>/due-date/propose/', design_views.design_due_date_propose, name='design_due_date_propose'),
