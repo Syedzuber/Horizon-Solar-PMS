@@ -645,16 +645,18 @@ class OpexSiteForm(forms.ModelForm):
     counterpart to ProjectCreateForm.
 
     Unlike the generic create flow (which lets Project.save() generate the ID), this
-    form captures site_code and COMPOSES the site's globally-unique
-    project_id = `{short_tender_code}-{site_code}` explicitly, so the view can set it
-    before save() and bypass generate_project_id() entirely (spec: OPEX must not go
-    through the suffix-parser). Every check is pre-save with a clear message — a
-    duplicate site_code or an over-length ID never surfaces as a raw IntegrityError:
-      • site_code is normalized (upper + [A-Z0-9]) identically to short_tender_code.
+    form captures site_code and uses it DIRECTLY as the site's globally-unique
+    project_id — no tender-code prefix is prepended. Teams control site-code naming
+    entirely (e.g. 'MB0003', 'RJJP001') and the code entered IS the stored ID.
+    The view sets project_id explicitly before save() so generate_project_id() is
+    bypassed entirely (spec: OPEX must not go through the suffix-parser).
+    Every check is pre-save with a clear message — a duplicate site_code or an
+    over-length ID never surfaces as a raw IntegrityError:
+      • site_code is normalized (upper + [A-Z0-9]).
       • site_code is unique WITHIN the Program, checked soft-delete-aware (unfiltered
         manager) so a soft-deleted site can't have its code reused into a colliding ID.
-      • the composed ID must fit project_id's 30-char column.
-      • the composed ID is re-checked for global uniqueness (defensive backstop).
+      • the site_code must fit project_id's 30-char column.
+      • the site_code is re-checked for global uniqueness (defensive backstop).
     On success, `self.composed_project_id` holds the value for the view to persist.
     """
 
@@ -694,13 +696,17 @@ class OpexSiteForm(forms.ModelForm):
         self.program = program
         self.composed_project_id = None
         super().__init__(*args, **kwargs)
-        # Site In-Charge Name is required on THIS form to mirror customer_phone's required
-        # status, even though the model keeps customer_contact_person blank=True (other
-        # paths — e.g. the Zoho webhook — legitimately omit it).
-        self.fields['customer_contact_person'].required = True
+        # Site In-Charge Name and Phone are optional for OPEX sites — live tenders
+        # (e.g. government OPEX contracts) often don't have in-charge contacts at
+        # the time of bulk upload.  The model keeps both blank=True so this is safe.
+        self.fields['customer_contact_person'].required = False
+        self.fields['customer_phone'].required = False
 
     def clean_customer_phone(self):
-        value = self.cleaned_data['customer_phone'].strip()
+        value = (self.cleaned_data.get('customer_phone') or '').strip()
+        if not value:
+            # Phone is optional for OPEX sites; skip format validation when blank.
+            return value
         _validate_phone(value)
         return value
 
@@ -728,20 +734,22 @@ class OpexSiteForm(forms.ModelForm):
             self.add_error('site_code', f"Site code {code} is already used in this tender.")
             return cleaned
 
-        composed = f"{self.program.short_tender_code}-{code}"
-        if len(composed) > 30:
+        # The site_code IS the project_id — no tender-code prefix.
+        # Teams define site codes (e.g. 'MB0003', 'RJJP001') and they are stored as-is.
+        project_id = code
+        if len(project_id) > 30:
             self.add_error(
                 'site_code',
-                f"The composed project ID '{composed}' is {len(composed)} characters — "
-                f"the maximum is 30. Use a shorter site code."
+                f"Site code '{project_id}' is {len(project_id)} characters — "
+                f"the maximum is 30."
             )
             return cleaned
 
         # Defensive global-uniqueness backstop (should already be guaranteed by the two
         # uniqueness rules above); never let it reach the DB as an IntegrityError.
-        if Project.objects.filter(project_id=composed).exists():
-            self.add_error('site_code', f"A project with ID '{composed}' already exists.")
+        if Project.objects.filter(project_id=project_id).exists():
+            self.add_error('site_code', f"A project with ID '{project_id}' already exists.")
             return cleaned
 
-        self.composed_project_id = composed
+        self.composed_project_id = project_id
         return cleaned

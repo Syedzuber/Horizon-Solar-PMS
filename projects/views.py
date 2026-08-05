@@ -2562,8 +2562,8 @@ def create_opex_site(program, data, creator, profile=None):
         same form instance so entered values and per-field errors are preserved. Bulk
         callers can read `form.errors` (a dict) off the returned form.
 
-    Composes the site's globally-unique project_id `{short_tender_code}-{site_code}` and
-    sets it EXPLICITLY before save() so generate_project_id()'s suffix-parser is bypassed
+    The site's globally-unique project_id IS the entered site_code (no tender-code prefix);
+    it is set EXPLICITLY before save() so generate_project_id()'s suffix-parser is bypassed
     entirely. The ID is STORED (not derived at read time), which is what makes it immutable
     across a later Program rename.
     """
@@ -2638,8 +2638,8 @@ def opex_site_create(request, pk):
 # Order here is the order columns are emitted into the downloadable template.
 _BULK_COLUMNS = [
     ('Site Code',            'site_code',                True),
-    ('Site In-Charge Name',  'customer_contact_person',  True),
-    ('Site In-Charge Phone', 'customer_phone',           True),
+    ('Site In-Charge Name',  'customer_contact_person',  False),
+    ('Site In-Charge Phone', 'customer_phone',           False),
     ('Site In-Charge Email', 'customer_email',           False),
     ('Site Address',         'site_address',             True),
     ('City',                 'city',                     True),
@@ -2718,17 +2718,25 @@ def _bulk_cell_to_str(value):
 
 
 def _parse_bulk_workbook(uploaded_file):
-    """Parse the uploaded .xlsx into (rows, extra_headers, error). Reads ONLY the 'Sites'
-    sheet (the downloadable template keeps all guidance on a separate 'Instructions' sheet,
-    so helper text can never be mistaken for a data row). Returns error!=None for a
-    whole-file rejection (bad file, missing required column, empty, too many rows)."""
+    """Parse the uploaded .xlsx into (rows, extra_headers, error). Reads the 'Sites' sheet
+    if present; otherwise takes the first sheet whose name is not 'Instructions' (so teams
+    can name their data sheet anything — e.g. 'MPUVNL', 'Bhopal', 'Tender42' — without
+    being forced to rename it). Returns error!=None for a whole-file rejection (bad file,
+    missing required column, empty, too many rows)."""
     try:
         from openpyxl import load_workbook
         wb = load_workbook(uploaded_file, read_only=True, data_only=True)
     except Exception:
         return None, None, "Could not read the file — please upload the .xlsx template unchanged."
 
-    ws = wb['Sites'] if 'Sites' in wb.sheetnames else wb.active
+    if 'Sites' in wb.sheetnames:
+        ws = wb['Sites']
+    else:
+        # Skip 'Instructions' and pick the first remaining sheet.  Falls back to the
+        # active sheet only when every sheet is named 'Instructions' (degenerate case).
+        data_sheets = [name for name in wb.sheetnames
+                       if name.strip().lower() != 'instructions']
+        ws = wb[data_sheets[0]] if data_sheets else wb.active
     all_rows = list(ws.iter_rows(values_only=True))
     wb.close()
     if not all_rows:
@@ -2938,15 +2946,20 @@ def opex_site_bulk_template(request, pk):
     info.append(['OPEX Bulk Site Upload — Instructions'])
     info.append([])
     info.append([f'Program: {program.name}  (tender code {program.short_tender_code})'])
-    info.append(['Each site ID is composed as  <tender code>-<Site Code>.'])
+    info.append(['The Site Code you enter IS the project ID — it is stored exactly as typed '
+                 '(uppercased, alphanumeric only). No tender-code prefix is added.'])
+    info.append(['Example: entering "MB0003" stores the site as project ID "MB0003".'])
     info.append([])
     info.append(['Fill one row per site on the "Sites" sheet. Do not rename the header row.'])
+    info.append(['The data sheet may be renamed (e.g. "MPUVNL", "Bhopal") — the system '
+                 'will skip the Instructions sheet and read the first remaining sheet.'])
     info.append([])
     info.append(['Column', 'Required?', 'Notes'])
     _notes = {
-        'site_code': 'Uppercase letters/digits (e.g. S045). Unique within this tender.',
-        'customer_contact_person': 'Site In-Charge full name.',
-        'customer_phone': '10 digits, no country code, must start with 6, 7, 8, or 9.',
+        'site_code': ('Alphanumeric (e.g. MB0003, RJJP001). Unique within this tender. '
+                      'This value IS the project ID — stored exactly as entered (uppercased).'),
+        'customer_contact_person': 'Optional. Site In-Charge full name.',
+        'customer_phone': 'Optional. If provided: 10 digits, no country code, must start with 6, 7, 8, or 9.',
         'customer_email': 'Optional.',
         'site_address': 'Full site address.',
         'city': 'City.',
@@ -2958,8 +2971,7 @@ def opex_site_bulk_template(request, pk):
     info.append([])
     info.append(['Example (do NOT copy this onto the Sites sheet as-is):'])
     info.append([h for h, _key, _req in _BULK_COLUMNS])
-    info.append(['S045', 'Ravi Kumar', '9876543210', 'ravi@example.com',
-                 '12 Grid Lane, Sector 5', 'Delhi', 'Delhi', '150.00'])
+    info.append(['MB0003', '', '', '', '12 Grid Lane, Sector 5', 'Bhopal', 'MP', '45.00'])
 
     resp = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')

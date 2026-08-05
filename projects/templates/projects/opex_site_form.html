@@ -8,7 +8,7 @@
     <h4 class="mb-0 mt-1">Add OPEX Site</h4>
     <div class="text-muted small">
       Tender code <span class="badge bg-secondary">{{ program.short_tender_code }}</span>
-      — the site ID is composed as <code>{{ program.short_tender_code }}-&lt;site code&gt;</code>.
+      — the site code you enter <strong>is</strong> the project ID (stored as-is, no prefix added).
     </div>
   </div>
 </div>
@@ -30,7 +30,7 @@
         <div class="col-md-4">
           <label class="form-label">Site Code <span class="text-danger">*</span></label>
           {{ form.site_code }}
-          <div class="form-text">Uppercase letters/digits, matching the tender's site list (e.g. S045).</div>
+          <div class="form-text">Alphanumeric, matching the tender's site list (e.g. MB0003, RJJP001). This becomes the project ID.</div>
           {% for e in form.site_code.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
       </div>
@@ -43,12 +43,12 @@
           <div class="form-text">Set automatically from the parent tender's client — frozen at creation.</div>
         </div>
         <div class="col-md-4">
-          <label class="form-label">Site In-Charge Name <span class="text-danger">*</span></label>
+          <label class="form-label">Site In-Charge Name</label>
           {{ form.customer_contact_person }}
           {% for e in form.customer_contact_person.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
         <div class="col-md-4">
-          <label class="form-label">Site In-Charge Phone <span class="text-danger">*</span></label>
+          <label class="form-label">Site In-Charge Phone</label>
           {{ form.customer_phone }}
           {% for e in form.customer_phone.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>

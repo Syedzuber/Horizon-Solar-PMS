@@ -8,7 +8,7 @@
     <h4 class="mb-0 mt-1">Bulk Upload Sites</h4>
     <div class="text-muted small">
       Tender code <span class="badge bg-secondary">{{ program.short_tender_code }}</span>
-      — each site ID is composed as <code>{{ program.short_tender_code }}-&lt;site code&gt;</code>.
+      — the site code in each row <strong>is</strong> the project ID (stored as-is, no prefix added).
     </div>
   </div>
 </div>
@@ -103,7 +103,7 @@
         {% for r in results %}{% if r.valid %}
         <tr>
           <td>{{ r.index }}</td>
-          <td><code>{{ program.short_tender_code }}-{{ r.site_code }}</code></td>
+          <td><code>{{ r.site_code }}</code></td>
           <td>{{ r.name }}</td>
           <td>{{ r.city }}</td>
         </tr>
