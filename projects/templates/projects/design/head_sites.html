@@ -166,10 +166,16 @@ page, and any markup named inside it becomes real elements.
                 </button>
               </div>
 
-              {# Add / edit the survey FOLDER LINK — the parallel route to the upload
-                 beside it. Either satisfies the allocation gate; both may coexist, so
-                 this is a sibling control and not an alternative to the button above.
-                 Its own collapse target (#lk), distinct from the upload's (#up). #}
+              {% comment %}
+              Add / edit the survey FOLDER LINK — the parallel route to the upload beside
+              it. Either satisfies the allocation gate; both may coexist, so this is a
+              sibling control and not an alternative to the button above. Its own collapse
+              target (#lk), distinct from the upload's (#up).
+
+              MULTI-LINE, so it uses the comment TAG. The single-line hash form cannot
+              span lines — see the note at the top of this file; it renders straight onto
+              the page instead of disappearing.
+              {% endcomment %}
               <div class="d-inline-block">
                 <button class="btn btn-sm btn-outline-secondary" type="button"
                         data-bs-toggle="collapse" data-bs-target="#lk{{ row.site.pk }}">
