@@ -2331,6 +2331,23 @@ class DesignAttempt(models.Model):
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='boq_submitted_attempts',
     )
+    # A note the DESIGNER writes for the reviewer, captured at the moment the BOQ is
+    # marked complete and read-only from then on — the design lock closes the entry
+    # screen and this closes with it.
+    #
+    # FOR THE BOQ, THE ATTEMPT IS THE VERSION. There is no per-submission BOQ row the
+    # way there is for an Arka or a CAD, so one remark per attempt is the whole history:
+    # a rework loop opens a new attempt and the designer writes a fresh one. It is
+    # deliberately NOT carried forward by _carry_forward_artifacts() — what carries
+    # there is the completion stamp, and a note written about an already-judged
+    # submission does not describe the new attempt.
+    #
+    # DELIBERATELY UNCONSTRAINED, unlike its two neighbours above. `qc_remarks` and
+    # `head_remarks` are reviewer-written and conditionally REQUIRED, and each carries a
+    # matching CHECK in Meta. This one is written by the submitter and is required in no
+    # state, so there is no condition to key a constraint off. Named `boq_remarks`
+    # rather than `remarks` precisely so it does not read as a third reviewer field.
+    boq_remarks = models.TextField(blank=True, default='')
 
     # ── What the failing reviewer sent back (Part 9.1) ───────────────────────
     # The artifacts the reviewer ticked on the fail form, as a sorted JSON list of

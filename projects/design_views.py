@@ -2125,11 +2125,22 @@ def design_boq_complete(request, project_id):
         return _back(f'{project.project_id}: enter a quantity for at least one BOQ item '
                      f'before marking the BOQ complete.')
 
+    # Optional note for the reviewer, captured at the moment of completion and never
+    # afterwards. Read HERE rather than in each caller because both submitting controls
+    # arrive at this view with their own POST: the site workspace posts straight to it,
+    # and opex_boq_entry() delegates by calling it with the SAME request object. One
+    # read therefore covers both, and the draft-save branch never reaches this line.
+    boq_remarks = (request.POST.get('boq_remarks') or '').strip()
+
     profile = request.user.profile
     with transaction.atomic():
         attempt.boq_submitted_at = timezone.now()
         attempt.boq_submitted_by = profile
-        attempt.save(update_fields=['boq_submitted_at', 'boq_submitted_by'])
+        attempt.boq_remarks      = boq_remarks
+        # boq_remarks MUST be in this list. A field assigned above but missing from
+        # update_fields is silently not written — nothing raises and nothing logs.
+        attempt.save(update_fields=['boq_submitted_at', 'boq_submitted_by',
+                                    'boq_remarks'])
         log_activity(project, profile,
                      f'BOQ marked complete for attempt {attempt.attempt_number}',
                      entity_type='DesignAttempt', entity_id=attempt.pk,

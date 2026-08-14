@@ -236,9 +236,19 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
           by {{ attempt.boq_submitted_by.user.get_full_name|default:attempt.boq_submitted_by.user.username }}
         </span>
       {% elif is_designer and arka_approved %}
-        <form method="post" action="{% url 'design_boq_complete' project_id=project.project_id %}">
+        {% comment %}
+        The SECOND route to design_boq_complete — the picker's own button is the other.
+        It carries the same optional remark field, so which button the designer happened
+        to use does not decide whether their note is captured.
+        {% endcomment %}
+        <form method="post" action="{% url 'design_boq_complete' project_id=project.project_id %}"
+              class="d-flex flex-column gap-1">
           {% csrf_token %}
-          <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+          <textarea name="boq_remarks" rows="2" class="form-control form-control-sm"
+                    style="min-width:16rem;"
+                    placeholder="Optional note for the reviewer"></textarea>
+          <button class="btn btn-sm text-white align-self-start"
+                  style="background-color:#1a7a4a;">
             Mark BOQ complete
           </button>
         </form>

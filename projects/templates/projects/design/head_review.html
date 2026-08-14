@@ -201,6 +201,32 @@ URL is refused exactly as a hidden button would have prevented.
 
 {% include "projects/design/_design_artifacts.html" %}
 
+{% comment %}
+BOQ COMPLETION, AND THE DESIGNER'S NOTE ON IT. This screen showed neither until now: it
+includes _design_artifacts.html, which covers the Arka and the CAD but has no BOQ block,
+and unlike qc_review.html it does not include _attempt_history.html. So the Head — the
+gate that actually unlocks the package — was the one reviewer who could not see a note
+the designer wrote for him. `attempt` and `boq_complete` come from the shared
+_workspace_context(), so nothing new is queried for this.
+{% endcomment %}
+{% if boq_complete %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body py-2">
+      <div class="small text-success">
+        BOQ marked complete {{ attempt.boq_submitted_at|date:"d M Y H:i" }}
+        {% if attempt.boq_submitted_by %}
+          by {{ attempt.boq_submitted_by.user.get_full_name|default:attempt.boq_submitted_by.user.username }}
+        {% endif %}
+      </div>
+      {% if attempt.boq_remarks %}
+        <div class="alert alert-secondary py-2 px-2 mt-2 mb-0 small">
+          <strong>Designer note on the BOQ:</strong> {{ attempt.boq_remarks }}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+
 <div class="text-muted small">
   Designer's view of this site:
   <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.

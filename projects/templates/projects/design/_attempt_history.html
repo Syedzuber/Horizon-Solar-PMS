@@ -201,6 +201,20 @@ the Head and the PM all read the same history in the same shape.
             by {{ a.boq_submitted_by.user.get_full_name|default:a.boq_submitted_by.user.username }}
           </div>
         {% endif %}
+
+        {% comment %}
+        The designer's own note on this attempt's BOQ. Styled apart from the two
+        reviewer-remark alerts above — those are alert-danger findings against the work,
+        this is the submitter's context — and labelled so the two can never be read as
+        the same kind of statement. Empty on every attempt where none was written, and
+        on every attempt that carried its BOQ completion forward, since the note is not
+        carried with the stamp.
+        {% endcomment %}
+        {% if a.boq_remarks %}
+          <div class="alert alert-secondary py-2 px-2 my-2 small mb-0">
+            <strong>Designer note on the BOQ:</strong> {{ a.boq_remarks }}
+          </div>
+        {% endif %}
       </li>
       {% endfor %}
     </ul>
