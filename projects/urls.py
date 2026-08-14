@@ -114,6 +114,23 @@ urlpatterns = [
     path('design/analytics/configure/',            design_views.design_analytics_configure, name='design_analytics_configure'),
     path('design/analytics/reset/',                design_views.design_analytics_reset,     name='design_analytics_reset'),
 
+    # ---------------------------------------------------------------------------
+    # Part 12 — the OPEX BOQ catalogue, managed by the Design Head. DESIGN HEAD ONLY
+    # (the flag itself, deputy excluded — same helper and same reasoning as Part 10).
+    #
+    # NOT under portal-admin/. The Admin's own catalogue screen stays exactly where it is
+    # and covers both templates; this one is a second, OPEX-scoped entry point onto the
+    # same model for a different person. Neither knows about the other.
+    #
+    # Toggle is POST only and is the only removal — there is no delete route, because
+    # BOQItem.item_master is SET_NULL and a hard delete would silently unlink live BOQ
+    # rows from cross-site quantity aggregation.
+    # ---------------------------------------------------------------------------
+    path('design/boq-catalogue/',                       design_views.design_boq_catalogue,        name='design_boq_catalogue'),
+    path('design/boq-catalogue/add/',                   design_views.design_boq_catalogue_create, name='design_boq_catalogue_create'),
+    path('design/boq-catalogue/<int:item_id>/edit/',    design_views.design_boq_catalogue_edit,   name='design_boq_catalogue_edit'),
+    path('design/boq-catalogue/<int:item_id>/toggle/',  design_views.design_boq_catalogue_toggle, name='design_boq_catalogue_toggle'),
+
     path('design/qc/',                              design_views.design_qc_queue,        name='design_qc_queue'),
     path('design/<str:project_id>/qc/',             design_views.design_qc_review,       name='design_qc_review'),
     path('design/<str:project_id>/qc/start/',       design_views.design_qc_start,        name='design_qc_start'),

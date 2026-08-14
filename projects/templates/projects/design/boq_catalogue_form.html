@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% comment %}
+Design Head — add / edit one OPEX catalogue item (Part 12).
+
+A GENERIC FIELD LOOP, and that is deliberate. BOQItemMasterForm.__init__ already stamps
+`form-control`, `form-select` and `form-check-input` onto every widget — those are
+Bootstrap class names, so the loop renders natively here and needs no compensating CSS.
+(The Admin's Tailwind version of this screen carries a <style> block to fake exactly those
+three classes.) It also means a field added to the form class appears here with no
+template change at all.
+
+The view deletes two fields before this renders, so neither appears: `project_type`,
+because this screen is OPEX-only and moving a row to Residential would put it on every new
+Residential BOQ; and on edit `code`, because it is the identifier existing BOQ rows are
+grouped under. Neither is hidden — both are gone, so a crafted POST cannot set them.
+{% endcomment %}
+
+{% block title %}{{ title }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="mb-3">
+  <a href="{% url 'design_boq_catalogue' %}" class="text-decoration-none small text-muted">
+    <i class="bi bi-arrow-left"></i> Back to OPEX BOQ Catalogue
+  </a>
+  <h5 class="mt-2 mb-0">{{ title }}</h5>
+  {% if item %}
+    <div class="text-muted small mt-1">
+      Code <code class="small">{{ item.code }}</code> is fixed after creation.
+      {{ linked_count }} existing BOQ row{{ linked_count|pluralize }}
+      link{{ linked_count|pluralize:"s," }} to this entry — saving here does not change
+      any of them.
+    </div>
+  {% endif %}
+</div>
+
+<div class="card shadow-sm border-0" style="max-width:42rem;">
+  <div class="card-body">
+    <form method="post">
+      {% csrf_token %}
+
+      {% if form.non_field_errors %}
+        <div class="alert alert-danger py-2 small">{{ form.non_field_errors }}</div>
+      {% endif %}
+
+      {% for field in form %}
+        <div class="mb-3">
+          <label for="{{ field.id_for_label }}" class="form-label small fw-semibold">
+            {{ field.label }}{% if field.field.required %}
+              <span class="text-danger">*</span>{% endif %}
+          </label>
+          {{ field }}
+          {% if field.help_text %}
+            <div class="form-text small">{{ field.help_text }}</div>
+          {% endif %}
+          {% for error in field.errors %}
+            <div class="text-danger small mt-1">{{ error }}</div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+
+      <div class="d-flex align-items-center gap-3 pt-1">
+        <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+          <i class="bi bi-save"></i> Save
+        </button>
+        <a href="{% url 'design_boq_catalogue' %}" class="text-muted small text-decoration-none">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}

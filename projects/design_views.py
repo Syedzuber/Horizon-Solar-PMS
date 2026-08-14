@@ -45,6 +45,9 @@ from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
     validate_cad_zip,
 )
+# Part 12 — the catalogue screen reuses the Admin screen's form class unchanged rather
+# than declaring a second one. forms.py imports only from .models, so this adds no cycle.
+from .forms import BOQItemMasterForm
 from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
@@ -72,6 +75,9 @@ from .models import (
     # screen groups the sheet exactly the way the entry screen does.
     get_opex_boq_catalogue, opex_catalogue_category_order,
     split_opex_boq_rows, group_boq_rows_by_category,
+    # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
+    # this module. Read here directly; the helpers above stay the only readers elsewhere.
+    BOQItemMaster,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
@@ -4779,3 +4785,226 @@ def design_analytics_reset(request):
     DesignAnalyticsPreference.objects.filter(profile=request.user.profile).delete()
     messages.success(request, 'Metric selection reset to the core set.')
     return _analytics_redirect(request)
+
+
+# ---------------------------------------------------------------------------
+# Part 12 — the OPEX BOQ catalogue, owned by the Design Head
+#
+# A PARALLEL SCREEN, NOT A WIDENED GATE. The Admin already has a catalogue screen at
+# /portal-admin/boq-items/ covering both templates (37 Residential + 207 OPEX). This is a
+# SECOND entry point onto the SAME model and the SAME form, scoped to OPEX, reached by a
+# different person through a different URL. The Admin's four views, its template and its
+# sidebar are untouched — which is the whole reason this shape was chosen over widening
+# @role_required. A permission-aware admin sidebar would have put all nine Admin screens
+# in the blast radius of a catalogue feature; this puts none of them there.
+#
+# THE DUPLICATION IS DELIBERATE. It is roughly sixty lines and it should not be factored
+# together with the Admin views. The two already differ — this one is OPEX-scoped at every
+# query, drops two form fields instead of one, and scopes its own sort_order suggestion —
+# and a shared implementation would drag Admin code into the diff of every future change
+# to either screen. They answer the same question for two different people, and only one
+# of them is allowed near the Residential rows.
+#
+# HEAD ONLY, AND user_is_design_head() RATHER THAN user_has_design_head_authority().
+# The precedent is Part 10 (see the block above design_quality_analytics), and the reason
+# here has the same shape. A deputy is named so review queues keep moving through an
+# absence, and a senior DESIGNER is the obvious person to name. Clearing an Arka queue for
+# a week is not the same authority as retiring an item every site in the tender buys from,
+# or adding one they will all be offered. The absence ends; the catalogue does not.
+#
+# OPEX-SCOPED AT EVERY QUERY, NOT ONLY THE LIST. The 37 Residential rows pre-populate every
+# new Residential BOQ (models.get_standard_boq_items), so they are the Admin's alone and
+# must stay unreachable from here by ANY route — including a hand-typed URL carrying a
+# Residential item_id. That is why the object lookup filters on project_type as well as pk
+# and 404s: a 403 would confirm the row exists, and a plain pk lookup would hand the Head
+# an ITM- row to edit on a form that would happily save it.
+# ---------------------------------------------------------------------------
+
+#: Where an unauthorised caller is told to go. ONE string, so all four endpoints refuse
+#: identically — a probe must not be able to tell them apart, and must not be able to tell
+#: "refused" from "no such row" by the wording either.
+_CATALOGUE_FORBIDDEN = 'The OPEX BOQ catalogue is for the Design Head only.'
+
+
+def _opex_catalogue_qs():
+    """The rows this screen manages, and the ONLY rows any of its four views may touch.
+
+    Every queryset in this section starts here rather than at BOQItemMaster.objects, so
+    the OPEX term cannot be present on three paths and forgotten on the fourth. That is
+    the entire reason this one-line function exists.
+    """
+    return BOQItemMaster.objects.filter(project_type='OPEX')
+
+
+def _opex_catalogue_item(item_id):
+    """One OPEX catalogue row, or 404.
+
+    THE project_type TERM IS THE BOUNDARY, not a convenience filter. A Residential item_id
+    typed into one of these URLs must behave exactly as a pk that does not exist.
+    """
+    return get_object_or_404(_opex_catalogue_qs(), pk=item_id)
+
+
+@login_required
+def design_boq_catalogue(request):
+    """The OPEX BOQ catalogue — every item the picker offers, and how many BOQ rows have
+    been built from each. Design Head only.
+
+    NO TYPE FILTER AND NO TYPE COLUMN, unlike the Admin screen. Everything here is OPEX by
+    construction, so both would carry one value on every row. The ACTIVE filter is kept:
+    it is the only axis on which these rows differ.
+
+    Ordering is (sort_order, code) with no project_type term. The Admin screen needs one
+    because it interleaves two templates whose sort_order both restart at 1; this screen
+    holds only one of them, so the model's own ordering would already be right and the
+    explicit clause is here to say so rather than to change anything.
+    """
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
+
+    items = (_opex_catalogue_qs()
+             .annotate(linked_count=Count('boq_items'))
+             .order_by('sort_order', 'code'))
+
+    active_filter = request.GET.get('active', '')
+    if active_filter == '1':
+        items = items.filter(is_active=True)
+    elif active_filter == '0':
+        items = items.filter(is_active=False)
+
+    return render(request, 'projects/design/boq_catalogue.html', {
+        'items':         items,
+        'active_filter': active_filter,
+        # Counts are of the whole OPEX catalogue, NOT of the filtered list — they are the
+        # denominator the filter chips are read against, so filtering must not move them.
+        'active_count':  _opex_catalogue_qs().filter(is_active=True).count(),
+        'total_count':   _opex_catalogue_qs().count(),
+    })
+
+
+@login_required
+def design_boq_catalogue_create(request):
+    """Add one OPEX catalogue item. Design Head only.
+
+    `project_type` IS DELETED FROM THE FORM AND SET ON THE INSTANCE. Not hidden, not
+    disabled, not merely overwritten after binding — DELETED, so a POST carrying
+    project_type=Residential is never read at all. The field is editable on the shared
+    BOQItemMasterForm because the Admin screen needs it there; here it is the one value
+    that must not be user-supplied, and `del` is what makes that true rather than merely
+    intended. It is the same idiom the Admin edit view uses to keep `code` create-only.
+    """
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
+
+    if request.method == 'POST':
+        form = BOQItemMasterForm(request.POST)
+        del form.fields['project_type']
+        if form.is_valid():
+            item = form.save(commit=False)
+            item.project_type = 'OPEX'
+            item.save()
+            log_activity(None, request.user.profile,
+                         f"Created OPEX BOQ catalogue item "
+                         f"'{item.code} — {item.description}'",
+                         entity_type='BOQItemMaster', entity_id=item.pk,
+                         action_code='design_boq_item_created')
+            messages.success(request, f'Catalogue item "{item.code}" added.')
+            return redirect('design_boq_catalogue')
+    else:
+        # The next slot at the end of the OPEX template, scoped to OPEX. The Admin screen's
+        # equivalent is unscoped and is logged as a deferred finding; it is not touched
+        # here, but this is new code and copying the unscoped form would have imported the
+        # bug rather than inherited it.
+        next_order = (_opex_catalogue_qs()
+                      .aggregate(m=Max('sort_order'))['m'] or 0) + 1
+        form = BOQItemMasterForm(initial={'sort_order': next_order, 'is_active': True})
+        del form.fields['project_type']
+
+    return render(request, 'projects/design/boq_catalogue_form.html', {
+        'form':  form,
+        'title': 'Add OPEX Catalogue Item',
+        'item':  None,
+    })
+
+
+@login_required
+def design_boq_catalogue_edit(request, item_id):
+    """Edit one OPEX catalogue item. Design Head only.
+
+    TWO FIELDS ARE DROPPED, FOR TWO DIFFERENT REASONS.
+
+    `code` is create-only — it is the stable identifier existing BOQ rows are grouped
+    under, and reassigning it would break the grouping. The Admin edit view drops it for
+    exactly this reason and this one follows.
+
+    `project_type` is dropped because this screen is OPEX-only. Left bound, it would let
+    the Head move a row onto the Residential template, where it would immediately
+    pre-populate every new Residential BOQ. That is the single edit on this form with
+    cross-type blast radius, and it is not his to make.
+
+    Existing BOQItem rows are never modified: BOQItem.description is a point-in-time
+    snapshot taken at BOQ creation, and nothing here writes to BOQItem.
+    """
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
+
+    item = _opex_catalogue_item(item_id)
+
+    if request.method == 'POST':
+        form = BOQItemMasterForm(request.POST, instance=item)
+        del form.fields['code']
+        del form.fields['project_type']
+        if form.is_valid():
+            form.save()
+            log_activity(None, request.user.profile,
+                         f"Updated OPEX BOQ catalogue item '{item.code}' "
+                         f"(active={item.is_active})",
+                         entity_type='BOQItemMaster', entity_id=item.pk,
+                         action_code='design_boq_item_updated')
+            messages.success(request, f'Catalogue item "{item.code}" saved.')
+            return redirect('design_boq_catalogue')
+    else:
+        form = BOQItemMasterForm(instance=item)
+        del form.fields['code']
+        del form.fields['project_type']
+
+    return render(request, 'projects/design/boq_catalogue_form.html', {
+        'form':         form,
+        'title':        f'Edit OPEX Catalogue Item — {item.code}',
+        'item':         item,
+        'linked_count': item.boq_items.count(),
+    })
+
+
+@login_required
+def design_boq_catalogue_toggle(request, item_id):
+    """Deactivate / reactivate one OPEX catalogue item. Design Head only. POST only.
+
+    DEACTIVATE IS THE ONLY REMOVAL, AND IT IS NOT A DELETE. BOQItem.item_master is
+    SET_NULL, so deleting a catalogue row would null the link on every BOQ line built from
+    it and drop those quantities out of aggregate_group_boq(), which joins on
+    item_master__isnull=False. Nothing would raise and no screen would say so. There is no
+    delete path here, and the request's word "delete" means this.
+
+    NO GUARD ON LINKED ROWS, deliberately. Deactivating leaves existing sheets untouched:
+    split_opex_boq_rows() reclassifies those rows as off-catalogue, so they still render
+    with their quantities and can still be removed — they simply cannot be re-added, and
+    the item stops being offered on new sheets. The linked-row count on the list exists to
+    inform that decision, not to block it.
+    """
+    if request.method != 'POST':
+        return redirect('design_boq_catalogue')
+    if not user_is_design_head(request.user):
+        return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
+
+    item = _opex_catalogue_item(item_id)
+    item.is_active = not item.is_active
+    item.save(update_fields=['is_active', 'updated_at'])
+
+    state = 'activated' if item.is_active else 'deactivated'
+    log_activity(None, request.user.profile,
+                 f"{state.capitalize()} OPEX BOQ catalogue item '{item.code}'",
+                 entity_type='BOQItemMaster', entity_id=item.pk,
+                 action_code=f'design_boq_item_{state}')
+    messages.success(request, f'Catalogue item "{item.code}" {state}.')
+    return redirect('design_boq_catalogue')

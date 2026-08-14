@@ -44,6 +44,9 @@ from .permissions import (
     user_can_manage_project, project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
+    # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
+    # decide whether the OPEX catalogue link renders. No gate in this module reads it.
+    user_is_design_head,
 )
 from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
@@ -1043,6 +1046,11 @@ def dashboard_design(request):
         # gets both strips, which is correct — they are two jobs, and the whole point of
         # settled decision 2 is that doing one on a site rules them out of the other.
         'qc_counts':            design_qc_dashboard_counts(request.user),
+        # Part 12 — the OPEX catalogue link, and NARROWER than `head_counts` above on
+        # purpose. That strip renders for the Head OR his named deputy; the catalogue
+        # screen is the Head's alone, so gating its link on `head_counts` would offer a
+        # deputy a button that then refuses them. One key, read only by that one link.
+        'is_design_head':       user_is_design_head(request.user),
     })
 
 
