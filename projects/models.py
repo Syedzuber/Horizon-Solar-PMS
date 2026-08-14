@@ -2144,6 +2144,33 @@ class DesignAssignment(models.Model):
     )
     assigned_at = models.DateTimeField(null=True, blank=True)
 
+    # ── Gate-1 QC allocation (Session B) ────────────────────────────────────
+    # Which Design QC reviewer owns the FIRST gate on this site. Mirrors the designer
+    # triple above field for field, because it answers the same shape of question about
+    # a different job.
+    #
+    # NULL MEANS OPEN POOL, AND IT IS THE DELIBERATE DEFAULT — not a missing value and
+    # not a row waiting to be backfilled. With the field null, gate 1 behaves exactly as
+    # it did before this existed: any is_design_qc holder who is not this site's designer
+    # may record the verdict. Setting it narrows that to one person. The whole point of
+    # the null branch is that no existing row needed touching and no site could be
+    # stranded by the deploy, so nothing here should ever be made non-null or given a
+    # CHECK — see permissions.user_can_qc_gate_design(), which is where the null is read.
+    #
+    # It does NOT relax the two rules that already bar people from gate 1. The site's own
+    # designer is still refused even if named here (assignment-time validation refuses it
+    # too, in design_views._resolve_qc_reviewer), and settled decision 2 still bars
+    # whoever recorded the other gate's verdict on the artifact.
+    qc_assigned_to = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='qc_design_assignments',
+    )
+    qc_assigned_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='made_qc_design_assignments',
+    )
+    qc_assigned_at = models.DateTimeField(null=True, blank=True)
+
     # 0 until the first attempt is opened; mirrors the highest DesignAttempt.attempt_number.
     # Maintained by the transition logic in a later part, NOT by this model.
     current_attempt_number = models.PositiveIntegerField(default=0)

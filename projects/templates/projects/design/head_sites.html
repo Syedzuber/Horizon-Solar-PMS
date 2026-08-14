@@ -184,9 +184,16 @@ page, and any markup named inside it becomes real elements.
               </div>
 
               {# Allocate one #}
-              {% if row.allocatable %}
+              {% comment %}
+              Session B: the same panel now also carries the Design QC selector, and the
+              two have DIFFERENT lifetimes — a designer is fixed once work starts,
+              a reviewer stays changeable until gate 1 rules. So the toggle opens whenever
+              either is still editable, and the label says which. Both flags are computed
+              in design_head_sites(); neither is derived here.
+              {% endcomment %}
+              {% if row.allocatable or row.qc_assignable %}
                 <button class="btn btn-sm btn-outline-primary" type="button"
-                        data-bs-toggle="collapse" data-bs-target="#al{{ row.site.pk }}">Allocate</button>
+                        data-bs-toggle="collapse" data-bs-target="#al{{ row.site.pk }}">{% if row.allocatable %}Allocate{% else %}Assign QC{% endif %}</button>
               {% endif %}
 
               {% comment %}
@@ -246,15 +253,23 @@ page, and any markup named inside it becomes real elements.
             </td>
           </tr>
 
-          {% if row.allocatable %}
+          {% if row.allocatable or row.qc_assignable %}
           <tr class="collapse" id="al{{ row.site.pk }}">
             <td colspan="7" class="bg-light">
+              {% if row.allocatable %}
               <form method="post" action="{% url 'design_allocate' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
+                {% comment %}
+                Session B.1 — `row.designer_choices`, not the flat `designers` list: this
+                site's current gate-1 reviewer is removed, mirroring the QC selector below
+                which removes this site's designer. One person cannot hold both roles on
+                one site, and the two dropdowns say so in the same way from both sides.
+                _allocate_one() refuses the pairing on POST regardless of what is rendered.
+                {% endcomment %}
                 <select name="designer_id" class="form-select form-select-sm" style="max-width:16rem;" required>
                   <option value="">Choose a designer…</option>
-                  {% for d in designers %}
+                  {% for d in row.designer_choices %}
                     <option value="{{ d.pk }}"
                       {% if row.assignment.assigned_to_id == d.pk %}selected{% endif %}>
                       {{ d.user.get_full_name|default:d.user.username }}
@@ -263,6 +278,48 @@ page, and any markup named inside it becomes real elements.
                 </select>
                 <button class="btn btn-sm btn-primary">Allocate</button>
               </form>
+              {% endif %}
+
+              {% comment %}
+              Session B — WHO REVIEWS THIS SITE AT GATE 1. A separate form from the
+              designer one above, not a second field on it: they post to different views,
+              they are permitted for different spans of the site's life, and submitting
+              one must never quietly rewrite the other.
+
+              `row.qc_choices` already has this site's own designer removed — the exclusion
+              is applied in the view against a single queryset, so this loop is a render and
+              not a query. Dropping the designer from the options is a courtesy, not the
+              rule: _resolve_qc_reviewer() refuses the pairing on POST, so a crafted form
+              gets the same answer as this one.
+
+              The empty option is a real instruction — it clears the assignment and returns
+              gate 1 to the open pool — which is why it is worded as a state and not as a
+              prompt to choose.
+              {% endcomment %}
+              {% if row.qc_assignable %}
+              <form method="post" action="{% url 'design_assign_qc' project_id=row.site.project_id %}"
+                    class="d-flex flex-wrap align-items-center gap-2 py-2">
+                {% csrf_token %}
+                <span class="small text-muted">Design QC:</span>
+                <select name="qc_id" class="form-select form-select-sm" style="max-width:16rem;">
+                  <option value="">Open pool — any QC reviewer</option>
+                  {% for r in row.qc_choices %}
+                    <option value="{{ r.pk }}"
+                      {% if row.assignment.qc_assigned_to_id == r.pk %}selected{% endif %}>
+                      {{ r.user.get_full_name|default:r.user.username }}
+                    </option>
+                  {% endfor %}
+                </select>
+                <button class="btn btn-sm btn-outline-primary">Save QC</button>
+                <span class="text-muted small">
+                  {% if row.qc_reviewer %}
+                    Currently {{ row.qc_reviewer.user.get_full_name|default:row.qc_reviewer.user.username }}.
+                  {% else %}
+                    Currently open pool — any Design QC reviewer may take it.
+                  {% endif %}
+                </span>
+              </form>
+              {% endif %}
             </td>
           </tr>
           {% endif %}

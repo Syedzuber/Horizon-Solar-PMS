@@ -79,7 +79,8 @@ from .permissions import (
     user_can_view_design, user_can_view_site_groups, user_has_design_head_authority,
     user_is_assigned_designer, user_is_design_head, user_is_design_head_deputy,
     user_can_qc_gate_design, user_can_head_gate_design, user_is_design_qc,
-    user_can_view_design_qc_dashboard,
+    user_can_view_design_qc_dashboard, user_can_view_qc_queue,
+    user_is_assigned_qc_reviewer,
 )
 
 logger = logging.getLogger(__name__)
@@ -268,18 +269,43 @@ def design_head_sites(request, pk):
 
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
     sites = (program.sites.filter(is_deleted=False)
-             .select_related('design_assignment', 'design_assignment__assigned_to__user')
+             .select_related('design_assignment', 'design_assignment__assigned_to__user',
+                             'design_assignment__qc_assigned_to__user')
+             # Session B: the QC-assignable flag needs the current attempt's gate-1
+             # reviewer. Prefetched rather than reached through _current_attempt() in the
+             # loop, which runs its own query per site.
+             .prefetch_related('design_assignment__attempts')
              .order_by('project_id'))
+
+    # ONE query for the whole screen, evaluated once with list(). The per-row designer
+    # exclusion below is a comprehension over this list — a queryset here would re-run
+    # .exclude() per site and put the N+1 straight back.
+    #
+    # SESSION B.1 — the SAME people as the designer selector. Gate-1 assignment draws from
+    # every active designer, not from `is_design_qc` holders, because assignment overrides
+    # the open pool instead of drawing from it. The two selectors on this screen therefore
+    # offer one list, built once and used twice. `designers` moved up from below the loop
+    # for that reuse; the queryset itself is unchanged.
+    designers = (UserProfile.objects.select_related('user')
+                 .filter(role='Design', is_active=True)
+                 .order_by('user__first_name', 'user__username'))
+    qc_reviewers = list(designers)
 
     rows = []
     for site in sites:
         assignment = getattr(site, 'design_assignment', None)
         current = pending = None
+        gate1_decided = False
         if assignment is not None:
             # The AGREED date, not the is_current row — a pending extension must not
             # change what this screen says the site is committed to (Part 8).
             current = _effective_commitment(assignment)
             pending = _pending_extension(assignment)
+            # .all() reads the prefetch cache; filtering here would issue a fresh query.
+            attempt = next(
+                (t for t in assignment.attempts.all()
+                 if t.attempt_number == assignment.current_attempt_number), None)
+            gate1_decided = _gate1_verdict_recorded(attempt)
         rows.append({
             'site':          site,
             'assignment':    assignment,
@@ -295,11 +321,27 @@ def design_head_sites(request, pk):
             'is_blocked':    bool(assignment and assignment.status == DESIGN_SURVEY_RETURNED),
             'allocatable':   bool(assignment and assignment.survey_ready
                                   and assignment.status in REALLOCATABLE_STATUSES),
+            # Session B — the SECOND visibility condition for the allocation block, and
+            # deliberately wider than `allocatable`: naming a reviewer stays open long
+            # after the designer is fixed, right up until gate 1 rules. Computed here
+            # rather than in the template so the rule has one home.
+            'qc_assignable': bool(assignment and not gate1_decided),
+            'qc_reviewer':   assignment.qc_assigned_to if assignment else None,
+            # THE TWO SELECTORS EXCLUDE EACH OTHER'S CURRENT HOLDER, and the symmetry is
+            # the point: one person cannot be both the designer and the gate-1 reviewer of
+            # the same site, so whichever role is already filled removes that person from
+            # the other list. Both are comprehensions over the single `qc_reviewers` list
+            # built before the loop — no query per row.
+            #
+            # Neither is the rule, only its courtesy. _resolve_qc_reviewer() and
+            # _allocate_one() each refuse the pairing on POST, so a crafted form gets the
+            # same answer as the dropdown.
+            'qc_choices':    [r for r in qc_reviewers
+                              if not (assignment and assignment.assigned_to_id == r.pk)],
+            'designer_choices': [d for d in qc_reviewers
+                                 if not (assignment
+                                         and assignment.qc_assigned_to_id == d.pk)],
         })
-
-    designers = (UserProfile.objects.select_related('user')
-                 .filter(role='Design', is_active=True)
-                 .order_by('user__first_name', 'user__username'))
 
     return render(request, 'projects/design/head_sites.html', {
         'program':   program,
@@ -622,6 +664,30 @@ def _allocate_one(assignment, designer, actor, allocated_on=None):
     if assignment.status == DESIGN_SURVEY_RETURNED:
         raise ValueError('is on Design Hold over an inadequate survey — '
                          'upload a replacement first')
+    # SESSION B.1 — THE SELF-REVIEW RULE, ENFORCED FROM THE ALLOCATION SIDE.
+    #
+    # _resolve_qc_reviewer() already refuses naming the site's designer as its reviewer.
+    # That covers one order of events and not the other: with no designer yet, naming a
+    # reviewer is legal, and allocating that same person as designer afterwards was
+    # accepted by this function because it never looked at qc_assigned_to. The result was
+    # a site whose designer and gate-1 reviewer were one person — which
+    # user_can_qc_gate_design() then refuses forever, since the designer exclusion is
+    # tested before the assignment branch. Assigned, and unreviewable.
+    #
+    # REFUSES RATHER THAN CLEARING THE REVIEWER. Silently dropping a gate-1 assignment as
+    # a side effect of allocating a designer would undo a decision the Head made
+    # deliberately, on a screen that says nothing about it. He is told instead, and
+    # chooses which of the two roles this person keeps.
+    #
+    # Living HERE covers the bulk path too, which is the whole reason this function
+    # exists — and there it correctly aborts the batch, since a partially applied
+    # allocation is worse than none.
+    if assignment.qc_assigned_to_id and assignment.qc_assigned_to_id == designer.pk:
+        raise ValueError(
+            f'cannot be allocated to '
+            f'{designer.user.get_full_name() or designer.user.username}, who is already '
+            f'its Design QC reviewer — nobody reviews their own work, so change the '
+            f'reviewer first')
     if assignment.status not in REALLOCATABLE_STATUSES:
         # Reallocation after work has started is out of scope for Part 2.
         raise ValueError(
@@ -766,6 +832,149 @@ def design_bulk_allocate(request, pk):
         f'{designer.user.get_full_name() or designer.user.username}, due {due}: '
         f'{", ".join(allocated)}.')
     return redirect('design_head_sites', pk=program.pk)
+
+
+# ---------------------------------------------------------------------------
+# 3b. Gate-1 QC allocation (Session B)
+#
+# WHO REVIEWS THIS SITE AT GATE 1, rather than "whoever gets to it first". The field is
+# nullable and null means open pool (see the note on DesignAssignment.qc_assigned_to), so
+# this whole section is additive: a site nobody assigns behaves exactly as it did before.
+#
+# Deliberately NOT folded into _allocate_one(). Allocating a designer computes a due date,
+# moves the status to `in_design` and stamps Project.assigned_design; none of that applies
+# to naming a reviewer, and a shared function would have to branch on which job it was
+# doing at every one of those steps.
+# ---------------------------------------------------------------------------
+
+def _gate1_verdict_recorded(attempt):
+    """True once a Design QC verdict is stored on `attempt` — the point after which the
+    reviewer must not be swapped.
+
+    Reads `qc_reviewed_by_id`, not `qc_verdict`: a closed attempt keeps qc_verdict at
+    'pending' forever when a PM change request ended it (see the note at the top of the
+    Part 4 section), so the verdict column cannot tell "nobody ruled" from "the row was
+    closed unruled". The reviewer FK is written only by design_qc_pass/design_qc_fail and
+    is therefore the honest signal.
+
+    SCOPED TO THE PACKAGE GATE, not the Arka gate. An Arka QC verdict lives on
+    ArkaSubmission.reviewed_by and does not lock reassignment — today's open pool already
+    lets one holder rule on the Arka and another on the package, so requiring one person
+    for both would be a new rule, not a preserved one.
+    """
+    return attempt is not None and attempt.qc_reviewed_by_id is not None
+
+
+def _resolve_qc_reviewer(raw_id, assignment):
+    """The QC reviewer named by `raw_id`, or None to clear. Raises ValueError otherwise.
+
+    ANY DESIGNER MAY BE ASSIGNED (Session B.1), not only an `is_design_qc` holder. The flag
+    governs the OPEN POOL — who may pick unclaimed work up — and assignment overrides the
+    pool rather than drawing from it, so requiring the flag here would refuse exactly the
+    case the field exists to express. permissions.user_can_qc_gate_design() reads the two
+    the same way round; the two must agree or the Head can save a state the gate refuses.
+
+    DELEGATES TO _resolve_designer() rather than restating what a designer is. That keeps
+    the existence check, the active check and the role test in ONE place for both kinds of
+    allocation, and it is the reason this function contains no role string of its own —
+    there is no canonical user_is_designer() helper in this codebase, and inventing a
+    second one used in two places would have made the drift worse, not better.
+
+    THE ONE RULE THAT IS GENUINELY ITS OWN is the self-review exclusion, and it is why this
+    validator needs the assignment in hand when _resolve_designer() needs nothing but a pk.
+    Refusing here as well as in user_can_qc_gate_design() is not belt and braces: without
+    it the Head can save an assignment the verdict gate will then refuse forever — a site
+    named to a reviewer who can never act on it, which reads as assigned and behaves as
+    stuck.
+    """
+    raw_id = (raw_id or '').strip()
+    # Empty is a legitimate instruction, not a missing field: it returns the site to the
+    # open pool. The template's "Open pool" option posts exactly this.
+    if not raw_id:
+        return None
+    reviewer = _resolve_designer(raw_id)
+    if assignment.assigned_to_id and assignment.assigned_to_id == reviewer.pk:
+        raise ValueError(
+            f'{reviewer.user.get_full_name() or reviewer.user.username} is the designer '
+            f'allocated to this site, and nobody reviews their own work at either gate')
+    return reviewer
+
+
+@login_required
+def design_assign_qc(request, project_id):
+    """Name (or clear) the Design QC reviewer for one OPEX site. Design Head only, POST only.
+
+    Assignment stays editable until a gate-1 verdict is recorded on the current attempt.
+    That is deliberately LATER than designer reallocation closes: a designer is fixed once
+    work starts (REALLOCATABLE_STATUSES), but the reviewer is not chosen for the work, they
+    are chosen for the review, and until the review has produced a verdict there is nothing
+    to be inconsistent with.
+    """
+    project = _opex_site(project_id)
+    if not user_has_design_head_authority(request.user):
+        return HttpResponseForbidden('Design Head only.')
+    if request.method != 'POST':
+        return redirect('design_head_sites', pk=project.program_id)
+
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        messages.error(request, f'{project.project_id}: design has not started on this '
+                                f'site, so there is no review to assign.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    if _gate1_verdict_recorded(_current_attempt(assignment)):
+        messages.error(request, f'{project.project_id}: Design QC has already recorded a '
+                                f'verdict on this attempt — the reviewer cannot be changed '
+                                f'now.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    try:
+        reviewer = _resolve_qc_reviewer(request.POST.get('qc_id', ''), assignment)
+    except ValueError as exc:
+        messages.error(request, f'{project.project_id}: {exc}.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    previous = assignment.qc_assigned_to
+    if (previous.pk if previous else None) == (reviewer.pk if reviewer else None):
+        messages.info(request, f'{project.project_id}: no change — the Design QC reviewer '
+                               f'was already '
+                               f'{"unassigned" if reviewer is None else reviewer.user.get_full_name() or reviewer.user.username}.')
+        return redirect('design_head_sites', pk=project.program_id)
+
+    actor = request.user.profile
+    now = timezone.now()
+    with transaction.atomic():
+        # filter().update() rather than save(): two Heads assigning the same site at once
+        # would otherwise each write a whole row from their own stale copy, and the loser's
+        # view of every other field would silently win.
+        DesignAssignment.objects.filter(pk=assignment.pk).update(
+            qc_assigned_to=reviewer, qc_assigned_by=actor, qc_assigned_at=now,
+            updated_at=now)
+
+        if reviewer is None:
+            detail = (f'Design QC reviewer cleared — gate 1 returns to the open pool '
+                      f'(was {previous.user.get_full_name() or previous.user.username})')
+            code = 'design_qc_unassigned'
+        elif previous is not None:
+            detail = (f'Design QC reviewer changed from '
+                      f'{previous.user.get_full_name() or previous.user.username} to '
+                      f'{reviewer.user.get_full_name() or reviewer.user.username}')
+            code = 'design_qc_reassigned'
+        else:
+            detail = (f'Design QC reviewer assigned: '
+                      f'{reviewer.user.get_full_name() or reviewer.user.username}')
+            code = 'design_qc_assigned'
+        log_activity(project, actor, detail,
+                     entity_type='DesignAssignment', entity_id=assignment.pk,
+                     action_code=code)
+
+    if reviewer is None:
+        messages.success(request, f'{project.project_id}: Design QC reviewer cleared — any '
+                                  f'QC reviewer may now take this site.')
+    else:
+        messages.success(request, f'{project.project_id}: Design QC assigned to '
+                                  f'{reviewer.user.get_full_name() or reviewer.user.username}.')
+    return redirect('design_head_sites', pk=project.program_id)
 
 
 # ---------------------------------------------------------------------------
@@ -3134,6 +3343,44 @@ def _attempt_history(assignment):
                 .order_by('attempt_number'))
 
 
+def _qc_scope(user):
+    """The Q() limiting a QC reviewer's worklist to sites that are theirs to review.
+
+    THREE ANSWERS, matching the three kinds of person who can reach this screen:
+
+        Head authority      -> Q()    unscoped, the whole gate
+        is_design_qc holder -> their own assignments PLUS the open pool
+        plain designer      -> their own assignments ONLY
+
+    HEAD AUTHORITY IS DELIBERATELY UNSCOPED. The Head runs the gate; hiding sites he has
+    assigned to somebody else would remove from his screen exactly the work he assigned and
+    is accountable for. The narrowing exists so a reviewer is never shown a colleague's
+    queue, not to partition the gate.
+
+    A user holding BOTH the QC flag and Head authority gets the unscoped view: he is
+    admitted here as the Head, and the wider of two overlapping claims is the honest one.
+
+    THE THIRD BRANCH IS SESSION B.1 AND IT IS LOAD-BEARING. A plain designer previously
+    fell through to Q() — harmless only because every read gate refused them entry, so the
+    branch was unreachable. user_can_view_qc_queue() now admits them, and an unscoped Q()
+    would show a designer with one assignment every reviewable site in the system. They get
+    the open pool arm removed, not merely narrowed: the pool is what `is_design_qc` grants
+    and they do not hold it.
+
+    THIS SCOPES VISIBILITY, NOT AUTHORITY. Whether a row's buttons are live is still
+    user_can_qc_gate_design() per row, which applies the same assignment rule and the two
+    exclusions this cannot see. A screen filter is not a gate.
+    """
+    if user_has_design_head_authority(user):
+        return Q()
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return Q()
+    if user_is_design_qc(user):
+        return Q(qc_assigned_to__isnull=True) | Q(qc_assigned_to=profile)
+    return Q(qc_assigned_to=profile)
+
+
 @login_required
 def design_qc_queue(request):
     """The review worklist for BOTH artifacts and BOTH gates.
@@ -3160,14 +3407,25 @@ def design_qc_queue(request):
     different verdict URLs, and read better as separate sections than as one list where
     half the rows have no package to open.
     """
-    if not user_can_view_design_qc_dashboard(request.user):
-        return HttpResponseForbidden('Design QC, Design Head or named deputy only.')
+    # Session B.1 — the queue's OWN gate, one case wider than the dashboard's: a plain
+    # designer who has been assigned at least one site gets in. Safe because _qc_scope()
+    # below hands them their assignments and nothing else — the door and what is behind it
+    # are decided together, and neither is sufficient alone.
+    if not user_can_view_qc_queue(request.user):
+        return HttpResponseForbidden(
+            'Design QC, Design Head, named deputy, or a designer assigned to review a site.')
 
     profile = getattr(request.user, 'profile', None)
 
+    # Session B — a QC reviewer sees their own sites plus the open pool, never a
+    # colleague's. Head authority is unscoped: the Head's job is to see the whole gate,
+    # and scoping him would hide work he is accountable for. See _qc_scope().
+    scope = _qc_scope(request.user)
+
     # ── Arkas: awaiting gate 1, or passed gate 1 and awaiting gate 2 ──────────
     arka_assignments = (DesignAssignment.objects
-                        .filter(status__in=(DESIGN_ARKA_SUBMITTED,
+                        .filter(scope,
+                                status__in=(DESIGN_ARKA_SUBMITTED,
                                             DESIGN_AWAITING_HEAD_ARKA),
                                 project__is_deleted=False)
                         .select_related('project', 'project__program', 'assigned_to__user')
@@ -3206,7 +3464,8 @@ def design_qc_queue(request):
 
     # ── Packages: awaiting gate 1, in gate 1, or awaiting gate 2 ──────────────
     assignments = (DesignAssignment.objects
-                   .filter(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
+                   .filter(scope,
+                           status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
                                        DESIGN_AWAITING_HEAD_QC),
                            project__is_deleted=False)
                    .select_related('project', 'project__program', 'assigned_to__user')
@@ -3256,8 +3515,14 @@ def design_qc_review(request, project_id):
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         raise Http404('No design assignment for this site.')
-    if not user_can_view_design_qc_dashboard(request.user):
-        return HttpResponseForbidden('Design QC, Design Head or named deputy only.')
+    # Session B.1 — PER SITE, and that is the whole difference from the queue's gate. A
+    # plain designer reaches this screen for the one site they were named on and no other;
+    # an unassigned site refuses them exactly as it did before B.1.
+    if not (user_can_view_design_qc_dashboard(request.user)
+            or user_is_assigned_qc_reviewer(request.user, project)):
+        return HttpResponseForbidden(
+            'Design QC, Design Head, named deputy, or the designer assigned to review '
+            'this site.')
 
     ctx = _workspace_context(project, assignment)
     attempt  = ctx['attempt']
@@ -3498,29 +3763,85 @@ def design_qc_dashboard_counts(user):
     nobody types a URL. Without this the Design QC dashboard and review queue would have no
     entry point anywhere in the product.
 
-    Returns None for a user who does not hold `is_design_qc`, so the template can test one
+    Returns None for a user with no claim on gate 1 at all, so the template can test one
     value — and deliberately NOT for a Head who lacks the QC flag, since his own strip
     already carries every number this one would.
 
+    SESSION B.1 — WHO GETS A STRIP, AND WHAT IS ON IT:
+
+        is_design_qc holder            -> every key, including `open_pool`
+        plain designer, >=1 assignment -> no `open_pool` KEY AT ALL
+        plain designer, 0 assignments  -> None, so the strip does not render
+
+    The middle case omits the key rather than setting it to zero, and that is the whole
+    point. A zero would tell a designer there is an open pool and that it happens to be
+    empty; the truth is that the pool is not theirs to see, and a number they can watch
+    change is a worse lie than no number. The template renders that block only
+    `{% if qc_counts.open_pool is not None %}`, so absence is what hides it.
+
     NOT METRICS. Two counts and a tender list; the dashboard is design_qc_dashboard().
     """
-    if not user_is_design_qc(user):
+    profile = getattr(user, 'profile', None)
+    has_flag = user_is_design_qc(user)
+    # A designer with no flag earns a strip only by having been handed work. Checked
+    # against the same FK the queue scopes on, so the strip appears exactly when
+    # user_can_view_qc_queue() would let them through to the screen it links to.
+    has_assignments = bool(
+        profile is not None
+        and DesignAssignment.objects.filter(qc_assigned_to=profile,
+                                            project__is_deleted=False).exists())
+    if not (has_flag or has_assignments):
         return None
-    base = DesignAssignment.objects.filter(project__is_deleted=False)
-    return {
+    # SESSION B — the same _qc_scope() the queue applies, so the numbers on this strip and
+    # the rows behind them cannot disagree. A header saying 4 above a list of 2 is worse
+    # than no header, and two counting paths is how that happens.
+    base = DesignAssignment.objects.filter(_qc_scope(user), project__is_deleted=False)
+    # The two Session B numbers decompose the three below by WHOSE the work is rather than
+    # by stage, so this must be the UNION of exactly those three sets and nothing wider.
+    #
+    # The Arka arm carries the same is_current/pending filter as `awaiting_arka` below, and
+    # it has to: a site at `arka_submitted` whose Arka the Head has already approved is not
+    # in anybody's review queue — it is with the designer, owing CAD and BOQ — and
+    # design_qc_queue() skips exactly those rows. Counting on status alone would put them
+    # in these two numbers and not in the list the numbers head.
+    #
+    # The gate-2 statuses are deliberately absent. These count gate-1 work owed, and
+    # `qc_assigned_to` says nothing about who clears gate 2.
+    gate1_owed = base.filter(
+        Q(status=DESIGN_ARKA_SUBMITTED,
+          attempts__arka_submissions__is_current=True,
+          attempts__arka_submissions__verdict=ARKA_PENDING)
+        | Q(status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC))
+    ).distinct()
+    counts = {
         'awaiting_arka': base.filter(status=DESIGN_ARKA_SUBMITTED,
                                      attempts__arka_submissions__is_current=True,
                                      attempts__arka_submissions__verdict=ARKA_PENDING
                                      ).distinct().count(),
         'awaiting_qc':   base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
         'in_qc':         base.filter(status=DESIGN_IN_QC).count(),
-        # Same reason as the Head's strip: `program_list` is
-        # @role_required(['Admin','PM','CEO']) and a Design QC reviewer holds
-        # role='Design', so that nav link 403s for them. Tenders are linked from here.
-        'programs':      list(Program.objects.filter(is_deleted=False,
-                                                     program_type='OPEX')
-                              .order_by('name')),
+        'assigned_to_me': (gate1_owed.filter(qc_assigned_to=profile).count()
+                           if profile is not None else 0),
     }
+    # TWO KEYS ADDED ONLY FOR A FLAG HOLDER — see the docstring. A plain designer's dict
+    # carries neither, which is what keeps both blocks off their strip.
+    #
+    # `open_pool`: setting it to zero would render a number about a pool they have no claim
+    # on. Absence, not zero, is what the template tests.
+    #
+    # `programs`: those buttons link to design_qc_dashboard, which is gated on
+    # user_can_view_design_qc_dashboard() and therefore 403s for a plain designer —
+    # deliberately, since a per-tender dashboard is portfolio data they were never handed.
+    # Offering a button that refuses the person who clicks it is worse than offering none,
+    # so the key goes with the authority. (Same reason as the Head's strip: `program_list`
+    # is @role_required(['Admin','PM','CEO']) and a QC holder is role='Design', so the nav
+    # link 403s for them and tenders are linked from here instead.)
+    if has_flag:
+        counts['open_pool'] = gate1_owed.filter(qc_assigned_to__isnull=True).count()
+        counts['programs'] = list(Program.objects.filter(is_deleted=False,
+                                                         program_type='OPEX')
+                                  .order_by('name'))
+    return counts
 
 
 def pm_change_request_targets(user, projects):

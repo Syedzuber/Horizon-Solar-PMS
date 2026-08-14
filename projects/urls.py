@@ -57,6 +57,9 @@ urlpatterns = [
     path('design/<str:project_id>/survey/link/',     design_views.design_survey_link_set,  name='design_survey_link_set'),
     path('design/<str:project_id>/survey/',          design_views.design_survey_download, name='design_survey_download'),
     path('design/<str:project_id>/allocate/',        design_views.design_allocate,        name='design_allocate'),
+    # Session B — names the gate-1 reviewer. Posting an empty qc_id clears it and returns
+    # the site to the open pool, which is why there is no separate unassign route.
+    path('design/<str:project_id>/assign-qc/',       design_views.design_assign_qc,       name='design_assign_qc'),
     path('design/<str:project_id>/due-date/propose/', design_views.design_due_date_propose, name='design_due_date_propose'),
     path('design/<str:project_id>/due-date/approve/', design_views.design_due_date_approve, name='design_due_date_approve'),
     path('design/<str:project_id>/due-date/reject/',  design_views.design_due_date_reject,  name='design_due_date_reject'),

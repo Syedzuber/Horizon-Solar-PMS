@@ -269,6 +269,15 @@ def user_can_view_project_boq(user, project):
     if user_is_design_qc(user):
         return True
 
+    # Session B.1 — the reviewer NAMED on this site, flag or no flag. Same reason as the
+    # branch above and scoped one site narrower: two of the sixteen error categories are
+    # about the BOQ, so an assigned reviewer who cannot open it cannot record the failure
+    # the system asks them for. The Design branch below refuses them by construction — a
+    # reviewer is never the site's own `assigned_design` — so without this the person the
+    # Head just handed the site to is the one person who cannot read its BOQ.
+    if user_is_assigned_qc_reviewer(user, project):
+        return True
+
     if profile.role == 'Design':
         if project.assigned_design_id == profile.pk:
             return True
@@ -475,12 +484,18 @@ def user_can_qc_design(user, assignment):
 #
 # TWO GATES, TWO PREDICATES, ONE SHARED EXCLUSION.
 #
-#   user_can_qc_gate_design()    gate 1 — Design QC.   is_design_qc AND not the designer
+#   user_can_qc_gate_design()    gate 1 — Design QC.   not the designer, AND THEN
+#                                                        unassigned site -> is_design_qc
+#                                                        assigned site   -> be the assignee
 #   user_can_head_gate_design()  gate 2 — Design Head. Head authority AND not the designer
 #
-# Both are narrowings of a flag by the SAME self-review exclusion, because settled
-# decision 3 is absolute: the assigned designer records no verdict on their own site at
-# either gate, whatever flags they hold.
+# Both carry the SAME self-review exclusion, because settled decision 3 is absolute: the
+# assigned designer records no verdict on their own site at either gate, whatever flags
+# they hold. Gate 2 is a narrowing of a flag by that exclusion and nothing else.
+#
+# GATE 1 IS NO LONGER A NARROWING OF A FLAG (Session B.1). It has two ways in, and the flag
+# governs only the unassigned one. A named reviewer needs no flag; the flag is what lets
+# somebody take unclaimed work instead. Both routes still pass through the exclusion.
 #
 # WHAT THESE DELIBERATELY DO NOT ANSWER: whether this particular actor has already
 # recorded the OTHER gate's verdict on THIS artifact (settled decision 2). That is a
@@ -490,8 +505,15 @@ def user_can_qc_design(user, assignment):
 # is the property that has kept it stable across nine parts.
 #
 # THE DEPUTY IS GATE 2 ONLY (settled decision 9). A Design Head's deputy acts for the
-# Head; there is no deputy for Design QC in this session, so user_can_qc_gate_design()
-# consults `is_design_qc` and nothing else.
+# Head; there is no deputy for Design QC, so user_can_qc_gate_design() never consults
+# deputy status — a deputy reaches gate 1 only by holding `is_design_qc` themselves, and
+# then reaches it as a QC holder rather than as a deputy.
+#
+# SESSION B GAVE GATE 1 A PER-SITE TERM. user_can_qc_gate_design() now also reads
+# DesignAssignment.qc_assigned_to — the one place either predicate looks at a field on the
+# row rather than at the user. Null there means open pool, which is the Part 9 behaviour
+# unchanged, so this widened nothing and can only ever refuse somebody Part 9 admitted.
+# Gate 2 is untouched by it.
 # ---------------------------------------------------------------------------
 
 def user_is_design_qc(user):
@@ -513,18 +535,52 @@ def user_is_design_qc(user):
 def user_can_qc_gate_design(user, assignment):
     """Return True if `user` may record the DESIGN QC (first-gate) verdict on `assignment`.
 
-        the is_design_qc flag
-        AND NOT the designer this site is allocated to
+        NOT the designer this site is allocated to, AND THEN:
+            qc_assigned_to is null  ->  the is_design_qc flag (the open pool)
+            qc_assigned_to is set   ->  BE that person (flag or no flag)
 
-    The Design Head does NOT satisfy this by virtue of being the Head — the two flags are
-    independent, and a Head who has not been given `is_design_qc` reviews at gate 2 only.
-    That is the whole point of a second gate: two people, not one person twice.
+    TWO WAYS IN, AND THE FLAG GOVERNS ONLY ONE OF THEM (Session B.1). Assignment does not
+    narrow the pool, it OVERRIDES it: a site the Head has named somebody to is that
+    person's to review, and `is_design_qc` has nothing to say about it. A site nobody has
+    named is the pool's, and there the flag is the whole rule — exactly as in Part 9.
+
+    So `is_design_qc` is not deprecated by assignment and must not be removed. It answers
+    "who may pick work up unbidden", which is a different question from "who was handed
+    this site", and only the first has anything to do with a flag on a person.
+
+    A designer WITHOUT the flag therefore reviews only what they were explicitly given.
+    They are not in the pool, cannot see it, and gain nothing portfolio-wide — see
+    user_can_view_qc_queue() and user_is_assigned_qc_reviewer() for the read side.
+
+    The Design Head does NOT satisfy the open-pool branch by virtue of being the Head — the
+    two flags are independent, and a Head who has not been given `is_design_qc` reviews at
+    gate 2 only. That is the whole point of a second gate: two people, not one person twice.
+    He can, however, be ASSIGNED here like anyone else, which is worth knowing: doing so
+    bars him from gate 2 on that site by settled decision 2, and with one Head and no named
+    deputy that leaves the site with nobody to clear gate 2.
+
+    ORDER MATTERS AND IS NOT COSMETIC. The designer exclusion is tested BEFORE either
+    branch, so naming a site's own designer as its QC reviewer cannot let them through
+    here: assignment can only ever take authority away from the pool, never hand it to
+    somebody the self-review rule refuses. Assignment-time validation refuses that pairing
+    as well (design_views._resolve_qc_reviewer), but this ordering is what makes the
+    refusal true even for a row written some other way.
+
+    Settled decision 2 is NOT restated here. Whether this actor already recorded the OTHER
+    gate's verdict on this artifact is a question about a row, not about a user, and stays
+    in design_views._other_gate_actor_conflict() — applied by every verdict endpoint on top
+    of this. Neither assignment nor the flag exempts anyone from it.
     """
     if assignment is None:
         return False
-    if not user_is_design_qc(user):
+    if user_is_assigned_designer(user, assignment):
         return False
-    return not user_is_assigned_designer(user, assignment)
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if assignment.qc_assigned_to_id is None:
+        return user_is_design_qc(user)
+    return assignment.qc_assigned_to_id == profile.pk
 
 
 def user_can_head_gate_design(user, assignment):
@@ -548,8 +604,65 @@ def user_can_view_design_qc_dashboard(user):
 
     Read only. It confers no authority to record any verdict; both gates are decided
     per site by the two predicates above.
+
+    DELIBERATELY NOT WIDENED BY SESSION B.1. This guards the per-TENDER QC dashboard as
+    well as the queue, and that screen carries stage counts and workload for every site in
+    a tender — data an assigned reviewer has no claim on just because one site was handed
+    to them. The queue has its own, narrower gate: user_can_view_qc_queue().
     """
     return user_is_design_qc(user) or user_has_design_head_authority(user)
+
+
+def user_is_assigned_qc_reviewer(user, project):
+    """Return True if `user` is the gate-1 reviewer NAMED on `project`'s design assignment.
+
+    THE PER-SITE READ KEY FOR SESSION B.1, and the reason that session is more than a
+    widened dropdown. Assignment made a designer without `is_design_qc` able to RECORD a
+    gate-1 verdict; without this they could not OPEN the site to form one — the package
+    listing rendered and every artifact link behind it returned 403. That is not a review,
+    and it is the exact failure Part 9 hit with Design QC and fixed the same way.
+
+    SCOPED TO ONE SITE, ALWAYS. It answers "were you handed THIS site", never "are you a
+    reviewer", so it can only ever admit somebody to the row they were named on. Every
+    caller adds it as one more OR beside the existing branches; none replaces a flag test
+    with it.
+
+    Reaches the assignment by reverse relation rather than importing DesignAssignment,
+    keeping this module model-import-free exactly as user_is_design_head_deputy() does.
+    """
+    if project is None:
+        return False
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return assignment.qc_assigned_to_id == profile.pk
+
+
+def user_can_view_qc_queue(user):
+    """Return True if `user` may open the gate-1 review QUEUE (Session B.1).
+
+    Wider than user_can_view_design_qc_dashboard() by exactly one case: a designer with no
+    QC flag who has been assigned at least one site. Without this they could be handed work
+    and have no screen on which to find it — and since nothing in this module notifies
+    anyone, a screen they cannot open is work they will never do.
+
+    ADMITTING THEM TO THE SCREEN IS NOT SHOWING THEM THE POOL. design_qc_queue() filters
+    its rows through design_views._qc_scope(), which gives a non-flag reviewer their own
+    assignments and nothing else. This decides whether the door opens; that decides what is
+    behind it, and the two must be read together.
+
+    `qc_design_assignments` is the reverse of DesignAssignment.qc_assigned_to, so this
+    needs no model import — same pattern as user_is_design_head_deputy().
+    """
+    if user_can_view_design_qc_dashboard(user):
+        return True
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.qc_design_assignments.exists()
 
 
 def user_can_request_design_change(user, project):
@@ -604,10 +717,19 @@ def user_can_view_design(user, project):
     them, and without this branch they could open the QC screen and then get "You do not
     have access to this site" from the CAD download link ON THAT SCREEN. Reported from
     live use: gate 1 could see the package listing and open none of it.
+
+    SESSION B.1 ADDS THE ASSIGNED REVIEWER, and it is the Part 9 paragraph above word for
+    word with the flag taken out. A designer named as gate-1 reviewer is, by the same
+    construction, NOT the site's `assigned_design` — so user_can_view_project() refuses
+    them — and they hold no flag, so the branch above refuses them too. This is the branch
+    that lets them open the survey and the CAD they are being asked to judge. Per site,
+    never portfolio-wide: the whole difference between this and the line above it is that
+    this one takes `project`.
     """
     return (user_can_view_project(user, project)
             or user_has_design_head_authority(user)
-            or user_is_design_qc(user))
+            or user_is_design_qc(user)
+            or user_is_assigned_qc_reviewer(user, project))
 
 
 # ---------------------------------------------------------------------------

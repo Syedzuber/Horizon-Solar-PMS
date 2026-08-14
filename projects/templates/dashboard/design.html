@@ -255,22 +255,63 @@ same site.
       <a href="{% url 'design_qc_queue' %}" class="btn btn-sm text-white"
          style="background-color:#1a7a4a;">Open review queue</a>
     </div>
+    {% comment %}
+    SESSION B ADDED THE LAST TWO, AND NARROWED THE FIRST THREE.
+
+    Every number here now comes from design_qc_dashboard_counts() under the SAME _qc_scope()
+    the review queue filters on, so this strip and the screen its button opens count the
+    same sites. They previously counted the whole gate for every holder, which was right
+    when the pool was open and becomes a lie the moment a site belongs to somebody.
+
+    The last two decompose the work by WHOSE it is rather than by stage: what has been
+    handed to this reviewer, and what is still anybody's to pick up. That split is the
+    whole of per-site assignment made visible, and it is the only place in the product a
+    reviewer can see it — nothing in this module notifies anyone.
+
+    A Head who also holds the QC flag sees unscoped numbers here (see _qc_scope), matching
+    the queue he opens.
+    {% endcomment %}
     <div class="row g-2 text-center">
-      <div class="col-4">
+      <div class="col-6 col-lg-4">
         <div class="design-stat-num {% if qc_counts.awaiting_arka %}text-warning{% else %}text-muted{% endif %}">
           {{ qc_counts.awaiting_arka }}</div>
         <div class="small text-muted">Arka awaiting your verdict</div>
       </div>
-      <div class="col-4">
+      <div class="col-6 col-lg-4">
         <div class="design-stat-num {% if qc_counts.awaiting_qc %}text-warning{% else %}text-muted{% endif %}">
           {{ qc_counts.awaiting_qc }}</div>
         <div class="small text-muted">Packages awaiting review</div>
       </div>
-      <div class="col-4">
+      <div class="col-6 col-lg-4">
         <div class="design-stat-num {% if qc_counts.in_qc %}text-primary{% else %}text-muted{% endif %}">
           {{ qc_counts.in_qc }}</div>
         <div class="small text-muted">In your review</div>
       </div>
+      <div class="col-6 {% if qc_counts.open_pool is not None %}col-lg-6{% else %}col-lg-12{% endif %}">
+        <a href="{% url 'design_qc_queue' %}" class="text-decoration-none">
+          <div class="design-stat-num {% if qc_counts.assigned_to_me %}text-warning{% else %}text-muted{% endif %}">
+            {{ qc_counts.assigned_to_me }}</div>
+        </a>
+        <div class="small text-muted">Assigned to <strong>you</strong></div>
+      </div>
+      {% comment %}
+      SESSION B.1 — the open pool is shown ONLY to an `is_design_qc` holder, and the test is
+      `is not None` rather than a truthiness test on purpose. A holder with an empty pool
+      must still see a 0; a plain designer assigned to a site must see no tile at all,
+      because the pool is not theirs to take from and a number they could watch change
+      would say otherwise. design_qc_dashboard_counts() omits the KEY for that person
+      rather than setting it to zero, which is what makes the two cases distinguishable
+      here — see the docstring there.
+      {% endcomment %}
+      {% if qc_counts.open_pool is not None %}
+      <div class="col-6 col-lg-6">
+        <a href="{% url 'design_qc_queue' %}" class="text-decoration-none">
+          <div class="design-stat-num text-muted">
+            {{ qc_counts.open_pool }}</div>
+        </a>
+        <div class="small text-muted">Open pool — anyone may take</div>
+      </div>
+      {% endif %}
     </div>
     {% if qc_counts.programs %}
     <div class="small mt-3">
