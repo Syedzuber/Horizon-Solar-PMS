@@ -1607,6 +1607,10 @@ def design_arka_submit(request, project_id):
     except ValidationError:
         return _back('Please enter a valid Arka link (a full URL, including https://).')
 
+    # Optional note for the reviewer. Never validated and never rejected — an empty
+    # value stores '' and the submission proceeds exactly as before.
+    remarks = (request.POST.get('remarks') or '').strip()
+
     profile = request.user.profile
     with transaction.atomic():
         attempt = _current_attempt(assignment)
@@ -1621,7 +1625,8 @@ def design_arka_submit(request, project_id):
         arka = ArkaSubmission.objects.create(
             attempt=attempt, version=next_version,
             capacity_kw=capacity, arka_link=arka_link,
-            submitted_by=profile, verdict=ARKA_PENDING, is_current=True,
+            submitted_by=profile, remarks=remarks,
+            verdict=ARKA_PENDING, is_current=True,
         )
         assignment.status = DESIGN_ARKA_SUBMITTED
         assignment.save(update_fields=['status', 'updated_at'])
@@ -2007,6 +2012,9 @@ def design_artifact_upload(request, project_id):
     except DesignStorageError as exc:
         return _back(f'{project.project_id}: {exc}')
 
+    # Optional note for the reviewer, per uploaded version. Never validated.
+    remarks = (request.POST.get('remarks') or '').strip()
+
     profile = request.user.profile
     with transaction.atomic():
         previous = attempt.design_files.filter(kind=kind, is_current=True).first()
@@ -2021,7 +2029,7 @@ def design_artifact_upload(request, project_id):
             content_type=(getattr(upload, 'content_type', '') or '')[:100],
             archive_listing=listing,
             derived_from_arka=arka,
-            uploaded_by=profile, is_current=True,
+            uploaded_by=profile, remarks=remarks, is_current=True,
         )
         if previous is not None:
             previous.is_current    = False
@@ -2198,6 +2206,9 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
             attempt=new_attempt, version=1,
             capacity_kw=old_arka.capacity_kw, arka_link=old_arka.arka_link,
             submitted_by=old_arka.submitted_by,
+            # The designer's submission note travels with the copy. Omitting it here
+            # would blank it on the new attempt with no error and no log line.
+            remarks=old_arka.remarks,
             # Both gates' verdicts travel with it. `carried_forward_from` is what keeps
             # that honest — see the note on the field.
             verdict=old_arka.verdict,
@@ -2228,6 +2239,8 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
                 archive_listing=old_file.archive_listing,
                 derived_from_arka=arka_for_new,
                 uploaded_by=old_file.uploaded_by,
+                # As above — the upload note travels with the copy.
+                remarks=old_file.remarks,
                 carried_forward_from=old_file, is_current=True,
             )
             carried.append(f'{KIND_LABELS.get(old_file.kind, old_file.kind)}'

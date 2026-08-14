@@ -95,6 +95,19 @@ stored anywhere (settled decision 8).
               <div class="text-muted" style="font-size:.7rem;">
                 {{ f.uploaded_by.user.get_full_name|default:f.uploaded_by.user.username }}
               </div>
+              {% comment %}
+              The designer's own note, written at upload. Optional, so nothing renders
+              when it is empty — no label, no divider. Labelled "Designer note" because
+              this cell otherwise carries only reviewer-facing facts and an unlabelled
+              block of prose here would read as a reviewer's words.
+              {% endcomment %}
+              {% if f.remarks %}
+                <div class="mt-1 ps-2 border-start border-2" style="font-size:.7rem;">
+                  <span class="text-muted">Designer note{% if f.carried_forward_from %}
+                    (written on attempt {{ f.carried_forward_from.attempt.attempt_number }}){% endif %}:</span>
+                  {{ f.remarks }}
+                </div>
+              {% endif %}
             </td>
             <td class="text-end">
               <a class="btn btn-sm btn-outline-secondary"
@@ -190,6 +203,27 @@ stored anywhere (settled decision 8).
             {% endif %}
           </div>
         </div>
+        {% comment %}
+        The designer's own note, written when this version was submitted. Same alert
+        shape as the two rejection blocks below, deliberately NOT alert-danger: this is
+        the submitter's context, not a reviewer's finding, and rendering the two alike
+        would make a note look like a rejection.
+
+        On a carried-forward version the note is text the designer wrote on an EARLIER
+        attempt — the same honesty problem the carried-forward badge above solves for
+        the verdicts, so it is qualified the same way.
+        {% endcomment %}
+        {% if a.remarks %}
+          <div class="alert alert-secondary py-2 px-2 my-2 small mb-0">
+            <strong>Designer note:</strong> {{ a.remarks }}
+            {% if a.carried_forward_from %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Written on attempt {{ a.carried_forward_from.attempt.attempt_number }},
+                carried forward with this version.
+              </div>
+            {% endif %}
+          </div>
+        {% endif %}
         {% if a.rejection_reason %}
           <div class="alert alert-danger py-2 px-2 my-2 small mb-0">
             <strong>Design QC rejection:</strong> {{ a.rejection_reason }}

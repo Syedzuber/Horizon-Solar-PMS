@@ -2411,6 +2411,16 @@ class ArkaSubmission(models.Model):
     )
     submitted_at = models.DateTimeField(auto_now_add=True)
 
+    # A note the DESIGNER writes when submitting, for whoever reviews it — context
+    # a reviewer would otherwise have to ask for. Always optional.
+    #
+    # DELIBERATELY UNCONSTRAINED, unlike every other free-text field on this model.
+    # `rejection_reason` and `head_rejection_reason` each carry a CHECK because they
+    # are conditionally REQUIRED — a reviewer who rejects must say why. This one is
+    # written by the submitter, is required in no state, and has no state to key a
+    # constraint off. The absence of a CHECK here is the decision, not an oversight.
+    remarks = models.TextField(blank=True, default='')
+
     # ── GATE 1: Design QC ───────────────────────────────────────────────────
     verdict = models.CharField(
         max_length=10, choices=ARKA_VERDICT_CHOICES, default=ARKA_PENDING,
@@ -2543,6 +2553,16 @@ class DesignFile(models.Model):
         'UserProfile', on_delete=models.PROTECT, related_name='uploaded_design_files',
     )
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    # A note the DESIGNER writes when uploading, for whoever reviews it. Always
+    # optional. Per VERSION, not per attempt: re-uploading a kind creates a new row
+    # with its own remark, and the superseded row keeps the remark it was uploaded
+    # under — the two are never conflated.
+    #
+    # DELIBERATELY UNCONSTRAINED — see the matching note on ArkaSubmission.remarks.
+    # The reviewer-written `*_reason` / `*_remarks` fields on this model's neighbours
+    # are conditionally required and carry CHECKs; this one is required in no state.
+    remarks = models.TextField(blank=True, default='')
 
     is_current = models.BooleanField(default=True)
     # Points at the DesignFile that replaced this one. SET_NULL so deleting the

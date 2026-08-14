@@ -105,6 +105,11 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
           <input type="url" name="arka_link" class="form-control form-control-sm"
                  placeholder="https://…" required>
         </div>
+        <div class="col-12">
+          <label class="form-label small mb-1">Remarks <span class="text-muted">(optional)</span></label>
+          <textarea name="remarks" rows="2" class="form-control form-control-sm"
+                    placeholder="Optional note for the reviewer"></textarea>
+        </div>
         <div class="col-12 col-md-3">
           <button class="btn btn-sm text-white w-100" style="background-color:#1a7a4a;">
             Submit Arka{% if arka %} v{{ arka.version|add:1 }}{% endif %}
@@ -172,6 +177,11 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
         <div class="col-12 col-md-6">
           <label class="form-label small mb-1">File</label>
           <input type="file" name="artifact_file" class="form-control form-control-sm" required>
+        </div>
+        <div class="col-12">
+          <label class="form-label small mb-1">Remarks <span class="text-muted">(optional)</span></label>
+          <textarea name="remarks" rows="2" class="form-control form-control-sm"
+                    placeholder="Optional note for the reviewer"></textarea>
         </div>
         <div class="col-12 col-md-3">
           <button class="btn btn-sm btn-primary w-100">Upload</button>
