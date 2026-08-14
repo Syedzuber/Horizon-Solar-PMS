@@ -692,6 +692,17 @@ class BOQItemMaster(models.Model):
         db_index=True,
     )
     is_active   = models.BooleanField(default=True)
+    # OPEX-ONLY IN MEANING, and enforced as such on the form rather than here. A later
+    # session pre-loads flagged items onto every new OPEX BOQ and stops the designer
+    # removing them; the OPEX sheet starts empty and is picked from, so "mandatory" has
+    # real work to do there. On the Residential side it would be a no-op by construction —
+    # get_standard_boq_items() already pre-populates EVERY active Residential row onto
+    # every new Residential BOQ, so a flagged row is already present and unremovable in
+    # the only sense that path has. BOQItemMasterForm.clean() refuses the combination so
+    # the 37 Residential rows do not carry a column that means nothing on their side.
+    #
+    # INERT AS OF THIS COMMIT. Nothing reads it but the two catalogue list templates.
+    is_mandatory = models.BooleanField(default=False)
     sort_order  = models.PositiveIntegerField(default=0)         # Also becomes BOQItem.serial_no on creation
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)

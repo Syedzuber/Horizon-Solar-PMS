@@ -484,7 +484,7 @@ class BOQItemMasterForm(forms.ModelForm):
     class Meta:
         model  = BOQItemMaster
         fields = ['code', 'project_type', 'description', 'unit', 'category',
-                  'is_active', 'sort_order']
+                  'is_active', 'is_mandatory', 'sort_order']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -507,6 +507,49 @@ class BOQItemMasterForm(forms.ModelForm):
         )
         self.fields['unit'].help_text     = 'e.g. Nos, Mtr, Kg, Set, Lot. Required — quantities cannot be summed across sites without it.'
         self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
+        self.fields['is_mandatory'].help_text = (
+            'OPEX only. A mandatory item is added to every new OPEX BOQ and cannot be '
+            'removed by the designer. Not used for Residential — every active Residential '
+            'item is already pre-populated onto every new Residential BOQ.'
+        )
+
+    def clean(self):
+        """Refuse `is_mandatory` on anything but an OPEX row.
+
+        WHY A CROSS-FIELD RULE AND NOT A MODEL CONSTRAINT: the meaning is about how the two
+        BOQ paths differ, not about a value being invalid in the database. A Residential row
+        carrying this flag is not corrupt, it is merely a claim nothing will ever act on —
+        and a CHECK would have needed a data migration to prove itself against 244 live
+        rows for no behavioural gain.
+
+        `project_type` IS NOT ALWAYS ON THIS FORM, and this rule must not assume it is. The
+        Design Head's catalogue screen is OPEX-only: both its views delete the field and set
+        'OPEX' on the instance AFTER validation, so at this point neither cleaned_data nor
+        self.instance holds a usable value there — self.instance carries the model default
+        'Residential' on the create path, which would refuse exactly the item the flag
+        exists for.
+
+        SO WHEN THE FIELD IS ABSENT, THE RULE STANDS DOWN. The only view that removes
+        `project_type` is the one that guarantees OPEX, which makes the check redundant
+        rather than skipped. Anything that removes the field WITHOUT forcing the value would
+        slip past this — that pairing is the contract, and it is why the deletion and the
+        assignment sit two lines apart in design_views rather than in different functions.
+
+        Deliberately does NOT touch `code`: the Admin edit view and both of the Head's
+        delete that field, and a rule reading it would break on all three.
+        """
+        cleaned = super().clean()
+        if not cleaned.get('is_mandatory'):
+            return cleaned
+        if 'project_type' not in self.fields:
+            return cleaned
+        if cleaned.get('project_type') != 'OPEX':
+            raise forms.ValidationError({
+                'is_mandatory': 'Only OPEX items can be marked mandatory. Every active '
+                                'Residential item is already added to every new '
+                                'Residential BOQ, so the flag would do nothing there.',
+            })
+        return cleaned
 
     def clean_code(self):
         value = (self.cleaned_data.get('code') or '').strip().upper()

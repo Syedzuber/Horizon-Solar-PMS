@@ -63,6 +63,7 @@ removal this product has, and it changes what every future sheet is offered.
           <th style="width:11rem;">Category</th>
           <th class="text-center" style="width:6rem;">BOQ rows</th>
           <th class="text-center" style="width:6rem;">Active</th>
+          <th class="text-center" style="width:7rem;">Mandatory</th>
           <th class="text-end" style="width:11rem;"></th>
         </tr>
       </thead>
@@ -83,6 +84,22 @@ removal this product has, and it changes what every future sheet is offered.
               <span class="badge rounded-pill text-bg-success">Active</span>
             {% else %}
               <span class="badge rounded-pill text-bg-secondary">Inactive</span>
+            {% endif %}
+          </td>
+          {% comment %}
+          FLAGGED ROWS ONLY. A badge on all 207 rows saying "No" would be noise on the one
+          column meant to be scannable — the point of this column is to spot the handful of
+          mandatory items at a glance, so the unflagged case renders a muted dash.
+
+          The flag is INERT as of this commit: nothing reads it but this cell and the
+          Admin screen's equivalent. Pre-loading it onto new OPEX BOQs and blocking its
+          removal is a later session.
+          {% endcomment %}
+          <td class="text-center">
+            {% if item.is_mandatory %}
+              <span class="badge rounded-pill text-bg-warning">Mandatory</span>
+            {% else %}
+              <span class="text-muted">—</span>
             {% endif %}
           </td>
           <td class="text-end text-nowrap">
@@ -117,7 +134,7 @@ removal this product has, and it changes what every future sheet is offered.
         </tr>
         {% empty %}
         <tr>
-          <td colspan="8" class="text-center text-muted py-4">
+          <td colspan="9" class="text-center text-muted py-4">
             No catalogue items match this filter.
           </td>
         </tr>

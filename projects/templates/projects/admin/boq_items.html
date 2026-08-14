@@ -62,6 +62,7 @@
       <th class="px-4 py-2 w-36">Category</th>
       <th class="px-4 py-2 w-24 text-center">BOQ rows</th>
       <th class="px-4 py-2 w-24 text-center">Active</th>
+      <th class="px-4 py-2 w-24 text-center">Mandatory</th>
       <th class="px-4 py-2 w-40"></th>
     </tr>
   </thead>
@@ -89,6 +90,21 @@
           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">Inactive</span>
         {% endif %}
       </td>
+      {% comment %}
+      Flagged rows only — a "No" on all 244 rows would drown the handful this column exists
+      to make scannable. OPEX-only in meaning, and the form refuses the combination on a
+      Residential row, so nothing here needs to branch on project_type.
+
+      Inert as of this commit: nothing reads the flag but this cell and the Design Head's
+      catalogue screen.
+      {% endcomment %}
+      <td class="px-4 py-3 text-center">
+        {% if item.is_mandatory %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Mandatory</span>
+        {% else %}
+          <span class="text-gray-300">—</span>
+        {% endif %}
+      </td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
         <a href="{% url 'admin_boq_item_edit' item.pk %}" class="text-gray-500 hover:text-gray-800 inline-flex items-center gap-1 mr-3">
           <i data-lucide="pencil" class="w-4 h-4"></i> Edit
@@ -106,7 +122,7 @@
       </td>
     </tr>
     {% empty %}
-    <tr><td colspan="9" class="px-4 py-8 text-center text-gray-400">No catalogue items match this filter.</td></tr>
+    <tr><td colspan="10" class="px-4 py-8 text-center text-gray-400">No catalogue items match this filter.</td></tr>
     {% endfor %}
   </tbody>
 </table>
