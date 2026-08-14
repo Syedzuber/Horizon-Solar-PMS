@@ -89,6 +89,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'projects.context_processors.notifications',  # Injects unread_count into every template
+                'projects.context_processors.home_url',  # Injects the user's own dashboard URL for the Home control
             ],
         },
     },

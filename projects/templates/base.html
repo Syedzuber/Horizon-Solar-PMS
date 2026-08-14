@@ -48,6 +48,11 @@
     <span class="navbar-brand mb-0">Horizon Solar — PMS</span>
   </div>
   <div class="d-flex align-items-center gap-3">
+    {% if home_url %}
+      <a href="{{ home_url }}" class="nav-link text-white small" title="Home">
+        <i class="bi bi-house-door me-1"></i>Home
+      </a>
+    {% endif %}
     {% if user.profile.role == 'Admin' or user.profile.role == 'PM' or user.profile.role == 'CEO' %}
       <a href="{% url 'program_list' %}" class="nav-link text-white small" title="Programs">
         <i class="bi bi-diagram-3 me-1"></i>Programs
