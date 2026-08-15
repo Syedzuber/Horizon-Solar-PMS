@@ -11,7 +11,7 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction, IntegrityError
-from django.db.models import Count, DecimalField, Exists, F, Max, Min, OuterRef, Prefetch, Q, Sum, Value
+from django.db.models import Count, DecimalField, Exists, F, Max, Min, OuterRef, Prefetch, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
@@ -33,6 +33,9 @@ from .models import (
     TaskDurationTemplate,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     Program, program_rollup_annotations, get_program_rollup,
+    DesignAssignment,
+    DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_QC_FAILED, DESIGN_RELEASED,
 )
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
@@ -1534,6 +1537,46 @@ def dashboard_scm(request):
     })
 
 
+# ---------------------------------------------------------------------------
+# CEO project-card fields (Session 1)
+# ---------------------------------------------------------------------------
+# POSITION OF THE DESIGN TASK IN THE RESIDENTIAL TEMPLATE.
+#
+# This is a POSITIONAL lookup, and it is positional because nothing better exists:
+# Task carries no milestone_key, no template FK and no slug, so the only handles are
+# the task_name string ('Design') or the (phase_order, task_order) pair. The pair is
+# used here because a rename is far likelier than a reorder — but BOTH are fragile,
+# and the debt is recorded in SECONDARY_FINDINGS.md. If a stable key is ever added to
+# Task, this constant pair is the call site to retire.
+#
+# The numbers come from build_residential_phases() in utils.py: phase 3 is 'Design'
+# and its task 1 is the 'Design' task. THEY ARE ONLY TRUE FOR RESIDENTIAL — phase 3 of
+# an OPEX/CAPEX project is whatever a PM happened to create third. The subquery below
+# therefore carries its own project_type term so it cannot match a non-Residential row
+# even if this branch were called for one.
+RESIDENTIAL_DESIGN_PHASE_ORDER = 3
+RESIDENTIAL_DESIGN_TASK_ORDER  = 1
+
+# DesignAssignment statuses that mean the DESIGNER HAS HANDED THE ARTIFACT OVER — the
+# tender-side equivalent of the Residential design task being Done.
+#
+# `qc_failed` is included deliberately: the artifact WAS submitted, and it came back.
+# Excluding it would make the pill flip Done -> Not Done when QC rejects, which reads
+# as "the designer un-submitted", not "the work bounced".
+#
+# The three Arka statuses (arka_submitted / awaiting_head_arka / arka_rejected) are
+# deliberately EXCLUDED. Arka is the earlier capacity-submission gate, not artifact
+# submission; the two exist as separate statuses precisely so a dashboard can tell
+# which one is holding a tender up (see the note at models.py:1781-1785).
+TENDER_DESIGN_SUBMITTED_STATUSES = (
+    DESIGN_ARTIFACTS_UPLOADED,
+    DESIGN_IN_QC,
+    DESIGN_AWAITING_HEAD_QC,
+    DESIGN_QC_FAILED,
+    DESIGN_RELEASED,
+)
+
+
 def _get_ceo_dashboard_context(context=None):
     """
     Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
@@ -1588,12 +1631,67 @@ def _get_ceo_dashboard_context(context=None):
         due_date__isnull=False,
         status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
     )
+    # -- Card field subqueries (Session 1) -----------------------------------
+    # All four card fields are annotations on THIS queryset. None of them may be
+    # resolved in the template by crossing a relation ({{ p.design_assignment.status }}
+    # and friends), which would cost one query per card — 26 cards x N fields.
+    #
+    # Design, RESIDENTIAL side. Selects the STATUS of the design task rather than
+    # testing Exists(status=Done), because the two differ under duplicate rows:
+    # Exists answers "is ANY task at (3,1) Done", which would flip on whichever
+    # duplicate happened to be completed. order_by('pk')[:1] pins it to the lowest
+    # pk, so the pill cannot change between page loads. No matching row yields NULL,
+    # which compares unequal to Task.DONE below — i.e. a missing task reads Not Done
+    # rather than raising or rendering blank.
+    residential_design_status_subq = Subquery(
+        Task.objects.filter(
+            phase__project=OuterRef('pk'),
+            # Type term belongs INSIDE the subquery: it makes the positional lookup
+            # incapable of matching an OPEX/CAPEX row, rather than relying on the
+            # caller to branch correctly.
+            phase__project__project_type='Residential',
+            phase__phase_order=RESIDENTIAL_DESIGN_PHASE_ORDER,
+            task_order=RESIDENTIAL_DESIGN_TASK_ORDER,
+        ).order_by('pk').values('status')[:1]
+    )
+    # Design, TENDER side. DesignAssignment is a OneToOne to Project, so there is at
+    # most one row and no tie-break is needed — Exists is enough.
+    tender_design_subq = DesignAssignment.objects.filter(
+        project=OuterRef('pk'),
+        project__project_type__in=['OPEX', 'CAPEX'],
+        status__in=TENDER_DESIGN_SUBMITTED_STATUSES,
+    )
+    # Next task: first not-Done task in template order. 'pk' is the final tie-break so
+    # two tasks sharing a (phase_order, task_order) cannot reorder between loads.
+    # NAME ONLY — no date. Task.due_date is null on every open task in production, and
+    # compute_gantt_schedule() is anchored to activated_at with no notion of today, so
+    # it renders elapsed projections as if they were commitments. Neither is shown.
+    next_task_name_subq = Subquery(
+        Task.objects
+        .filter(phase__project=OuterRef('pk'))
+        .exclude(status=Task.DONE)
+        .order_by('phase__phase_order', 'task_order', 'pk')
+        .values('task_name')[:1]
+    )
     projects_qs = (
         Project.objects
         .filter(is_deleted=False, status__in=active_statuses, **_context_filter(context))
         .annotate(
             has_blocked_task=Exists(blocked_subq),
             has_at_risk_task=Exists(at_risk_subq),
+            residential_design_status=residential_design_status_subq,
+            tender_design_submitted=Exists(tender_design_subq),
+            next_task_name=next_task_name_subq,
+            # The two counts ride ONE phases__tasks LEFT JOIN. Exists/Subquery add no
+            # rows, so nothing fans out against them or against each other.
+            #
+            # Total is annotated (rather than a pending count) so that Pending is
+            # derived as total - done: that makes Pending + Completed == total true by
+            # construction. A Count(filter=~Q(phases__tasks__status=DONE)) would not be
+            # equivalent — a negated Q across a multi-valued relation takes Django's
+            # exclude() subquery path instead of a plain SQL FILTER.
+            task_total_count=Count('phases__tasks'),
+            task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)),
         )
         .order_by('target_commissioning_date', 'project_id')
     )
@@ -1620,7 +1718,34 @@ def _get_ceo_dashboard_context(context=None):
             badge = 'on_time'
             proj_on_time += 1
 
-        project_cards.append({'project': p, 'badge': badge, 'is_delayed': is_delayed})
+        # -- Card fields (Session 1) — all read from annotations, no DB hit here --
+        #
+        # BRANCH BY project_type. The two design sources are not interchangeable: the
+        # Residential one is a task at a template position, the tender one is the
+        # DesignAssignment state machine. Reading the wrong one for a project type is
+        # the failure this branch exists to prevent. (Both subqueries are also
+        # type-constrained internally, so a mistake here still cannot produce a false
+        # Done — the two guards are deliberately redundant.)
+        if p.project_type == 'Residential':
+            design_done = (p.residential_design_status == Task.DONE)
+        else:
+            design_done = p.tender_design_submitted
+
+        # Deliberately a TWO-WAY PARTITION: Pending + Completed == the project's total
+        # task count, always, for both task_type values. This does NOT reconcile with
+        # the header Tasks card, whose four rows (Unassigned / In Progress / Completed
+        # / Overdue) mix an assignment predicate with status predicates and therefore
+        # both overlap and under-cover — see CEO_DASHBOARD_AUDIT.md D12/D13. The two
+        # are answering different questions and are not meant to add up.
+        project_cards.append({
+            'project':     p,
+            'badge':       badge,
+            'is_delayed':  is_delayed,
+            'design_done': design_done,
+            'pending':     p.task_total_count - p.task_done_count,
+            'completed':   p.task_done_count,
+            'next_task':   p.next_task_name,   # None when nothing is open — template renders an em dash
+        })
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
     task_agg = Task.objects.filter(

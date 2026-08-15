@@ -40,6 +40,30 @@
     font-size: .73rem; font-weight: 700; white-space: nowrap;
   }
 
+  /* ── Project card facts: 2x2 grid (Design / Pending / Completed / Next task) ── */
+  .card-facts {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: .35rem .75rem;
+    margin: .6rem 0; padding: .55rem 0;
+    border-top: 1px solid #f0f0f0; border-bottom: 1px solid #f0f0f0;
+  }
+  .fact       { display: flex; align-items: baseline; gap: .3rem; font-size: .8rem; min-width: 0; }
+  .fact-lbl   { color: #6b7280; }
+  .fact-val   { font-weight: 700; color: #1e293b; }
+  /* Task names run long ("OCR, Documentation & Verification"); min-width:0 on both the
+     grid cell and this span is what actually lets ellipsis engage inside a grid track. */
+  .fact-name  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+                font-weight: 600; color: #1e293b; }
+  /* Done reuses the on-time green; Not Done is neutral grey, NOT red — a design that is
+     not yet finished is a normal state on a live project, not a fault to flag. */
+  .design-pill {
+    display: inline-flex; align-items: center;
+    padding: .1rem .45rem; border-radius: 999px;
+    font-size: .72rem; font-weight: 700; white-space: nowrap;
+  }
+  .design-pill.done     { background: #d1fae5; color: #065f46; }
+  .design-pill.not-done { background: #f3f4f6; color: #374151; }
+
   /* ── Section headers ── */
   .section-label {
     font-size: .7rem; font-weight: 700; color: #9ca3af;
@@ -654,6 +678,44 @@
             &nbsp;·&nbsp;{{ p.project_type }}
             {% if p.capacity_kw %}&nbsp;·&nbsp;{{ p.capacity_kw }} kW{% endif %}
           </p>
+
+          {% comment %}
+            Card facts: Design / Pending / Completed / Next task.
+
+            Every value here comes from an annotation on projects_qs, resolved in the
+            card-list query. Do NOT swap one for a relation lookup on the project —
+            design_assignment.status, phases.all and the like are one query per card,
+            which at 26 cards takes this page from 12 queries to ~194.
+
+            USE {% templatetag openblock %} comment {% templatetag closeblock %} HERE, NOT THE HASH FORM. Django's hash comment cannot
+            span lines: a multi-line one is not a comment at all, and any variable
+            syntax inside it is parsed and EXECUTED. Writing the warning above in a
+            multi-line hash comment is what first introduced the 16 extra queries it
+            warns about.
+          {% endcomment %}
+          <div class="card-facts">
+            <div class="fact">
+              <span class="fact-lbl">Design</span>
+              {% if card.design_done %}
+                <span class="design-pill done">Done</span>
+              {% else %}
+                <span class="design-pill not-done">Not Done</span>
+              {% endif %}
+            </div>
+            <div class="fact">
+              <span class="fact-lbl">Pending:</span>
+              <span class="fact-val">{{ card.pending }}</span>
+            </div>
+            <div class="fact">
+              <span class="fact-lbl">Completed:</span>
+              <span class="fact-val">{{ card.completed }}</span>
+            </div>
+            <div class="fact">
+              <span class="fact-lbl flex-shrink-0">Next:</span>
+              {# Name only — no date. See the note on next_task_name_subq in views.py. #}
+              <span class="fact-name">{{ card.next_task|default_if_none:"—" }}</span>
+            </div>
+          </div>
 
           {# Target date #}
           <div class="d-flex align-items-center gap-1" style="font-size:.8rem;">
