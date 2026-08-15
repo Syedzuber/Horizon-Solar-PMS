@@ -57,6 +57,17 @@ authority and both locks on the POST regardless of what this template chose to r
        class="btn btn-sm btn-outline-secondary">
       <i class="bi bi-arrow-left me-1"></i>Design workspace
     </a>
+    {% comment %}
+    Session E1 — download the sheet as .xlsx. OUTSIDE every `can_edit` block on purpose:
+    the locks stop writes, and a BOQ that is with review or committed to a purchase is
+    still one a reviewer needs to read offline. Deliberately NOT wrapped in `{% if boq %}`
+    the way History is either — a site with no BOQ row yet still yields a real file, with
+    the mandatory rows blank, and that is 93 of the 97 OPEX sites.
+    {% endcomment %}
+    <a href="{% url 'opex_boq_download' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-download me-1"></i>Download
+    </a>
     {% if boq %}
       <a href="{% url 'boq_history' project.project_id %}"
          class="btn btn-sm btn-outline-secondary">History</a>

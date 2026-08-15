@@ -4850,6 +4850,266 @@ def opex_boq_entry(request, project_id):
     })
 
 
+# ---------------------------------------------------------------------------
+# Session E1 — OPEX BOQ download
+#
+# This site's BOQ as an .xlsx: the item specification carried as locked columns,
+# quantity the only editable one. The designer fills quantities offline and
+# Session E2 reads the file back.
+#
+# THE CONSTANTS BELOW ARE THE CONTRACT BETWEEN THE TWO HALVES, which is why they
+# are named and shared rather than inlined into the writer the way a one-off
+# export would be. E2 imports them; two modules re-typing "Quantity" or "BOQ" is
+# precisely how a renamed column becomes a silently empty import.
+#
+# A SEPARATE VIEW FROM opex_boq_entry, AND GATED DIFFERENTLY. The picker is the
+# author's screen and takes user_can_edit_project_boq(); this is a read, so it
+# takes the READ gate and NEITHER LOCK. A QC reviewer or the Design Head working
+# through a package offline needs the sheet, and a BOQ that is frozen against
+# writes is still a BOQ to read.
+# ---------------------------------------------------------------------------
+
+#: Data-sheet columns in emission order — AND THE ORDER SESSION E2 EXPECTS.
+#: (header, key), the same shape as _BULK_COLUMNS above and for the same reason:
+#: one definition drives the writer here and the header->value mapping there.
+#:
+#: `quantity` IS LAST DELIBERATELY — it is the one editable column, so it sits at
+#: the right-hand edge where a designer fills down a sheet.
+#:
+#: `mandatory` is its OWN COLUMN rather than a marker inside `code` or
+#: `description`. Those two are the matching key and a locked spec field; a marker
+#: in either would corrupt the very thing it was annotating, and E2 matches rows
+#: on `code` exactly.
+BOQ_DOWNLOAD_COLUMNS = [
+    ('Code',        'code'),
+    ('Description', 'description'),
+    ('Unit',        'unit'),
+    ('Category',    'category'),
+    ('Mandatory',   'mandatory'),
+    ('Quantity',    'quantity'),
+]
+
+#: 1-based column index of the one editable column. DERIVED from the list above,
+#: never written as a literal — reordering the columns must not be able to leave
+#: the unlocked cell pointing at a spec field.
+BOQ_DOWNLOAD_QUANTITY_COL = [k for _h, k in BOQ_DOWNLOAD_COLUMNS].index('quantity') + 1
+
+#: Sheet names, shared with E2 for the same reason the columns are: its parser
+#: reads BOQ_DOWNLOAD_SHEET by exact name and skips the other two by theirs.
+BOQ_DOWNLOAD_SHEET      = 'BOQ'
+BOQ_DOWNLOAD_OFF_SHEET  = 'Not In Catalogue'
+BOQ_DOWNLOAD_INFO_SHEET = 'Instructions'
+
+
+def _boq_download_row(row, mandatory_ids):
+    """One BOQ row as the data sheet's cell values, in BOQ_DOWNLOAD_COLUMNS order.
+
+    TAKES EITHER of the two things the data sheet carries, because the sheet
+    interleaves them and the grouping helper sorts them together:
+
+      * a BOQItem     — a row actually on this BOQ. `code` comes from the linked
+                        master; `description` and `unit` come from the ROW, which
+                        holds the point-in-time snapshot taken when it was added,
+                        not from the master's current text.
+      * a BOQItemMaster — a mandatory catalogue row this BOQ does not carry yet,
+                        composed in for display exactly as the picker's GET does.
+                        Nothing is written for it; its quantity is blank.
+
+    A BLANK QUANTITY IS None, NEVER 0. openpyxl writes None as a genuinely empty
+    cell, and E2 has to tell "nobody has entered this yet" apart from "this site
+    needs none of it" — a zero is a statement, an empty cell is an absence.
+    """
+    if isinstance(row, BOQItem):
+        return {
+            'code':        row.item_master.code,
+            'description': row.description,
+            'unit':        row.uom,
+            'category':    row.category,
+            'mandatory':   'Yes' if row.item_master_id in mandatory_ids else '',
+            'quantity':    row.boq_quantity,
+        }
+    return {
+        'code':        row.code,
+        'description': row.description,
+        'unit':        row.unit,
+        'category':    row.category,
+        'mandatory':   'Yes',
+        'quantity':    None,
+    }
+
+
+@login_required
+def opex_boq_download(request, project_id):
+    """Download this site's OPEX BOQ as .xlsx — specification locked, quantity editable.
+
+    THE READ GATE, NOT THE WRITE GATE. Downloading is reading. Gating this on
+    user_can_edit_project_boq() would give the sheet to the assigned designer and
+    to nobody else — locking out the QC reviewer named on the site and the Design
+    Head, who are exactly the people who need to review a package away from the
+    screen. user_can_view_project_boq() is the gate boq_detail and the picker both
+    use to decide who may SEE a BOQ, and this shows the same rows.
+
+    NO LOCK CHECK, DELIBERATELY. Both locks stop WRITES. A design-locked BOQ is
+    with review and a group-locked one is committed to a purchase; in both states
+    reading the sheet is the point, not the risk. This is why the download control
+    sits outside the template's `can_edit` block rather than inside it.
+
+    CREATES NOTHING. A site with no BOQ row at all — 93 of the 97 OPEX sites —
+    yields a file carrying just the mandatory rows, blank. It must NOT bring a BOQ
+    into existence, for the same reason the picker's GET must not: a read by a
+    reviewer, or a download nobody acts on, would otherwise mutate the site.
+    split_opex_boq_rows() returns ([], []) for a null BOQ, so this needs no special
+    case beyond never calling BOQ.objects.create().
+
+    SHEET PROTECTION IS AN AFFORDANCE, NOT A SECURITY BOUNDARY. It stops a
+    designer damaging the specification by accident and shows them which column is
+    theirs. It is trivially removable — any zip tool, any "unprotect" script, or a
+    save through a tool that ignores it — and it is not relied on anywhere: E2
+    re-derives every specification field from BOQItemMaster server-side and reads
+    nothing but `code` and `quantity` from the file. Do not add a check that trusts
+    what the file says about an item.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+
+    # OPEX only, the same refusal the picker makes and for the same reason: a
+    # Residential BOQ is a different sheet with a different catalogue behind it.
+    if project.project_type != 'OPEX':
+        raise Http404('The BOQ download is for OPEX sites. Residential BOQs are read on '
+                      'the standard BOQ screen.')
+
+    if not user_can_view_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    catalogue      = get_opex_boq_catalogue()
+    category_order = opex_catalogue_category_order()
+    added_on, added_off = split_opex_boq_rows(boq, {m.pk for m in catalogue})
+
+    # THE SAME COMPOSITION THE PICKER'S GET PERFORMS (see opex_boq_entry), so the
+    # file and the screen carry the same set: mandatory rows this BOQ does not hold
+    # yet appear with a blank quantity. Read once and reused for both the missing
+    # list and the marker, so a single query answers both questions.
+    mandatory         = get_opex_mandatory_items()
+    mandatory_ids     = {m.pk for m in mandatory}
+    on_master_ids     = {row.item_master_id for row in added_on}
+    missing_mandatory = [m for m in mandatory if m.pk not in on_master_ids]
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Protection
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = BOQ_DOWNLOAD_SHEET
+    ws.append([header for header, _key in BOQ_DOWNLOAD_COLUMNS])
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    # GROUPED BY CATEGORY IN CATALOGUE ORDER, through the helper the picker and the
+    # Part 9 review panel already use. BOQItem and BOQItemMaster both carry
+    # `category`, so the composed mandatory rows sort into their own categories
+    # rather than trailing at the end — which is what the picker's renderSheet()
+    # does with the same payload. Category order comes from
+    # opex_catalogue_category_order() and is not derived a second time here.
+    for _category, rows in group_boq_rows_by_category(added_on + missing_mandatory,
+                                                      category_order):
+        for row in rows:
+            values = _boq_download_row(row, mandatory_ids)
+            ws.append([values[key] for _header, key in BOQ_DOWNLOAD_COLUMNS])
+
+    # Spec cells need no explicit lock — openpyxl's default cell protection is
+    # already locked=True, and that flag does nothing at all until the sheet itself
+    # is protected on the last line here. Only the quantity column is opened up.
+    for excel_row in range(2, ws.max_row + 1):
+        ws.cell(row=excel_row, column=BOQ_DOWNLOAD_QUANTITY_COL).protection = \
+            Protection(locked=False)
+
+    ws.freeze_panes = 'A2'
+    for column_letter, width in (('A', 11), ('B', 62), ('C', 9),
+                                 ('D', 18), ('E', 11), ('F', 12)):
+        ws.column_dimensions[column_letter].width = width
+    ws.protection.sheet = True
+
+    # ---- Sheet 2: rows that are not in the OPEX catalogue -------------------
+    # OMITTED ENTIRELY WHEN THERE ARE NONE — an empty sheet headed "Not In
+    # Catalogue" reads as something having gone wrong.
+    #
+    # THEY CANNOT GO ON THE DATA SHEET. E2 rejects a whole file on any code that
+    # is not in the active OPEX catalogue, so putting them there would make the
+    # download produce a file its own upload refuses. They are still shown,
+    # because a designer's file that silently omits live rows of their BOQ is not
+    # their BOQ.
+    #
+    # NO CODE COLUMN, matching the picker's own off-catalogue panel. These rows
+    # can carry a real, resolvable Residential code (ITM-001 and friends, on sites
+    # seeded before the OPEX catalogue existed) — printing it beside a "not read on
+    # upload" heading invites someone to paste it onto the data sheet, which is the
+    # one mistake this sheet exists to prevent.
+    if added_off:
+        off = wb.create_sheet(BOQ_DOWNLOAD_OFF_SHEET)
+        off.append(['These rows are on this BOQ but are NOT in the OPEX catalogue.'])
+        off.append(['Shown for reference only. They are NOT read when you upload this '
+                    'file, and uploading does not change or remove them.'])
+        off.append(['To change or remove them, use the BOQ screen.'])
+        off.append([])
+        off.append(['Description', 'Unit', 'Category', 'Quantity'])
+        for cell in off[5]:
+            cell.font = Font(bold=True)
+        for _category, rows in group_boq_rows_by_category(added_off, category_order):
+            for row in rows:
+                off.append([row.description, row.uom, row.category, row.boq_quantity])
+        for column_letter, width in (('A', 62), ('B', 9), ('C', 18), ('D', 12)):
+            off.column_dimensions[column_letter].width = width
+        off.protection.sheet = True
+
+    # ---- Sheet 3: instructions ----------------------------------------------
+    # Kept OFF the data sheet, the same convention opex_site_bulk_template uses,
+    # so no guidance line can ever be read as a BOQ row. This copy is the
+    # user-facing contract for the upload half.
+    info = wb.create_sheet(BOQ_DOWNLOAD_INFO_SHEET)
+    info.append([f'BOQ — {project.project_id}'])
+    if project.program_id:
+        info.append([f'{project.program.name} ({project.program.short_tender_code})'])
+    info.append([])
+    info.append(['How this file is used'])
+    info.append([])
+    info.append(['1.', 'Only the Quantity column is read. Code, Description, Unit and '
+                       'Category are the item specification and are locked — they are '
+                       're-read from the catalogue on upload, so editing them here '
+                       'changes nothing.'])
+    info.append(['2.', 'If the file contains an item code that is not in the OPEX '
+                       'catalogue, THE WHOLE FILE IS REJECTED and nothing is imported. '
+                       'The error names every row and code at fault.'])
+    info.append(['3.', 'A row you leave out of the file is LEFT ALONE. Its quantity on '
+                       'the BOQ is unchanged.'])
+    info.append(['4.', 'UPLOADING NEVER DELETES ANYTHING. Deleting rows in this '
+                       'spreadsheet has no effect. Remove items on the BOQ screen '
+                       'instead — that is the only place a row can be taken off.'])
+    info.append(['5.', 'Items marked Mandatory are put back if they are missing, and a '
+                       'message says which. Every mandatory item needs a quantity before '
+                       'the BOQ can be marked complete.'])
+    info.append(['6.', f'The other sheets are not read. "{BOQ_DOWNLOAD_OFF_SHEET}" is '
+                       f'reference only, and this sheet is ignored.'])
+    info.append([])
+    info.append(['A blank Quantity means no quantity has been entered. It is not the '
+                 'same as 0 — enter 0 only if this site genuinely needs none.'])
+    info.column_dimensions['A'].width = 4
+    info.column_dimensions['B'].width = 96
+    info.protection.sheet = True
+
+    # Windows rejects most punctuation in a filename, and project_id is
+    # user-supplied at site creation — sanitised rather than trusted.
+    safe_id = re.sub(r'[^A-Za-z0-9._-]', '_', project.project_id)
+    resp = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    resp['Content-Disposition'] = f'attachment; filename="BOQ_{safe_id}.xlsx"'
+    wb.save(resp)
+    return resp
+
+
 @login_required
 def boq_submit(request, project_id):
     """

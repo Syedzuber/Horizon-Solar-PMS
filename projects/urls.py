@@ -206,6 +206,10 @@ urlpatterns = [
     # one is pre-populated. 404s on a Residential site; boq_detail redirects the OPEX
     # designer here, and everyone else on an OPEX site still reads the sheet on boq_detail.
     path('projects/<str:project_id>/boq/entry/',             views.opex_boq_entry,       name='opex_boq_entry'),        # OPEX Design only
+    # SESSION E1 — the OPEX BOQ as a spreadsheet. A READ, so unlike boq/entry/ it takes
+    # the BOQ read gate (designer, named QC reviewer, Design Head, PM, SCM/Admin/CEO) and
+    # neither lock — a frozen BOQ is still one to read. 404s on a Residential site.
+    path('projects/<str:project_id>/boq/download/',          views.opex_boq_download,    name='opex_boq_download'),     # OPEX, BOQ readers
     path('projects/<str:project_id>/boq/submit/',            views.boq_submit,           name='boq_submit'),            # Design only
     path('projects/<str:project_id>/boq/acknowledge/',       views.boq_acknowledge,      name='boq_acknowledge'),       # SCM only
     path('projects/<str:project_id>/boq/request-revision/',  views.boq_request_revision, name='boq_request_revision'),  # PM only
