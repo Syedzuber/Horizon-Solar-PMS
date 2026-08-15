@@ -73,7 +73,7 @@ from .models import (
     DEFAULT_REDO_BY_CATEGORY, default_redo_for_category,
     # Part 11 — the OPEX catalogue helpers, so the read-only BOQ panel on the review
     # screen groups the sheet exactly the way the entry screen does.
-    get_opex_boq_catalogue, opex_catalogue_category_order,
+    get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
     # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
     # this module. Read here directly; the helpers above stay the only readers elsewhere.
@@ -1598,9 +1598,15 @@ def _designer_boq(project):
 def _boq_review_panel(boq):
     """Read-only context for the BOQ panel on the Part 9 package review screen (Part 11).
 
-    ONLY WHAT THE DESIGNER ADDED. The reviewer sees this site's bill, not the 207-item
+    ONLY WHAT IS ON THIS SITE'S SHEET. The reviewer sees this site's bill, not the 207-item
     catalogue it was drawn from — the point of the picker is that the sheet is short and
-    every row on it is deliberate, and the review has to show that same thing.
+    the review has to show that same thing.
+
+    NOT EVERY ROW IS THE DESIGNER'S CHOICE, which this used to claim and no longer can.
+    Items flagged mandatory on the catalogue are composed onto every OPEX BOQ and cannot be
+    removed, so `boq_mandatory_ids` comes back with the rows and the template marks them.
+    A reviewer judging whether the designer picked the right items has to be able to tell
+    which ones they actually picked.
 
     A READ, LIKE EVERYTHING ELSE IN THIS MODULE. It builds no form and writes nothing;
     settled decision 4 stands. It borrows the entry screen's own grouping helpers from
@@ -1609,7 +1615,8 @@ def _boq_review_panel(boq):
     """
     if boq is None:
         return {'boq_by_category': [], 'boq_off_catalogue': [],
-                'boq_row_count': 0, 'boq_quantity_count': 0}
+                'boq_row_count': 0, 'boq_quantity_count': 0,
+                'boq_mandatory_ids': set()}
 
     category_order = opex_catalogue_category_order()
     catalogue_ids  = {m.pk for m in get_opex_boq_catalogue()}
@@ -1618,6 +1625,9 @@ def _boq_review_panel(boq):
     return {
         'boq_by_category':    group_boq_rows_by_category(on_rows, category_order),
         'boq_off_catalogue':  group_boq_rows_by_category(off_rows, category_order),
+        # Only catalogue-linked rows can be mandatory, so this is never consulted for the
+        # off-catalogue half — an ad-hoc row has no master to carry the flag.
+        'boq_mandatory_ids':  {m.pk for m in get_opex_mandatory_items()},
         'boq_row_count':      len(on_rows) + len(off_rows),
         'boq_quantity_count': sum(1 for row in on_rows + off_rows
                                   if row.boq_quantity and row.boq_quantity > 0),
@@ -2339,6 +2349,26 @@ def design_boq_complete(request, project_id):
     if boq is None or not boq.items.filter(boq_quantity__gt=0).exists():
         return _back(f'{project.project_id}: enter a quantity for at least one BOQ item '
                      f'before marking the BOQ complete.')
+
+    # AND A QUANTITY ON EVERY MANDATORY ITEM, which is a stricter thing than the guard
+    # above and sits beside it rather than replacing it. Without this the flag would be
+    # decorative: aggregate_group_boq() filters boq_quantity__gt=0, so a mandatory row left
+    # blank contributes nothing to the procurement total and is indistinguishable from the
+    # item never having been mandatory at all.
+    #
+    # SCOPED TO ACTIVE MASTERS through get_opex_mandatory_items(). An item deactivated
+    # while still carrying the flag must not strand this BOQ — the picker would not offer
+    # it, so the designer could not satisfy a guard that demanded it. One query for the
+    # quantified set, not one per row.
+    quantified = set(
+        boq.items.filter(boq_quantity__gt=0, item_master__isnull=False)
+        .values_list('item_master_id', flat=True))
+    unquantified = [m for m in get_opex_mandatory_items() if m.pk not in quantified]
+    if unquantified:
+        return _back(
+            f'{project.project_id}: every mandatory item needs a quantity before the BOQ '
+            f'can be marked complete — still missing ' +
+            ', '.join(f'{m.code} {m.description}' for m in unquantified) + '.')
 
     # Optional note for the reviewer, captured at the moment of completion and never
     # afterwards. Read HERE rather than in each caller because both submitting controls
@@ -4998,6 +5028,16 @@ def design_boq_catalogue_toggle(request, item_id):
         return HttpResponseForbidden(_CATALOGUE_FORBIDDEN)
 
     item = _opex_catalogue_item(item_id)
+
+    # A FLAGGED ITEM CANNOT BE DEACTIVATED WHILE STILL FLAGGED, the same rule and the same
+    # wording as the Admin screen's toggle. Deactivating would leave a mandatory item the
+    # picker never offers, which the completion guard then has to ignore to avoid stranding
+    # every BOQ — a contradiction better refused than absorbed. Reactivation is unaffected.
+    if item.is_active and item.is_mandatory:
+        messages.error(request, f'Catalogue item "{item.code}" is marked mandatory — clear '
+                                f'the mandatory flag before deactivating it.')
+        return redirect('design_boq_catalogue')
+
     item.is_active = not item.is_active
     item.save(update_fields=['is_active', 'updated_at'])
 

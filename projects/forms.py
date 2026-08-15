@@ -541,6 +541,18 @@ class BOQItemMasterForm(forms.ModelForm):
         cleaned = super().clean()
         if not cleaned.get('is_mandatory'):
             return cleaned
+        # ACTIVE-NESS IS TESTED FIRST, AND ABOVE THE `project_type` EARLY RETURN BELOW.
+        # The Design Head's catalogue screens delete `project_type` from the form but keep
+        # `is_active`; placing this after that return would leave the combination reachable
+        # on exactly the screen most likely to produce it. Guarded on field presence for
+        # the same reason the rule below is — a form that does not offer the field cannot
+        # be judged on it.
+        if 'is_active' in self.fields and not cleaned.get('is_active'):
+            raise forms.ValidationError({
+                'is_mandatory': 'A mandatory item cannot be inactive. The picker offers '
+                                'active items only, so the flag could never be satisfied — '
+                                'clear one or the other.',
+            })
         if 'project_type' not in self.fields:
             return cleaned
         if cleaned.get('project_type') != 'OPEX':

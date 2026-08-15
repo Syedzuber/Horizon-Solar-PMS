@@ -188,7 +188,18 @@ reviewer and the designer are looking at the same document in the same sequence.
             {% for row in rows %}
               <tr class="small">
                 <td class="text-muted">{{ row.item_master.code }}</td>
-                <td style="line-height:1.3">{{ row.description }}</td>
+                <td style="line-height:1.3">
+                  {{ row.description }}
+                  {% comment %}
+                  Marked because it is NOT the designer's choice — a mandatory catalogue
+                  item is composed onto every OPEX BOQ and cannot be removed. A reviewer
+                  judging whether the right items were picked has to be able to tell the
+                  picked ones from the imposed ones.
+                  {% endcomment %}
+                  {% if row.item_master_id in boq_mandatory_ids %}
+                    <span class="badge rounded-pill text-bg-warning ms-1">Mandatory</span>
+                  {% endif %}
+                </td>
                 <td class="text-muted">{{ row.uom }}</td>
                 <td class="text-end">
                   {% if row.boq_quantity %}<strong>{{ row.boq_quantity|floatformat:"-2" }}</strong>

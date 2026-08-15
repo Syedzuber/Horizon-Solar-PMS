@@ -24,7 +24,7 @@ from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
     Vendor, VendorCategory, VendorBrand,
     BOQ, BOQItem, BOQItemMaster, BOQRevision, Notification, get_standard_boq_items,
-    get_opex_boq_catalogue, opex_catalogue_category_order,
+    get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
@@ -4662,6 +4662,24 @@ def opex_boq_entry(request, project_id):
                 chosen.append(int(raw))
         chosen_set = set(chosen)
 
+        # MANDATORY ITEMS ARE RE-ADDED, NOT ENFORCED BY REFUSING THE SAVE. Removal on this
+        # screen is expressed as ABSENCE from the POST, so the server cannot tell a
+        # deliberate removal from a page that rendered before the item was flagged, or from
+        # a truncated POST. Rejecting would therefore fail saves for something the designer
+        # never did and could not have seen, and this view has no validation-error render —
+        # it would have to discard the whole posted sheet to say so.
+        #
+        # UNIONED HERE, BEFORE THE TRANSACTION, so nothing downstream needs a special case:
+        # the delete loop skips these pks because they are now in `chosen_set`, and the
+        # create/update loop creates any that are missing and leaves the rest alone.
+        mandatory = get_opex_mandatory_items()
+        readded   = []
+        for master in mandatory:
+            if master.pk not in chosen_set:
+                chosen.append(master.pk)
+                chosen_set.add(master.pk)
+                readded.append(master)
+
         # Off-catalogue rows are identified by BOQItem pk, not master pk — an ad-hoc row
         # has no master. Only rows on THIS BOQ are addressable.
         keep_off = {int(raw) for raw in request.POST.getlist('keep_row') if raw.isdigit()}
@@ -4729,6 +4747,20 @@ def opex_boq_entry(request, project_id):
                     row.boq_quantity = _quantity(f'qty_row_{row.pk}', row.boq_quantity)
                     row.save(update_fields=['boq_quantity'])
 
+        # SAY SO WHEN A ROW WAS PUT BACK. Silent re-add is the correct behaviour and a
+        # confusing one at the same time: a designer who removed a row and watched it
+        # reappear with no explanation would reasonably file it as a bug. Reported, never
+        # blocking. Empty on a normal save — the browser posts every row the sheet renders,
+        # including the mandatory ones the GET composed in, so this fires only when one was
+        # actually dropped or the page predates the flag.
+        if readded:
+            messages.info(
+                request,
+                'Put back ' +
+                ', '.join(f'{m.code} {m.description}' for m in readded) +
+                ' — marked mandatory in the catalogue, so every OPEX BOQ carries it. '
+                'Enter a quantity before marking the BOQ complete.')
+
         if action == 'mark_complete':
             # design_boq_complete owns the attempt stamp and every precondition on it —
             # the assignment status, an approved Arka, "not already stamped", and at least
@@ -4746,21 +4778,44 @@ def opex_boq_entry(request, project_id):
     # The catalogue, as the picker's JS consumes it. Items already on the sheet are still
     # sent — the JS filters them out of the results and needs them to render the sheet
     # after an add or a remove without a round trip.
+    # `mand` is what lets renderSheet() mark the row and withhold its remove button. It is
+    # a BooleanField, so json.dumps emits a bare true/false — unlike `desc` and `cat` it
+    # carries no author-supplied text and adds nothing to what the |safe payload already
+    # trusts.
     catalogue_json = json.dumps([
         {'id': m.pk, 'code': m.code, 'cat': m.category,
-         'desc': m.description, 'unit': m.unit}
+         'desc': m.description, 'unit': m.unit, 'mand': m.is_mandatory}
         for m in catalogue
     ])
-    added_json = json.dumps([
-        {'id': row.item_master_id, 'qty': ('' if row.boq_quantity is None
-                                           else f'{row.boq_quantity.normalize():f}')}
-        for row in added_on
-    ])
+
+    # Mandatory items this sheet does not carry yet are composed in FOR DISPLAY ONLY, with
+    # a blank quantity. NOTHING IS WRITTEN HERE, for the same reason the POST path creates
+    # the BOQ rather than the GET: a page load must not bring rows into existence on a site
+    # nobody has entered anything for, and a QC reviewer or PM opening this screen
+    # read-only must not mutate the sheet by looking at it. They persist on the first save,
+    # because renderSheet() emits a hidden `item` input for every row in this payload and
+    # the POST union would put them back regardless.
+    on_master_ids     = {row.item_master_id for row in added_on}
+    missing_mandatory = [m for m in get_opex_mandatory_items()
+                         if m.pk not in on_master_ids]
+
+    added_json = json.dumps(
+        [{'id': row.item_master_id, 'qty': ('' if row.boq_quantity is None
+                                            else f'{row.boq_quantity.normalize():f}')}
+         for row in added_on]
+        + [{'id': m.pk, 'qty': ''} for m in missing_mandatory]
+    )
 
     # Which categories the designer has never put anything in (settled decision 7). The
     # picker shows this per category so "I have not looked at Earthing yet" is visible at
     # a glance rather than something they have to remember.
+    #
+    # COMPOSED MANDATORY ROWS COUNT AS USED, because they are on the sheet the designer is
+    # looking at. Leaving them out would make this disagree with the client, which derives
+    # the same indicator from the same composed payload and would redraw the category as
+    # used the moment the JS ran.
     used_categories = {row.category for row in added_on}
+    used_categories.update(m.category for m in missing_mandatory)
     empty_categories = [c for c in category_order if c not in used_categories]
 
     # Why the screen is read-only, when it is. Most specific first: the procurement lock is
@@ -9133,6 +9188,19 @@ def admin_boq_item_toggle(request, item_id):
         return redirect('admin_boq_items')
 
     item = get_object_or_404(BOQItemMaster, pk=item_id)
+
+    # A FLAGGED ITEM CANNOT BE DEACTIVATED WHILE STILL FLAGGED. The picker offers active
+    # rows only, so the mandatory flag would become unsatisfiable — the item would never be
+    # composed onto a sheet, and the completion guard scopes itself to active masters
+    # precisely so a stranded flag cannot make BOQs uncompletable. Refusing here keeps the
+    # two states from ever disagreeing, and says which order to do it in. REACTIVATION IS
+    # UNAFFECTED: the guard tests `is_active` first, so it only ever intercepts the
+    # active -> inactive direction.
+    if item.is_active and item.is_mandatory:
+        messages.error(request, f'Catalogue item "{item.code}" is marked mandatory — clear '
+                                f'the mandatory flag before deactivating it.')
+        return redirect('admin_boq_items')
+
     item.is_active = not item.is_active
     item.save(update_fields=['is_active', 'updated_at'])
 

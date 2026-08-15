@@ -781,6 +781,40 @@ def get_opex_boq_catalogue():
     )
 
 
+def get_opex_mandatory_items():
+    """The active OPEX catalogue rows the item head has flagged mandatory.
+
+    THE ONE PLACE "WHICH ITEMS ARE MANDATORY" IS COMPUTED, and every consumer calls it:
+    the picker's GET composes these into the sheet for display, its POST unions them into
+    the chosen set so they survive a save that omits them, design_boq_complete() refuses a
+    sheet that leaves one without a quantity, and the Part 9 review panel marks them for
+    the reviewer. Four callers, one definition — two places deriving this set is precisely
+    how the displayed sheet and the saved sheet would drift apart.
+
+    THE is_active TERM IS REQUIRED, NOT COSMETIC. An inactive master's pk is not in the
+    picker's `catalogue_by_id`, so an unscoped set would be re-added by the POST union and
+    then dropped again by the NEXT save, whose `chosen` filter tests exactly that
+    membership — the row would flicker in and out of the sheet on alternate saves, and
+    nothing would report it. It would also make the BOQ permanently uncompletable, because
+    the completion guard could never be satisfied by an item the picker refuses to offer.
+    BOQItemMasterForm and both toggle handlers refuse the mandatory+inactive combination so
+    the state cannot be reached through the UI; this term is the structural backstop for
+    data that arrives some other way.
+
+    Returns model instances, like get_opex_boq_catalogue() and for the same reason: callers
+    need the pk to match BOQItem.item_master, and the code and description to name the item
+    in a message.
+
+    Returns [] when nothing is flagged, which is the state this shipped in — the whole
+    feature is inert until the item head marks his first row.
+    """
+    return list(
+        BOQItemMaster.objects
+        .filter(is_active=True, project_type='OPEX', is_mandatory=True)
+        .order_by('sort_order', 'code')
+    )
+
+
 def opex_catalogue_category_order():
     """OPEX category names in CATALOGUE order — the order of first appearance by
     sort_order, which is spreadsheet order.

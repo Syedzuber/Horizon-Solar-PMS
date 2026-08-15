@@ -353,10 +353,17 @@ authority and both locks on the POST regardless of what this template chose to r
                     item.id + '" value="' + esc(chosen[item.id] || '') + '">'
                   : '<span class="small">' + esc(chosen[item.id] || '—') + '</span>') +
                 '</td><td style="width:38px">' +
-                (CAN_EDIT
-                  ? '<button type="button" class="btn btn-sm btn-link text-danger p-0" ' +
-                    'data-del="' + item.id + '" title="Remove">&times;</button>'
-                  : '') +
+                // A mandatory row gets a marker instead of a remove control. This is a
+                // HINT, not the enforcement — removal is expressed as absence from the
+                // POST, so the server's union is what actually holds. Marked whether or
+                // not the sheet is editable, because a reviewer needs to see it too.
+                (item.mand
+                  ? '<span class="boq-chip" title="Mandatory — the catalogue puts this on ' +
+                    'every OPEX BOQ, so it cannot be removed">Req</span>'
+                  : CAN_EDIT
+                    ? '<button type="button" class="btn btn-sm btn-link text-danger p-0" ' +
+                      'data-del="' + item.id + '" title="Remove">&times;</button>'
+                    : '') +
                 '</td></tr>';
       });
     });
@@ -389,6 +396,10 @@ authority and both locks on the POST regardless of what this template chose to r
   }
 
   function remove(id) {
+    // No remove button is rendered for a mandatory row, so this is a backstop rather than
+    // a path anyone reaches — it keeps a stray call from desynchronising the sheet from
+    // what the server will save back anyway.
+    if (BY_ID[id] && BY_ID[id].mand) { return; }
     delete chosen[id];
     order = order.filter(function (x) { return x !== id; });
     dirty = true;
