@@ -4876,16 +4876,22 @@ def opex_boq_entry(request, project_id):
 #: `quantity` IS LAST DELIBERATELY — it is the one editable column, so it sits at
 #: the right-hand edge where a designer fills down a sheet.
 #:
-#: `mandatory` is its OWN COLUMN rather than a marker inside `code` or
-#: `description`. Those two are the matching key and a locked spec field; a marker
-#: in either would corrupt the very thing it was annotating, and E2 matches rows
-#: on `code` exactly.
+#: THERE IS NO "MANDATORY" COLUMN, and the marker E1 carried here was removed
+#: rather than hidden — a hidden column still lives in this constant, still has to
+#: be maintained, and comes back the moment somebody unhides it.
+#:
+#: It went because it could not mean anything on either side. To a reader it would
+#: have read as "you cannot remove this row", and removal is not expressible in
+#: this file at all: the upload never deletes, so no marking can describe a thing
+#: the file cannot do. To the parser it would have meant nothing either, because
+#: the upload derives the mandatory set from get_opex_mandatory_items() and never
+#: from what the file claims. What the column used to convey is now said in words
+#: on the instructions sheet, which is where a fact about the process belongs.
 BOQ_DOWNLOAD_COLUMNS = [
     ('Code',        'code'),
     ('Description', 'description'),
     ('Unit',        'unit'),
     ('Category',    'category'),
-    ('Mandatory',   'mandatory'),
     ('Quantity',    'quantity'),
 ]
 
@@ -4901,7 +4907,7 @@ BOQ_DOWNLOAD_OFF_SHEET  = 'Not In Catalogue'
 BOQ_DOWNLOAD_INFO_SHEET = 'Instructions'
 
 
-def _boq_download_row(row, mandatory_ids):
+def _boq_download_row(row):
     """One BOQ row as the data sheet's cell values, in BOQ_DOWNLOAD_COLUMNS order.
 
     TAKES EITHER of the two things the data sheet carries, because the sheet
@@ -4925,7 +4931,6 @@ def _boq_download_row(row, mandatory_ids):
             'description': row.description,
             'unit':        row.uom,
             'category':    row.category,
-            'mandatory':   'Yes' if row.item_master_id in mandatory_ids else '',
             'quantity':    row.boq_quantity,
         }
     return {
@@ -4933,7 +4938,6 @@ def _boq_download_row(row, mandatory_ids):
         'description': row.description,
         'unit':        row.unit,
         'category':    row.category,
-        'mandatory':   'Yes',
         'quantity':    None,
     }
 
@@ -4991,12 +4995,12 @@ def opex_boq_download(request, project_id):
 
     # THE SAME COMPOSITION THE PICKER'S GET PERFORMS (see opex_boq_entry), so the
     # file and the screen carry the same set: mandatory rows this BOQ does not hold
-    # yet appear with a blank quantity. Read once and reused for both the missing
-    # list and the marker, so a single query answers both questions.
-    mandatory         = get_opex_mandatory_items()
-    mandatory_ids     = {m.pk for m in mandatory}
+    # yet appear with a blank quantity. They are composed in but NOT marked — the
+    # instructions sheet says in words that some items are always carried, which is
+    # a fact about the process rather than a property of one row.
     on_master_ids     = {row.item_master_id for row in added_on}
-    missing_mandatory = [m for m in mandatory if m.pk not in on_master_ids]
+    missing_mandatory = [m for m in get_opex_mandatory_items()
+                         if m.pk not in on_master_ids]
 
     from openpyxl import Workbook
     from openpyxl.styles import Font, Protection
@@ -5017,7 +5021,7 @@ def opex_boq_download(request, project_id):
     for _category, rows in group_boq_rows_by_category(added_on + missing_mandatory,
                                                       category_order):
         for row in rows:
-            values = _boq_download_row(row, mandatory_ids)
+            values = _boq_download_row(row)
             ws.append([values[key] for _header, key in BOQ_DOWNLOAD_COLUMNS])
 
     # Spec cells need no explicit lock — openpyxl's default cell protection is
@@ -5029,7 +5033,7 @@ def opex_boq_download(request, project_id):
 
     ws.freeze_panes = 'A2'
     for column_letter, width in (('A', 11), ('B', 62), ('C', 9),
-                                 ('D', 18), ('E', 11), ('F', 12)):
+                                 ('D', 18), ('E', 12)):
         ws.column_dimensions[column_letter].width = width
     ws.protection.sheet = True
 
@@ -5088,9 +5092,11 @@ def opex_boq_download(request, project_id):
     info.append(['4.', 'UPLOADING NEVER DELETES ANYTHING. Deleting rows in this '
                        'spreadsheet has no effect. Remove items on the BOQ screen '
                        'instead — that is the only place a row can be taken off.'])
-    info.append(['5.', 'Items marked Mandatory are put back if they are missing, and a '
-                       'message says which. Every mandatory item needs a quantity before '
-                       'the BOQ can be marked complete.'])
+    info.append(['5.', 'Some catalogue items are carried on EVERY OPEX BOQ. That is why a '
+                       'site with nothing entered yet still shows a few rows here with '
+                       'blank quantities. If one is missing from your file it is put back '
+                       'on upload and a message says which, and every one of them needs a '
+                       'quantity before the BOQ can be marked complete.'])
     info.append(['6.', f'The other sheets are not read. "{BOQ_DOWNLOAD_OFF_SHEET}" is '
                        f'reference only, and this sheet is ignored.'])
     info.append([])
@@ -5108,6 +5114,484 @@ def opex_boq_download(request, project_id):
     resp['Content-Disposition'] = f'attachment; filename="BOQ_{safe_id}.xlsx"'
     wb.save(resp)
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Session E2 — OPEX BOQ upload
+#
+# Reads a filled copy of the download back and applies its quantities.
+#
+# THE ONE RULE THAT SHAPES EVERYTHING: THE FILE ADDS ROWS AND CHANGES
+# QUANTITIES; ONLY THE PICKER REMOVES ROWS. This upload has no delete of any
+# kind, and that is not an omission to be tidied up later. The picker's POST is a
+# full reconciliation — absence from the post means "removed" — because the
+# browser sends every row the sheet renders, so absence is reliable evidence. A
+# spreadsheet gives no such guarantee: a designer who filters, sorts, deletes a
+# block to tidy up, or sends a partial file has not asked for anything to be
+# deleted. Treating absence as removal here would silently destroy a BOQ, and the
+# person it happened to would have no way to tell.
+#
+# SO THE PERSISTENCE PATH IS THE PICKER'S, MINUS ITS TWO DELETE LOOPS. Everything
+# else is shared: the lazy BOQ create, split_opex_boq_rows(), the by_master index,
+# the create/update loop and its field mapping. opex_boq_entry is not modified.
+#
+# ITS OWN SCREEN, WITH A PREVIEW. An unknown code rejects the whole file naming
+# every offending row, and opex_boq_entry has no validation-error render — every
+# path there ends in redirect(). Once a screen exists that can list errors, the
+# preview costs almost nothing and is where "0 rows removed" gets said out loud.
+# ---------------------------------------------------------------------------
+
+#: Rejected before the workbook is opened. Deliberately far smaller than the 20 MB
+#: and 25 MB caps the Supabase paths use: the largest legitimate file here is a few
+#: hundred rows of short text, which the download emits at roughly 9 KB. Three
+#: orders of magnitude of headroom, and a hostile file is still refused on the
+#: cheapest possible evidence — the ordering principle validate_cad_zip() states.
+BOQ_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+
+#: Head-room above the catalogue for the row cap. The real bound is the catalogue
+#: size (see _boq_upload_row_cap): a file cannot legitimately carry more rows than
+#: there are items to name, and every code outside the catalogue is rejected
+#: anyway. Derived rather than a literal like _BULK_MAX_ROWS = 500, so the cap
+#: cannot drift away from the catalogue it is protecting.
+BOQ_UPLOAD_ROW_MARGIN = 50
+
+#: Largest value numeric(10,2) can hold — max_digits=10, decimal_places=2 on
+#: BOQItem.boq_quantity. THE REASON THIS EXISTS: neither objects.create() nor
+#: save(update_fields=...) calls full_clean(), so nothing between a spreadsheet
+#: cell and the INSERT would catch an out-of-range number, and a pasted 1e21 would
+#: reach Postgres as a DataError and take the whole transaction down with a
+#: traceback. Checked in validation instead, where it can name the row.
+BOQ_UPLOAD_MAX_QUANTITY = Decimal('99999999.99')
+
+
+def _boq_upload_row_cap():
+    """Largest number of data rows an uploaded BOQ file may carry."""
+    return len(get_opex_boq_catalogue()) + BOQ_UPLOAD_ROW_MARGIN
+
+
+def _boq_upload_quantity(raw):
+    """Parse one quantity cell -> (value, error). `value` is a Decimal or None.
+
+    None MEANS "LEAVE THE EXISTING QUANTITY ALONE", and 0 means zero. This is the
+    one place the upload deliberately INVERTS _quantity()'s semantics, and the
+    reason is that the two inputs carry different evidence. The picker's browser
+    posts every quantity box it renders, so an empty box is a real instruction to
+    clear. A blank spreadsheet cell is not: it is overwhelmingly "I did not touch
+    this row", and it is also what a merged cell, a formula the file has no cached
+    result for, and a column the designer filtered out all look like. Clearing is
+    still expressible — type 0, or use the picker.
+
+    A MALFORMED OR NEGATIVE VALUE IS AN ERROR HERE, where _quantity() forgives it
+    and reads None. Forgiveness is right on the picker because a human is looking
+    at the box they just typed into. In a fifty-row file, silently blanking
+    "1,200" because of its comma is data loss nobody would notice.
+    """
+    if raw is None:
+        return None, None
+    text = str(raw).strip()
+    if not text:
+        return None, None
+    try:
+        value = Decimal(text)
+    except InvalidOperation:
+        return None, f'"{text}" is not a number'
+    if value.is_nan() or value.is_infinite():
+        return None, f'"{text}" is not a number'
+    if value < 0:
+        return None, f'"{text}" is negative'
+    if value > BOQ_UPLOAD_MAX_QUANTITY:
+        return None, f'"{text}" is larger than the maximum of {BOQ_UPLOAD_MAX_QUANTITY}'
+    return value, None
+
+
+def _parse_boq_workbook(uploaded_file):
+    """Parse an uploaded BOQ .xlsx into (rows, error).
+
+    `rows` is [{'index': excel_row_number, 'code': str, 'quantity_raw': str}] and
+    `index` is the row's OWN number in the spreadsheet, captured before blank rows
+    are dropped so an error message points at the line the designer can actually
+    scroll to.
+
+    THE DATA SHEET IS SELECTED BY NAME AND EVERY OTHER SHEET IS SKIPPED BY NAME.
+    _parse_bulk_workbook falls back to "the first sheet that is not Instructions"
+    when its named sheet is missing; that fallback is deliberately NOT copied,
+    because here it would land on the off-catalogue sheet — whose rows are exactly
+    the ones that would then reject the whole file. A missing data sheet is an
+    error naming the sheet that was expected.
+
+    ONLY `Code` AND `Quantity` ARE REQUIRED. The specification columns are ignored
+    entirely (they are re-derived from the master), so they are not required
+    either, and any unrecognised column is passed over rather than rejected — which
+    is also what makes a file carrying a stale extra column still importable.
+    """
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(uploaded_file, read_only=True, data_only=True)
+    except Exception:
+        return None, ('Could not read that file. Upload the .xlsx you downloaded from '
+                      'this BOQ, with your quantities filled in.')
+
+    try:
+        if BOQ_DOWNLOAD_SHEET not in wb.sheetnames:
+            return None, (f'This file has no "{BOQ_DOWNLOAD_SHEET}" sheet, so there is '
+                          f'nothing to read. Upload the file you downloaded from this '
+                          f'BOQ — its first sheet is named "{BOQ_DOWNLOAD_SHEET}".')
+        all_rows = list(wb[BOQ_DOWNLOAD_SHEET].iter_rows(values_only=True))
+    finally:
+        wb.close()
+
+    if not all_rows:
+        return None, f'The "{BOQ_DOWNLOAD_SHEET}" sheet is empty.'
+
+    header = [_bulk_cell_to_str(c).strip().lower() for c in all_rows[0]]
+    wanted = {key: header.index(head.strip().lower())
+              for head, key in BOQ_DOWNLOAD_COLUMNS
+              if head.strip().lower() in header}
+    missing = [head for head, key in BOQ_DOWNLOAD_COLUMNS
+               if key in ('code', 'quantity') and key not in wanted]
+    if missing:
+        return None, ('Missing column(s): ' + ', '.join(missing) +
+                      '. Upload the file as downloaded, without removing columns.')
+
+    # Excel numbering: the header is row 1, so data starts at row 2. The index is
+    # taken BEFORE blank rows are dropped, so it keeps pointing at the real line.
+    numbered = [(n, raw) for n, raw in enumerate(all_rows[1:], start=2)
+                if any(_bulk_cell_to_str(c) for c in raw)]
+    if not numbered:
+        return None, (f'The "{BOQ_DOWNLOAD_SHEET}" sheet has a header but no rows. '
+                      f'Nothing was imported.')
+
+    cap = _boq_upload_row_cap()
+    if len(numbered) > cap:
+        return None, (f'This file has {len(numbered)} rows — the limit is {cap}. That is '
+                      f'more rows than there are items in the OPEX catalogue, so this is '
+                      f'unlikely to be a BOQ downloaded from this site.')
+
+    rows = []
+    for n, raw in numbered:
+        def _at(key):
+            i = wanted.get(key)
+            return raw[i] if i is not None and i < len(raw) else None
+        rows.append({
+            'index':        n,
+            'code':         _bulk_cell_to_str(_at('code')).strip().upper(),
+            'quantity_raw': _bulk_cell_to_str(_at('quantity')),
+        })
+    return rows, None
+
+
+def _validate_boq_rows(rows, catalogue_by_code):
+    """Validate every parsed row. Returns (clean, errors) — errors is a list of
+    strings, EVERY one of them, never just the first.
+
+    Reporting only the first fault would make a file with four bad codes take four
+    upload attempts to fix. The audit's own finding about this view's ancestor was
+    that there is no error surface at all; having built one, it should say
+    everything it knows in one pass.
+
+    `clean` is [{'index': n, 'code': str, 'master': BOQItemMaster, 'quantity': Decimal|None}]
+    and is only meaningful when `errors` is empty — nothing is written otherwise.
+    """
+    errors, clean, seen = [], [], {}
+
+    for row in rows:
+        index, code = row['index'], row['code']
+
+        if not code:
+            errors.append(f'Row {index}: no item code.')
+            continue
+
+        # ONE MEMBERSHIP TEST COVERS THREE QUESTIONS. catalogue_by_code is built
+        # from get_opex_boq_catalogue(), which already filters is_active=True and
+        # project_type='OPEX' — so "is it a real code", "is it an OPEX code" and
+        # "is it still active" are all answered here, by the same helper the picker
+        # validates its posted pks against.
+        master = catalogue_by_code.get(code)
+        if master is None:
+            errors.append(f'Row {index}: item code "{code}" is not in the OPEX catalogue.')
+            continue
+
+        if code in seen:
+            errors.append(f'Row {index}: item code "{code}" already appears on row '
+                          f'{seen[code]}.')
+            continue
+        seen[code] = index
+
+        quantity, problem = _boq_upload_quantity(row['quantity_raw'])
+        if problem:
+            errors.append(f'Row {index}: quantity {problem}.')
+            continue
+
+        clean.append({'index': index, 'code': code, 'master': master,
+                      'quantity': quantity})
+
+    return clean, errors
+
+
+@login_required
+def opex_boq_upload(request, project_id):
+    """Upload a filled BOQ spreadsheet — preview, then commit.
+
+    THE WRITE GATE, W-NARROW, and the same one the picker's POST applies: only the
+    designer named in assigned_design may change a BOQ. Downloading takes the read
+    gate and admits reviewers; uploading must not, because it authors.
+
+    BOTH LOCKS REFUSE, BEFORE THE FILE IS READ, and they are checked ahead of the
+    phase dispatch so a crafted POST straight to 'commit' meets them too. The two
+    messages differ because the two states differ: the design lock is reversible
+    and names the route out of it, the group lock is final and there is no unlock.
+
+    NOTHING IS STORED. The workbook is parsed and discarded — no Supabase object,
+    no file on disk. What rides to the confirm step is the parsed (code, quantity)
+    pairs, which are then RE-VALIDATED FROM SCRATCH, because that payload has been
+    through the browser.
+
+    NO SAVEPOINT OR DRY-RUN MACHINERY. opex_site_bulk_upload needs it because a
+    site's validity can only be settled by running the real create against the
+    database. Validity here is set membership in a dict already in memory, so
+    preview reaches no row at all — which is also why it cannot create the BOQ.
+    """
+    project = get_object_or_404(Project, project_id=project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('The BOQ upload is for OPEX sites. Residential BOQs are entered on '
+                      'the standard BOQ screen.')
+
+    if not user_can_edit_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    ctx = {'project': project, 'stage': 'upload', 'max_mb': BOQ_UPLOAD_MAX_BYTES // 1024 // 1024}
+
+    # Most specific first, exactly as the picker orders them: the procurement lock
+    # is the final one, so when both are on it is the one worth naming.
+    if project_boq_is_group_locked(project):
+        ctx.update({'stage': 'locked', 'lock_reason': (
+            'This site is in a locked procurement group. Its BOQ quantities are final and '
+            'can no longer be changed — they have been committed to a purchase. There is '
+            'no unlock: a correction now needs a variance against the order, raised with '
+            'SCM directly.')})
+        return render(request, 'projects/opex_boq_upload.html', ctx)
+
+    if project_boq_is_design_locked(project):
+        ctx.update({'stage': 'locked', 'lock_reason': (
+            'This BOQ is marked complete and is with design review, so it cannot be '
+            'changed right now. It reopens — with the full catalogue and this upload — if '
+            'a reviewer sends it back, or if the PM raises a change request that opens a '
+            'new attempt.')})
+        return render(request, 'projects/opex_boq_upload.html', ctx)
+
+    catalogue        = get_opex_boq_catalogue()
+    catalogue_by_code = {m.code: m for m in catalogue}
+    phase = request.POST.get('phase') if request.method == 'POST' else None
+
+    # ---- Phase: PREVIEW (parse + validate; nothing is written) ----
+    if phase == 'preview':
+        uploaded = request.FILES.get('file')
+        if not uploaded:
+            ctx['file_error'] = 'Please choose a file to upload.'
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        # Extension and size BEFORE the workbook is opened. The bulk site upload
+        # checks neither, which is why a renamed .pdf there yields only a generic
+        # "could not read"; both are cheap and both are refusals a designer can act on.
+        if not uploaded.name.lower().endswith('.xlsx'):
+            ctx['file_error'] = (f'"{uploaded.name}" is not an .xlsx file. Upload the '
+                                 f'spreadsheet you downloaded from this BOQ.')
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+        if uploaded.size > BOQ_UPLOAD_MAX_BYTES:
+            ctx['file_error'] = (f'That file is {uploaded.size / 1024 / 1024:.1f} MB — the '
+                                 f'limit is {BOQ_UPLOAD_MAX_BYTES // 1024 // 1024} MB.')
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        rows, file_error = _parse_boq_workbook(uploaded)
+        if file_error:
+            ctx['file_error'] = file_error
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        clean, errors = _validate_boq_rows(rows, catalogue_by_code)
+        if errors:
+            ctx.update({'stage': 'errors', 'errors': errors, 'error_count': len(errors)})
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        ctx.update(_boq_upload_plan(project, clean, catalogue))
+        ctx.update({
+            'stage': 'preview',
+            'rows_json': json.dumps([{'code': r['code'],
+                                      'quantity': (None if r['quantity'] is None
+                                                   else str(r['quantity']))}
+                                     for r in clean]),
+        })
+        return render(request, 'projects/opex_boq_upload.html', ctx)
+
+    # ---- Phase: COMMIT (apply the previewed rows for real) ----
+    if phase == 'commit':
+        try:
+            payload = json.loads(request.POST.get('rows_json') or '[]')
+        except (ValueError, TypeError):
+            payload = None
+        if not payload or not isinstance(payload, list):
+            ctx['file_error'] = ('Nothing to import — please choose a file and preview it '
+                                 'first.')
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        # RE-VALIDATED FROM SCRATCH, not trusted. The payload went out to the
+        # browser and came back, and the catalogue may have changed underneath it.
+        # Rebuilt into the same shape the parser produces so one validator serves
+        # both phases and they cannot drift.
+        rows = [{'index': n,
+                 'code': str((item or {}).get('code') or '').strip().upper(),
+                 'quantity_raw': str((item or {}).get('quantity') or '')}
+                for n, item in enumerate(payload, start=2)]
+        clean, errors = _validate_boq_rows(rows, catalogue_by_code)
+        if errors:
+            ctx.update({'stage': 'errors', 'errors': errors, 'error_count': len(errors)})
+            return render(request, 'projects/opex_boq_upload.html', ctx)
+
+        boq, added, changed, readded = _boq_upload_apply(project, clean)
+
+        # After the primary save, never inline — and `boq` comes back from the apply
+        # rather than being re-read off `project`, whose reverse one-to-one may still
+        # be caching the miss from before the row existed.
+        log_activity(
+            project, getattr(request.user, 'profile', None),
+            f'BOQ spreadsheet uploaded — {added} row(s) added, {changed} quantity(ies) '
+            f'changed, 0 removed',
+            entity_type='BOQ', entity_id=boq.pk,
+            action_code='boq_uploaded',
+        )
+
+        if readded:
+            messages.info(
+                request,
+                'Put back ' + ', '.join(f'{m.code} {m.description}' for m in readded) +
+                ' — marked mandatory in the catalogue, so every OPEX BOQ carries it. '
+                'Enter a quantity before marking the BOQ complete.')
+        messages.success(
+            request,
+            f'BOQ updated from the spreadsheet: {added} row(s) added, {changed} '
+            f'quantity(ies) changed. Nothing was removed — rows are removed on the BOQ '
+            f'screen.')
+        ctx.update({'stage': 'result', 'added': added, 'changed': changed,
+                    'readded': readded})
+        return render(request, 'projects/opex_boq_upload.html', ctx)
+
+    # GET, or an unrecognised phase — the initial upload screen.
+    return render(request, 'projects/opex_boq_upload.html', ctx)
+
+
+def _boq_upload_plan(project, clean, catalogue):
+    """What the confirmed file WOULD do, for the preview. Reads only.
+
+    Deliberately does not create the BOQ, touch a row, or open a transaction — a
+    designer looking at a preview and walking away must leave the site exactly as
+    they found it, the same rule the picker's GET follows.
+    """
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    existing_on, _existing_off = split_opex_boq_rows(boq, {m.pk for m in catalogue})
+    by_master = {row.item_master_id: row for row in existing_on}
+
+    add, change, same = [], [], 0
+    for entry in clean:
+        row = by_master.get(entry['master'].pk)
+        if row is None:
+            add.append(entry)
+        elif entry['quantity'] is None or entry['quantity'] == row.boq_quantity:
+            same += 1
+        else:
+            change.append({'entry': entry, 'was': row.boq_quantity})
+
+    return {
+        'plan_add':       add,
+        'plan_change':    change,
+        'plan_unchanged': same,
+        'plan_readded':   _boq_upload_missing_mandatory(by_master, clean),
+    }
+
+
+def _boq_upload_missing_mandatory(by_master, clean):
+    """Mandatory items that neither the BOQ nor the file carries.
+
+    THE ONE DERIVATION, get_opex_mandatory_items(), the same helper the picker's
+    POST unions with and design_boq_complete() guards on.
+
+    Adapted to this path's rule rather than copied blindly: the picker unions over
+    the posted set because that set IS the whole sheet, so anything absent from it
+    was removed. Here absence means nothing at all, so a mandatory row already on
+    the BOQ needs no action and is not reported as "put back" — only one that is
+    missing from BOTH the sheet and the file is genuinely being restored.
+    """
+    file_codes = {entry['code'] for entry in clean}
+    return [m for m in get_opex_mandatory_items()
+            if m.pk not in by_master and m.code not in file_codes]
+
+
+def _boq_upload_apply(project, clean):
+    """Apply the validated rows. Returns (boq, added, changed, readded).
+
+    THE PICKER'S PERSISTENCE BLOCK MINUS ITS TWO DELETE LOOPS (see opex_boq_entry).
+    The lazy BOQ create, split_opex_boq_rows(), the by_master index and the
+    create/update loop's field mapping are all the picker's, so a row this writes
+    is indistinguishable from a row the picker writes. What is absent is absent on
+    purpose: there is no branch here that can delete a BOQItem.
+
+    OFF-CATALOGUE ROWS ARE NOT EVEN READ. The file never carries them — they live
+    on their own sheet, which the parser skips by name — so they cannot be changed
+    and cannot be removed by any file.
+    """
+    added = changed = 0
+
+    with transaction.atomic():
+        try:
+            boq = project.boq
+        except BOQ.DoesNotExist:
+            # The picker's three lines, and the same rule: created on commit only,
+            # never on the upload screen's GET and never at preview.
+            boq = BOQ.objects.create(project=project)
+
+        existing_on, _existing_off = split_opex_boq_rows(
+            boq, {m.pk for m in get_opex_boq_catalogue()})
+        by_master = {row.item_master_id: row for row in existing_on}
+
+        readded = _boq_upload_missing_mandatory(by_master, clean)
+
+        # serial_no comes from the catalogue's sort_order, category/description/uom
+        # from the MASTER — never from the file. The spreadsheet's specification
+        # columns are read past entirely; sheet protection is an affordance and the
+        # server re-derives the truth.
+        for entry in clean:
+            master = entry['master']
+            row    = by_master.get(master.pk)
+            if row is None:
+                BOQItem.objects.create(
+                    boq=boq, item_master=master, serial_no=master.sort_order,
+                    category=master.category, description=master.description,
+                    uom=master.unit, boq_quantity=entry['quantity'],
+                    is_standard_item=True,
+                )
+                added += 1
+            elif entry['quantity'] is not None and entry['quantity'] != row.boq_quantity:
+                # A BLANK CELL FALLS THROUGH THIS BRANCH UNTOUCHED. That is decision
+                # 5, and it is what makes a mis-filtered or partly-filled file
+                # incapable of destroying a quantity.
+                row.boq_quantity = entry['quantity']
+                row.save(update_fields=['boq_quantity'])
+                changed += 1
+
+        # Counted separately from `added` rather than folded in, so the number the
+        # result reports is the number the preview promised — a put-back row was
+        # never something the designer asked the file to add.
+        for master in readded:
+            BOQItem.objects.create(
+                boq=boq, item_master=master, serial_no=master.sort_order,
+                category=master.category, description=master.description,
+                uom=master.unit, boq_quantity=None, is_standard_item=True,
+            )
+
+    return boq, added, changed, readded
 
 
 @login_required

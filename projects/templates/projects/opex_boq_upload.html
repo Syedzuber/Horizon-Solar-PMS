@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% comment %}
+OPEX BOQ upload (Session E2) — choose a file, preview what it will do, confirm.
+
+WHY THIS IS A SCREEN AND NOT A CONTROL ON THE PICKER. Two reasons, and either alone
+would be enough. First, rejecting a file means naming every offending row and code, and
+opex_boq_entry's POST has no validation-error render — every path there ends in
+redirect(), so a list of errors has nowhere to go. Second, the picker's whole page is a
+single <form> without enctype="multipart/form-data", and HTML forbids nesting a second
+form inside it; giving the picker's form that enctype would change the encoding of every
+draft save it makes.
+
+STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
+  locked   — a lock refuses the upload; no form is rendered at all
+  upload   — choose a file
+  errors   — the file was rejected; nothing was written
+  preview  — what the file will do, and a Confirm control
+  result   — what it did
+{% endcomment %}
+{% block title %}Upload BOQ — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Upload BOQ — {{ project.project_id }}</h5>
+    <div class="text-muted small">
+      {{ project.customer_name }}{% if project.city %} · {{ project.city }}{% endif %}
+      {% if project.program %} · {{ project.program.name }}
+        ({{ project.program.short_tender_code }}){% endif %}
+    </div>
+  </div>
+  <div class="d-flex gap-2">
+    <a href="{% url 'opex_boq_entry' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-arrow-left me-1"></i>BOQ screen
+    </a>
+    <a href="{% url 'opex_boq_download' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-download me-1"></i>Download
+    </a>
+  </div>
+</div>
+
+{% if file_error %}
+  <div class="alert alert-danger">{{ file_error }}</div>
+{% endif %}
+
+{# =================== STAGE: LOCKED =================== #}
+{% if stage == 'locked' %}
+  <div class="alert alert-warning">{{ lock_reason }}</div>
+  <p class="text-muted small">
+    The BOQ can still be <a href="{% url 'opex_boq_download' project.project_id %}">downloaded</a>
+    and read while it is locked — only changes are refused.
+  </p>
+{% endif %}
+
+{# =================== STAGE: UPLOAD =================== #}
+{% if stage == 'upload' %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <h6 class="card-title">Choose the filled spreadsheet</h6>
+      <p class="text-muted small mb-3">
+        Download the BOQ, fill in the <strong>Quantity</strong> column, and upload it here.
+        Nothing is changed until you have seen the preview and confirmed it.
+      </p>
+      <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <input type="hidden" name="phase" value="preview">
+        <div class="d-flex align-items-center gap-2">
+          <input type="file" name="file" accept=".xlsx" required
+                 class="form-control form-control-sm" style="max-width:420px;">
+          <button type="submit" class="btn btn-sm text-white"
+                  style="background-color:#1a7a4a;">Preview</button>
+        </div>
+        <div class="form-text">.xlsx only, up to {{ max_mb }} MB.</div>
+      </form>
+    </div>
+  </div>
+
+  {% comment %}
+  The same contract the file's own instructions sheet states. Said here too because a
+  designer who is about to upload is the person who most needs it, and they may not have
+  opened that sheet.
+  {% endcomment %}
+  <div class="alert alert-light border small">
+    <div class="fw-semibold mb-1">What an upload does</div>
+    <ul class="mb-0 ps-3">
+      <li>Only the <strong>Quantity</strong> column is read. Description, Unit and Category
+          come from the catalogue, not from your file.</li>
+      <li>A row you leave out is <strong>left alone</strong>.</li>
+      <li><strong>Uploading never deletes anything.</strong> Deleting rows in the
+          spreadsheet has no effect — remove items on the
+          <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a> instead.</li>
+      <li>A blank quantity leaves the existing value alone. Enter <code>0</code> to set zero.</li>
+      <li>An item code that is not in the OPEX catalogue rejects the whole file.</li>
+    </ul>
+  </div>
+{% endif %}
+
+{# =================== STAGE: ERRORS =================== #}
+{% if stage == 'errors' %}
+  <div class="alert alert-danger">
+    <div class="fw-semibold mb-1">
+      This file was not imported — {{ error_count }} problem{{ error_count|pluralize }} found.
+    </div>
+    Nothing on the BOQ has been changed. Fix the rows below and upload again.
+  </div>
+  <div class="card mb-3">
+    <div class="card-body p-0">
+      <table class="table table-sm mb-0">
+        <tbody>
+          {% for error in errors %}
+            <tr><td class="small">{{ error }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="text-muted small">
+    Row numbers are the spreadsheet's own — open the file and go to that row.
+  </p>
+  <a href="{% url 'opex_boq_upload' project.project_id %}" class="btn btn-sm btn-outline-secondary">
+    Choose another file
+  </a>
+{% endif %}
+
+{# =================== STAGE: PREVIEW =================== #}
+{% if stage == 'preview' %}
+  <div class="alert alert-light border">
+    <div class="fw-semibold mb-2">Nothing has been changed yet. This is what the file will do.</div>
+    <div class="d-flex flex-wrap gap-2">
+      <span class="badge bg-light text-dark border fs-6">Rows added: <strong>{{ plan_add|length }}</strong></span>
+      <span class="badge bg-light text-dark border fs-6">Quantities changed: <strong>{{ plan_change|length }}</strong></span>
+      <span class="badge bg-light text-dark border fs-6">Unchanged: <strong>{{ plan_unchanged }}</strong></span>
+      {% comment %}
+      ALWAYS SHOWN, AND ALWAYS ZERO. Someone who deleted rows in Excel expecting them to
+      disappear needs to be told plainly why nothing happened, and the only reliable moment
+      to tell them is the one where they are looking for that number.
+      {% endcomment %}
+      <span class="badge bg-light text-dark border fs-6">Rows removed: <strong>0</strong></span>
+    </div>
+    <div class="small text-muted mt-2">
+      Rows are never removed by an upload — deletions are made on the
+      <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a>.
+      Description, Unit and Category in your file were ignored; they come from the catalogue.
+    </div>
+  </div>
+
+  {% if plan_readded %}
+    <div class="alert alert-info small">
+      <div class="fw-semibold mb-1">These will be put back</div>
+      {% for m in plan_readded %}
+        <div><code>{{ m.code }}</code> {{ m.description }}</div>
+      {% endfor %}
+      Marked mandatory in the catalogue, so every OPEX BOQ carries them. They will be added
+      with a blank quantity.
+    </div>
+  {% endif %}
+
+  {% if plan_change %}
+    <div class="card mb-3">
+      <div class="card-header py-2 small fw-semibold">Quantities that will change</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead><tr>
+            <th class="small">Code</th><th class="small">Item</th>
+            <th class="small text-end">From</th><th class="small text-end">To</th>
+          </tr></thead>
+          <tbody>
+            {% for c in plan_change %}
+              <tr>
+                <td class="small"><code>{{ c.entry.code }}</code></td>
+                <td class="small">{{ c.entry.master.description }}</td>
+                <td class="small text-end text-muted">{{ c.was|default_if_none:"—" }}</td>
+                <td class="small text-end fw-semibold">{{ c.entry.quantity }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+
+  {% if plan_add %}
+    <div class="card mb-3">
+      <div class="card-header py-2 small fw-semibold">Rows that will be added</div>
+      <div class="card-body p-0">
+        <table class="table table-sm mb-0">
+          <thead><tr>
+            <th class="small">Code</th><th class="small">Item</th>
+            <th class="small">Unit</th><th class="small text-end">Quantity</th>
+          </tr></thead>
+          <tbody>
+            {% for a in plan_add %}
+              <tr>
+                <td class="small"><code>{{ a.code }}</code></td>
+                <td class="small">{{ a.master.description }}</td>
+                <td class="small text-muted">{{ a.master.unit }}</td>
+                <td class="small text-end">{{ a.quantity|default_if_none:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="phase" value="commit">
+    <input type="hidden" name="rows_json" value="{{ rows_json }}">
+    <div class="d-flex align-items-center gap-2">
+      <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+        Confirm and apply
+      </button>
+      <a href="{% url 'opex_boq_upload' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary">Cancel</a>
+    </div>
+  </form>
+{% endif %}
+
+{# =================== STAGE: RESULT =================== #}
+{% if stage == 'result' %}
+  <div class="alert alert-success">
+    <div class="fw-semibold mb-1">BOQ updated.</div>
+    {{ added }} row{{ added|pluralize }} added · {{ changed }} quantit{{ changed|pluralize:"y,ies" }}
+    changed · <strong>0 removed</strong>.
+  </div>
+  {% if readded %}
+    <div class="alert alert-info small">
+      <div class="fw-semibold mb-1">Put back</div>
+      {% for m in readded %}
+        <div><code>{{ m.code }}</code> {{ m.description }}</div>
+      {% endfor %}
+      Marked mandatory in the catalogue. Enter a quantity before marking the BOQ complete.
+    </div>
+  {% endif %}
+  <div class="d-flex gap-2">
+    <a href="{% url 'opex_boq_entry' project.project_id %}" class="btn btn-sm text-white"
+       style="background-color:#1a7a4a;">Back to the BOQ</a>
+    <a href="{% url 'opex_boq_upload' project.project_id %}"
+       class="btn btn-sm btn-outline-secondary">Upload another file</a>
+  </div>
+{% endif %}
+
+{% endblock %}

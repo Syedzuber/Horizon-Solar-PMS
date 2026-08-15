@@ -221,6 +221,24 @@ authority and both locks on the POST regardless of what this template chose to r
             Mark BOQ complete
           </button>
         </div>
+        {% comment %}
+        Session E2 — upload a filled spreadsheet. INSIDE `can_edit`, unlike the Download
+        control in the header: uploading writes, so it belongs with Save draft and Mark
+        complete and disappears with them when either lock closes.
+
+        A LINK, NOT A FILE INPUT. Everything from the top of this template is one
+        <form method="post" id="boqForm"> with no enctype, and HTML forbids nesting a
+        second form inside it — while giving boqForm enctype="multipart/form-data" would
+        change the encoding of every draft save the picker makes. The file input lives on
+        the upload screen, which is also where a rejected file's per-row errors are listed.
+        {% endcomment %}
+        <div class="small mt-2">
+          <a href="{% url 'opex_boq_upload' project.project_id %}">Upload quantities from a spreadsheet</a>
+          <span class="text-muted">
+            — download the sheet, fill in quantities offline, upload it back. Adds rows and
+            changes quantities; it never removes anything.
+          </span>
+        </div>
       {% endif %}
     </div>
   </div>
