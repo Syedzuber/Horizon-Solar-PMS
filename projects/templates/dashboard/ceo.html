@@ -63,6 +63,19 @@
   }
   .design-pill.done     { background: #d1fae5; color: #065f46; }
   .design-pill.not-done { background: #f3f4f6; color: #374151; }
+  /* Material pill — same geometry as .design-pill; colours reuse the status-chip
+     palette at the top of this block so the card speaks one vocabulary. */
+  .material-pill {
+    display: inline-flex; align-items: center;
+    padding: .1rem .45rem; border-radius: 999px;
+    font-size: .72rem; font-weight: 700; white-space: nowrap;
+  }
+  .material-pill.received { background: #d1fae5; color: #065f46; }
+  .material-pill.partial  { background: #fef3c7; color: #92400e; }
+  .material-pill.expected { background: #f3f4f6; color: #374151; }
+  .material-pill.rejected { background: #fee2e2; color: #991b1b; }
+  /* Last activity spans the full width — task names plus a date do not fit a half track */
+  .fact-wide  { grid-column: 1 / -1; }
 
   /* ── Section headers ── */
   .section-label {
@@ -680,7 +693,12 @@
           </p>
 
           {% comment %}
-            Card facts: Design / Pending / Completed / Next task.
+            Card facts: Design / Pending / Completed / Material / Last activity.
+
+            The Material cell is OMITTED, not blanked, when the project has no delivery
+            challan — "no delivery record" is not a delivery state. Completed then sits
+            alone in its row; the other cells keep their positions so a reader can scan
+            straight down a column across cards.
 
             Every value here comes from an annotation on projects_qs, resolved in the
             card-list query. Do NOT swap one for a relation lookup on the project —
@@ -710,10 +728,19 @@
               <span class="fact-lbl">Completed:</span>
               <span class="fact-val">{{ card.completed }}</span>
             </div>
+            {% if card.has_material %}
             <div class="fact">
-              <span class="fact-lbl flex-shrink-0">Next:</span>
-              {# Name only — no date. See the note on next_task_name_subq in views.py. #}
-              <span class="fact-name">{{ card.next_task|default_if_none:"—" }}</span>
+              <span class="fact-lbl">Material</span>
+              <span class="material-pill {{ card.material_css }}">{{ card.material_label }}</span>
+            </div>
+            {% endif %}
+            <div class="fact fact-wide">
+              <span class="fact-lbl flex-shrink-0">Last:</span>
+              {% if card.last_name %}
+                <span class="fact-name">{{ card.last_name }} &middot; {{ card.last_date|date:"d M Y" }}</span>
+              {% else %}
+                <span class="fact-name">—</span>
+              {% endif %}
             </div>
           </div>
 

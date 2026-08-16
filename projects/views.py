@@ -11,7 +11,10 @@ from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction, IntegrityError
-from django.db.models import Count, DecimalField, Exists, F, Max, Min, OuterRef, Prefetch, Q, Subquery, Sum, Value
+from django.db.models import (
+    Case, Count, DecimalField, Exists, F, IntegerField, Max, Min, OuterRef,
+    Prefetch, Q, Subquery, Sum, Value, When,
+)
 from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
@@ -1576,6 +1579,28 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
     DESIGN_RELEASED,
 )
 
+# MATERIAL DELIVERY: worst condition wins, same precedence idea as the project badge
+# (Blocked > Delayed > At Risk > On Time). Rank 1 is worst, so the aggregate for a
+# project is simply its lowest-ranked challan — ORDER BY rank LIMIT 1 in the subquery
+# below. Expressing the precedence as ONE ORDERED LIST rather than a stack of Exists
+# branches is what keeps "worst wins" readable: the order here IS the rule.
+#
+# 'Expected' outranks 'Partially Received' deliberately: nothing having arrived yet is
+# a worse position than some of it having arrived.
+MATERIAL_RANK_REJECTED  = 1
+MATERIAL_RANK_EXPECTED  = 2
+MATERIAL_RANK_PARTIAL   = 3
+MATERIAL_RANK_RECEIVED  = 4
+
+#: rank -> (display label, css modifier on .material-pill). None/absent rank means the
+#: project has no challan at all, and the row is omitted from the card entirely.
+MATERIAL_STATUS_BY_RANK = {
+    MATERIAL_RANK_REJECTED: ('Rejected', 'rejected'),
+    MATERIAL_RANK_EXPECTED: ('Expected', 'expected'),
+    MATERIAL_RANK_PARTIAL:  ('Partial',  'partial'),
+    MATERIAL_RANK_RECEIVED: ('Received', 'received'),
+}
+
 
 def _get_ceo_dashboard_context(context=None):
     """
@@ -1661,17 +1686,50 @@ def _get_ceo_dashboard_context(context=None):
         project__project_type__in=['OPEX', 'CAPEX'],
         status__in=TENDER_DESIGN_SUBMITTED_STATUSES,
     )
-    # Next task: first not-Done task in template order. 'pk' is the final tie-break so
-    # two tasks sharing a (phase_order, task_order) cannot reorder between loads.
-    # NAME ONLY — no date. Task.due_date is null on every open task in production, and
-    # compute_gantt_schedule() is anchored to activated_at with no notion of today, so
-    # it renders elapsed projections as if they were commitments. Neither is shown.
-    next_task_name_subq = Subquery(
+    # -- Card field subqueries (Session 1b) ----------------------------------
+    # LAST ACTIVITY replaces the "Next task" field shipped in Session 1. That field
+    # took the first not-Done task by (phase_order, task_order), which on real projects
+    # names the OLDEST SKIPPED task rather than the next one — HRP-RES-2026-037 read
+    # "Next: Advance Payment Confirmation" at 49 done / 1 pending. The cause is
+    # structural, not a bad rule: Task has no dependency field, no predecessor FK and no
+    # concurrency flag, so the schema cannot say which open tasks are actionable now.
+    # Any single-valued "next" is inference dressed as fact. Last activity is a plain
+    # observed fact instead — the most recently completed task — so it cannot mislead.
+    #
+    # completed_at is required, not just preferred: it is what 'most recent' is measured
+    # on. A Done task with a null completed_at is excluded rather than guessed at from
+    # created_at. Production currently has 0 such rows out of 467 Done tasks.
+    #
+    # One base queryset, two Subquery expressions off it — the ordering must be
+    # identical for both or the name and the date could come from different rows.
+    last_done_base = (
         Task.objects
-        .filter(phase__project=OuterRef('pk'))
-        .exclude(status=Task.DONE)
-        .order_by('phase__phase_order', 'task_order', 'pk')
-        .values('task_name')[:1]
+        .filter(
+            phase__project=OuterRef('pk'),
+            status=Task.DONE,
+            completed_at__isnull=False,
+        )
+        .order_by('-completed_at', 'pk')   # newest first; lowest pk breaks an exact tie
+    )
+    last_activity_name_subq = Subquery(last_done_base.values('task_name')[:1])
+    last_activity_date_subq = Subquery(last_done_base.values('completed_at')[:1])
+
+    # MATERIAL delivery. Presence and status are separate annotations because they answer
+    # separate questions: presence decides whether the row is rendered AT ALL (a project
+    # with no challan gets no row, not a dash), status decides what the pill says.
+    project_challans = DeliveryChallan.objects.filter(project=OuterRef('pk'))
+    material_rank_subq = Subquery(
+        project_challans
+        .annotate(rank=Case(
+            When(status=DeliveryChallan.REJECTED,           then=Value(MATERIAL_RANK_REJECTED)),
+            When(status=DeliveryChallan.EXPECTED,           then=Value(MATERIAL_RANK_EXPECTED)),
+            When(status=DeliveryChallan.PARTIALLY_RECEIVED, then=Value(MATERIAL_RANK_PARTIAL)),
+            default=Value(MATERIAL_RANK_RECEIVED),
+            output_field=IntegerField(),
+        ))
+        .order_by('rank')                  # worst condition wins — lowest rank first
+        .values('rank')[:1],
+        output_field=IntegerField(),
     )
     projects_qs = (
         Project.objects
@@ -1681,7 +1739,10 @@ def _get_ceo_dashboard_context(context=None):
             has_at_risk_task=Exists(at_risk_subq),
             residential_design_status=residential_design_status_subq,
             tender_design_submitted=Exists(tender_design_subq),
-            next_task_name=next_task_name_subq,
+            last_activity_name=last_activity_name_subq,
+            last_activity_date=last_activity_date_subq,
+            has_delivery_challan=Exists(project_challans),
+            material_rank=material_rank_subq,
             # The two counts ride ONE phases__tasks LEFT JOIN. Exists/Subquery add no
             # rows, so nothing fans out against them or against each other.
             #
@@ -1737,6 +1798,13 @@ def _get_ceo_dashboard_context(context=None):
         # / Overdue) mix an assignment predicate with status predicates and therefore
         # both overlap and under-cover — see CEO_DASHBOARD_AUDIT.md D12/D13. The two
         # are answering different questions and are not meant to add up.
+        # Material: rank is None when the project has no challan at all. That case is
+        # carried by has_delivery_challan and the template omits the ROW — deliberately
+        # not a dash or a greyed pill, because "no delivery record" is not a delivery
+        # state. Only 1 of 28 active projects has a challan today, so nearly every card
+        # omits this row; that is the intended reading, not a gap to fill.
+        material_label, material_css = MATERIAL_STATUS_BY_RANK.get(p.material_rank, ('', ''))
+
         project_cards.append({
             'project':     p,
             'badge':       badge,
@@ -1744,7 +1812,13 @@ def _get_ceo_dashboard_context(context=None):
             'design_done': design_done,
             'pending':     p.task_total_count - p.task_done_count,
             'completed':   p.task_done_count,
-            'next_task':   p.next_task_name,   # None when nothing is open — template renders an em dash
+            # Both None when nothing on the project has been completed — template
+            # renders an em dash. Name and date always come from the same row.
+            'last_name':   p.last_activity_name,
+            'last_date':   p.last_activity_date,
+            'has_material':   p.has_delivery_challan,
+            'material_label': material_label,
+            'material_css':   material_css,
         })
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
