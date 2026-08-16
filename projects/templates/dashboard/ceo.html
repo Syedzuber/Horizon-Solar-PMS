@@ -77,6 +77,26 @@
   /* Last activity spans the full width — task names plus a date do not fit a half track */
   .fact-wide  { grid-column: 1 / -1; }
 
+  /* ── Top People card ── */
+  /* Tabs mirror the page-level EPC Residential | Tenders switcher in base.html:
+     active is white on the brand green, inactive is btn-outline-secondary. */
+  .people-tab        { font-size: .72rem; font-weight: 600; padding: .15rem .5rem; }
+  .people-tab.active { background-color: #1a7a4a; border-color: #1a7a4a; color: #fff; }
+  /* rank | name | role | value — name takes the slack, value is fixed so ranks and
+     numbers line up down the column across all three views. */
+  .person-row  { display: grid; grid-template-columns: 1.1rem minmax(0,1fr) auto auto;
+                 align-items: baseline; gap: .4rem;
+                 padding: .2rem 0; font-size: .85rem; }
+  .person-row + .person-row { border-top: 1px solid #f0f0f0; }
+  .person-rank { color: #9ca3af; font-size: .75rem; font-variant-numeric: tabular-nums; }
+  .person-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                 min-width: 0; color: #1e293b; }
+  .person-role { color: #9ca3af; font-size: .7rem; white-space: nowrap; }
+  .person-val  { font-weight: 700; color: #1e293b; text-align: right;
+                 font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .person-share { font-weight: 600; font-size: .7rem; color: #6b7280; margin-left: .3rem; }
+  .people-foot { font-size: .72rem; line-height: 1.45; }
+
   /* ── Section headers ── */
   .section-label {
     font-size: .7rem; font-weight: 700; color: #9ca3af;
@@ -460,28 +480,112 @@
 <div class="section-label">Workload &amp; due dates</div>
 <div class="row g-3 mb-4">
 
-  {# Top-5 assignees by open tasks #}
+  {% comment %}
+    Top People — one card, three views (Open / Completed / Usage).
+
+    ALL THREE LISTS ARE COMPUTED SERVER-SIDE and rendered into the page on load.
+    Alpine holds local view state and nothing else: no fetch, no XHR, no backend call
+    from this card. Switching views shows and hides markup that is already present.
+
+    "Usage" is named that way on purpose. It counts actions logged, not work done, and
+    must never be labelled Most Active / Activity Score / Leaderboard — one bulk
+    operation can outrank a week of difficult work, so a performance reading of this
+    number would be wrong.
+  {% endcomment %}
   <div class="col-md-6 col-xl-6">
-    <div class="card shadow-sm h-100">
+    <div class="card shadow-sm h-100" x-data="{ view: 'open' }">
       <div class="card-body">
-        <div class="d-flex align-items-center gap-2 mb-3">
+
+        <div class="d-flex align-items-center gap-2 mb-3 flex-wrap">
           <i data-lucide="users" class="icon-md text-muted"></i>
-          <span class="fw-semibold">Top Assignees</span>
-          <span class="ms-auto text-muted" style="font-size:.72rem;">open tasks</span>
-        </div>
-        {% if top_assignees %}
-          {% for row in top_assignees %}
-          <div class="stat-row">
-            <span class="text-muted text-truncate" style="max-width:75%;">{{ forloop.counter }}. {{ row.display_name }}</span>
-            <span class="stat-num dark">{{ row.count }}</span>
+          <span class="fw-semibold">Top People</span>
+          <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Top People view">
+            <button type="button" class="btn people-tab"
+                    :class="view === 'open' ? 'active' : 'btn-outline-secondary'"
+                    :aria-pressed="view === 'open'"
+                    @click="view = 'open'">Open</button>
+            <button type="button" class="btn people-tab"
+                    :class="view === 'completed' ? 'active' : 'btn-outline-secondary'"
+                    :aria-pressed="view === 'completed'"
+                    @click="view = 'completed'">Completed</button>
+            <button type="button" class="btn people-tab"
+                    :class="view === 'usage' ? 'active' : 'btn-outline-secondary'"
+                    :aria-pressed="view === 'usage'"
+                    @click="view = 'usage'">Usage</button>
           </div>
-          {% endfor %}
-        {% else %}
-          <p class="text-muted mb-0" style="font-size:.85rem;">No open tasks assigned to anyone.</p>
-        {% endif %}
-        <p class="text-muted mt-2 mb-0" style="font-size:.72rem;">
-          Open = Not Started, In Progress or Blocked. Top 5 by count.
-        </p>
+        </div>
+
+        {% comment %}
+          No x-cloak on this one, deliberately. Alpine is loaded with `defer`, so there
+          is a window before it boots; cloaking all three views would render an empty
+          card for that window. Open is the default view, so it is left visible and
+          x-show simply keeps it visible once Alpine takes over. The other two carry
+          x-cloak so they never flash before being hidden.
+        {% endcomment %}
+        <div x-show="view === 'open'">
+          {% if top_assignees %}
+            {% for row in top_assignees %}
+            <div class="person-row">
+              <span class="person-rank">{{ forloop.counter }}</span>
+              <span class="person-name">{{ row.display_name }}</span>
+              <span class="person-role">{{ row.role }}</span>
+              <span class="person-val">{{ row.count }}</span>
+            </div>
+            {% endfor %}
+          {% else %}
+            <p class="text-muted mb-0" style="font-size:.85rem;">No activity in this period.</p>
+          {% endif %}
+          <p class="text-muted mt-2 mb-0 people-foot">
+            Open = Not Started, In Progress or Blocked.
+          </p>
+        </div>
+
+        {# ── View 2: Completed ── #}
+        <div x-show="view === 'completed'" x-cloak>
+          {% if top_completed %}
+            {% for row in top_completed %}
+            <div class="person-row">
+              <span class="person-rank">{{ forloop.counter }}</span>
+              <span class="person-name">{{ row.display_name }}</span>
+              <span class="person-role">{{ row.role }}</span>
+              <span class="person-val">{{ row.count }}</span>
+            </div>
+            {% endfor %}
+          {% else %}
+            <p class="text-muted mb-0" style="font-size:.85rem;">No activity in this period.</p>
+          {% endif %}
+          <p class="text-muted mt-2 mb-0 people-foot">
+            Tasks completed in the last {{ usage_window_days }} days.
+          </p>
+        </div>
+
+        {# ── View 3: Usage ── #}
+        <div x-show="view === 'usage'" x-cloak>
+          {% if top_usage %}
+            {% for row in top_usage %}
+            <div class="person-row">
+              <span class="person-rank">{{ forloop.counter }}</span>
+              <span class="person-name">{{ row.display_name }}</span>
+              <span class="person-role">{{ row.role }}</span>
+              <span class="person-val">
+                {{ row.count }}{% if row.share_pct is not None %}<span class="person-share">{{ row.share_pct }}%</span>{% endif %}
+              </span>
+            </div>
+            {% endfor %}
+          {% else %}
+            <p class="text-muted mb-0" style="font-size:.85rem;">No activity in this period.</p>
+          {% endif %}
+          {% comment %}
+            The idle-account line is the most useful thing on this card — it says how
+            much of the organisation is not using the system at all. Keep it visible,
+            do not abbreviate it, and do not move it behind the toggle.
+          {% endcomment %}
+          <p class="text-muted mt-2 mb-0 people-foot">
+            Actions logged in the last {{ usage_window_days }} days.<br>
+            {{ usage_accounts_idle }} of {{ usage_accounts_total }} accounts had no activity in this period.
+          </p>
+        </div>
+
       </div>
     </div>
   </div>

@@ -1601,6 +1601,35 @@ MATERIAL_STATUS_BY_RANK = {
     MATERIAL_RANK_RECEIVED: ('Received', 'received'),
 }
 
+# ---------------------------------------------------------------------------
+# Top People card (Session 2)
+# ---------------------------------------------------------------------------
+#: Rolling window for the Completed and Usage views. ROLLING, NOT CALENDAR-MONTH, and
+#: deliberately shared by both so the two views are directly comparable — a calendar
+#: month would make "completed" and "usage" cover different spans on every day but the
+#: last of the month.
+TOP_PEOPLE_WINDOW_DAYS = 30
+
+#: Rows rendered per view. Fixed across all three: a toggle card whose height changes
+#: when you switch views reads as a rendering fault, not as data.
+TOP_PEOPLE_ROWS = 5
+
+
+def _attach_person_display(rows, prefix):
+    """
+    Resolve get_full_name()-equivalent and role from .values() columns already pulled by
+    the grouping query — no per-row round-trip, which at 5 rows x 3 views would be 15
+    latent queries.
+
+    `prefix` is the FK path the rows were grouped on ('assigned_to' for task rows,
+    'actor' for activity rows). Mutates and returns the list.
+    """
+    for row in rows:
+        full_name = f"{row[prefix + '__user__first_name']} {row[prefix + '__user__last_name']}".strip()
+        row['display_name'] = full_name or row[prefix + '__user__username']
+        row['role'] = row.get(prefix + '__role', '')
+    return rows
+
 
 def _get_ceo_dashboard_context(context=None):
     """
@@ -1639,6 +1668,9 @@ def _get_ceo_dashboard_context(context=None):
     next_month_start_dt = _to_dt(next_month_start)
     last_month_start_dt = _to_dt(last_month_start)
     aged_block_cutoff   = now_dt - timedelta(days=7)
+    # Rolling window shared by the Top People Completed and Usage views, so the two are
+    # measured over the same span and can be read against each other.
+    top_people_cutoff   = now_dt - timedelta(days=TOP_PEOPLE_WINDOW_DAYS)
 
     active_statuses = ['Active', 'In Progress']
 
@@ -1978,9 +2010,21 @@ def _get_ceo_dashboard_context(context=None):
         )['s'] or 0
     )
 
-    # -- QUERY 5: Top-5 assignee leaderboard (open tasks per user) --
+    # -- QUERY 5: Top People / OPEN — open tasks per user --
     # Open = Not Started / In Progress / Blocked (Blocked counts as still on the plate).
-    # select_related pulls the profile→user names in the same query — no per-row round-trip.
+    # The .values() grouping pulls profile→user names in the same query — no per-row
+    # round-trip.
+    #
+    # THE FILTER TERMS BELOW ARE AS SHIPPED AND ARE DELIBERATELY NOT TOUCHED. Note in
+    # particular that this view does NOT exclude is_active=False assignees, while the
+    # Completed and Usage views below DO. That asymmetry is real but currently inert:
+    # no inactive user holds an open task or has logged activity on production. Left
+    # as-is rather than silently changing what this long-standing card counts; recorded
+    # in SECONDARY_FINDINGS.md.
+    #
+    # Session 2 added exactly two things here, neither of which can change which rows
+    # or counts come back: `assigned_to__role` (role is 1:1 with the profile already in
+    # the GROUP BY, so it is a display column only), and the `assigned_to` tie-break.
     top_assignees = list(
         Task.objects.filter(
             phase__project__is_deleted=False,
@@ -1994,14 +2038,90 @@ def _get_ceo_dashboard_context(context=None):
             'assigned_to__user__first_name',
             'assigned_to__user__last_name',
             'assigned_to__user__username',
+            'assigned_to__role',
         )
         .annotate(count=Count('pk'))
-        .order_by('-count')[:5]
+        .order_by('-count', 'assigned_to')[:TOP_PEOPLE_ROWS]
     )
-    # Resolve a display name (get_full_name equivalent) without a second query.
-    for row in top_assignees:
-        full_name = f"{row['assigned_to__user__first_name']} {row['assigned_to__user__last_name']}".strip()
-        row['display_name'] = full_name or row['assigned_to__user__username']
+    _attach_person_display(top_assignees, 'assigned_to')
+
+    # -- QUERY 6: Top People / COMPLETED — tasks finished in the rolling window --
+    # completed_at is REQUIRED, not merely preferred: it is what "in the last 30 days"
+    # is measured on, so a Done task without one cannot be placed in the window and is
+    # excluded rather than guessed at. Production has 0 such rows.
+    top_completed = list(
+        Task.objects.filter(
+            phase__project__is_deleted=False,
+            phase__project__status__in=active_statuses,
+            assigned_to__isnull=False,
+            assigned_to__is_active=True,
+            status=Task.DONE,
+            completed_at__isnull=False,
+            completed_at__gte=top_people_cutoff,
+            **_context_filter(context, 'phase__project__'),
+        )
+        .values(
+            'assigned_to',
+            'assigned_to__user__first_name',
+            'assigned_to__user__last_name',
+            'assigned_to__user__username',
+            'assigned_to__role',
+        )
+        .annotate(count=Count('pk'))
+        .order_by('-count', 'assigned_to')[:TOP_PEOPLE_ROWS]
+    )
+    _attach_person_display(top_completed, 'assigned_to')
+
+    # -- QUERY 7: Top People / USAGE — actions logged in the rolling window --
+    # DELIBERATELY NOT CONTEXT-FILTERED, unlike the two views above. ActivityLog.project
+    # is nullable and a large share of rows carry none (logins, program- and
+    # catalogue-level events), so filtering by project type would silently drop most of
+    # a person's activity and make the Tenders tab read as near-zero usage. This view
+    # answers "who is using the system", which is not a per-portfolio question.
+    top_usage = list(
+        ActivityLog.objects.filter(
+            timestamp__gte=top_people_cutoff,
+            actor__isnull=False,
+            actor__is_active=True,
+        )
+        .values(
+            'actor',
+            'actor__user__first_name',
+            'actor__user__last_name',
+            'actor__user__username',
+            'actor__role',
+        )
+        .annotate(count=Count('pk'))
+        .order_by('-count', 'actor')[:TOP_PEOPLE_ROWS]
+    )
+    _attach_person_display(top_usage, 'actor')
+
+    # -- QUERY 8: account totals behind the Usage footnote --
+    # ONE query yields all three numbers, which is why the card costs +3 and not +4:
+    #   accounts_total          -> M in "<N> of <M> accounts had no activity"
+    #   accounts_with_activity  -> M - N
+    #   usage_total_actions     -> the percentage denominator
+    # distinct=True on the two account counts is load-bearing: the LEFT JOIN to
+    # activity_logs multiplies a profile row once per log row, so a plain Count('pk')
+    # would report actions, not accounts.
+    account_agg = UserProfile.objects.filter(is_active=True).aggregate(
+        accounts_total=Count('pk', distinct=True),
+        accounts_with_activity=Count(
+            'pk', filter=Q(activity_logs__timestamp__gte=top_people_cutoff), distinct=True,
+        ),
+        usage_total_actions=Count(
+            'activity_logs', filter=Q(activity_logs__timestamp__gte=top_people_cutoff),
+        ),
+    )
+    usage_total_actions = account_agg['usage_total_actions'] or 0
+    # Share of total, computed once here rather than in the template. Suppressed (None)
+    # when the denominator is zero — a percentage of nothing is not 0%, it is undefined,
+    # and rendering "0.0%" against an empty log would be a claim we cannot support.
+    for row in top_usage:
+        row['share_pct'] = (
+            round(100.0 * row['count'] / usage_total_actions, 1)
+            if usage_total_actions else None
+        )
 
     ctx = {
         'proj_total':    proj_total,
@@ -2011,7 +2131,15 @@ def _get_ceo_dashboard_context(context=None):
         'proj_blocked':  proj_blocked,
         'project_cards': project_cards,
         'dept_rows':     dept_rows,
+        # Top People — all three views computed server-side and passed together. The
+        # toggle is Alpine local state only; nothing on this card fetches.
         'top_assignees': top_assignees,
+        'top_completed': top_completed,
+        'top_usage':     top_usage,
+        'usage_window_days':      TOP_PEOPLE_WINDOW_DAYS,
+        'usage_accounts_total':   account_agg['accounts_total'],
+        'usage_accounts_idle':    account_agg['accounts_total'] - account_agg['accounts_with_activity'],
+        'usage_total_actions':    usage_total_actions,
         'fin_payment_requests_pending':    fin_payment_requests_pending,
         'fin_vendor_payments_outstanding': fin_vendor_payments_outstanding,
         'fin_client_contract_value':       fin_client_contract_value,
