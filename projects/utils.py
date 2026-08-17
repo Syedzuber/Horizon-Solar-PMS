@@ -1,7 +1,197 @@
-﻿from datetime import timedelta
+﻿import logging
+
+from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Assignment chokepoint
+#
+# Task.assigned_to is written in exactly two places: assign_task_to() for a
+# single task, assign_tasks_to() for a set. Every other module calls one of
+# these. Same pattern as send_notification(), log_activity() and
+# user_can_manage_project() — no signals, no save() overrides.
+# ---------------------------------------------------------------------------
+
+# Both assignment templates count towards the same per-recipient/per-project
+# budget: a person who has had one of each must not receive a third.
+ASSIGN_NOTIFY_TEMPLATES = ('assign_task', 'assign_tasks_bulk')
+
+# 1st assignment in the window sends assign_task, 2nd sends assign_tasks_bulk,
+# 3rd and beyond send nothing until the window expires.
+ASSIGN_COOLDOWN_WINDOW       = timedelta(hours=1)
+ASSIGN_COOLDOWN_MAX_MESSAGES = 2
+
+# Runaway backstop, well above the cooldown's own limit of 2 sends (= 6 rows at
+# three channels each). Only a fault in the cooldown lookup can reach it.
+ASSIGN_CIRCUIT_BREAKER_ROWS = 20
+
+# Fallback origin for absolute links when no request is available (management
+# commands, shell). Mirrors the hardcoded host already used in the email bodies.
+SITE_BASE_URL = 'https://horizon-solar-pms-production.up.railway.app'
+
+
+def _abs_url(path, request):
+    """Absolute URL for `path`, preferring the live request's own origin."""
+    if request is not None:
+        return request.build_absolute_uri(path)
+    return f'{SITE_BASE_URL}{path}'
+
+
+def _assign_notification_state(user, project):
+    """
+    Return (sends_in_window, breaker_tripped) for one recipient on one project.
+
+    Counted on the in_app channel only. send_notification() writes one
+    NotificationLog row PER CHANNEL, so counting raw rows would read a single
+    three-channel send as three. in_app is the reliable one-row-per-send marker:
+    _send_in_app() always runs and always logs, with no master switch or
+    per-user preference in front of it, so this counts notification *events* and
+    does not drift when somebody turns WhatsApp or email off. That is also what
+    keeps the cooldown from bypassing the preference layer — the decision to
+    throttle is made on events, and delivery stays send_notification()'s call.
+
+    The backstop deliberately counts every row on a different query shape, so a
+    bug in the channel filter above cannot disable both at once.
+    """
+    from .models import NotificationLog
+
+    window = NotificationLog.objects.filter(
+        recipient=user,
+        related_project=project,
+        template_name__in=ASSIGN_NOTIFY_TEMPLATES,
+        created_at__gte=timezone.now() - ASSIGN_COOLDOWN_WINDOW,
+    )
+    return window.filter(channel='in_app').count(), window.count() >= ASSIGN_CIRCUIT_BREAKER_ROWS
+
+
+def _notify_assignment(task, user, actor=None, request=None):
+    """
+    Apply the per-recipient, per-project, 1-hour cooldown and send at most one
+    message. Scope is per project on purpose: somebody assigned work on two
+    projects inside the hour must hear about both.
+    """
+    from .notifications import send_notification
+
+    project        = task.phase.project
+    recipient_name = user.user.get_full_name() or user.user.username
+
+    sends, breaker_tripped = _assign_notification_state(user, project)
+
+    if breaker_tripped:
+        logger.error(
+            'assign_task_to: circuit breaker tripped — %s assignment notification rows '
+            'for %s on %s inside the window; sending nothing.',
+            ASSIGN_CIRCUIT_BREAKER_ROWS, recipient_name, project.project_id,
+        )
+        return
+
+    if sends >= ASSIGN_COOLDOWN_MAX_MESSAGES:
+        return
+
+    if sends == 0:
+        # First of the window — the existing message, unchanged.
+        task_url     = f'/projects/{project.project_id}/tasks/{task.pk}/'
+        task_url_abs = _abs_url(task_url, request)
+        message = (
+            f'Hi {recipient_name},\n\n'
+            f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
+            f'Please login to review details and update progress.'
+        )
+        send_notification(
+            recipient=user,
+            message=f'{message}\n\nView in Horizon Solar PMS:\n{SITE_BASE_URL}{task_url}',
+            channels=['in_app', 'whatsapp', 'email'],
+            link=task_url,
+            subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
+            template='assign_task',
+            template_params=[project.customer_name, recipient_name, task.task_name,
+                             project.customer_name, task_url_abs],
+            related_project=project,
+            actor=actor,
+        )
+        return
+
+    # Second of the window — one summary instead of a second per-task message.
+    # It links to the project's task list rather than any single task: the count
+    # goes stale the moment a third assignment lands, the list does not.
+    task_count   = sends + 1
+    list_url     = f'/projects/{project.project_id}/overview/'
+    list_url_abs = _abs_url(list_url, request)
+    message = (
+        f'Hi {recipient_name},\n\n'
+        f'{task_count} tasks on project {project.customer_name} have been assigned to you.\n\n'
+        f'Please login to review details and update progress.'
+    )
+    send_notification(
+        recipient=user,
+        message=f'{message}\n\nView in Horizon Solar PMS:\n{SITE_BASE_URL}{list_url}',
+        channels=['in_app', 'whatsapp', 'email'],
+        link=list_url,
+        subject=f'{task_count} Tasks Assigned — {project.customer_name}',
+        template='assign_tasks_bulk',
+        template_params=[project.customer_name, recipient_name, task_count,
+                         project.customer_name, list_url_abs],
+        related_project=project,
+        actor=actor,
+    )
+
+
+def assign_task_to(task, user, notify=False, actor=None, request=None):
+    """
+    Write Task.assigned_to for ONE task, and make the notification decision.
+
+    `notify` defaults to False deliberately. Seven of the nine write sites are
+    silent today — activation, the assign_design bulk action, all three unassign
+    paths and the Django admin — and must stay silent. Only the two interactive
+    assignment views pass notify=True. A helper that notified by default would
+    turn this refactor into an unrequested behaviour change discovered in
+    production rather than in a test.
+
+    Unassignment (user=None) never notifies: telling somebody work was taken off
+    them is a separate decision nobody has asked for.
+
+    Returns True if the field changed, False if this was a no-op. Assigning
+    somebody to a task they already hold writes nothing and sends nothing, which
+    is what makes a double-submitted form harmless.
+
+    ActivityLog is deliberately not written here — callers own it. The
+    interactive views log one line per task; the bulk paths log a single summary
+    line. Logging inside this helper would give activation 20 extra ActivityLog
+    rows and skew the EOD digest, which filters on action_code.
+    """
+    from .models import Task
+
+    if task.assigned_to_id == (user.pk if user is not None else None):
+        return False
+
+    Task.objects.filter(pk=task.pk).update(assigned_to=user)
+    task.assigned_to = user  # keep the caller's in-memory copy honest
+
+    if notify and user is not None:
+        _notify_assignment(task, user, actor=actor, request=request)
+
+    return True
+
+
+def assign_tasks_to(queryset, user):
+    """
+    Write Task.assigned_to for a SET of tasks. Returns the number of rows updated.
+
+    Always silent, and there is no notify parameter by design. The three bulk
+    write sites — activation's PM and Finance pre-assignment, and the
+    assign_design action — send nothing today, and making that structural means
+    no later edit can turn them noisy by flipping a default.
+
+    Kept set-based on purpose: looping assign_task_to() over these would turn
+    activation's 2 UPDATEs into 21 and assign_design's 1 into 7, inside blocks
+    that are already atomic, for no behavioural gain.
+    """
+    return queryset.update(assigned_to=user)
 
 
 def generate_project_id(project_type):
@@ -683,10 +873,13 @@ def attach_residential_template(project):
         # SE-role tasks start unassigned — same as Design/SCM/Finance.
         pm_profile = project.assigned_pm
 
-        Task.objects.filter(
-            phase__project=project,
-            assigned_role=Task.PM,
-        ).update(assigned_to=pm_profile)
+        assign_tasks_to(
+            Task.objects.filter(
+                phase__project=project,
+                assigned_role=Task.PM,
+            ),
+            pm_profile,
+        )
 
         # Auto-assign the send-invoice AND finance-confirmation tasks to the same
         # Finance user (by email), resolved in one place. This is required data:
@@ -706,10 +899,13 @@ def attach_residential_template(project):
                 f"UserProfile with this email must exist to own the send-invoice "
                 f"and finance-confirmation tasks."
             )
-        Task.objects.filter(
-            phase__project=project,
-            task_name__in=INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES,
-        ).update(assigned_to=finance_assignee)
+        assign_tasks_to(
+            Task.objects.filter(
+                phase__project=project,
+                task_name__in=INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES,
+            ),
+            finance_assignee,
+        )
 
         # Integrity checks — roll back everything if counts are wrong.
         # These assertions run inside the atomic block so a mismatch aborts the transaction.

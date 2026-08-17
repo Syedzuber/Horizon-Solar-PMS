@@ -57,6 +57,7 @@ from .permissions import (
 from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
     get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
+    assign_task_to, assign_tasks_to,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -4031,45 +4032,15 @@ def task_assign(request, project_id, task_id):
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
-            Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            # The chokepoint owns the write and the notification decision, including
+            # the per-recipient/per-project 1-hour cooldown. Its no-op-when-unchanged
+            # rule replaces the old 10-second double-submit guard: a resubmitted form
+            # finds the task already assigned and neither writes nor sends.
+            assign_task_to(task, assignee, notify=True,
+                           actor=request.user.profile, request=request)
             _log_task_assignment(project, request.user.profile, task, prev_assignee, assignee)
-            recipient_name = assignee.user.get_full_name() or assignee.user.username
-            task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
-            task_url_abs = request.build_absolute_uri(task_url)
-            _at_message = (
-                f'Hi {recipient_name},\n\n'
-                f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
-                f'Please login to review details and update progress.'
-            )
-            _at_email_message = (
-                f'{_at_message}\n\nView in Horizon Solar PMS:\n'
-                f'https://horizon-solar-pms-production.up.railway.app{task_url}'
-            )
-            # Guard: skip if an identical assign_task notification was logged in
-            # the last 10 seconds — catches browser double-submit before the
-            # redirect completes. 10 s is generous for a redirect but tight enough
-            # to allow a legitimate reassign-to-same-person seconds later.
-            _recent_cutoff = timezone.now() - timedelta(seconds=10)
-            _already_sent = NotificationLog.objects.filter(
-                recipient=assignee,
-                related_project=project,
-                template_name='assign_task',
-                created_at__gte=_recent_cutoff,
-            ).exists()
-            if not _already_sent:
-                send_notification(
-                    recipient=assignee,
-                    message=_at_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=task_url,
-                    subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
-                    template='assign_task',
-                    template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
-                    related_project=project,
-                    actor=request.user.profile,
-                )
         else:
-            Task.objects.filter(pk=task.pk).update(assigned_to=None)
+            assign_task_to(task, None, actor=request.user.profile)
             _log_task_assignment(project, request.user.profile, task, prev_assignee, None)
 
         if _is_hx(request):
@@ -4113,44 +4084,12 @@ def task_assign_design_head(request, project_id, task_id):
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role='Design', is_active=True)
-            Task.objects.filter(pk=task.pk).update(assigned_to=assignee)
+            # Same chokepoint, same cooldown, same double-submit protection as task_assign.
+            assign_task_to(task, assignee, notify=True,
+                           actor=request.user.profile, request=request)
             _log_task_assignment(project, request.user.profile, task, prev_assignee, assignee)
-            recipient_name = assignee.user.get_full_name() or assignee.user.username
-            task_url = f'/projects/{project.project_id}/tasks/{task.pk}/'
-            task_url_abs = request.build_absolute_uri(task_url)
-            _at_message = (
-                f'Hi {recipient_name},\n\n'
-                f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
-                f'Please login to review details and update progress.'
-            )
-            _at_email_message = (
-                f'{_at_message}\n\nView in Horizon Solar PMS:\n'
-                f'https://horizon-solar-pms-production.up.railway.app{task_url}'
-            )
-            # Guard: skip if an identical assign_task notification was logged in
-            # the last 10 seconds — catches browser double-submit before the
-            # redirect completes.
-            _recent_cutoff = timezone.now() - timedelta(seconds=10)
-            _already_sent = NotificationLog.objects.filter(
-                recipient=assignee,
-                related_project=project,
-                template_name='assign_task',
-                created_at__gte=_recent_cutoff,
-            ).exists()
-            if not _already_sent:
-                send_notification(
-                    recipient=assignee,
-                    message=_at_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=task_url,
-                    subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
-                    template='assign_task',
-                    template_params=[project.customer_name, recipient_name, task.task_name, project.customer_name, task_url_abs],
-                    related_project=project,
-                    actor=request.user.profile,
-                )
         else:
-            Task.objects.filter(pk=task.pk).update(assigned_to=None)
+            assign_task_to(task, None, actor=request.user.profile)
             _log_task_assignment(project, request.user.profile, task, prev_assignee, None)
 
         if _is_hx(request):
@@ -6867,11 +6806,14 @@ def project_overview(request, project_id):
                     return redirect('project_overview', project_id=project.project_id)
                 project.assigned_design = design_user
                 project.save(update_fields=['assigned_design'])
-                _n = Task.objects.filter(
-                    phase__project=project,
-                    assigned_role=Task.DESIGN,
-                    status__in=['Not Started', 'In Progress'],
-                ).update(assigned_to=design_user)
+                _n = assign_tasks_to(
+                    Task.objects.filter(
+                        phase__project=project,
+                        assigned_role=Task.DESIGN,
+                        status__in=['Not Started', 'In Progress'],
+                    ),
+                    design_user,
+                )
                 # One summary line for the whole bulk assignment — never per-task.
                 _design_name = design_user.user.get_full_name() or design_user.user.username
                 log_activity(
@@ -6883,11 +6825,14 @@ def project_overview(request, project_id):
             else:
                 project.assigned_design = None
                 project.save(update_fields=['assigned_design'])
-                _n = Task.objects.filter(
-                    phase__project=project,
-                    assigned_role=Task.DESIGN,
-                    status__in=['Not Started', 'In Progress'],
-                ).update(assigned_to=None)
+                _n = assign_tasks_to(
+                    Task.objects.filter(
+                        phase__project=project,
+                        assigned_role=Task.DESIGN,
+                        status__in=['Not Started', 'In Progress'],
+                    ),
+                    None,
+                )
                 # Clearing the Design lead is also a single summary line.
                 log_activity(
                     project, request.user.profile,

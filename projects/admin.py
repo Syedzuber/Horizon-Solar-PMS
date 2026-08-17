@@ -8,6 +8,7 @@ from .models import (
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
 )
+from .utils import assign_task_to
 
 
 class MilestoneInline(admin.TabularInline):
@@ -142,6 +143,31 @@ class TaskAdmin(admin.ModelAdmin):
     list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
     list_filter  = ['assigned_role', 'status']
     search_fields = ['task_name']
+
+    def save_model(self, request, obj, form, change):
+        """Route Task.assigned_to through the assignment chokepoint.
+
+        The admin change form writes every field at once, so this saves the row
+        with assigned_to at its previous value and lets assign_task_to() apply
+        the new one. Net DB state is identical; the point is that the admin
+        stops being the one path that skips the chokepoint — so the reminders
+        session's assigned_at stamping will fire here too.
+
+        ModelAdmin.save_model is not a model save() override. The architecture
+        ban covers Model.save() and signals, which fire implicitly on every
+        write; this is an explicit, admin-only interception of one field.
+
+        notify is False: the admin sends nothing today and must keep doing so.
+        """
+        if 'assigned_to' not in form.changed_data:
+            super().save_model(request, obj, form, change)
+            return
+
+        new_assignee = obj.assigned_to
+        # On add there is no previous value; on change, form.initial holds the pk.
+        obj.assigned_to_id = form.initial.get('assigned_to') if change else None
+        super().save_model(request, obj, form, change)
+        assign_task_to(obj, new_assignee, notify=False)
 
 
 @admin.register(Milestone)
