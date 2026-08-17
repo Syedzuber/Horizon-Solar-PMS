@@ -12,8 +12,8 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction, IntegrityError
 from django.db.models import (
-    Case, Count, DecimalField, Exists, F, IntegerField, Max, Min, OuterRef,
-    Prefetch, Q, Subquery, Sum, Value, When,
+    Count, DecimalField, Exists, F, IntegerField, Max, Min, OuterRef,
+    Prefetch, Q, Subquery, Sum, Value,
 )
 from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied
@@ -1579,27 +1579,88 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
     DESIGN_RELEASED,
 )
 
-# MATERIAL DELIVERY: worst condition wins, same precedence idea as the project badge
-# (Blocked > Delayed > At Risk > On Time). Rank 1 is worst, so the aggregate for a
-# project is simply its lowest-ranked challan — ORDER BY rank LIMIT 1 in the subquery
-# below. Expressing the precedence as ONE ORDERED LIST rather than a stack of Exists
-# branches is what keeps "worst wins" readable: the order here IS the rule.
+# DELIVERY AND BOQ ARE TASK-DERIVED PROXIES, NOT RECORDS OF THE THING THEY NAME.
 #
-# 'Expected' outranks 'Partially Received' deliberately: nothing having arrived yet is
-# a worse position than some of it having arrived.
-MATERIAL_RANK_REJECTED  = 1
-MATERIAL_RANK_EXPECTED  = 2
-MATERIAL_RANK_PARTIAL   = 3
-MATERIAL_RANK_RECEIVED  = 4
+# `Delivery` reads "were the Delivery-phase tasks ticked", not "did material arrive".
+# `BOQ` reads "was the BOQ Preparation task ticked", not "does a BOQ document exist".
+# DeliveryChallan and BOQ/BOQItem are the semantically correct sources and are
+# deliberately NOT consulted here: production holds 1 challan and 2 BOQ rows across 28
+# active projects, so a card built on them is blank on 27 of 28 cards. The phase/task
+# data is populated because that is where people actually work.
+#
+# This is a considered trade of precision for coverage. Do not "improve" it by
+# cross-checking against the SCM models — the two will disagree, and the disagreement
+# is not a bug in either. See SECONDARY_FINDINGS.md.
+#
+# Positions come from build_residential_phases() and are RESIDENTIAL-ONLY. There is no
+# OPEX/CAPEX phase template in this codebase at all (attach_residential_template is the
+# only builder; non-Residential activation tells the PM to add tasks by hand), and no
+# non-Residential project on production has a single phase row. Phase 6 of a tender site
+# would therefore be whatever someone happened to create sixth, so both subqueries carry
+# their own project_type term and both rows hide for those types.
+RESIDENTIAL_DELIVERY_PHASE_ORDER = 6   # phase 'Delivery', 5 tasks
+RESIDENTIAL_BOQ_PHASE_ORDER      = 3   # phase 'Design'
+RESIDENTIAL_BOQ_TASK_ORDER       = 5   # task  'BOQ Preparation' — the only BOQ task in the template
 
-#: rank -> (display label, css modifier on .material-pill). None/absent rank means the
-#: project has no challan at all, and the row is omitted from the card entirely.
-MATERIAL_STATUS_BY_RANK = {
-    MATERIAL_RANK_REJECTED: ('Rejected', 'rejected'),
-    MATERIAL_RANK_EXPECTED: ('Expected', 'expected'),
-    MATERIAL_RANK_PARTIAL:  ('Partial',  'partial'),
-    MATERIAL_RANK_RECEIVED: ('Received', 'received'),
-}
+
+def _phase_progress_subqueries(phase_order, task_order=None):
+    """
+    (total, done) Subquery pair counting tasks in a Residential phase.
+
+    Scoped to the LOWEST-PK phase at `phase_order`, not to every phase carrying that
+    order: ProjectPhase has no uniqueness constraint on (project, phase_order), so a
+    double-run activation could leave two. Grouping inside the subquery and taking
+    .values(...)[:1] off an ORDER BY pk makes the answer come from exactly one phase and
+    stay stable between page loads. No duplicate exists on production today; this is
+    defensive.
+
+    `task_order` narrows to a single task within the phase (used by BOQ); omit it to
+    count the whole phase (used by Delivery).
+
+    Returns NULL for a project with no such phase — which the caller reads as "hide the
+    row", distinct from a phase that exists but is empty.
+    """
+    base = ProjectPhase.objects.filter(
+        project=OuterRef('pk'),
+        project__project_type='Residential',
+        phase_order=phase_order,
+    ).order_by('pk')
+
+    if task_order is None:
+        total_expr = Count('tasks')
+        done_expr = Count('tasks', filter=Q(tasks__status=Task.DONE))
+    else:
+        total_expr = Count('tasks', filter=Q(tasks__task_order=task_order))
+        done_expr = Count('tasks', filter=Q(
+            tasks__task_order=task_order, tasks__status=Task.DONE,
+        ))
+
+    return (
+        Subquery(base.annotate(n=total_expr).values('n')[:1], output_field=IntegerField()),
+        Subquery(base.annotate(n=done_expr).values('n')[:1], output_field=IntegerField()),
+    )
+
+
+def _phase_state(total, done):
+    """
+    (label, css modifier) for a task-derived phase pill.
+
+    Reads Task.status ONLY — never completed_at. A task marked Done without a
+    completion timestamp still counts as done here, because the question is "was it
+    ticked", not "when". That is deliberately a different rule from the Last activity
+    field, which needs a date and so requires completed_at.
+
+    total of None (no such phase) or 0 (phase exists but empty) both mean HIDE THE ROW.
+    A single-task position such as BOQ can only ever be Done or Not Started — 'Partial'
+    is unreachable there by construction, not by a guard.
+    """
+    if not total:
+        return ('', '')
+    if done >= total:
+        return ('Done', 'done')
+    if done:
+        return ('Partial', 'partial')
+    return ('Not Started', 'not-started')
 
 # ---------------------------------------------------------------------------
 # Top People card (Session 2)
@@ -1746,22 +1807,14 @@ def _get_ceo_dashboard_context(context=None):
     last_activity_name_subq = Subquery(last_done_base.values('task_name')[:1])
     last_activity_date_subq = Subquery(last_done_base.values('completed_at')[:1])
 
-    # MATERIAL delivery. Presence and status are separate annotations because they answer
-    # separate questions: presence decides whether the row is rendered AT ALL (a project
-    # with no challan gets no row, not a dash), status decides what the pill says.
-    project_challans = DeliveryChallan.objects.filter(project=OuterRef('pk'))
-    material_rank_subq = Subquery(
-        project_challans
-        .annotate(rank=Case(
-            When(status=DeliveryChallan.REJECTED,           then=Value(MATERIAL_RANK_REJECTED)),
-            When(status=DeliveryChallan.EXPECTED,           then=Value(MATERIAL_RANK_EXPECTED)),
-            When(status=DeliveryChallan.PARTIALLY_RECEIVED, then=Value(MATERIAL_RANK_PARTIAL)),
-            default=Value(MATERIAL_RANK_RECEIVED),
-            output_field=IntegerField(),
-        ))
-        .order_by('rank')                  # worst condition wins — lowest rank first
-        .values('rank')[:1],
-        output_field=IntegerField(),
+    # DELIVERY and BOQ, both task-derived (Session 1c). These replace the challan-backed
+    # Material field from Session 1b — see the note on the position constants above for
+    # why the SCM models are not the source.
+    delivery_total_subq, delivery_done_subq = _phase_progress_subqueries(
+        RESIDENTIAL_DELIVERY_PHASE_ORDER,
+    )
+    boq_total_subq, boq_done_subq = _phase_progress_subqueries(
+        RESIDENTIAL_BOQ_PHASE_ORDER, task_order=RESIDENTIAL_BOQ_TASK_ORDER,
     )
     projects_qs = (
         Project.objects
@@ -1773,8 +1826,10 @@ def _get_ceo_dashboard_context(context=None):
             tender_design_submitted=Exists(tender_design_subq),
             last_activity_name=last_activity_name_subq,
             last_activity_date=last_activity_date_subq,
-            has_delivery_challan=Exists(project_challans),
-            material_rank=material_rank_subq,
+            delivery_total=delivery_total_subq,
+            delivery_done=delivery_done_subq,
+            boq_total=boq_total_subq,
+            boq_done=boq_done_subq,
             # The two counts ride ONE phases__tasks LEFT JOIN. Exists/Subquery add no
             # rows, so nothing fans out against them or against each other.
             #
@@ -1830,12 +1885,12 @@ def _get_ceo_dashboard_context(context=None):
         # / Overdue) mix an assignment predicate with status predicates and therefore
         # both overlap and under-cover — see CEO_DASHBOARD_AUDIT.md D12/D13. The two
         # are answering different questions and are not meant to add up.
-        # Material: rank is None when the project has no challan at all. That case is
-        # carried by has_delivery_challan and the template omits the ROW — deliberately
-        # not a dash or a greyed pill, because "no delivery record" is not a delivery
-        # state. Only 1 of 28 active projects has a challan today, so nearly every card
-        # omits this row; that is the intended reading, not a gap to fill.
-        material_label, material_css = MATERIAL_STATUS_BY_RANK.get(p.material_rank, ('', ''))
+        # Empty label means the position does not exist on this project — a tender site
+        # (no phase template at all) or a project not yet activated. The template omits
+        # the field rather than showing a dash: "this project has no Delivery phase" is
+        # not a delivery state.
+        boq_label, boq_css           = _phase_state(p.boq_total, p.boq_done)
+        delivery_label, delivery_css = _phase_state(p.delivery_total, p.delivery_done)
 
         project_cards.append({
             'project':     p,
@@ -1848,9 +1903,10 @@ def _get_ceo_dashboard_context(context=None):
             # renders an em dash. Name and date always come from the same row.
             'last_name':   p.last_activity_name,
             'last_date':   p.last_activity_date,
-            'has_material':   p.has_delivery_challan,
-            'material_label': material_label,
-            'material_css':   material_css,
+            'boq_label':      boq_label,
+            'boq_css':        boq_css,
+            'delivery_label': delivery_label,
+            'delivery_css':   delivery_css,
         })
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --

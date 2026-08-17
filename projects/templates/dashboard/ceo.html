@@ -63,17 +63,17 @@
   }
   .design-pill.done     { background: #d1fae5; color: #065f46; }
   .design-pill.not-done { background: #f3f4f6; color: #374151; }
-  /* Material pill — same geometry as .design-pill; colours reuse the status-chip
-     palette at the top of this block so the card speaks one vocabulary. */
-  .material-pill {
+  /* BOQ / Delivery pill — same geometry as .design-pill above, and the same green and
+     grey. NOTHING HERE IS RED: not-started and partly-done are ordinary positions on a
+     live project, not faults, and colouring them as alarms would misread the board. */
+  .status-pill {
     display: inline-flex; align-items: center;
     padding: .1rem .45rem; border-radius: 999px;
     font-size: .72rem; font-weight: 700; white-space: nowrap;
   }
-  .material-pill.received { background: #d1fae5; color: #065f46; }
-  .material-pill.partial  { background: #fef3c7; color: #92400e; }
-  .material-pill.expected { background: #f3f4f6; color: #374151; }
-  .material-pill.rejected { background: #fee2e2; color: #991b1b; }
+  .status-pill.done        { background: #d1fae5; color: #065f46; }
+  .status-pill.partial     { background: #fef3c7; color: #92400e; }
+  .status-pill.not-started { background: #f3f4f6; color: #374151; }
   /* Last activity spans the full width — task names plus a date do not fit a half track */
   .fact-wide  { grid-column: 1 / -1; }
 
@@ -797,12 +797,16 @@
           </p>
 
           {% comment %}
-            Card facts: Design / Pending / Completed / Material / Last activity.
+            Card facts, filling the 2-column grid in DOM order:
+              row 1  Design    | Pending
+              row 2  BOQ       | Completed
+              row 3  Delivery  |
+              row 4  Last activity (full width)
 
-            The Material cell is OMITTED, not blanked, when the project has no delivery
-            challan — "no delivery record" is not a delivery state. Completed then sits
-            alone in its row; the other cells keep their positions so a reader can scan
-            straight down a column across cards.
+            BOQ and Delivery are TASK-DERIVED. They report whether the relevant tasks
+            were ticked, not whether a BOQ document exists or material physically
+            arrived — see the note on the position constants in views.py before reading
+            them as SCM facts.
 
             Every value here comes from an annotation on projects_qs, resolved in the
             card-list query. Do NOT swap one for a relation lookup on the project —
@@ -828,14 +832,31 @@
               <span class="fact-lbl">Pending:</span>
               <span class="fact-val">{{ card.pending }}</span>
             </div>
+            {% comment %}
+              BOQ holds column 1 of row 2 even when it has nothing to show, so Completed
+              never slides left. The cell is emitted empty rather than skipped: keeping
+              each field in a fixed column is what lets a reader scan one value straight
+              down a list of cards.
+            {% endcomment %}
+            <div class="fact">
+              {% if card.boq_label %}
+                <span class="fact-lbl">BOQ</span>
+                <span class="status-pill {{ card.boq_css }}">{{ card.boq_label }}</span>
+              {% endif %}
+            </div>
             <div class="fact">
               <span class="fact-lbl">Completed:</span>
               <span class="fact-val">{{ card.completed }}</span>
             </div>
-            {% if card.has_material %}
+            {% comment %}
+              Delivery is alone on its row, so when it is absent the whole row collapses
+              and nothing else moves horizontally. Omitted entirely rather than emitted
+              empty, to avoid a dead band of vertical space on every tender card.
+            {% endcomment %}
+            {% if card.delivery_label %}
             <div class="fact">
-              <span class="fact-lbl">Material</span>
-              <span class="material-pill {{ card.material_css }}">{{ card.material_label }}</span>
+              <span class="fact-lbl">Delivery</span>
+              <span class="status-pill {{ card.delivery_css }}">{{ card.delivery_label }}</span>
             </div>
             {% endif %}
             <div class="fact fact-wide">
