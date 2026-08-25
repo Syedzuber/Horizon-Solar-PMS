@@ -188,6 +188,83 @@
               &sim; Invoiced-today may undercount &mdash; not all invoicing paths are date-stamped yet.
             </td>
           </tr>
+
+          {% comment %}
+          Per-user status table. Same figures as the page at /reports/user-status/ — both
+          call reports.build_user_status_rows(), so they cannot disagree.
+
+          EIGHT columns, not the page's ten: Blocked and Done Today are dropped here
+          because ten numeric columns do not fit 600px without wrapping in Outlook, and
+          widening the shell past 600px breaks every other section of this email. The
+          link under the table is how a reader reaches the missing two. If a column is
+          ever added to the page, it does NOT automatically belong here — decide what to
+          drop first.
+          {% endcomment %}
+          <tr>
+            <td style="padding:18px 28px 0 28px; font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:12px; font-weight:bold; color:#0f4c81; letter-spacing:.06em; text-transform:uppercase; border-top:1px solid #eef1f4; padding-top:16px;">Per-user status &middot; {{ date_str }}</div>
+            </td>
+          </tr>
+          {% if user_status.rows %}
+          <tr>
+            <td style="padding:10px 28px 0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; font-family:Arial,Helvetica,sans-serif; font-size:11px;">
+                <tr>
+                  <th align="left"   style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">User</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Proj</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Tasks</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Not<br>Started</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">In<br>Prog</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Done</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Over<br>due</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Log<br>in</th>
+                </tr>
+                {% for row in user_status.rows %}
+                <tr{% if not row.logged_in %} style="background-color:#fdf6ec;"{% endif %}>
+                  <td align="left" style="padding:6px 4px; color:#22303c; border-bottom:1px solid #eef1f4;">
+                    {{ row.name }}<br><span style="color:#9aa7b4; font-size:10px;">{{ row.role }}</span>
+                  </td>
+                  <td align="center" style="padding:6px 2px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.projects_assigned }}</td>
+                  <td align="center" style="padding:6px 2px; color:#22303c; font-weight:bold; border-bottom:1px solid #eef1f4;">{{ row.tasks_assigned }}</td>
+                  <td align="center" style="padding:6px 2px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.not_started }}</td>
+                  <td align="center" style="padding:6px 2px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.in_progress }}</td>
+                  <td align="center" style="padding:6px 2px; color:#2e7d32; border-bottom:1px solid #eef1f4;">{{ row.completed }}</td>
+                  <td align="center" style="padding:6px 2px; {% if row.overdue %}color:#c0392b; font-weight:bold;{% else %}color:#5a6b7b;{% endif %} border-bottom:1px solid #eef1f4;">{{ row.overdue }}</td>
+                  <td align="center" style="padding:6px 2px; {% if row.logged_in %}color:#2e7d32;{% else %}color:#c0392b;{% endif %} border-bottom:1px solid #eef1f4;">{% if row.logged_in %}Yes{% else %}No{% endif %}</td>
+                </tr>
+                {% endfor %}
+                <tr>
+                  <td align="left"   style="padding:7px 4px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">Totals</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.projects_assigned }}</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.tasks_assigned }}</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.not_started }}</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.in_progress }}</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.completed }}</td>
+                  <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.overdue }}</td>
+                  <td align="center" style="padding:7px 2px; color:#9aa7b4; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.not_logged_in_count }}&nbsp;no</td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 0 28px; font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#9aa7b4;">
+              Blocked and Done-Today counts are on the full report.
+              {% if user_status_url %}<a href="{{ user_status_url }}" style="color:#0f4c81; text-decoration:underline;">Open the full daily report</a>.{% endif %}
+              <br>
+              Overdue counts tasks whose due date has passed and which are not completed. An overdue task is also counted under Not Started or In Progress, so the row will not sum to Tasks.
+              <br>
+              Task counts cover projects that use the task template. OPEX and CAPEX design work is tracked separately.
+              <br>
+              Projects counts every project that is still Active; the system has no project-closure step yet.
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td style="padding:10px 28px 0 28px; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#9aa7b4;">
+              No users have tasks or projects assigned for this date.
+            </td>
+          </tr>
+          {% endif %}
           {% endif %}
 
           {% if app_url %}

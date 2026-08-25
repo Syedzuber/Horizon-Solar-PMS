@@ -4,7 +4,7 @@ End-of-Day (EOD) digest email.
 Sends each active user one daily summary of THEIR OWN activity today plus a snapshot
 of their open workload. Intended to run once daily from a Railway Cron Job:
 
-    python manage.py send_eod_digest
+    python manage.py send_eod_digest --i-am-sending-to-real-people
 
 Metrics (all "today" figures are the user's own actions, keyed on ActivityLog.actor,
 and depend on the action_code values shipped in the Audit Log Coverage work — never
@@ -38,11 +38,34 @@ Aggregate sends log to NotificationLog under template='eod_digest_aggregate' (vs
 
 Options:
   --dry-run          compute + render everything but send nothing (prints a table + totals)
-  --user <email>     restrict to a single user (pre-flight); also skips the aggregate send
+  --user <email>     restrict to a single user (pre-flight); also skips the aggregate
+                     send. Still a REAL send, so it needs the interlock below.
   --date <YYYY-MM-DD> override "today" (IST) for back-testing against real activity
+  --out <PATH>       render the CEO aggregate HTML to PATH and exit. Sends nothing, logs
+                     nothing, and issues NO write query of any kind (not even the
+                     SystemSettings get_or_create) - safe to run from a local machine over
+                     a READ-ONLY connection to the production database.
+  --to <EMAIL>       repeatable. Overrides the aggregate recipients with these addresses:
+                     the role='CEO' lookup and the Admin/HR address-merge are skipped
+                     entirely, and every address gets the richer CEO body. Also skips the
+                     individual digests - the mirror of what --user does to the aggregate.
+  --i-am-sending-to-real-people
+                     Safety interlock. REQUIRED for any real send: without it, and without
+                     --dry-run / --out / --to, the command names the recipients it resolved,
+                     refuses, and exits 1 before a single email leaves. This is what stops a
+                     local run pointed at the production database from mailing the company.
+
+Every run prints DATABASES['default'] HOST (never the password) before doing anything else,
+so the operator can see at a glance which database they are pointed at.
+
+The cron invocation must therefore carry the interlock:
+
+    python manage.py send_eod_digest --i-am-sending-to-real-people
 """
 
 import logging
+import os
+import sys
 from datetime import date as date_cls
 
 from django.conf import settings
@@ -73,13 +96,31 @@ class Command(BaseCommand):
                             help='Restrict to a single user by email address.')
         parser.add_argument('--date', type=str, default='',
                             help='Override the reporting date (IST), format YYYY-MM-DD.')
+        parser.add_argument('--out', type=str, default='',
+                            help='Render the CEO aggregate HTML to this path and exit. '
+                                 'Sends nothing and writes nothing to the database.')
+        parser.add_argument('--to', action='append', default=[], metavar='EMAIL',
+                            help='Override the aggregate recipients (repeatable). Skips the '
+                                 "role='CEO' lookup, the Admin/HR merge, and the individual digests.")
+        parser.add_argument('--i-am-sending-to-real-people', action='store_true',
+                            help='Safety interlock. Required for a real send; without it (and '
+                                 'without --dry-run/--out/--to) the command refuses and exits 1.')
 
     def handle(self, *args, **options):
+        # Before anything else: say which database this run is pointed at. HOST (and NAME)
+        # only - the same dict also holds PASSWORD, which is never printed.
+        db_conf = settings.DATABASES.get('default', {})
+        db_host = db_conf.get('HOST') or '(none - local/socket)'
+        self.stdout.write(f"[db] host={db_host} name={db_conf.get('NAME') or '(unset)'}")
+
         from projects.models import Task, ActivityLog, UserProfile, Project, Issue
         from projects.notifications import send_notification, _log
 
         dry_run   = options['dry_run']
         only_email = options['user'].strip().lower()
+        out_path   = (options.get('out') or '').strip()
+        to_emails  = [e.strip() for e in (options.get('to') or []) if e.strip()]
+        armed      = options.get('i_am_sending_to_real_people', False)
 
         if options['date']:
             try:
@@ -91,6 +132,37 @@ class Command(BaseCommand):
 
         app_url = getattr(settings, 'APP_BASE_URL',
                           'https://horizon-solar-pms-production.up.railway.app')
+        date_str = today.strftime('%d %b %Y')
+
+        # --- Safety interlock -----------------------------------------------------------
+        # A real send requires --i-am-sending-to-real-people. --dry-run and --out send
+        # nothing, and --to redirects the mail to the operator's own address(es), so those
+        # three are exempt. The check lives HERE, before anything is sent: refusing inside
+        # _run_aggregate would be too late, because the individual digests run first and
+        # would already have gone out to the whole company.
+        if not (dry_run or out_path or to_emails or armed):
+            recipients_line = '\n                  '.join(self._aggregate_recipient_labels())
+            self.stderr.write(
+                'REFUSING TO SEND: --i-am-sending-to-real-people was not given.\n'
+                f'  database host : {db_host}\n'
+                '  would send    : individual digests to every active, non-excluded user\n'
+                f'  aggregate to  : {recipients_line}\n'
+                'Re-run with --dry-run, --out PATH or --to EMAIL to test safely, or with '
+                '--i-am-sending-to-real-people for the real send.'
+            )
+            sys.exit(1)
+
+        # --- --out: render the CEO aggregate to a file and stop. No send, no DB write. ---
+        if out_path:
+            self._run_aggregate(today, date_str, app_url, dry_run=False, out_path=out_path)
+            return
+
+        # --- --to: the aggregate IS the target, so the individual digests are skipped -
+        # the mirror image of --user, which skips the aggregate. ---
+        if to_emails:
+            self.stdout.write('Skipping individual digests (--to targets the aggregate only).')
+            self._run_aggregate(today, date_str, app_url, dry_run, to_emails=to_emails)
+            return
 
         # --- Recipients: active profiles of active users (deactivated users excluded) ---
         # Hard role exclusion (§1): CEO/Admin/System Admin never get an INDIVIDUAL digest —
@@ -214,7 +286,7 @@ class Command(BaseCommand):
                 if cpk in coord_pks:
                     coord_issues_map[cpk] = c
 
-        date_str = today.strftime('%d %b %Y')
+        date_str = today.strftime('%d %b %Y')   # same value handle() computed above
         sent = errored = attempted = skipped = 0
 
         for profile in recipients:
@@ -413,10 +485,29 @@ class Command(BaseCommand):
             'most_active':      most_active,   # None -> template shows "No activity recorded today"
         }
 
-    def _run_aggregate(self, today, date_str, app_url, dry_run):
-        from django.contrib.auth.models import User
+    def _aggregate_recipient_labels(self):
+        """'Label <email>' for everyone a real aggregate run would reach. SELECT-only, and
+        used solely by the interlock's refusal message - it never sends anything."""
         from projects.models import UserProfile
-        from projects.notifications import send_aggregate_email
+
+        labels = [
+            f"Admin <{(getattr(settings, 'ADMIN_DIGEST_EMAIL', '') or '').strip() or '(unset)'}>",
+            f"HR <{(getattr(settings, 'HR_DIGEST_EMAIL', '') or '').strip() or '(unset)'}>",
+        ]
+        for p in (UserProfile.objects
+                  .filter(role='CEO', is_active=True, user__is_active=True)
+                  .select_related('user')
+                  .order_by('user__first_name', 'user__username')):
+            email = (p.user.email or '').strip()
+            if email:
+                labels.append(f"CEO {p.user.get_full_name() or p.user.username} <{email}>")
+        return labels
+
+    def _run_aggregate(self, today, date_str, app_url, dry_run, out_path='', to_emails=None):
+        from projects.models import UserProfile
+        # Imported inside the method, matching this command's existing convention of
+        # deferring every projects.* import until handle() runs.
+        from projects.reports import build_user_status_rows
 
         admin_email = (getattr(settings, 'ADMIN_DIGEST_EMAIL', '') or '').strip()
         hr_email    = (getattr(settings, 'HR_DIGEST_EMAIL', '') or '').strip()
@@ -452,11 +543,63 @@ class Command(BaseCommand):
             f"paid_today={ceo['paid_today']} deliveries_today={ceo['deliveries_today']} "
             f"most_active={(ma['name'] + ' (' + str(ma['count']) + ')') if ma else '(none)'}"
         )
+        # Per-user status table — the SAME builder the /reports/user-status/ page calls, so
+        # the email and the page can never report different figures for the same day. Six
+        # queries, flat in the number of users. Added to the CEO context ONLY: Admin/HR
+        # never set show_ceo_sections, and base_ctx is untouched above, so their bodies stay
+        # byte-identical to what they received before this change.
+        user_status = build_user_status_rows(today)
+        self.stdout.write(
+            f"[aggregate][ceo] per-user rows={len(user_status['rows'])} "
+            f"tasks={user_status['totals']['tasks_assigned']} "
+            f"overdue={user_status['totals']['overdue']} "
+            f"not_logged_in={user_status['totals']['not_logged_in_count']}"
+        )
         ceo_ctx = dict(base_ctx)
         ceo_ctx['show_ceo_sections'] = True
         ceo_ctx['ceo'] = ceo
+        ceo_ctx['user_status'] = user_status
+        # Reuses app_url, which is already resolved by handle() through the same
+        # getattr(settings, 'APP_BASE_URL', <hardcoded Railway URL>) fallback this command
+        # has always used. Deliberately not adding the setting — see DEFERRED G2.
+        ceo_ctx['user_status_url'] = f"{app_url.rstrip('/')}/reports/user-status/"
         ceo_html = render_to_string('projects/email/eod_digest.html', ceo_ctx)
         ceo_text = render_to_string('projects/email/eod_digest.txt', ceo_ctx)
+
+        # --out: write the CEO body to a file and stop. Everything executed above is
+        # SELECT-only, and the master-switch read below deliberately avoids
+        # SystemSettings.get() (a get_or_create, i.e. a WRITE when the row is missing) in
+        # favour of a plain .filter(pk=1).first(), so the whole path is safe on a READ-ONLY
+        # connection to production. A missing row is treated as the switch being off.
+        if out_path:
+            from projects.models import SystemSettings
+            row = SystemSettings.objects.filter(pk=1).first()
+            missing = ' (no SystemSettings row - treated as OFF)' if row is None else ''
+            state = 'ON' if (row is not None and row.email_enabled) else 'OFF'
+            self.stdout.write(f'[out] email master switch: {state}{missing}')
+
+            directory = os.path.dirname(os.path.abspath(out_path))
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(out_path, 'w', encoding='utf-8') as fh:
+                fh.write(ceo_html)
+            self.stdout.write(
+                f'[out] wrote CEO aggregate HTML ({len(ceo_html)} chars) to {out_path}')
+            self.stdout.write('[out] nothing sent, nothing logged, no rows written.')
+            return
+
+        # --to: the given addresses ARE the recipient set. The role='CEO' lookup and the
+        # Admin/HR address-merge below are skipped entirely; every address gets the CEO body.
+        if to_emails:
+            self.stdout.write('[aggregate] --to override, recipients: ' + ', '.join(to_emails))
+            entries = [('--to', e, ceo_text, ceo_html, None) for e in to_emails]
+            if dry_run:
+                for label, email, *_ in entries:
+                    self.stdout.write(f'[aggregate][dry-run] would send to {label}: {email} '
+                                      f'(with CEO extra sections)')
+                return
+            self._deliver(entries, date_str)
+            return
 
         # (label, email, text_body, html_body, profile). Admin/HR are FIXED addresses sharing
         # the base body. CEO recipients are resolved DYNAMICALLY from role='CEO' (CEO is its
@@ -524,8 +667,17 @@ class Command(BaseCommand):
             if e:
                 send_map[e.lower()] = (label, e, text_body, html_body, prof)
 
+        self._deliver(send_map.values(), date_str)
+
+    def _deliver(self, entries, date_str):
+        """Send the aggregate email to each (label, email, text_body, html_body, profile)
+        entry. Unchanged from the loop that used to live inline in _run_aggregate; shared
+        now so the --to override reuses exactly the same send + logging path."""
+        from django.contrib.auth.models import User
+        from projects.notifications import send_aggregate_email
+
         subject = f'Company-wide Horizon Solar EOD Summary — {date_str}'
-        for label, val, text_body, html_body, prof in send_map.values():
+        for label, val, text_body, html_body, prof in entries:
             # Resolve the address to a UserProfile (by email) so the send lands in
             # NotificationLog; if there's no matching account, it still sends but is
             # recorded only in the application log (see send_aggregate_email). CEO entries

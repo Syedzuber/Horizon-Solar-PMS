@@ -18,7 +18,17 @@ Executive snapshot (today):
 - Payments received today           : {{ ceo.paid_today }}
 - Delivery challans received today  : {{ ceo.deliveries_today }}
 - Most active user today            : {% if ceo.most_active %}{{ ceo.most_active.name }} ({{ ceo.most_active.count }} action{{ ceo.most_active.count|pluralize }}){% else %}No activity recorded today{% endif %}
-{% endif %}
+
+Per-user status ({{ date_str }}):
+{% if user_status.rows %}{% for row in user_status.rows %}- {{ row.name }} ({{ row.role }}): {{ row.projects_assigned }} project{{ row.projects_assigned|pluralize }}, {{ row.tasks_assigned }} task{{ row.tasks_assigned|pluralize }} ({{ row.not_started }} not started, {{ row.in_progress }} in progress, {{ row.completed }} completed), {{ row.overdue }} overdue, logged in: {% if row.logged_in %}yes{% else %}NO{% endif %}
+{% endfor %}- TOTALS: {{ user_status.totals.projects_assigned }} projects, {{ user_status.totals.tasks_assigned }} tasks ({{ user_status.totals.not_started }} not started, {{ user_status.totals.in_progress }} in progress, {{ user_status.totals.completed }} completed), {{ user_status.totals.overdue }} overdue, {{ user_status.totals.not_logged_in_count }} of {{ user_status.totals.user_count }} not logged in
+
+Blocked and Done-Today counts are on the full report.{% if user_status_url %} Open it: {{ user_status_url }}{% endif %}
+Overdue counts tasks whose due date has passed and which are not completed. An overdue task is also counted under Not Started or In Progress, so the row will not sum to Tasks.
+Task counts cover projects that use the task template. OPEX and CAPEX design work is tracked separately.
+Projects counts every project that is still Active; the system has no project-closure step yet.
+{% else %}No users have tasks or projects assigned for this date.
+{% endif %}{% endif %}
 {% if footer_note %}{{ footer_note }}{% else %}These figures reflect your own actions today.{% endif %}
 {% if app_url %}
 Open Horizon Solar: {{ app_url }}
