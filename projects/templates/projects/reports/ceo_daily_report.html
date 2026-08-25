@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Daily Report — SolarPMS{% endblock %}
+
+{% comment %}
+Bootstrap 5.3.3 + Bootstrap Icons, inherited from base.html. Do NOT introduce Tailwind
+or Alpine here — those belong to admin_base.html / subadmin_base.html, a separate shell
+with a different stack, and mixing the two produces a page that looks broken in both.
+Every figure comes from reports.build_user_status_rows(); this template computes nothing.
+{% endcomment %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Daily Report</h4>
+    <div class="text-muted small">Per-user task and login status &middot; {{ report_date|date:"d M Y" }} (IST)</div>
+  </div>
+
+  {# Date picker reloads the page with ?date=. GET so the view stays read-only and the #}
+  {# resulting URL is shareable and bookmarkable. max= stops the browser offering a    #}
+  {# future date; the view warns and falls back to today if one arrives anyway.        #}
+  <form method="get" class="d-flex align-items-end gap-2">
+    <div>
+      <label for="reportDate" class="form-label small text-muted mb-1">Date</label>
+      <input type="date" id="reportDate" name="date" class="form-control form-control-sm"
+             value="{{ report_date|date:'Y-m-d' }}" max="{{ max_date|date:'Y-m-d' }}">
+    </div>
+    <button type="submit" class="btn btn-primary btn-sm">
+      <i class="bi bi-arrow-repeat me-1"></i>Show
+    </button>
+  </form>
+</div>
+
+{% if rows %}
+<div class="card shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-hover table-sm align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>User</th>
+          <th class="text-center">Projects<br><span class="fw-normal text-muted small">Assigned</span></th>
+          <th class="text-center">Tasks<br><span class="fw-normal text-muted small">Assigned</span></th>
+          <th class="text-center">Not<br>Started</th>
+          <th class="text-center">In<br>Progress</th>
+          <th class="text-center">Completed</th>
+          <th class="text-center">Blocked</th>
+          <th class="text-center">Overdue</th>
+          <th class="text-center">Done<br>Today</th>
+          <th class="text-center">Logged<br>In</th>
+          {% comment %}
+          A "Design Assignments" column would slot in HERE, immediately after Logged In,
+          reading DesignAssignment rows per designer. Deliberately not built this session:
+          the design workflow is OPEX-only (design_views.py:218 404s on any other project
+          type), so the column would be structurally blank for every Residential project
+          and for every non-Design user. Add it alongside a tender-scoped filter, not
+          before. Adding it also means dropping a column from the email table, which is
+          already at its 600px limit — see the note in email/eod_digest.html.
+          {% endcomment %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {# Rows for people who have not logged in are tinted, because "carrying overdue #}
+        {# work and not logged in today" is the pairing this report exists to surface.  #}
+        <tr {% if not row.logged_in %}class="table-warning"{% endif %}>
+          <td>
+            <div class="fw-semibold">{{ row.name }}</div>
+            <div class="text-muted small">{{ row.role }}</div>
+          </td>
+          <td class="text-center">{{ row.projects_assigned }}</td>
+          <td class="text-center fw-semibold">{{ row.tasks_assigned }}</td>
+          <td class="text-center">{{ row.not_started }}</td>
+          <td class="text-center">{{ row.in_progress }}</td>
+          <td class="text-center">{{ row.completed }}</td>
+          <td class="text-center">
+            {% if row.blocked %}<span class="badge text-bg-secondary">{{ row.blocked }}</span>{% else %}0{% endif %}
+          </td>
+          <td class="text-center">
+            {% if row.overdue %}<span class="badge text-bg-danger">{{ row.overdue }}</span>{% else %}0{% endif %}
+          </td>
+          <td class="text-center">
+            {% if row.done_today %}<span class="badge text-bg-success">{{ row.done_today }}</span>{% else %}0{% endif %}
+          </td>
+          <td class="text-center">
+            {% if row.logged_in %}
+              <i class="bi bi-check-circle-fill text-success" title="Logged in"></i>
+              <span class="visually-hidden">Yes</span>
+            {% else %}
+              <i class="bi bi-x-circle text-danger" title="Not logged in"></i>
+              <span class="visually-hidden">No</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-light border-top">
+        <tr class="fw-semibold">
+          <td>
+            Totals
+            <div class="text-muted small fw-normal">{{ totals.user_count }} user{{ totals.user_count|pluralize }}</div>
+          </td>
+          <td class="text-center">{{ totals.projects_assigned }}</td>
+          <td class="text-center">{{ totals.tasks_assigned }}</td>
+          <td class="text-center">{{ totals.not_started }}</td>
+          <td class="text-center">{{ totals.in_progress }}</td>
+          <td class="text-center">{{ totals.completed }}</td>
+          <td class="text-center">{{ totals.blocked }}</td>
+          <td class="text-center">{{ totals.overdue }}</td>
+          <td class="text-center">{{ totals.done_today }}</td>
+          <td class="text-center">
+            <span class="text-muted small fw-normal">{{ totals.not_logged_in_count }} not logged in</span>
+          </td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+<div class="text-muted small mt-3">
+  <p class="mb-2">
+    Overdue counts tasks whose due date has passed and which are not completed. An
+    overdue task is also counted under Not Started, In Progress or Blocked, so Overdue is
+    not a separate column total and the row will not sum to Tasks Assigned.
+  </p>
+  <p class="mb-2">
+    Task counts cover projects that use the task template. OPEX and CAPEX design work is
+    tracked separately and does not appear in these columns.
+  </p>
+  <p class="mb-0">
+    Projects Assigned counts every project that is still Active. The system has no
+    project-closure step yet, so completed projects remain counted.
+  </p>
+</div>
+
+{% else %}
+<div class="card shadow-sm">
+  <div class="card-body text-center text-muted py-5">
+    <i class="bi bi-inbox fs-2 d-block mb-2"></i>
+    No users have tasks or projects assigned for this date.
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

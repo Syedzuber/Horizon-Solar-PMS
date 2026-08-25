@@ -58,6 +58,14 @@
         <i class="bi bi-diagram-3 me-1"></i>Programs
       </a>
     {% endif %}
+    {# Daily Report — CEO / Admin / System Admin only. Gated inline to match the Programs #}
+    {# link above; the authoritative predicate is permissions.can_view_user_status_report, #}
+    {# which the view itself calls. Keep the two role lists in step.                       #}
+    {% if user.profile.role == 'CEO' or user.profile.role == 'Admin' or user.profile.role == 'System Admin' %}
+      <a href="{% url 'ceo_daily_report' %}" class="nav-link text-white small" title="Daily Report">
+        <i class="bi bi-clipboard-data me-1"></i>Daily Report
+      </a>
+    {% endif %}
     <div class="position-relative" id="user-hover-menu">
       <span class="text-white-50 small" style="cursor:default;">
         {{ user.get_full_name|default:user.username }}

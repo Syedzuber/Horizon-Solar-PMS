@@ -2,6 +2,7 @@ from django.urls import path
 from django.views.generic import RedirectView
 from . import views
 from . import design_views   # OPEX design workflow (Part 2) — separate module, no existing view changed
+from . import report_views   # Read-only management reports — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -383,6 +384,15 @@ urlpatterns = [
     path('tasks/due-today/', views.tasks_drill_down, {'filter_type': 'due-today'}, name='tasks_due_today'),
     path('tasks/due-soon/',  views.tasks_drill_down, {'filter_type': 'due-soon'},  name='tasks_due_soon'),
     path('tasks/overdue/',   views.tasks_drill_down, {'filter_type': 'overdue'},   name='tasks_overdue'),
+
+    # ---------------------------------------------------------------------------
+    # Reports — read-only management reporting (report_views.py)
+    # ---------------------------------------------------------------------------
+    # NOTE the '/reports/' prefix, NOT '/admin/': Django's admin URLconf is mounted
+    # first and would intercept anything under /admin/ before it reached this file.
+    # CEO daily report — CEO / Admin / System Admin only
+    path('reports/user-status/', report_views.ceo_daily_report,
+         name='ceo_daily_report'),
 
     # ---------------------------------------------------------------------------
     # Delivery Challans — SCM Delivery Tracker (Day 9)

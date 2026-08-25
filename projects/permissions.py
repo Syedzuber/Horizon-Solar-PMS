@@ -864,6 +864,35 @@ def project_boq_is_design_locked(project):
     ).exists()
 
 
+# Roles who may read the per-user status report — every individual's task workload and
+# whether they logged in. Deliberately NOT PORTFOLIO_VIEW_ROLES: that set contains
+# Finance and SCM, whose portfolio-wide remit is over PROJECTS, not over their
+# colleagues. This report is about people, and seeing every project is not a reason to
+# see every person's login and workload.
+#
+# Kept as its own frozenset for exactly the reason BOQ_PORTFOLIO_READ_ROLES is
+# (permissions.py:156-159): so that widening one visibility can never silently widen
+# another as a side effect. Adding a role to PORTFOLIO_VIEW_ROLES must not hand out
+# per-person surveillance by accident.
+USER_STATUS_REPORT_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def can_view_user_status_report(user):
+    """Who may see per-user task and login counts for every user.
+
+    True for CEO, Admin and System Admin only (USER_STATUS_REPORT_ROLES). This is not a
+    project-scoped question — there is no project argument — so it takes the user alone.
+
+    The `getattr` guard mirrors every other helper in this module: a superuser created
+    via `createsuperuser` may have no UserProfile, and a user with no profile holds no
+    role and therefore no access.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in USER_STATUS_REPORT_ROLES
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:
