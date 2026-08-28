@@ -204,7 +204,7 @@ If a prompt appears to require one of these, **stop and ask**. Do not build a sm
 | B-07 | Who may mark a drawing not-applicable — designer, or Design Head at review? | 3.1 |
 | B-08 | Can a site override a template task dependency? | 1.4 |
 | B-09 | Final phase and task list for the execution template (Residential is 52 tasks / 9 phases; OPEX has none) | 1.3, 2.4 |
-| B-10 | What happens to an in-flight project when its template is upgraded? | 0.4 |
+| ~~B-10~~ | ~~What happens to an in-flight project when its template is upgraded?~~ **CLOSED 28 Aug 2026 by prompt 0.4 — see §14.** The answer is *nothing*. | — |
 | B-12 | Who may waive a punch point, and does it need senior approval? | 2.3 |
 | B-14 | How many warehouses, and how are keepers assigned to them? **Now needed in phase 1** — a keeper logs in | 1.2, 4.1 |
 | B-15 | Net metering: hard block or warning, which project types, who owns it? | 5.1 |
@@ -340,3 +340,113 @@ themselves — **and a row moved from the second table above to the first.**
   are bypassed by `QuerySet.update()` and `QuerySet.delete()`. The stronger form is a
   database-level `REVOKE UPDATE, DELETE ON projects_statustransition`, deliberately left
   for a deployment task.
+
+---
+
+## 14. Task templates — versioned, and what that does and does not change
+
+Added by prompt 0.4, 28 Aug 2026. **Read this before assuming a project reflects the
+template it was built from.**
+
+### The template is data now
+
+`build_residential_phases()` no longer runs at activation. `attach_residential_template()`
+reads the **active `TaskTemplate`** for the project type instead. Migration `0067` seeded
+the Residential list as `RESIDENTIAL` v1 — 9 phases, 52 tasks, durations resolved by the
+same `_get_duration()` call the old code made, against the live `TaskDurationTemplate`
+rows — so a project activated after the migration gets exactly what one activated before
+it got. The function stays in `utils.py` as the seed the migration read and as the source
+the virgin-database bootstrap re-seeds from; it is not executed at runtime any more.
+
+| Model | Holds |
+|---|---|
+| `TaskTemplate` | one numbered version — `code`, `label`, `project_type`, `version_no`, `status`, `effective_from` |
+| `TaskTemplatePhase` | `code`, `label`, `sort_order` — becomes a `ProjectPhase` |
+| `TaskTemplateTask` | `code`, `label`, `sort_order`, `assigned_role`, `task_type`, `duration_days`, `is_payment_milestone` — becomes a `Task` |
+
+`assigned_role` and `task_type` use `Task.ROLE_CHOICES` and `Task.TYPE_CHOICES`. No new
+role or type vocabulary was introduced. `code` is the cross-version identity — when v2
+rewords a label, `code` is what says it is still the same row.
+
+### B-10 is CLOSED — the answer is *nothing*
+
+> *"What happens to an in-flight project when its template is upgraded?"*
+
+**Nothing happens to it, and nothing can.** `Task.task_name`, `assigned_role`,
+`task_type`, `duration_days` and `is_payment_milestone` are **copies taken at
+`bulk_create`**, not reads through a foreign key. An in-flight project holds its own rows
+and is structurally immune to any later version. Publishing v2 changes what the *next*
+activation produces and nothing else.
+
+That also settles R-8 for tasks without a new column: **`Task.task_name` is already the
+snapshot.** A `label_snapshot` field was considered and deliberately **not** added — it
+would duplicate `task_name` and become a second thing to keep in sync. The only thing
+`Task` gained is `template_task`, a nullable `SET_NULL` FK recording **provenance only**.
+Nothing reads it back to decide behaviour, and nothing may start to: the moment a code
+path resolves a task's name, role or duration *through* that FK, B-10 reopens.
+`tests_task_template.InFlightProjectIsolationTests` is the guard on that.
+
+### R-7 is enforced, not documented
+
+A version's content is editable **only while `status='draft'`**. `TaskTemplatePhase` and
+`TaskTemplateTask` override `save()` and `delete()` to raise `TemplateVersionLocked`
+otherwise — archived is frozen as hard as active, because an archived version is the
+record of what last month's projects were built from. `TaskTemplate.activate()` promotes a
+draft and archives the outgoing version **in one transaction**; the partial unique
+constraint `uniq_active_task_template_per_code` is what makes "at most one active version
+per code" true at the database rather than by convention.
+
+**Same enforcement limit as `StatusTransition` (§13), stated rather than implied:**
+`QuerySet.update()`, `QuerySet.delete()` and the FK cascade from deleting a `TaskTemplate`
+all operate in SQL and bypass the overrides entirely.
+
+### `TaskDurationTemplate` is superseded and no longer read by anything
+
+Its two editors — `admin_task_durations` (Admin) and `subadmin_task_durations` (System
+Admin), which were byte-similar duplicates of one POST handler — are **read-only** and now
+render the **active `TaskTemplate`**. Repointing them to *edit* was rejected: editing a
+duration in place would violate R-7, and doing it correctly means "create v+1, edit,
+activate", which is the template-authoring UI that 0.4 explicitly does not build. Showing
+the stale table read-only was rejected for the same reason the editor was — it would still
+be presenting a number nothing acts on.
+
+**The table is deliberately not dropped.** That is a separate decision with its own
+migration. Do not repoint anything back at the model.
+
+### What 0.4 did NOT do
+
+- **No OPEX or CAPEX template exists.** 0.4 makes one *possible*; prompt 1.3 creates it,
+  and it needs the phase and task list from the projects team first (**B-09**).
+- **No template-authoring UI.** Templates are seeded and edited through migrations or the
+  Django admin, which refuses to open a form on a non-draft version. A real UI is phase 1
+  at the earliest.
+- **No change to any in-flight project.** Verified by fingerprinting every pre-existing
+  column of `projects_task`, `projects_projectphase` and `projects_project` before and
+  after the migration; all three hashes are identical.
+- **`get_residential_template_task_names()`** (the checklist admin's task-name picker) now
+  reads the active template, so it cannot drift from what activation creates. It falls
+  back to `build_residential_phases()` only on a database that holds no template at all.
+
+### Instrumentation — no change to §13
+
+0.4 adds **no** `StatusTransition` subject type. `TaskTemplate.status`
+(`draft | active | archived`) is **not instrumented**: it is an eighth status-bearing model
+outside 0.3's six-value subject vocabulary, and adding it means a new `SUBJECT_*` constant
+and a `SUBJECT_TYPE_CHOICES` migration — a schema change, so R-1 applies. Add this row to
+§13's "NOT instrumented" table when reading it:
+
+| Model | Statuses | Why not |
+|---|---|---|
+| `TaskTemplate` | `draft \| active \| archived` (`activate()`) | New in 0.4. A new `subject_type` is a schema change (R-1). Version history is legible without it: the rows themselves are the record, `effective_from` stamps the promotion, and R-7 makes them immutable. |
+
+The §13 "Instrumented" table is **unchanged** — the six subject types 0.3 covered are still
+exactly the six that are covered.
+
+### Decision log addition
+
+| Date | Decision |
+|---|---|
+| **28 Aug** | **Templates are versioned data, immutable once active (R-7).** The Residential list is `RESIDENTIAL` v1; `build_residential_phases()` is kept as its seed and no longer runs at activation. |
+| **28 Aug** | **B-10 closed: nothing happens to an in-flight project on upgrade.** Instances hold copied rows. `Task.template_task` is provenance only and must never become a behaviour lookup. |
+| **28 Aug** | **No `label_snapshot` on `Task`.** `task_name` already is the snapshot; a second copy would only be a second thing to keep in sync. |
+| **28 Aug** | **`TaskDurationTemplate`'s two editors made read-only, not repointed.** Repointing them to edit would either break R-7 or require the authoring UI 0.4 does not build. The table stays; dropping it is its own decision. |

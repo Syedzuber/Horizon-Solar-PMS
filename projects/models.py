@@ -373,6 +373,18 @@ class Task(models.Model):
     completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
     blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance
+    # PROVENANCE ONLY — which TaskTemplateTask this task was created from. Nothing reads
+    # it back to decide behaviour, and it is null for every task added by hand. There is
+    # deliberately NO label_snapshot beside it: task_name above is ALREADY a copy taken
+    # at bulk_create, not a lookup, so R-8 is satisfied and a second copy of the same
+    # text would only be a second thing to keep in sync. SET_NULL so retiring a template
+    # version can never cascade a project's tasks away.
+    template_task        = models.ForeignKey(
+        'TaskTemplateTask',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='tasks',
+    )
     created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -1791,9 +1803,23 @@ class DesignSubmission(models.Model):
 
 class TaskDurationTemplate(models.Model):
     """
-    Admin-editable default duration_days for each task in the residential project template.
-    Seeded from the hardcoded values in attach_residential_template(); changes apply to
-    new projects only — existing tasks are never touched.
+    SUPERSEDED BY TaskTemplateTask.duration_days — NO LONGER READ BY ANYTHING.
+
+    Was: admin-editable default duration_days for each task in the residential project
+    template. Since prompt 0.4 the durations that activation actually uses live on
+    TaskTemplateTask, and migration 0067 read this table once to seed them. Nothing
+    reads it now.
+
+    The table is deliberately NOT dropped — that is a separate decision with its own
+    migration — and the two screens that used to edit it (admin_task_durations,
+    subadmin_task_durations) are read-only and now render the active TaskTemplate
+    instead. Do not repoint anything back at this model: a saved edit here would have
+    no effect anywhere, which is worse than the screen not existing.
+
+    Note also that its unique_together is ('project_type', 'task_name') — phase_name is
+    stored and displayed but never matched on, so two identically-named tasks in
+    different phases could not carry different durations. TaskTemplateTask has no such
+    limit: its uniqueness is per-phase.
     """
 
     PROJECT_TYPE_CHOICES = [
@@ -1819,6 +1845,215 @@ class TaskDurationTemplate(models.Model):
 
     def __str__(self):
         return f"{self.project_type} | {self.phase_name} | {self.task_name} ({self.duration_days}d)"
+
+
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The phase/task list a project is built from at activation. Before prompt 0.4 this
+# lived in Python source as build_residential_phases(); it is data now, so a template
+# can be changed without a deploy and last month's version is still on record.
+# ---------------------------------------------------------------------------
+
+
+class TemplateVersionLocked(Exception):
+    """Raised when something tries to change the content of a non-draft template version."""
+
+
+def _require_draft_template(template, what):
+    """Guard for R-7: template content is editable only while the version is a draft.
+
+    Archived is frozen as hard as active — an archived version is the record of what
+    a project built last month was built from, and rewriting it would make that record
+    a lie.
+    """
+    if template is None:          # unsaved parent; the parent's own save() will fail first
+        return
+    if template.status != TaskTemplate.DRAFT:
+        raise TemplateVersionLocked(
+            f"Cannot modify {what}: {template} is '{template.status}', not a draft. "
+            f"Editing an active template means creating version {template.version_no + 1} "
+            f"as a draft, changing that, and calling activate() (R-7)."
+        )
+
+
+class TaskTemplate(models.Model):
+    """One numbered version of a project task template — the phase/task list a project
+    is built from at activation.
+
+    R-7: a version's content is editable ONLY while it is `draft`. Editing an active
+    template means creating version+1 as a draft, changing that, then calling
+    activate(), which archives version N in the same transaction. Rows in an active or
+    archived version are never modified in place.
+
+    Versioned by an integer on the row, matching the BOQ.version / DesignFile.version
+    precedent already in this codebase rather than introducing a separate version model.
+
+    A PROJECT DOES NOT HOLD A REFERENCE TO THE VERSION IT WAS BUILT FROM, and does not
+    need one. Task.task_name, assigned_role, task_type and duration_days are plain
+    COPIES taken at bulk_create, so an in-flight project is structurally immune to its
+    template being upgraded — that is the answer to B-10. Task.template_task records
+    which template row a task came from for provenance only; nothing reads it back to
+    decide behaviour.
+
+    ENFORCEMENT LIMIT, stated rather than implied: the R-7 guards below are save()/
+    delete() overrides on the child models. QuerySet.update(), QuerySet.delete() and
+    the FK cascade from deleting a TaskTemplate all operate in SQL and bypass them
+    entirely — the same honest half-measure as StatusTransition's append-only overrides.
+    """
+
+    DRAFT    = 'draft'
+    ACTIVE   = 'active'
+    ARCHIVED = 'archived'
+
+    STATUS_CHOICES = [
+        (DRAFT,    'Draft'),
+        (ACTIVE,   'Active'),
+        (ARCHIVED, 'Archived'),
+    ]
+
+    code           = models.CharField(max_length=50)   # Cross-version identity: v1 and v2 of one template share it
+    label          = models.CharField(max_length=100)
+    # Project.project_type vocabulary ('Residential'), NOT TaskDurationTemplate's
+    # lowercase 'residential' — this value is compared directly to project.project_type.
+    project_type   = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
+    version_no     = models.PositiveIntegerField(default=1)
+    status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
+    effective_from = models.DateField(null=True, blank=True)   # Stamped by activate()
+    created_by     = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='task_templates_created',
+    )
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['code', '-version_no']
+        indexes = [
+            # Activation's hot path is filter(project_type=..., status='active').
+            models.Index(fields=['project_type', 'status'], name='tasktmpl_type_status_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code', 'version_no'],
+                name='uniq_task_template_code_version',
+            ),
+            # At most ONE active version per template code. Partial (condition=) so any
+            # number of draft and archived versions may coexist beside it — the history
+            # is kept, the exclusivity is not weakened by keeping it. Same shape as
+            # uniq_active_site_group_membership.
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(status='active'),   # literal: a nested Meta cannot see the outer class body's ACTIVE
+                name='uniq_active_task_template_per_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.code} v{self.version_no} ({self.status})"
+
+    @property
+    def is_editable(self):
+        """Content may be changed only while the version is a draft (R-7)."""
+        return self.status == self.DRAFT
+
+    def activate(self):
+        """Make this draft the active version, archiving the current active one.
+
+        Both writes happen in ONE transaction, so there is no instant at which a
+        template code has two active versions or none. The partial unique constraint
+        would reject the former regardless; doing it explicitly states the intent
+        rather than leaning on an IntegrityError to express it.
+        """
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be activated; {self} is '{self.status}'."
+            )
+        with transaction.atomic():
+            # filter().update() rather than load-and-save: the archive and the
+            # activation must not interleave with a concurrent activate() of a third
+            # version, and the partial unique constraint is what adjudicates a race.
+            TaskTemplate.objects.filter(
+                code=self.code, status=self.ACTIVE,
+            ).exclude(pk=self.pk).update(status=self.ARCHIVED)
+
+            self.status = self.ACTIVE
+            if self.effective_from is None:
+                self.effective_from = timezone.now().date()
+            self.save(update_fields=['status', 'effective_from'])
+        return self
+
+
+class TaskTemplatePhase(models.Model):
+    """One phase of a template version. Becomes a ProjectPhase at activation."""
+
+    template   = models.ForeignKey(TaskTemplate, related_name='phases', on_delete=models.CASCADE)
+    code       = models.CharField(max_length=50)    # Stable across versions; label may be reworded
+    label      = models.CharField(max_length=100)   # Copied verbatim into ProjectPhase.phase_name
+    sort_order = models.PositiveIntegerField()      # Becomes ProjectPhase.phase_order
+
+    class Meta:
+        ordering = ['sort_order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['template', 'code'],
+                name='uniq_task_template_phase_code',
+            ),
+            # sort_order is deliberately NOT unique: reordering two phases in a draft
+            # would otherwise need a temporary-value dance for no gain, and a duplicate
+            # sort_order degrades to a stable tie-break, not to corruption.
+        ]
+
+    def __str__(self):
+        return f"{self.template.code} v{self.template.version_no} / {self.label}"
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.template, f"phase '{self.label}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.template, f"phase '{self.label}'")
+        return super().delete(*args, **kwargs)
+
+
+class TaskTemplateTask(models.Model):
+    """One task of a template phase. Becomes a Task at activation.
+
+    assigned_role and task_type use Task.ROLE_CHOICES and Task.TYPE_CHOICES — the same
+    constants, not a parallel vocabulary.
+    """
+
+    phase                = models.ForeignKey(TaskTemplatePhase, related_name='tasks', on_delete=models.CASCADE)
+    code                 = models.CharField(max_length=100)   # Stable across versions; label may be reworded
+    label                = models.CharField(max_length=200)   # Copied verbatim into Task.task_name
+    sort_order           = models.PositiveIntegerField()      # Becomes Task.task_order
+    assigned_role        = models.CharField(max_length=20, choices=Task.ROLE_CHOICES, default=Task.PM)
+    task_type            = models.CharField(max_length=10, choices=Task.TYPE_CHOICES, default=Task.INTERNAL)
+    duration_days        = models.PositiveIntegerField(default=1)
+    is_payment_milestone = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['sort_order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['phase', 'code'],
+                name='uniq_task_template_task_code',
+            ),
+        ]
+
+    def __str__(self):
+        return self.label
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.phase.template, f"task '{self.label}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.phase.template, f"task '{self.label}'")
+        return super().delete(*args, **kwargs)
 
 
 class Checklist(models.Model):

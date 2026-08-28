@@ -7,6 +7,7 @@ from .models import (
     Program,
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
+    TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
 )
 from .utils import assign_task_to
 
@@ -320,3 +321,77 @@ class DesignChangeRequestAdmin(admin.ModelAdmin):
                      'rejection_reason']
     raw_id_fields = ['attempt', 'resulting_attempt', 'decided_by']
     readonly_fields = ['requested_at']
+
+
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The only authoring surface for a template until a real UI exists (phase 1 at the
+# earliest). Everything here refuses to edit a version that is not a draft, so the
+# admin cannot walk into the TemplateVersionLocked guard on the models and turn it
+# into a 500. Editing an active template means adding version+1 as a draft, changing
+# that, and activating it.
+# ---------------------------------------------------------------------------
+
+
+class _DraftOnlyContentAdmin(admin.ModelAdmin):
+    """Shared authority rules for template CONTENT (phases and tasks).
+
+    Content of an active or archived version is immutable (R-7). The model's save()
+    already raises; these two hooks stop the admin from offering the form at all, so a
+    user gets "you may not change this" rather than a server error on save.
+    """
+
+    def _template_of(self, obj):
+        raise NotImplementedError
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None and not self._template_of(obj).is_editable:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and not self._template_of(obj).is_editable:
+            return False
+        return super().has_delete_permission(request, obj)
+
+
+@admin.register(TaskTemplate)
+class TaskTemplateAdmin(admin.ModelAdmin):
+    list_display  = ['code', 'version_no', 'label', 'project_type', 'status',
+                     'effective_from', 'created_by', 'created_at']
+    list_filter   = ['code', 'project_type', 'status']
+    search_fields = ['code', 'label']
+    # status is set by activate(), which archives the outgoing version in the same
+    # transaction. Editing it here would activate a version without archiving its
+    # predecessor and hit the partial unique constraint as an IntegrityError.
+    readonly_fields = ['status', 'created_at']
+
+    def has_change_permission(self, request, obj=None):
+        # The version's OWN row (its label, effective_from) is editable while draft.
+        if obj is not None and not obj.is_editable:
+            return False
+        return super().has_change_permission(request, obj)
+
+
+@admin.register(TaskTemplatePhase)
+class TaskTemplatePhaseAdmin(_DraftOnlyContentAdmin):
+    list_display  = ['template', 'sort_order', 'code', 'label']
+    list_filter   = ['template']
+    search_fields = ['code', 'label']
+    raw_id_fields = ['template']
+
+    def _template_of(self, obj):
+        return obj.template
+
+
+@admin.register(TaskTemplateTask)
+class TaskTemplateTaskAdmin(_DraftOnlyContentAdmin):
+    list_display  = ['phase', 'sort_order', 'label', 'assigned_role', 'task_type',
+                     'duration_days', 'is_payment_milestone']
+    list_filter   = ['phase__template', 'assigned_role', 'task_type', 'is_payment_milestone']
+    search_fields = ['code', 'label']
+    raw_id_fields = ['phase']
+
+    def _template_of(self, obj):
+        return obj.phase.template

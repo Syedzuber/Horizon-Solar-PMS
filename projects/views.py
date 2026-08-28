@@ -33,7 +33,6 @@ from .models import (
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
-    TaskDurationTemplate,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     Program, program_rollup_annotations, get_program_rollup,
     DesignAssignment,
@@ -66,6 +65,9 @@ from .utils import (
     # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
     # row, inside the same transaction as the change itself.
     record_transition,
+    # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
+    # screens render the active version and nothing in views writes a template.
+    resolve_active_task_template,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -10361,96 +10363,59 @@ def admin_assign_pm(request, project_id):
     return redirect('admin_project_list')
 
 
+def _residential_template_duration_rows():
+    """Return (grouped, total, template) for the read-only duration screens.
+
+    Sourced from the ACTIVE TaskTemplate — the rows activation actually reads — not from
+    TaskDurationTemplate, which nothing reads any more. Showing the stale table read-only
+    would still be misleading, which is the whole problem being closed here.
+
+    `grouped` is [(phase_label, [TaskTemplateTask, ...]), ...] in template order, which is
+    the same shape the templates already iterate. Returns ([], 0, None) when no template
+    is active, so the page renders an explanation instead of raising.
+    """
+    template = resolve_active_task_template('Residential')
+    if template is None:
+        return [], 0, None
+
+    grouped = [
+        (phase.label, list(phase.tasks.all()))
+        for phase in template.phases.all()
+    ]
+    total = sum(len(tasks) for _, tasks in grouped)
+    return grouped, total, template
+
+
 @login_required
 @role_required(['Admin'])
 def admin_task_durations(request):
     """
-    Admin view to edit default duration_days for each task in the residential project template.
-    Changes apply to new projects only — existing project tasks are never modified.
-    GET: render grouped table. POST: validate and save changed values.
+    Admin view listing the task durations of the active Residential template. READ-ONLY.
+    Access: Admin only.
+
+    Was an editor over TaskDurationTemplate. Since prompt 0.4 the durations activation
+    uses live on TaskTemplateTask inside a versioned template, and a template version is
+    immutable once active (R-7) — so editing a duration in place is not a thing that can
+    be allowed, and continuing to accept a POST here would have saved a value that
+    changes nothing anywhere. Changing a duration means shipping template version+1.
+    A version-authoring UI is explicitly out of scope for this session.
     """
+    # POST is refused rather than removed from the URLconf: a bookmarked form or a
+    # double-submitted old page must get a clear answer, not a 405 or a silent no-op.
     if request.method == 'POST':
-        actor = request.user.profile
-        changed = 0
-        errors = []
-
-        for key, raw_val in request.POST.items():
-            if not key.startswith('duration_'):
-                continue
-            try:
-                pk = int(key.split('_', 1)[1])
-            except (ValueError, IndexError):
-                continue
-
-            raw_val = raw_val.strip()
-            if not raw_val.isdigit():
-                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
-                continue
-            new_days = int(raw_val)
-
-            try:
-                record = TaskDurationTemplate.objects.get(pk=pk)
-            except TaskDurationTemplate.DoesNotExist:
-                continue
-
-            if new_days == record.duration_days:
-                continue
-
-            old_days = record.duration_days
-            record.duration_days = new_days
-            record.updated_by = request.user
-            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
-            changed += 1
-
-            log_activity(
-                project=None,
-                actor=actor,
-                action=(
-                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
-                    f"changed from {old_days}d to {new_days}d [residential template]"
-                ),
-                entity_type='TaskDurationTemplate',
-                entity_id=record.pk,
-            )
-
-        if errors:
-            for msg in errors:
-                messages.error(request, msg)
-        else:
-            messages.success(request, f'Saved. {changed} duration(s) updated.')
-
+        messages.info(
+            request,
+            'Task durations are no longer edited here. They live on the versioned '
+            'Residential task template, which is immutable once active — changing a '
+            'duration means publishing a new template version.'
+        )
         return redirect('admin_task_durations')
 
-    # GET — group records by phase_name preserving the natural phase order
-    PHASE_ORDER = [
-        'Sales & Documentation',
-        'Detail Engineering Visit',
-        'Design',
-        'Pre-Installation Approvals',
-        'Procurement',
-        'Delivery',
-        'Installation',
-        'Commissioning',
-        'Finance Closure',
-    ]
-    records = list(
-        TaskDurationTemplate.objects
-        .filter(project_type='residential')
-        .select_related('updated_by')
-        .order_by('phase_name', 'task_name')
-    )
-
-    phase_groups = {phase: [] for phase in PHASE_ORDER}
-    for rec in records:
-        if rec.phase_name in phase_groups:
-            phase_groups[rec.phase_name].append(rec)
-
-    # Build ordered list of (phase_name, [records]) skipping empty phases
-    grouped = [(phase, phase_groups[phase]) for phase in PHASE_ORDER if phase_groups[phase]]
-
+    grouped, total, template = _residential_template_duration_rows()
     return render(request, 'projects/admin/task_durations.html', {
-        'grouped': grouped,
-        'total': len(records),
+        'grouped':  grouped,
+        'total':    total,
+        'template': template,
     })
 
 
@@ -10975,20 +10940,6 @@ _SA_DEPT_NAMES = {
     'BD':                  'Sales & Business Development',
 }
 
-# Phase order for task duration template
-_PHASE_ORDER = [
-    'Sales & Documentation',
-    'Detail Engineering Visit',
-    'Design',
-    'Pre-Installation Approvals',
-    'Procurement',
-    'Delivery',
-    'Installation',
-    'Commissioning',
-    'Finance Closure',
-]
-
-
 @system_admin_required
 def subadmin_projects(request):
     """System Admin: view all projects and assign unassigned ones to a PM (first-time only)."""
@@ -11275,74 +11226,29 @@ def _subadmin_create_user(request):
 
 @system_admin_required
 def subadmin_task_durations(request):
-    """System Admin view for task duration templates — same data as admin version, own template."""
+    """
+    System Admin view listing the task durations of the active Residential template.
+    READ-ONLY. Access: System Admin only.
+
+    The System Admin twin of admin_task_durations — same data, own template. Both were
+    editors over TaskDurationTemplate and both are read-only for the same reason; see
+    admin_task_durations for it. They are repointed together deliberately: leaving one
+    editable would be the precise "the same act behaves differently depending on which
+    screen you pressed" defect this codebase already carries three of (B-2, B-5, B-7).
+    """
+    # POST refused, not removed — see admin_task_durations.
     if request.method == 'POST':
-        actor   = request.user.profile
-        changed = 0
-        errors  = []
-
-        for key, raw_val in request.POST.items():
-            if not key.startswith('duration_'):
-                continue
-            try:
-                pk = int(key.split('_', 1)[1])
-            except (ValueError, IndexError):
-                continue
-
-            raw_val = raw_val.strip()
-            if not raw_val.isdigit():
-                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
-                continue
-            new_days = int(raw_val)
-
-            try:
-                record = TaskDurationTemplate.objects.get(pk=pk)
-            except TaskDurationTemplate.DoesNotExist:
-                continue
-
-            if new_days == record.duration_days:
-                continue
-
-            old_days = record.duration_days
-            record.duration_days = new_days
-            record.updated_by    = request.user
-            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
-            changed += 1
-
-            log_activity(
-                project=None,
-                actor=actor,
-                action=(
-                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
-                    f"changed from {old_days}d to {new_days}d [residential template]"
-                ),
-                entity_type='TaskDurationTemplate',
-                entity_id=record.pk,
-            )
-
-        if errors:
-            for msg in errors:
-                messages.error(request, msg)
-        else:
-            messages.success(request, f'Saved. {changed} duration(s) updated.')
-
+        messages.info(
+            request,
+            'Task durations are no longer edited here. They live on the versioned '
+            'Residential task template, which is immutable once active — changing a '
+            'duration means publishing a new template version.'
+        )
         return redirect('subadmin_task_durations')
 
-    records = list(
-        TaskDurationTemplate.objects
-        .filter(project_type='residential')
-        .select_related('updated_by')
-        .order_by('phase_name', 'task_name')
-    )
-
-    phase_groups = {phase: [] for phase in _PHASE_ORDER}
-    for rec in records:
-        if rec.phase_name in phase_groups:
-            phase_groups[rec.phase_name].append(rec)
-
-    grouped = [(phase, phase_groups[phase]) for phase in _PHASE_ORDER if phase_groups[phase]]
-
+    grouped, total, template = _residential_template_duration_rows()
     return render(request, 'projects/subadmin/task_durations.html', {
-        'grouped': grouped,
-        'total':   len(records),
+        'grouped':  grouped,
+        'total':    total,
+        'template': template,
     })

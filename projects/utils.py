@@ -1,8 +1,9 @@
 ﻿import logging
+import re
 
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -863,9 +864,15 @@ RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES = (
 def build_residential_phases():
     """
     Return the Residential EPC template as a list of phase dicts (9 phases / 52 tasks).
-    Single source of truth: attach_residential_template() builds projects from this, and
-    the checklist admin's task-name picker sources its known task names from it. Task is
-    imported inside to avoid a module-level circular import.
+
+    NO LONGER EXECUTED AT RUNTIME. Prompt 0.4 moved the template into the database as
+    TaskTemplate 'RESIDENTIAL' v1; attach_residential_template() now reads that instead
+    of calling this. This function stays because it IS the seed migration 0067 read, and
+    because the runtime bootstrap re-seeds a virgin database from it — deleting it would
+    make both unreproducible. Change the template by shipping version+1, never by
+    editing these literals.
+
+    Task is imported inside to avoid a module-level circular import.
     """
     from .models import Task
     PHASES = [
@@ -981,58 +988,268 @@ def build_residential_phases():
 
 def get_residential_template_task_names():
     """Return the ordered, de-duplicated list of (phase_name, task_name) pairs for the
-    Residential template — the known task names the checklist admin can assign to."""
+    Residential template — the known task names the checklist admin can assign to.
+
+    Reads the ACTIVE template so the picker cannot drift from what activation actually
+    creates. Falls back to build_residential_phases() only when no template row exists
+    at all, which is a virgin database; the two are identical by construction until a
+    version 2 is authored, and once one is, an active template exists and the fallback
+    can no longer fire.
+    """
+    template = resolve_active_task_template('Residential')
+    if template is not None:
+        source = [
+            (phase.label, [t.label for t in phase.tasks.all()])
+            for phase in template.phases.all()
+        ]
+    else:
+        source = [
+            (phase['phase_name'], [t['task_name'] for t in phase['tasks']])
+            for phase in build_residential_phases()
+        ]
+
     pairs = []
     seen = set()
-    for phase in build_residential_phases():
-        for t in phase['tasks']:
-            name = t['task_name']
+    for phase_name, task_names in source:
+        for name in task_names:
             if name not in seen:
                 seen.add(name)
-                pairs.append((phase['phase_name'], name))
+                pairs.append((phase_name, name))
     return pairs
+
+
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The template a project is built from lives in TaskTemplate / TaskTemplatePhase /
+# TaskTemplateTask, not in Python source. Everything here is the read and seed side of
+# that; the immutability rules live on the models.
+# ---------------------------------------------------------------------------
+
+RESIDENTIAL_TEMPLATE_CODE  = 'RESIDENTIAL'
+RESIDENTIAL_TEMPLATE_LABEL = 'Residential EPC'
+
+
+def template_code_from_label(label, max_length=100):
+    """Stable uppercase identifier derived from a label.
+
+    `code` is the cross-version identity of a phase or task: when version 2 rewords a
+    label, `code` is what says it is still the same row. Derived rather than authored so
+    version 1 needed no hand-written mapping. Verified collision-free across all 9 phase
+    names and all 52 task names of the Residential template.
+    """
+    return re.sub(r'[^A-Za-z0-9]+', '_', label).strip('_').upper()[:max_length]
+
+
+def resolve_active_task_template(project_type):
+    """Return the active TaskTemplate for a project type, or None if there is none.
+
+    prefetch_related because every caller immediately walks phases and their tasks —
+    without it activation is 1 + 9 queries instead of 3.
+
+    Import inside the function to avoid a module-level circular import.
+    """
+    from .models import TaskTemplate
+
+    return (
+        TaskTemplate.objects
+        .filter(project_type=project_type, status=TaskTemplate.ACTIVE)
+        .prefetch_related('phases__tasks')
+        .first()
+    )
+
+
+def seed_task_template_version(*, template_model, phase_model, task_model,
+                               code, label, project_type, version_no, phases,
+                               duration_resolver, created_by=None):
+    """Write one TaskTemplate version and its phases and tasks, then activate it.
+
+    `phases` is a list of phase dicts in build_residential_phases() shape.
+    `duration_resolver` is called as duration_resolver(task_name) -> int.
+
+    Shared by migration 0067 and the virgin-database bootstrap below, so a template
+    seeded from model state is byte-identical to the migrated one. The model CLASSES are
+    passed in rather than imported because the migration hands over historical classes
+    from apps.get_model(), which are different objects from the concrete ones.
+
+    Created as a draft and flipped to active at the end, never created active: that is
+    the order the real authoring flow uses, and the only order the R-7 save() guards on
+    the concrete models permit.
+    """
+    template = template_model.objects.create(
+        code=code,
+        label=label,
+        project_type=project_type,
+        version_no=version_no,
+        status='draft',
+        effective_from=timezone.now().date(),
+        created_by=created_by,
+    )
+
+    for phase_data in phases:
+        phase = phase_model.objects.create(
+            template=template,
+            code=template_code_from_label(phase_data['phase_name'], 50),
+            label=phase_data['phase_name'],
+            sort_order=phase_data['phase_order'],
+        )
+        task_model.objects.bulk_create([
+            task_model(
+                phase=phase,
+                code=template_code_from_label(t['task_name'], 100),
+                label=t['task_name'],
+                sort_order=t['task_order'],
+                assigned_role=t['assigned_role'],
+                task_type=t['task_type'],
+                duration_days=duration_resolver(t['task_name']),
+                is_payment_milestone=t.get('is_payment_milestone', False),
+            )
+            for t in phase_data['tasks']
+        ])
+
+    # Activate by hand rather than via TaskTemplate.activate(): a historical model class
+    # carries no methods, and this function must work for both.
+    # filter().update() so the archive and the activation cannot interleave with a
+    # concurrent activation of a third version.
+    template_model.objects.filter(
+        code=code, status='active',
+    ).exclude(pk=template.pk).update(status='archived')
+    template.status = 'active'
+    template.save(update_fields=['status'])
+    return template
+
+
+def _residential_duration_resolver():
+    """Return a duration_resolver bound to the live TaskDurationTemplate overrides.
+
+    Resolves exactly as _get_duration() always has — a TaskDurationTemplate row where
+    one exists, else RESIDENTIAL_DURATION_DEFAULTS, else 1 — so a template seeded now
+    gives the durations a project activated yesterday received.
+
+    Import inside the function to avoid a module-level circular import.
+    """
+    from .models import TaskDurationTemplate
+
+    # Note the case difference: this table stores 'residential' lowercase while
+    # Project.project_type stores 'Residential'. Two vocabularies, never compared.
+    overrides = {
+        obj.task_name: obj.duration_days
+        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
+    }
+    return lambda task_name: _get_duration(task_name, overrides)
+
+
+def resolve_residential_template():
+    """Resolve the active RESIDENTIAL template, bootstrapping version 1 if the database
+    has never held one.
+
+    Three outcomes, and none of them is a silent fallback to build_residential_phases():
+
+      - an active version exists      -> use it. The only path production ever takes,
+                                         because migration 0067 seeded it at deploy.
+      - NO row with this code at all   -> seed version 1 from build_residential_phases().
+                                         A virgin database: the test suite (test_settings
+                                         disables migrations, so 0067 never runs) or a
+                                         schema built with --run-syncdb.
+      - rows exist but none is active  -> RAISE. Someone archived every version. That is
+                                         an operator error, and inventing a version to
+                                         paper over it would hide it.
+
+    The bootstrap is what stops this from needing a silent fallback, which would be the
+    same trap as an admin screen that saves a value nothing reads.
+    """
+    from .models import TaskTemplate, TaskTemplatePhase, TaskTemplateTask
+
+    template = resolve_active_task_template('Residential')
+    if template is not None:
+        return template
+
+    if TaskTemplate.objects.filter(code=RESIDENTIAL_TEMPLATE_CODE).exists():
+        raise TaskTemplate.DoesNotExist(
+            f"Task template '{RESIDENTIAL_TEMPLATE_CODE}' exists but no version of it "
+            f"is active. Activate one before activating a Residential project; a "
+            f"version is not created automatically to cover this."
+        )
+
+    try:
+        # Savepoint: a concurrent first activation losing the unique constraint must not
+        # poison the outer activation transaction.
+        with transaction.atomic():
+            seed_task_template_version(
+                template_model=TaskTemplate,
+                phase_model=TaskTemplatePhase,
+                task_model=TaskTemplateTask,
+                code=RESIDENTIAL_TEMPLATE_CODE,
+                label=RESIDENTIAL_TEMPLATE_LABEL,
+                project_type='Residential',
+                version_no=1,
+                phases=build_residential_phases(),
+                duration_resolver=_residential_duration_resolver(),
+            )
+    except IntegrityError:
+        # Another activation seeded version 1 first. Re-read rather than fail: this can
+        # only happen on a virgin database and both writers wanted the same rows.
+        pass
+
+    template = resolve_active_task_template('Residential')
+    if template is None:
+        raise TaskTemplate.DoesNotExist(
+            f"Failed to resolve or bootstrap task template "
+            f"'{RESIDENTIAL_TEMPLATE_CODE}'."
+        )
+    return template
 
 
 def attach_residential_template(project):
     """
-    Create all 9 phases and 52 tasks for a Residential project.
+    Create the phases and tasks for a Residential project from the ACTIVE TaskTemplate.
+
+    Reads TaskTemplate 'RESIDENTIAL' rather than build_residential_phases() since prompt
+    0.4 — the template is data, and can be changed by shipping a new version instead of
+    a deploy. Everything else about this function is unchanged.
+
     Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
     The send-invoice and finance-confirmation tasks are auto-assigned to
     RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL (required data — activation fails loudly
     and rolls back if that user is absent).
     Entire operation is atomic — any failure rolls back all phases and tasks.
-    Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
+    Asserts at the end verify the created rows against the template; a failed assert
+    rolls back via the outer atomic().
     """
     # import inside function to avoid circular import at module level
-    from .models import ProjectPhase, Task, TaskDurationTemplate, UserProfile
-
-    # DB-first duration lookup — falls back to RESIDENTIAL_DURATION_DEFAULTS if table is empty
-    duration_overrides = {
-        obj.task_name: obj.duration_days
-        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
-    }
+    from .models import ProjectPhase, Task, UserProfile
 
     with transaction.atomic():
 
-        PHASES = build_residential_phases()
+        # Resolved INSIDE the atomic block so a virgin database's bootstrap seed rolls
+        # back with the activation it was triggered by, rather than surviving a failed
+        # one. Raises rather than falling back if a template exists but none is active.
+        template = resolve_residential_template()
 
-        for phase_data in PHASES:
+        # Every task row of the template, in order, so the assertions below have
+        # something to compare the created rows against.
+        template_tasks = []
+
+        for tpl_phase in template.phases.all():
             phase = ProjectPhase.objects.create(
                 project=project,
-                phase_name=phase_data['phase_name'],
-                phase_order=phase_data['phase_order'],
+                phase_name=tpl_phase.label,
+                phase_order=tpl_phase.sort_order,
             )
+            tpl_tasks = list(tpl_phase.tasks.all())
+            template_tasks.extend(tpl_tasks)
             Task.objects.bulk_create([
                 Task(
                     phase=phase,
-                    task_name=t['task_name'],
-                    task_order=t['task_order'],
-                    assigned_role=t['assigned_role'],
-                    duration_days=_get_duration(t['task_name'], duration_overrides),
-                    task_type=t['task_type'],
-                    is_payment_milestone=t.get('is_payment_milestone', False),
+                    task_name=t.label,
+                    task_order=t.sort_order,
+                    assigned_role=t.assigned_role,
+                    duration_days=t.duration_days,
+                    task_type=t.task_type,
+                    is_payment_milestone=t.is_payment_milestone,
+                    template_task=t,   # provenance; nothing reads it back
                 )
-                for t in phase_data['tasks']
+                for t in tpl_tasks
             ])
 
         # Pre-assign PM tasks to the named PM on this project.
@@ -1073,13 +1290,32 @@ def attach_residential_template(project):
             finance_assignee,
         )
 
-        # Integrity checks — roll back everything if counts are wrong.
-        # These assertions run inside the atomic block so a mismatch aborts the transaction.
+        # Integrity checks — roll back everything if the created rows do not match the
+        # template. These assertions run inside the atomic block so a mismatch aborts the
+        # transaction, which is the whole point of them: a half-seeded project must never
+        # ship. The expected numbers are now DERIVED FROM THE TEMPLATE rather than
+        # hardcoded to 52 and 44/8, because the template is data and a second version may
+        # legitimately have different counts. They still catch a partial write.
+        expected_phases   = len(template.phases.all())
+        expected_total    = len(template_tasks)
+        expected_internal = sum(1 for t in template_tasks if t.task_type == Task.INTERNAL)
+        expected_external = sum(1 for t in template_tasks if t.task_type == Task.EXTERNAL)
+
+        # An empty template would make every count assertion below pass trivially and
+        # ship a project with no work in it. Checked explicitly for that reason.
+        assert expected_total > 0, f"Task template {template} has no tasks"
+
+        phase_count = ProjectPhase.objects.filter(project=project).count()
+        assert phase_count == expected_phases, \
+            f"Expected {expected_phases} phases, got {phase_count}"
+
         task_count = Task.objects.filter(phase__project=project).count()
-        assert task_count == 52, f"Expected 52 tasks, got {task_count}"
+        assert task_count == expected_total, f"Expected {expected_total} tasks, got {task_count}"
 
         internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        assert internal_count == 44, f"Expected 44 internal tasks, got {internal_count}"
+        assert internal_count == expected_internal, \
+            f"Expected {expected_internal} internal tasks, got {internal_count}"
 
         external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
-        assert external_count == 8, f"Expected 8 external tasks, got {external_count}"
+        assert external_count == expected_external, \
+            f"Expected {expected_external} external tasks, got {external_count}"
