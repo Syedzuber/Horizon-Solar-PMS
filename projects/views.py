@@ -2397,6 +2397,32 @@ def _get_user_role(request):
         return None
 
 
+def _active_project(project_id, select_related=None):
+    """Resolve a Project by its public project_id or 404, refusing a soft-deleted one.
+
+    THE SINGLE RESOLUTION PATH. No view in this module may resolve a Project any other
+    way. `_opex_site()` in design_views.py is the precedent this copies: every design
+    endpoint resolves through it, and that is exactly why the design module carried none
+    of the soft-delete findings the A-0.2 audit raised against this file.
+
+    The filter is not tidiness. `project_delete` sets `is_deleted=True` and leaves
+    `status` untouched, so a deleted project keeps `status='Draft'` or `'Active'` and
+    still satisfies every status-based precondition in the codebase. There are no custom
+    model managers (execution-model.md §6), so nothing applies the filter for us. Without
+    this helper `project_activate` will activate a deleted Draft — 52 tasks, 3 milestones
+    and six tasks back-assigned to the Finance user, on a record the Admin believes is
+    gone. (The A-0.2 audit adds "and fires an assignment notification". It does not:
+    activation reaches the Finance user through utils.assign_tasks_to(), which is silent
+    by design and takes no notify parameter.)
+
+    `select_related` takes the same field names QuerySet.select_related() does, for the
+    callers that need them; passing them here rather than fetching and re-querying keeps
+    the single resolution path single.
+    """
+    queryset = Project.objects.select_related(*select_related) if select_related else Project.objects
+    return get_object_or_404(queryset, project_id=project_id, is_deleted=False)
+
+
 def _pm_owns_project(request, project):
     """Return True if the request user is the assigned PM on this project.
 
@@ -2514,7 +2540,7 @@ def project_edit(request, project_id):
     Edit a Draft project's fields. Active+ projects are locked — edit is blocked
     with a warning redirect. Access: assigned PM only, Draft status only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2572,7 +2598,7 @@ def project_field_edit(request, project_id):
     no role-string / assigned_pm comparison here. GET returns the modal body; POST
     validates, saves, logs, and (HTMX) OOB-swaps the header pills.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # Server-side authority check — the button is only rendered for managers, but the
     # POST handler must not rely on that (see spec §5).
@@ -2656,7 +2682,7 @@ def project_activate(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2723,7 +2749,7 @@ def project_recalculate_dates(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2751,7 +2777,7 @@ def enable_cascade_scheduling(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise PermissionDenied
@@ -2792,7 +2818,7 @@ def task_add(request, project_id):
     task_order is set to last+1 within the chosen phase.
     Access: assigned PM only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -3648,7 +3674,7 @@ def task_status_update(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below, not merged
     # into it. Two independent questions: "may you see this project" (here) and "is this
@@ -3884,7 +3910,7 @@ def task_detail_status_update(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     try:
@@ -4087,7 +4113,7 @@ def task_assign(request, project_id, task_id):
     filter().update() used to avoid overwriting other task fields via .save().
     Access: assigned PM only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -4198,7 +4224,7 @@ def task_set_due_date(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below. The
     # assigned_role comparison is portfolio-blind on its own -- it asks which role owns
@@ -4287,7 +4313,7 @@ def assign_coordinators(request, project_id):
     assigned_pm, so PM ownership can never be transferred or lost through it
     (the Overwrite bug the invariant warns against is impossible here by construction).
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # Only someone who already manages this project (PM or a coordinator on it) may edit.
     if not user_can_manage_project(request.user, project):
@@ -4722,7 +4748,7 @@ def boq_detail(request, project_id):
     NOTHING ELSE CHANGES FOR EITHER TYPE. SCM still acknowledges an OPEX BOQ here, PM and
     Admin still read one here, and the Residential path — seeding included — is untouched.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
     role    = profile.role
 
@@ -5037,7 +5063,7 @@ def opex_boq_entry(request, project_id):
     rows they added arrive as catalogue pks and are created. Doing it any other way would
     make "remove" a second round trip that could half-apply.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
         raise Http404('The BOQ picker is for OPEX sites. Residential BOQs are entered on '
@@ -5399,7 +5425,7 @@ def opex_boq_download(request, project_id):
     nothing but `code` and `quantity` from the file. Do not add a check that trusts
     what the file says about an item.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # OPEX only, the same refusal the picker makes and for the same reason: a
     # Residential BOQ is a different sheet with a different catalogue behind it.
@@ -5777,7 +5803,7 @@ def opex_boq_upload(request, project_id):
     database. Validity here is set membership in a dict already in memory, so
     preview reaches no row at all — which is also why it cannot create the BOQ.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
         raise Http404('The BOQ upload is for OPEX sites. Residential BOQs are entered on '
@@ -6038,7 +6064,7 @@ def boq_submit(request, project_id):
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     if not user_can_edit_project_boq(request.user, project):
@@ -6104,7 +6130,7 @@ def boq_acknowledge(request, project_id):
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # DELIBERATELY role-only, with no project relationship requirement. SCM is portfolio-wide
@@ -6137,7 +6163,7 @@ def boq_request_revision(request, project_id):
     user_can_manage_project() treats them as PM-equivalent, so routing through it keeps the
     two in step. (The docstring previously said "PM only", which the role tuple never was.)
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     if not user_can_manage_project(request.user, project):
@@ -6191,7 +6217,7 @@ def boq_history(request, project_id):
     Access: same read gate as boq_detail — the history is the BOQ's own audit trail, so
     anyone who may read the BOQ may read how it got there, and nobody else.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
@@ -6359,7 +6385,7 @@ def milestone_create(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     if not _pm_owns_project(request, project):
         raise Http404
 
@@ -6397,7 +6423,7 @@ def raise_payment_request(request, project_id):
     if profile.role != 'SCM':
         return HttpResponse(status=403)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     vendor_id      = request.POST.get('vendor_id', '').strip()
     boq_item_id    = request.POST.get('boq_item_id', '').strip()
@@ -6493,7 +6519,7 @@ def confirm_payment_request(request, project_id, request_id):
     if profile.role != 'Finance':
         return HttpResponse(status=403)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     pr = get_object_or_404(
         PaymentRequest.objects.select_related('vendor', 'boq_item'),
         pk=request_id, project=project, status=PaymentRequest.PENDING,
@@ -6747,7 +6773,7 @@ def set_milestone_amounts(request, project_id):
     if request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'POST only'}, status=405)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # 0.2 lockdown — THE PM ARM ONLY, and the asymmetry is deliberate.
     #
@@ -6836,11 +6862,9 @@ def project_overview(request, project_id):
     Merges the former project_detail (task management) and project_overview (status summary)
     into a single URL. Access: all roles; PM and SE isolation applies.
     """
-    project = get_object_or_404(
-        Project.objects.select_related(
-            'assigned_pm__user', 'assigned_design__user', 'created_by',
-        ),
-        project_id=project_id,
+    project = _active_project(
+        project_id,
+        select_related=('assigned_pm__user', 'assigned_design__user', 'created_by'),
     )
     profile = request.user.profile
     role    = profile.role
@@ -7450,7 +7474,7 @@ def task_detail(request, project_id, task_id):
     Task detail page: attachments, issues, and threaded comments for this task.
     Access: all roles; PM isolation applies.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PM sees only their own projects
@@ -7512,7 +7536,7 @@ def upload_project_document(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
@@ -7610,10 +7634,16 @@ def delete_project_document(request, project_id, doc_pk):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so Project Coordinator, Site Engineer and Design reached any
+    # project in the portfolio. 0.2 fixed the upload sibling of this endpoint and missed
+    # this one, which left an unrelated user unable to upload a file to a project but
+    # still able to reach the delete endpoint for one. The uploader-or-Admin check below
+    # is unchanged -- authority and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     doc = get_object_or_404(ProjectDocument, pk=doc_pk, project=project, is_deleted=False)
@@ -7650,7 +7680,7 @@ def upload_task_attachment(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
@@ -7747,10 +7777,16 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so Project Coordinator, Site Engineer and Design reached any
+    # project in the portfolio. 0.2 fixed the upload sibling of this endpoint and missed
+    # this one, which left an unrelated user unable to upload a file to a project but
+    # still able to reach the delete endpoint for one. The uploader-or-Admin check below
+    # is unchanged -- authority and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task   = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7808,7 +7844,7 @@ def checklist_item_complete(request, project_id, task_id, item_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # 0.2 lockdown: project scope, added ALONGSIDE _user_can_complete_checklist_item()
     # below, not merged into it. That helper answers "may this person tick items on a task
@@ -7902,8 +7938,19 @@ def checklist_item_complete(request, project_id, task_id, item_id):
 # ---------------------------------------------------------------------------
 
 def _issue_base_qs():
-    """Base Issue queryset with actor relations pre-joined — used in issue detail views."""
-    return Issue.objects.select_related('raised_by__user', 'assigned_to__user', 'task')
+    """Base Issue queryset with actor relations pre-joined — used in issue detail views.
+
+    Excludes issues whose project has been soft-deleted. Issue has no is_deleted field of
+    its own, so the filter has to sit on the parent; and because deletion is soft, the
+    CASCADE on Issue.project never fires to remove the row. Without this, resolve_issue
+    sends WhatsApp and email about an issue on a project deleted months ago.
+
+    THE SINGLE ISSUE RESOLUTION PATH — the sibling of _active_project(). Every view that
+    resolves an Issue goes through here rather than hitting Issue.objects directly.
+    """
+    return Issue.objects.select_related(
+        'raised_by__user', 'assigned_to__user', 'task',
+    ).filter(project__is_deleted=False)
 
 
 def _is_project_pm(profile, project):
@@ -7973,7 +8020,7 @@ def create_project_issue(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
@@ -8071,7 +8118,7 @@ def create_task_issue(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
@@ -8172,7 +8219,7 @@ def create_delivery_issue(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PMs can only interact with their own projects
@@ -8184,7 +8231,7 @@ def create_delivery_issue(request, project_id, dc_id):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -8324,7 +8371,7 @@ def update_issue_status(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8368,7 +8415,7 @@ def resolve_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8441,7 +8488,7 @@ def close_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8474,7 +8521,7 @@ def reopen_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8508,7 +8555,7 @@ def assign_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8557,7 +8604,7 @@ def create_task_comment(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
     profile = request.user.profile
 
@@ -8622,7 +8669,7 @@ def create_issue_comment(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8713,7 +8760,7 @@ def project_timeline(request, project_id):
     """Project activity timeline. All roles — PM isolation applies."""
     from django.core.paginator import Paginator
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PM can only view their own projects
@@ -8889,7 +8936,7 @@ def create_delivery_challan(request, project_id):
     Minimum 1 line item required — zero items rejected with a validation error.
     GET renders the form; POST creates the DC + line items in one transaction.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
     vendors = Vendor.objects.filter(is_active=True).order_by('name')
 
@@ -9000,19 +9047,22 @@ def delivery_challan_detail(request, project_id, dc_id):
     to prevent cross-project data leakage via URL manipulation.
     Access: SCM, PM, SE, Admin.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # Only SCM, PM, SE, Admin can view DC pages
     if profile.role not in ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin'):
         return HttpResponseForbidden()
 
-    # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so a Project Coordinator or Site Engineer on any project read
+    # the delivery detail of every project in the portfolio. The role list above is
+    # unchanged -- role and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
-    challan    = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan    = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -9051,7 +9101,7 @@ def confirm_grn(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # 0.2 lockdown, AUDIT FINDING 1 -- the reason a site engineer could not be given a
@@ -9073,7 +9123,7 @@ def confirm_grn(request, project_id, dc_id):
         raise Http404
 
     # Cross-project guard
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -9148,11 +9198,11 @@ def override_grn(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # Cross-project guard
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -9280,15 +9330,21 @@ def my_documents(request):
     profile = request.user.profile
     role    = profile.role
 
+    # Every section below filters the PARENT project's is_deleted as well as any
+    # is_deleted the row itself carries. Deleting a project is soft and does not cascade,
+    # so without the parent term this archive keeps listing a deleted project's documents,
+    # BOQs and challans — each linking to a detail view that now 404s.
     # Section A — Uploaded Files (all roles)
     task_attachments = TaskAttachment.objects.filter(
         uploaded_by=profile,
         is_deleted=False,
+        task__phase__project__is_deleted=False,
     ).select_related('task', 'task__phase', 'task__phase__project').order_by('-uploaded_at')[:50]
 
     project_docs = ProjectDocument.objects.filter(
         uploaded_by=profile,
         is_deleted=False,
+        project__is_deleted=False,
     ).select_related('project').order_by('-uploaded_at')[:50]
 
     # Section B — BOQ Submissions (Design only)
@@ -9296,6 +9352,7 @@ def my_documents(request):
     if role == 'Design':
         boq_list = BOQ.objects.filter(
             submitted_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-submitted_at')[:50]
 
     # Section C — Design Submissions (Design only)
@@ -9303,6 +9360,7 @@ def my_documents(request):
     if role == 'Design':
         design_list = DesignSubmission.objects.filter(
             submitted_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-submitted_at')[:50]
 
     # Section D — Delivery Challans (SCM only)
@@ -9310,6 +9368,7 @@ def my_documents(request):
     if role == 'SCM':
         dc_list = DeliveryChallan.objects.filter(
             created_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-created_at')[:50]
 
     # Section E — Payment Requests (SCM only)
@@ -9318,6 +9377,7 @@ def my_documents(request):
     if role == 'SCM':
         pr_list = PaymentRequest.objects.filter(
             requested_by=request.user,
+            project__is_deleted=False,
         ).select_related('project', 'vendor').order_by('-requested_date')[:50]
 
     context = {
@@ -9335,7 +9395,10 @@ def my_documents(request):
 @login_required
 def design_submission_detail(request, pk):
     """Read-only detail view for a DesignSubmission. Submitter, PM, or Admin only."""
-    submission = get_object_or_404(DesignSubmission, pk=pk)
+    # Resolved by pk, not project_id, so _active_project() cannot be used — the
+    # is_deleted term goes on the parent instead. DesignSubmission has no is_deleted
+    # field of its own, and CASCADE from Project never fires because deletion is soft.
+    submission = get_object_or_404(DesignSubmission, pk=pk, project__is_deleted=False)
     profile    = request.user.profile
     if profile != submission.submitted_by and profile.role not in ('PM', 'Admin'):
         messages.error(request, "You don't have access to this submission.")
@@ -9346,7 +9409,7 @@ def design_submission_detail(request, pk):
 @login_required
 def payment_request_detail(request, project_id, request_id):
     """Read-only detail view for a PaymentRequest. SCM, Finance, PM, or Admin only."""
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     pr      = get_object_or_404(PaymentRequest, pk=request_id, project=project)
     profile = request.user.profile
 
