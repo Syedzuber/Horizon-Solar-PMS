@@ -39,6 +39,10 @@ from .models import (
     DesignAssignment,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
     DESIGN_QC_FAILED, DESIGN_RELEASED,
+    # Prompt 0.3 — reason vocabulary for the state ledger (R-10: constants, not a table).
+    REASON_CREATED, REASON_BLOCKED, REASON_UNBLOCKED, REASON_MILESTONE_SYNC,
+    REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
+    REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK,
 )
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
@@ -59,6 +63,9 @@ from .utils import (
     attach_residential_template, calculate_due_dates, recalculate_from_task,
     get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
     assign_task_to, assign_tasks_to,
+    # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
+    # row, inside the same transaction as the change itself.
+    record_transition,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -2487,6 +2494,12 @@ def project_create(request):
                 project.status = 'Draft'
                 project.created_by = request.user
                 project.save()
+                # R-2, inside the block that already existed. Creation transition:
+                # blank from_status, because there is no from.
+                record_transition(
+                    project, to_status='Draft', actor=request.user.profile,
+                    reason_code=REASON_CREATED,
+                )
 
             messages.success(request, f"Project {project.project_id} created successfully.")
             return redirect('project_overview', project_id=project.project_id)
@@ -2700,10 +2713,17 @@ def project_activate(request, project_id):
     designer = get_object_or_404(UserProfile, pk=assigned_design_id, role='Design', is_active=True)
 
     with transaction.atomic():
+        _prev_project_status = project.status   # 'Draft' — checked above
         project.assigned_design = designer
         project.status = 'Active'
         project.activated_at = timezone.now()
         project.save()
+        # R-2, inside the activation block that already existed — so a template or
+        # milestone failure rolls the ledger row back with everything else.
+        record_transition(
+            project, to_status='Active', from_status=_prev_project_status,
+            actor=request.user.profile,
+        )
 
         if project.project_type == 'Residential':
             attach_residential_template(project)
@@ -3083,6 +3103,12 @@ def create_opex_site(program, data, creator, profile=None):
         site.created_by = creator
         site.project_id = form.composed_project_id   # explicit → skips generate_project_id()
         site.save()
+        # R-2. This is the THIRD write to Project.status in the codebase (the 0.3
+        # prompt named only two); an OPEX site that never appears in the ledger
+        # would read as a project that was never created.
+        record_transition(
+            site, to_status='Draft', actor=profile, reason_code=REASON_CREATED,
+        )
     log_activity(
         site, profile,
         f"Created OPEX site {site.project_id} under program {program.name}",
@@ -3779,7 +3805,19 @@ def task_status_update(request, project_id, task_id):
                 return redirect(next_url)
             return redirect('project_overview', project_id=project.project_id)
 
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        # R-2: the status write and its ledger row commit together or not at all.
+        # The atomic block is deliberately TIGHT — it holds the pair and nothing
+        # else, so the Issue creation and notifications below keep exactly the
+        # failure behaviour they had before this was instrumented.
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=request.user.profile, reason_code=REASON_BLOCKED,
+                # The hold reason, captured where one exists — this branch is the
+                # only task path that collects any free text at all.
+                remark=block_issue_title,
+            )
 
         block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
         if block_severity not in dict(Issue.SEVERITY_CHOICES):
@@ -3791,16 +3829,22 @@ def task_status_update(request, project_id, task_id):
                 block_assignee = UserProfile.objects.get(pk=block_assignee_id)
             except UserProfile.DoesNotExist:
                 pass
-        issue = Issue.objects.create(
-            project=project,
-            task=task,
-            title=block_issue_title,
-            description=request.POST.get('block_issue_description', '').strip(),
-            severity=block_severity,
-            status=Issue.OPEN,
-            raised_by=request.user.profile,
-            assigned_to=block_assignee,
-        )
+        with transaction.atomic():
+            issue = Issue.objects.create(
+                project=project,
+                task=task,
+                title=block_issue_title,
+                description=request.POST.get('block_issue_description', '').strip(),
+                severity=block_severity,
+                status=Issue.OPEN,
+                raised_by=request.user.profile,
+                assigned_to=block_assignee,
+            )
+            # Creation transition: from_status is blank because there is no from.
+            record_transition(
+                issue, to_status=Issue.OPEN, actor=request.user.profile,
+                reason_code=REASON_BLOCKED, remark=block_issue_title,
+            )
         log_activity(
             project, request.user.profile,
             f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
@@ -3808,7 +3852,17 @@ def task_status_update(request, project_id, task_id):
         )
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
     else:
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        # R-2, same tight pair as the blocked branch above.
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=request.user.profile,
+                # Only leaving Blocked carries a reason here; the ordinary ladder
+                # moves have none, and inventing one would be a lie in a column
+                # people will later group by.
+                reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
+            )
         # Log status changes for all non-blocked transitions (blocked has its own log above)
         log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
                      action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
@@ -3829,11 +3883,26 @@ def task_status_update(request, project_id, task_id):
             if _vr_str:
                 _ms_update['variance_reason'] = _vr_str
             try:
-                _ms_updated = PaymentMilestone.objects.filter(
+                # Read the rows BEFORE the set-based update — a .update() cannot
+                # report the from-status it overwrote, and the ledger needs one per
+                # milestone. At most one row matches in practice.
+                _ms_before = list(PaymentMilestone.objects.filter(
                     project=project,
                     milestone_name=_ms_label,
                     status__in=['Pending', 'Invoiced'],
-                ).update(**_ms_update)
+                ))
+                with transaction.atomic():
+                    _ms_updated = PaymentMilestone.objects.filter(
+                        project=project,
+                        milestone_name=_ms_label,
+                        status__in=['Pending', 'Invoiced'],
+                    ).update(**_ms_update)
+                    for _ms_row in _ms_before:
+                        record_transition(
+                            _ms_row, to_status='Received', from_status=_ms_row.status,
+                            actor=request.user.profile, project=project,
+                            reason_code=REASON_MILESTONE_SYNC,
+                        )
                 # Attribution: this Finance-confirmation task can be completed by the PM
                 # OR a Project Coordinator (drizzle-down authority), which auto-flips the
                 # milestone to Received. Log WHO did it — by name and role — so Finance can
@@ -3976,7 +4045,15 @@ def task_detail_status_update(request, project_id, task_id):
                 return _render_task_status_hx(request, project, task)
             return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        # R-2 — see the identical pair in task_status_update. Tight atomic block:
+        # the status write and its ledger row, and nothing else.
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=profile, reason_code=REASON_BLOCKED,
+                remark=block_issue_title,   # the hold reason
+            )
 
         block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
         if block_severity not in dict(Issue.SEVERITY_CHOICES):
@@ -3988,16 +4065,21 @@ def task_detail_status_update(request, project_id, task_id):
                 block_assignee = UserProfile.objects.get(pk=block_assignee_id)
             except UserProfile.DoesNotExist:
                 pass
-        issue = Issue.objects.create(
-            project=project,
-            task=task,
-            title=block_issue_title,
-            description=request.POST.get('block_issue_description', '').strip(),
-            severity=block_severity,
-            status=Issue.OPEN,
-            raised_by=profile,
-            assigned_to=block_assignee,
-        )
+        with transaction.atomic():
+            issue = Issue.objects.create(
+                project=project,
+                task=task,
+                title=block_issue_title,
+                description=request.POST.get('block_issue_description', '').strip(),
+                severity=block_severity,
+                status=Issue.OPEN,
+                raised_by=profile,
+                assigned_to=block_assignee,
+            )
+            record_transition(
+                issue, to_status=Issue.OPEN, actor=profile,
+                reason_code=REASON_BLOCKED, remark=block_issue_title,
+            )
         log_activity(
             project, profile,
             f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
@@ -4005,7 +4087,13 @@ def task_detail_status_update(request, project_id, task_id):
         )
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
     else:
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=profile,
+                reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
+            )
         log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
                      action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
 
@@ -4024,11 +4112,24 @@ def task_detail_status_update(request, project_id, task_id):
             if _vr_str:
                 _ms_update['variance_reason'] = _vr_str
             try:
-                _ms_updated = PaymentMilestone.objects.filter(
+                # Pre-read for the from-status — see task_status_update.
+                _ms_before = list(PaymentMilestone.objects.filter(
                     project=project,
                     milestone_name=_ms_label,
                     status__in=['Pending', 'Invoiced'],
-                ).update(**_ms_update)
+                ))
+                with transaction.atomic():
+                    _ms_updated = PaymentMilestone.objects.filter(
+                        project=project,
+                        milestone_name=_ms_label,
+                        status__in=['Pending', 'Invoiced'],
+                    ).update(**_ms_update)
+                    for _ms_row in _ms_before:
+                        record_transition(
+                            _ms_row, to_status='Received', from_status=_ms_row.status,
+                            actor=profile, project=project,
+                            reason_code=REASON_MILESTONE_SYNC,
+                        )
                 # Attribution (see task_status_update): record the specific person who
                 # completed the Finance-confirmation task and thereby flipped the milestone.
                 if _ms_updated:
@@ -4647,8 +4748,17 @@ def _apply_boq_acknowledgement(boq, profile, request):
     The revision snapshot also stays with the inline caller — only that path has ever
     written one (see the 0.2b report).
     """
-    boq.status = 'Acknowledged'
-    boq.save(update_fields=['status'])
+    # R-2. Instrumenting HERE rather than at the two callers is the payoff from
+    # 0.2b's consolidation: one business act, one status write, one ledger row,
+    # whichever button was pressed.
+    with transaction.atomic():
+        _boq_prev_status = boq.status
+        boq.status = 'Acknowledged'
+        boq.save(update_fields=['status'])
+        record_transition(
+            boq, to_status='Acknowledged', from_status=_boq_prev_status,
+            actor=profile, project=boq.project,
+        )
 
     log_activity(
         boq.project, profile,
@@ -4876,20 +4986,32 @@ def boq_detail(request, project_id):
                 return redirect('boq_detail', project_id=project_id)
 
             try:
+                _boq_prev_status = boq.status   # for the ledger, before the mutation
                 is_revision  = boq.status in ('Revision Requested', 'Acknowledged')
                 new_version  = boq.version + 1 if is_revision else boq.version
                 reason       = f'Revision v{new_version}' if is_revision else 'Initial submission'
                 snapshot     = _boq_snapshot(boq)
-                BOQRevision.objects.create(
-                    boq=boq, revised_by=profile,
-                    version=new_version, reason=reason, snapshot=snapshot,
-                )
-                boq.status       = 'Submitted'
-                boq.submitted_by = profile
-                boq.submitted_at = timezone.now()
-                if is_revision:
-                    boq.version = new_version
-                boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
+                # R-2. The atomic block sits INSIDE the existing try, so a ledger
+                # failure rolls the submission back and then surfaces through the
+                # same 'Submit failed' path any other failure here already uses —
+                # never a submitted BOQ with no record of who submitted it.
+                with transaction.atomic():
+                    BOQRevision.objects.create(
+                        boq=boq, revised_by=profile,
+                        version=new_version, reason=reason, snapshot=snapshot,
+                    )
+                    boq.status       = 'Submitted'
+                    boq.submitted_by = profile
+                    boq.submitted_at = timezone.now()
+                    if is_revision:
+                        boq.version = new_version
+                    boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
+                    record_transition(
+                        boq, to_status='Submitted', from_status=_boq_prev_status,
+                        actor=profile,
+                        reason_code=REASON_RESUBMITTED if is_revision else '',
+                        remark=reason,
+                    )
                 messages.success(request, 'BOQ submitted to SCM for review.')
                 return redirect('boq_detail', project_id=project_id)
             except Exception as exc:
@@ -6094,6 +6216,7 @@ def boq_submit(request, project_id):
         messages.error(request, 'At least one item must have a BOQ quantity before submitting.')
         return redirect('boq_detail', project_id=project_id)
 
+    _boq_prev_status = boq.status   # captured before the mutation below, for the ledger
     is_resubmission = boq.status in ('Revision Requested', 'Acknowledged')
     new_version     = boq.version + 1 if is_resubmission else boq.version
     reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
@@ -6103,17 +6226,30 @@ def boq_submit(request, project_id):
     # TypeError on every submission that reached this line (defect B-7).
     snapshot = _boq_snapshot(boq)
 
-    BOQRevision.objects.create(
-        boq=boq, revised_by=profile,
-        version=new_version, reason=reason, snapshot=snapshot,
-    )
+    # R-2. NOTE FOR A LATER SESSION: this is one of TWO places that write
+    # boq.status = 'Submitted' — the other is the inline `submit_design` branch of
+    # boq_detail, which is the path the UI actually posts to. 0.2b consolidated the
+    # snapshot (_boq_snapshot) and the acknowledgement (_apply_boq_acknowledgement)
+    # but NOT this pair. Both are instrumented; consolidating them is 0.2b-shaped
+    # work and out of scope here (R-12 — recorded, not fixed in passing).
+    with transaction.atomic():
+        BOQRevision.objects.create(
+            boq=boq, revised_by=profile,
+            version=new_version, reason=reason, snapshot=snapshot,
+        )
 
-    boq.status       = 'Submitted'
-    boq.submitted_by = profile
-    boq.submitted_at = timezone.now()
-    if is_resubmission:
-        boq.version = new_version
-    boq.save()
+        boq.status       = 'Submitted'
+        boq.submitted_by = profile
+        boq.submitted_at = timezone.now()
+        if is_resubmission:
+            boq.version = new_version
+        boq.save()
+        record_transition(
+            boq, to_status='Submitted', from_status=_boq_prev_status,
+            actor=profile,
+            reason_code=REASON_RESUBMITTED if is_resubmission else '',
+            remark=reason,
+        )
 
     # Log BOQ submission event
     log_activity(project, profile, f"Submitted BOQ for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
@@ -6187,13 +6323,22 @@ def boq_request_revision(request, project_id):
 
         try:
             snapshot = _boq_snapshot(boq)
-            BOQRevision.objects.create(
-                boq=boq, revised_by=profile,
-                version=boq.version, reason=f'Revision requested: {reason}',
-                snapshot=snapshot,
-            )
-            boq.status = 'Revision Requested'
-            boq.save(update_fields=['status'])
+            _boq_prev_status = boq.status
+            # R-2, inside the existing try for the same reason as submit_design.
+            with transaction.atomic():
+                BOQRevision.objects.create(
+                    boq=boq, revised_by=profile,
+                    version=boq.version, reason=f'Revision requested: {reason}',
+                    snapshot=snapshot,
+                )
+                boq.status = 'Revision Requested'
+                boq.save(update_fields=['status'])
+                record_transition(
+                    boq, to_status='Revision Requested', from_status=_boq_prev_status,
+                    actor=profile, reason_code=REASON_REVISION_REQUESTED,
+                    # The PM's stated reason — already mandatory on this path.
+                    remark=reason,
+                )
             # Log BOQ revision request event
             log_activity(project, profile, f"BOQ Revision Requested for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
             messages.success(request, 'Revision requested. Design team will be notified.')
@@ -6306,9 +6451,15 @@ def milestone_invoice(request, project_id, milestone_pk):
         messages.error(request, 'Only Pending milestones can be marked as Invoiced.')
         return redirect('dashboard_finance')
 
-    milestone.status       = 'Invoiced'
-    milestone.invoice_date = date.today()
-    milestone.save(update_fields=['status', 'invoice_date'])
+    with transaction.atomic():
+        _ms_prev_status        = milestone.status   # 'Pending' — checked above
+        milestone.status       = 'Invoiced'
+        milestone.invoice_date = date.today()
+        milestone.save(update_fields=['status', 'invoice_date'])
+        record_transition(
+            milestone, to_status='Invoiced', from_status=_ms_prev_status,
+            actor=request.user.profile,
+        )
     # Log milestone invoiced — project accessed via FK to avoid extra query
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Invoiced", entity_type='Milestone', entity_id=milestone.pk)
     messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
@@ -6348,11 +6499,20 @@ def milestone_receive(request, project_id, milestone_pk):
     if milestone.amount and amount_received > milestone.amount and not variance_reason:
         variance_reason = 'Overpayment'
 
-    milestone.status          = 'Received'
-    milestone.received_date   = date.today()
-    milestone.amount_received = amount_received
-    milestone.variance_reason = variance_reason
-    milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+    with transaction.atomic():
+        _ms_prev_status           = milestone.status
+        milestone.status          = 'Received'
+        milestone.received_date   = date.today()
+        milestone.amount_received = amount_received
+        milestone.variance_reason = variance_reason
+        milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+        record_transition(
+            milestone, to_status='Received', from_status=_ms_prev_status,
+            actor=request.user.profile,
+            # Only populated when the amount differs from what was invoiced — the
+            # nearest thing this path has to a stated reason.
+            remark=variance_reason,
+        )
     # Log milestone received — project accessed via FK to avoid extra query
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
 
@@ -6361,11 +6521,31 @@ def milestone_receive(request, project_id, milestone_pk):
     _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
     if _sync_task_name:
         try:
-            Task.objects.filter(
+            # Pre-read for the from-status: a set-based .update() cannot report what
+            # it overwrote, and each synced task needs its own row.
+            _sync_before = list(Task.objects.filter(
                 phase__project=milestone.project,
                 task_name=_sync_task_name,
                 status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ).update(status=Task.DONE, completed_at=timezone.now())
+            ).select_related('phase__project'))
+            # The atomic block sits INSIDE the existing try, which is deliberate and
+            # is NOT the helper swallowing anything. If the ledger write fails here,
+            # the sync rolls back and the except below leaves the milestone update
+            # alone — so the outcome is neither the status change nor the row, never
+            # one without the other. Removing that except would change this path's
+            # documented "never block the milestone update" behaviour.
+            with transaction.atomic():
+                Task.objects.filter(
+                    phase__project=milestone.project,
+                    task_name=_sync_task_name,
+                    status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+                ).update(status=Task.DONE, completed_at=timezone.now())
+                for _sync_task in _sync_before:
+                    record_transition(
+                        _sync_task, to_status=Task.DONE, from_status=_sync_task.status,
+                        actor=request.user.profile, project=milestone.project,
+                        reason_code=REASON_MILESTONE_SYNC,
+                    )
         except Exception:
             pass  # Non-critical — never block the milestone update
 
@@ -6893,6 +7073,7 @@ def project_overview(request, project_id):
                     if _actor_role == 'Finance':
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
                         _save_fields = ['milestone_description']
+                        _ms_prev_status = milestone.status
                         _amount_received_str = request.POST.get('amount_received', '').strip()
                         if _amount_received_str and milestone.status != 'Received':
                             try:
@@ -6902,18 +7083,43 @@ def project_overview(request, project_id):
                                 _save_fields += ['amount_received', 'status', 'received_date']
                             except InvalidOperation:
                                 pass
-                        milestone.save(update_fields=_save_fields)
+                        # R-2. This branch writes a status only SOMETIMES — when a
+                        # parsable amount arrives on a not-yet-Received milestone — so
+                        # the ledger row is conditional on the same test, not on the
+                        # save. A description-only edit is not a transition.
+                        with transaction.atomic():
+                            milestone.save(update_fields=_save_fields)
+                            if 'status' in _save_fields:
+                                record_transition(
+                                    milestone, to_status='Received',
+                                    from_status=_ms_prev_status,
+                                    actor=request.user.profile, project=project,
+                                )
                         log_activity(project, request.user.profile, f"Updated {milestone.milestone_name}", entity_type='Milestone', entity_id=milestone.pk)
                         if 'status' in _save_fields:
                             # Map lives at module level (_MILESTONE_TO_FINANCE_TASK).
                             _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
                             if _sync_task_name:
                                 try:
-                                    Task.objects.filter(
+                                    # Pre-read for the from-status — see milestone_receive.
+                                    _sync_before = list(Task.objects.filter(
                                         phase__project=project,
                                         task_name=_sync_task_name,
                                         status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-                                    ).update(status=Task.DONE, completed_at=timezone.now())
+                                    ).select_related('phase__project'))
+                                    with transaction.atomic():
+                                        Task.objects.filter(
+                                            phase__project=project,
+                                            task_name=_sync_task_name,
+                                            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+                                        ).update(status=Task.DONE, completed_at=timezone.now())
+                                        for _sync_task in _sync_before:
+                                            record_transition(
+                                                _sync_task, to_status=Task.DONE,
+                                                from_status=_sync_task.status,
+                                                actor=request.user.profile, project=project,
+                                                reason_code=REASON_MILESTONE_SYNC,
+                                            )
                                 except Exception:
                                     pass
                     else:
@@ -7325,23 +7531,33 @@ def zoho_deal_closed_webhook(request):
 
     # Create project
     try:
-        project = Project.objects.create(
-            customer_name=customer_name or 'Unknown',
-            customer_contact_person=customer_contact_person,
-            customer_phone=customer_phone,
-            customer_email=(deal.get('Customer_Email', '') or '').strip() or None,
-            site_address='',
-            city=(deal.get('City', '') or '').strip(),
-            state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
-            project_type='Residential',
-            capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
-            contract_value=_safe_decimal(deal.get('Amount')),
-            assigned_pm=assigned_pm,
-            target_commissioning_date=target_commissioning_date,
-            status='Draft',
-            zoho_deal_id=record_id,
-            created_by=None,
-        )
+        # R-2. The FOURTH write to Project.status, and the only one with no human
+        # behind it — actor stays None and actor_role_code becomes ACTOR_ROLE_SYSTEM.
+        # The atomic block keeps the existing failure contract intact: if the ledger
+        # write fails, the project creation rolls back with it and the except below
+        # still returns 200, because a non-200 makes Zoho retry and duplicate.
+        with transaction.atomic():
+            project = Project.objects.create(
+                customer_name=customer_name or 'Unknown',
+                customer_contact_person=customer_contact_person,
+                customer_phone=customer_phone,
+                customer_email=(deal.get('Customer_Email', '') or '').strip() or None,
+                site_address='',
+                city=(deal.get('City', '') or '').strip(),
+                state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
+                project_type='Residential',
+                capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
+                contract_value=_safe_decimal(deal.get('Amount')),
+                assigned_pm=assigned_pm,
+                target_commissioning_date=target_commissioning_date,
+                status='Draft',
+                zoho_deal_id=record_id,
+                created_by=None,
+            )
+            record_transition(
+                project, to_status='Draft', actor=None,
+                reason_code=REASON_ZOHO_WEBHOOK,
+            )
     except Exception as exc:
         logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
         # Return 200 even on failure — non-200 would cause Zoho to retry and create duplicates
@@ -8057,17 +8273,23 @@ def create_project_issue(request, project_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        task=None,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            task=None,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        # R-2 creation transition — blank from_status.
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
@@ -8157,17 +8379,22 @@ def create_task_issue(request, project_id, task_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        task=task,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            task=task,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
@@ -8262,18 +8489,23 @@ def create_delivery_issue(request, project_id, dc_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        delivery_challan=challan,
-        task=None,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            delivery_challan=challan,
+            task=None,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(
         project, profile,
         f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
@@ -8395,7 +8627,16 @@ def update_issue_status(request, issue_id):
 
     # filter().update() with status condition prevents race condition — updated==0 means
     # another request already changed the status between our read and this write
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
+    # R-2. The row is written only when the guarded update actually moved something:
+    # updated == 0 means another request won the race and there is no transition here
+    # to record — theirs already wrote one.
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
+        if updated:
+            record_transition(
+                issue, to_status=Issue.IN_PROGRESS, from_status=Issue.OPEN,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8438,11 +8679,20 @@ def resolve_issue(request, issue_id):
         messages.error(request, 'Resolution note is required.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.IN_PROGRESS).update(
-        status=Issue.RESOLVED,
-        resolved_at=timezone.now(),
-        resolution_note=resolution_note,
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.IN_PROGRESS).update(
+            status=Issue.RESOLVED,
+            resolved_at=timezone.now(),
+            resolution_note=resolution_note,
+        )
+        if updated:
+            record_transition(
+                issue, to_status=Issue.RESOLVED, from_status=Issue.IN_PROGRESS,
+                actor=profile, project=project,
+                # Already mandatory on this path — the one place today that meets
+                # R-9's bar without any change to the UI.
+                remark=resolution_note,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8499,10 +8749,16 @@ def close_issue(request, issue_id):
         messages.warning(request, 'Issue must be Resolved before it can be closed.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
-        status=Issue.CLOSED,
-        closed_at=timezone.now(),
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+            status=Issue.CLOSED,
+            closed_at=timezone.now(),
+        )
+        if updated:
+            record_transition(
+                issue, to_status=Issue.CLOSED, from_status=Issue.RESOLVED,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8532,11 +8788,21 @@ def reopen_issue(request, issue_id):
         messages.warning(request, 'Only Resolved issues can be reopened.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
-        status=Issue.OPEN,
-        resolved_at=None,
-        resolution_note='',
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+            status=Issue.OPEN,
+            resolved_at=None,
+            resolution_note='',
+        )
+        if updated:
+            # A reopen CLEARS resolution_note on the Issue row. The ledger keeps the
+            # earlier resolve transition and its remark, so what was claimed as the
+            # resolution is still readable after the claim has been wiped off the
+            # issue itself — the append-only rule (R-4) earning its keep.
+            record_transition(
+                issue, to_status=Issue.OPEN, from_status=Issue.RESOLVED,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -9024,6 +9290,14 @@ def create_delivery_challan(request, project_id):
             notes=notes,
             created_by=profile,
         )
+        # R-2. recalculate_dc_status() is NOT called here (see below) so it cannot
+        # write this one — and without it a challan's ledger would open at
+        # 'Expected → Received' with no record of when it started waiting, which is
+        # exactly the dwell time SCM will want.
+        record_transition(
+            challan, to_status=DeliveryChallan.EXPECTED, actor=profile,
+            reason_code=REASON_CREATED,
+        )
         # Create line items after challan exists; recalculate_dc_status is NOT called
         # here because all new items have no received_quantity → status stays Expected
         for item_data in line_items_data:
@@ -9171,8 +9445,9 @@ def confirm_grn(request, project_id, dc_id):
         item.save()
 
     # Recalculate DC status ONCE after all line items saved — never inside the loop
-    # (calling it inside the loop causes status to oscillate incorrectly)
-    recalculate_dc_status(challan)
+    # (calling it inside the loop causes status to oscillate incorrectly).
+    # actor/reason feed the state ledger; recalculate_dc_status owns the row (R-2).
+    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_CONFIRMED)
     challan.refresh_from_db()
 
     log_activity(
@@ -9244,8 +9519,11 @@ def override_grn(request, project_id, dc_id):
         # grn_confirmed_by NOT overwritten — original SE submitter is preserved
         item.save()
 
-    # Recalculate DC status ONCE after all line items saved
-    recalculate_dc_status(challan)
+    # Recalculate DC status ONCE after all line items saved.
+    # The ledger records the SCM overrider here, not the original SE submitter —
+    # grn_confirmed_by deliberately keeps the latter, and the two answer different
+    # questions.
+    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
     challan.refresh_from_db()
 
     log_activity(

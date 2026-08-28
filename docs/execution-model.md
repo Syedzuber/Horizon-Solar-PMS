@@ -4,7 +4,7 @@
 
 Read this file at the start of every execution-module session. It is the authority on vocabulary, structure and rules for this module. Where it conflicts with an older document, this file wins. Where it is silent, `PROJECT_CONTEXT.md` and `code commenting standard.txt` apply unchanged.
 
-**Version 1.2 — 25 Aug 2026.** Built from v1.0 by the prompt 0.1 verification session (25 claims confirmed, 11 corrected), then extended by the A-0.2 access audit and the 0.2a regression baseline. Claims marked ✔ were verified against source. **§11 lists seven known defects found by 0.2a; §12 is the decision log.**
+**Version 1.2 — 25 Aug 2026.** *(Prompt 0.3 appended §13 on 28 Aug 2026 — `StatusTransition` coverage. The version string is left at 1.2 deliberately: several later prompts hard-check for it, and a bump would trip their own stop conditions over an additive section.)* Built from v1.0 by the prompt 0.1 verification session (25 claims confirmed, 11 corrected), then extended by the A-0.2 access audit and the 0.2a regression baseline. Claims marked ✔ were verified against source. **§11 lists seven known defects found by 0.2a; §12 is the decision log.**
 
 > **If the copy in `docs/` says "Last updated: 23 Aug 2026" it is v1.0 and has eleven errors in it. Replace it.**
 
@@ -283,3 +283,60 @@ All seven are current behaviour, read from source. None is one of the fifteen fi
 | **25 Aug** | **Phase 3 targets OPEX/tender only.** Residential has no design workflow to extend. |
 | **25 Aug** | **Project closure is fixed in phase 5** with COD and HOTO. Prompt 1.3 owns only the opening transition. |
 | **25 Aug** | **Duplicate business paths are consolidated in 0.2b, before the lockdown.** |
+| **28 Aug** | **`StatusTransition` ships in 0.3 covering six subject types, not all of them.** The design module is a session of its own — see §13. |
+
+---
+
+## 13. `StatusTransition` coverage — what is instrumented, and what is not
+
+Added by prompt 0.3, 28 Aug 2026. **Read this before drawing any conclusion from a
+missing row.**
+
+A partly-populated ledger is worse than an empty one if nobody knows where it stops.
+An absent `StatusTransition` row means one of two completely different things — "that
+status change did not happen" or "that model was never instrumented" — and only this
+table tells you which. Every session that adds or removes instrumentation updates it.
+
+### Instrumented — every status write goes through `record_transition()` (R-2)
+
+| `subject_type` | Model | Write sites covered |
+|---|---|---|
+| `project` | `Project` | `project_create` (→ Draft), `project_activate` (Draft → Active), `create_opex_site` (→ Draft), the Zoho webhook's project creation (→ Draft, `actor=None`) |
+| `task` | `Task` | `task_status_update` and `task_detail_status_update` — both the ordinary ladder and the auto-block branch — plus both directions of the task↔milestone sync |
+| `boq` | `BOQ` | `boq_submit`, the inline `submit_design` branch of `boq_detail`, `_apply_boq_acknowledgement` (shared by both acknowledge paths), `boq_request_revision` |
+| `delivery_challan` | `DeliveryChallan` | `create_delivery_challan` (→ Expected) and every outcome of `recalculate_dc_status()`, which is instrumented **inside the function** so `confirm_grn` and `override_grn` cannot diverge |
+| `issue` | `Issue` | all five creation sites (→ Open), `update_issue_status`, `resolve_issue`, `close_issue`, `reopen_issue` |
+| `payment_milestone` | `PaymentMilestone` | `milestone_invoice`, `milestone_receive`, the Finance branch of `project_overview`'s `update_milestone`, and both directions of the task↔milestone sync |
+
+**Corrections to the record made while instrumenting.** `Project.status` is written in
+**four** places, not the two previously believed — `create_opex_site` and the Zoho
+webhook are the other two. And 0.2b consolidated the BOQ *snapshot* and the BOQ
+*acknowledgement*, but **not** the BOQ *submit*: `boq_submit` and the inline
+`submit_design` branch still both write `status = 'Submitted'`. Both are instrumented;
+consolidating them is 0.2b-shaped work and was not done in 0.3 (R-12).
+
+### NOT instrumented — a missing row here means nothing
+
+| Model | Statuses | Why not |
+|---|---|---|
+| `DesignAssignment` | 14 (`DESIGN_ASSIGNMENT_STATUS_CHOICES`) | The richest workflow in the product. Instrumenting it means editing `design_views.py`, which has been correctly scoped and untouched all programme. **It is a session of its own.** |
+| `DesignAttempt` | its own lifecycle, plus several existing terminal stamps | Same reason. Note it already carries ad-hoc stamps, so a future session must decide whether those become transitions or stay beside them. |
+| `PaymentRequest` | `pending \| confirmed` (`payment_request_confirm`) | A seventh status-bearing model outside 0.3's six-value subject vocabulary. Adding it means a new `subject_type` constant and a `SUBJECT_TYPE_CHOICES` migration — a schema change, so R-1 applies. |
+| `SiteGroup` | `SITE_GROUP_STATUS_CHOICES` | Not yet reached by the execution build plan; prompt 1.1 owns it. |
+| `Milestone` (legacy) | `pending \| in_progress \| completed \| delayed` | Superseded by `PaymentMilestone` and kept only for schema compatibility. Do not instrument it; do not revive it. |
+
+Adding a subject type is three coordinated edits and one migration: the `SUBJECT_*`
+constant and `SUBJECT_TYPE_CHOICES` entry in `models.py`, the model-class entry in
+`utils._subject_type_registry()` and `_SUBJECT_PROJECT_RESOLVERS`, the call sites
+themselves — **and a row moved from the second table above to the first.**
+
+### Two properties that are enforced in code, not in the schema
+
+- **R-9 (mandatory remarks)** is enforced by `record_transition()` against
+  `REMARK_REQUIRED_SUBJECT_TYPES`, which is **empty today**. It cannot be a `NOT NULL`
+  column while the retrofitted paths collect no remark; making it one would 500 every
+  task status change. Phase 2 adds `task` to the set when two-step completion ships.
+- **R-4 (append-only)** is enforced by `save()`/`delete()` overrides on the model. Those
+  are bypassed by `QuerySet.update()` and `QuerySet.delete()`. The stronger form is a
+  database-level `REVOKE UPDATE, DELETE ON projects_statustransition`, deliberately left
+  for a deployment task.

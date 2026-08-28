@@ -194,6 +194,172 @@ def assign_tasks_to(queryset, user):
     return queryset.update(assigned_to=user)
 
 
+# ---------------------------------------------------------------------------
+# State-ledger chokepoint — prompt 0.3 (rules R-2, R-3, R-4, R-9, R-14)
+#
+# StatusTransition rows are written HERE AND NOWHERE ELSE. Same pattern as
+# assign_task_to() above and send_notification(): one function owns one table's
+# writes, no signals, no save() overrides.
+# ---------------------------------------------------------------------------
+
+# Model class -> subject_type. subject_type is DERIVED FROM THE MODEL through
+# this one registry and is never a string the caller passes: a caller-supplied
+# string is how these vocabularies drift, and a typo would be indistinguishable
+# from a subject type that genuinely has no rows.
+#
+# Built lazily and cached — utils cannot import models at module level.
+_SUBJECT_TYPE_REGISTRY = None
+
+# How to reach the owning Project from each subject. Task is the odd one: it has
+# no project FK and must go through its phase (see feedback_task_project_path).
+_SUBJECT_PROJECT_RESOLVERS = {
+    'Project':          lambda s: s,
+    'Task':             lambda s: s.phase.project,
+    'BOQ':              lambda s: s.project,
+    'DeliveryChallan':  lambda s: s.project,
+    'Issue':            lambda s: s.project,
+    'PaymentMilestone': lambda s: s.project,
+}
+
+
+def _subject_type_registry():
+    """Model class -> subject_type constant. Cached after the first call."""
+    global _SUBJECT_TYPE_REGISTRY
+    if _SUBJECT_TYPE_REGISTRY is None:
+        from .models import (
+            Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
+            SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
+            SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
+        )
+        _SUBJECT_TYPE_REGISTRY = {
+            Project:          SUBJECT_PROJECT,
+            Task:             SUBJECT_TASK,
+            BOQ:              SUBJECT_BOQ,
+            DeliveryChallan:  SUBJECT_DELIVERY_CHALLAN,
+            Issue:            SUBJECT_ISSUE,
+            PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
+        }
+    return _SUBJECT_TYPE_REGISTRY
+
+
+def record_transition(subject, to_status, from_status='', actor=None,
+                      reason_code='', remark='', project=None,
+                      client_uuid=None, occurred_at=None):
+    """
+    Write one StatusTransition row. MUST be called inside the same
+    transaction.atomic() block as the status change it records.
+
+    A transition row without its status change, or a status change without its
+    row, is worse than neither — the first is a history of something that never
+    happened, the second is a gap indistinguishable from "we never instrumented
+    this path". Callers own the atomic block; this function does not open one,
+    because opening its own would defeat the point.
+
+    THIS FUNCTION RAISES. IT NEVER SWALLOWS. That is the whole difference from
+    log_activity(), which catches bare `Exception` and logs it, so a failure
+    there loses one line of a feed and nothing more. Here a swallowed failure
+    would leave a status change with no record of who made it, silently, and the
+    caller's atomic block would commit the change anyway. If someone later
+    "harmonises" the two helpers by wrapping this body in try/except, they will
+    have reintroduced exactly that defect. R-3: the feed and the ledger are
+    different things and are allowed to fail differently.
+
+    Args:
+        subject:     the model INSTANCE whose status changed. Its class decides
+                     subject_type via _subject_type_registry() — never a string.
+        to_status:   required, the new status.
+        from_status: the previous status; '' for a creation transition.
+        actor:       UserProfile, or None where no human acted (the Zoho
+                     webhook). actor.role is COPIED into actor_role_code, never
+                     joined, so a later role change cannot rewrite history.
+        reason_code: one of the REASON_* constants in models.
+        remark:      free text. Mandatory for subject types listed in
+                     REMARK_REQUIRED_SUBJECT_TYPES (R-9) — empty today.
+        project:     override for the derived project. Pass it only where the
+                     resolver cannot work (e.g. a subject not yet saved).
+        client_uuid: R-14 idempotency key. A repeat is IGNORED — same row
+                     returned, nothing duplicated, no exception.
+        occurred_at: override for "now", for a replayed offline submission.
+
+    Returns the StatusTransition row (existing one on an idempotent repeat).
+    """
+    from django.db import IntegrityError
+    from .models import (
+        StatusTransition, ACTOR_ROLE_SYSTEM, REMARK_REQUIRED_SUBJECT_TYPES,
+    )
+
+    subject_type = _subject_type_registry().get(type(subject))
+    if subject_type is None:
+        raise ValueError(
+            f"record_transition(): {type(subject).__name__} is not an instrumented "
+            f"subject type. Add it to the registry and to SUBJECT_TYPE_CHOICES, and "
+            f"record it in docs/execution-model.md §13 — a subject type that writes "
+            f"rows without being documented makes the ledger's gaps unreadable."
+        )
+
+    if not to_status:
+        raise ValueError('record_transition(): to_status is required.')
+
+    # R-9, enforced here rather than by the database — see the note on
+    # StatusTransition.remark for why it cannot be a NOT NULL column yet.
+    if subject_type in REMARK_REQUIRED_SUBJECT_TYPES and not (remark or '').strip():
+        raise ValueError(
+            f"record_transition(): a remark is mandatory for '{subject_type}' "
+            f"transitions (R-9)."
+        )
+
+    if client_uuid:
+        # Fast path: the replay we have already seen. The savepoint below is what
+        # actually makes this safe under concurrency; this just avoids the
+        # round-trip in the common case.
+        existing = StatusTransition.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            return existing
+
+    if project is None:
+        resolver = _SUBJECT_PROJECT_RESOLVERS.get(type(subject).__name__)
+        if resolver is not None:
+            project = resolver(subject)
+
+    # Copied, not joined. A departed or re-roled user must not be able to change
+    # what this row says they were at the time.
+    if actor is not None:
+        actor_role_code = actor.role or ACTOR_ROLE_SYSTEM
+    else:
+        actor_role_code = ACTOR_ROLE_SYSTEM
+
+    row = StatusTransition(
+        subject_type=subject_type,
+        subject_id=subject.pk,
+        project=project,
+        from_status=from_status or '',
+        to_status=to_status,
+        actor=actor,
+        actor_role_code=actor_role_code,
+        reason_code=reason_code or '',
+        remark=remark or '',
+        client_uuid=client_uuid or None,
+        occurred_at=occurred_at or timezone.now(),
+    )
+
+    if not client_uuid:
+        row.save()
+        return row
+
+    # Idempotent replay, race included. The nested atomic() is a SAVEPOINT: without
+    # it an IntegrityError here would poison the CALLER's transaction, so recovering
+    # from a duplicate key would abort the status change we were called to record.
+    try:
+        with transaction.atomic():
+            row.save()
+        return row
+    except IntegrityError:
+        existing = StatusTransition.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            return existing
+        raise  # some other integrity problem — never swallow it
+
+
 def generate_project_id(project_type):
     """
     Generate a unique project ID of the form HRP-{PREFIX}-{YEAR}-{NNN}.

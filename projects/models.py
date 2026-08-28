@@ -1,5 +1,6 @@
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 
 class Project(models.Model):
@@ -1294,7 +1295,7 @@ def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
     return 'amber'  # Shortfall only, or full qty with some damage
 
 
-def recalculate_dc_status(challan):
+def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
     """
     Recalculate and save DeliveryChallan.status using per-line-item severity rollup.
     Severity per item (via _dc_item_severity): green / amber / red.
@@ -1303,33 +1304,52 @@ def recalculate_dc_status(challan):
       amber  → Partially Received
       red    → Rejected  (repurposed: severe delivery failure — shortfall+damage or nothing received)
     Must be called ONCE after all line items are saved — never inside the save loop.
+
+    `actor`/`reason_code`/`remark` feed the state ledger (prompt 0.3, R-2). They are
+    optional so no existing caller breaks, and instrumenting HERE rather than at the
+    call sites is deliberate: this is the only place DeliveryChallan.status is
+    recomputed, so every one of its four outcomes is covered by one row of code
+    instead of one per GRN endpoint. A row is written only when the status actually
+    CHANGES — an idempotent recalculation is not a transition, and recording it as
+    one would put dwell times of zero all through the delivery history.
     """
+    from .utils import record_transition
+
+    previous = challan.status
+
     items     = list(challan.line_items.all())
     confirmed = [item for item in items if item.received_quantity is not None]
 
     if not confirmed:
         # No items have GRN data yet
         challan.status = DeliveryChallan.EXPECTED
-        challan.save()
-        return
-
-    worst = 'green'
-    for item in confirmed:
-        sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
-        if sev == 'red':
-            worst = 'red'
-            break          # Can't get worse; short-circuit
-        elif sev == 'amber':
-            worst = 'amber'
-
-    if worst == 'green':
-        challan.status = DeliveryChallan.RECEIVED
-    elif worst == 'amber':
-        challan.status = DeliveryChallan.PARTIALLY_RECEIVED
     else:
-        # 'red': severe delivery failure — quantity short AND damage, or nothing received
-        challan.status = DeliveryChallan.REJECTED
-    challan.save()
+        worst = 'green'
+        for item in confirmed:
+            sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
+            if sev == 'red':
+                worst = 'red'
+                break          # Can't get worse; short-circuit
+            elif sev == 'amber':
+                worst = 'amber'
+
+        if worst == 'green':
+            challan.status = DeliveryChallan.RECEIVED
+        elif worst == 'amber':
+            challan.status = DeliveryChallan.PARTIALLY_RECEIVED
+        else:
+            # 'red': severe delivery failure — quantity short AND damage, or nothing received
+            challan.status = DeliveryChallan.REJECTED
+
+    # The save() still happens unconditionally, exactly as before — only the ledger
+    # row is conditional on the status having moved.
+    with transaction.atomic():
+        challan.save()
+        if challan.status != previous:
+            record_transition(
+                challan, to_status=challan.status, from_status=previous,
+                actor=actor, reason_code=reason_code, remark=remark,
+            )
 
 
 def get_material_status(project):
@@ -1419,6 +1439,169 @@ def log_activity(project, actor, action, entity_type='', entity_id=None, action_
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"ActivityLog failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# The state ledger — StatusTransition (prompt 0.3; rules R-2, R-3, R-4, R-9)
+#
+# THIS IS NOT A SECOND ActivityLog, and the two must never be merged (R-3).
+# ActivityLog is the human-readable feed: an actor, a sentence, an entity
+# reference. It answers "what has been happening on this project". It has no
+# from-status, no to-status, no reason and no actor role, so it cannot answer
+# "how long did this sit in Blocked" or "who moved it, and why" — which is the
+# whole point of this table.
+#
+# Written ONLY by utils.record_transition(), inside the same transaction as the
+# status change it records. Nothing else writes here.
+# ---------------------------------------------------------------------------
+
+# Subject vocabulary. Flat strings, matching ActivityLog.entity_type's pattern
+# rather than a GenericForeignKey: the value must mean the same thing on every
+# deployment forever, and a django_content_type row id does not (it is renumbered
+# by a fresh database). A string also still reads correctly after its subject has
+# been hard-deleted, where a GFK dereference raises.
+SUBJECT_PROJECT           = 'project'
+SUBJECT_TASK              = 'task'
+SUBJECT_BOQ               = 'boq'
+SUBJECT_DELIVERY_CHALLAN  = 'delivery_challan'
+SUBJECT_ISSUE             = 'issue'
+SUBJECT_PAYMENT_MILESTONE = 'payment_milestone'
+
+SUBJECT_TYPE_CHOICES = [
+    (SUBJECT_PROJECT,           'Project'),
+    (SUBJECT_TASK,              'Task'),
+    (SUBJECT_BOQ,               'BOQ'),
+    (SUBJECT_DELIVERY_CHALLAN,  'Delivery Challan'),
+    (SUBJECT_ISSUE,             'Issue'),
+    (SUBJECT_PAYMENT_MILESTONE, 'Payment Milestone'),
+]
+
+# Reason vocabulary — module-level constants per R-10, NOT a lookup table and
+# deliberately NOT a `choices=` list on the field. subject_type gets choices
+# because it is structural (a seventh subject type means new instrumentation and
+# a code change anyway); a seventh REASON must not cost an AlterField migration.
+REASON_CREATED            = 'created'             # first state; there is no from-status
+REASON_BLOCKED            = 'blocked'             # task blocked, blocking Issue raised alongside
+REASON_UNBLOCKED          = 'unblocked'
+REASON_MILESTONE_SYNC     = 'milestone_sync'      # task<->milestone auto-sync, not a direct act
+REASON_GRN_CONFIRMED      = 'grn_confirmed'
+REASON_GRN_OVERRIDDEN     = 'grn_overridden'
+REASON_REVISION_REQUESTED = 'revision_requested'
+REASON_RESUBMITTED        = 'resubmitted'
+REASON_ZOHO_WEBHOOK       = 'zoho_webhook'
+
+# Written into actor_role_code when no human performed the change. The Zoho
+# webhook creates projects with created_by=None and no request user at all;
+# actor_role_code is required, so "nobody" needs a spelling of its own.
+ACTOR_ROLE_SYSTEM = 'system'
+
+# Subject types whose transitions MUST carry a remark (R-9).
+#
+# EMPTY TODAY, ON PURPOSE. R-9 wants remarks mandatory, but that cannot be a
+# database constraint in this session: prompt 0.3 retrofits six existing paths
+# that do not collect a remark today and never have, so a NOT NULL column would
+# 500 every task status change on the first deploy. Enforcement therefore lives
+# in record_transition(), driven by this set. Phase 2 adds SUBJECT_TASK when
+# two-step completion ships and the UI actually collects the text.
+REMARK_REQUIRED_SUBJECT_TYPES = frozenset()
+
+
+class AppendOnlyViolation(Exception):
+    """Raised when something tries to mutate or delete an append-only ledger row."""
+
+
+class StatusTransition(models.Model):
+    """One recorded state change: subject, from, to, who, their role then, why, when.
+
+    Append-only (R-4). A correction is a NEW row; nothing is ever updated or
+    deleted. save() refuses to touch an existing row and delete() refuses
+    outright.
+
+    THE ENFORCEMENT HERE IS APPLICATION-LEVEL, AND THAT IS A DELIBERATE HALF
+    MEASURE, NOT AN OVERSIGHT. QuerySet.update() and QuerySet.delete() operate in
+    SQL and bypass both overrides entirely. The stronger form is a database-level
+    `REVOKE UPDATE, DELETE ON projects_statustransition` for the application role;
+    that belongs to a deployment task, not to a model definition, and is left for
+    one. What is here is testable and honest about its own limits.
+
+    Not registered in Django admin — the admin's change form is an UPDATE.
+    """
+
+    subject_type = models.CharField(
+        max_length=30, choices=SUBJECT_TYPE_CHOICES, db_index=True,
+    )
+    # Not a FK: the subject is polymorphic across six unrelated models.
+    subject_id   = models.PositiveIntegerField()
+
+    # Denormalised so "this project's whole history" is one indexed query instead
+    # of a six-way union. SET_NULL rather than CASCADE: a hard-deleted Project
+    # must not erase the ledger that explains what happened to it.
+    project      = models.ForeignKey(
+        'Project', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='status_transitions',
+    )
+
+    from_status  = models.CharField(max_length=50, blank=True, default='')  # blank = creation
+    to_status    = models.CharField(max_length=50)
+
+    actor        = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='status_transitions',
+    )
+    # COPIED AT WRITE TIME, NEVER JOINED. When someone changes role next year,
+    # last year's history must still say what they were when they acted.
+    # ACTOR_ROLE_SYSTEM where no human was involved.
+    actor_role_code = models.CharField(max_length=30)
+
+    reason_code  = models.CharField(max_length=40, blank=True, default='')
+
+    # Blank is allowed AT THE DATABASE LEVEL and must stay that way: the 0.3
+    # retrofit instruments six paths that collect no remark today. R-9 is enforced
+    # by record_transition() against REMARK_REQUIRED_SUBJECT_TYPES instead. Do not
+    # "fix" this by making it NOT NULL (which breaks every retrofitted path) or by
+    # deleting the enforcement set (which discards R-9).
+    remark       = models.TextField(blank=True, default='')
+
+    # R-14 idempotency key. A site engineer will write these from the field in
+    # phase 2 and a queued offline submission must replay safely. null (not '')
+    # so the unique index admits unlimited keyless rows — NULLs are distinct,
+    # empty strings are not. Costs nothing now; cannot be retrofitted once real
+    # rows exist.
+    client_uuid  = models.CharField(max_length=64, null=True, blank=True, unique=True)
+
+    # default=, NOT auto_now_add= (which is what ActivityLog.timestamp uses).
+    # auto_now_add cannot be set explicitly, so a replayed offline submission
+    # could not carry the time it actually happened at, and a backfill would be
+    # impossible.
+    occurred_at  = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+        indexes = [
+            # One subject's own history — the dwell-time query.
+            models.Index(fields=['subject_type', 'subject_id', 'occurred_at'],
+                         name='sttrans_subject_idx'),
+            # One project's whole timeline, across all six subject types.
+            models.Index(fields=['project', 'occurred_at'],
+                         name='sttrans_project_idx'),
+        ]
+
+    def __str__(self):
+        origin = self.from_status or '(new)'
+        return f"{self.subject_type}#{self.subject_id}: {origin} -> {self.to_status}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'StatusTransition is append-only (R-4) — a correction is a new row, '
+                'never an edit to an existing one.'
+            )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'StatusTransition is append-only (R-4) — rows are never deleted.'
+        )
 
 
 class NotificationLog(models.Model):
