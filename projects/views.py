@@ -382,6 +382,27 @@ _FILTER_TITLES = {
     'overdue':   'Overdue Tasks',
 }
 
+# --- Finance confirmation task <-> PaymentMilestone mapping -----------------
+# One definition for the whole module; four copies previously drifted, three of
+# them still naming 'Finance Confirmation', which was deleted from the
+# Residential template. Its M2 role passed to 'Pre Dispatch Payment
+# Confirmation' (see RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES in utils.py).
+# The reverse map is DERIVED, so the two directions cannot drift apart.
+_FINANCE_TASK_TO_MILESTONE = {
+    'Advance Payment Confirmation':      'M1',
+    'Pre Dispatch Payment Confirmation': 'M2',
+    '100% Payment Confirmation':         'M3',
+}
+_MILESTONE_TO_FINANCE_TASK = {
+    milestone: task_name
+    for task_name, milestone in _FINANCE_TASK_TO_MILESTONE.items()
+}
+
+# UserProfile.role and Task.assigned_role use the same strings for every role
+# except BD, which the task template spells 'BD / Sales'. Normalise through this
+# before comparing the two.
+_PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+
 
 @login_required
 def tasks_drill_down(request, filter_type):
@@ -2401,7 +2422,6 @@ def _user_can_complete_checklist_item(user, task, project):
     if user_can_manage_project(user, project):
         return True
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
     return normalised_user_role == task.assigned_role
 
@@ -2679,7 +2699,13 @@ def project_activate(request, project_id):
     log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
 
     if project.project_type == 'Residential':
-        messages.success(request, 'Project activated. 53 tasks created. Set the first task due date to calculate all dates.')
+        # Count the rows actually created rather than restating the template size — the
+        # message said 53 while the template has always created (and asserted) 52.
+        _created_task_count = Task.objects.filter(phase__project=project).count()
+        messages.success(
+            request,
+            f'Project activated. {_created_task_count} tasks created. '
+            f'Set the first task due date to calculate all dates.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
 
@@ -3461,7 +3487,6 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
     permission context the page uses so role-gating is identical to a full render."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
     is_assigned_pm = _pm_owns_project(request, project)
     gate_pk        = _gate_task_pk(project)
@@ -3574,7 +3599,6 @@ def _render_task_assign_design_success_hx(request, project, task):
     be the PM)."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
         'row_task':            task,
@@ -3595,7 +3619,6 @@ def _render_task_add_success_hx(request, project, phase):
     page order and correctly places the new row."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     phase_tasks = list(phase.tasks.all())
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
@@ -3656,7 +3679,6 @@ def task_status_update(request, project_id, task_id):
     is_pm = _pm_owns_project(request, project)
 
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(user_role, user_role)
 
     if normalised_user_role != task.assigned_role and not is_pm:
@@ -3767,11 +3789,7 @@ def task_status_update(request, project_id, task_id):
 
         # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
         # Mapping by task name — names are fixed in the residential template.
-        _FINANCE_TASK_TO_MILESTONE = {
-            'Advance Payment Confirmation':      'M1',
-            'Pre Dispatch Payment Confirmation': 'M2',
-            '100% Payment Confirmation':         'M3',
-        }
+        # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
         if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
             _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
             _ms_update = {'status': 'Received', 'received_date': date.today()}
@@ -3966,11 +3984,7 @@ def task_detail_status_update(request, project_id, task_id):
                      action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
 
         # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received
-        _FINANCE_TASK_TO_MILESTONE = {
-            'Advance Payment Confirmation': 'M1',
-            'Finance Confirmation':         'M2',
-            '100% Payment Confirmation':    'M3',
-        }
+        # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
         if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
             _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
             _ms_update = {'status': 'Received', 'received_date': date.today()}
@@ -4198,7 +4212,6 @@ def task_set_due_date(request, project_id, task_id):
 
     if not is_pm:
         # Map UserProfile.role to Task.assigned_role (BD → BD / Sales)
-        _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
         user_task_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
 
         if task.assigned_role != user_task_role:
@@ -4593,6 +4606,36 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
         )
 
 
+def _apply_boq_acknowledgement(boq, profile, request):
+    """
+    Apply the SCM acknowledgement of a BOQ: status write, ActivityLog, notification.
+
+    Single implementation shared by the inline `acknowledge_scm` branch of boq_detail and
+    the standalone `boq_acknowledge` endpoint. Previously each path did part of the work —
+    the inline one notified but never logged, the standalone one logged but never notified,
+    so whether the PM heard about an acknowledgement depended on which control was clicked
+    (defect B-5).
+
+    Gates and status preconditions stay with the callers: each keeps its own
+    `profile.role != 'SCM'` check and its own view of which statuses may be acknowledged.
+    The revision snapshot also stays with the inline caller — only that path has ever
+    written one (see the 0.2b report).
+    """
+    boq.status = 'Acknowledged'
+    boq.save(update_fields=['status'])
+
+    log_activity(
+        boq.project, profile,
+        f"BOQ Acknowledged for project: {boq.project.project_id}",
+        entity_type='BOQ', entity_id=boq.pk,
+    )
+
+    # _notify_boq_acknowledged dereferences boq.submitted_by.user — a BOQ acknowledged
+    # without a recorded submitter has no Design user to notify.
+    if boq.submitted_by:
+        _notify_boq_acknowledged(boq, profile, request)
+
+
 def _build_vendors_by_category():
     """
     Return dict mapping category name → list of {id, name, make_brand} for active vendors.
@@ -4854,13 +4897,7 @@ def boq_detail(request, project_id):
                 reason=f'SCM Acknowledged v{boq.version}',
                 snapshot=snapshot,
             )
-            boq.status = 'Acknowledged'
-            boq.save(update_fields=['status'])
-
-            # Notify the Design user who submitted this BOQ
-            if boq.submitted_by:
-                _notify_boq_acknowledged(boq, profile, request)
-
+            _apply_boq_acknowledgement(boq, profile, request)
             messages.success(request, 'BOQ acknowledged.')
             return redirect('boq_detail', project_id=project_id)
 
@@ -6020,7 +6057,10 @@ def boq_submit(request, project_id):
     # other project is unreachable through this endpoint.
     boq = get_object_or_404(BOQ, project=project)
 
-    if boq.status not in ('Draft', 'Revision Requested'):
+    # Status precondition matches the inline submit_design branch in boq_detail — that is
+    # the path the UI actually posts to, and 'Acknowledged' is a legitimate starting point
+    # for a resubmission there. Keeping the two rules identical is the point of 0.2b.
+    if boq.status not in ('Draft', 'Revision Requested', 'Acknowledged'):
         messages.error(request, 'BOQ cannot be submitted in its current state.')
         return redirect('boq_detail', project_id=project_id)
 
@@ -6028,15 +6068,14 @@ def boq_submit(request, project_id):
         messages.error(request, 'At least one item must have a BOQ quantity before submitting.')
         return redirect('boq_detail', project_id=project_id)
 
-    is_resubmission = boq.status == 'Revision Requested'
+    is_resubmission = boq.status in ('Revision Requested', 'Acknowledged')
     new_version     = boq.version + 1 if is_resubmission else boq.version
     reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
 
-    snapshot = list(boq.items.values(
-        'serial_no', 'category', 'description', 'uom',
-        'boq_quantity', 'ordered_quantity',
-        'make_preference__name', 'ordered_vendor__name',
-    ))
+    # Single snapshot implementation, shared with the inline branch. Building the rows
+    # from a raw .values() here left Decimal quantities uncoerced and raised an unhandled
+    # TypeError on every submission that reached this line (defect B-7).
+    snapshot = _boq_snapshot(boq)
 
     BOQRevision.objects.create(
         boq=boq, revised_by=profile,
@@ -6081,11 +6120,7 @@ def boq_acknowledge(request, project_id):
         messages.error(request, 'Only submitted BOQs can be acknowledged.')
         return redirect('boq_detail', project_id=project_id)
 
-    boq.status = 'Acknowledged'
-    boq.save()
-
-    # Log BOQ acknowledgment event
-    log_activity(project, profile, f"BOQ Acknowledged for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
+    _apply_boq_acknowledgement(boq, profile, request)
     messages.success(request, 'BOQ acknowledged.')
     return redirect('boq_detail', project_id=project_id)
 
@@ -6296,11 +6331,7 @@ def milestone_receive(request, project_id, milestone_pk):
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
 
     # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done.
-    _MILESTONE_TO_FINANCE_TASK = {
-        'M1': 'Advance Payment Confirmation',
-        'M2': 'Finance Confirmation',
-        'M3': '100% Payment Confirmation',
-    }
+    # Map lives at module level (_MILESTONE_TO_FINANCE_TASK), derived from the forward map.
     _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
     if _sync_task_name:
         try:
@@ -6850,11 +6881,7 @@ def project_overview(request, project_id):
                         milestone.save(update_fields=_save_fields)
                         log_activity(project, request.user.profile, f"Updated {milestone.milestone_name}", entity_type='Milestone', entity_id=milestone.pk)
                         if 'status' in _save_fields:
-                            _MILESTONE_TO_FINANCE_TASK = {
-                                'M1': 'Advance Payment Confirmation',
-                                'M2': 'Finance Confirmation',
-                                'M3': '100% Payment Confirmation',
-                            }
+                            # Map lives at module level (_MILESTONE_TO_FINANCE_TASK).
                             _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
                             if _sync_task_name:
                                 try:
@@ -7101,7 +7128,6 @@ def project_overview(request, project_id):
     dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if role == 'SCM' else []
 
     # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
     # Cascade scheduling context — PM-only feature gate check
