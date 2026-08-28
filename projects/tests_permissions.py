@@ -175,16 +175,43 @@ class TruthTableTests(TestCase):
                     if user_can_manage_project(user, project):
                         self.assertTrue(user_can_view_project(user, project), label)
 
-    def test_system_admin_is_assignment_based(self):
-        """System Admin has no branch of its own, so it falls through to management.
+    def test_system_admin_is_portfolio_wide(self):
+        """System Admin is unrestricted, exactly as Admin is — execution-model §2 D-4.
 
-        NOT in the design's truth table — see the audit note. Pinned here so the
-        fall-through default is a decision on record rather than an accident.
+        THIS TEST WAS INVERTED BY THE 0.2 LOCKDOWN, deliberately. It previously read
+        `test_system_admin_is_assignment_based` and asserted the OPPOSITE of the last
+        line below, pinning the fall-through this function had when System Admin had no
+        branch of its own. That fall-through was never a policy — its own docstring
+        called it a default "NOT in the design's truth table" — and it was survivable
+        only because the endpoints' PM-only guard did not name System Admin, so they
+        reached projects without this function ever admitting them.
+
+        Prompt 0.2 removes that guard and routes every detail endpoint through
+        user_can_view_project(). Leaving the old assertion in place would have meant
+        either locking System Admin out of the product or leaving the guard unfixed, so
+        D-4 was applied and this test rewritten to match. Unlike BDPortfolioPolicyTests
+        below, the old assertion was not a settled product decision.
         """
         u_pm, u_co, u_no = self._profiles_for('System Admin', 'System Admin', False)
         self.assertTrue(user_can_view_project(u_pm, self.p_pm))
         self.assertTrue(user_can_view_project(u_co, self.p_coord))
-        self.assertFalse(user_can_view_project(u_no, self.p_none))
+        self.assertTrue(user_can_view_project(u_no, self.p_none))
+
+    def test_system_admin_portfolio_view_confers_no_management_authority(self):
+        """Unrestricted VISIBILITY, and not one inch of authority — same split as BD."""
+        _, _, u_no = self._profiles_for('System Admin', 'System Admin', False)
+        self.assertTrue(user_can_view_project(u_no, self.p_none))
+        self.assertFalse(user_can_manage_project(u_no, self.p_none))
+
+    def test_system_admin_still_has_no_boq_read(self):
+        """The D-4 widening is project visibility ONLY — it must not reach the BOQ.
+
+        user_can_view_project_boq() keeps its own BOQ_PORTFOLIO_READ_ROLES frozenset,
+        which does not list System Admin. This is the test that fails if somebody
+        "simplifies" the two by making the BOQ gate defer to user_can_view_project().
+        """
+        _, _, u_no = self._profiles_for('System Admin', 'System Admin', False)
+        self.assertFalse(user_can_view_project_boq(u_no, self.p_none))
 
     def test_blank_role_is_assignment_based(self):
         """role='' is permitted by the model (blank=True) and must not grant anything."""

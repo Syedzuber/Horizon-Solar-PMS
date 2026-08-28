@@ -232,12 +232,29 @@ class GanttGridBuilderTests(TestCase):
 
 
 class GanttRoleVisibilityTests(TestCase):
+    """Which roles see the CLIENT Gantt view on project_overview.
+
+    THE SUBJECT HERE IS ROLE GATING, NOT PROJECT SCOPE. Every actor below is therefore
+    given a genuine relationship to the project before its role is tested — the per-site
+    roles by assignment, the portfolio roles by remit.
+
+    That was not true before the 0.2 lockdown. These tests used to log in a bare
+    Coordinator / Site Engineer / Design user with NO connection to the project and still
+    get a 200 from project_overview, because that endpoint's guard only ever checked
+    `role == 'PM'`. That is audit finding 6, and closing it turned these into 404s —
+    KeyError on ctx['gantt_can_view_client'], since a 404 response carries no context.
+
+    The fixtures below were repaired rather than the gate loosened: an unrelated
+    coordinator reaching another PM's project was never the behaviour this file meant to
+    assert, only a convenient way to obtain a non-PM user.
+    """
+
     def setUp(self):
         self.client = Client(SERVER_NAME='localhost')
         self.pm_user, self.pm = _make_user('pm_view', 'PM')
         self.project = _make_project(self.pm)
         ph = _phase(self.project, 'P1', 1)
-        _task(ph, 'A', 1, 2)
+        self.task = _task(ph, 'A', 1, 2)
         self.url = reverse('project_overview', args=[self.project.project_id])
 
     def _ctx(self, user):
@@ -251,17 +268,34 @@ class GanttRoleVisibilityTests(TestCase):
         self.assertIsNotNone(ctx['gantt_client'])
 
     def test_coordinator_and_ceo_see_client_view(self):
-        for uname, role in (('coord_v', 'Project Coordinator'), ('ceo_v', 'CEO')):
-            u, _ = _make_user(uname, role)
-            ctx = self._ctx(u)
+        # The coordinator is coordinator OF THIS PROJECT; the CEO is portfolio-wide.
+        coord_user, coord = _make_user('coord_v', 'Project Coordinator')
+        self.project.coordinators.add(coord)
+        ceo_user, _ = _make_user('ceo_v', 'CEO')
+
+        for user, role in ((coord_user, 'Project Coordinator'), (ceo_user, 'CEO')):
+            ctx = self._ctx(user)
             self.assertTrue(ctx['gantt_can_view_client'], role)
             self.assertIsNotNone(ctx['gantt_client'], role)
 
     def test_other_roles_get_no_client_rows(self):
-        for uname, role in (('se_v', 'Site Engineer'), ('fin_v', 'Finance'),
-                            ('scm_v', 'SCM'), ('des_v', 'Design'), ('bd_v', 'BD')):
+        # Site Engineer reaches this project by holding a task on it, Design by being its
+        # assigned_design — the two relationships user_can_view_project() scopes them on.
+        # Finance, SCM and BD are portfolio-wide and need no assignment.
+        se_user, se = _make_user('se_v', 'Site Engineer')
+        Task.objects.filter(pk=self.task.pk).update(assigned_to=se)
+
+        des_user, des = _make_user('des_v', 'Design')
+        self.project.assigned_design = des
+        self.project.save(update_fields=['assigned_design'])
+
+        actors = [(se_user, 'Site Engineer'), (des_user, 'Design')]
+        for uname, role in (('fin_v', 'Finance'), ('scm_v', 'SCM'), ('bd_v', 'BD')):
             u, _ = _make_user(uname, role)
-            ctx = self._ctx(u)
+            actors.append((u, role))
+
+        for user, role in actors:
+            ctx = self._ctx(user)
             self.assertFalse(ctx['gantt_can_view_client'], role)
             self.assertIsNone(ctx['gantt_client'], role)          # not in DOM for these roles
             self.assertIsNotNone(ctx['gantt_internal'], role)     # internal still visible

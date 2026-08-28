@@ -47,7 +47,8 @@ from .decorators import (
     get_post_login_url, LANDING_ROLES,
 )
 from .permissions import (
-    user_can_manage_project, project_managers, user_can_manage_program,
+    user_can_manage_project, user_can_view_project, manageable_projects_q,
+    project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
@@ -235,7 +236,12 @@ def login_view(request):
     role goes straight to its role dashboard exactly as before. Access: public.
     """
     if request.user.is_authenticated:
-        return redirect(get_post_login_url(request.user))
+        # 0.2 lockdown: a profile-less user now resolves to NO_PROFILE_URL ('/login/'),
+        # so redirecting unconditionally would loop this page against itself. Falling
+        # through to render instead gives them the one page they can actually see.
+        target = get_post_login_url(request.user)
+        if target != request.path:
+            return redirect(target)
 
     if request.method == 'POST':
         username = request.POST.get('username', '').strip()
@@ -394,13 +400,27 @@ def tasks_drill_down(request, filter_type):
         due_date__isnull=False,
     ).select_related('phase__project')
 
+    # 0.2 lockdown: EVERY role now has an explicit branch. Six roles previously reached
+    # the whole portfolio through a trailing `# SCM and others` comment rather than a
+    # decision — so a blank role, or any role added to ROLE_CHOICES later, silently
+    # inherited portfolio-wide task visibility by falling off the end of the chain. The
+    # final `else` below is now a deny, so a new role gets nothing until somebody chooses
+    # what it should see.
+    #
+    # This changes NO existing role's scope. The portfolio branch lists exactly the roles
+    # that already fell through, and it is the same policy as PORTFOLIO_VIEW_ROLES + BD +
+    # System Admin — Finance, SCM and BD stay portfolio-wide by the 25 Aug decision.
     if role in ('PM', 'Project Coordinator'):
         # Coordinators are scoped exactly like a PM, but to the projects they
         # coordinate. For a pure PM the coordinators clause matches nothing, so
         # this is identical to the old assigned_pm-only filter (additive-only).
+        #
+        # Routed through permissions.manageable_projects_q() rather than hand-writing
+        # `Q(assigned_pm=...) | Q(coordinators=...)` here for a second time — it is the
+        # queryset form of the same canonical rule user_can_manage_project() applies to a
+        # single project, and the two are pinned to each other by that helper's invariant.
         base_qs = base_qs.filter(
-            Q(phase__project__assigned_pm=profile) |
-            Q(phase__project__coordinators=profile)
+            manageable_projects_q(profile, 'phase__project__')
         ).distinct()
     elif role == 'Design':
         # Union: FK-owned projects (assigned_design) plus projects where this
@@ -412,7 +432,16 @@ def tasks_drill_down(request, filter_type):
         ).distinct()
     elif role == 'Site Engineer':
         base_qs = base_qs.filter(assigned_to=profile)
-    # SCM and others: all active non-deleted projects
+    elif role in ('CEO', 'Finance', 'SCM', 'Admin', 'System Admin', 'BD'):
+        # Portfolio-wide by remit — unchanged behaviour, now stated as a branch instead of
+        # inherited from a fall-through. Finance, SCM and BD are portfolio-wide by the
+        # 25 Aug decision (execution-model §12); narrowing them is deferred, not forgotten.
+        pass
+    else:
+        # A role with no branch — today only a blank role, tomorrow whatever gets added to
+        # ROLE_CHOICES next — sees nothing. Deny by default: a new role must be given
+        # visibility deliberately, never by omission.
+        base_qs = base_qs.none()
 
     active_statuses = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
 
@@ -2208,8 +2237,18 @@ def _get_ceo_dashboard_context(context=None):
 
 
 @login_required
+@role_required(['CEO', 'Admin', 'System Admin'])
 def dashboard_ceo(request):
-    """CEO portfolio overview. Access: CEO role only. Renders in 3 DB queries via _get_ceo_dashboard_context."""
+    """CEO portfolio overview. Renders in 3 DB queries via _get_ceo_dashboard_context.
+
+    Access: CEO, plus Admin and System Admin per execution-model §2 D-4 (the
+    administrative roles are unrestricted).
+
+    0.2 lockdown: this decorator is NEW. The docstring already claimed "Access: CEO role
+    only" while the view carried @login_required alone, so every authenticated user — every
+    site engineer, every designer — reached the full portfolio: contract values, payment
+    positions and per-project financials for the whole company. The gate now says what the
+    docstring always said."""
     # Display context (EPC Residential / Tenders). None => no filter => the exact
     # portfolio-wide behaviour this dashboard had before the context feature.
     selected_context = _read_context(request)
@@ -2417,7 +2456,20 @@ def project_create(request):
 
 @login_required
 def project_detail(request, project_id):
-    """Merged into project_overview — redirect all traffic there."""
+    """Merged into project_overview — redirect all traffic there.
+
+    NO SCOPE GATE HERE, AND THAT IS THE CORRECT ANSWER, not an omission. This endpoint is
+    on the 0.2 audit's A.5 list, but since the merge it loads no object, touches no
+    queryset and renders nothing — it is three lines that hand the caller to
+    project_overview, which now carries the scope check for both. There is nothing here to
+    disclose, so a gate could only re-ask the question the target already answers, at the
+    cost of a second Project fetch on every hit.
+
+    An unrelated caller therefore gets 302-then-404 rather than a bare 404. That reveals no
+    more than the 404 does: the redirect is unconditional and identical for a project that
+    does not exist at all.
+
+    If this ever grows a body again, it needs the gate the rest of A.5 got."""
     return redirect('project_overview', project_id=project_id)
 
 
@@ -3574,6 +3626,14 @@ def task_status_update(request, project_id, task_id):
         return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below, not merged
+    # into it. Two independent questions: "may you see this project" (here) and "is this
+    # your role's task, or are you its PM" (below). Before this, the role-matcher alone
+    # let any Site Engineer move any Site Engineer task in the portfolio.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     if task.assigned_to is None:
@@ -4125,6 +4185,13 @@ def task_set_due_date(request, project_id, task_id):
         return redirect('project_overview', project_id=project_id)
 
     project = get_object_or_404(Project, project_id=project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below. The
+    # assigned_role comparison is portfolio-blind on its own -- it asks which role owns
+    # the task, never which project the caller has any business on.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     profile = request.user.profile
     is_pm = _pm_owns_project(request, project)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -6651,6 +6718,23 @@ def set_milestone_amounts(request, project_id):
 
     project = get_object_or_404(Project, project_id=project_id)
 
+    # 0.2 lockdown — THE PM ARM ONLY, and the asymmetry is deliberate.
+    #
+    # PM: gated on management authority. Without this, the @role_required above let any PM
+    # in the company rewrite the agreed M1/M2/M3 amounts on any project in the portfolio —
+    # a write straight onto the commercial terms of somebody else's contract.
+    #
+    # BD: LEFT EXACTLY AS IT WAS, by decision, not oversight. Narrowing BD is deferred
+    # (execution-model §12, 25 Aug: "BD and Design Head unchanged. Neither has a per-user
+    # term to scope on"). BD has no assignment field on Project and no task relationship to
+    # key off, so there is nothing to scope BD on without inventing a relationship this
+    # module does not have. Setting these amounts is also BD's own act — it is called from
+    # the Phase 1 Task 1 Done gate and the BD dashboard pencil — so a scope term that
+    # refused every BD would break the primary path. When BD gets a per-user term, this is
+    # the branch to change.
+    if request.user.profile.role == 'PM' and not user_can_manage_project(request.user, project):
+        raise Http404
+
     try:
         data = json.loads(request.body)
     except (json.JSONDecodeError, ValueError):
@@ -6730,8 +6814,11 @@ def project_overview(request, project_id):
     profile = request.user.profile
     role    = profile.role
 
-    # Role isolation
-    if role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     is_assigned_pm    = user_can_manage_project(request.user, project)
@@ -7341,7 +7428,11 @@ def task_detail(request, project_id, task_id):
     profile = request.user.profile
 
     # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task        = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7398,7 +7489,11 @@ def upload_project_document(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     files = request.FILES.getlist('files')
@@ -7532,7 +7627,11 @@ def upload_task_attachment(request, project_id, task_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7684,6 +7783,15 @@ def checklist_item_complete(request, project_id, task_id, item_id):
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     project = get_object_or_404(Project, project_id=project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE _user_can_complete_checklist_item()
+    # below, not merged into it. That helper answers "may this person tick items on a task
+    # of this shape" -- a role question -- and is shared with the template context, so
+    # narrowing it would silently change what the page renders. Scope is asked here, once,
+    # and the completer rule is left exactly as it was.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     # The item must belong to the checklist currently linked to this task — never trust a
@@ -7784,6 +7892,52 @@ def _is_project_pm(profile, project):
     return profile.role in ('PM', 'Project Coordinator') and user_can_manage_project(profile.user, project)
 
 
+def _issue_assignable_profiles(project):
+    """The UserProfiles an issue on `project` may be assigned to: everyone with an actual
+    relationship to it — its PM, its coordinators, and anyone holding a task on it.
+
+    0.2 lockdown. This replaces `UserProfile.objects.filter(is_active=True)`, which put
+    EVERY active person in the company into the assignee dropdown on every issue — a
+    company directory rendered to anyone who could open an issue page, and a way to put a
+    colleague's name on work they have no connection to.
+
+    ONE DEFINITION, TWO CALL SITES, DELIBERATELY. issue_detail() renders it and
+    assign_issue() validates against it. A dropdown that is narrowed on the page but not
+    revalidated on POST is decoration, not a gate — the pk goes straight into the form
+    body and nothing stops a hand-rolled request. Defined here once so the two cannot
+    drift, exactly as _user_can_complete_checklist_item() is shared between its view and
+    its template context.
+
+    Active profiles only, matching the queryset this replaced. `assigned_pm` is included
+    even where that profile does not hold the PM role, because it is a real relationship to
+    the project (and reachable via the Zoho webhook, which matches on email with no role
+    filter) — the same reason user_can_manage_project() compares the FK rather than the
+    role. Distinct + ordered to match the previous dropdown's ordering.
+
+    `assigned_design` IS INCLUDED, and it is one term wider than the 0.2 prompt's
+    enumeration (PM, coordinators, task-holders). It is here because it is a relationship
+    to this project by exactly the same standard as `assigned_pm` — user_can_view_project()
+    admits the stamped designer on the strength of that FK alone — and activation leaves
+    design tasks assignable rather than assigned, so a designer frequently holds no Task
+    row on their own site. Without this term the two BOQ/drawing error categories that most
+    need an issue raised against them could not be assigned to the one person who has to
+    fix them. Omitting it would have been an over-narrowing, which is the failure mode a
+    lockdown actually has.
+    """
+    return (
+        UserProfile.objects.select_related('user')
+        .filter(is_active=True)
+        .filter(
+            Q(pm_projects=project)
+            | Q(coordinated_projects=project)
+            | Q(design_projects=project)
+            | Q(assigned_tasks__phase__project=project)
+        )
+        .distinct()
+        .order_by('user__first_name')
+    )
+
+
 @login_required
 def create_project_issue(request, project_id):
     """
@@ -7796,7 +7950,11 @@ def create_project_issue(request, project_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     title       = request.POST.get('title', '').strip()
@@ -7890,7 +8048,11 @@ def create_task_issue(request, project_id, task_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7988,7 +8150,11 @@ def create_delivery_issue(request, project_id, dc_id):
     profile = request.user.profile
 
     # PM isolation: PMs can only interact with their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
@@ -8090,10 +8256,17 @@ def issue_detail(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
-    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
+    # 0.2 lockdown: the assignee dropdown was every active UserProfile in the company.
+    # Narrowed to people with an actual relationship to this project, and revalidated on
+    # POST by assign_issue() against the SAME helper.
+    all_profiles = _issue_assignable_profiles(project)
     is_pm        = _is_project_pm(profile, project)
 
     # Prefetch replies to avoid N+1 — template iterates comment.replies.all()
@@ -8129,7 +8302,11 @@ def update_issue_status(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8169,7 +8346,11 @@ def resolve_issue(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8305,7 +8486,11 @@ def assign_issue(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8313,9 +8498,13 @@ def assign_issue(request, issue_id):
 
     assignee_id = request.POST.get('assigned_to', '').strip()
     if assignee_id:
+        # 0.2 lockdown: resolve the pk WITHIN the set of people related to this project,
+        # not across every UserProfile in the company. issue_detail() renders the same
+        # helper, so this is the POST-side half of that narrowing — without it the
+        # dropdown is cosmetic and any pk in the form body is still accepted.
         try:
-            new_assignee = UserProfile.objects.get(pk=assignee_id)
-        except UserProfile.DoesNotExist:
+            new_assignee = _issue_assignable_profiles(project).get(pk=assignee_id)
+        except (UserProfile.DoesNotExist, ValueError):
             messages.error(request, 'Invalid user selected.')
             return redirect('issue_detail', issue_id=issue_id)
         Issue.objects.filter(pk=issue.pk).update(assigned_to=new_assignee)
@@ -8347,7 +8536,11 @@ def create_task_comment(request, project_id, task_id):
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -8408,7 +8601,11 @@ def create_issue_comment(request, issue_id):
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -8494,7 +8691,11 @@ def project_timeline(request, project_id):
     profile = request.user.profile
 
     # PM isolation: PM can only view their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # All activity logs for this project, newest first, with actor data
@@ -8827,6 +9028,24 @@ def confirm_grn(request, project_id, dc_id):
     project = get_object_or_404(Project, project_id=project_id)
     profile = request.user.profile
 
+    # 0.2 lockdown, AUDIT FINDING 1 -- the reason a site engineer could not be given a
+    # login until this shipped. The @role_required above asks only "are you a Site
+    # Engineer", with no project term of any kind, so ANY site engineer in the company
+    # could confirm a GRN on ANY challan in the portfolio -- signing off receipt of
+    # materials at a site they have never been to.
+    #
+    # The role gate is KEPT and this is added beside it: two independent questions, two
+    # independent answers. This one is scope.
+    #
+    # user_can_view_project() IS the task-holding test here, not merely the minimum. This
+    # endpoint is Site-Engineer-only, and that helper's Site Engineer branch is exactly
+    # `project.phases.filter(tasks__assigned_to=profile).exists()` -- the same relationship
+    # dashboard_site_engineer scopes on. Routing through the canonical helper gives the
+    # stricter rule without a second copy of it here, and the legitimate case pinned by
+    # DeliveryGRNWorkflowTests (the SE holding tasks on this project) is unaffected.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     # Cross-project guard
     challan = get_object_or_404(DeliveryChallan, pk=dc_id)
     if challan.project.project_id != project_id:
@@ -9104,6 +9323,14 @@ def payment_request_detail(request, project_id, request_id):
     project = get_object_or_404(Project, project_id=project_id)
     pr      = get_object_or_404(PaymentRequest, pk=request_id, project=project)
     profile = request.user.profile
+
+    # 0.2 lockdown: project scope, added BESIDE the role allowlist below, not merged into
+    # it. The allowlist has no project term, so any PM could read any project's vendor
+    # invoice, amount and document URL. Finance / SCM / Admin are portfolio-wide under
+    # current policy and so are unaffected by this line; it is the PM arm it narrows.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     if profile.role not in ('SCM', 'Finance', 'PM', 'Admin'):
         messages.error(request, "You don't have access to this payment request.")
         return redirect('my_documents')
