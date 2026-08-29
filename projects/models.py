@@ -580,6 +580,36 @@ class UserProfile(models.Model):
         on_delete=models.SET_NULL,
         related_name='deputy_for',
     )
+
+    # EXECUTION CAPABILITY FLAGS (R-15, §4 "New capabilities in this module")
+    # — BOOLEANS, NOT ROLE_CHOICES VALUES.
+    #
+    # READ THIS BEFORE "FIXING" IT BY ADDING A ROLE STRING. That has been tried. Part 1
+    # added 'Design Head' to ROLE_CHOICES (migration 0048) and Part 6.5b took it back out
+    # (migration 0053); the comment on ROLE_CHOICES above enumerates what it cost. The
+    # load-bearing part is `Task.assigned_role`, which is matched against `role` as a
+    # plain string — a holder of a NEW role string matches no template task and therefore
+    # cannot change a task's status, move its due date, or tick a checklist item. Every
+    # @role_required decorator, every `role='...'` queryset and _SA_EDITABLE_ROLE_CHOICES
+    # would need widening alongside it, and missing one of them fails silently rather than
+    # loudly.
+    #
+    # QA/QC, HSE clearance and warehouse keeping are things a person may do IN ADDITION
+    # to their role, not instead of it. The site engineer who also holds the HSE clearance
+    # is still a site engineer and must keep every task his role gives him. A boolean
+    # beside the role says exactly that and costs none of the above.
+    #
+    # NOTHING READS THESE YET, AND THAT IS THE DECISION, NOT AN OVERSIGHT. Consumers
+    # arrive with 2.2 (is_hse), 2.3 (is_qaqc) and 4.1 (is_warehouse_keeper); until then
+    # they are set from the shell or Django admin and there is no UI for them. No
+    # permission helper ships here either — an unconsumed predicate is written against an
+    # imagined call site (R-12), so `user_is_keeper_of()` and its kind belong with their
+    # first caller. On its own a capability flag grants NOTHING: it changes no role, no
+    # queryset and no existing permission check.
+    is_qaqc                 = models.BooleanField(default=False)  # May record a QA/QC verdict on a site's work, and raise a punch point against it
+    is_hse                  = models.BooleanField(default=False)  # May grant a site its HSE mobilisation clearance, without which execution may not start
+    is_warehouse_keeper     = models.BooleanField(default=False)  # Runs a StockLocation — receives, holds and issues the material in it; see StockLocation.keeper
+
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)
     created_at              = models.DateTimeField(auto_now_add=True)
@@ -3521,6 +3551,27 @@ class SiteGroup(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            # A LOCK IS A PROCUREMENT ACT, AND NOW THE DATABASE SAYS SO. Locking freezes
+            # the member sites' BOQ quantities because a purchase order is about to be
+            # raised against their aggregate; an execution batch has no order behind it,
+            # so a locked one would freeze a BOQ for no reason anyone could name.
+            #
+            # THIS RETIRES A PIECE OF PROSE (EXECUTION_MODULE_DEFERRED §B7). `boq_detail`
+            # reads a site's memberships WITHOUT asking what type they are, and is correct
+            # today only because no execution group can be `locked` — a rule that until now
+            # was upheld by six filter terms spread across the views and by nothing else.
+            # A CHECK makes it a guarantee instead of a coincidence, so B7's remaining fix
+            # is cosmetic rather than load-bearing.
+            #
+            # Expressible as a CHECK because both columns are local to this row, which is
+            # the same reason F-1 forced `group_type` onto the membership.
+            models.CheckConstraint(
+                condition=~models.Q(group_type=GROUP_TYPE_EXECUTION,
+                                    status=SITE_GROUP_LOCKED),
+                name='execution_groups_are_never_locked',
+            ),
+        ]
 
     def save(self, *args, **kwargs):
         # A group does not change type. Without this, every denormalised copy on the
@@ -3672,3 +3723,72 @@ class DesignAnalyticsPreference(models.Model):
 
     def __str__(self):
         return f"Design analytics selection — {self.profile.user.username}"
+
+
+# ---------------------------------------------------------------------------
+# Execution 1.2a — physical stock locations (B-14)
+#
+# HORIZON RUNS THREE WAREHOUSES TODAY. THE COUNT IS NOT STRUCTURAL, AND THAT IS THE
+# WHOLE POINT OF THIS TABLE. Three is what the business happens to have this year, not
+# a fact about the system: warehouses are ROWS, added through a screen when 4.1 builds
+# one. They are not a choices list, not a settings constant, and not seeded by a
+# migration — every one of those spellings would make a fourth warehouse a code change
+# and a deploy instead of a form submission.
+#
+# NOTHING IS SEEDED HERE FOR THE SAME REASON. The three that exist in the world are the
+# product owner's data to enter, and hardcoding them into a migration is precisely what
+# "the count must not be structural" forbids.
+#
+# AUTHORITY FOLLOWS THE WAREHOUSE, NOT THE TENDER (B-14's answer). A keeper acts on
+# whatever is inside their building — receiving it, holding it, issuing it — regardless
+# of which tender or programme paid for it. This is not a convenience; it matches how
+# SCM already works, where material lands at one shared drop point and cost is attributed
+# AT ISSUE rather than at receipt. A keeper who could only touch their own tender's
+# material would be unable to sign for the lorry that brought all of it.
+# ---------------------------------------------------------------------------
+
+
+class StockLocation(models.Model):
+    """One physical place material is received into, held at, and issued from.
+
+    A warehouse, a store, or a site container — anywhere stock physically rests. Rows,
+    not constants: see the section note above for why the number of them must never be
+    written into the code.
+
+    NO `is_deleted`, DELIBERATELY. `is_active` is enough for a warehouse — one that
+    closes stops receiving, but its history has to stay readable — and this codebase has
+    NO custom managers, so every soft-deleted model is one more thing that every future
+    queryset has to remember to filter out by hand. `Project.is_deleted` already costs
+    exactly that (see the soft-delete note on `project_delete`). One flag, one meaning.
+    """
+
+    name    = models.CharField(max_length=120)
+    #: Short human identifier used on documents and in pickers — 'HYD-1', 'MUM-CENTRAL'.
+    code    = models.CharField(max_length=20, unique=True)
+    address = models.TextField(blank=True, default='')
+
+    # THE KEEPER'S AUTHORITY FOLLOWS THIS WAREHOUSE, NOT A TENDER. Whoever is named here
+    # acts on everything inside this location — whatever programme, tender or project it
+    # was bought for — and on nothing inside any other location. That is B-14's answer,
+    # and it is the thing a later session will otherwise guess at.
+    #
+    # ONE KEEPER PER WAREHOUSE is the rule, which is why this is a single FK and not a
+    # M2M. It is deliberately NOT unique: nothing says one person cannot cover two
+    # buildings, and on a three-warehouse operation with someone on leave, they will.
+    #
+    # SET_NULL so retiring a person's profile leaves the warehouse standing with nobody
+    # in charge of it — a state an admin can see and fix. CASCADE here would delete a
+    # building because its keeper left.
+    keeper  = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='keeper_of',
+    )
+
+    is_active  = models.BooleanField(default=True)  # A closed warehouse stops receiving; its history stays readable
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} — {self.name}"

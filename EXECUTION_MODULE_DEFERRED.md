@@ -360,6 +360,42 @@ predicate return the group, so there is one spelling rather than two.
 
 ---
 
+#### UPDATED 30 Aug 2026 BY PROMPT 1.2a — STILL OPEN, BUT NO LONGER RESTING ON A COINCIDENCE
+
+**B7 IS NOT CLOSED. The unnarrowed read is still there, unchanged**, and 1.2a was forbidden
+`views.py` exactly as 1.1b was. What changed is the ground underneath it.
+
+Everything above says this query is correct **by coincidence** — that no locked execution group
+happens to exist, upheld by nothing but six filter terms spread across the views, "with the same
+expiry date" as the pre-1.1b predicate. **That is now a database guarantee.** 1.2a added
+`execution_groups_are_never_locked` to `SiteGroup.Meta.constraints`:
+
+```sql
+CHECK (NOT ("group_type" = 'execution' AND "status" = 'locked'))
+```
+
+**So the failure scenario two paragraphs up cannot occur.** It required "a site in both a locked
+procurement group and a locked execution group"; the second of those is unwritable — by INSERT,
+by UPDATE, and by `QuerySet.update()`, which a CHECK catches where the model's `save()` guards
+by their own admission do not. There is no longer a state in which `.first()` has two rows to
+choose between, and no expiry date on that.
+
+**What is left is cosmetic, and it is worth saying which two things that means.** *(1)* The
+duplicate query — two spellings of one question, which drift independently; the fix is still to
+delete it and have `project_boq_is_group_locked()` return the group. *(2)* The missing
+`group_type='procurement'` term, which is now **documentation of intent** rather than a
+correctness fix: it makes the reader's guarantee local to the line instead of requiring them to
+know a constraint exists three thousand lines away in `models.py`.
+
+**Why it stays open rather than being downgraded and forgotten.** The constraint is what makes
+this inert, and a future session that wants an execution lifecycle with a `locked` state will
+have to drop that constraint to get it. If B7 has been closed by then, this read silently
+becomes a live bug again the moment the constraint goes. Keep it open; whoever removes
+`execution_groups_are_never_locked` must fix this line in the same edit. **The next session
+allowed to touch `views.py` should still do it.**
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

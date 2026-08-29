@@ -39,7 +39,8 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | — | **A-1.1 audit** — `SITE_GROUP_AUDIT.md`. Read-only; wrote no code. Found F-1, which is why 1.1 split. | ✅ |
 | 1.1a | **`group_type` — the schema half.** Constants, the column on both models, the two `save()` guards, migration `0071_site_group_type`, `tests_site_group_type.py`. **Zero behaviour change.** | ✅ |
 | 1.1b | **`group_type` — the consumer half.** `active_group_membership()` takes a **required** type argument; all three callers, `_group_or_404`, `_group_rows`, `post_qc_pool`, `site_group_create` and `project_boq_is_group_locked` narrowed to `procurement`. 12 tests, each building an execution membership by hand. **No migration.** Touched `design_views.py`, `permissions.py` — **not `views.py`** (see below). **D-1 is complete.** | ✅ |
-| 1.2 | Assignment — gated on Q-E3 (`ProgramAssignment` designed, not built) | ☐ |
+| 1.2a | **Capability flags, warehouses and the execution lock.** `is_qaqc` / `is_hse` / `is_warehouse_keeper` on `UserProfile` (R-15); `StockLocation` (B-14 closed); `execution_groups_are_never_locked` on `SiteGroup`; migration `0072`. 23 tests. **Entirely additive — no behaviour change, no view touched.** Rewrote one 1.1b test whose fixture the constraint made unwritable. | ✅ |
+| 1.2b | **`ProjectAssignment` — BLOCKED on a product-owner decision.** Not started. See below | ☐ |
 | 1.3 | The OPEX/CAPEX task template — gated on B-09 | ☐ |
 | 1.4 | Task dependencies — gated on B-08 | ☐ |
 
@@ -89,3 +90,63 @@ not nine — D-5 through D-9 do not exist anywhere in this repository. The open 
 §8, running Q-E3 and B-05 … B-18. The pre-condition was **waived by the product owner on 29
 Aug 2026** on that finding. A later prompt should point at `docs/execution-model.md` §2 and §8
 rather than at this file.
+
+### Why 1.2 became 1.2a and 1.2b
+
+Split on 30 Aug 2026, **before either half was written**, and for a different reason than
+1.1's. 1.1 split on a technical finding. **1.2 split because one of its four pieces needs
+an answer from the product owner that no session can supply.**
+
+1.2 as scoped carried four things: the three capability flags, `StockLocation`, the
+execution-lock constraint, and **`ProjectAssignment`**. The first three are additive,
+independent of each other, and answer questions that were already settled — R-15 (24 Aug),
+B-14, and D-1's procurement-only lock. They shipped as 1.2a.
+
+**`ProjectAssignment` is held because it would be a SECOND representation of project
+assignment.** `Project` already carries `assigned_pm`, `assigned_design` and a
+`coordinators` M2M, and every scoping helper in `permissions.py` reads them —
+`user_can_manage_project()` and `manageable_projects_q()` are built on exactly those three
+terms. A `ProjectAssignment` table either **supersedes** them, in which case this is a
+migration plus a rewrite of the access layer and every dashboard queryset that scopes on a
+PM, or it **sits beside** them, in which case two tables answer "who is on this project"
+and the product acquires the drift D-3 exists to forbid.
+
+**That is a policy question, not an implementation detail, and either answer is defensible
+— which is exactly why a session must not pick one.** Building it the wrong way is not a
+bug that surfaces in review; it is a second source of truth that looks correct until the
+two disagree in production.
+
+**Nothing in 1.2a anticipates it.** No assignment model, no join table, no nullable FK
+left "for later", and no permission helper written against a call site that does not exist
+(R-12). The three capability flags are deliberately **not** an assignment mechanism: they
+say what a person may be, never which projects they are on. If `ProjectAssignment` later
+supersedes the three existing FKs, 1.2a's work is unaffected — it touches none of them.
+
+**Related and still open:** Q-E3 (do Finance and SCM get Program-level assignment?) and
+`ProgramAssignment`, designed in `ACCESS_ISOLATION_AUDIT.md` Task E and deliberately not
+built. These are the same question one level up, and whoever answers 1.2b should answer
+them together rather than one at a time.
+
+### 1.2a — three notes
+
+**One existing test was rewritten, and it was the right kind of breakage.**
+`tests_site_group_type.ConsumerNarrowingTests.test_an_execution_group_never_locks_the_boq`
+(formerly `..._whatever_its_status`) forced an execution group to `locked` to prove
+`project_boq_is_group_locked()` ignored it. `execution_groups_are_never_locked` makes that
+row unwritable, so the test died in its own fixture rather than in its assertion. The fear
+it was written against is **retired, not unproven**: what used to be a predicate coping
+with a bad row is now a row the database refuses. The constraint itself is pinned in the
+new `ExecutionGroupsAreNeverLockedTests`.
+
+**"D-5" does not exist.** The 1.2a prompt cited the flags-not-roles decision as D-5. This
+file already records that D-5…D-9 appear nowhere in the repository, and they still do not.
+The decision is real and is **R-15**, restated in `docs/execution-model.md` §4, which had
+already specified all three field names exactly as built. Nothing was written under a D-5
+heading.
+
+**The migration was hand-adjusted in one respect, and it is stated in the file.**
+`makemigrations` emitted four operations, splitting `StockLocation.keeper` into an
+`AddField` after the `CreateModel` — its habit with a created model's outbound FKs. It was
+folded back in: `projects.userprofile` predates `0072` by seventy revisions, so no circular
+dependency forced the split. `makemigrations --check` is clean afterwards and the migration
+reverses and re-applies.

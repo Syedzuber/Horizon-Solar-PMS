@@ -24,10 +24,18 @@ narrowed or unnarrowed. Each test below therefore MANUFACTURES an execution memb
 directly and asserts the consumer ignores it. A 1.1b test that does not create an
 execution row is testing nothing.
 
+**PROMPT 1.2a ADDED A THIRD SECTION, `ExecutionGroupsAreNeverLockedTests`.** D-1 said the
+lock is procurement-only and 1.1b enforced it in six filter terms; 1.2a moves it into the
+database as `execution_groups_are_never_locked`. It also REWROTE one 1.1b test —
+`test_an_execution_group_never_locks_the_boq` used to force an execution group to
+'locked' first, and that row is now unwritable. Its own docstring explains the swap.
+
 ON ASSERTING AGAINST IntegrityError RATHER THAN THE CONSTRAINT NAME: the suite runs on
 SQLite, whose message is 'UNIQUE constraint failed: <table>.<col>' and never names the
 constraint. `tests_design_part46.test_02_...` asserts on the name and is the suite's one
-standing failure because of exactly that. Do not copy it here.
+standing failure because of exactly that. Do not copy it here. (SQLite is not consistent
+about this — it DOES name a failed CHECK, where it does not name a failed UNIQUE — but
+Postgres words both differently again, so the rule stands for both kinds.)
 """
 from decimal import Decimal
 
@@ -39,6 +47,7 @@ from django.utils import timezone
 
 from .models import (Program, Project, SiteGroup, SiteGroupMembership,
                      SiteGroupTypeImmutable, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
+                     SITE_GROUP_STATUS_CHOICES,
                      GROUP_TYPE_PROCUREMENT, GROUP_TYPE_EXECUTION)
 # Prompt 1.1b — the consumers this session narrowed.
 from .design_views import active_group_membership, _group_rows, _group_or_404
@@ -306,18 +315,24 @@ class ConsumerNarrowingTests(GroupTypeTestCase):
 
         self.assertTrue(project_boq_is_group_locked(self.project))
 
-    def test_an_execution_group_never_locks_the_boq_whatever_its_status(self):
+    def test_an_execution_group_never_locks_the_boq(self):
         """D-1: the lock is procurement-only. An execution batch is re-plannable and
         must not freeze quantities no purchase order was raised against.
 
-        The status is forced to 'locked' deliberately — that is the shape the audit
-        warned about, where an execution lifecycle reuses the word and the unnarrowed
-        predicate silently starts freezing BOQs with no unlock.
+        REWRITTEN BY 1.2a, AND THE REWRITE IS THE INTERESTING PART. This test used to be
+        called `..._whatever_its_status` and forced the execution group to 'locked' first
+        — the shape the audit warned about, where an execution lifecycle reuses the word
+        and the unnarrowed predicate silently starts freezing BOQs with no unlock.
+
+        THAT ROW CAN NO LONGER EXIST. `execution_groups_are_never_locked` refuses it at
+        the database, so the old test now dies with an IntegrityError in setUp rather
+        than asserting anything. The fear it was written against is retired, not
+        unproven: what used to be a predicate that coped with a bad row is now a row the
+        database will not accept. The refusal itself is pinned in
+        `ExecutionGroupsAreNeverLockedTests` below; what is left for this test is the
+        live half — a draft execution membership must not lock a BOQ either.
         """
-        execution_locked = self._group('PM batch', GROUP_TYPE_EXECUTION)
-        SiteGroup.objects.filter(pk=execution_locked.pk).update(
-            status=SITE_GROUP_LOCKED)
-        membership = self._join(execution_locked)
+        membership = self._join(self.execution_group)
         self.assertEqual(membership.group_type, GROUP_TYPE_EXECUTION)
 
         self.assertFalse(project_boq_is_group_locked(self.project),
@@ -361,3 +376,89 @@ class ConsumerNarrowingTests(GroupTypeTestCase):
         pk must not reach an execution group through any of them."""
         with self.assertRaises(Http404):
             _group_or_404(self.execution_group.pk)
+
+
+# ---------------------------------------------------------------------------
+# Prompt 1.2a — `execution_groups_are_never_locked`
+#
+# A BOQ FREEZE IS A PROCUREMENT ACT, AND THE DATABASE NOW SAYS SO. Until 1.2a that rule
+# was prose held up by six filter terms in the views; `boq_detail` reads a site's
+# memberships without asking their type and was correct only because no locked execution
+# group happened to exist. This constraint turns that coincidence into a guarantee.
+#
+# ASSERTED ON THE EXCEPTION TYPE, NEVER THE CONSTRAINT NAME — see the module docstring.
+# SQLite as it happens DOES name it ('CHECK constraint failed:
+# execution_groups_are_never_locked') where it does not name a UNIQUE one, but Postgres
+# words the same failure differently and the suite must pass on both. The name is not
+# the assertion.
+# ---------------------------------------------------------------------------
+
+
+class ExecutionGroupsAreNeverLockedTests(GroupTypeTestCase):
+    """The lock belongs to procurement. The other three statuses belong to everyone."""
+
+    def test_a_procurement_group_may_be_locked(self):
+        """THE CONSTRAINT MUST NOT COST SCM ITS ONLY WRITE PATH. `site_group_lock` is a
+        live production view; if this fails, the constraint is too wide."""
+        group = self._group('SCM batch to lock', GROUP_TYPE_PROCUREMENT)
+
+        group.status = SITE_GROUP_LOCKED
+        group.save(update_fields=['status'])
+
+        group.refresh_from_db()
+        self.assertEqual(group.status, SITE_GROUP_LOCKED)
+
+    def test_locking_an_execution_group_is_refused_by_the_database(self):
+        group = self._group('PM batch that must not lock', GROUP_TYPE_EXECUTION)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                group.status = SITE_GROUP_LOCKED
+                group.save(update_fields=['status'])
+
+    def test_creating_an_execution_group_already_locked_is_refused_too(self):
+        """The constraint is on the ROW, not on the transition. There is no back door
+        through INSERT for something UPDATE would have refused."""
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SiteGroup.objects.create(
+                    program=self.program, name='born locked', created_by=self.scm,
+                    group_type=GROUP_TYPE_EXECUTION, status=SITE_GROUP_LOCKED)
+
+    def test_queryset_update_cannot_slip_past_it_either(self):
+        """The save() guards on this model are honest about not covering .update()
+        (§13, R-17). A CHECK has no such gap, and this is the test that proves the
+        difference is real rather than asserted in a comment."""
+        group = self._group('PM batch, updated sideways', GROUP_TYPE_EXECUTION)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SiteGroup.objects.filter(pk=group.pk).update(status=SITE_GROUP_LOCKED)
+
+    def test_an_execution_group_may_hold_every_other_status(self):
+        """`locked` is the ONLY status denied to an execution group. Iterating
+        SITE_GROUP_STATUS_CHOICES rather than naming 'draft' means that if a later part
+        adds a third status, this test asks about it automatically instead of silently
+        continuing to cover two."""
+        others = [s for s, _ in SITE_GROUP_STATUS_CHOICES if s != SITE_GROUP_LOCKED]
+        self.assertIn(SITE_GROUP_DRAFT, others, 'fixture sanity')
+
+        for status in others:
+            with self.subTest(status=status):
+                group = self._group(f'PM batch {status}', GROUP_TYPE_EXECUTION)
+                group.status = status
+                group.save(update_fields=['status'])
+
+                group.refresh_from_db()
+                self.assertEqual(group.status, status)
+
+    def test_a_procurement_group_may_hold_every_status(self):
+        """The other side of the same sweep: nothing was taken away from procurement."""
+        for status, _ in SITE_GROUP_STATUS_CHOICES:
+            with self.subTest(status=status):
+                group = self._group(f'SCM batch {status}', GROUP_TYPE_PROCUREMENT)
+                group.status = status
+                group.save(update_fields=['status'])
+
+                group.refresh_from_db()
+                self.assertEqual(group.status, status)
