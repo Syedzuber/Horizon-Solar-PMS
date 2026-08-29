@@ -33,7 +33,131 @@ was known and when stays readable.
 
 ## A. Phase 0 — foundations (prompts 0.1 – 0.6)
 
-_No entries yet._
+### A1 — B-8: the inline BOQ acknowledge writes a `BOQRevision` snapshot, the standalone endpoint does not
+
+`projects/views.py:5068-5075` (inline `acknowledge_scm` branch of `boq_detail`) versus
+`projects/views.py:6312` (`boq_acknowledge`).
+
+0.2b moved the status write, the `ActivityLog` row and the notification into
+`_apply_boq_acknowledgement()` (`views.py:4763`), so those three no longer depend on which
+control the user pressed — that was defect **B-5**, and it is closed. 0.3 later put the
+`StatusTransition` write inside the same helper for the same reason.
+
+**One asymmetry was left standing.** Only the inline branch creates the revision row:
+
+```python
+snapshot = _boq_snapshot(boq)
+BOQRevision.objects.create(
+    boq=boq, revised_by=profile,
+    version=boq.version,
+    reason=f'SCM Acknowledged v{boq.version}',
+    snapshot=snapshot,
+)
+_apply_boq_acknowledgement(boq, profile, request)
+```
+
+The standalone endpoint calls `_apply_boq_acknowledgement()` alone. The helper's own
+docstring records the boundary: *"The revision snapshot also stays with the inline caller —
+only that path has ever written one."*
+
+**Why it was not fixed.** 0.2b's prompt named three duplications to extract — the snapshot
+helper, the acknowledgement, and the M2 map — and this was not one of them (**R-12**). It is
+also not a straight extraction: the two paths differ in *which* is right. Adding the snapshot
+to the standalone endpoint changes what that endpoint records; removing it from the inline
+one destroys a record that has been written for as long as the branch has existed. That is a
+decision about what a BOQ acknowledgement *is*, not a deduplication.
+
+**Risk if left.** The acknowledgement audit trail depends on which button was pressed —
+exactly the class of defect 0.2b existed to remove, surviving in the one place 0.2b was told
+not to look. It is narrower than B-5 was (nothing is notified or not notified; a history row
+is written or not), but it is the same shape. Whoever owns BOQ revision history next should
+settle which behaviour is correct and make both paths do it.
+
+### A2 — `_DESIGN_EDITABLE` is spelled out twice in `boq_detail`, and the duplicate is unreachable from the constant
+
+`projects/views.py:4952` defines `_DESIGN_EDITABLE = ('Draft', 'Revision Requested',
+'Acknowledged')` **inside** the `if request.method == 'POST'` block. The GET path at
+`views.py:5137` computes `design_form_open` from a repeated literal instead, because the
+constant is not in scope there.
+
+Both sites carry a comment pointing at the other, and they are in step today. **This has a
+written deferral already** — `DESIGN_MODULE_DEFERRED.md` **J3**, which states the fix (hoist
+the constant to module scope: one line, no behaviour change) and says it should be done by
+whoever next has a reason to touch that view.
+
+**Recorded here rather than re-deferred there** because phase 0 read it as a *fourth*
+duplicated constant, alongside the three 0.2b consolidated, and because J3's own note matters
+to this module: A2/C2 in that file — `'Acknowledged'` being editable at all, so Design can
+still edit a BOQ SCM has acknowledged — is now duplicated too, and fixing it means editing
+both places.
+
+**Why it was not fixed.** 0.2b's scope was three named extractions (R-12). `boq_detail` was
+also under an explicit instruction from Part 6 to leave that constant alone.
+
+**Risk if left.** If the two drift, the symptom is a page that renders inputs the POST
+handler then refuses, or the reverse — a form that silently does nothing.
+
+### A3 — `_TASK_TO_PROFILE_ROLE` is still declared locally, twice
+
+`projects/views.py:4252` and `projects/views.py:7372`, both
+`{'BD / Sales': 'BD'}`.
+
+0.2b consolidated the **forward** map — seven byte-identical local copies of
+`_PROFILE_TO_TASK_ROLE` became one module-level constant at `views.py:413` — and did not
+touch the inverse. `DESIGN_MODULE_DEFERRED.md` **K5** recorded six local dicts (four forward,
+two inverse) expressing one mapping; **K5 is now half closed.**
+
+**Why it was not fixed.** The 0.2b commit message states the forward consolidation was itself
+pulled forward from prompt 1.2; extending it to the inverse was not in scope (R-12).
+
+**Risk if left.** K5's original point stands for the remaining two: this mapping is what
+decides whether a user may change a task's status, set a due date or tick a checklist item,
+and a future role that needs to act on tasks must still be added in three places rather than
+one. Lower than K5's original six, and no longer symmetrical — the forward direction is now
+safe and the reverse is not, which is a worse thing to reason about than either uniform state.
+**Prompt 1.2 should finish it and close K5.**
+
+### A4 — `user_can_act_on_project()` was proposed by the audit and never built
+
+`ACCESS_ISOLATION_AUDIT.md`'s "Proposed scope for prompt 0.2", Step 1, says to replace the
+PM-only guard with *"a single call to the existing `permissions.user_can_view_project()` (for
+reads) or a new `user_can_act_on_project()` (for writes)"*.
+
+**The second helper does not exist.** `projects/permissions.py` has no such function, and 0.2
+routed 19 endpoints — writes included — through `user_can_view_project()`.
+
+**This is not a defect and is not being reported as one.** The audit's own Step 1 observes
+that under today's policy the two questions have the same answer, so one helper is
+behaviourally sufficient, and 38 isolation tests pin the behaviour that shipped.
+
+**Recorded because the gap between a report and the code is worth one line.** A future session
+reading the audit will look for `user_can_act_on_project()` and not find it, and should know
+that is a decision rather than an omission. It is also the natural seam: the day view
+authority and write authority need to differ — the most likely trigger being a QA/QC or
+warehouse role that may *see* a project it may not *write* to — this is where the split goes.
+
+### A5 — `Project` resolution is single-path in new code and four-exceptions in old
+
+**R-16** says a Project is resolved through `_active_project()`. Four call sites in
+`projects/views.py` — `project_delete` (`:2543`), `task_assign_design_head` (`:4302`),
+`admin_assign_pm` (`:10331`), `subadmin_projects` (`:11117`) — plus `_opex_site()` in
+`projects/design_views.py:221` still call `get_object_or_404(Project, …)` directly.
+
+**Every one already passes `is_deleted=False`.** They pre-date 0.2c and were correct before
+it, which is exactly why 0.2c left them: the prompt's job was closing the ~30 sites that had
+**no** filter, not churning the handful that did. Two of them (`subadmin_projects`,
+`_opex_site`) also key on something other than `project_id`, which `_active_project()` does
+not accept in its current signature.
+
+**Why it was not fixed.** Out of 0.2c's scope, and the safety property already holds. Changing
+`_opex_site()` is additionally a design-module edit, which has been correctly scoped out all
+programme.
+
+**Risk if left.** Low for correctness, real for legibility: R-16 reads as absolute and the
+code has five exceptions, so the next reader must decide whether each is a bug. That decision
+is the cost the rule exists to remove. R-16 in `docs/execution-model.md` §3 names all five
+explicitly so nobody has to re-derive the list — **keep that list current if any of them
+moves.**
 
 ---
 
@@ -69,7 +193,17 @@ _No entries yet._
 
 ## G. Cross-cutting — found outside any one phase
 
-### G1 — `dashboard_ceo` has no role gate at all
+### ~~G1 — `dashboard_ceo` has no role gate at all~~ — **CLOSED by prompt 0.2**
+
+**Closed 28 Aug 2026.** `dashboard_ceo` now carries
+`@role_required(['CEO', 'Admin', 'System Admin'])` at `projects/views.py:2270`, and its
+docstring names the reason for the three roles rather than one — Admin and System Admin are
+unrestricted per `docs/execution-model.md` §2 D-4. The bounce behaviour this entry flagged as
+the reason it needed its own session was handled in the same commit: `role_required()` now
+returns **403** instead of redirecting to `get_user_dashboard()`, so the loop concern through
+`ROLE_DASHBOARD` cannot arise. `tests_access_isolation.DashboardGateTests` pins it.
+
+*Original entry, kept for the record:*
 
 `projects/views.py:2232-2241`. The view carries only `@login_required`. Its own docstring
 states *"Access: CEO role only"*, but there is no `@role_required(['CEO'])` decorator and
