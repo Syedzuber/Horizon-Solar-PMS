@@ -1055,9 +1055,12 @@ class TaskProgressionTests(ResidentialBaselineBase):
 
     def test_the_assigned_user_completes_a_checklist_item_with_a_photo(self):
         task = self._task(self.project_a, 'Pre Commissioning Check List')
-        checklist = Checklist.objects.create(name='Pre-commissioning', is_active=True)
+        # Draft, then items, then activate() — R-7 refuses an item added to an active
+        # version, so the fixture has to build one the way the product does.
+        checklist = Checklist.objects.create(name='Pre-commissioning')
         item = ChecklistItem.objects.create(checklist=checklist,
                                             label='Earth resistance < 5 ohm', order=1)
+        checklist.activate()
         ChecklistTaskLink.objects.create(checklist=checklist,
                                          task_name=task.task_name,
                                          project_type='Residential')
@@ -1083,9 +1086,12 @@ class TaskProgressionTests(ResidentialBaselineBase):
 
     def test_a_checklist_item_cannot_be_checked_without_a_photo(self):
         task = self._task(self.project_a, 'Pre Commissioning Check List')
-        checklist = Checklist.objects.create(name='Pre-commissioning', is_active=True)
+        # Draft, then items, then activate() — R-7 refuses an item added to an active
+        # version, so the fixture has to build one the way the product does.
+        checklist = Checklist.objects.create(name='Pre-commissioning')
         item = ChecklistItem.objects.create(checklist=checklist, label='Torque check',
                                             order=1)
+        checklist.activate()
         ChecklistTaskLink.objects.create(checklist=checklist, task_name=task.task_name,
                                          project_type='Residential')
 

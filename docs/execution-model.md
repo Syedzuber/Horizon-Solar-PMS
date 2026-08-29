@@ -637,23 +637,17 @@ for the same reason `TaskTemplate.status` is not: a new `subject_type` is a
 - **No checklist gate on task completion.** That is **B-6** and it belongs to 2.3.
 - **No checklist-authoring UI.**
 
-### The regression net paid for this
+### The regression net paid for this — settled by prompt 1.0
 
-Four tests in the two files 0.5 may not modify build their fixture as *create active
-checklist, then add an item* — which is precisely what R-7 now forbids. They fail with
-`TemplateVersionLocked` at the fixture line, not at an assertion:
-
-| File | Test |
-|---|---|
-| `tests_residential_baseline.py` | `test_the_assigned_user_completes_a_checklist_item_with_a_photo` |
-| `tests_residential_baseline.py` | `test_a_checklist_item_cannot_be_checked_without_a_photo` |
-| `tests_soft_delete.py` | `test_checklist_item_complete_refuses_a_deleted_project` |
-| `tests_soft_delete.py` | `test_a_live_project_still_takes_a_checklist_completion` |
-
-All four are fixed by reordering the fixture to *create draft, add items, `activate()`* —
-no assertion changes. The behaviour each one asserts is re-covered meanwhile by
-`tests_checklist_snapshot.py`. **Whoever is next allowed to touch those files should make
-that reorder and delete this subsection.**
+Four tests in the two files 0.5 was not allowed to modify built their fixture as *create
+active checklist, then add an item*, which is precisely what R-7 forbids, and failed with
+`TemplateVersionLocked` at the fixture line. **Prompt 1.0 reordered all three copies of that
+fixture to *create draft, add items, `activate()`* — no assertion changed, no non-test file
+changed.** The suite is 645 tests, 1 failure, 0 errors, that one failure being the known
+SQLite constraint-name message difference in `tests_design_part46`. The fixture turned out to
+be written out three times rather than shared once; that duplication is recorded as **B3** in
+`EXECUTION_MODULE_DEFERRED.md`, along with **B4**, the `is_active` setter that let an active
+checklist be created without passing through `activate()` in the first place.
 
 ### Decision log addition
 

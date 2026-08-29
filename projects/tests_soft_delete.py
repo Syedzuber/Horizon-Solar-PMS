@@ -198,9 +198,12 @@ class SoftDeleteBase(TestCase):
         return challan
 
     def _make_checklist(self, task):
-        checklist = Checklist.objects.create(name='Pre-commissioning', is_active=True)
+        # Draft, then items, then activate() — R-7 refuses an item added to an active
+        # version, so the fixture has to build one the way the product does.
+        checklist = Checklist.objects.create(name='Pre-commissioning')
         item = ChecklistItem.objects.create(
             checklist=checklist, label='Earth resistance < 5 ohm', order=1)
+        checklist.activate()
         ChecklistTaskLink.objects.create(
             checklist=checklist, task_name=task.task_name, project_type='Residential')
         return item

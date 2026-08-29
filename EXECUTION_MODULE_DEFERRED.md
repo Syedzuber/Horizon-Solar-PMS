@@ -218,6 +218,53 @@ Two related notes for whoever takes that session: `post_qc_pool()` silently lose
 execution groups unless narrowed (Task B), and `project_boq_is_group_locked()` is correct today
 only because `'locked'` happens to exist on no other group type (Task D).
 
+### B3 — the checklist fixture is written out three times across two regression-net files
+
+Found by prompt 1.0 (test-baseline repair), 29 Aug 2026. The *create draft → add items →
+`activate()`* fixture is not one shared helper. It exists as:
+
+- `tests_soft_delete.py:200` — `SoftDeleteBase._make_checklist()`, a real helper, used by
+  `DeletedProjectWriteRefusalTests` and `LiveProjectStillWorksTests`
+- `tests_residential_baseline.py:1058` — the same lines inline in
+  `test_the_assigned_user_completes_a_checklist_item_with_a_photo`
+- `tests_residential_baseline.py:1088` — the same lines inline again in
+  `test_a_checklist_item_cannot_be_checked_without_a_photo`
+
+All three were repaired identically and independently. **Not consolidated** — R-12: prompt 1.0's
+mandate was to reorder fixtures, and lifting a shared helper across two test modules is a refactor
+of the regression net immediately before phase 1 leans on it. **Risk if left:** the next change to
+how a checklist is published (a third status, a required `code`, a `published_by`) has to be made
+in three places, and a fixture that is only fixed in two of them fails at the fixture line again
+rather than at an assertion — which is exactly the failure mode this session existed to clear.
+`tests_checklist_snapshot.py:118` `_publish_checklist()` is a fourth spelling of the same idea and
+is the one to consolidate *onto* if a later session is permitted to.
+
+### B4 — the `is_active` setter shim writes `status` directly, bypassing `activate()`
+
+Found by prompt 1.0, 29 Aug 2026, as the proximate cause of the four errors it repaired.
+`Checklist.is_active` (`models.py:2176`) is a deprecated property shim kept so old readers still
+see one truth. Its **setter** does:
+
+```python
+@is_active.setter
+def is_active(self, value):
+    self.status = self.ACTIVE if value else self.ARCHIVED
+```
+
+`Checklist.objects.create(name=..., is_active=True)` therefore produces an *active* checklist
+without ever passing through `activate()` — so no draft check, and none of the sibling versions
+with the same name/code get archived. The three broken fixtures all did exactly that, and R-7 then
+correctly refused the item they added next. The read half of the shim is sound; it is only the
+write half that offers a second, weaker door into the active state.
+
+**Not changed** — R-12, and it is a non-test file. **Risk if left:** any caller that sets
+`is_active = True` mints an active version that skipped activation, which can leave two active rows
+for one `code` if the partial unique index does not happen to catch them, and no
+`TemplateVersionLocked` where one is due. The observation stands that the setter would be better
+raising `TemplateVersionLocked` (pointing the caller at `activate()`) than silently writing
+`status`; that is a product change and needs its own session with a survey of every assignment to
+`is_active` first.
+
 ---
 
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
