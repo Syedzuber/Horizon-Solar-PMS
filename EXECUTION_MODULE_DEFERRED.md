@@ -265,6 +265,55 @@ raising `TemplateVersionLocked` (pointing the caller at `activate()`) than silen
 `status`; that is a product change and needs its own session with a survey of every assignment to
 `is_active` first.
 
+### B5 — `save()` guards on `group_type` are bypassed by `update()` and `bulk_create()`
+
+Found and **deliberately not fixed** by prompt 1.1a, 29 Aug 2026. Recorded because it is a
+known hole, not a discovered one.
+
+`SiteGroupMembership.save()` stamps `group_type` from the group on insert and refuses to change
+it afterwards; `SiteGroup.save()` refuses to change it at all. Neither runs under
+`QuerySet.update()` or `bulk_create()`, so either one can write a `group_type` the guards would
+have refused — including a membership whose type disagrees with its own group's, which would put
+the row under the wrong half of the exclusivity constraint.
+
+**Why it was not fixed:** the alternatives are worse at this stage. A `CheckConstraint` cannot
+reach across the FK to compare the two columns; a database trigger is not a thing this codebase
+has anywhere; and refusing `update()` outright would break soft removal, which is an
+`update()` in `seed_scm_handoff_data` and a `save()` in the view. **This is the same half-measure
+R-17 and §13 already document for `StatusTransition`** — the ledger is complete only for writes
+that go through `record_transition()`, and this column is honest only for writes that go through
+`save()`.
+
+**What makes it acceptable today:** the only production writer is `design_views._add_sites()`,
+which uses `objects.create()` per row for its own documented reasons (per-site savepoints, so
+one refused site does not fail the batch). Verified at 1.1a's pre-flight. `grep bulk_create`
+returns no hit on either model.
+
+**What would make it unacceptable:** anything that reaches for `bulk_create()` on
+`SiteGroupMembership` — most likely a future "add all released sites to this group" bulk action.
+Such a caller must set `group_type` itself. Stated in a comment on both `save()` methods so the
+person writing that caller is told at the point they would get it wrong.
+
+### B6 — four documents still name the pre-1.1a constraint, and were out of scope to fix
+
+Found by prompt 1.1a, 29 Aug 2026. The constraint was renamed
+`uniq_active_site_group_membership` → `uniq_active_site_group_membership_per_type`. Three
+documents and one migration still carry the old name:
+
+| File | Status |
+|---|---|
+| `projects/migrations/0052_sitegroup_sitegroupmembership.py` | **Correct as-is, leave it.** A migration is history; it created the constraint under its original name and must keep saying so. |
+| `ACCESS_ISOLATION_AUDIT.md` (~719) | Stale. Out of 1.1a's write scope. |
+| `PARTS_11_4.6_10_STATUS.md` (~837) | Stale. Out of 1.1a's write scope. |
+| `PHASE_0_COMPLETION.md` (~323) | Stale, **and now wrong in substance** — it states the migration "must alter `uniq_active_site_group_membership` from `(project)` to ...", which is the shape F-1 showed does not compile. Out of 1.1a's write scope. |
+
+Two in-scope references **were** updated: `docs/execution-model.md` §2 D-1, and the comment in
+`TaskTemplate.Meta` that cites the site-group constraint as the precedent for its own partial
+unique index.
+
+Not urgent — all four are records rather than instructions, and none is loaded by code. Worth a
+sweep whenever one of those documents is next opened for another reason.
+
 ---
 
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)

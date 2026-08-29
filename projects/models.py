@@ -1947,7 +1947,8 @@ class TaskTemplate(models.Model):
             # At most ONE active version per template code. Partial (condition=) so any
             # number of draft and archived versions may coexist beside it — the history
             # is kept, the exclusivity is not weakened by keeping it. Same shape as
-            # uniq_active_site_group_membership.
+            # uniq_active_site_group_membership_per_type (renamed from
+            # uniq_active_site_group_membership by 1.1a).
             models.UniqueConstraint(
                 fields=['code'],
                 condition=models.Q(status='active'),   # literal: a nested Meta cannot see the outer class body's ACTIVE
@@ -3403,9 +3404,16 @@ class DesignChangeRequest(models.Model):
 # or supersedes a BOQ row, because per-site profitability and expense tracking
 # (out of scope for this version) need the per-site figures to stay intact.
 #
-# NO save() OVERRIDES AND NO SIGNALS, matching every prior part. Both transitions —
-# locking a group, and soft-removing a membership — live in the view layer next to
-# the permission check that authorises them.
+# NO SIGNALS. Both lifecycle transitions — locking a group, and soft-removing a
+# membership — live in the view layer next to the permission check that authorises them.
+#
+# THIS PART ORIGINALLY HAD NO save() OVERRIDES EITHER, AND PROMPT 1.1a REVERSED THAT
+# DELIBERATELY. `group_type` is denormalised onto SiteGroupMembership so a partial
+# UniqueConstraint can be written over it (audit F-1: a constraint's fields must be
+# local columns), and a denormalised copy has nowhere else to be set — a view that
+# forgot it would silently write the wrong exclusivity key. The two save() guards below
+# are therefore about a column's integrity, not about a lifecycle transition; the rule
+# above still holds for everything else on these two models.
 # ---------------------------------------------------------------------------
 
 SITE_GROUP_DRAFT  = 'draft'
@@ -3415,6 +3423,54 @@ SITE_GROUP_STATUS_CHOICES = [
     (SITE_GROUP_DRAFT,  'Draft'),
     (SITE_GROUP_LOCKED, 'Locked'),
 ]
+
+# D-1: a SiteGroup serves two purposes. SCM's procurement batch (everything built
+# before 1.1a) and the PM's execution batch are different groupings of the same sites,
+# and a project may hold one live membership of each at the same time.
+GROUP_TYPE_PROCUREMENT = 'procurement'
+GROUP_TYPE_EXECUTION   = 'execution'
+
+GROUP_TYPE_CHOICES = [
+    (GROUP_TYPE_PROCUREMENT, 'Procurement'),
+    (GROUP_TYPE_EXECUTION,   'Execution'),
+]
+
+
+class SiteGroupTypeImmutable(Exception):
+    """Raised when something tries to change `group_type` on a row that already exists."""
+
+
+def _require_unchanged_group_type(instance, what):
+    """Guard: `group_type` is set once, at insert, and never again.
+
+    Same shape as `_require_draft_template()` — a module-level function called from
+    save(), raising a named exception rather than returning a boolean, so the caller
+    that ignores it cannot ignore it quietly.
+
+    Two rows enforce one rule between them, so neither may drift:
+
+      * A SiteGroup that changed type would leave every membership it owns holding a
+        stale copy, and the partial unique constraint would then be enforcing the old
+        answer.
+      * A membership that changed type would move a site between exclusivity keys
+        without the constraint ever seeing the transition.
+
+    A group does not become a different kind of thing, and a site does not change what
+    kind of thing it belongs to. Both are re-created, not edited.
+    """
+    if instance.pk is None:                     # insert; nothing to compare against
+        return
+    previous = type(instance).objects.filter(pk=instance.pk).values_list(
+        'group_type', flat=True).first()
+    if previous is None:                        # row vanished under us; let save() decide
+        return
+    if previous != instance.group_type:
+        raise SiteGroupTypeImmutable(
+            f"Cannot change group_type on {what}: it is '{previous}' and may not become "
+            f"'{instance.group_type}'. group_type is fixed at creation — the partial "
+            f"unique constraint is written over it, so changing it would move a site "
+            f"between exclusivity keys without the database ever seeing the transition."
+        )
 
 
 class SiteGroup(models.Model):
@@ -3438,6 +3494,17 @@ class SiteGroup(models.Model):
         max_length=10, choices=SITE_GROUP_STATUS_CHOICES, default=SITE_GROUP_DRAFT,
     )
 
+    # D-1. Defaults to procurement because every group that existed before 1.1a is an
+    # SCM procurement batch — `site_group_create` was the only writer.
+    #
+    # DELIBERATELY NOT db_index=True, contrary to the audit's draft. Two values over a
+    # table this size is an index the planner would never choose over the existing
+    # program_id one, and it is one more object to carry through every future migration.
+    # Do not add it back reflexively; add it when a query plan asks for it.
+    group_type = models.CharField(
+        max_length=12, choices=GROUP_TYPE_CHOICES, default=GROUP_TYPE_PROCUREMENT,
+    )
+
     created_by = models.ForeignKey(
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='created_site_groups',
@@ -3455,6 +3522,17 @@ class SiteGroup(models.Model):
     class Meta:
         ordering = ['-created_at']
 
+    def save(self, *args, **kwargs):
+        # A group does not change type. Without this, every denormalised copy on the
+        # memberships below drifts the moment someone edits a group.
+        #
+        # LIMIT, STATED HONESTLY (§13, R-17): QuerySet.update() and bulk_create() do not
+        # call save() and therefore do not reach this guard. That is the same half-measure
+        # the codebase already documents elsewhere, and it is not a reason to skip it —
+        # every production write goes through objects.create() or an instance save().
+        _require_unchanged_group_type(self, f"group '{self.name}'")
+        return super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.name} — {self.program.name} ({self.status})"
 
@@ -3469,9 +3547,16 @@ class SiteGroupMembership(models.Model):
     request pulls a site out (settled decision 6).
 
     The partial unique constraint is the real enforcement of "a site belongs to at most
-    one group at a time" (settled decision 2). The view checks it too, for a decent error
-    message, but the database is what makes it true — a view check alone loses to a
-    concurrent add.
+    one group OF EACH TYPE at a time" (settled decision 2, widened by D-1). The view
+    checks it too, for a decent error message, but the database is what makes it true —
+    a view check alone loses to a concurrent add.
+
+    `group_type` HERE IS A COPY, NOT A FACT. It is taken from `group.group_type` at
+    insert and exists for exactly one reason: a UniqueConstraint's `fields` must be
+    local columns, so `(project, group_type)` cannot be expressed by joining to
+    SiteGroup (audit F-1). `StatusTransition.actor_role_code` is the precedent —
+    "COPIED AT WRITE TIME, NEVER JOINED". Read the type off `self.group` when you want
+    to know what kind of group this is; this column answers the database, not you.
     """
 
     group = models.ForeignKey(
@@ -3479,6 +3564,14 @@ class SiteGroupMembership(models.Model):
     )
     project = models.ForeignKey(
         Project, on_delete=models.CASCADE, related_name='group_memberships',
+    )
+
+    # NEVER SET BY A CALLER. save() overwrites whatever is passed here with the group's
+    # own value on insert — see the docstring above and the guard below. The default
+    # exists so the 1.1a migration can add the column to existing rows without a NULL
+    # window; it is not a fallback anyone should be relying on.
+    group_type = models.CharField(
+        max_length=12, choices=GROUP_TYPE_CHOICES, default=GROUP_TYPE_PROCUREMENT,
     )
 
     added_by = models.ForeignKey(
@@ -3497,15 +3590,38 @@ class SiteGroupMembership(models.Model):
     class Meta:
         ordering = ['added_at']
         constraints = [
-            # At most ONE live membership per project, across every group in the system.
+            # At most ONE live membership per project PER TYPE, across every group in
+            # the system — so one procurement batch and one execution batch may hold the
+            # same site, and a second of either may not (D-1).
+            #
             # Partial (condition=) so any number of removed rows may coexist with it —
             # the history is kept, the exclusivity is not weakened by keeping it.
+            #
+            # RENAMED, NOT REUSED. This name reaches SCM: `_add_sites()` catches the
+            # IntegrityError it raises and turns it into the refusal message, and the
+            # name should say what the rule now is rather than what it used to be.
             models.UniqueConstraint(
-                fields=['project'],
+                fields=['project', 'group_type'],
                 condition=models.Q(removed_at__isnull=True),
-                name='uniq_active_site_group_membership',
+                name='uniq_active_site_group_membership_per_type',
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        # On insert the copy is taken from the group, OVERWRITING whatever a caller
+        # passed — this column is not a caller's to set (see the docstring). On update
+        # it may not move at all.
+        #
+        # LIMIT, STATED HONESTLY (§13, R-17): QuerySet.update() and bulk_create() bypass
+        # save() and therefore bypass both halves of this. `_add_sites()` — the only
+        # production writer — uses objects.create() per row, deliberately and for its own
+        # reasons, so it is covered. Anything that reaches for bulk_create() here must
+        # set group_type itself.
+        if self.pk is None:
+            self.group_type = self.group.group_type
+        else:
+            _require_unchanged_group_type(self, f"membership {self.pk}")
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         state = 'removed' if self.removed_at else 'active'
