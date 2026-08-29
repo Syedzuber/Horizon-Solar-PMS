@@ -29,7 +29,8 @@ from django.utils import timezone
 
 from .models import (Program, Project, UserProfile, DesignAssignment, SiteGroup,
                      SiteGroupMembership, DESIGN_RELEASED, DESIGN_IN_DESIGN,
-                     SITE_GROUP_DRAFT, SITE_GROUP_LOCKED)
+                     SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
+                     GROUP_TYPE_PROCUREMENT, GROUP_TYPE_EXECUTION)
 from .design_views import post_qc_pool, tender_release_completeness, _group_member_ids
 
 
@@ -93,11 +94,58 @@ class PostQCPoolTests(TestCase):
         self.assertEqual(len(post_qc_pool(self.program, self.now)), 2)
 
     # ── the other three clauses ────────────────────────────────────────────────
-    def test_site_with_a_live_membership_is_excluded(self):
+    def test_site_with_a_live_procurement_membership_is_excluded(self):
         site = self._site('S01', released_days_ago=5)
         SiteGroupMembership.objects.create(
             group=self._group('G1'), project=site, added_by=self.scm)
         self.assertEqual(post_qc_pool(self.program, self.now), [])
+
+    # ── D-1, prompt 1.1b: the pool asks "has SCM taken it", not "is it in a group" ──
+    #
+    # THESE TWO TESTS MANUFACTURE AN EXECUTION MEMBERSHIP DIRECTLY, and they have to.
+    # Nothing in the product creates one — there is no execution-group screen — so the
+    # suite would pass with `post_qc_pool()` narrowed or not. Green is not evidence
+    # here; only a hand-built execution row is.
+    def test_site_in_a_live_execution_group_still_appears_in_the_pool(self):
+        """THE REGRESSION 1.1b EXISTS TO PREVENT.
+
+        A released site that the PM has put in an execution batch has NOT been procured.
+        Dropping it here would delete it from the only screen that tells SCM it is
+        waiting — silently, and months from now at go-live rather than today.
+        """
+        site = self._site('S01', released_days_ago=5)
+        execution_group = SiteGroup.objects.create(
+            program=self.program, name='PM crew batch', status=SITE_GROUP_DRAFT,
+            created_by=self.scm, group_type=GROUP_TYPE_EXECUTION)
+        membership = SiteGroupMembership.objects.create(
+            group=execution_group, project=site, added_by=self.scm)
+        # The row really is what the test claims — save() copies the type from the group.
+        self.assertEqual(membership.group_type, GROUP_TYPE_EXECUTION)
+        self.assertIsNone(membership.removed_at)
+
+        pool = post_qc_pool(self.program, self.now)
+        self.assertEqual([a.project_id for a in pool], [site.pk],
+                         'an execution membership is not a procurement membership — the '
+                         'site is still waiting for SCM and must stay in the pool')
+
+    def test_a_procurement_membership_still_excludes_a_site_that_also_has_an_execution_one(self):
+        """The narrowing must not become a hole. Both memberships live at once (D-1);
+        the procurement one is the one this screen answers to."""
+        site = self._site('S01', released_days_ago=5)
+        SiteGroupMembership.objects.create(
+            group=self._group('G1'), project=site, added_by=self.scm)
+        execution_group = SiteGroup.objects.create(
+            program=self.program, name='PM crew batch', status=SITE_GROUP_DRAFT,
+            created_by=self.scm, group_type=GROUP_TYPE_EXECUTION)
+        SiteGroupMembership.objects.create(
+            group=execution_group, project=site, added_by=self.scm)
+
+        self.assertEqual(
+            SiteGroupMembership.objects.filter(
+                project=site, removed_at__isnull=True).count(), 2)
+        self.assertEqual(post_qc_pool(self.program, self.now), [],
+                         'SCM has taken this site — the execution membership beside it '
+                         'changes nothing')
 
     def test_site_whose_membership_was_removed_is_back_in_the_pool(self):
         """Settled decision 6: a change request returns the site to the queue rather

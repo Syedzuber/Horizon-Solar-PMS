@@ -38,7 +38,7 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | 1.0 | The regression net goes green — three fixtures reordered to draft, items, `activate()` | ✅ |
 | — | **A-1.1 audit** — `SITE_GROUP_AUDIT.md`. Read-only; wrote no code. Found F-1, which is why 1.1 split. | ✅ |
 | 1.1a | **`group_type` — the schema half.** Constants, the column on both models, the two `save()` guards, migration `0071_site_group_type`, `tests_site_group_type.py`. **Zero behaviour change.** | ✅ |
-| 1.1b | **`group_type` — the consumer half.** Narrow `active_group_membership()` and every caller; the design change-request gate must ask for `procurement` explicitly. Touches `design_views.py`, `views.py`, `permissions.py`. | ☐ |
+| 1.1b | **`group_type` — the consumer half.** `active_group_membership()` takes a **required** type argument; all three callers, `_group_or_404`, `_group_rows`, `post_qc_pool`, `site_group_create` and `project_boq_is_group_locked` narrowed to `procurement`. 12 tests, each building an execution membership by hand. **No migration.** Touched `design_views.py`, `permissions.py` — **not `views.py`** (see below). **D-1 is complete.** | ✅ |
 | 1.2 | Assignment — gated on Q-E3 (`ProgramAssignment` designed, not built) | ☐ |
 | 1.3 | The OPEX/CAPEX task template — gated on B-09 | ☐ |
 | 1.4 | Task dependencies — gated on B-08 | ☐ |
@@ -70,3 +70,22 @@ did not.** The one thing that could have forced it to — `_add_sites()` creatin
 via `bulk_create()`, which bypasses `save()` and so bypasses the guard — was checked at
 pre-flight. It uses `objects.create()` per row, deliberately and with its own reasons
 documented, so the guard covers the only production creation path.
+
+### 1.1b — two scope notes, recorded because a later session will hit both
+
+**`views.py` was in the row above and out of the prompt's MODE.** This log's own 1.1b row
+originally said the session touched `design_views.py`, `views.py` and `permissions.py`; the
+1.1b prompt's MODE listed `views.py` as **forbidden**. The audit is right that
+`boq_detail`'s `locked_group` banner lookup is an unnarrowed membership read — the prompt's
+scope list won, and it is deferred as §B7 rather than fixed. It is cosmetic-only while
+`locked` remains a procurement-only status, but it is a real narrowing owed.
+
+**This file has never held a deviation table or an open-questions table.** The 1.1b prompt's
+pre-conditions expected `EXECUTION_PROMPT_LOG.md` to contain a deviation table running D-1 to
+D-9 and an open-questions table running B-09 to Q-E3, and to stop if it did not. It does not,
+and never did — it was created by 1.1a as a session log and nothing more. Both tables live in
+`docs/execution-model.md`: the deviations are §2, and there are **four** of them (D-1 … D-4),
+not nine — D-5 through D-9 do not exist anywhere in this repository. The open questions are
+§8, running Q-E3 and B-05 … B-18. The pre-condition was **waived by the product owner on 29
+Aug 2026** on that finding. A later prompt should point at `docs/execution-model.md` §2 and §8
+rather than at this file.

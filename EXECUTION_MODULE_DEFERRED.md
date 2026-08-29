@@ -314,6 +314,50 @@ unique index.
 Not urgent — all four are records rather than instructions, and none is loaded by code. Worth a
 sweep whenever one of those documents is next opened for another reason.
 
+**Prompt 1.1b adds two more, both missed by the table above because it swept `.md` files and
+these are `.py` comments.** Neither is behaviour-bearing; no code matches on the constraint
+name string anywhere (1.1b pre-flight verified this, and `_add_sites()` catches the exception
+*type*, not the message).
+
+| File | Status |
+|---|---|
+| `projects/migrations/0070_checklist_drop_is_active.py` (~31) | Comment citing the old name as precedent. A migration is history — arguably correct as-is, like `0052`. Leave it. |
+| `projects/management/commands/seed_scm_handoff_data.py` (~429) | Comment explaining why the fixture stamps `removed_at` via `update()`, citing the old name. Stale wording only. Fix when that command is next opened. |
+
+---
+
+### B7 — `boq_detail`'s `locked_group` banner lookup is the one membership read 1.1b did not narrow
+
+Found and left by prompt 1.1b, 29 Aug 2026. **`projects/views.py` was on that prompt's
+forbidden list**, so this was reported rather than fixed. [views.py:5145](projects/views.py#L5145):
+
+```python
+locked_membership = (project.group_memberships
+                     .filter(removed_at__isnull=True, group__status='locked')
+                     .select_related('group', 'group__locked_by__user').first())
+```
+
+It is a hand-written second copy of `project_boq_is_group_locked()`'s query — same two filter
+terms — fetched only to name the locking group in the BOQ banner. 1.1b narrowed the predicate
+and could not narrow this.
+
+**Why it is not urgent.** It runs only inside `if boq_group_locked:`, and that flag now comes
+from the narrowed predicate, so it fires only when a locked *procurement* group exists. Its own
+`group__status='locked'` term restricts it to a status only procurement groups use. It is
+therefore correct today — by the same coincidence the predicate was correct before 1.1b, and
+with the same expiry date.
+
+**Why it is real.** If an execution lifecycle ever reuses the `status` column or the string
+`locked`, a site in both a locked procurement group and a locked execution group would have two
+matching rows and an unordered `.first()` between them: the banner would name the PM's execution
+batch as the reason the BOQ is frozen. Cosmetic, but it is a screen SCM and the designer read to
+find out who to talk to.
+
+**The fix is one filter term** — `group_type='procurement'`, spelled on the membership, matching
+what `permissions.project_boq_is_group_locked()` now does. **Do it in the next session allowed to
+touch `views.py`.** Better still, have that session delete the duplicate query and have the
+predicate return the group, so there is one spelling rather than two.
+
 ---
 
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)

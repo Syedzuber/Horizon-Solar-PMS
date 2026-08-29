@@ -38,13 +38,27 @@ There is no `exec_task`, no `Lot`, and no `Site` model ✔. "Lot" is the Tenders
 
 **The lock is procurement-only.** A locked procurement group means a purchase order has gone out, and there is deliberately no unlock. An execution group has its own lifecycle — planning, active, closed — and stays re-plannable.
 
-> **⚠ The schema half is DONE (prompt 1.1a, migration `0071_site_group_type`). The consumers are not (1.1b).**
+> **✅ DONE. The schema half is prompt 1.1a (migration `0071_site_group_type`); the consumer half is prompt 1.1b. D-1 is implemented.**
 >
 > **This box previously said the fix was to alter the constraint to `(project, group_type)`. That was not implementable as written**, and `SITE_GROUP_AUDIT.md` F-1 is why: a `UniqueConstraint`'s `fields` must be **local columns**, and `group_type` lived only on `SiteGroup`. There is no way to reach it from `SiteGroupMembership` inside a constraint.
 >
 > **The shape actually built** — audit Shape A, approved 29 Aug: `group_type` is **denormalised onto `SiteGroupMembership` as well as `SiteGroup`**, copied from the group at insert by `SiteGroupMembership.save()`, and refused any later change by that same guard (and by `SiteGroup.save()`, so the source cannot drift away from its copies). The constraint is then written over the membership's **own** column and is named `uniq_active_site_group_membership_per_type`. This is the only shape in which the **database** enforces D-1 rather than a view. The membership's `group_type` is never a second source of truth and is never joined on — `StatusTransition.actor_role_code` is the same pattern.
 >
-> **1.1a changed no behaviour, and the caller problem is still open.** Live code depends on the *old* guarantee. `active_group_membership()` documents that its `.first()` is "picking the only row that can exist, not the first of several" ✔, and its caller uses that single result to compute `in_draft_group`, the gate admitting a released design to a change request. That sentence is **true today only because no execution membership exists yet**. **Prompt 1.1b must narrow every caller, and the design change-request gate must explicitly ask for `procurement`** — until it does, creating the first execution membership makes that gate order-dependent.
+> **1.1a changed no behaviour and left the caller problem open. 1.1b closed it.** Live code depended on the *old* guarantee: `active_group_membership()` documented that its `.first()` was "picking the only row that can exist, not the first of several", which was true only while no execution membership could exist. Every consumer has now been narrowed to `procurement`, and each says at its call site why.
+>
+> **`active_group_membership(project, group_type)` takes a REQUIRED type argument, by design — it is deliberately not defaulted to `procurement`.** A default is the exact failure D-1 introduces: a future execution caller that forgets the argument would be handed a procurement row silently, and every fact computed from it would answer a question it did not ask. Required means a new call site cannot be written without deciding. **Do not add a default to make a call site shorter.**
+>
+> **What 1.1b narrowed** — `design_views.py`: `active_group_membership()` and all three of its callers (`design_change_request`, `design_change_request_form`, `_add_sites`), `_group_or_404()`, `_group_rows()`, `post_qc_pool()`, and `site_group_create()` (which now states `group_type` rather than leaning on the model default). `permissions.py`: `project_boq_is_group_locked()`.
+>
+> **`_group_or_404()` is the load-bearing one.** Six views resolve their group through it, including both write paths — adding sites and locking — so `site_group_detail`, `site_group_remove_site` and `_group_member_ids` need no type filter of their own and deliberately do not have one. If that filter is ever removed, all six widen at once.
+>
+> **`post_qc_pool()` was the live regression.** It excluded any site with any live membership. Unnarrowed, the first execution group ever created would have deleted its sites from SCM's post-QC queue — released, unprocured, and invisible to the one screen that would have said so. Silent, and it would have surfaced at go-live rather than in review.
+>
+> **`remove_from_group()` was NOT narrowed**, and should not be: it is handed a row a caller already resolved, and its mechanism suits both types. Its *log text* hardcoded the word "procurement" and now comes from the row.
+>
+> **One consumer is knowingly unnarrowed:** `views.py : boq_detail`'s `locked_group` banner lookup. Cosmetic-only while `locked` is a procurement-only status, out of 1.1b's write scope, recorded as `EXECUTION_MODULE_DEFERRED.md` §B7.
+>
+> **Tests must manufacture the execution row.** Nothing in the product creates an execution group, so the suite passes whether or not a consumer is narrowed. `tests_site_group_type.ConsumerNarrowingTests` and two tests in `tests_design_groups.PostQCPoolTests` each build one by hand. A 1.1b-style test that does not is testing nothing.
 
 ### D-2 · `PaymentRequest` is live and stays
 

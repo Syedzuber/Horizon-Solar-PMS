@@ -8,11 +8,21 @@ WHAT THIS FILE PINS, AND WHY IT IS ONLY THIS MUCH.
 denormalised copy honest. It changes NO behaviour: every consumer still assumes one
 membership, and narrowing them is 1.1b's work with 1.1b's own review question.
 
-So these tests are about the constraint and the guards, and nothing else. There is
-deliberately nothing here about `active_group_membership()`, the design change-request
-gate, `post_qc_pool()` or `project_boq_is_group_locked()` — those assertions need 1.1b's
-code to be true, and writing them now would only pin today's behaviour as if it were the
-intent.
+So the 1.1a tests below are about the constraint and the guards, and nothing else.
+
+**PROMPT 1.1b ADDED THE CONSUMER HALF, at the bottom of this file.** 1.1a's docstring
+said there was "deliberately nothing here about `active_group_membership()`,
+the design change-request gate, `post_qc_pool()` or `project_boq_is_group_locked()`,
+because those assertions need 1.1b's code to be true". They now do.
+`ConsumerNarrowingTests` covers `active_group_membership()`,
+`project_boq_is_group_locked()`, `_group_rows()` and `_group_or_404()`; `post_qc_pool()`
+is pinned next to its own siblings in `tests_design_groups.PostQCPoolTests`.
+
+GREEN PROVES NOTHING IN THE 1.1b TESTS UNLESS THEY BUILD THE ROW THEMSELVES. No screen
+in the product creates an execution group, so every consumer would pass its tests
+narrowed or unnarrowed. Each test below therefore MANUFACTURES an execution membership
+directly and asserts the consumer ignores it. A 1.1b test that does not create an
+execution row is testing nothing.
 
 ON ASSERTING AGAINST IntegrityError RATHER THAN THE CONSTRAINT NAME: the suite runs on
 SQLite, whose message is 'UNIQUE constraint failed: <table>.<col>' and never names the
@@ -23,12 +33,16 @@ from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
+from django.http import Http404
 from django.test import TestCase
 from django.utils import timezone
 
 from .models import (Program, Project, SiteGroup, SiteGroupMembership,
-                     SiteGroupTypeImmutable, SITE_GROUP_DRAFT,
+                     SiteGroupTypeImmutable, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
                      GROUP_TYPE_PROCUREMENT, GROUP_TYPE_EXECUTION)
+# Prompt 1.1b — the consumers this session narrowed.
+from .design_views import active_group_membership, _group_rows, _group_or_404
+from .permissions import project_boq_is_group_locked
 
 
 def _make_user(username, role):
@@ -239,3 +253,111 @@ class ExistingFixturesAreAllProcurementTests(TestCase):
         self.assertFalse(
             SiteGroupMembership.objects.exclude(
                 group_type=GROUP_TYPE_PROCUREMENT).exists())
+
+
+# ---------------------------------------------------------------------------
+# PROMPT 1.1b — the consumer half of D-1
+#
+# Every test in this class builds an EXECUTION membership by hand and asserts that a
+# procurement consumer does not see it. That is the only way these assertions can mean
+# anything: no screen in the product creates an execution group, so a suite that waits
+# for one would stay green through the entire bug.
+# ---------------------------------------------------------------------------
+
+class ConsumerNarrowingTests(GroupTypeTestCase):
+    """The consumers ask for a type, and get only that type."""
+
+    # ── active_group_membership() — both directions, on ONE project ────────────
+    def test_the_helper_returns_each_type_on_a_project_that_holds_both(self):
+        """D-1's whole point, seen from the caller. One site, two live memberships;
+        the answer is decided by the argument and nothing else."""
+        procurement = self._join(self.procurement_group)
+        execution = self._join(self.execution_group)
+
+        self.assertEqual(
+            active_group_membership(self.project, GROUP_TYPE_PROCUREMENT).pk,
+            procurement.pk)
+        self.assertEqual(
+            active_group_membership(self.project, GROUP_TYPE_EXECUTION).pk,
+            execution.pk)
+
+    def test_asking_for_procurement_when_only_an_execution_membership_exists_returns_none(self):
+        """The failure a default argument would have hidden. Before 1.1b the helper
+        would have returned the execution row here and the caller would have believed
+        the site was in a procurement group."""
+        self._join(self.execution_group)
+
+        self.assertIsNone(
+            active_group_membership(self.project, GROUP_TYPE_PROCUREMENT))
+        self.assertIsNotNone(
+            active_group_membership(self.project, GROUP_TYPE_EXECUTION))
+
+    def test_group_type_is_a_required_argument(self):
+        """Not defaulted, by design: a future execution caller that forgets it must
+        fail loudly rather than be handed a procurement row."""
+        with self.assertRaises(TypeError):
+            active_group_membership(self.project)
+
+    # ── project_boq_is_group_locked() — a BOQ freeze is a procurement act ──────
+    def test_a_locked_procurement_group_locks_the_boq(self):
+        locked = self._group('SCM locked batch', GROUP_TYPE_PROCUREMENT)
+        SiteGroup.objects.filter(pk=locked.pk).update(status=SITE_GROUP_LOCKED)
+        self._join(locked)
+
+        self.assertTrue(project_boq_is_group_locked(self.project))
+
+    def test_an_execution_group_never_locks_the_boq_whatever_its_status(self):
+        """D-1: the lock is procurement-only. An execution batch is re-plannable and
+        must not freeze quantities no purchase order was raised against.
+
+        The status is forced to 'locked' deliberately — that is the shape the audit
+        warned about, where an execution lifecycle reuses the word and the unnarrowed
+        predicate silently starts freezing BOQs with no unlock.
+        """
+        execution_locked = self._group('PM batch', GROUP_TYPE_EXECUTION)
+        SiteGroup.objects.filter(pk=execution_locked.pk).update(
+            status=SITE_GROUP_LOCKED)
+        membership = self._join(execution_locked)
+        self.assertEqual(membership.group_type, GROUP_TYPE_EXECUTION)
+
+        self.assertFalse(project_boq_is_group_locked(self.project),
+                         'an execution group must never freeze a BOQ')
+
+    def test_a_draft_execution_group_beside_a_locked_procurement_one_does_not_unlock_it(self):
+        """Both memberships live at once. The procurement one still decides."""
+        locked = self._group('SCM locked batch', GROUP_TYPE_PROCUREMENT)
+        SiteGroup.objects.filter(pk=locked.pk).update(status=SITE_GROUP_LOCKED)
+        self._join(locked)
+        self._join(self.execution_group)
+
+        self.assertTrue(project_boq_is_group_locked(self.project))
+
+    # ── _group_rows() / _group_or_404() — SCM's screens are procurement screens ─
+    def test_group_rows_does_not_surface_execution_groups(self):
+        """SCM's group list renders a Lock button on every row it returns. An execution
+        batch listed there would offer an action D-1 says it does not have."""
+        rows = _group_rows(self.program)
+
+        names = [g.name for g in rows]
+        self.assertIn(self.procurement_group.name, names)
+        self.assertNotIn(self.execution_group.name, names)
+        self.assertTrue(all(g.group_type == GROUP_TYPE_PROCUREMENT for g in rows))
+
+    def test_group_rows_still_counts_live_members_of_the_groups_it_does_return(self):
+        """The narrowing must not have broken the annotation it sits beside."""
+        self._join(self.procurement_group)
+
+        row = next(g for g in _group_rows(self.program)
+                   if g.pk == self.procurement_group.pk)
+        self.assertEqual(row.member_count, 1)
+
+    def test_group_or_404_resolves_a_procurement_group(self):
+        self.assertEqual(
+            _group_or_404(self.procurement_group.pk).pk, self.procurement_group.pk)
+
+    def test_group_or_404_refuses_an_execution_group(self):
+        """THE HIGHEST-LEVERAGE ASSERTION IN THIS FILE. Six views resolve through this
+        function, including both write paths — adding sites, and locking. A hand-typed
+        pk must not reach an execution group through any of them."""
+        with self.assertRaises(Http404):
+            _group_or_404(self.execution_group.pk)

@@ -861,11 +861,31 @@ def project_boq_is_group_locked(project):
     this module import-free like the rest of it. A removed membership does not count —
     a site that has left a group is free again, which is what makes settled decision 6
     (a PM change request pulls the site out of a draft group) work at all.
+
+    PROCUREMENT ONLY (prompt 1.1b, D-1). A BOQ freeze is a procurement act: it means a
+    purchase order has gone out against these quantities, which is why there is no
+    unlock. An execution group is the PM's delivery batch and has its own re-plannable
+    lifecycle — it must NEVER freeze a BOQ, and this is the predicate that would let it.
+
+    NOTHING BREAKS TODAY WITHOUT THIS FILTER, AND THAT IS THE WHOLE REASON TO ADD IT.
+    `group__status='locked'` already restricts the match to a status only procurement
+    groups use, so the unnarrowed query is correct — by coincidence, and only until an
+    execution lifecycle reuses that word or shares this column. The narrowing makes the
+    guarantee structural rather than a fact about which strings happen to be in use.
+
+    `group_type` IS SPELLED ON THE MEMBERSHIP, NOT `group__group_type`. The two cannot
+    disagree (SiteGroupMembership.save() copies one from the other and refuses any later
+    change), and the local column is the one the partial unique constraint is written
+    over — so this filter states the same condition the exclusivity guarantee does, and
+    adds no join. `'procurement'` is a literal here rather than GROUP_TYPE_PROCUREMENT
+    for the same reason `'locked'` on the line below is: this module imports no models,
+    deliberately, and that is not being changed for one constant.
     """
     if project is None:
         return False
     return project.group_memberships.filter(
         removed_at__isnull=True, group__status='locked',
+        group_type='procurement',
     ).exists()
 
 
