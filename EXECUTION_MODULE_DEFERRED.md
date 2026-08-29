@@ -163,7 +163,60 @@ moves.**
 
 ## B. Phase 1 — grouping, assignment and templates (prompts 1.1 – 1.4)
 
-_No entries yet._
+### B1 — `in_draft_group` is computed twice, with two different spellings
+
+Found by the A-1.1 audit (read-only), 29 Aug 2026. `design_views.py:design_change_request`
+(~3119) and `design_views.py:design_change_request_form` (~4055) each compute the same gate, and
+they do not spell it the same way:
+
+```python
+# design_change_request (the POST) — the locked case has already returned above
+in_draft_group = membership is not None
+
+# design_change_request_form (the GET)
+group_locked   = membership is not None and membership.group.status == SITE_GROUP_LOCKED
+in_draft_group = membership is not None and not group_locked
+```
+
+The two agree **only** because the POST returns early on the locked case, several lines above.
+The form's own comment says the two must agree — *"the window the FORM offers must agree with the
+one design_change_request() enforces, or the PM gets a button that 403s or a missing button that
+would have worked"* — and keeps them in step by hand rather than by construction.
+
+**Not fixed** — A-1.1 is an audit session and may not modify `.py` files, and `design_views.py`
+is behind a standing scope boundary (see B2). **Risk if left:** any future edit to the locked-case
+early return in the POST silently changes what `in_draft_group` means on that side only, and the
+form and the POST diverge with no test between them. The natural fix is one shared helper
+returning `(membership, group_locked, in_draft_group)`, called by both — which prompt 1.1 is
+already touching both functions to do.
+
+### B2 — fixing the change-request gate requires editing `design_views.py`, which is behind a standing scope boundary
+
+Found by the A-1.1 audit, 29 Aug 2026. Recorded here as a **decision a later session must know
+about**, not as a defect.
+
+`docs/execution-model.md` §2 D-1 requires `SiteGroup.group_type`, and adding it makes
+`design_views.py:active_group_membership`'s `.first()` order-dependent — its own docstring says
+that `.first()` is *"picking the only row that can exist, not the first of several"*, and that
+stops being true the moment two live memberships are possible. The gate it feeds, `in_draft_group`,
+decides whether a **released** design may be reopened by a PM. A wrong answer does not error; it
+answers a different question.
+
+**Every piece of the fix is inside `design_views.py`** — the helper, both gates, `_add_sites()`'s
+duplicate-add check, `remove_from_group()`'s hardcoded *"Removed from procurement group"* log
+string, `_group_or_404()`, and `site_group_lock`'s write path. §13 of the model doc states the
+boundary plainly for `DesignAssignment`: *"editing design_views.py … has been correctly scoped and
+untouched all programme. It is a session of its own."*
+
+**Not fixed, and deliberately not worked around.** **Risk if left:** prompt 1.1 cannot deliver D-1
+without crossing this boundary, so it must be granted permission explicitly and in writing before
+it starts — otherwise it will either stop halfway or cross the boundary on its own judgement. The
+smallest diff (three lines, one function, no caller changes) is quoted in `SITE_GROUP_AUDIT.md`
+Task C.
+
+Two related notes for whoever takes that session: `post_qc_pool()` silently loses sites to
+execution groups unless narrowed (Task B), and `project_boq_is_group_locked()` is correct today
+only because `'locked'` happens to exist on no other group type (Task D).
 
 ---
 
