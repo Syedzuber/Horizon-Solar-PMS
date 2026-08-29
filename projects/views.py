@@ -3600,15 +3600,28 @@ def _render_comments_hx(request, project, task):
 
 
 def _checklist_for_task(task, project):
-    """Resolve the active Checklist assigned to this task via ChecklistTaskLink
-    (task_name + project_type), or None. Inactive checklists are treated as unassigned."""
+    """Resolve the ACTIVE version of the Checklist assigned to this task via
+    ChecklistTaskLink (task_name + project_type), or None. A draft or archived checklist
+    is treated as unassigned — exactly as is_active=False was.
+
+    RESOLUTION IS THROUGH THE FAMILY, NOT THE LINKED ROW. The link records which
+    checklist family is assigned to this task name; `status='active'` records which
+    version of that family is live. Before versioning existed every family had exactly
+    one version, so for every task that exists today this returns the same row
+    link.checklist.is_active returned, and None wherever it returned None. Without the
+    family lookup, activating v2 would leave the link pointing at the archived v1 and
+    the checklist would vanish from the task."""
     link = (ChecklistTaskLink.objects
             .select_related('checklist')
             .filter(task_name=task.task_name, project_type=project.project_type)
             .first())
-    if link is None or not link.checklist.is_active:
+    if link is None:
         return None
-    return link.checklist
+    if link.checklist.status == Checklist.ACTIVE:
+        return link.checklist              # fast path: the linked row IS the live version
+    return (Checklist.objects
+            .filter(code=link.checklist.code, status=Checklist.ACTIVE)
+            .first())
 
 
 def _checklist_context(request, project, task):
@@ -3627,7 +3640,19 @@ def _checklist_context(request, project, task):
             for c in ChecklistItemCompletion.objects.filter(task=task, item__in=items)
                                                     .select_related('checked_by')
         }
-    rows = [{'item': it, 'completion': completions.get(it.id)} for it in items]
+    # R-8 read path: a CHECKED row renders the text that was actually answered, never
+    # the item's current label — that is the whole point of the snapshot. An unchecked
+    # row has no snapshot to render and shows the live label, which is the question
+    # being asked now. Computed here rather than in the template so there is exactly
+    # one place that decides which of the two a reader sees.
+    rows = []
+    for it in items:
+        completion = completions.get(it.id)
+        if completion is not None and completion.is_checked and completion.item_text_snapshot:
+            label = completion.item_text_snapshot
+        else:
+            label = it.label
+        rows.append({'item': it, 'completion': completion, 'label': label})
     return {
         'project':            project,
         'task':               task,
@@ -8128,21 +8153,26 @@ def checklist_item_complete(request, project_id, task_id, item_id):
         f"{settings.SUPABASE_BUCKET}/{supabase_path}"
     )
 
-    # Atomic completion: tick + all three photo fields written together on the (item, task) row.
+    # Atomic completion: tick + all three photo fields + the text snapshot written
+    # together on the (item, task) row. item_text_snapshot joins that same save
+    # deliberately (R-8) — a checked item can no more lack the question it answered than
+    # it can lack its photo.
+    answered_text = item.label
     completion, _created = ChecklistItemCompletion.objects.get_or_create(item=item, task=task)
     completion.photo_file_name     = photo.name
     completion.photo_url           = file_url
     completion.photo_supabase_path = supabase_path
     completion.is_checked          = True
+    completion.item_text_snapshot  = answered_text
     completion.checked_by          = request.user
     completion.checked_at          = timezone.now()
     completion.save(update_fields=[
         'photo_file_name', 'photo_url', 'photo_supabase_path',
-        'is_checked', 'checked_by', 'checked_at',
+        'is_checked', 'item_text_snapshot', 'checked_by', 'checked_at',
     ])
 
     log_activity(project, profile,
-                 f"Completed checklist item '{item.label}' on task: {task.task_name}",
+                 f"Completed checklist item '{answered_text}' on task: {task.task_name}",
                  entity_type='ChecklistItemCompletion', entity_id=completion.pk)
     messages.success(request, 'Checklist item checked.')
 
@@ -10429,6 +10459,16 @@ def admin_task_durations(request):
 # hardcoded Residential template via utils.get_residential_template_task_names(). All
 # mutations are Admin-only and log_activity(entity_type='Checklist'). Item CRUD lives
 # here (NOT on task detail); task detail is completion-only.
+#
+# R-7 SINCE 0.5: a Checklist is one numbered VERSION of a family. Items may be added,
+# reworded, reordered and deleted only while the version is a DRAFT; activating it
+# freezes the content and archives the previous active version of the same code in one
+# transaction. Task LINKS are not version content and stay editable throughout — the
+# link says which family a task uses, `status` says which version of it is live.
+#
+# Creating version 2 is not a screen this module builds (prompt 0.5, task 4). It is done
+# through the Django admin or a migration, and the only thing that makes v2 the next
+# version of a family rather than a new family is passing the SAME `code`.
 # ---------------------------------------------------------------------------
 
 def _checklist_task_name_choices():
@@ -10438,11 +10478,29 @@ def _checklist_task_name_choices():
     return get_residential_template_task_names()
 
 
+def _checklist_locked_redirect(request, checklist):
+    """R-7 refusal shared by every portal-admin action that edits checklist CONTENT.
+
+    Returns a redirect when the version is not a draft, or None when the caller may
+    proceed. The model's save()/delete() already raise TemplateVersionLocked; this turns
+    that into a message on the screen the admin is standing on, rather than a 500 —
+    the same choice _DraftOnlyContentAdmin makes in the Django admin."""
+    if checklist.is_editable:
+        return None
+    messages.error(
+        request,
+        f'"{checklist.name}" is {checklist.get_status_display().lower()}, not a draft, and its '
+        f'items cannot be changed (R-7). Editing a live checklist means publishing '
+        f'version {checklist.version_no + 1}.'
+    )
+    return redirect('admin_checklist_edit', checklist_id=checklist.pk)
+
+
 @login_required
 @role_required(['Admin'])
 def admin_checklists(request):
-    """List all Checklists (name, item count, assigned task_name/project_type pairs, active
-    toggle). Access: Admin only."""
+    """List all Checklist versions (name, version, status, item count, assigned
+    task_name/project_type pairs). Access: Admin only."""
     checklists = (
         Checklist.objects
         .prefetch_related('items', 'task_links')
@@ -10456,7 +10514,11 @@ def admin_checklists(request):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_create(request):
-    """Create a new empty Checklist, then redirect to its editor. Access: Admin only. POST only."""
+    """Create a new Checklist as version 1, in DRAFT, then redirect to its editor.
+
+    Draft, not live: items are addable only while the version is a draft (R-7), so the
+    order is author-then-publish. `code` is derived from the name by Checklist.save().
+    Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklists')
 
@@ -10467,17 +10529,25 @@ def admin_checklist_create(request):
 
     checklist = Checklist.objects.create(name=name, created_by=request.user)
     log_activity(None, request.user.profile,
-                 f"Created checklist '{name}'",
+                 f"Created checklist '{name}' as {checklist.code} v1 (draft)",
                  entity_type='Checklist', entity_id=checklist.pk)
-    messages.success(request, f'Checklist "{name}" created. Add items and assign tasks below.')
+    messages.success(
+        request,
+        f'Checklist "{name}" created as a draft. Add its items, then publish it — '
+        f'a draft is not shown on any task until it is published.'
+    )
     return redirect('admin_checklist_edit', checklist_id=checklist.pk)
 
 
 @login_required
 @role_required(['Admin'])
 def admin_checklist_edit(request, checklist_id):
-    """Editor for one Checklist: rename/active toggle, item add/edit/delete/reorder, and
-    task-link assign/unassign. GET only — mutations POST to the dedicated actions below."""
+    """Editor for one Checklist version: rename, publish/archive, item
+    add/edit/delete/reorder, and task-link assign/unassign. GET only — mutations POST to
+    the dedicated actions below.
+
+    `is_editable` drives the whole screen: on a published or archived version the item
+    forms are replaced with read-only rows (R-7), while the task links stay editable."""
     checklist = get_object_or_404(Checklist, pk=checklist_id)
     items = checklist.items.all()
     links = checklist.task_links.all()
@@ -10486,6 +10556,12 @@ def admin_checklist_edit(request, checklist_id):
         'checklist':       checklist,
         'items':           items,
         'links':           links,
+        # Other versions of the same family, so the editor shows the history rather than
+        # presenting a version as if it stood alone.
+        'sibling_versions': (Checklist.objects
+                             .filter(code=checklist.code)
+                             .exclude(pk=checklist.pk)
+                             .order_by('-version_no')),
         'task_name_pairs': _checklist_task_name_choices(),
         'project_types':   Project.PROJECT_TYPE_CHOICES,
     })
@@ -10494,23 +10570,79 @@ def admin_checklist_edit(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_update(request, checklist_id):
-    """Rename a Checklist and/or toggle its active flag. Access: Admin only. POST only."""
+    """Rename a DRAFT Checklist, or move a version through its lifecycle.
+
+    Replaces the old is_active checkbox, which no longer has a column behind it. Two
+    actions, and only one of them can apply to a given version:
+
+      publish  — draft → active, archiving the previous active version of the same code
+                 in the same transaction (Checklist.activate()). Freezes the content.
+      archive  — active → archived. Withdraws the checklist from every task that links
+                 to it, which is what unticking "Active" used to do.
+
+    ARCHIVING IS NOT REVERSIBLE, deliberately, and this is a change from the old
+    checkbox. An archived version is the record of what last month's sites answered;
+    bringing it back would mean its content had been frozen for a period and then
+    resumed. Republishing means publishing version+1. Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    action = request.POST.get('action', 'rename').strip()
+
+    if action == 'publish':
+        if not checklist.is_editable:
+            messages.error(request, f'Only a draft can be published; this version is '
+                                    f'{checklist.get_status_display().lower()}.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+        if not checklist.items.exists():
+            messages.error(request, 'Add at least one item before publishing this checklist.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+        superseded = (Checklist.objects
+                      .filter(code=checklist.code, status=Checklist.ACTIVE)
+                      .exclude(pk=checklist.pk)
+                      .values_list('version_no', flat=True).first())
+        checklist.activate()
+        note = f' (v{superseded} archived)' if superseded else ''
+        log_activity(None, request.user.profile,
+                     f"Published checklist '{checklist.name}' {checklist.code} "
+                     f"v{checklist.version_no}{note}",
+                     entity_type='Checklist', entity_id=checklist.pk)
+        messages.success(request, f'Published version {checklist.version_no}. '
+                                  f'Its items are now frozen.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    if action == 'archive':
+        if checklist.status != Checklist.ACTIVE:
+            messages.error(request, 'Only the active version can be archived.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+        checklist.status = Checklist.ARCHIVED
+        checklist.save(update_fields=['status'])
+        log_activity(None, request.user.profile,
+                     f"Archived checklist '{checklist.name}' {checklist.code} "
+                     f"v{checklist.version_no}",
+                     entity_type='Checklist', entity_id=checklist.pk)
+        messages.success(request, 'Checklist archived. It is no longer shown on any task.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    # --- rename -------------------------------------------------------------------
+    # The name is the version's own label, not its content, but it is still what the
+    # version was published as. Editable while draft only, matching TaskTemplateAdmin.
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     name = request.POST.get('name', '').strip()
     if not name:
         messages.error(request, 'Checklist name cannot be empty.')
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
-    is_active = request.POST.get('is_active') == 'on'
     checklist.name = name
-    checklist.is_active = is_active
-    checklist.save(update_fields=['name', 'is_active'])
+    checklist.save(update_fields=['name'])
 
     log_activity(None, request.user.profile,
-                 f"Updated checklist '{name}' (active={is_active})",
+                 f"Renamed checklist {checklist.code} v{checklist.version_no} to '{name}'",
                  entity_type='Checklist', entity_id=checklist.pk)
     messages.success(request, 'Checklist saved.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
@@ -10519,17 +10651,23 @@ def admin_checklist_update(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_delete(request, checklist_id):
-    """Delete a Checklist. Cascades to its items, task links, and item completions.
+    """Delete a Checklist version. Cascades to its items and task links.
+
+    IT NO LONGER DESTROYS COMPLETION HISTORY. ChecklistItemCompletion.item is SET_NULL,
+    so every tick, photo, checker and timestamp survives with the answered text held in
+    item_text_snapshot. That is the point of 0.5: an admin tidying up a checklist used
+    to erase the inspection record of every site that had ever answered it.
+
     Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklists')
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
     name = checklist.name
-    checklist.delete()  # CASCADE: items → completions, and task_links
+    checklist.delete()  # CASCADE: items and task_links. Completions survive, item=NULL.
 
     log_activity(None, request.user.profile,
-                 f"Deleted checklist '{name}' (and its items, links, and completions)",
+                 f"Deleted checklist '{name}' (its items and links; completion records kept)",
                  entity_type='Checklist', entity_id=None)
     messages.success(request, f'Checklist "{name}" deleted.')
     return redirect('admin_checklists')
@@ -10538,11 +10676,18 @@ def admin_checklist_delete(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_add(request, checklist_id):
-    """Append one item to a Checklist. Access: Admin only. POST only."""
+    """Append one item to a DRAFT Checklist. Access: Admin only. POST only.
+
+    Adding is content too (R-7): a question added to a live checklist retroactively
+    makes every site that already completed it incomplete."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     label = request.POST.get('label', '').strip()
     if not label:
         messages.error(request, 'Please enter a label for the item.')
@@ -10561,11 +10706,18 @@ def admin_checklist_item_add(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_edit(request, checklist_id, item_id):
-    """Edit one Checklist item's label. Access: Admin only. POST only."""
+    """Edit one DRAFT Checklist item's label. Access: Admin only. POST only.
+
+    This is the defect 0.5 exists for: rewording a live item used to change the wording
+    displayed against every completion already recorded against it."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     label = request.POST.get('label', '').strip()
     if not label:
@@ -10585,11 +10737,18 @@ def admin_checklist_item_edit(request, checklist_id, item_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_delete(request, checklist_id, item_id):
-    """Delete one Checklist item (cascades to its completions). Access: Admin only. POST only."""
+    """Delete one item from a DRAFT Checklist. Access: Admin only. POST only.
+
+    It does NOT cascade to completions any more — the FK is SET_NULL and each completion
+    keeps its tick, photo, checker, timestamp and the text it answered."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     label = item.label
     item.delete()
@@ -10604,12 +10763,16 @@ def admin_checklist_item_delete(request, checklist_id, item_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_move(request, checklist_id, item_id):
-    """Reorder a Checklist item up or down by swapping `order` with its neighbour (no drag
-    library). Access: Admin only. POST only."""
+    """Reorder a DRAFT Checklist item up or down by swapping `order` with its neighbour
+    (no drag library). Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     direction = request.POST.get('direction', '')
 

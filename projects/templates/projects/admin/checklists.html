@@ -11,6 +11,8 @@
     <p class="text-sm text-gray-500 mt-1">
       Reusable checklists — author items once, then assign to one or more tasks by
       (task name, project type). A task can have at most one checklist.
+      Each row is one numbered version: a draft is editable and shown nowhere, publishing
+      freezes its items, and archiving withdraws it.
     </p>
   </div>
   <form method="POST" action="{% url 'admin_checklist_create' %}" class="flex items-center gap-2 shrink-0">
@@ -30,9 +32,10 @@
   <thead>
     <tr class="bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
       <th class="px-4 py-2">Name</th>
+      <th class="px-4 py-2 w-24">Version</th>
       <th class="px-4 py-2 w-20 text-center">Items</th>
       <th class="px-4 py-2">Assigned tasks</th>
-      <th class="px-4 py-2 w-24 text-center">Active</th>
+      <th class="px-4 py-2 w-24 text-center">Status</th>
       <th class="px-4 py-2 w-20"></th>
     </tr>
   </thead>
@@ -41,7 +44,9 @@
     <tr class="hover:bg-gray-50 transition-colors align-top">
       <td class="px-4 py-3 font-medium text-gray-800">
         <a href="{% url 'admin_checklist_edit' cl.pk %}" class="text-green-700 hover:underline">{{ cl.name }}</a>
+        <div class="text-xs text-gray-400 font-normal mt-0.5">{{ cl.code }}</div>
       </td>
+      <td class="px-4 py-3 text-gray-600">v{{ cl.version_no }}</td>
       <td class="px-4 py-3 text-center text-gray-600">{{ cl.items.count }}</td>
       <td class="px-4 py-3">
         {% for link in cl.task_links.all %}
@@ -53,10 +58,12 @@
         {% endfor %}
       </td>
       <td class="px-4 py-3 text-center">
-        {% if cl.is_active %}
+        {% if cl.status == 'active' %}
           <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+        {% elif cl.status == 'draft' %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Draft</span>
         {% else %}
-          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">Inactive</span>
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">Archived</span>
         {% endif %}
       </td>
       <td class="px-4 py-3 text-right">
@@ -66,7 +73,7 @@
       </td>
     </tr>
     {% empty %}
-    <tr><td colspan="5" class="px-4 py-8 text-center text-gray-400">No checklists yet. Create one above.</td></tr>
+    <tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">No checklists yet. Create one above.</td></tr>
     {% endfor %}
   </tbody>
 </table>

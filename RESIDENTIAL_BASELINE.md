@@ -428,6 +428,19 @@ Linked by **string match**, not FK: `ChecklistTaskLink(task_name, project_type)`
 - Already-checked is an idempotent no-op.
 - Writes `ChecklistItemCompletion(item, task)` plus one `ActivityLog`. No notification.
 
+> **Changed 29 Aug 2026 by prompt 0.5 — see `docs/execution-model.md` §15.** The completion
+> now also writes `item_text_snapshot`, in the *same* `save()` as `is_checked` and the photo
+> fields, and every read path renders the snapshot rather than `item.label`. The item FK is
+> nullable `SET_NULL`, so deleting a checklist item no longer deletes its completions.
+> `Checklist` is versioned (`code` / `version_no` / `status`, `is_active` is now a property
+> over `status`), its items are immutable once the version is active, and
+> `_checklist_for_task()` resolves the *active version of the linked family* — which for
+> every checklist that existed before 0.5 is the identical row it returned before.
+>
+> Four fixtures in `tests_residential_baseline.py` and `tests_soft_delete.py` create an
+> active checklist and *then* add an item, which R-7 now forbids; the fix is a fixture
+> reorder that changes no assertion. Listed in §15.
+
 **Nothing gates task completion on the checklist.** A task with an unfinished checklist can be
 marked `Done`. `docs/execution-model.md` §9 lists "installation checklist blocking" as a
 confirmed business rule; it is not implemented.

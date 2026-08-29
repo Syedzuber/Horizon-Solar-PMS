@@ -1,3 +1,5 @@
+import re
+
 from django.db import models, transaction
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -1866,10 +1868,15 @@ def _require_draft_template(template, what):
     Archived is frozen as hard as active — an archived version is the record of what
     a project built last month was built from, and rewriting it would make that record
     a lie.
+
+    SHARED BY BOTH VERSIONED FAMILIES — TaskTemplate (0.4) and Checklist (0.5). It reads
+    `template.DRAFT` off the version rather than naming one class, so the two families
+    cannot drift into two different answers to the same question. Any third versioned
+    template must expose DRAFT/ACTIVE/ARCHIVED, `status` and `version_no` and reuse this.
     """
     if template is None:          # unsaved parent; the parent's own save() will fail first
         return
-    if template.status != TaskTemplate.DRAFT:
+    if template.status != template.DRAFT:
         raise TemplateVersionLocked(
             f"Cannot modify {what}: {template} is '{template.status}', not a draft. "
             f"Editing an active template means creating version {template.version_no + 1} "
@@ -2056,35 +2063,173 @@ class TaskTemplateTask(models.Model):
         return super().delete(*args, **kwargs)
 
 
+def derive_checklist_code(name, checklist_model, exclude_pk=None):
+    """Derive a stable, unique family code for a Checklist from its human name.
+
+    TaskTemplate.code is always supplied explicitly because templates are seeded by
+    migrations. Checklists are created through a screen where the admin types only a
+    name, so the code is derived here rather than made the admin's problem.
+
+    VERSION 2 AND LATER MUST PASS THE FAMILY'S CODE EXPLICITLY. Deriving it again from
+    the same name would find v1's code already taken and hand back a disambiguated one,
+    which would make v2 a separate family rather than the next version of this one.
+    """
+    base = re.sub(r'[^A-Z0-9]+', '-', (name or '').upper()).strip('-')[:50]
+    if not base:
+        base = 'CHECKLIST'
+
+    qs = checklist_model.objects.all()
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    taken = set(qs.values_list('code', flat=True))
+
+    if base not in taken:
+        return base
+    n = 2
+    while True:
+        suffix    = f'-{n}'
+        candidate = f'{base[:50 - len(suffix)]}{suffix}'
+        if candidate not in taken:
+            return candidate
+        n += 1
+
+
 class Checklist(models.Model):
     """
-    A named, reusable checklist template authored once in portal-admin and surfaced on
-    a task by explicitly linking it to one or more (task_name, project_type) pairs via
+    One numbered version of a reusable checklist, authored in portal-admin and surfaced
+    on a task by linking it to one or more (task_name, project_type) pairs via
     ChecklistTaskLink. Its line items live in ChecklistItem; per-task completion state
-    lives in ChecklistItemCompletion. Replaces the prior per-task-instance checklist
-    model — checklists are now reusable across every task with the linked name/type.
+    lives in ChecklistItemCompletion.
+
+    R-7 — VERSIONED AND IMMUTABLE ONCE ACTIVE, exactly as TaskTemplate is. Editing an
+    active checklist means creating version+1 as a draft, changing that, then calling
+    activate(), which archives version N in the same transaction. `code` is the identity
+    that survives across versions: when v2 rewords a label, `code` is what says it is
+    still the same checklist. The shape, the constraint style and the immutability
+    enforcement are deliberately identical to TaskTemplate's — two versioned template
+    families in one codebase must not carry two different designs.
+
+    `is_active` USED TO BE A COLUMN AND IS NOW A PROPERTY over `status` (migration 0070).
+    Two stored columns answering "is this live" is exactly the drift this model existed
+    to demonstrate; there is one answer now, and the property is a compatibility shim
+    over it, not a second source of truth.
+
+    ENFORCEMENT LIMIT, stated rather than implied: the R-7 guards are save()/delete()
+    overrides on ChecklistItem. QuerySet.update(), QuerySet.delete() and the FK cascade
+    from deleting a Checklist all operate in SQL and bypass them entirely — the same
+    honest half-measure as TaskTemplate's and StatusTransition's.
     """
 
-    name       = models.CharField(max_length=200)
-    is_active  = models.BooleanField(default=True)  # Inactive checklists are hidden on task detail
-    created_by = models.ForeignKey(
+    DRAFT    = 'draft'
+    ACTIVE   = 'active'
+    ARCHIVED = 'archived'
+
+    STATUS_CHOICES = [
+        (DRAFT,    'Draft'),
+        (ACTIVE,   'Active'),
+        (ARCHIVED, 'Archived'),
+    ]
+
+    code           = models.CharField(max_length=50)   # Cross-version identity: v1 and v2 of one checklist share it
+    name           = models.CharField(max_length=200)
+    version_no     = models.PositiveIntegerField(default=1)
+    status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
+    effective_from = models.DateField(null=True, blank=True)   # Stamped by activate()
+    created_by     = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='created_checklists',
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['name', '-version_no']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code', 'version_no'],
+                name='uniq_checklist_code_version',
+            ),
+            # At most ONE active version per checklist code. Partial (condition=) so any
+            # number of draft and archived versions may coexist beside it — the history
+            # is kept, the exclusivity is not weakened by keeping it. Same shape as
+            # uniq_active_task_template_per_code.
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(status='active'),   # literal: a nested Meta cannot see the outer class body's ACTIVE
+                name='uniq_active_checklist_per_code',
+            ),
+        ]
 
     def __str__(self):
-        return self.name
+        return f"{self.name} v{self.version_no} ({self.status})"
+
+    @property
+    def is_active(self):
+        """DEPRECATED SHIM over `status`, kept so existing callers keep reading one truth.
+
+        There is no is_active column any more. Reads answer "is this the live version",
+        which is what the column meant; writes map True → active and False → archived,
+        because an inactive checklist was one that had been offered and withdrawn, not
+        one that had never been published.
+        """
+        return self.status == self.ACTIVE
+
+    @is_active.setter
+    def is_active(self, value):
+        self.status = self.ACTIVE if value else self.ARCHIVED
+
+    @property
+    def is_editable(self):
+        """Content may be changed only while the version is a draft (R-7)."""
+        return self.status == self.DRAFT
+
+    def save(self, *args, **kwargs):
+        # A checklist created through the admin screen carries only a name; derive the
+        # family code from it. Never overwrites a code that was supplied — which is how
+        # version 2 of a family stays in the family.
+        if not self.code:
+            self.code = derive_checklist_code(self.name, Checklist, exclude_pk=self.pk)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'code' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['code']
+        return super().save(*args, **kwargs)
+
+    def activate(self):
+        """Make this draft the active version, archiving the current active one.
+
+        Both writes happen in ONE transaction, so there is no instant at which a
+        checklist code has two active versions or none. Byte-for-byte the same body as
+        TaskTemplate.activate() by intent, not by accident.
+        """
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be activated; {self} is '{self.status}'."
+            )
+        with transaction.atomic():
+            # filter().update() rather than load-and-save: the archive and the
+            # activation must not interleave with a concurrent activate() of a third
+            # version, and the partial unique constraint is what adjudicates a race.
+            Checklist.objects.filter(
+                code=self.code, status=self.ACTIVE,
+            ).exclude(pk=self.pk).update(status=self.ARCHIVED)
+
+            self.status = self.ACTIVE
+            if self.effective_from is None:
+                self.effective_from = timezone.now().date()
+            self.save(update_fields=['status', 'effective_from'])
+        return self
 
 
 class ChecklistItem(models.Model):
     """
     One line item belonging to a Checklist. `order` is ascending within the checklist and
     is swapped by the admin up/down actions (no drag library). Deleting the parent
-    Checklist cascades to its items (and each item cascades to its completions).
+    Checklist cascades to its items — but an item's completions are NO LONGER destroyed
+    with it: ChecklistItemCompletion.item is SET_NULL and the answered text lives on the
+    completion as a snapshot.
+
+    R-7: content is editable only while the parent checklist is a draft. That covers
+    adding a line as well as rewording or removing one — adding a question to a live
+    checklist retroactively makes every site that already completed it incomplete.
     """
 
     checklist = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='items')
@@ -2096,6 +2241,16 @@ class ChecklistItem(models.Model):
 
     def __str__(self):
         return f"Checklist {self.checklist_id} — {self.label[:40]}"
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived checklist is immutable.
+        _require_draft_template(self.checklist, f"checklist item '{self.label[:40]}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived checklist is immutable.
+        _require_draft_template(self.checklist, f"checklist item '{self.label[:40]}'")
+        return super().delete(*args, **kwargs)
 
 
 class ChecklistTaskLink(models.Model):
@@ -2127,11 +2282,29 @@ class ChecklistItemCompletion(models.Model):
     an item requires BOTH a tick and a photo: is_checked is only ever set True together
     with the three photo_* fields in the same save, so a checked item can never lack a
     photo. Reuses the same three-field Supabase convention as the rest of the app.
+
+    R-8 — IT STORES THE TEXT IT WAS ANSWERING. `item_text_snapshot` is written from the
+    item's label at the instant the item is checked, and every read path renders the
+    snapshot rather than item.label. Without it, rewording a checklist line silently
+    rewrote history: forty sites completed in March displayed April's wording, and a
+    "Yes" recorded against the old question appeared to answer the new one.
+
+    THE FK IS SET_NULL, NOT CASCADE. Deleting a checklist item must never delete the
+    record of answering it — the tick, the photo, who checked it and when. The FK is
+    kept for provenance; the snapshot is the record. A completion whose item is null is
+    an answer to a question that no longer exists, and it is still evidence.
     """
 
-    item       = models.ForeignKey(ChecklistItem, on_delete=models.CASCADE, related_name='completions')
+    item       = models.ForeignKey(
+        ChecklistItem, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='completions',
+    )
     task       = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='checklist_completions')
     is_checked = models.BooleanField(default=False)
+
+    # The item's label as it stood when this item was checked (R-8). Blank only on a row
+    # that has never been checked, and on pre-0069 rows the backfill could not reach.
+    item_text_snapshot = models.TextField(blank=True, default='')
 
     # Supabase storage — same three-field convention as PaymentRequest / TaskAttachment.
     # One photo per completion; blank until the item is checked.
@@ -2147,8 +2320,22 @@ class ChecklistItemCompletion(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('item', 'task')
-        ordering        = ['pk']
+        ordering = ['pk']
+        constraints = [
+            # Was unique_together ('item', 'task'). Now PARTIAL, because `item` is
+            # nullable: both Postgres and SQLite treat NULLs as distinct in a unique
+            # index, so the plain form would silently degrade to "orphans are
+            # unconstrained". That degraded behaviour is the one we want — two orphaned
+            # completions on one task were two genuinely different items and both must
+            # survive — but leaning on per-backend NULL semantics to express a business
+            # rule is the implicit-rule class this module has been removing. Live rows
+            # keep exactly the old guarantee: one completion per (item, task).
+            models.UniqueConstraint(
+                fields=['item', 'task'],
+                condition=models.Q(item__isnull=False),
+                name='uniq_checklist_completion_item_task',
+            ),
+        ]
 
     def __str__(self):
         state = 'checked' if self.is_checked else 'pending'

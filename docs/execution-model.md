@@ -148,7 +148,7 @@ Assignments are **effective-dated rows**, never a foreign key on `Project`. Ther
 |---|---|---|
 | Execution phases and tasks | `ProjectPhase`, `Task` | **52** tasks across 9 phases for Residential ✔ — asserted at `utils.py:908` inside the atomic block, so a mismatch rolls back activation. 44 internal / 8 external. **OPEX/CAPEX have no template at all** ✔ |
 | Task template | `TaskDurationTemplate` | `unique_together = ('project_type', 'task_name')` ✔ — **`phase_name` is stored and displayed but never matched on**. Two identically-named tasks in different phases cannot carry different durations. No version, no snapshot ✔ |
-| Checklists | `Checklist`, `ChecklistItem`, `ChecklistTaskLink`, `ChecklistItemCompletion` | Linked by `(task_name, project_type)` string match ✔. Completion FKs the item with **no snapshot field of any kind** ✔, and the FK is `CASCADE` — deleting an item deletes its history outright |
+| Checklists | `Checklist`, `ChecklistItem`, `ChecklistTaskLink`, `ChecklistItemCompletion` | Linked by `(task_name, project_type)` string match ✔ — still, until 2.4. **Corrected 29 Aug by 0.5:** the completion now carries `item_text_snapshot`, and the item FK is nullable `SET_NULL`, not `CASCADE`. `Checklist` is versioned (`code`/`version_no`/`status`) and its content is immutable once active. See §15 |
 | Punch points | `Issue` | Carries severity, status, raised_by, assigned_to, due_date, resolution_note ✔; links to both `Task` and `DeliveryChallan`, both nullable `SET_NULL` ✔ |
 | Delivery and GRN | `DeliveryChallan`, `DCLineItem` | Project-scoped; no warehouse, movement type or serials ✔. **`DCLineItem` has no FK to `BOQItem` or `BOQItemMaster`** ✔ — only `boq_category` (CharField) and free-text `item_description`. Its `CATEGORY_CHOICES` has four values against `BOQItem`'s five ✔; anything in `Other` is unreconcilable by construction |
 | Vendor invoices | `PaymentRequest` | Live. `pending \| confirmed` ✔. "No edit/cancel by design" ✔ |
@@ -176,7 +176,7 @@ Residential "design" is six template tasks with `assigned_role='Design'`, moved 
 - **Delivery state is deliberately duplicated on the CEO dashboard, not the SCM one.** `dashboard_scm` reads `DeliveryChallan`/`DCLineItem` directly ✔ and reflects actual receipt state. The task-derived proxy is on the **CEO** dashboard ✔, and the code carries an explicit instruction: *"Do not 'improve' it by cross-checking against the SCM models — the two will disagree, and the disagreement is not a bug in either."* The reason given is coverage: production holds 1 challan and 2 BOQ rows across 28 active projects, so a challan-based card would be blank on 27 of 28. **This is a considered trade, not a defect.** It may deserve revisiting once real execution data exists — but only by decision, never by a session deciding to tidy it.
 - **The "BOQ is finished" signals are separate on purpose.** `project_boq_is_design_locked()` and `project_boq_is_group_locked()` each carry a written rationale for being distinct predicates answering different questions — authority over a user versus state of a site ✔. Do not collapse them without an explicit decision.
 - **No general transition history.** There are ad-hoc terminal stamps — `Task.completed_at`, `Task.blocked_since`, `Issue.resolved_at`/`closed_at`, several on `DesignAttempt` ✔ — but no from-status, no actor role, no reason. Dwell time in Blocked is partly answerable today; dwell time between two arbitrary states is not. Prompt 0.3 fixes the general case.
-- **Checklist history is rewritable and deletable.** Prompt 0.5 fixes it. Until then, treat every newly authored checklist as carrying the defect.
+- ~~**Checklist history is rewritable and deletable.**~~ **FIXED 29 Aug 2026 by prompt 0.5 — see §15.** The completion snapshots the text it answered, and the item FK is `SET_NULL`. What the fix cannot do is recover wordings edited before 0.5 shipped; the backfill records the label as it stands today.
 - **Access scoping** — see D-4 for what is already correct and what is not.
 - **`log_activity()` catches bare `Exception`** ✔ and can silently lose rows. Do not copy that pattern into `record_transition()`.
 - **Soft delete has no custom managers** ✔ — zero `objects =` or `models.Manager` in `models.py`. Every queryset must filter `is_deleted=False` itself.
@@ -450,3 +450,146 @@ exactly the six that are covered.
 | **28 Aug** | **B-10 closed: nothing happens to an in-flight project on upgrade.** Instances hold copied rows. `Task.template_task` is provenance only and must never become a behaviour lookup. |
 | **28 Aug** | **No `label_snapshot` on `Task`.** `task_name` already is the snapshot; a second copy would only be a second thing to keep in sync. |
 | **28 Aug** | **`TaskDurationTemplate`'s two editors made read-only, not repointed.** Repointing them to edit would either break R-7 or require the authoring UI 0.4 does not build. The table stays; dropping it is its own decision. |
+
+---
+
+## 15. Checklists — versioned, snapshotted, and no longer destroyed by their own FK
+
+Added by prompt 0.5, 29 Aug 2026. **Read this before drawing any conclusion from a
+checklist completion, and before assuming a checklist can be edited in place.**
+
+### The two defects it closes
+
+`ChecklistItemCompletion` foreign-keyed `ChecklistItem` and stored no copy of the text it
+was answering. That produced two failures with the same root:
+
+- **Rewriting.** Rewording a label changed the wording shown against every completion
+  already recorded against it. Sites completed in March displayed April's question, and a
+  tick recorded against the old one appeared to answer the new one.
+- **Deletion.** The FK was `CASCADE`, so deleting an item deleted every completion of it —
+  the tick, the photo reference, who checked it and when. Not rewritten; gone. One admin
+  tidying a checklist erased the inspection record of every site that had answered it.
+
+For CEIG paperwork, completion certificates and warranty claims that is a compromised
+audit trail rather than a display bug.
+
+### R-8 — the completion stores the text it answered
+
+`ChecklistItemCompletion.item_text_snapshot` is written from `item.label` in the **same
+`save()`** that writes `is_checked` and the three `photo_*` fields, so a checked item can
+no more lack the question it answered than it can lack its photo. `BOQRevision.snapshot`
+is the existing precedent for the pattern.
+
+**The FK is now `null=True, on_delete=SET_NULL`.** It is provenance; the snapshot is the
+record. A completion whose `item` is null answers a question that no longer exists, and it
+is still evidence.
+
+`unique_together ('item', 'task')` became a **partial** `UniqueConstraint` with
+`condition=Q(item__isnull=False)`. Live rows keep exactly the old guarantee — one
+completion per (item, task). Orphans are deliberately unconstrained, because two
+completions orphaned on one task answered two genuinely different questions and both must
+survive. Making the condition explicit rather than relying on per-backend NULL semantics
+is the point; the plain form would have degraded to the same behaviour by accident.
+
+**Every read path renders the snapshot** — `_checklist_context()` computes the label once
+and `_checklist.html` renders `row.label`; `ChecklistItemCompletionAdmin` shows an
+`answered_text` column. An unchecked row still shows the live label, because it is the
+question being asked now, not one that was answered.
+
+### R-7 — the checklist is versioned, on `TaskTemplate`'s design
+
+Deliberately the same shape, constraint style and enforcement as 0.4's task templates,
+because two versioned template families in one codebase must not carry two designs.
+`_require_draft_template()` and `TemplateVersionLocked` are **shared**, not duplicated.
+
+| | |
+|---|---|
+| Identity across versions | `Checklist.code` — derived from the name on first save, since the admin screen only asks for a name. **Version 2+ must pass the family code explicitly**; deriving it again would produce a disambiguated code and a different family. |
+| Constraints | `uniq_checklist_code_version`, and `uniq_active_checklist_per_code` (partial, `status='active'`) |
+| Immutability | `ChecklistItem.save()`/`delete()` raise unless the parent is `draft`. Archived is frozen as hard as active. **Adding** is content too: a question added to a live checklist retroactively makes every site that already completed it incomplete. |
+| Promotion | `Checklist.activate()` — archives the outgoing version and promotes the draft in one transaction |
+
+**`is_active` is gone as a column** (migration 0070) and survives as a read/write property
+over `status`: reads answer "is this the live version", writes map `True` to active and
+`False` to archived. One stored answer, and no second thing to keep in sync.
+
+`_checklist_for_task()` **resolves through the family, not the linked row**:
+`ChecklistTaskLink` says which family a task uses, `status` says which version is live.
+Every checklist migrated in as the sole v1 of its own code, so for every task that exists
+today it returns exactly the row `link.checklist.is_active` returned. Without it,
+publishing v2 would leave the link on the archived v1 and the checklist would vanish off
+the task. `ChecklistTaskLink` is therefore **not** version content and stays editable on a
+published version — it also could not be per-version, because `unique_together
+('task_name', 'project_type')` forbids v1 and v2 both linking the same task name.
+
+### Enforcement limits, stated rather than implied
+
+- The R-7 guards are `save()`/`delete()` overrides. `QuerySet.update()`,
+  `QuerySet.delete()` and the FK cascade from deleting a `Checklist` bypass them, exactly
+  as for `TaskTemplate` (§14) and `StatusTransition` (§13).
+- `SET_NULL` is enforced by Django's collector, **not** by a database-level
+  `ON DELETE SET NULL` — Django emits `NO ACTION`. A raw SQL `DELETE` against
+  `projects_checklistitem` now **raises a foreign-key violation** instead of cascading.
+  That is strictly safer than the old behaviour, which deleted the history silently, but
+  it is not the same as the ORM path.
+- The backfill is **best effort and cannot be otherwise.** A label reworded before 29 Aug
+  2026 was recorded as it stood on that date, not as it was answered. That history was
+  already unrecoverable. And a completion destroyed by the old cascade was *deleted*, not
+  orphaned — there is no null-item row standing in for it.
+
+### Authoring changed shape, and this is a real cost
+
+The portal-admin flow is now **create draft, add items, publish**. A new checklist is a
+draft and is shown on no task until published. The "Active" checkbox is replaced by
+Publish and Archive actions, and **archiving is not reversible** — republishing means
+publishing version+1. Creating version 2 is not a screen 0.5 builds; it is done through
+the Django admin or a migration.
+
+### Instrumentation — no change to §13
+
+0.5 adds **no** `StatusTransition` subject type. `Checklist.status` is not instrumented,
+for the same reason `TaskTemplate.status` is not: a new `subject_type` is a
+`SUBJECT_TYPE_CHOICES` migration, and R-1 applies. Add this row to §13's "NOT
+instrumented" table when reading it:
+
+| Model | Statuses | Why not |
+|---|---|---|
+| `Checklist` | `draft \| active \| archived` (`activate()`) | New in 0.5. A new `subject_type` is a schema change (R-1). The version rows are themselves the record, `effective_from` stamps the promotion, and R-7 makes them immutable. |
+
+### What 0.5 did NOT do
+
+- **No relink to template tasks.** `ChecklistTaskLink` still matches on
+  `(task_name, project_type)`; prompt 2.4 replaces the string match with a
+  `TaskTemplateTask` reference now that 0.4 has created those rows.
+- **No response types, acceptance rules or `fail_raises_punch`.** Phase 2.
+- **No checklist gate on task completion.** That is **B-6** and it belongs to 2.3.
+- **No checklist-authoring UI.**
+
+### The regression net paid for this
+
+Four tests in the two files 0.5 may not modify build their fixture as *create active
+checklist, then add an item* — which is precisely what R-7 now forbids. They fail with
+`TemplateVersionLocked` at the fixture line, not at an assertion:
+
+| File | Test |
+|---|---|
+| `tests_residential_baseline.py` | `test_the_assigned_user_completes_a_checklist_item_with_a_photo` |
+| `tests_residential_baseline.py` | `test_a_checklist_item_cannot_be_checked_without_a_photo` |
+| `tests_soft_delete.py` | `test_checklist_item_complete_refuses_a_deleted_project` |
+| `tests_soft_delete.py` | `test_a_live_project_still_takes_a_checklist_completion` |
+
+All four are fixed by reordering the fixture to *create draft, add items, `activate()`* —
+no assertion changes. The behaviour each one asserts is re-covered meanwhile by
+`tests_checklist_snapshot.py`. **Whoever is next allowed to touch those files should make
+that reorder and delete this subsection.**
+
+### Decision log addition
+
+| Date | Decision |
+|---|---|
+| **29 Aug** | **Checklists are versioned data, immutable once active (R-7)** — the same design as `TaskTemplate`, sharing its guard and its exception rather than restating them. |
+| **29 Aug** | **Completions snapshot the answered text (R-8) and the item FK is `SET_NULL`.** The FK is provenance; the snapshot is the record. |
+| **29 Aug** | **`is_active` removed as a column, kept as a property over `status`.** Two columns answering "is this live" is the drift the session existed to stop. |
+| **29 Aug** | **`ChecklistTaskLink` is not version content.** It names the family; `status` names the live version. `_checklist_for_task()` resolves through the family so publishing v2 moves the task onto it. |
+| **29 Aug** | **Archiving is terminal.** Republishing means publishing version+1 — a change from the old reversible Active checkbox, accepted as the cost of R-7. |
+| **29 Aug** | **Full R-7 parity chosen over keeping the regression net green.** Blocking *adds* as well as edits costs four fixture lines in files this session may not touch; a weaker guard would have cost a second immutability design. |

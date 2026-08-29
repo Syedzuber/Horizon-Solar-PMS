@@ -201,12 +201,39 @@ class NotificationLogAdmin(admin.ModelAdmin):
 
 
 class ChecklistItemInline(admin.TabularInline):
+    """Items are CONTENT of a checklist version (R-7) — editable only while it is a
+    draft. Same rule, and the same reason, as TaskTemplatePhase/TaskTemplateTask: the
+    model's save() already raises, and these hooks stop the admin offering the form at
+    all so a user gets "you may not change this" rather than a 500 on save."""
+
     model = ChecklistItem
     extra = 1
     fields = ['order', 'label']
 
+    def _is_draft(self, obj):
+        return obj is None or obj.is_editable
+
+    def has_add_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_add_permission(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_delete_permission(request, obj)
+
 
 class ChecklistTaskLinkInline(admin.TabularInline):
+    # NOT version content. The link records which checklist FAMILY is assigned to a task
+    # name; status records which version of it is live. Locking it to drafts would make
+    # a task's assignment un-editable the moment its checklist went live, and v1 and v2
+    # cannot both hold a link to the same task_name — unique_together forbids it.
     model = ChecklistTaskLink
     extra = 1
     fields = ['task_name', 'project_type']
@@ -214,10 +241,21 @@ class ChecklistTaskLinkInline(admin.TabularInline):
 
 @admin.register(Checklist)
 class ChecklistAdmin(admin.ModelAdmin):
-    list_display  = ['name', 'is_active', 'created_by', 'created_at']
-    list_filter   = ['is_active']
-    search_fields = ['name']
+    list_display  = ['name', 'code', 'version_no', 'status', 'effective_from',
+                     'created_by', 'created_at']
+    list_filter   = ['status', 'code']
+    search_fields = ['name', 'code']
+    # status is set by activate(), which archives the outgoing version in the same
+    # transaction. Editing it here would activate a version without archiving its
+    # predecessor and hit the partial unique constraint as an IntegrityError.
+    readonly_fields = ['status', 'created_at']
     inlines       = [ChecklistItemInline, ChecklistTaskLinkInline]
+
+    def has_change_permission(self, request, obj=None):
+        # The version's OWN row (its name, effective_from) is editable while draft.
+        if obj is not None and not obj.is_editable:
+            return False
+        return super().has_change_permission(request, obj)
 
 
 @admin.register(ChecklistTaskLink)
@@ -229,9 +267,19 @@ class ChecklistTaskLinkAdmin(admin.ModelAdmin):
 
 @admin.register(ChecklistItemCompletion)
 class ChecklistItemCompletionAdmin(admin.ModelAdmin):
-    list_display  = ['item', 'task', 'is_checked', 'checked_by', 'checked_at']
+    # R-8 read path: the column shows the text that was ANSWERED, not the item's current
+    # label. 'item' used to sit here and rendered ChecklistItem.__str__ — which reworded
+    # itself under the reader, and renders as None once the item has been deleted.
+    list_display  = ['answered_text', 'task', 'is_checked', 'checked_by', 'checked_at']
     list_filter   = ['is_checked']
-    readonly_fields = ['item', 'task', 'checked_by', 'checked_at', 'created_at']
+    readonly_fields = ['item', 'item_text_snapshot', 'task', 'checked_by', 'checked_at',
+                       'created_at']
+
+    @admin.display(description='Answered text')
+    def answered_text(self, obj):
+        # Falls back to the live label only for a row that was never checked and so
+        # never took a snapshot.
+        return obj.item_text_snapshot or (obj.item.label if obj.item_id else '—')
 
 
 @admin.register(SystemSettings)
