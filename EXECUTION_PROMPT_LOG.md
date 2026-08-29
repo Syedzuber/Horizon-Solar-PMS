@@ -42,7 +42,8 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | 1.2a | **Capability flags, warehouses and the execution lock.** `is_qaqc` / `is_hse` / `is_warehouse_keeper` on `UserProfile` (R-15); `StockLocation` (B-14 closed); `execution_groups_are_never_locked` on `SiteGroup`; migration `0072`. 23 tests. **Entirely additive — no behaviour change, no view touched.** Rewrote one 1.1b test whose fixture the constraint made unwritable. | ✅ |
 | 1.2b | **`ProjectAssignment` — BLOCKED on a product-owner decision.** Not started. See below | ☐ |
 | 1.3 | The OPEX/CAPEX task template — gated on B-09 | ☐ |
-| 1.4 | Task dependencies — gated on B-08 | ☐ |
+| 1.4a | **Task dependencies — the model half.** `TaskTemplateTaskDependency` and `TaskDependency`, `DependencyCycle`, `incomplete_predecessors()` and `materialise_task_dependencies()` in the new `projects/task_dependencies.py`, migration `0073`. 42 tests. **Entirely additive — no view, no template, no permission file, no status-change behaviour, and nothing that can prevent a task from being started.** Closes B-08 at the model layer. | ✅ |
+| 1.4b | **Task dependencies — the enforcement half.** Wires the early-start **warning** and the **mandatory reason** into the status-change path, and records the override as a `StatusTransition` with a remark under a new `REASON_EARLY_START`. **No migration** — a `REASON_*` constant is module-level by R-10, and `SUBJECT_TASK` already exists. **The first user-visible change in this programme**, on the most-used write path in the product. **The write paths it must cover — enumerated by 1.4a's pre-flight, so this session does not rediscover them:**<br>① `views.py:task_status_update` — blocked branch (`update()` at ~3840)<br>② `views.py:task_status_update` — ordinary ladder (~3884)<br>③ `views.py:task_detail_status_update` — blocked branch (~4078)<br>④ `views.py:task_detail_status_update` — ordinary ladder (~4118)<br>⑤ `views.py:milestone_receive` — milestone→task sync (~6569)<br>⑥ `views.py:project_overview` — Finance `update_milestone` branch, milestone→task sync (~7142)<br>**①–④ are two near-identical copies of one ~180-line function** (§B8). The warning must land in **both**, or a user routes around it by using the other screen. **⑤ and ⑥ are not a user starting a task** — they are an automatic sync wrapped in `except Exception: pass`, and a mandatory reason must **not** be imposed on them. **A seventh path exists and is uninstrumented: the Django admin's `TaskAdmin` change form** (§B9) — out of 1.4b's scope, but it is why "every task status write is instrumented" is not quite true today. | ☐ |
 
 ### Why 1.1 became 1.1a and 1.1b
 
@@ -150,3 +151,58 @@ heading.
 folded back in: `projects.userprofile` predates `0072` by seventy revisions, so no circular
 dependency forced the split. `makemigrations --check` is clean afterwards and the migration
 reverses and re-applies.
+
+### Why 1.4 became 1.4a and 1.4b
+
+Split on 30 Aug 2026, **before either half was written**, and for a third distinct reason.
+1.1 split on a technical finding. 1.2 split because one piece needed a product-owner
+answer. **1.4 splits because its two halves carry different kinds of risk, and bundling
+them would put both under one review.**
+
+**1.4a is a migration with no user-visible change.** Two tables, one exception, one new
+module, forty-two tests. Nothing reads the new tables, nothing calls the new functions, and
+no template version authors an edge — so on the day it deploys, the product behaves
+identically. That is a schema review.
+
+**1.4b edits `task_status_update` and `task_detail_status_update`, which is the most-used
+write path in the system, and it is the first change in this whole programme that a user
+can see.** Every PM, site engineer, designer and finance user moves tasks through that
+ladder every day. That is a behaviour review, and it deserves to be read on its own rather
+than alongside a `CREATE TABLE`.
+
+**The enumeration of status-write paths is 1.4b's, and it is in the row above rather than
+here**, so that session starts from a list instead of a search. Two findings came out of
+producing it and both are recorded in `EXECUTION_MODULE_DEFERRED.md` §B: ①–④ are **two
+copies of the same function** (§B8), and the **Django admin can change a task's status with
+no transition row at all** (§B9).
+
+### 1.4a — four notes
+
+**B-08 is closed, and the closure is narrower than it looks.** The *question* — may a site
+override a template task dependency — is answered and the mechanism now exists. The
+*enforcement* is 1.4b. B-08 was carried as "ANSWERED, NOT CLOSED" precisely because an
+answer with nothing built is a note rather than a decision; that is no longer true, and the
+remaining work is tracked as a prompt rather than as an open question.
+
+**Three narrowings were taken deliberately and are recorded in §12 so a later session can
+tell them from omissions:** Finish-to-Start only (no `dependency_type` column), no lag, and
+template-level authoring with instance materialisation. The first two are the same
+argument — a column that holds one value forever is worse than no column, and it is one
+additive migration to add when something real needs it. The third is B-10 restated for
+edges.
+
+**Cycle prevention was built, not deferred.** A cycle makes every task in it permanently
+waiting on a predecessor and is invisible until somebody tries to work, so it cannot be
+left to be noticed in production. Both models refuse one, on save, with a `DependencyCycle`
+that names the closing edge and the chain that closes it. Two-, three- and four-node cycles
+are pinned, and so is a **diamond**, which is convergence and must *not* be refused.
+
+**`materialise_task_dependencies()` exists but is called by nothing.** Its call site is
+inside `attach_residential_template()`'s existing atomic block, immediately after the phase
+and task loop — and 1.4a was forbidden to touch that function, correctly, because it is the
+single most load-bearing function in the product. The function is written so it can be
+called and tested in isolation, and one test runs it against a **really activated**
+Residential project to prove it is a well-behaved no-op against the shape production
+actually builds. It deliberately does **not** use `bulk_create()`: that would bypass every
+guard the same session just wrote, and the materialiser must not be the thing that walks
+around them.

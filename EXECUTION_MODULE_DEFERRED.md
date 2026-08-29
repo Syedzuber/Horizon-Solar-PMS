@@ -396,6 +396,83 @@ allowed to touch `views.py` should still do it.**
 
 ---
 
+### B8 — `task_status_update` and `task_detail_status_update` are two copies of one function
+
+Found by prompt 1.4a's pre-flight, 30 Aug 2026. **`projects/views.py` was on that prompt's
+forbidden list**, so this was enumerated rather than fixed. [views.py:3718](projects/views.py#L3718)
+and [views.py:3998](projects/views.py#L3998).
+
+The two are near-identical for roughly 180 lines each. Both parse `request.POST['status']`
+against the same `valid_statuses`, apply the same allowed-transition table, build the same
+`update_kwargs`, set and clear `blocked_since` on the same condition, write the status and its
+`record_transition()` row inside the same deliberately tight `transaction.atomic()`, run the same
+`_FINANCE_TASK_TO_MILESTONE` sync and the same `is_payment_milestone` branch. **They differ in
+two places only**: how the actor is resolved (`request.user.profile` versus a `profile` already
+bound by the caller), and what they render (an HTMX task row versus a task-detail redirect).
+
+**Why this matters more than an ordinary duplication.** These are two of the four write paths
+that change a `Task`'s status, and they are reached from two different screens that the same
+person uses interchangeably. **Any rule added to one and not the other is not enforced — it is
+merely avoidable**, by clicking through the other screen. 1.4b adds exactly such a rule: the
+B-08 early-start warning and its mandatory reason. If it lands in one copy, the feature is
+decorative.
+
+**The fix** is the 0.2b shape — extract the shared body into one helper that takes the actor and
+returns the outcome, leaving the two views owning only their gate and their rendering, the way
+`_apply_boq_acknowledgement()` left `boq_acknowledge` and the inline branch owning theirs.
+**That is a consolidation session, not 1.4b's job (R-12).** 1.4b must edit both copies and say
+in its report that it did.
+
+**Related, and counted honestly:** ⑤ `milestone_receive` and ⑥ `project_overview`'s Finance
+`update_milestone` branch contain a **second** duplicated pair — the milestone→task sync block,
+written out verbatim twice, both wrapped in `except Exception: pass`. Neither is a user starting
+a task, so 1.4b's warning does not belong in them, and they are noted here only so the count of
+task status-write paths is not later reported as four when it is six.
+
+---
+
+### B9 — the Django admin can change a task's status with no transition row
+
+Found by prompt 1.4a's pre-flight, 30 Aug 2026. **`projects/admin.py` was outside that prompt's
+MODE list**, so this was reported rather than fixed. [admin.py:142](projects/admin.py#L142):
+
+```python
+@admin.register(Task)
+class TaskAdmin(admin.ModelAdmin):
+    list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
+    list_filter  = ['assigned_role', 'status']
+    search_fields = ['task_name']
+```
+
+There is no `readonly_fields`, no `fields` and no `exclude`, so **every field including `status`
+is editable on the admin change form**, and `save_model()` intercepts only `assigned_to` — it
+routes that one field through the assignment chokepoint and passes everything else to
+`super().save_model()` untouched.
+
+**What that costs.** An admin status change writes **no `StatusTransition` row**. It does not set
+`completed_at` on a move to Done, does not set or clear `blocked_since`, does not run the
+task↔milestone sync, and — once 1.4b ships — will not show the early-start warning or collect
+the mandatory reason. `docs/execution-model.md` §13 currently lists `task` under **"Instrumented —
+every status write goes through `record_transition()`"** and names four view functions. **That
+claim is true of the views and not true of the product**, and §13's whole purpose is that a
+missing row must mean something definite.
+
+**Why it is not urgent.** The Django admin is reachable only by staff superusers, this is a
+five-person operation, and nothing in the product's own screens routes through it. The rows it
+writes are correct data; what is missing is the record of who changed them and why.
+
+**The fix, and it is small.** Either add `'status'` to `TaskAdmin.readonly_fields` — the admin
+stops being a status-write path at all, which is the honest answer given that `task_status_update`
+exists and is the supported one — or extend `save_model()` to call `record_transition()` when
+`'status' in form.changed_data`, alongside the `assigned_to` interception already there. **The
+first is preferable**: an admin form that writes a status correctly is a second implementation of
+the ladder, and D-3 and B8 above are both about not having two.
+
+**Do it in the next session allowed to touch `admin.py`, and correct §13 in the same edit** — a
+coverage table that overstates its coverage is worse than one that admits a gap.
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

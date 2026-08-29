@@ -1,5 +1,6 @@
 import re
 
+from django.core.exceptions import ValidationError
 from django.db import models, transaction
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -2092,6 +2093,279 @@ class TaskTemplateTask(models.Model):
         # R-7: content of an active or archived version is immutable.
         _require_draft_template(self.phase.template, f"task '{self.label}'")
         return super().delete(*args, **kwargs)
+
+
+
+# ---------------------------------------------------------------------------
+# Task dependencies (B-08) — Finish-to-Start, authored on the template,
+# materialised onto the instance.
+#
+# Two models, deliberately, and TaskDependency's docstring says why. Read it
+# before changing either.
+#
+# NOTHING HERE BLOCKS ANYTHING. B-08 was answered by the product owner on
+# 30 Aug 2026: a dependent task may be started before its predecessor is Done,
+# by ANYONE, with a mandatory reason and a warning. There is no hard block, no
+# role gate and no approval step, and none is to be added. The predicate that
+# reports an early start lives in projects/task_dependencies.py and is called
+# incomplete_predecessors(); it reports, it never refuses.
+# ---------------------------------------------------------------------------
+
+
+class DependencyCycle(Exception):
+    """Raised when an edge would close a loop in a task dependency graph.
+
+    A specific exception rather than a generic ValidationError, because whoever hits
+    this needs to be told WHICH edge closed the loop and by what existing path — a
+    cycle makes every task in it permanently 'waiting on a predecessor', and the loop
+    is invisible until somebody tries to work. The message carries the closing edge
+    and the chain the new edge would join up.
+
+    A plain Exception, matching TemplateVersionLocked and AppendOnlyViolation — this
+    codebase's two other structural-refusal exceptions — rather than a ValidationError
+    subclass. There is no form and no admin over these models today; when one is
+    written, it catches this by name.
+    """
+
+
+def _reject_dependency_cycle(edge_rows, predecessor, successor, exclude_pk=None):
+    """Refuse `predecessor -> successor` if `successor` can already reach `predecessor`.
+
+    `edge_rows` is an iterable of (predecessor_id, successor_id) pairs, ALREADY NARROWED
+    to the one scope the new edge lives in — one template version, or one project. The
+    caller owns that narrowing because the two models scope differently; this function
+    issues no query of its own.
+
+    A straightforward breadth-first walk forward from `successor` over the existing
+    edges. A template is tens of tasks, so the graph is small and fits in memory, and a
+    cleverer algorithm would buy nothing but a harder thing to read. If the walk reaches
+    `predecessor`, the proposed edge closes a loop and the path found is the proof.
+    """
+    if predecessor.pk is None or successor.pk is None:
+        return                      # unsaved endpoints; the FK write will fail first
+
+    forward = {}
+    for pred_id, succ_id in edge_rows:
+        if exclude_pk is not None and (pred_id, succ_id) == (predecessor.pk, successor.pk):
+            continue                # re-saving this very edge is not a new cycle
+        forward.setdefault(pred_id, []).append(succ_id)
+
+    # BFS from successor, remembering how each node was reached, so the message can
+    # print the actual chain rather than merely assert that one exists.
+    came_from = {successor.pk: None}
+    queue     = [successor.pk]
+    while queue:
+        node = queue.pop(0)
+        if node == predecessor.pk:
+            chain = []
+            while node is not None:
+                chain.append(node)
+                node = came_from[node]
+            chain.reverse()         # successor ... -> predecessor
+            raise DependencyCycle(
+                f"'{predecessor}' -> '{successor}' would close a dependency loop: "
+                f"'{successor}' already reaches '{predecessor}' through "
+                f"{len(chain) - 1} edge(s) (ids {' -> '.join(str(n) for n in chain)}). "
+                f"A cycle makes every task in it permanently waiting on a predecessor."
+            )
+        for nxt in forward.get(node, ()):
+            if nxt not in came_from:
+                came_from[nxt] = node
+                queue.append(nxt)
+
+
+class TaskTemplateTaskDependency(models.Model):
+    """Within one template version, `successor` may not start until `predecessor` is Done.
+
+    FINISH-TO-START ONLY, AND NO LAG — both are narrowings decided on 30 Aug 2026, not
+    omissions (docs/execution-model.md §12). There is deliberately no `dependency_type`
+    column: nothing in the business has asked for start-to-start or finish-to-finish,
+    and a type column holding one value forever is worse than no column. Add either
+    when a real task list needs it.
+
+    R-7, AND IT SITS INSIDE TaskTemplate's VERSIONING SCHEME RATHER THAN BESIDE IT. An
+    edge is content of a template version, so it is editable only while that version is
+    a draft, enforced through the shared _require_draft_template() that
+    TaskTemplatePhase, TaskTemplateTask and ChecklistItem already raise from. Adding an
+    edge to a live version would retroactively make in-flight work wait on something it
+    was never told about — the same class of harm as adding a question to a live
+    checklist, which is why 0.5's guard blocks adds as well as edits.
+
+    BOTH SIDES MUST BELONG TO THE SAME TEMPLATE VERSION. That cannot be a
+    CheckConstraint: the two versions are reached through two FK hops and a constraint's
+    fields must be local columns — the same wall audit F-1 hit on D-1. It is therefore
+    clean() plus a guard in save(), and the honest limit of that is stated once for both
+    models on TaskDependency below.
+    """
+
+    predecessor = models.ForeignKey(
+        'TaskTemplateTask', on_delete=models.CASCADE, related_name='dependents',
+    )
+    successor   = models.ForeignKey(
+        'TaskTemplateTask', on_delete=models.CASCADE, related_name='dependencies',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'task template task dependency'
+        verbose_name_plural = 'task template task dependencies'
+        constraints = [
+            # The same edge twice is meaningless.
+            models.UniqueConstraint(
+                fields=['predecessor', 'successor'],
+                name='uniq_task_template_task_dependency',
+            ),
+            # A task may not depend on itself. BOTH columns are local, so unlike the
+            # same-version rule this one IS expressible as a database CHECK — and is
+            # written as one for the reason 1.2a wrote execution_groups_are_never_locked
+            # as one: a rule the database enforces stops being a rule the code has to
+            # remember. The save() guard beside it exists only to raise a readable
+            # message instead of an IntegrityError.
+            models.CheckConstraint(
+                condition=~models.Q(predecessor=models.F('successor')),
+                name='task_template_task_dependency_not_self',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.predecessor} -> {self.successor}"
+
+    def clean(self):
+        # A task may not depend on itself.
+        if self.predecessor_id is not None and self.predecessor_id == self.successor_id:
+            raise ValidationError(
+                f"A template task cannot depend on itself ('{self.predecessor}')."
+            )
+
+        if self.predecessor_id is None or self.successor_id is None:
+            return
+
+        # Both sides must belong to the same template version. An edge spanning two
+        # versions would mean a project waiting on a row from a version it was never
+        # built from.
+        pred_template = self.predecessor.phase.template_id
+        succ_template = self.successor.phase.template_id
+        if pred_template != succ_template:
+            raise ValidationError(
+                f"A dependency must join two tasks of the SAME template version: "
+                f"'{self.predecessor}' belongs to {self.predecessor.phase.template} and "
+                f"'{self.successor}' belongs to {self.successor.phase.template}."
+            )
+
+        # Cycle check, scoped to this template version's own edges.
+        _reject_dependency_cycle(
+            TaskTemplateTaskDependency.objects
+            .filter(predecessor__phase__template_id=pred_template)
+            .values_list('predecessor_id', 'successor_id'),
+            self.predecessor, self.successor, exclude_pk=self.pk,
+        )
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable. Checked FIRST, so
+        # a change to a live version is refused for being live rather than for whatever
+        # else might also be wrong with it.
+        if self.predecessor_id is not None:
+            _require_draft_template(self.predecessor.phase.template, f"dependency '{self}'")
+        if self.successor_id is not None:
+            _require_draft_template(self.successor.phase.template, f"dependency '{self}'")
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: removing an edge is a content change like any other.
+        if self.predecessor_id is not None:
+            _require_draft_template(self.predecessor.phase.template, f"dependency '{self}'")
+        return super().delete(*args, **kwargs)
+
+
+class TaskDependency(models.Model):
+    """On ONE project, `successor` may not start until `predecessor` is Done.
+
+    WHY THIS EXISTS RATHER THAN RESOLVING THROUGH THE TEMPLATE AT READ TIME: a template
+    version could later be superseded, and an in-flight project's dependencies must not
+    change underneath it. This is the same reasoning that made Task.task_name a snapshot
+    and closed B-10.
+
+    Rows are COPIES, taken from TaskTemplateTaskDependency at activation by
+    materialise_task_dependencies() in projects/task_dependencies.py, exactly as
+    Task.task_name is a copy taken at bulk_create. There is deliberately NO FK back to
+    the template edge: the copy is the whole point, and a provenance FK here would be
+    the first thing a later session resolved behaviour through.
+
+    ON_DELETE IS CASCADE ON BOTH SIDES, CHOSEN RATHER THAN INHERITED. An edge is a
+    statement about two tasks; when either task ceases to exist, the statement has no
+    subject left. SET_NULL would leave half-edges that incomplete_predecessors() must
+    filter out at every single read — a permanent tax to preserve a row that says
+    nothing. PROTECT would make deleting a task fail for a reason the user cannot see
+    and cannot fix from the screen they are on. Tasks are already CASCADEd away by their
+    phase and their project, so CASCADE is also what the surrounding schema does.
+
+    ENFORCEMENT LIMIT, STATED FOR BOTH MODELS RATHER THAN IMPLIED. Same-project (and,
+    on the template side, same-version), no-self-reference and no-cycles are clean()/
+    save() guards. QuerySet.update(), bulk_create() and QuerySet.delete() operate in SQL
+    and bypass them entirely — the identical honest half-measure that StatusTransition
+    (R-4), TaskTemplate (R-7) and SiteGroupMembership (D-1) each document about
+    themselves. The ONE exception is no-self-reference, which is a database CHECK on
+    both models and holds against all three. materialise_task_dependencies() therefore
+    writes edges one save() at a time and does not use bulk_create; see its docstring.
+    """
+
+    predecessor = models.ForeignKey(
+        'Task', on_delete=models.CASCADE, related_name='dependents',
+    )
+    successor   = models.ForeignKey(
+        'Task', on_delete=models.CASCADE, related_name='dependencies',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'task dependency'
+        verbose_name_plural = 'task dependencies'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['predecessor', 'successor'],
+                name='uniq_task_dependency',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(predecessor=models.F('successor')),
+                name='task_dependency_not_self',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.predecessor} -> {self.successor}"
+
+    def clean(self):
+        if self.predecessor_id is not None and self.predecessor_id == self.successor_id:
+            raise ValidationError(
+                f"A task cannot depend on itself ('{self.predecessor}')."
+            )
+
+        if self.predecessor_id is None or self.successor_id is None:
+            return
+
+        # Both sides must belong to the same project. Task has no project FK — it is
+        # reached through its phase (feedback_task_project_path), which is exactly why
+        # this cannot be a CheckConstraint either.
+        pred_project = self.predecessor.phase.project_id
+        succ_project = self.successor.phase.project_id
+        if pred_project != succ_project:
+            raise ValidationError(
+                f"A dependency must join two tasks of the SAME project: "
+                f"'{self.predecessor}' belongs to {self.predecessor.phase.project} and "
+                f"'{self.successor}' belongs to {self.successor.phase.project}."
+            )
+
+        _reject_dependency_cycle(
+            TaskDependency.objects
+            .filter(predecessor__phase__project_id=pred_project)
+            .values_list('predecessor_id', 'successor_id'),
+            self.predecessor, self.successor, exclude_pk=self.pk,
+        )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
 
 
 def derive_checklist_code(name, checklist_model, exclude_pk=None):
