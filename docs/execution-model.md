@@ -405,7 +405,19 @@ An absent `StatusTransition` row means one of two completely different things �
 status change did not happen" or "that model was never instrumented" — and only this
 table tells you which. Every session that adds or removes instrumentation updates it.
 
-### Instrumented — every status write goes through `record_transition()` (R-2)
+### Instrumented — every status write in the VIEW LAYER goes through `record_transition()` (R-2)
+
+**Read the heading exactly as written.** It says *view layer*, and the qualifier is load-bearing —
+see "The Django admin is not a view" below. Until 30 Aug 2026 this heading read "**every status
+write goes through `record_transition()`**", with no qualifier, and that was **wrong**: the Django
+admin change form wrote `Task.status` and `Project.status` directly, with no ledger row and no
+mention anywhere in this section. If you have been reading this table since 0.3 and concluding
+that a missing `task` row means the change did not happen, that conclusion was unsafe for admin
+edits made before that date. ~~It is safe for `task` from B9 onward, and **still not safe for
+`project`** — B10 is open.~~ **Corrected 30 Aug 2026 by prompt B10:** it is safe for `task` from
+B9 onward and for `project` from B10 onward, both landed before the phase 1 deploy. For an admin
+edit made *before* those two commits the conclusion stays unsafe and no later work can change
+that — an unreconstructable gap is exactly the thing that cannot be reconstructed.
 
 | `subject_type` | Model | Write sites covered |
 |---|---|---|
@@ -416,9 +428,23 @@ table tells you which. Every session that adds or removes instrumentation update
 | `issue` | `Issue` | all five creation sites (→ Open), `update_issue_status`, `resolve_issue`, `close_issue`, `reopen_issue` |
 | `payment_milestone` | `PaymentMilestone` | `milestone_invoice`, `milestone_receive`, the Finance branch of `project_overview`'s `update_milestone`, and both directions of the task↔milestone sync |
 
-**Corrections to the record made while instrumenting.** `Project.status` is written in
+**Corrections to the record made while instrumenting.** ~~`Project.status` is written in
 **four** places, not the two previously believed — `create_opex_site` and the Zoho
-webhook are the other two. And 0.2b consolidated the BOQ *snapshot* and the BOQ
+webhook are the other two.~~ **Corrected again 30 Aug 2026 by prompt B10: four was still short.**
+`Project.status` was written in **five** places. The fifth was `ProjectAdmin`'s change form,
+which 0.3 never counted because it went looking for views and the admin is not one — so the
+"four" above was a true statement about `views.py` presented as a true statement about the
+product, which is the same mistake in miniature that this whole section exists to stop.
+
+The fifth site is now **closed rather than instrumented**: `status` is in
+`ProjectAdmin.readonly_fields`, so the admin writes it nowhere and the count of instrumented
+write sites correctly stays at four. Closing beat instrumenting for the reason B9 gave for
+`Task` and one more that is specific to `Project` — `project_activate` is the only path that
+attaches the phase and task template and stamps `activated_at`, so an admin form that wrote
+`status` correctly would still produce an Active project with no phases. **The admin is not an
+activation route.**
+
+And 0.2b consolidated the BOQ *snapshot* and the BOQ
 *acknowledgement*, but **not** the BOQ *submit*: `boq_submit` and the inline
 `submit_design` branch still both write `status = 'Submitted'`. Both are instrumented;
 consolidating them is 0.2b-shaped work and was not done in 0.3 (R-12).
@@ -443,6 +469,37 @@ Adding a subject type is three coordinated edits and one migration: the `SUBJECT
 constant and `SUBJECT_TYPE_CHOICES` entry in `models.py`, the model-class entry in
 `utils._subject_type_registry()` and `_SUBJECT_PROJECT_RESOLVERS`, the call sites
 themselves — **and a row moved from the second table above to the first.**
+
+### The Django admin is not a view, and was writing statuses past this table
+
+`ModelAdmin` saves a form's fields straight to the row. There is no place in that path for
+`record_transition()`, so a status changed on an admin change form moves the record and leaves the
+ledger silent — and a missing row is indistinguishable from "this model was never instrumented",
+which is the one thing this whole section exists to prevent. It cannot be reconstructed afterwards.
+
+| `ModelAdmin` | Status editable? | State |
+|---|---|---|
+| `TaskAdmin` (`projects/admin.py`) | No | **Closed 30 Aug 2026 by prompt B9** — `readonly_fields = ['status']`. `status` stays in `list_display`/`list_filter` (read paths) and must never enter `list_editable`, which writes past `readonly_fields`. Guarded by `AdminCannotWriteTaskStatusTests` in `projects/tests_status_transition.py`. |
+| `ProjectAdmin` (`projects/admin.py`) | No | **Closed 30 Aug 2026 by prompt B10** — `status` added to `readonly_fields`. `list_editable` was already empty, so `readonly_fields` alone was the whole door. Guarded by `AdminCannotWriteProjectStatusTests`. |
+| `BOQ`, `DeliveryChallan`, `Issue`, `PaymentMilestone` | n/a | Not registered on `admin.site` at all. Safe by absence, not by decision — **registering any of them for shell verification reopens this hole**, so add `readonly_fields = ['status']` in the same edit. No longer safe *silently*: see the standing guard below. |
+
+The rule this leaves behind: **a status field belonging to any subject type in the first table
+above must be in its `ModelAdmin`'s `readonly_fields`.** Instrumenting a seventh subject means
+adding that line too, not only the three edits and the migration listed above.
+
+**That rule is now a test, not a paragraph.**
+`NoInstrumentedSubjectHasAnEditableAdminStatusTests` (B10, `projects/tests_status_transition.py`)
+walks `utils._subject_type_registry()` itself — not a tuple copied from it — and for every subject
+model that *is* registered on `admin.site`, asserts `status` is neither a bound field on the form
+the admin builds nor present in `list_editable`. The four unregistered models pass trivially and
+cost nothing; the day someone adds `admin.register(BOQ)` for shell convenience, the test fails and
+names the reason. A seventh subject type is covered the moment it enters the registry, without
+anyone remembering that test exists.
+
+One editable status remains reachable from `ProjectAdmin`, and it is deliberate:
+`MilestoneInline` exposes `Milestone.status`. `Milestone` is the **legacy** model in the
+"NOT instrumented" table above — superseded by `PaymentMilestone`, kept for schema compatibility,
+never a subject type. Editing it writes past no ledger, because it has none by decision.
 
 ### Two properties that are enforced in code, not in the schema
 

@@ -38,22 +38,24 @@ from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.contrib import admin as django_admin
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.test import Client, TestCase
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
     BOQ, BOQItem, BOQItemMaster, DCLineItem, DeliveryChallan, Issue,
-    PaymentMilestone, Project, StatusTransition, Task, UserProfile,
+    PaymentMilestone, Project, ProjectPhase, StatusTransition, Task, UserProfile,
     ACTOR_ROLE_SYSTEM, AppendOnlyViolation, REASON_BLOCKED, REASON_CREATED,
     REASON_GRN_CONFIRMED, REASON_MILESTONE_SYNC, SUBJECT_BOQ,
     SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
     SUBJECT_PROJECT, SUBJECT_TASK,
 )
 from .utils import (
-    RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to, record_transition,
+    RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, _subject_type_registry, assign_tasks_to,
+    record_transition,
 )
 
 
@@ -834,3 +836,304 @@ class DwellTimeTests(LedgerFixture):
         self.assertEqual(subject_types,
                          {SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ})
         self.assertGreaterEqual(len(timeline), 3)
+
+
+# ---------------------------------------------------------------------------
+# 8 — The admin is not a side door into the ledger (B9, R-10)
+# ---------------------------------------------------------------------------
+
+class AdminCannotWriteTaskStatusTests(TestCase):
+    """`TaskAdmin` must not offer `Task.status` as an editable field.
+
+    Every path in §13's instrumented table is a VIEW, which records the transition
+    in the same transaction as the write. `ModelAdmin` has no such step: it saves
+    the form's fields straight to the row. An admin status edit therefore moves the
+    task and leaves the ledger silent — and a missing row is indistinguishable from
+    "this path was never instrumented", so the gap cannot be reconstructed later.
+
+    Every assertion below reads the admin's RESOLVED configuration — the class
+    actually registered on `admin.site`, and the form it actually builds — rather
+    than a copy of the tuple in `admin.py`. A restructure that moves `status` back
+    into an editable position must fail here, not pass against a stale literal.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = User.objects.create_superuser(
+            'b9_admin', 'b9@example.com', 'pw')
+        self.model_admin = django_admin.site._registry[Task]
+
+        project = Project.objects.create(
+            customer_name='Admin Sidedoor', customer_phone='9000000001',
+            site_address='2 Sun Road', city='Lucknow', project_type='Residential',
+            capacity_kw=Decimal('5.00'), status='Draft',
+        )
+        phase = ProjectPhase.objects.create(
+            project=project, phase_order=1, phase_name='Phase 1')
+        self.task = Task.objects.create(
+            phase=phase, task_name='Site Survey', task_order=1,
+            assigned_role=Task.PM,
+        )
+
+    def _request(self):
+        request = self.factory.get('/')
+        request.user = self.superuser
+        return request
+
+    def test_status_is_read_only_on_the_change_form(self):
+        request = self._request()
+        self.assertIn('status',
+                      self.model_admin.get_readonly_fields(request, self.task),
+                      'TaskAdmin no longer marks status read-only — an admin edit '
+                      'would move the task with no StatusTransition row (R-2)')
+
+        form = self.model_admin.get_form(request, self.task)
+        self.assertNotIn('status', form.base_fields,
+                         'status is still a bound form field, so the change form '
+                         'writes it regardless of readonly_fields')
+
+    def test_status_is_not_in_list_editable(self):
+        """`list_editable` writes from the changelist and ignores `readonly_fields`
+        entirely, so read-only on the change form is only half the door."""
+        self.assertNotIn('status', self.model_admin.list_editable)
+
+    def test_the_change_form_cannot_be_posted_into_a_new_status(self):
+        """The end-to-end shape of the hole: submit a status the admin never
+        rendered, and the row must not move."""
+        request = self._request()
+        form_class = self.model_admin.get_form(request, self.task)
+        form = form_class(
+            data={
+                'phase': self.task.phase_id,
+                'task_name': self.task.task_name,
+                'task_order': self.task.task_order,
+                'assigned_role': self.task.assigned_role,
+                'status': Task.DONE,          # not a field on this form
+                'task_type': self.task.task_type,
+                'duration_days': self.task.duration_days,
+            },
+            instance=self.task,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.model_admin.save_model(request, form.save(commit=False), form, change=True)
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, Task.NOT_STARTED)
+        self.assertFalse(
+            StatusTransition.objects.filter(
+                subject_type=SUBJECT_TASK, subject_id=self.task.pk).exists(),
+            'no transition was written, which is correct — and is exactly why the '
+            'status must not have moved either')
+
+    def test_the_add_form_still_creates_a_task_at_the_model_default(self):
+        """A read-only field is omitted from the add form, so a new task takes
+        `Task.status`'s default. Creating through the admin is unaffected."""
+        request = self._request()
+        form_class = self.model_admin.get_form(request, None)
+        self.assertNotIn('status', form_class.base_fields)
+
+        form = form_class(data={
+            'phase': self.task.phase_id,
+            'task_name': 'Added Through Admin',
+            'task_order': 2,
+            'assigned_role': Task.PM,
+            'task_type': Task.INTERNAL,
+            'duration_days': 1,
+        })
+        self.assertTrue(form.is_valid(), form.errors)
+        obj = form.save(commit=False)
+        self.model_admin.save_model(request, obj, form, change=False)
+
+        created = Task.objects.get(task_name='Added Through Admin')
+        self.assertEqual(created.status, Task.NOT_STARTED)
+        self.assertEqual(created.status, Task._meta.get_field('status').default)
+
+
+# ---------------------------------------------------------------------------
+# 9 — The same door, on the project (B10, R-10)
+# ---------------------------------------------------------------------------
+
+class AdminCannotWriteProjectStatusTests(TestCase):
+    """`ProjectAdmin` must not offer `Project.status` as an editable field.
+
+    Everything said about `TaskAdmin` above applies here — plus one failure the
+    task case does not have. `project_activate` is the ONLY path that attaches the
+    phase and task template and stamps `activated_at`. An admin who typed 'Active'
+    into this form moved the column and did none of that, leaving the project
+    Active and empty: a state the product itself cannot produce, reached with
+    nothing raising and no ledger row explaining it.
+
+    So the admin is not an activation route, and these tests are what says so.
+    Every assertion reads the RESOLVED configuration — the class actually on
+    `admin.site` and the form it actually builds — never a copy of the tuple in
+    `admin.py`.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = User.objects.create_superuser(
+            'b10_admin', 'b10@example.com', 'pw')
+        self.model_admin = django_admin.site._registry[Project]
+
+        self.project = Project.objects.create(
+            customer_name='Admin Sidedoor Project', customer_phone='9000000002',
+            site_address='3 Sun Road', city='Lucknow', state='Uttar Pradesh',
+            project_type='Residential', capacity_kw=Decimal('5.00'),
+        )
+
+    def _request(self):
+        request = self.factory.get('/')
+        request.user = self.superuser
+        return request
+
+    def test_status_is_read_only_on_the_change_form(self):
+        request = self._request()
+        self.assertIn('status',
+                      self.model_admin.get_readonly_fields(request, self.project),
+                      'ProjectAdmin no longer marks status read-only — an admin edit '
+                      'would move the project with no StatusTransition row (R-2), and '
+                      'a move to Active would skip project_activate entirely')
+
+        form = self.model_admin.get_form(request, self.project)
+        self.assertNotIn('status', form.base_fields,
+                         'status is still a bound form field, so the change form '
+                         'writes it regardless of readonly_fields')
+
+    def test_status_is_not_in_list_editable(self):
+        """`list_editable` writes from the changelist and ignores `readonly_fields`
+        entirely, so read-only on the change form is only half the door."""
+        self.assertNotIn('status', tuple(self.model_admin.list_editable or ()))
+
+    def test_the_change_form_cannot_be_posted_into_a_new_status(self):
+        """The end-to-end shape of the hole: submit 'Active' — the status whose
+        admin write also skips template attachment — and the row must not move."""
+        request = self._request()
+        form_class = self.model_admin.get_form(request, self.project)
+        form = form_class(
+            data={
+                'project_type': self.project.project_type,
+                'customer_name': self.project.customer_name,
+                'customer_phone': self.project.customer_phone,
+                'site_address': self.project.site_address,
+                'city': self.project.city,
+                'state': self.project.state,
+                'status': 'Active',           # not a field on this form
+            },
+            instance=self.project,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.model_admin.save_model(request, form.save(commit=False), form, change=True)
+
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.status, 'Draft')
+        self.assertIsNone(self.project.activated_at)
+        self.assertFalse(
+            self.project.phases.exists(),
+            'no template was attached, which is correct — and is exactly why the '
+            'status must not have moved to Active either')
+        self.assertFalse(
+            StatusTransition.objects.filter(
+                subject_type=SUBJECT_PROJECT, subject_id=self.project.pk,
+                to_status='Active').exists(),
+            'no transition was written, which is correct — and is exactly why the '
+            'status must not have moved either')
+
+    def test_the_add_form_still_creates_a_project_at_the_model_default(self):
+        """A read-only field is omitted from the add form, so a new project takes
+        `Project.status`'s default. Creating through the admin is unaffected."""
+        request = self._request()
+        form_class = self.model_admin.get_form(request, None)
+        self.assertNotIn('status', form_class.base_fields)
+
+        form = form_class(data={
+            'project_type': 'Residential',
+            'customer_name': 'Added Through Admin',
+            'customer_phone': '9000000003',
+            'site_address': '4 Sun Road',
+            'city': 'Lucknow',
+            'state': 'Uttar Pradesh',
+        })
+        self.assertTrue(form.is_valid(), form.errors)
+        obj = form.save(commit=False)
+        self.model_admin.save_model(request, obj, form, change=False)
+
+        created = Project.objects.get(customer_name='Added Through Admin')
+        self.assertEqual(created.status, 'Draft')
+        self.assertEqual(created.status, Project._meta.get_field('status').default)
+        self.assertTrue(created.project_id, 'the admin add path still generates an ID')
+
+
+class NoInstrumentedSubjectHasAnEditableAdminStatusTests(TestCase):
+    """The standing guard, over EVERY subject in the ledger's registry.
+
+    B9 and B10 each closed one `ModelAdmin`. `BOQ`, `DeliveryChallan`, `Issue` and
+    `PaymentMilestone` are safe today for a reason that is not a decision: nobody
+    has registered them on `admin.site`. A single `admin.register(BOQ)` added for
+    shell convenience in some later session reopens exactly the hole B9 closed,
+    and nothing anywhere would notice.
+
+    This test walks `utils._subject_type_registry()` — the ledger's own list, not a
+    tuple copied from it — and asserts the rule §13 states: *a status field
+    belonging to any subject type in the instrumented table must not be editable in
+    its ModelAdmin.* Unregistered models pass trivially and cost nothing. A seventh
+    subject type added later is covered the moment it enters the registry, without
+    anyone remembering this file exists.
+
+    The form is resolved with `obj=None`, which is the class-level configuration.
+    An admin that made `status` editable only for a particular instance would slip
+    past this net; that is a per-ModelAdmin concern and none of the six do it.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = User.objects.create_superuser(
+            'b10_registry', 'registry@example.com', 'pw')
+
+    def _request(self):
+        request = self.factory.get('/')
+        request.user = self.superuser
+        return request
+
+    def test_every_registered_subject_model_keeps_status_out_of_the_admin(self):
+        registry = _subject_type_registry()
+
+        # Anchors, so a refactor that empties or renames the registry fails here
+        # rather than making the loop below vacuously true.
+        self.assertIn(Project, registry)
+        self.assertIn(Task, registry)
+
+        checked = []
+        for model, subject_type in registry.items():
+            model_admin = django_admin.site._registry.get(model)
+            if model_admin is None:
+                # Safe by absence. Nothing to assert, and nothing to fix.
+                continue
+            checked.append(subject_type)
+
+            with self.subTest(subject_type=subject_type, model=model.__name__):
+                field_names = {f.name for f in model._meta.get_fields()}
+                self.assertIn(
+                    'status', field_names,
+                    f"{model.__name__} is an instrumented subject type with no field "
+                    f"named 'status'. If its status column is spelled differently, "
+                    f"teach this test that name — do not delete the assertion.")
+
+                form = model_admin.get_form(self._request(), None)
+                self.assertNotIn(
+                    'status', form.base_fields,
+                    f"{type(model_admin).__name__} builds an admin form with an "
+                    f"editable 'status'. ModelAdmin writes form fields straight to "
+                    f"the row, so a status change there leaves no StatusTransition "
+                    f"row (R-2) — and a missing row is indistinguishable from "
+                    f"'never instrumented'. Add 'status' to its readonly_fields, and "
+                    f"see docs/execution-model.md §13.")
+                self.assertNotIn(
+                    'status', tuple(model_admin.list_editable or ()),
+                    f"{type(model_admin).__name__}.list_editable contains 'status'. "
+                    f"The changelist writes past readonly_fields entirely.")
+
+        self.assertTrue(
+            checked,
+            'no subject model is registered in the admin at all, so this test '
+            'asserted nothing — which means the registry lookup above is broken, '
+            'not that the codebase is safe')

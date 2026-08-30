@@ -431,7 +431,7 @@ task status-write paths is not later reported as four when it is six.
 
 ---
 
-### B9 — the Django admin can change a task's status with no transition row
+### ~~B9 — the Django admin can change a task's status with no transition row~~ — **CLOSED by prompt B9**
 
 Found by prompt 1.4a's pre-flight, 30 Aug 2026. **`projects/admin.py` was outside that prompt's
 MODE list**, so this was reported rather than fixed. [admin.py:142](projects/admin.py#L142):
@@ -470,6 +470,168 @@ the ladder, and D-3 and B8 above are both about not having two.
 
 **Do it in the next session allowed to touch `admin.py`, and correct §13 in the same edit** — a
 coverage table that overstates its coverage is worse than one that admits a gap.
+
+#### CLOSED 30 Aug 2026 BY PROMPT B9
+
+Fixed as the entry recommended, by the first option: `TaskAdmin.readonly_fields = ['status']`
+([admin.py:159](projects/admin.py#L159)), with a comment above it naming R-10 and the reason,
+because a field that is read-only for no visible reason is the kind of thing a maintainer
+deletes. `status` stays in `list_display` and `list_filter` — those are read paths — and is
+**not** in `list_editable`, which would have written past `readonly_fields` entirely.
+
+`readonly_fields` alone was sufficient. `ModelAdmin.get_form()` adds the read-only names to the
+form's `exclude`, so `status` is not a bound field on either the add or the change form: a POST
+carrying `status` is ignored rather than merely un-rendered. Verified end-to-end through the real
+admin URLs — `GET /admin/projects/task/add/` renders no `name="status"` input, and a POST to it
+carrying `status=Done` creates the task at `Task.NOT_STARTED`, the model default.
+
+Guarded by `AdminCannotWriteTaskStatusTests` in
+[projects/tests_status_transition.py](projects/tests_status_transition.py) — four tests, all
+reading the admin's *resolved* configuration off `admin.site._registry[Task]` and the form it
+actually builds, so a restructure that moves `status` back into an editable position fails the
+test rather than passing against a stale literal.
+
+`docs/execution-model.md` §13 corrected in the same edit, and it keeps a note saying what the
+old wording claimed. See **B10** below for the same question asked of the other five
+instrumented subjects.
+
+---
+
+### ~~B10 — `ProjectAdmin` has the identical hole B9 just closed, and it was left open~~ — **CLOSED by prompt B10**
+
+Found by prompt B9, 30 Aug 2026, while checking every subject in `StatusTransition`'s registry.
+**B9's MODE allowed `admin.py` but scoped the fix to `Task` only**, so this is recorded rather
+than fixed (R-12).
+
+`utils._subject_type_registry()` ([utils.py:226](projects/utils.py#L226)) names six models. Their
+admin exposure today:
+
+| `subject_type` | Model | `ModelAdmin` | Status editable in the admin? |
+|---|---|---|---|
+| `project` | `Project` | `ProjectAdmin` — [admin.py:66](projects/admin.py#L66) | **YES** |
+| `task` | `Task` | `TaskAdmin` — [admin.py:143](projects/admin.py#L143) | No — closed by B9 |
+| `boq` | `BOQ` | *none* | No — not registered on `admin.site` |
+| `delivery_challan` | `DeliveryChallan` | *none* | No — not registered on `admin.site` |
+| `issue` | `Issue` | *none* | No — not registered on `admin.site` |
+| `payment_milestone` | `PaymentMilestone` | *none* | No — not registered on `admin.site` |
+
+**`ProjectAdmin` is exactly as exposed as `TaskAdmin` was, and this is not a flat filing.**
+`status` sits in the `'Project Info'` fieldset ([admin.py:77](projects/admin.py#L77)) and
+`readonly_fields` is `['project_id', 'created_at', 'activated_at', 'deleted_at']` — `status` is
+not in it. There is no `save_model()` override at all on this class, so a status edit goes
+straight to the column. It writes no `StatusTransition` row, and it is worse than the task case
+was: moving a project to `Active` by hand skips `project_activate` entirely, so the phase and
+task template is never attached, `activated_at` is never stamped, and the project sits Active and
+empty. §13 lists **four** instrumented write sites for `project` — this is a fifth path that is
+not one of them.
+
+The other four models are safe only because nobody has registered them. That is an absence, not
+a decision: `admin.register(BOQ)` added for shell verification in some later session silently
+reopens the same hole, with no test anywhere that would notice.
+
+**The same deploy-window argument that made B9 urgent applies here.** Once real users are on the
+system, an admin project-status edit is an unreconstructable gap in the ledger — and, unlike the
+task case, it also leaves the project itself in a state the product cannot produce.
+
+**The fix is the same one line**: add `'status'` to `ProjectAdmin.readonly_fields`, with the same
+R-10 comment, and extend `AdminCannotWriteTaskStatusTests` to loop over
+`_subject_type_registry()` rather than naming `Task` — so a newly registered `BOQAdmin` fails the
+test on the day it is written. **Do it in the next session allowed to touch `admin.py`, and
+before the phase 1 deploy if one is available.**
+
+#### CLOSED 30 Aug 2026 BY PROMPT B10
+
+Fixed as the entry recommended and in the same shape as B9: `'status'` added to
+`ProjectAdmin.readonly_fields` ([admin.py:94](projects/admin.py#L94)), under a
+`DO NOT REMOVE — R-10` comment naming both reasons — the ledger gap, and the one this admin has
+that `TaskAdmin` did not, that **activation is a view-layer action and the admin is not an
+activation route**. `project_activate` is the only path that attaches the phase and task template
+and stamps `activated_at`; an admin who could type 'Active' here produced an Active project with
+zero phases and nothing raising. Losing that ability is the correct outcome, not a regression,
+and the comment says so where a maintainer tempted to delete the line will read it.
+
+`readonly_fields` alone was sufficient, verified against the resolved configuration rather than
+by reading the class: `ProjectAdmin.list_editable` is `()`, there is no `fields`/`exclude`
+override, and the two admin actions (`soft_delete_selected`, `restore_selected`) and
+`delete_model()` touch only `is_deleted`/`deleted_at`. `Project.status` defaults to `'Draft'`,
+and the admin add path is unaffected — a created project takes that default and still generates
+its `project_id`.
+
+`MilestoneInline` does expose an editable `Milestone.status` on this same admin. Left alone
+deliberately: `Milestone` is the legacy model in §13's **NOT instrumented** table, superseded by
+`PaymentMilestone` and never a subject type, so there is no ledger to write past.
+
+Guarded by two test classes in
+[projects/tests_status_transition.py](projects/tests_status_transition.py):
+
+- `AdminCannotWriteProjectStatusTests` — the four B9-shaped tests, all reading
+  `admin.site._registry[Project]` and the form it actually builds. The change-form test asserts
+  the project stays `'Draft'` **and** that `activated_at` is null and no phases were attached,
+  so the activation half of this finding is pinned too, not just the ledger half.
+- `NoInstrumentedSubjectHasAnEditableAdminStatusTests` — the standing guard the entry asked for.
+  It walks `utils._subject_type_registry()` itself and asserts, for every subject model that is
+  registered on `admin.site`, that `status` is neither a bound field on the admin's form nor in
+  `list_editable`. `BOQ`, `DeliveryChallan`, `Issue` and `PaymentMilestone` are unregistered and
+  pass trivially; the day one is registered it fails and names the reason. A seventh subject type
+  is covered the moment it enters the registry. Confirmed non-vacuous by registering `BOQ` at
+  runtime in a scratch script and watching the assertion fire.
+
+Verified end-to-end through the real admin URLs: `GET /admin/projects/project/add/` renders zero
+form controls named `status` (and one named `city`, for contrast); a POST to it carrying
+`status=Active` creates the project at `'Draft'` with `activated_at` null and no phases; and a
+POST to the change form carrying `status=Commissioned` saves the row — `customer_name` changes —
+with `status` still `'Draft'`. `docs/execution-model.md` §13 corrected in the same edit,
+including the write-site count, with the previous wording struck rather than deleted.
+
+**Found while verifying, not fixed here — see B11.**
+
+---
+
+### B11 — the `ProjectAdmin` add and change pages have been raising `FieldError`, and `manage.py check` cannot see it
+
+Found by prompt B10, 30 Aug 2026, while driving the real admin URLs for its own verification.
+
+[admin.py:21-24](projects/admin.py#L21):
+
+```python
+class DocumentInline(admin.TabularInline):
+    model = ProjectDocument
+    extra = 1
+    fields = ['doc_type', 'title', 'file']
+```
+
+`ProjectDocument` has **none** of those three fields. Its actual columns are `file_name`,
+`file_url`, `supabase_path`, `file_type`, `file_size_kb`, `uploaded_by`, `uploaded_at` and the
+soft-delete pair ([models.py:434](projects/models.py#L434)). `DocumentInline` is on
+`ProjectAdmin.inlines`, so **both** `/admin/projects/project/add/` and
+`/admin/projects/project/<pk>/change/` raise
+
+```
+django.core.exceptions.FieldError: Unknown field(s) (doc_type, file, title) specified for ProjectDocument
+```
+
+— a 500, before any form is rendered. Reproduced on this branch and confirmed present at `HEAD`
+(the line is untouched by B10). The changelist is fine; only the two form pages are dead.
+
+**`manage.py check` reports no issues, and cannot.** Django does not validate names in a
+`ModelAdmin`/`InlineModelAdmin` `fields` list against the model, because `fields` is allowed to
+name fields contributed by a custom `ModelForm`. The mismatch is only discoverable by rendering
+the page, which is why it has survived — nothing in the suite opens an admin project page.
+
+**What it costs, and does not.** No data is at risk and no product screen is affected; the admin
+project form is simply unreachable. It matters mostly because it is the kind of breakage that
+makes an admin-side workaround look impossible during an incident, and because B10's own
+end-to-end verification had to drop the inline at runtime to run at all.
+
+**Not fixed here.** B10's task was `status`; this is an unrelated defect in a different class,
+and inventing the right field list (`file_type`/`file_name`, plus whether an inline that cannot
+upload to Supabase should exist on this admin at all) is a decision, not a rename (R-12).
+
+**The fix is small but needs that decision.** Either correct `fields` to real columns — likely
+`['file_type', 'file_name', 'file_url']` with `readonly_fields` for the Supabase-owned ones,
+since the admin has no upload path — or drop `DocumentInline` from `ProjectAdmin.inlines`
+entirely. **Whichever is chosen, add a test that GETs both admin project pages**, because that is
+the only thing that would have caught this and the only thing that will catch the next one.
 
 ---
 

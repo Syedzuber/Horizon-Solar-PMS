@@ -68,7 +68,30 @@ class ProjectAdmin(admin.ModelAdmin):
                        'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
     list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
-    readonly_fields = ['project_id', 'created_at', 'activated_at', 'deleted_at']
+    # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
+    # read-only field is exactly what a future maintainer will want to delete.
+    #
+    # Same reason as TaskAdmin below, plus one this admin has and that one does not.
+    #
+    # First: every project status change must go through the view layer so
+    # record_transition() writes the StatusTransition row in the same transaction (R-2).
+    # ModelAdmin saves the form field straight to the column, so an admin edit would move
+    # the project and leave no ledger row — and a gap in the ledger cannot be
+    # reconstructed afterwards.
+    #
+    # Second, and worse: ACTIVATION IS A VIEW-LAYER ACTION AND THIS ADMIN IS NOT AN
+    # ACTIVATION ROUTE. project_activate() is the only path that attaches the phase and
+    # task template and stamps activated_at. Typing 'Active' into this form did none of
+    # that — it left the project Active and empty, a state the product itself cannot
+    # produce, with nothing raising. An admin who cannot set status also cannot activate
+    # a project here, and that is the correct outcome, not a lost capability.
+    #
+    # Reading `status` is still fine: it stays in list_display and list_filter, which are
+    # read paths. It must never appear in list_editable, which writes past this.
+    #
+    # On the ADD form Django omits readonly fields entirely, so a new project takes the
+    # model default, Project.status's 'Draft' — the same value project_create gives it.
+    readonly_fields = ['project_id', 'status', 'created_at', 'activated_at', 'deleted_at']
     inlines         = [PhaseInline, MilestoneInline, DocumentInline]
     actions         = ['soft_delete_selected', 'restore_selected']
 
@@ -144,6 +167,19 @@ class TaskAdmin(admin.ModelAdmin):
     list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
     list_filter  = ['assigned_role', 'status']
     search_fields = ['task_name']
+    # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
+    # read-only field is exactly what a future maintainer will want to delete.
+    #
+    # Every task status change must go through the view layer so record_transition()
+    # writes the StatusTransition row in the same transaction (R-2). ModelAdmin saves the
+    # form field straight to the column, so an admin edit would move the task and leave no
+    # ledger row — and a gap in the ledger cannot be reconstructed afterwards. Reading
+    # `status` is still fine: it stays in list_display and list_filter, which are read
+    # paths. It must never appear in list_editable, which writes past this.
+    #
+    # On the ADD form Django omits readonly fields entirely, so a new task takes the model
+    # default, Task.NOT_STARTED ('Not Started') — the same value it would have had.
+    readonly_fields = ['status']
 
     def save_model(self, request, obj, form, change):
         """Route Task.assigned_to through the assignment chokepoint.
