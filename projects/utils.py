@@ -196,6 +196,69 @@ def assign_tasks_to(queryset, user):
 
 
 # ---------------------------------------------------------------------------
+# Metric chokepoint — prompt 1.3b (rule R-20)
+#
+# WHAT COUNTS AS SOMEBODY'S WORK. Every task METRIC in this codebase — overdue,
+# pending, workload, progress, digest gating — routes through the two callables
+# below, and they are the only place the rule is written down.
+#
+# A mirror task's status is DERIVED from another object (a DesignAssignment, a
+# delivery quantity, a COD record) and no human may write it. Counting one as a
+# person's work attributes another team's queue to the wrong person: an OPEX
+# site's two PM mirrors are the PM's "pending approvals" without the PM ever
+# being able to act on either, and an EOD digest gated on open work would email
+# somebody about tasks they cannot touch.
+#
+# WHAT THIS IS NOT: it is not a visibility rule. A site dashboard must still
+# SHOW its mirrors — displaying the derived state is the entire reason mirrors
+# exist. This removes them from metrics, never from lists. The one exception is
+# a list that exists to itemise a metric (`tasks_drill_down`, and the PM card's
+# five-row blocked/overdue evidence lists), which must reconcile with the number
+# it hangs off or the page contradicts itself.
+#
+# WHY A `Q` AND NOT A FILTERED QUERYSET: three consumers have no queryset to
+# filter — two conditional aggregates (`Count(..., filter=...)` on the CEO
+# dashboard and the SE dashboard, where a base filter would change what the
+# other annotations on the same join count) and one prefetched Python list
+# (`project_overview`'s per-phase progress). A `Q` serves all three plus the
+# plain `.filter()` sites; `is_human_owned()` is the row-at-a-time form.
+#
+# WHY NOT A CUSTOM MANAGER: there are no custom managers anywhere in this
+# codebase, deliberately — soft delete relies on `Task.objects` meaning
+# "everything", so that every queryset has to state its own predicate and no
+# reader has to guess whether one is already applied. See the module docstring
+# of reports.py. Adding a manager for the second predicate while the first
+# still has none would make both harder to reason about.
+#
+# The `prefix` convention is `reports._active_project_filter()`'s.
+# ---------------------------------------------------------------------------
+
+def human_owned_tasks_q(prefix=''):
+    """Q() matching only the tasks a human is accountable for.
+
+    `prefix` is the relation path to Task — '' when querying Task itself,
+    'phases__tasks__' when querying Project, 'tasks__' when querying
+    ProjectPhase.
+
+    Positive, never a negation, and that is load-bearing on the CEO dashboard:
+    a negated Q across the multi-valued `phases__tasks` relation takes Django's
+    exclude() subquery path instead of a plain SQL FILTER, which would change
+    the join fan-out the two card counts deliberately share.
+    """
+    from django.db.models import Q
+
+    return Q(**{f'{prefix}is_mirror': False})
+
+
+def is_human_owned(task):
+    """Row-at-a-time form of human_owned_tasks_q(), for prefetched lists.
+
+    Same rule, applied in Python where no queryset exists to filter.
+    """
+    return not task.is_mirror
+
+
+# ---------------------------------------------------------------------------
 # State-ledger chokepoint — prompt 0.3 (rules R-2, R-3, R-4, R-9, R-14)
 #
 # StatusTransition rows are written HERE AND NOWHERE ELSE. Same pattern as

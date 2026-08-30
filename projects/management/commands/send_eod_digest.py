@@ -115,6 +115,7 @@ class Command(BaseCommand):
 
         from projects.models import Task, ActivityLog, UserProfile, Project, Issue
         from projects.notifications import send_notification, _log
+        from projects.utils import human_owned_tasks_q
 
         dry_run   = options['dry_run']
         only_email = options['user'].strip().lower()
@@ -193,9 +194,13 @@ class Command(BaseCommand):
         coord_pks = {p.pk for p in recipients if p.role == COORDINATOR_ROLE}
 
         # --- Metric 1: open tasks assigned to each user (snapshot, grouped) ---
+        # Mirrors excluded (R-20). This is not only a wrong number if they are in:
+        # has_open_work below GATES THE SEND on it, so a mirror could flip somebody
+        # from "no digest" to "digest" and email them about work they cannot do.
         assigned_map = dict(
             Task.objects
             .filter(assigned_to__in=recipient_pks)
+            .filter(human_owned_tasks_q())
             .exclude(status=Task.DONE)
             .values_list('assigned_to')
             .annotate(c=Count('id'))
@@ -260,11 +265,14 @@ class Command(BaseCommand):
                 if cpk in coord_pks:
                     coord_projects_map[cpk] = c
             # Open tasks across coordinated active projects (status != Done).
+            # The worst of the three: this counter has NO assignment term at all, so
+            # every mirror on every coordinated site counts. Also a send gate (R-20).
             task_rows = (
                 Task.objects
                 .filter(phase__project__coordinators__in=coord_pks,
                         phase__project__is_deleted=False,
                         phase__project__activated_at__isnull=False)
+                .filter(human_owned_tasks_q())
                 .exclude(phase__project__status='Cancelled')
                 .exclude(status=Task.DONE)
                 .values_list('phase__project__coordinators')
@@ -413,11 +421,15 @@ class Command(BaseCommand):
     def _company_totals(self, today):
         """Company-wide totals — every user's activity counts, no actor filter."""
         from projects.models import Task, ActivityLog
+        from projects.utils import human_owned_tasks_q
 
         # Metric 1: open assigned tasks across active (not soft-deleted) projects.
+        # Mirrors excluded (R-20) — the company total must agree with the per-user
+        # rows above it, which exclude them.
         assigned = (
             Task.objects
             .filter(assigned_to__isnull=False, phase__project__is_deleted=False)
+            .filter(human_owned_tasks_q())
             .exclude(status=Task.DONE)
             .count()
         )

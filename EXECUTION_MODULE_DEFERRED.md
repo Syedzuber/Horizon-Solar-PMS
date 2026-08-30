@@ -908,6 +908,79 @@ durations they were built from regardless (B-10).
 
 ---
 
+### B19 — `attach_residential_template()` does not copy `is_mirror`, so every 1.3b exclusion is inert until 1.3c fixes it
+
+Found by prompt 1.3b's pre-flight, 30 Aug 2026. **This is a hard pre-condition on 1.3c, not a
+tidy-up.**
+
+`models.py:418` documents `Task.is_mirror` as *"The seventh snapshot copied from
+`TaskTemplateTask`, following the six above."* The `bulk_create()` at `utils.py:1249` copies
+**six** — `task_name`, `task_order`, `assigned_role`, `duration_days`, `task_type`,
+`is_payment_milestone` — and **`is_mirror` is not among them.** Every `Task` row any attach
+path creates therefore takes the field default `False`, whatever its template row says.
+
+The consequence is precise: **1.3b's twelve counter exclusions are correct and completely
+inert.** They cannot fire, because no production row can be `is_mirror=True`. Every test in
+`tests_mirror_metrics.py` sets the flag by hand and says so in its docstring — those tests
+prove the counters, and cannot prove the pipeline that feeds them.
+
+**Not fixed by 1.3b**, deliberately: adding the line is beyond "the exclusion itself", and
+1.3c rewrites this function anyway when it generalises the attach beyond Residential. It also
+owns the neighbouring decision — whether a mirror is created with an assignee at all — and the
+two should be made together. **1.3c must add the copy in the same commit as the attach, or the
+whole of 1.3b silently does nothing.**
+
+---
+
+### B20 — the CEO department block has no Project Coordinator row, so one OPEX task per site is counted by no department
+
+Re-recorded by prompt 1.3b, 30 Aug 2026. Previously assigned to 1.3b by
+`docs/execution-model.md` §4; **examined and deliberately not fixed.**
+
+`_get_ceo_dashboard_context()` QUERY 2 builds six `dept_*` groups — PM, SCM, Design, BD,
+Execution (SE), Finance. `Task.ROLE_CHOICES` has seven values since 1.3a. The OPEX template's
+**Completion Certificates (Paperwork)** carries `assigned_role='Project Coordinator'`, so on
+every OPEX site it lands in `task_total`, `task_unassigned` and the status counts, and in
+**no department row**. The rollup under-covers the portfolio by one task per site — 95 rows
+at full tender scale.
+
+**Why 1.3b did not fix it, and why that is not evasion.** Completion Certificates is **not a
+mirror**. 1.3b's exclusion has no bearing on it whatsoever; the two findings merely arrived in
+the same audit. Closing the gap means *adding* a seventh department: three new conditional
+counts in the aggregate, a seventh `dept_rows` entry, and a template row — a behaviour change
+beyond that session's stated remit of "no behaviour change other than the exclusion itself".
+
+**When it is fixed**, note that the six existing groups are hardcoded three times over
+(aggregate keys, `dept_rows`, template). The honest fix derives all three from
+`Task.ROLE_CHOICES`, in the shape R-19 established for the role map — otherwise the seventh
+role is added in three places and the eighth is forgotten in one of them.
+
+---
+
+### B21 — `current_phase` is computed four times, one copy is in `models.py`, and a stuck mirror pins all four
+
+Found by prompt 1.3b, 30 Aug 2026. **Deferred by decision, not by oversight** (30 Aug).
+
+"First phase holding a not-Done task" exists in four independent copies:
+
+| Site | Shape |
+|---|---|
+| `views.py` `dashboard_pm` | `project.phases.filter(tasks__status__in=[...])` |
+| `views.py` `dashboard_site_engineer` | the same queryset |
+| `views.py` `dashboard_bd` | an **inline Python loop** over prefetched phases |
+| `models.py` `Project.get_current_phase()` | an inline Python loop |
+
+A mirror that never completes — and COD, HOTO and As-Built have no source object in existence
+to complete them — pins a site at its earliest mirror-bearing phase permanently, on all four.
+
+1.3b left every one of them alone. `models.py` is outside its MODE, and fixing three of four
+is worse than fixing none: the copies would then disagree with each other about what phase a
+project is in, which is harder to diagnose than a consistently wrong answer. **The fix is the
+consolidation, not the filter** — one helper, called by all four, with R-20's exclusion inside
+it. Whoever does it needs `models.py` in scope.
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

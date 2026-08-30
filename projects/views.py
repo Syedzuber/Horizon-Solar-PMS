@@ -68,6 +68,9 @@ from .utils import (
     # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
+    # Prompt 1.3b — the metric chokepoint (R-20). Every task COUNT below goes through
+    # one of these two; task LISTS deliberately do not.
+    human_owned_tasks_q, is_human_owned,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -449,11 +452,15 @@ def tasks_drill_down(request, filter_type):
     profile = request.user.profile
     role    = profile.role
 
+    # Grouped task lists + a total_count, per due-date window. This is a LIST, but it
+    # is the drill-through for the four dashboard stat blocks (_pm/_se/_design/_scm
+    # task bases), so it must exclude mirrors for the same reason they do — otherwise
+    # the card says 3 and the page it links to lists 4.
     base_qs = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    ).select_related('phase__project')
+    ).filter(human_owned_tasks_q()).select_related('phase__project')
 
     # 0.2 lockdown: EVERY role now has an explicit branch. Six roles previously reached
     # the whole portfolio through a trailing `# SCM and others` comment rather than a
@@ -565,30 +572,36 @@ def dashboard_pm(request):
         status__in=['Active', 'In Progress'],
     ).count()
 
+    # The four headline cards. All four exclude mirrors, uniformly and including the
+    # two where no mirror can appear today (no OPEX mirror is External, and none is
+    # seeded Blocked): a rule applied to three of four reads as a coincidence to the
+    # next person, and `pending_approvals` is the one that most needs it — it matches
+    # on assigned_role with NO assignment term, so an OPEX site's two PM mirrors (COD,
+    # HOTO) would land on this card whether or not anyone was assigned to them.
     due_today = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         due_date=date.today(),
         due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     blocked_tasks = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         status='Blocked',
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     pending_approvals = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         assigned_role=Task.PM,
         status='Not Started',
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     external_pending = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         task_type=Task.EXTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     # Draft projects assigned to this PM (Zoho-created or manually created and not yet activated)
     draft_projects = list(
@@ -608,25 +621,36 @@ def dashboard_pm(request):
             project.boq_status = None
             project.boq_url    = None
 
-        total_tasks    = Task.objects.filter(phase__project=project).count()
-        done_tasks     = Task.objects.filter(phase__project=project, status='Done').count()
-        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').count()
+        # Per-project progress. Mirrors are out of BOTH the numerator and the
+        # denominator (decision of 30 Aug, execution-model R-20): a site's percentage
+        # answers "how much of the work you can do is done". The alternative — keeping
+        # mirrors in the denominator — stalls every OPEX site permanently, because COD,
+        # HOTO and As-Built have no source object in existence to complete them.
+        # The cost, stated plainly: a phase can read 100% while its mirrors are still
+        # Not Started. That is the accepted trade, not an oversight.
+        total_tasks    = Task.objects.filter(phase__project=project).filter(human_owned_tasks_q()).count()
+        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(human_owned_tasks_q()).count()
+        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(human_owned_tasks_q()).count()
+        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(human_owned_tasks_q()).count()
         internal_percent = int(internal_done / internal_total * 100) if internal_total else 0
         ext_pending    = Task.objects.filter(
             phase__project=project, task_type=Task.EXTERNAL,
             status__in=['Not Started', 'In Progress'],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
         overdue_count  = Task.objects.filter(
             phase__project=project, task_type=Task.INTERNAL,
             due_date__lt=date.today(), due_date__isnull=False,
             status__in=['Not Started', 'In Progress'],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
         blocked_count = Task.objects.filter(
             phase__project=project, status='Blocked',
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
+        # The two five-row evidence lists under the counts above. Filtered to match:
+        # they itemise blocked_count and overdue_count, so a mirror appearing in a list
+        # whose own headline number excludes it would contradict the card.
         blocked_tasks_for_project = list(
             Task.objects.filter(phase__project=project, status='Blocked')
+            .filter(human_owned_tasks_q())
             .select_related('phase')[:5]
         )
         overdue_tasks_for_project = list(
@@ -634,7 +658,7 @@ def dashboard_pm(request):
                 phase__project=project, task_type=Task.INTERNAL,
                 due_date__lt=date.today(), due_date__isnull=False,
                 status__in=['Not Started', 'In Progress'],
-            ).select_related('phase')[:5]
+            ).filter(human_owned_tasks_q()).select_related('phase')[:5]
         )
         is_delayed = bool(
             project.target_commissioning_date
@@ -650,11 +674,12 @@ def dashboard_pm(request):
             .order_by('phase_order').first()
             or project.phases.order_by('-phase_order').first()
         )
+        # Per-project due-today count on the same card.
         due_today_for_project = Task.objects.filter(
             phase__project=project,
             due_date=date.today(), due_date__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
 
         milestones_list = []
         for _m in project.milestones.all():
@@ -778,12 +803,14 @@ def dashboard_pm(request):
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
 
+    # Due-today / due-soon / overdue stat block. Drills through to tasks_drill_down,
+    # which carries the same exclusion so the card and the list agree.
     _pm_task_base = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    )
+    ).filter(human_owned_tasks_q())
     _active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _soon   = date.today() + timedelta(days=7)
     tasks_due_today_count = _pm_task_base.filter(due_date=date.today(), status__in=_active).count()
@@ -844,6 +871,11 @@ def dashboard_site_engineer(request):
         status__in=['Active', 'In Progress'],
         phases__tasks__assigned_to=se_profile,
     ).distinct().annotate(
+        # Per-project overdue / blocked for this SE. The exclusion rides INSIDE the
+        # Count filter, not on the queryset: the project SELECTION above
+        # (phases__tasks__assigned_to) is a visibility rule and must keep matching on
+        # mirrors, or an SE assigned only a mirror would lose the site off their
+        # dashboard entirely. Metrics out, visibility untouched.
         overdue_count=Count(
             'phases__tasks',
             filter=Q(
@@ -852,7 +884,7 @@ def dashboard_site_engineer(request):
                 phases__tasks__due_date__lt=today,
                 phases__tasks__due_date__isnull=False,
                 phases__tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ),
+            ) & human_owned_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         blocked_count=Count(
@@ -860,7 +892,7 @@ def dashboard_site_engineer(request):
             filter=Q(
                 phases__tasks__assigned_to=se_profile,
                 phases__tasks__status=Task.BLOCKED,
-            ),
+            ) & human_owned_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         pending_grn_count=Count(
@@ -878,7 +910,12 @@ def dashboard_site_engineer(request):
     projects_data = []
     for project in projects:
         # Compute SE task progress: done / total for tasks explicitly assigned to this SE
-        se_tasks_qs = Task.objects.filter(phase__project=project, assigned_to=se_profile)
+        # Progress over the SE's own tasks, mirrors out of numerator and denominator
+        # (R-20, Option A). No OPEX mirror carries the Site Engineer role today, so
+        # this changes nothing now; it is here so the rule is uniform when one does.
+        se_tasks_qs = Task.objects.filter(
+            phase__project=project, assigned_to=se_profile,
+        ).filter(human_owned_tasks_q())
         se_total    = se_tasks_qs.count()
         se_done     = se_tasks_qs.filter(status=Task.DONE).count()
         progress    = int(se_done / se_total * 100) if se_total else 0
@@ -958,12 +995,13 @@ def dashboard_site_engineer(request):
     total_issues      = sum(p['issue_count'] for p in projects_data)
     total_urgent      = sum(p['urgency_count'] for p in projects_data)
 
+    # Due-today / due-soon / overdue stat block — drills through to tasks_drill_down.
     _se_task_base = Task.objects.filter(
         assigned_to=se_profile,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    )
+    ).filter(human_owned_tasks_q())
     _se_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _se_soon   = today + timedelta(days=7)
     se_tasks_due_today = _se_task_base.filter(due_date=today, status__in=_se_active).count()
@@ -1102,10 +1140,13 @@ def dashboard_design(request):
     # phase__project__in=projects_qs guarantees this stat block counts tasks
     # from exactly the same project set as the cards above — no drift between
     # the two if the visibility union ever changes.
+    # Counts every task on the visible projects with NO assignment or role term, so an
+    # OPEX site's two Design mirrors would land here on assignment alone. The project
+    # SELECTION (projects_qs, above) is left alone — that is visibility.
     _design_task_base = Task.objects.filter(
         phase__project__in=projects_qs,
         due_date__isnull=False,
-    ).distinct()
+    ).filter(human_owned_tasks_q()).distinct()
     _d_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _d_soon   = today + timedelta(days=7)
     design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
@@ -1581,12 +1622,15 @@ def dashboard_scm(request):
         .values('id', 'name')
     )
 
+    # Portfolio-wide task stat block with no role term — the OPEX Material Delivery
+    # mirror is SCM-owned and would count here. (The delivery figures above are
+    # DeliveryChallan-derived by design and are not touched.)
     _scm_task_base = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
         **_context_filter(ctx, 'phase__project__'),
-    )
+    ).filter(human_owned_tasks_q())
     _s_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _s_soon   = today + timedelta(days=7)
     scm_tasks_due_today = _scm_task_base.filter(due_date=today, status__in=_s_active).count()
@@ -1677,12 +1721,18 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
 # cross-checking against the SCM models — the two will disagree, and the disagreement
 # is not a bug in either. See SECONDARY_FINDINGS.md.
 #
-# Positions come from build_residential_phases() and are RESIDENTIAL-ONLY. There is no
-# OPEX/CAPEX phase template in this codebase at all (attach_residential_template is the
-# only builder; non-Residential activation tells the PM to add tasks by hand), and no
-# non-Residential project on production has a single phase row. Phase 6 of a tender site
-# would therefore be whatever someone happened to create sixth, so both subqueries carry
-# their own project_type term and both rows hide for those types.
+# Positions come from build_residential_phases() and are RESIDENTIAL-ONLY. Phase 6 of a
+# tender site is NOT the Residential phase 6, so both subqueries carry their own
+# project_type term and both rows hide for those types.
+#
+# CORRECTED 30 Aug 2026 (prompt 1.3b). This block used to justify itself by asserting
+# "there is no OPEX/CAPEX phase template in this codebase at all" and "no non-Residential
+# project on production has a single phase row". Migration 0075 falsified the first —
+# an OPEX template (7 phases, 22 tasks) is seeded and active — and 1.3c will falsify the
+# second the moment it attaches one. THE GUARD ITSELF IS UNAFFECTED: it is a
+# project_type equality test, not an inference from the absence of a template, so it
+# keeps holding for exactly the reason stated in the paragraph above. Only the
+# now-false rationale is removed, so the next reader does not act on it.
 RESIDENTIAL_DELIVERY_PHASE_ORDER = 6   # phase 'Delivery', 5 tasks
 RESIDENTIAL_BOQ_PHASE_ORDER      = 3   # phase 'Design'
 RESIDENTIAL_BOQ_TASK_ORDER       = 5   # task  'BOQ Preparation' — the only BOQ task in the template
@@ -1923,8 +1973,15 @@ def _get_ceo_dashboard_context(context=None):
             # construction. A Count(filter=~Q(phases__tasks__status=DONE)) would not be
             # equivalent — a negated Q across a multi-valued relation takes Django's
             # exclude() subquery path instead of a plain SQL FILTER.
-            task_total_count=Count('phases__tasks'),
-            task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)),
+            #
+            # Both counts exclude mirrors (R-20), and BOTH must or the partition
+            # breaks. The exclusion is a POSITIVE Q inside the FILTER clause, so it
+            # rides the same single join and adds no fan-out — a negated form would
+            # take Django's exclude() subquery path, which is exactly what the note
+            # above warns against.
+            task_total_count=Count('phases__tasks', filter=human_owned_tasks_q('phases__tasks__')),
+            task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)
+                                                         & human_owned_tasks_q('phases__tasks__')),
         )
         .order_by('target_commissioning_date', 'project_id')
     )
@@ -1995,11 +2052,17 @@ def _get_ceo_dashboard_context(context=None):
         })
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
+    # Every one of the ~40 conditional counts below excludes mirrors, because the
+    # exclusion sits on the BASE rather than on each Count. That is deliberate: the 18
+    # dept_* terms match on assigned_role with NO assignment term, so they are the one
+    # place a mirror inflates whether or not anybody is assigned to it — an OPEX site
+    # adds 2 to dept_pm_pending, 2 to dept_design_pending and 1 to dept_scm_pending on
+    # attach alone. There is no values()/group-by here, so the base filter adds no join.
     task_agg = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
         **_context_filter(context, 'phase__project__'),
-    ).aggregate(
+    ).filter(human_owned_tasks_q()).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
         task_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -2166,6 +2229,12 @@ def _get_ceo_dashboard_context(context=None):
     # Session 2 added exactly two things here, neither of which can change which rows
     # or counts come back: `assigned_to__role` (role is 1:1 with the profile already in
     # the GROUP BY, so it is a display column only), and the `assigned_to` tie-break.
+    #
+    # Session 1.3b added a third: the mirror exclusion (R-20). It DOES change what
+    # comes back, and that is the point — this card ranks people by workload, and a PM
+    # holding 190 COD/HOTO mirrors across the OPEX portfolio would top it on work
+    # nobody can do. Applied to the base, before the grouping, so the counts partition
+    # the same rows.
     top_assignees = list(
         Task.objects.filter(
             phase__project__is_deleted=False,
@@ -2174,6 +2243,7 @@ def _get_ceo_dashboard_context(context=None):
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
             **_context_filter(context, 'phase__project__'),
         )
+        .filter(human_owned_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -2190,6 +2260,10 @@ def _get_ceo_dashboard_context(context=None):
     # completed_at is REQUIRED, not merely preferred: it is what "in the last 30 days"
     # is measured on, so a Done task without one cannot be placed in the window and is
     # excluded rather than guessed at. Production has 0 such rows.
+    #
+    # Mirrors excluded (R-20): a Design mirror reaching Done writes completed_at like
+    # any other task, and crediting that completion to its nominal owner attributes
+    # another team's finished work to them.
     top_completed = list(
         Task.objects.filter(
             phase__project__is_deleted=False,
@@ -2201,6 +2275,7 @@ def _get_ceo_dashboard_context(context=None):
             completed_at__gte=top_people_cutoff,
             **_context_filter(context, 'phase__project__'),
         )
+        .filter(human_owned_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -7155,11 +7230,18 @@ def project_overview(request, project_id):
             tasks = list(phase.tasks.all())
             if not tasks:
                 continue
-            internal       = [t for t in tasks if t.task_type == 'Internal']
+            # Per-phase progress bar. Mirrors out of numerator and denominator (R-20,
+            # Option A) — a 7-task phase holding 2 mirrors reads out of 5. `phases`
+            # itself is NOT filtered: the task TABLE below this bar still lists every
+            # task including mirrors, which is the whole point of them. Only the
+            # metric drops them, which is why the filter is here and not on the
+            # queryset above.
+            countable     = [t for t in tasks if is_human_owned(t)]
+            internal       = [t for t in countable if t.task_type == 'Internal']
             internal_done  = sum(1 for t in internal if t.status == 'Done')
             internal_total = len(internal)
             pct            = int(internal_done / internal_total * 100) if internal_total else 0
-            ext_pending    = sum(1 for t in tasks if t.task_type == 'External' and t.status != 'Done')
+            ext_pending    = sum(1 for t in countable if t.task_type == 'External' and t.status != 'Done')
             phase_data_json.append({
                 'pk':             phase.pk,
                 'pct':            pct,

@@ -20,6 +20,7 @@ from django.db.models import Count, Q
 from django.utils import timezone
 
 from .models import Project, Task, UserProfile
+from .utils import human_owned_tasks_q
 
 
 # The active-project predicate, in one place. Deliberately identical to the one
@@ -71,10 +72,19 @@ def build_user_status_rows(report_date):
     # Task has no soft-delete of its own, so the project carries the liveness filter.
     # `assigned_to__isnull=False` drops unassigned template rows, which belong to nobody
     # and would otherwise group under a NULL key.
+    #
+    # Counts every column on this report — tasks_assigned, the four status columns,
+    # overdue, done_today — plus the task-derived half of projects_assigned below.
+    # Mirrors are out because their status is written by another team's object, so a
+    # mirror in this table would put another team's queue in this person's row.
+    # Narrowing the BASE (rather than each Count) is what keeps the row-sum invariant
+    # not_started + in_progress + completed + blocked == tasks_assigned true: the four
+    # partition the same rows, before grouping, adding no join.
     task_active, task_cancelled = _active_project_filter('phase__project__')
     task_base = (
         Task.objects
         .filter(assigned_to__isnull=False, **task_active)
+        .filter(human_owned_tasks_q())
         .exclude(**task_cancelled)
     )
 
