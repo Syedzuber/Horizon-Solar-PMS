@@ -163,6 +163,16 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 **Enforced by** `projects/tests_task_status_path.py`: one contract mixin run through both entry points as `OverviewRowPathTests` and `TaskDetailPathTests`, so a rule that stops holding on one screen fails a named test. ⑤ `milestone_receive` and ⑥ the `update_milestone` branch of `project_overview` are **outside this rule** — see §13.
 
+**R-19 · The profile↔task role mapping lives in one place. A new role is added there and nowhere else.** *(Established by prompt K5, 30 Aug 2026.)*
+
+`UserProfile.role` and `Task.assigned_role` are two vocabularies for one idea. `_PROFILE_TO_TASK_ROLE` in `projects/views.py` is the only translation between them, and `_TASK_TO_PROFILE_ROLE` beside it is **derived from it by comprehension, never written as a second literal** — two constants drift, a derived one cannot. Same idiom as `_MILESTONE_TO_FINANCE_TASK` thirteen lines above it.
+
+**The map is differences-only, deliberately.** Only BD's two strings differ (`'BD'` ↔ `'BD / Sales'`); every other role is spelled identically on both sides, and both maps are read through `.get(x, x)` so identical strings pass through. An identity entry `{'Foo': 'Foo'}` would be a line that proves nothing — it does not make `'Foo'` a role any user can hold.
+
+**Why it is a rule.** This pair decides whether a user may change a task's status, set a due date, or tick a checklist item, and it is what builds the assignment candidate lists. When it is wrong the failure is **silent**: the holder gets a permission refusal, not an error, so nothing logs and nothing names the cause. That is precisely what `'Design Head'` cost its holder (see the comment on `UserProfile.ROLE_CHOICES`), and prompt 1.3a walked into the mirror image of it by adding `'Project Coordinator'` to `Task.ROLE_CHOICES` alone.
+
+**Enforced by** `projects/tests_role_mapping.py::RoleMappingStructureTests`. The guard walks `Task.ROLE_CHOICES` — **derived from the choices, never a hardcoded tuple**, since a hardcoded list is a third place to forget the role — and asserts that every value, mapped backwards, lands on a real `UserProfile.ROLE_CHOICES` value. A companion test records which profile roles have no task counterpart (today: Admin, CEO, System Admin), so moving a role into or out of that set is a visible diff rather than a silent one.
+
 ---
 
 ## 4. Roles and ownership
@@ -171,7 +181,11 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 The stored BD value is **`'BD'`** ✔. `'BD / Sales'` is a `Task.assigned_role` value, not a `UserProfile.role` value — do not confuse them.
 
-`Task.ROLE_CHOICES` has six values ✔ and lacks Admin, System Admin, Project Coordinator and CEO. **A Project Coordinator therefore matches no `assigned_role` and cannot be assigned a task today** — relevant to prompts 1.2 and 2.1.
+`Task.ROLE_CHOICES` has **seven** values as of 1.3a and lacks Admin, System Admin and CEO. **Project Coordinator was added by 1.3a** for the OPEX template's Completion Certificates task, and K5 wired it through: it needs no `_PROFILE_TO_TASK_ROLE` entry, because the two sides spell it identically and both maps pass identical strings through (R-19).
+
+**A Project Coordinator's task authority does not come from the role match, and a future prompt must not assume it does.** For this role `user_can_view_project()` and `user_can_manage_project()` are the *same predicate* — Project Coordinator has no task-relation branch of its own, unlike Site Engineer and Design, so it sees exactly the projects it coordinates. `task_status_update` applies the 0.2 view-scope lockdown **before** the role gate, so a coordinator off the project is refused at scope (404, not 403) and a coordinator on it already has `is_pm=True`. The forward map is therefore **unreachable for this role** on `task_status_update`, on `task_set_due_date` and in `_user_can_complete_checklist_item` — all three test manage authority first. What genuinely depends on the mapping for a coordinator is the **inverse** direction, in `task_assign`'s candidate queryset and `project_overview`'s `candidates_by_role`. Pinned by `tests_role_mapping.CoordinatorTaskActionTests`.
+
+**Still open:** `_get_ceo_dashboard_context()` has six hardcoded `dept_*` counter groups and no Coordinator one, so a task with this role is counted by no department. Assigned to **1.3b**.
 
 `_PROFILE_TO_TASK_ROLE` is **one module-level constant** at `views.py:413` — `{'BD': 'BD / Sales'}`, applied as `.get(role, role)` at seven call sites. **Corrected 29 Aug by 0.6:** it used to be seven byte-identical *local* copies, and 0.2b consolidated them ahead of prompt 1.2's schedule. The two vocabularies differ in exactly one value; they differ in *membership* more than in naming.
 

@@ -97,7 +97,38 @@ also under an explicit instruction from Part 6 to leave that constant alone.
 **Risk if left.** If the two drift, the symptom is a page that renders inputs the POST
 handler then refuses, or the reverse — a form that silently does nothing.
 
-### A3 — `_TASK_TO_PROFILE_ROLE` is still declared locally, twice
+### ~~A3 — `_TASK_TO_PROFILE_ROLE` is still declared locally, twice~~ — **CLOSED 30 Aug 2026 by prompt K5**
+
+**Closed.** Both local copies are gone. `_TASK_TO_PROFILE_ROLE` now sits at `views.py:435`,
+immediately below the forward map and **derived from it by comprehension** rather than written
+as a second literal — the same idiom `_MILESTONE_TO_FINANCE_TASK` uses thirteen lines above.
+Two constants can drift; a derived one cannot. The rule is recorded as **R-19** in
+`docs/execution-model.md` and enforced structurally by
+`projects/tests_role_mapping.py::RoleMappingStructureTests`, which walks `Task.ROLE_CHOICES`
+and asserts every value maps back to a real `UserProfile.ROLE_CHOICES` value.
+
+**The line numbers below were stale by ~129 lines** — the actual sites were `views.py:4123`
+and `views.py:7243`. Recorded because this is the third enumeration handed to a session in this
+programme that did not survive contact with the file.
+
+**Two findings K5 made while closing it**, neither of which A3 anticipated:
+
+1. **Project Coordinator needed no map entry at all.** The map is differences-only, read through
+   `.get(x, x)`; the profile and task strings for this role are byte-identical, so passthrough
+   already resolved it. "Add the role to the mapping" was the obvious wrong fix.
+2. **For a Project Coordinator the forward map is unreachable on the status path.**
+   `user_can_view_project()` and `user_can_manage_project()` are the same predicate for this
+   role, and the 0.2 view-scope lockdown runs before the role gate — so a coordinator off the
+   project is refused at scope, and one on it already has `is_pm=True`. A3's stated risk
+   ("decides whether a user may change a task's status…") is therefore true of BD and of any
+   future role with a task-relation view branch, but **not** of Project Coordinator. See §4 of
+   `docs/execution-model.md`.
+
+The original entry follows.
+
+---
+
+### A3 (original) — `_TASK_TO_PROFILE_ROLE` is still declared locally, twice
 
 `projects/views.py:4252` and `projects/views.py:7372`, both
 `{'BD / Sales': 'BD'}`.

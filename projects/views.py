@@ -410,7 +410,32 @@ _MILESTONE_TO_FINANCE_TASK = {
 # UserProfile.role and Task.assigned_role use the same strings for every role
 # except BD, which the task template spells 'BD / Sales'. Normalise through this
 # before comparing the two.
+#
+# THIS PAIR DECIDES WHETHER A USER MAY ACT ON A TASK. Read through `.get(x, x)`,
+# it is what `task_status_update`, `task_detail_status_update`'s sibling role gate,
+# `task_set_due_date` and `_user_can_complete_checklist_item` compare against
+# `Task.assigned_role` — so a role the mapping resolves wrongly loses status
+# changes, due dates and checklist ticks, and loses them SILENTLY: the holder gets
+# a permission refusal, not an error, so nothing logs and nothing names the cause.
+# That is exactly what 'Design Head' cost its holder (see UserProfile.ROLE_CHOICES).
+# `task_assign` and `project_overview` read the inverse to build candidate lists.
+#
+# DIFFERENCES ONLY, DELIBERATELY. Every other role's two strings are byte-identical,
+# so `.get(x, x)` passes them through unchanged and an identity entry would add a
+# line that proves nothing — `{'Foo': 'Foo'}` does not make 'Foo' a real profile
+# role. The invariant that actually matters is enforced structurally instead, by
+# `tests_role_mapping.py`: every Task.ROLE_CHOICES value, mapped backwards, must
+# land on a real UserProfile.ROLE_CHOICES value. A NEW ROLE IS ADDED HERE AND
+# NOWHERE ELSE (R-19).
 _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+
+# Derived, never written as a second literal — two constants drift, a derived one
+# cannot. Strict inverse: the forward map's values are unique, so this round-trips.
+# Same idiom as _MILESTONE_TO_FINANCE_TASK above.
+_TASK_TO_PROFILE_ROLE = {
+    task_role: profile_role
+    for profile_role, task_role in _PROFILE_TO_TASK_ROLE.items()
+}
 
 
 @login_required
@@ -4119,8 +4144,8 @@ def task_assign(request, project_id, task_id):
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD'
-    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD' — module-level
+    # constant since K5; was a local copy of the same dict here and in project_overview
     profile_role = _TASK_TO_PROFILE_ROLE.get(task.assigned_role, task.assigned_role)
 
     # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task
@@ -7239,8 +7264,8 @@ def project_overview(request, project_id):
         })
 
     # Design assignment candidates (PM only, for assign-design dropdown)
-    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD'
-    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD' — module-level
+    # constant since K5; was a local copy of the same dict here and in task_assign
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
