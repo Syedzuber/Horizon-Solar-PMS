@@ -516,6 +516,31 @@ cost nothing; the day someone adds `admin.register(BOQ)` for shell convenience, 
 names the reason. A seventh subject type is covered the moment it enters the registry, without
 anyone remembering that test exists.
 
+**And a warning about the surface both prompts were editing.** While B10 was proving the above
+end to end, it found `ProjectAdmin` could not render at all: `DocumentInline.fields` named
+`doc_type`, `title` and `file`, none of which `ProjectDocument` has, so `modelform_factory` raised
+`FieldError` and **both admin project pages returned 500** — for an unknown length of time, with
+every automated signal green. B10 had to drop the inline at runtime to finish its demonstration.
+
+`python manage.py check` reported no issues and structurally cannot report this. Django lets a
+`ModelAdmin.fields` entry name a field the *form* contributes rather than the model, so
+`BaseModelAdminChecks._check_field_spec_item` treats any name it cannot find on the model as
+presumed-valid and returns no error. That permission is correct and load-bearing; the cost is
+that a typo and a genuine form-contributed field are indistinguishable until the form is built —
+and building the form is something only a request does. **Admin field specs are checked at
+request time. `manage.py check` is not cover for them.**
+
+What covers them now is `EveryRegisteredAdminPageLoadsTests` (B11,
+`projects/tests_admin_smoke.py`): for every model in `admin.site._registry` — the registry itself,
+so a registration added later is covered without anyone remembering — it GETs the changelist and
+the add form and asserts 200, naming the model and the admin class on failure. It needs no
+fixtures, and it covers the add form rather than the change form; a `fields` entry that resolves
+on add and fails on change would still slip past, which nothing in `projects/admin.py` does today.
+B11 also corrected the inline: the names map to `file_name`, `file_type` and `file_url`, but it is
+now **read-only and cannot add**, because a `ProjectDocument` row is a pointer into a Supabase
+bucket and the admin cannot put an object there — same rule as `DesignFileAdmin`'s frozen
+`bucket`/`path`.
+
 One editable status remains reachable from `ProjectAdmin`, and it is deliberate:
 `MilestoneInline` exposes `Milestone.status`. `Milestone` is the **legacy** model in the
 "NOT instrumented" table above — superseded by `PaymentMilestone`, kept for schema compatibility,

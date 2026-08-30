@@ -55,7 +55,7 @@ forbidden to fix (R-12), and each is numbered by the entry it closes.
 | B9 | **`TaskAdmin` stops writing task status past the ledger.** `readonly_fields = ['status']` with a DO-NOT-REMOVE comment; `AdminCannotWriteTaskStatusTests`. Closed §B9, opened §B10. | ✅ |
 | B10 | **`ProjectAdmin` — the identical hole, plus the worse half.** Activation is a view-layer action, so typing 'Active' into the admin form left a project Active and empty, a state the product cannot produce. `AdminCannotWriteProjectStatusTests` and a registry walk over every instrumented subject. Closed §B10, opened §B11. | ✅ |
 | B8 | **One task status-change path.** `_apply_task_status_change()` extracted from two near-identical ~180-line copies; **R-18** added. `views.py` 11,417 → 11,288. 49 new tests, the contract half run through **both** entry points. Closed §B8, opened §B12–§B16. **No rule added, removed or altered** — the four behavioural differences between the copies were preserved and pinned, not resolved. | ✅ |
-| B11 | `ProjectAdmin`'s add and change pages raise `FieldError`; `manage.py check` cannot see it. Found by B10, not fixed | ☐ |
+| B11 | **Both admin project pages were 500ing, and nothing could tell you.** `DocumentInline.fields` named three columns `ProjectDocument` has never had. `manage.py check` reported no issues and structurally cannot — an unknown `fields` entry is presumed form-contributed — so the defect survived with every signal green. Inline corrected to real names and made **read-only**: the row is a pointer into a Supabase bucket the admin cannot write. The durable half is `EveryRegisteredAdminPageLoadsTests`, which GETs the changelist and add form of **every** model in `admin.site._registry`. Closed §B11. | ✅ |
 
 ---
 

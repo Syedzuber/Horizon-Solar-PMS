@@ -717,7 +717,7 @@ including the write-site count, with the previous wording struck rather than del
 
 ---
 
-### B11 — the `ProjectAdmin` add and change pages have been raising `FieldError`, and `manage.py check` cannot see it
+### ~~B11 — the `ProjectAdmin` add and change pages have been raising `FieldError`, and `manage.py check` cannot see it~~ — **CLOSED by prompt B11**
 
 Found by prompt B10, 30 Aug 2026, while driving the real admin URLs for its own verification.
 
@@ -762,6 +762,62 @@ upload to Supabase should exist on this admin at all) is a decision, not a renam
 since the admin has no upload path — or drop `DocumentInline` from `ProjectAdmin.inlines`
 entirely. **Whichever is chosen, add a test that GETs both admin project pages**, because that is
 the only thing that would have caught this and the only thing that will catch the next one.
+
+#### CLOSED 30 Aug 2026 BY PROMPT B11
+
+Fixed as the entry's first option, and the entry's parenthetical was the right instinct: the
+names do map one-to-one — `doc_type` → `file_type`, `title` → `file_name`, `file` → `file_url` —
+but the **write path does not survive the correction**
+([admin.py:21](projects/admin.py#L21)). `extra` is now `0`, all three fields are in
+`readonly_fields`, `can_delete` is `False` and `has_add_permission()` returns `False`.
+
+The reason is not tidiness. A `ProjectDocument` row is a *pointer* into a Supabase bucket, and the
+two columns that make it resolvable are `file_url` and `supabase_path` — the latter being what
+`purge_deleted_files` hands to `storage.remove()`
+([purge_deleted_files.py:41](projects/management/commands/purge_deleted_files.py#L41)). A row
+typed into an editable inline would name a file nobody uploaded and, with `supabase_path` left
+empty, could never be purged either. The admin cannot put an object in the bucket, so it must not
+create the row that claims one is there. That is the same rule `DesignFileAdmin` already states
+for `bucket`/`path`, applied to the same kind of object. Upload and delete stay in the view
+layer, which does both halves.
+
+**No other admin or inline had the defect.** Established by measurement, not inference: the new
+smoke test run against unfixed `HEAD` produced exactly one error — `(model='Project')`,
+`FieldError: Unknown field(s) (title, doc_type, file) specified for ProjectDocument` — and passed
+every other changelist and add form, `PhaseInline`, `MilestoneInline`, `ChecklistItemInline` and
+`ChecklistTaskLinkInline` included.
+
+**The durable half is the test the entry asked for**, generalised past the two pages that
+prompted it: `EveryRegisteredAdminPageLoadsTests` in
+[projects/tests_admin_smoke.py](projects/tests_admin_smoke.py) walks `admin.site._registry` —
+the registry itself, never a tuple copied from it — and GETs every registered model's changelist
+and add form, asserting 200 and naming the model and admin class on failure. No fixtures: a
+changelist renders with zero rows and an add form with no object, and setup is the part of a
+smoke test that rots. `NotificationLogAdmin` denies add outright, so its 403 proves nothing about
+its field spec; for any such admin the test resolves `get_form()` and each inline's
+`get_formset()` directly, so the one admin that forbids adding is not the one admin nothing
+validates.
+
+Two things the test needed that are worth recording. `solarpms.middleware.AdminAccessMiddleware`
+gates `/admin/` on `UserProfile.role == 'Admin'`, **not** on `is_staff` — a superuser with any
+other role is redirected, and the first run of this test read 302 on every page for that reason
+alone. And it covers the **add** form, not the change form: a `fields` entry that resolved on add
+and failed on change would slip past. Nothing in `projects/admin.py` builds fields conditionally
+on `obj` today, and one valid instance per registered model — most behind required foreign keys —
+costs more than that gap is worth.
+
+**Confirmed non-vacuous**, in the shape B10 used. With `MilestoneAdmin.fields` broken to
+`['due_dat']` at runtime in a scratch script, `manage.py check` still reported *"System check
+identified no issues (0 silenced)"* — the mechanism, demonstrated rather than asserted — while
+the smoke test errored at `(model='Milestone')` with
+`FieldError: Unknown field(s) (due_dat) specified for Milestone. Check fields/fieldsets/exclude
+attributes of class MilestoneAdmin.` Restored; nothing on disk was touched.
+
+Verified end to end through the real admin URLs with **all three inlines in place** and a real row
+in each: `GET /admin/projects/project/` → 200, `.../1/change/` → 200, `.../add/` → 200, with the
+document's `file_name` rendering in the change form's read panel. `docs/execution-model.md` §13
+records that `manage.py check` is not cover for admin field specs, and why it structurally cannot
+be.
 
 ---
 

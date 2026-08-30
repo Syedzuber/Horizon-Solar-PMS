@@ -19,9 +19,36 @@ class MilestoneInline(admin.TabularInline):
 
 
 class DocumentInline(admin.TabularInline):
+    """B11 — a READ panel. `ProjectDocument` is a pointer, not a document.
+
+    This inline named `doc_type`, `title` and `file`; the model has never had any of
+    the three. `modelform_factory` raised `FieldError` and BOTH admin project pages
+    returned 500. `manage.py check` cannot see it — an unknown `fields` entry is
+    assumed to be a field the form contributes — so `tests_admin_smoke` is what
+    catches this class of defect now.
+
+    The names map one-to-one onto real columns: doc_type -> file_type,
+    title -> file_name, file -> file_url. What does NOT survive the correction is
+    the write path. A row here is a pointer into a Supabase bucket, and the two
+    columns that make it resolvable are `file_url` and `supabase_path` — the latter
+    is what `purge_deleted_files` passes to `storage.remove()`. A row typed into
+    this inline would name a file nobody uploaded and, with `supabase_path` empty,
+    could never be purged either. The admin cannot put an object in the bucket, so
+    it must not create the row that claims one is there.
+
+    Same rule and same reason as `DesignFileAdmin` below, which freezes `bucket` and
+    `path` because rewriting them orphans the file. Uploading and deleting documents
+    stay where they already are: the view layer, which does both halves.
+    """
+
     model = ProjectDocument
-    extra = 1
-    fields = ['doc_type', 'title', 'file']
+    extra = 0
+    fields = ['file_name', 'file_type', 'file_url']
+    readonly_fields = ['file_name', 'file_type', 'file_url']
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 class PhaseInline(admin.TabularInline):
