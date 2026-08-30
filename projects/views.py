@@ -3714,14 +3714,261 @@ def _render_task_add_success_hx(request, project, phase):
     return resp
 
 
+# Outcomes of _apply_task_status_change(). Three values and not a bool, because the
+# two callers respond differently to a MISSING BLOCK REASON than to the other
+# refusals: task_status_update honours ?next= on that one and on success, and
+# ignores it on the rest. A bool could not tell those apart without the caller
+# re-deriving the rule the helper just applied.
+_TASK_STATUS_APPLIED            = 'applied'
+_TASK_STATUS_REFUSED            = 'refused'
+_TASK_STATUS_NEEDS_BLOCK_REASON = 'needs_block_reason'
+
+
+def _apply_task_status_change(task, new_status, profile, request, project):
+    """
+    Apply a user-initiated change to a Task's status: validation, the field writes,
+    the StatusTransition row, the ActivityLog row, and the downstream milestone sync
+    and notification.
+
+    THE ONE DECISION PATH FOR TASK STATUS (R-18). Single implementation shared by
+    task_status_update (the project-overview row control) and task_detail_status_update
+    (the task-detail status block) — two screens the same person uses interchangeably.
+    Previously each was a ~180-line copy of the other, so a rule added to one was not
+    enforced, merely avoidable. A NEW TASK-STATUS RULE IS ADDED HERE, NEVER TO A VIEW.
+
+    Gates and response shaping stay with the callers, as in _apply_boq_acknowledgement:
+    each keeps its own answer to "may you move this task" (role-or-PM on the overview,
+    assignee-only on the detail page) and its own redirect or HTMX partial. This helper
+    never returns an HttpResponse and does not know which screen called it.
+
+    `task` is NOT refreshed here — `task.status` stays the pre-change value throughout,
+    because it is the from-status every record_transition() call needs. Callers refresh
+    before rendering.
+
+    `project` is passed rather than read from `task.phase.project`: both callers already
+    hold it, and dereferencing would cost a query on the hottest write path in the app.
+
+    Emits its own user-facing messages so the wording of a refusal cannot drift between
+    the two screens. Returns one of _TASK_STATUS_APPLIED, _TASK_STATUS_REFUSED or
+    _TASK_STATUS_NEEDS_BLOCK_REASON — see those constants for why three.
+    """
+    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
+    if new_status not in valid_statuses:
+        messages.error(request, 'Invalid status value.')
+        return _TASK_STATUS_REFUSED
+
+    # State machine: defines allowed next states for each current state.
+    # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
+    VALID_TRANSITIONS = {
+        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
+        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
+        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
+        Task.DONE:        {Task.BLOCKED},
+    }
+
+    allowed = VALID_TRANSITIONS.get(task.status, set())
+    if new_status not in allowed:
+        messages.error(
+            request,
+            f"Cannot move task from '{task.status}' to '{new_status}'."
+        )
+        return _TASK_STATUS_REFUSED
+
+    # Finance can supply due_date inline when switching to In Progress — save before the guard
+    _due_date_str = request.POST.get('due_date', '').strip()
+    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
+        try:
+            _parsed_due = date.fromisoformat(_due_date_str)
+            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
+            task.due_date = _parsed_due
+        except ValueError:
+            pass
+
+    # Server-side guard: In Progress requires a due date
+    if new_status == Task.IN_PROGRESS and not task.due_date:
+        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        return _TASK_STATUS_REFUSED
+
+    update_kwargs = {'status': new_status}
+    if new_status == Task.DONE:
+        update_kwargs['completed_at'] = timezone.now()
+    # Track when a task first becomes blocked so the CEO aged-KPI can measure how long it has been stuck
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        update_kwargs['blocked_since'] = timezone.now()
+    # Clear on un-block so any future re-block re-ages from zero, not from the original block date
+    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
+        update_kwargs['blocked_since'] = None
+
+    # Blocked requires a stated blocking issue (fresh transition only)
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        block_issue_title = request.POST.get('block_issue_title', '').strip()
+        if not block_issue_title:
+            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            return _TASK_STATUS_NEEDS_BLOCK_REASON
+
+        # R-2: the status write and its ledger row commit together or not at all.
+        # The atomic block is deliberately TIGHT — it holds the pair and nothing
+        # else, so the Issue creation and notifications below keep exactly the
+        # failure behaviour they had before this was instrumented.
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=profile, reason_code=REASON_BLOCKED,
+                # The hold reason, captured where one exists — this branch is the
+                # only task path that collects any free text at all.
+                remark=block_issue_title,
+            )
+
+        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
+        if block_severity not in dict(Issue.SEVERITY_CHOICES):
+            block_severity = Issue.HIGH
+        block_assignee = None
+        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
+        if block_assignee_id:
+            try:
+                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
+            except UserProfile.DoesNotExist:
+                pass
+        with transaction.atomic():
+            issue = Issue.objects.create(
+                project=project,
+                task=task,
+                title=block_issue_title,
+                description=request.POST.get('block_issue_description', '').strip(),
+                severity=block_severity,
+                status=Issue.OPEN,
+                raised_by=profile,
+                assigned_to=block_assignee,
+            )
+            # Creation transition: from_status is blank because there is no from.
+            record_transition(
+                issue, to_status=Issue.OPEN, actor=profile,
+                reason_code=REASON_BLOCKED, remark=block_issue_title,
+            )
+        log_activity(
+            project, profile,
+            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
+            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
+        )
+        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
+        return _TASK_STATUS_APPLIED
+
+    # R-2, same tight pair as the blocked branch above.
+    with transaction.atomic():
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        record_transition(
+            task, to_status=new_status, from_status=task.status,
+            actor=profile,
+            # Only leaving Blocked carries a reason here; the ordinary ladder
+            # moves have none, and inventing one would be a lie in a column
+            # people will later group by.
+            reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
+        )
+    # Log status changes for all non-blocked transitions (blocked has its own log above)
+    log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
+                 action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
+
+    # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
+    # Mapping by task name — names are fixed in the residential template.
+    # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
+    if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
+        _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
+        _ms_update = {'status': 'Received', 'received_date': date.today()}
+        _ar_str    = request.POST.get('amount_received', '').strip()
+        _vr_str    = request.POST.get('variance_reason', '').strip()
+        if _ar_str:
+            try:
+                _ms_update['amount_received'] = Decimal(_ar_str)
+            except InvalidOperation:
+                pass
+        if _vr_str:
+            _ms_update['variance_reason'] = _vr_str
+        try:
+            # Read the rows BEFORE the set-based update — a .update() cannot
+            # report the from-status it overwrote, and the ledger needs one per
+            # milestone. At most one row matches in practice.
+            _ms_before = list(PaymentMilestone.objects.filter(
+                project=project,
+                milestone_name=_ms_label,
+                status__in=['Pending', 'Invoiced'],
+            ))
+            with transaction.atomic():
+                _ms_updated = PaymentMilestone.objects.filter(
+                    project=project,
+                    milestone_name=_ms_label,
+                    status__in=['Pending', 'Invoiced'],
+                ).update(**_ms_update)
+                for _ms_row in _ms_before:
+                    record_transition(
+                        _ms_row, to_status='Received', from_status=_ms_row.status,
+                        actor=profile, project=project,
+                        reason_code=REASON_MILESTONE_SYNC,
+                    )
+            # Attribution: this Finance-confirmation task can be completed by the PM
+            # OR a Project Coordinator (drizzle-down authority), which auto-flips the
+            # milestone to Received. Log WHO did it — by name and role — so Finance can
+            # identify the specific person, never attributed generically to "PM".
+            if _ms_updated:
+                _actor_name = profile.user.get_full_name() or profile.user.username
+                log_activity(
+                    project, profile,
+                    f"Milestone {_ms_label} auto-marked Received via completion of "
+                    f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
+                    entity_type='Milestone',
+                )
+        except Exception:
+            pass  # Non-critical — never block the task update
+
+    # Payment milestone notification: task.is_payment_milestone is read from the pre-update
+    # object — the flag never changes during a status update, so this is safe.
+    if new_status == Task.DONE and task.is_payment_milestone:
+        seen_pks = set()
+        milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
+        milestone_recipients += project_managers(project)
+        milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
+        for recipient in milestone_recipients:
+            if recipient.pk in seen_pks:
+                continue
+            seen_pks.add(recipient.pk)
+            _pm_link = f'/projects/{project.project_id}/'
+            _pm_message = (
+                f'Project {project.project_id} ({project.customer_name}) has reached '
+                f'payment milestone: "{task.task_name}".\n\n'
+                f'Please initiate collection at the earliest.'
+            )
+            _pm_email_message = (
+                f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
+                f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
+            )
+            send_notification(
+                recipient=recipient,
+                message=_pm_email_message,
+                channels=['in_app', 'whatsapp', 'email'],
+                link=_pm_link,
+                subject=f'Payment Milestone Reached — {project.customer_name}',
+                template='payment_notification',
+                template_params=[project.customer_name, task.task_name, project.customer_name],
+                related_project=project,
+                actor=profile,
+            )
+
+    return _TASK_STATUS_APPLIED
+
+
 @login_required
 def task_status_update(request, project_id, task_id):
     """
-    Update a task's status. Enforces a transition table so invalid moves are rejected.
-    The assigned role or the project PM may update. Blocking a task requires a title
-    for a new Issue — the issue is auto-created and linked to the task.
-    filter().update() used instead of .save() to prevent race condition on concurrent
-    status changes from two users.
+    Update a task's status from the project-overview task row. Enforces a transition
+    table so invalid moves are rejected. The assigned role or the project PM may update.
+    Blocking a task requires a title for a new Issue — the issue is auto-created and
+    linked to the task.
+
+    The decision itself lives in _apply_task_status_change() and is shared with
+    task_detail_status_update. What stays here is the permission model (role-or-PM,
+    which the detail screen deliberately does not share), the unassigned-task
+    precondition, and the response — the HTMX row swap or a ?next=-aware redirect.
+
     Access: task's assigned_role or project PM. POST only.
     """
     if request.method != 'POST':
@@ -3733,6 +3980,10 @@ def task_status_update(request, project_id, task_id):
     # into it. Two independent questions: "may you see this project" (here) and "is this
     # your role's task, or are you its PM" (below). Before this, the role-matcher alone
     # let any Site Engineer move any Site Engineer task in the portfolio.
+    #
+    # B8 note: task_detail_status_update has NO equivalent of this check. That asymmetry
+    # was found by B8's pre-flight and deliberately preserved rather than resolved —
+    # see EXECUTION_MODULE_DEFERRED.md B12.
     if not user_can_view_project(request.user, project):
         raise Http404
 
@@ -3766,230 +4017,24 @@ def task_status_update(request, project_id, task_id):
             return _render_task_row_hx(request, project, task)
         return HttpResponseForbidden()
 
-    new_status = request.POST.get('status', '').strip()
-    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
-    if new_status not in valid_statuses:
-        messages.error(request, 'Invalid status value.')
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
+    outcome = _apply_task_status_change(
+        task, request.POST.get('status', '').strip(),
+        request.user.profile, request, project,
+    )
 
-    # State machine: defines allowed next states for each current state.
-    # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
-    VALID_TRANSITIONS = {
-        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
-        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
-        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
-        Task.DONE:        {Task.BLOCKED},
-    }
-
-    allowed = VALID_TRANSITIONS.get(task.status, set())
-    if new_status not in allowed:
-        messages.error(
-            request,
-            f"Cannot move task from '{task.status}' to '{new_status}'."
-        )
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
-
-    # Finance can supply due_date inline when switching to In Progress — save before the guard
-    _due_date_str = request.POST.get('due_date', '').strip()
-    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
-        try:
-            _parsed_due = date.fromisoformat(_due_date_str)
-            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-            task.due_date = _parsed_due
-        except ValueError:
-            pass
-
-    # Server-side guard: In Progress requires a due date
-    if new_status == Task.IN_PROGRESS and not task.due_date:
-        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
-
-    update_kwargs = {'status': new_status}
-    if new_status == Task.DONE:
-        update_kwargs['completed_at'] = timezone.now()
-    # Track when a task first becomes blocked so the CEO aged-KPI can measure how long it has been stuck
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        update_kwargs['blocked_since'] = timezone.now()
-    # Clear on un-block so any future re-block re-ages from zero, not from the original block date
-    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
-        update_kwargs['blocked_since'] = None
-
-    # Blocked requires a stated blocking issue (fresh transition only)
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        block_issue_title = request.POST.get('block_issue_title', '').strip()
-        if not block_issue_title:
-            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
-            if _is_hx(request):
-                return _render_task_row_hx(request, project, task)
-            next_url = request.POST.get('next', '')
-            if next_url and not _urlparse(next_url).netloc:
-                return redirect(next_url)
-            return redirect('project_overview', project_id=project.project_id)
-
-        # R-2: the status write and its ledger row commit together or not at all.
-        # The atomic block is deliberately TIGHT — it holds the pair and nothing
-        # else, so the Issue creation and notifications below keep exactly the
-        # failure behaviour they had before this was instrumented.
-        with transaction.atomic():
-            Task.objects.filter(pk=task.pk).update(**update_kwargs)
-            record_transition(
-                task, to_status=new_status, from_status=task.status,
-                actor=request.user.profile, reason_code=REASON_BLOCKED,
-                # The hold reason, captured where one exists — this branch is the
-                # only task path that collects any free text at all.
-                remark=block_issue_title,
-            )
-
-        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
-        if block_severity not in dict(Issue.SEVERITY_CHOICES):
-            block_severity = Issue.HIGH
-        block_assignee = None
-        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
-        if block_assignee_id:
-            try:
-                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
-            except UserProfile.DoesNotExist:
-                pass
-        with transaction.atomic():
-            issue = Issue.objects.create(
-                project=project,
-                task=task,
-                title=block_issue_title,
-                description=request.POST.get('block_issue_description', '').strip(),
-                severity=block_severity,
-                status=Issue.OPEN,
-                raised_by=request.user.profile,
-                assigned_to=block_assignee,
-            )
-            # Creation transition: from_status is blank because there is no from.
-            record_transition(
-                issue, to_status=Issue.OPEN, actor=request.user.profile,
-                reason_code=REASON_BLOCKED, remark=block_issue_title,
-            )
-        log_activity(
-            project, request.user.profile,
-            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
-        )
-        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
-    else:
-        # R-2, same tight pair as the blocked branch above.
-        with transaction.atomic():
-            Task.objects.filter(pk=task.pk).update(**update_kwargs)
-            record_transition(
-                task, to_status=new_status, from_status=task.status,
-                actor=request.user.profile,
-                # Only leaving Blocked carries a reason here; the ordinary ladder
-                # moves have none, and inventing one would be a lie in a column
-                # people will later group by.
-                reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
-            )
-        # Log status changes for all non-blocked transitions (blocked has its own log above)
-        log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
-                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
-
-        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
-        # Mapping by task name — names are fixed in the residential template.
-        # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
-        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
-            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
-            _ms_update = {'status': 'Received', 'received_date': date.today()}
-            _ar_str    = request.POST.get('amount_received', '').strip()
-            _vr_str    = request.POST.get('variance_reason', '').strip()
-            if _ar_str:
-                try:
-                    _ms_update['amount_received'] = Decimal(_ar_str)
-                except InvalidOperation:
-                    pass
-            if _vr_str:
-                _ms_update['variance_reason'] = _vr_str
-            try:
-                # Read the rows BEFORE the set-based update — a .update() cannot
-                # report the from-status it overwrote, and the ledger needs one per
-                # milestone. At most one row matches in practice.
-                _ms_before = list(PaymentMilestone.objects.filter(
-                    project=project,
-                    milestone_name=_ms_label,
-                    status__in=['Pending', 'Invoiced'],
-                ))
-                with transaction.atomic():
-                    _ms_updated = PaymentMilestone.objects.filter(
-                        project=project,
-                        milestone_name=_ms_label,
-                        status__in=['Pending', 'Invoiced'],
-                    ).update(**_ms_update)
-                    for _ms_row in _ms_before:
-                        record_transition(
-                            _ms_row, to_status='Received', from_status=_ms_row.status,
-                            actor=request.user.profile, project=project,
-                            reason_code=REASON_MILESTONE_SYNC,
-                        )
-                # Attribution: this Finance-confirmation task can be completed by the PM
-                # OR a Project Coordinator (drizzle-down authority), which auto-flips the
-                # milestone to Received. Log WHO did it — by name and role — so Finance can
-                # identify the specific person, never attributed generically to "PM".
-                if _ms_updated:
-                    _actor = request.user.profile
-                    _actor_name = _actor.user.get_full_name() or _actor.user.username
-                    log_activity(
-                        project, _actor,
-                        f"Milestone {_ms_label} auto-marked Received via completion of "
-                        f"Finance task '{task.task_name}' by {_actor_name} ({_actor.role})",
-                        entity_type='Milestone',
-                    )
-            except Exception:
-                pass  # Non-critical — never block the task update
-
-        # Payment milestone notification: task.is_payment_milestone is read from the pre-update
-        # object — the flag never changes during a status update, so this is safe.
-        if new_status == Task.DONE and task.is_payment_milestone:
-            seen_pks = set()
-            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            milestone_recipients += project_managers(project)
-            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
-            for recipient in milestone_recipients:
-                if recipient.pk in seen_pks:
-                    continue
-                seen_pks.add(recipient.pk)
-                _pm_link = f'/projects/{project.project_id}/'
-                _pm_message = (
-                    f'Project {project.project_id} ({project.customer_name}) has reached '
-                    f'payment milestone: "{task.task_name}".\n\n'
-                    f'Please initiate collection at the earliest.'
-                )
-                _pm_email_message = (
-                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
-                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
-                )
-                send_notification(
-                    recipient=recipient,
-                    message=_pm_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=_pm_link,
-                    subject=f'Payment Milestone Reached — {project.customer_name}',
-                    template='payment_notification',
-                    template_params=[project.customer_name, task.task_name, project.customer_name],
-                    related_project=project,
-                    actor=request.user.profile,
-                )
-
-    # HTMX success: swap just this row with its new status/completed date. task was
-    # updated via filter().update() so refresh the in-memory copy before rendering.
+    # HTMX: swap just this row with its new status/completed date, on refusal as well as
+    # on success — the flash fragment carries the helper's message. task was updated via
+    # filter().update() so refresh the in-memory copy before rendering.
     if _is_hx(request):
         task.refresh_from_db()
         return _render_task_row_hx(request, project, task)
 
-    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain)
-    next_url = request.POST.get('next', None)
-    if next_url:
-        from urllib.parse import urlparse
-        if urlparse(next_url).netloc == '':
+    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain). Applied
+    # on success and on a missing block reason, and NOT on the other refusals — which is
+    # what the two pre-B8 copies of this tail did.
+    if outcome in (_TASK_STATUS_APPLIED, _TASK_STATUS_NEEDS_BLOCK_REASON):
+        next_url = request.POST.get('next', '')
+        if next_url and not _urlparse(next_url).netloc:
             return redirect(next_url)
     return redirect('project_overview', project_id=project.project_id)
 
@@ -3999,8 +4044,13 @@ def task_detail_status_update(request, project_id, task_id):
     """
     Status update submitted from the task detail page.
     Only the user specifically assigned to the task (task.assigned_to) may change status.
-    Uses the same transition table and notification flows as task_status_update, but
-    permission is user-level (not role-level) and the redirect returns to the task detail page.
+
+    Shares the whole decision with task_status_update via _apply_task_status_change(),
+    so the transition table, the guards, the ledger row and the notifications cannot
+    drift between the two screens. What differs, and stays here, is that permission is
+    user-level rather than role-level, and that the response returns to the task detail
+    page and never honours ?next= (see EXECUTION_MODULE_DEFERRED.md B12).
+
     POST only.
     """
     if request.method != 'POST':
@@ -4018,188 +4068,9 @@ def task_detail_status_update(request, project_id, task_id):
     if task.assigned_to is None or task.assigned_to != profile:
         return HttpResponseForbidden()
 
-    new_status = request.POST.get('status', '').strip()
-    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
-    if new_status not in valid_statuses:
-        messages.error(request, 'Invalid status value.')
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    VALID_TRANSITIONS = {
-        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
-        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
-        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
-        Task.DONE:        {Task.BLOCKED},
-    }
-
-    allowed = VALID_TRANSITIONS.get(task.status, set())
-    if new_status not in allowed:
-        messages.error(request, f"Cannot move task from '{task.status}' to '{new_status}'.")
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    # In Progress requires a due date — Finance users may supply one inline
-    _due_date_str = request.POST.get('due_date', '').strip()
-    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
-        try:
-            _parsed_due = date.fromisoformat(_due_date_str)
-            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-            task.due_date = _parsed_due
-        except ValueError:
-            pass
-
-    if new_status == Task.IN_PROGRESS and not task.due_date:
-        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    update_kwargs = {'status': new_status}
-    if new_status == Task.DONE:
-        update_kwargs['completed_at'] = timezone.now()
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        update_kwargs['blocked_since'] = timezone.now()
-    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
-        update_kwargs['blocked_since'] = None
-
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        block_issue_title = request.POST.get('block_issue_title', '').strip()
-        if not block_issue_title:
-            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
-            if _is_hx(request):
-                return _render_task_status_hx(request, project, task)
-            return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-        # R-2 — see the identical pair in task_status_update. Tight atomic block:
-        # the status write and its ledger row, and nothing else.
-        with transaction.atomic():
-            Task.objects.filter(pk=task.pk).update(**update_kwargs)
-            record_transition(
-                task, to_status=new_status, from_status=task.status,
-                actor=profile, reason_code=REASON_BLOCKED,
-                remark=block_issue_title,   # the hold reason
-            )
-
-        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
-        if block_severity not in dict(Issue.SEVERITY_CHOICES):
-            block_severity = Issue.HIGH
-        block_assignee = None
-        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
-        if block_assignee_id:
-            try:
-                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
-            except UserProfile.DoesNotExist:
-                pass
-        with transaction.atomic():
-            issue = Issue.objects.create(
-                project=project,
-                task=task,
-                title=block_issue_title,
-                description=request.POST.get('block_issue_description', '').strip(),
-                severity=block_severity,
-                status=Issue.OPEN,
-                raised_by=profile,
-                assigned_to=block_assignee,
-            )
-            record_transition(
-                issue, to_status=Issue.OPEN, actor=profile,
-                reason_code=REASON_BLOCKED, remark=block_issue_title,
-            )
-        log_activity(
-            project, profile,
-            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
-        )
-        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
-    else:
-        with transaction.atomic():
-            Task.objects.filter(pk=task.pk).update(**update_kwargs)
-            record_transition(
-                task, to_status=new_status, from_status=task.status,
-                actor=profile,
-                reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
-            )
-        log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
-                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
-
-        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received
-        # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
-        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
-            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
-            _ms_update = {'status': 'Received', 'received_date': date.today()}
-            _ar_str    = request.POST.get('amount_received', '').strip()
-            _vr_str    = request.POST.get('variance_reason', '').strip()
-            if _ar_str:
-                try:
-                    _ms_update['amount_received'] = Decimal(_ar_str)
-                except InvalidOperation:
-                    pass
-            if _vr_str:
-                _ms_update['variance_reason'] = _vr_str
-            try:
-                # Pre-read for the from-status — see task_status_update.
-                _ms_before = list(PaymentMilestone.objects.filter(
-                    project=project,
-                    milestone_name=_ms_label,
-                    status__in=['Pending', 'Invoiced'],
-                ))
-                with transaction.atomic():
-                    _ms_updated = PaymentMilestone.objects.filter(
-                        project=project,
-                        milestone_name=_ms_label,
-                        status__in=['Pending', 'Invoiced'],
-                    ).update(**_ms_update)
-                    for _ms_row in _ms_before:
-                        record_transition(
-                            _ms_row, to_status='Received', from_status=_ms_row.status,
-                            actor=profile, project=project,
-                            reason_code=REASON_MILESTONE_SYNC,
-                        )
-                # Attribution (see task_status_update): record the specific person who
-                # completed the Finance-confirmation task and thereby flipped the milestone.
-                if _ms_updated:
-                    _actor_name = profile.user.get_full_name() or profile.user.username
-                    log_activity(
-                        project, profile,
-                        f"Milestone {_ms_label} auto-marked Received via completion of "
-                        f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
-                        entity_type='Milestone',
-                    )
-            except Exception:
-                pass
-
-        if new_status == Task.DONE and task.is_payment_milestone:
-            seen_pks = set()
-            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            milestone_recipients += project_managers(project)
-            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
-            for recipient in milestone_recipients:
-                if recipient.pk in seen_pks:
-                    continue
-                seen_pks.add(recipient.pk)
-                _pm_link = f'/projects/{project.project_id}/'
-                _pm_message = (
-                    f'Project {project.project_id} ({project.customer_name}) has reached '
-                    f'payment milestone: "{task.task_name}".\n\n'
-                    f'Please initiate collection at the earliest.'
-                )
-                _pm_email_message = (
-                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
-                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
-                )
-                send_notification(
-                    recipient=recipient,
-                    message=_pm_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=_pm_link,
-                    subject=f'Payment Milestone Reached — {project.customer_name}',
-                    template='payment_notification',
-                    template_params=[project.customer_name, task.task_name, project.customer_name],
-                    related_project=project,
-                    actor=profile,
-                )
+    _apply_task_status_change(
+        task, request.POST.get('status', '').strip(), profile, request, project,
+    )
 
     if _is_hx(request):
         task.refresh_from_db()

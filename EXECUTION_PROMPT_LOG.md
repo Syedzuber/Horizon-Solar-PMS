@@ -45,6 +45,20 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | 1.4a | **Task dependencies — the model half.** `TaskTemplateTaskDependency` and `TaskDependency`, `DependencyCycle`, `incomplete_predecessors()` and `materialise_task_dependencies()` in the new `projects/task_dependencies.py`, migration `0073`. 42 tests. **Entirely additive — no view, no template, no permission file, no status-change behaviour, and nothing that can prevent a task from being started.** Closes B-08 at the model layer. | ✅ |
 | 1.4b | **Task dependencies — the enforcement half.** Wires the early-start **warning** and the **mandatory reason** into the status-change path, and records the override as a `StatusTransition` with a remark under a new `REASON_EARLY_START`. **No migration** — a `REASON_*` constant is module-level by R-10, and `SUBJECT_TASK` already exists. **The first user-visible change in this programme**, on the most-used write path in the product. **The write paths it must cover — enumerated by 1.4a's pre-flight, so this session does not rediscover them:**<br>① `views.py:task_status_update` — blocked branch (`update()` at ~3840)<br>② `views.py:task_status_update` — ordinary ladder (~3884)<br>③ `views.py:task_detail_status_update` — blocked branch (~4078)<br>④ `views.py:task_detail_status_update` — ordinary ladder (~4118)<br>⑤ `views.py:milestone_receive` — milestone→task sync (~6569)<br>⑥ `views.py:project_overview` — Finance `update_milestone` branch, milestone→task sync (~7142)<br>**①–④ are two near-identical copies of one ~180-line function** (§B8). The warning must land in **both**, or a user routes around it by using the other screen. **⑤ and ⑥ are not a user starting a task** — they are an automatic sync wrapped in `except Exception: pass`, and a mandatory reason must **not** be imposed on them. **A seventh path exists and is uninstrumented: the Django admin's `TaskAdmin` change form** (§B9) — out of 1.4b's scope, but it is why "every task status write is instrumented" is not quite true today. | ☐ |
 
+## Deferred-item prompts — run out of sequence, from `EXECUTION_MODULE_DEFERRED.md`
+
+These are not phase sessions. Each closes one entry that a phase prompt found and was
+forbidden to fix (R-12), and each is numbered by the entry it closes.
+
+| # | Session | Done |
+|---|---|---|
+| B9 | **`TaskAdmin` stops writing task status past the ledger.** `readonly_fields = ['status']` with a DO-NOT-REMOVE comment; `AdminCannotWriteTaskStatusTests`. Closed §B9, opened §B10. | ✅ |
+| B10 | **`ProjectAdmin` — the identical hole, plus the worse half.** Activation is a view-layer action, so typing 'Active' into the admin form left a project Active and empty, a state the product cannot produce. `AdminCannotWriteProjectStatusTests` and a registry walk over every instrumented subject. Closed §B10, opened §B11. | ✅ |
+| B8 | **One task status-change path.** `_apply_task_status_change()` extracted from two near-identical ~180-line copies; **R-18** added. `views.py` 11,417 → 11,288. 49 new tests, the contract half run through **both** entry points. Closed §B8, opened §B12–§B16. **No rule added, removed or altered** — the four behavioural differences between the copies were preserved and pinned, not resolved. | ✅ |
+| B11 | `ProjectAdmin`'s add and change pages raise `FieldError`; `manage.py check` cannot see it. Found by B10, not fixed | ☐ |
+
+---
+
 ### Why 1.1 became 1.1a and 1.1b
 
 Planned as one session. Split on 29 Aug 2026, **before either half was written**, on the

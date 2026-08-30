@@ -396,7 +396,7 @@ allowed to touch `views.py` should still do it.**
 
 ---
 
-### B8 — `task_status_update` and `task_detail_status_update` are two copies of one function
+### ~~B8 — `task_status_update` and `task_detail_status_update` are two copies of one function~~ — **CLOSED by prompt B8**
 
 Found by prompt 1.4a's pre-flight, 30 Aug 2026. **`projects/views.py` was on that prompt's
 forbidden list**, so this was enumerated rather than fixed. [views.py:3718](projects/views.py#L3718)
@@ -428,6 +428,136 @@ in its report that it did.
 written out verbatim twice, both wrapped in `except Exception: pass`. Neither is a user starting
 a task, so 1.4b's warning does not belong in them, and they are noted here only so the count of
 task status-write paths is not later reported as four when it is six.
+
+#### CLOSED 30 Aug 2026 BY PROMPT B8
+
+Extracted as the entry recommended, in the `_apply_boq_acknowledgement()` shape:
+`_apply_task_status_change(task, new_status, profile, request, project)` in
+[projects/views.py](projects/views.py), called by both views. **R-18** records the rule in
+`docs/execution-model.md` §3: *a new task-status rule is added to the helper, never to a view.*
+`views.py` went from 11,417 lines to 11,288.
+
+**This entry's "they differ in two places only" was wrong, and the correction is the substance
+of what B8 found.** A mechanical diff of the two bodies turned up **eight** differences, not two.
+Four are cosmetic or genuinely per-screen — the actor binding this entry named, the HTMX partial,
+the redirect target, and a stray function-local `urlparse` import shadowing the module-level
+`_urlparse`. **The other four are behavioural, and B8 preserved rather than resolved all four**,
+because B8's remit was explicitly "no new rule, no behaviour change" and every non-preserve
+answer changes behaviour on one screen. They are opened below as **B12–B15**, and each is pinned
+by a test in `tests_task_status_path.DecidedDifferenceTests` so that "still differs" is a fact
+the suite asserts rather than an omission nobody notices.
+
+**⑤ and ⑥ were left exactly as they are, and the ledger gap this entry implied does not exist.**
+Both write status through `filter().update()` and **both already call `record_transition()`** —
+⑤ at [views.py:6569](projects/views.py#L6569), ⑥ at [views.py:7142](projects/views.py#L7142) —
+each pre-reading the affected rows for their from-status and writing one ledger row per synced
+task with `REASON_MILESTONE_SYNC`. Routing them through a helper that may raise, from inside
+`except Exception: pass`, would convert a visible failure into a silent one. See **B16**.
+
+Guarded by [projects/tests_task_status_path.py](projects/tests_task_status_path.py): 49 tests —
+one contract mixin of 20 tests run through **both** entry points as `OverviewRowPathTests` and
+`TaskDetailPathTests`, plus 9 pinning B12–B15. Verified adversarially: mutating the shared
+transition table to permit Done → In Progress fails **two tests in each class**, symmetrically,
+which is the property the module exists to guarantee.
+
+---
+
+### B12 — `task_detail_status_update` has no project-scope gate, and B8 preserved that
+
+Found by prompt B8's pre-flight, 30 Aug 2026. Preserved deliberately (R-12) — closing it adds a
+gate, which B8's MODE forbade. **Decided by the operator as "preserve and rectify later".**
+
+[views.py:3718](projects/views.py#L3718) `task_status_update` opens with:
+
+```python
+if not user_can_view_project(request.user, project):
+    raise Http404
+```
+
+added by the 0.2 lockdown **alongside** the role rule, because the role-matcher alone let any
+Site Engineer move any Site Engineer task in the portfolio. `task_detail_status_update` has **no
+equivalent**; its only gate is `task.assigned_to != profile → 403`.
+
+**Mostly self-covering, and precisely where it is not.** `user_can_view_project`'s Site Engineer
+and Design branches grant visibility to anyone *holding a task* on the project, so for those
+roles `assigned_to == profile` already implies visibility. The exposure is the roles with **no
+task-holding branch**: a PM or Project Coordinator personally assigned to a task on a project
+they do not manage passes the detail path and is refused by the overview path. Narrow, but the
+same class of hole 0.2 closed on the other screen.
+
+**Before fixing**, confirm whether any legitimate workflow depends on a PM or Coordinator acting
+on a task in a project they do not manage. If one does, the gate needs a task-holding branch
+rather than a flat refusal. Pinned as-is by
+`DecidedDifferenceTests.test_the_detail_path_has_no_project_scope_gate_and_lets_the_same_user_through`
+— **that test should fail when this is closed**, and be replaced by its opposite.
+
+---
+
+### B13 — the two screens answer an unassigned task with different status codes
+
+Found by prompt B8's pre-flight, 30 Aug 2026. Preserved (R-12).
+
+Same condition, two answers. `task_status_update` has an explicit early branch: under HTMX a
+flash message and a re-rendered row, otherwise
+`JsonResponse({'success': False, 'error': …}, status=400)` — the only JSON response in either
+view. `task_detail_status_update` folds `assigned_to is None` into its permission test and
+returns a bare `HttpResponseForbidden`.
+
+**403 is arguably the better answer, and B8 could not give it.** The 400 is pinned by
+`tests_residential_baseline.TaskProgressionTests.test_an_unassigned_task_cannot_have_its_status_changed`,
+one of the 92 characterisation tests, which asserts `status_code == 400`. Resolving this toward
+403 means editing a characterisation test — out of scope for a consolidation session, and a
+decision about what the API contract *is* rather than about tidiness.
+
+---
+
+### B14 — the two screens shape an HTMX permission refusal differently
+
+Found by prompt B8's pre-flight, 30 Aug 2026. Preserved (R-12).
+
+`task_status_update` under HTMX renders the task row carrying an error message (HTTP 200), so the
+swap target receives valid HTML; only a non-HTMX request gets `HttpResponseForbidden`.
+`task_detail_status_update` returns `HttpResponseForbidden` unconditionally — **an HTMX post from
+the detail screen swaps a 403 body into the status block.** No test pinned either shape before
+B8; both are pinned now.
+
+The overview behaviour looks like the correct one. Changing the detail screen to match is a
+visible behaviour change on a live screen and wants its own prompt.
+
+---
+
+### B15 — `?next=` is honoured on one screen and ignored on the other
+
+Found by prompt B8's pre-flight, 30 Aug 2026. Preserved (R-12).
+
+`task_status_update` honours a local `next` on success and on the missing-block-reason bail-out,
+and ignores it on the other refusals — B8 kept that asymmetry exactly, and it is why
+`_apply_task_status_change()` returns three outcomes rather than a bool.
+`task_detail_status_update` never reads `next` and always returns to the task detail page.
+
+Possibly correct as it stands — a detail screen has an obvious place to return to. Recorded
+because it was preserved by default rather than decided.
+
+---
+
+### B16 — should ⑤ and ⑥ route their task sync through `_apply_task_status_change()`?
+
+Raised by prompt B8, 30 Aug 2026. **Question, not a defect** — and explicitly not acted on.
+
+⑤ `milestone_receive` and ⑥ `project_overview`'s `update_milestone` branch each flip a Finance
+confirmation task to Done as an unattended sync. Both already write their `StatusTransition`
+rows, so there is **no ledger gap**. The open question is whether they should share the helper.
+
+**The argument against acting is stronger than it looks.** Both sit inside
+`except Exception: pass`, chosen so a sync failure never blocks the milestone update. Routing
+them through a helper that raises would convert a visible failure into a silent one — and worse,
+the helper emits `messages.*` and skips the transition table, neither of which suits an
+unattended sync where no user is watching and the milestone has already moved. A shared path
+would also make the five features queued behind R-18 apply to machine syncs, which is not what
+any of them means.
+
+If this is ever revisited, the shape is a **second**, narrower helper for unattended syncs — not
+a flag on this one.
 
 ---
 
