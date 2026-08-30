@@ -1,4 +1,4 @@
-# OPEX Execution Task Template — Specification v1.2
+# OPEX Execution Task Template — Specification v1.3
 
 Horizon Solar PMS · 30 Aug 2026 · for prompt 1.3
 
@@ -13,7 +13,10 @@ map to no named bucket and there is no RMS category — expands to six when SCM 
 durations left unset for the team to decide; all 29 tasks `task_type = Internal`.
 **v1.2** — Survey dropped, and with it Phase 1: survey is done before execution begins and is
 recorded outside PMS. Activation is manual, triggered by the assigned PM, with no gate.
-**22 tasks in 7 phases**, not 29 in 8. Every factual claim about the codebase in it must be verified by a
+**22 tasks in 7 phases**, not 29 in 8.
+
+**v1.3** — Completion Certificates is owned by **Project Coordinator**, not "PM / Coordinator".
+`Task.assigned_role` cannot store the latter; 1.3a added `'Project Coordinator'` as a valid value. Every factual claim about the codebase in it must be verified by a
 session with repo access before anything is built on it — five such claims have already turned out
 wrong in this programme.
 
@@ -111,7 +114,7 @@ not represented; when it arrives it becomes a second signal on the same row, not
 
 ### Phase 4 — Installation
 
-All **E**, role **Site Engineer** (PM / Coordinator as applicable).
+All **E**, role **Site Engineer**. The source list said "PM, Site Engineers and Project Coordinator as applicable"; `assigned_role` stores one value, and the site engineer is the owner of installation work.
 
 Civil Work and MMS Installation · Module Installation · LA and Earthing Installation · DC Cable
 Laying with Conduit · DCDB and ACDB Installation · Inverter Installation · AC Cable Laying · RMS
@@ -142,7 +145,7 @@ list. It returns at phase 2.3, when punch points become a real concept.
 | Task | | Role | Source / notes |
 |---|---|---|---|
 | COD | **M** | PM | Milestone / COD record (phase 5.3). Refuses while a blocking punch point is open. |
-| Completion Certificates (Paperwork) | **E** | PM / Coordinator | |
+| Completion Certificates (Paperwork) | **E** | Project Coordinator | Coordinators own execution paperwork. |
 | As-Built Drawings | **M** | Design | Design workspace. Post-commissioning, so it sits in Closeout rather than Phase 1 despite appearing under Design in the source list. Blocks HOTO. |
 | HOTO | **M** | PM | Phase 5.3. Refuses without as-built unless overridden. |
 
