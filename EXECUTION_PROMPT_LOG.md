@@ -41,7 +41,10 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | 1.1b | **`group_type` — the consumer half.** `active_group_membership()` takes a **required** type argument; all three callers, `_group_or_404`, `_group_rows`, `post_qc_pool`, `site_group_create` and `project_boq_is_group_locked` narrowed to `procurement`. 12 tests, each building an execution membership by hand. **No migration.** Touched `design_views.py`, `permissions.py` — **not `views.py`** (see below). **D-1 is complete.** | ✅ |
 | 1.2a | **Capability flags, warehouses and the execution lock.** `is_qaqc` / `is_hse` / `is_warehouse_keeper` on `UserProfile` (R-15); `StockLocation` (B-14 closed); `execution_groups_are_never_locked` on `SiteGroup`; migration `0072`. 23 tests. **Entirely additive — no behaviour change, no view touched.** Rewrote one 1.1b test whose fixture the constraint made unwritable. | ✅ |
 | 1.2b | **`ProjectAssignment` — BLOCKED on a product-owner decision.** Not started. See below | ☐ |
-| 1.3 | The OPEX/CAPEX task template — gated on B-09 | ☐ |
+| — | **A-1.3 audit** — `OPEX_TEMPLATE_AUDIT.md`. Read-only; wrote no code. **Three of the seven claims in its own prompt were wrong**, and it found that the OPEX spec could not be built as written — which is why 1.3 split into three. | ✅ |
+| 1.3a | **The OPEX template as data, and `is_mirror`.** `OPEX` v1 seeded by migration `0075` — 7 phases, 22 tasks, 5 mirrors, active. `is_mirror` boolean on `TaskTemplateTask` and on `Task` (indexed on `Task`), and `'Project Coordinator'` added to `Task.ROLE_CHOICES`; migration `0074`. One line added to `seed_task_template_version()` so the shared helper carries the flag. 19 tests. **Nothing attaches the template and nothing reads `is_mirror`** — no view, template, counter or activation path touched. | ✅ |
+| 1.3b | **Mirror exclusion across the task counters.** The 20 counters the A-1.3 audit enumerated — 12 querysets across 6 files. **MUST land before 1.3c.** Also closes the Coordinator gap: the CEO dashboard has six `dept_*` blocks and no Coordinator one. **No migration.** | ☐ |
+| 1.3c | **OPEX execution start.** Manual PM activation; drop `project_activate`'s `assigned_design_id` refusal (design allocation lives on `DesignAssignment.assigned_to`, so **only 5 of 96 OPEX sites carry that FK and 91 are structurally unactivatable**); stop minting M1/M2/M3 Residential milestones on tender sites (285 such rows already exist and are left alone by decision); attach the template. Adds the **R-18 mirror refusal in `_apply_task_status_change()`** — the helper, never a view. **Two traps recorded for it:** both status views refuse an *unassigned* task **before** the helper runs, so a refusal test must use an owned mirror or it passes without proving anything; and `calculate_due_dates()` on 22 Internal tasks at the default duration makes every site a 22-day project (§B18). | ☐ |
 | 1.4a | **Task dependencies — the model half.** `TaskTemplateTaskDependency` and `TaskDependency`, `DependencyCycle`, `incomplete_predecessors()` and `materialise_task_dependencies()` in the new `projects/task_dependencies.py`, migration `0073`. 42 tests. **Entirely additive — no view, no template, no permission file, no status-change behaviour, and nothing that can prevent a task from being started.** Closes B-08 at the model layer. | ✅ |
 | 1.4b | **Task dependencies — the enforcement half.** Wires the early-start **warning** and the **mandatory reason** into the status-change path, and records the override as a `StatusTransition` with a remark under a new `REASON_EARLY_START`. **No migration** — a `REASON_*` constant is module-level by R-10, and `SUBJECT_TASK` already exists. **The first user-visible change in this programme**, on the most-used write path in the product. **The write paths it must cover — enumerated by 1.4a's pre-flight, so this session does not rediscover them:**<br>① `views.py:task_status_update` — blocked branch (`update()` at ~3840)<br>② `views.py:task_status_update` — ordinary ladder (~3884)<br>③ `views.py:task_detail_status_update` — blocked branch (~4078)<br>④ `views.py:task_detail_status_update` — ordinary ladder (~4118)<br>⑤ `views.py:milestone_receive` — milestone→task sync (~6569)<br>⑥ `views.py:project_overview` — Finance `update_milestone` branch, milestone→task sync (~7142)<br>**①–④ are two near-identical copies of one ~180-line function** (§B8). The warning must land in **both**, or a user routes around it by using the other screen. **⑤ and ⑥ are not a user starting a task** — they are an automatic sync wrapped in `except Exception: pass`, and a mandatory reason must **not** be imposed on them. **A seventh path exists and is uninstrumented: the Django admin's `TaskAdmin` change form** (§B9) — out of 1.4b's scope, but it is why "every task status write is instrumented" is not quite true today. | ☐ |
 
@@ -165,6 +168,64 @@ heading.
 folded back in: `projects.userprofile` predates `0072` by seventy revisions, so no circular
 dependency forced the split. `makemigrations --check` is clean afterwards and the migration
 reverses and re-applies.
+
+### Why 1.3 became 1.3a, 1.3b and 1.3c — and why the order is fixed
+
+1.1 split on a technical finding. 1.2 split because one piece needed a product-owner
+decision. **1.3 split on a sequencing hazard**: the three pieces are not independent, and
+running them in the wrong order corrupts numbers that people have already looked at.
+
+- **1.3a — the template exists as data; `is_mirror` exists as a column.** Nothing uses
+  either. One schema migration, one seed migration, no view touched.
+- **1.3b — mirror exclusion across the 20 task counters** the A-1.3 audit enumerated:
+  12 querysets, 6 files, no migration.
+- **1.3c — OPEX execution start**: manual PM activation, the `assigned_design_id` refusal
+  dropped, Residential milestones no longer minted on tender sites, the template attached,
+  and the R-18 mirror refusal added to `_apply_task_status_change()`.
+
+**1.3b must land before 1.3c, and that is the whole reason for the middle session.** A
+mirror is nobody's task — it is another team's queue, displayed on this site's spine. The
+first activated OPEX site puts 22 rows into every counter that has not yet learned to
+exclude the 5 mirrors among them. Worse, `Project.activated_at` **is** the definition of
+"active" for both the CEO per-user report (`reports._active_project_filter()`) and
+`send_eod_digest`, so **95 tender sites join two portfolio-wide surfaces on the day 1.3c
+runs**, regardless of anything else that session does. Shipping 1.3c first means the
+exclusion arrives as a correction to numbers already in circulation, and the audit's
+prediction is that the correction gets argued with rather than accepted.
+
+**A second reason the split is real, not bookkeeping.** The A-1.3 audit found the spec
+could not be built as written — Punch Points had no source concept, the six delivery
+mirrors had no join and no category mapping, and two assigned roles were unstorable. The
+spec was amended to v1.2 (and one unstorable role still survived that revision — §B17).
+Separating "write down what the template is" from "start running sites on it" is what made
+that discoverable before 95 sites were built from it.
+
+### 1.3a — three notes
+
+**Nothing attaches the template, and that is the deliverable, not a shortfall.**
+`project_activate` still refuses OPEX sites, still mints Residential milestones, and still
+resolves only `RESIDENTIAL`. `is_mirror` is written on 5 rows and read by nothing. A
+session that finds itself editing a counter or an activation path is in 1.3b or 1.3c.
+
+**`projects/utils.py` was on 1.3a's forbidden list, and one line was authorised into it.**
+`seed_task_template_version()` builds each task row from a fixed field list and had no
+`is_mirror` passthrough. The alternatives were worse: a post-activation
+`QuerySet.update()` — which works only because `update()` **bypasses** the R-7 guard, and
+would have made the migration that introduces the field also the first place in the
+codebase to author template content past that guard — or an OPEX-only copy of the seeder,
+abandoning the "one shared helper so the two paths cannot drift" property the helper's own
+docstring exists to state. The line added is `is_mirror=t.get('is_mirror', False)`,
+optional exactly like `is_payment_milestone` beside it, so Residential's phase dicts seed
+`False` unchanged.
+
+**The OPEX phase data lives in the migration, not beside `build_residential_phases()`.**
+That looks like a departure from 0067 and is not: 0067's own header says
+`build_residential_phases()` *"IS the thing being migrated, and after this runs it stops
+being executed at runtime"*. There was no pre-existing OPEX builder to migrate out of
+runtime source and nothing at runtime needs one. `projects/tests_opex_template.py` holds a
+**second, independent transcription** of the spec table and asserts the seeded rows against
+it — two transcriptions, so a typo in one fails against the other, where a test importing
+the migration's own data would agree with any typo it contained.
 
 ### Why 1.4 became 1.4a and 1.4b
 

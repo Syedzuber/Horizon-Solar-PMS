@@ -321,20 +321,35 @@ class Task(models.Model):
     """A single unit of work within a phase, owned by a role and tracked to completion."""
 
     # Role constants — mirror UserProfile.ROLE_CHOICES where relevant
-    PM            = 'PM'
-    SITE_ENGINEER = 'Site Engineer'
-    FINANCE       = 'Finance'
-    SCM           = 'SCM'
-    BD            = 'BD / Sales'
-    DESIGN        = 'Design'
+    PM                  = 'PM'
+    SITE_ENGINEER       = 'Site Engineer'
+    FINANCE             = 'Finance'
+    SCM                 = 'SCM'
+    BD                  = 'BD / Sales'
+    DESIGN              = 'Design'
+    # Added by 1.3a for the OPEX template's "Completion Certificates (Paperwork)",
+    # which the OPEX spec owns jointly between the PM and the Coordinator. Added on
+    # the TASK side of a pair that already existed on the profile side — the exact
+    # OPPOSITE of the Design Head mistake documented under UserProfile.ROLE_CHOICES
+    # below, which put a role on UserProfile that no Task surface admitted and so
+    # cost its holder every assigned_role match. 'Project Coordinator' is already a
+    # UserProfile.ROLE_CHOICES value, and _PROFILE_TO_TASK_ROLE in views.py maps only
+    # BD, passing every other role through unchanged — so a Coordinator's profile.role
+    # already equals this string and every role-match comparison works untouched.
+    #
+    # KNOWN GAP, deliberately left to 1.3b: the CEO dashboard's six dept_* counter
+    # blocks (views.py) have no Coordinator block, so a task with this role is counted
+    # by no department. Nothing creates such a Task before 1.3c attaches the template.
+    PROJECT_COORDINATOR = 'Project Coordinator'   # 19 chars — fits max_length=20
 
     ROLE_CHOICES = [
-        (PM,            'PM'),
-        (SITE_ENGINEER, 'Site Engineer'),
-        (FINANCE,       'Finance'),
-        (SCM,           'SCM'),
-        (BD,            'BD / Sales'),
-        (DESIGN,        'Design'),
+        (PM,                  'PM'),
+        (SITE_ENGINEER,       'Site Engineer'),
+        (FINANCE,             'Finance'),
+        (SCM,                 'SCM'),
+        (BD,                  'BD / Sales'),
+        (DESIGN,              'Design'),
+        (PROJECT_COORDINATOR, 'Project Coordinator'),
     ]
 
     NOT_STARTED = 'Not Started'
@@ -376,6 +391,31 @@ class Task(models.Model):
     completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
     blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance
+    # A mirror task's status is derived from another object and NO HUMAN MAY WRITE IT.
+    #
+    # The refusal lives in `_apply_task_status_change()` (R-18) and is ADDED BY PROMPT
+    # 1.3c — this column only marks which rows it applies to. A mirror is excluded from
+    # overdue and workload counts, and that exclusion is ADDED BY PROMPT 1.3b. Neither
+    # is implemented yet: as of this migration NOTHING READS THIS FIELD, and a True
+    # value has no behavioural effect anywhere in the codebase.
+    #
+    # What it is NOT: it is not "has a source object". COD, HOTO and As-Built are
+    # mirrors with no source object in existence today, and they must still be
+    # unwritable. That is why this is a boolean and not a nullable derivation_source
+    # enum — under `source IS NOT NULL ⇒ read-only`, those three would be NULL and
+    # therefore writable by anyone. `derivation_source` is added BESIDE this in phases
+    # 3–5, under a check constraint `derivation_source IS NULL OR is_mirror`.
+    #
+    # A trap for 1.3c's refusal test, from the A-1.3 audit: BOTH status views refuse an
+    # unassigned task BEFORE `_apply_task_status_change()` runs. A mirror seeded with no
+    # assignee would be refused for the wrong reason and the test would pass without
+    # proving the refusal exists. Every mirror in the OPEX template carries an owning
+    # ROLE for this reason; whether it also carries an assignee is 1.3c's decision.
+    #
+    # Indexed because 1.3b filters on it in a dozen counter querysets, and the audit
+    # asked for the index now rather than as a second migration over a larger table.
+    # The seventh snapshot copied from TaskTemplateTask, following the six above.
+    is_mirror            = models.BooleanField(default=False, db_index=True)
     # PROVENANCE ONLY — which TaskTemplateTask this task was created from. Nothing reads
     # it back to decide behaviour, and it is null for every task added by hand. There is
     # deliberately NO label_snapshot beside it: task_name above is ALREADY a copy taken
@@ -2071,6 +2111,17 @@ class TaskTemplateTask(models.Model):
     task_type            = models.CharField(max_length=10, choices=Task.TYPE_CHOICES, default=Task.INTERNAL)
     duration_days        = models.PositiveIntegerField(default=1)
     is_payment_milestone = models.BooleanField(default=False)
+    # A mirror task's status is derived from another object and NO HUMAN MAY WRITE IT.
+    #
+    # Authored here on the template row and COPIED onto every Task built from it, the
+    # same way the six fields above are copied — see Task.is_mirror, which carries the
+    # full rationale. The refusal itself lives in `_apply_task_status_change()` (R-18)
+    # and is ADDED BY PROMPT 1.3c; the counter exclusion is ADDED BY PROMPT 1.3b. As of
+    # this migration NOTHING READS THIS FIELD.
+    #
+    # NOT indexed here, unlike on Task: this table holds 74 rows across both templates
+    # and is only ever read whole, at activation.
+    is_mirror            = models.BooleanField(default=False)
 
     class Meta:
         ordering = ['sort_order']

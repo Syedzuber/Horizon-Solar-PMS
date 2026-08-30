@@ -1103,6 +1103,14 @@ def seed_task_template_version(*, template_model, phase_model, task_model,
                 task_type=t['task_type'],
                 duration_days=duration_resolver(t['task_name']),
                 is_payment_milestone=t.get('is_payment_milestone', False),
+                # Optional, exactly like is_payment_milestone above: the Residential
+                # phase dicts carry no 'is_mirror' key and so seed False, unchanged.
+                # Set HERE, while the version is still a draft, rather than by a
+                # QuerySet.update() after activate() — the R-7 guard is meant to make
+                # post-activation content writes impossible, and leaning on the
+                # documented update() bypass to author content would set the wrong
+                # precedent in the very migration that introduces the field.
+                is_mirror=t.get('is_mirror', False),
             )
             for t in phase_data['tasks']
         ])

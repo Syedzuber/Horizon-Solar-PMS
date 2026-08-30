@@ -821,6 +821,62 @@ be.
 
 ---
 
+### B17 — the OPEX spec still assigned an unstorable role, and v1.2 did not catch it
+
+Found by prompt 1.3a's pre-flight, 30 Aug 2026. **Reported before building, resolved by the
+product owner, recorded because the same class of error survived a revision.**
+
+`docs/OPEX_task_template_spec.md` v1.0 assigned two roles `Task.assigned_role` cannot store:
+`—` on Punch Points and `PM / Coordinator` on Completion Certificates (Paperwork). The A-1.3
+audit flagged **both**. v1.1/v1.2 fixed the first by **dropping Punch Points entirely**, and
+the second **survived untouched into v1.2** — the revision resolved the finding by deleting
+the row it happened to sit on rather than by acting on the finding.
+
+Neither would have raised. `assigned_role` is `CharField(choices=…, default='PM')`, **not
+null and with no blank choice**, and Django does not validate `choices` on `bulk_create` or
+on a plain `create()` — an unstorable value becomes a **silent `PM`**. On Punch Points that
+would have added a third PM mirror to `dashboard_pm`'s `pending_approvals`.
+
+Resolved by adding `'Project Coordinator'` to `Task.ROLE_CHOICES` (see `docs/execution-model.md`
+§12, 30 Aug). **The general lesson is the one worth keeping:** a spec's role column is
+schema, and the only thing that catches a bad value is a test that asserts membership of an
+allow-list — `tests_opex_template.test_every_assigned_role_is_a_storable_choice` is that
+test, and it asserts against the five roles this template may use rather than against
+`ROLE_CHOICES`, which the silent default would satisfy.
+
+---
+
+### B18 — the OPEX template's durations are all 1, and that makes every site a 22-day project
+
+Found by prompt 1.3a, 30 Aug 2026. **Not a defect today. It becomes one the moment 1.3c
+calls `calculate_due_dates()` for an OPEX site.**
+
+Durations are unset in OPEX v1 by decision (spec §5 — *"the team decides per task later"*),
+so all 22 rows carry `duration_days`'s field default of **1**. All 22 are also `Internal`,
+and `calculate_due_dates()` chains Internal tasks strictly sequentially off `activated_at`:
+
+```python
+task.due_date = add_calendar_days(previous_internal_due, task.duration_days)
+previous_internal_due = task.due_date
+```
+
+So the last task, **HOTO, falls due `activated_at + 22 calendar days`**, and the whole site
+reads as a 22-day project. Across the 95 tender sites that would put the entire OPEX
+portfolio overdue within a month of activation — and the likely reaction to that is to
+distrust the overdue number, not to fix the durations.
+
+**Harmless today** because nothing calls `calculate_due_dates()` for OPEX: `project_activate`
+refuses OPEX sites, and `Task.due_date` is nullable and left null. **1.3c owns the decision**
+— call it with real durations, or do not call it and leave OPEX due dates null until the
+team supplies them. The second is the honest default: a null due date says "not scheduled",
+where 22 sequential days says something specific and false.
+
+Fixing it later is a template **version bump** (v2 as a draft, then `activate()`), not an
+`UPDATE` — R-7 forbids editing an active version in place, and in-flight projects keep the
+durations they were built from regardless (B-10).
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._
