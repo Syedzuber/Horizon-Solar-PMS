@@ -393,11 +393,17 @@ class Task(models.Model):
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance
     # A mirror task's status is derived from another object and NO HUMAN MAY WRITE IT.
     #
-    # The refusal lives in `_apply_task_status_change()` (R-18) and is ADDED BY PROMPT
-    # 1.3c — this column only marks which rows it applies to. A mirror is excluded from
-    # overdue and workload counts, and that exclusion is ADDED BY PROMPT 1.3b. Neither
-    # is implemented yet: as of this migration NOTHING READS THIS FIELD, and a True
-    # value has no behavioural effect anywhere in the codebase.
+    # The refusal belongs in `_apply_task_status_change()` (R-18) — this column only
+    # marks which rows it applies to. A mirror is excluded from overdue and workload
+    # counts, and that exclusion SHIPPED IN PROMPT 1.3b.
+    #
+    # STATE OF PLAY, corrected by prompt 1.3c. The counter exclusions are live and, since
+    # the snapshot below is copied, are no longer inert: an activated OPEX site really
+    # does carry five is_mirror=True rows and every metric really does drop them.
+    # THE HUMAN-WRITE REFUSAL IS STILL NOT BUILT — 1.3c's remit was the opening
+    # transition, not the status path. Until it lands, a mirror is protected only by
+    # having no assignee (both status views refuse an unassigned task first), which is
+    # protection by accident. See EXECUTION_MODULE_DEFERRED.md §B.
     #
     # What it is NOT: it is not "has a source object". COD, HOTO and As-Built are
     # mirrors with no source object in existence today, and they must still be
@@ -1574,6 +1580,13 @@ REASON_GRN_OVERRIDDEN     = 'grn_overridden'
 REASON_REVISION_REQUESTED = 'revision_requested'
 REASON_RESUBMITTED        = 'resubmitted'
 REASON_ZOHO_WEBHOOK       = 'zoho_webhook'
+# Added by prompt 1.3c for OPEX activation, which is the first status change in this
+# codebase to name its own reason. Costs no migration, exactly as the note above
+# promised: reason_code carries no choices=. NOT retrofitted onto the Residential
+# activation's record_transition() call, which still writes reason_code='' — that path
+# is pinned byte-for-byte by 92 characterisation tests and a new value in a column it
+# has never written is a behaviour change, however small.
+REASON_EXECUTION_STARTED  = 'execution_started'  # Draft -> Active, template attached
 
 # Written into actor_role_code when no human performed the change. The Zoho
 # webhook creates projects with created_by=None and no request user at all;

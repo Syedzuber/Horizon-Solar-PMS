@@ -44,9 +44,40 @@ Nine sessions, not six: 0.2 was split three ways once it was underway. Full acco
 | — | **A-1.3 audit** — `OPEX_TEMPLATE_AUDIT.md`. Read-only; wrote no code. **Three of the seven claims in its own prompt were wrong**, and it found that the OPEX spec could not be built as written — which is why 1.3 split into three. | ✅ |
 | 1.3a | **The OPEX template as data, and `is_mirror`.** `OPEX` v1 seeded by migration `0075` — 7 phases, 22 tasks, 5 mirrors, active. `is_mirror` boolean on `TaskTemplateTask` and on `Task` (indexed on `Task`), and `'Project Coordinator'` added to `Task.ROLE_CHOICES`; migration `0074`. One line added to `seed_task_template_version()` so the shared helper carries the flag. 19 tests. **Nothing attaches the template and nothing reads `is_mirror`** — no view, template, counter or activation path touched. | ✅ |
 | 1.3b | **Mirror exclusion across the task counters (R-20).** `human_owned_tasks_q(prefix='')` + `is_human_owned(task)` in `utils.py` — a `Q`, not a filtered queryset, because three consumers have no queryset to filter (two conditional aggregates and one prefetched list). Applied at **21 counter sites in 4 files**; the three `{{ phase.tasks.count }}` template captions deliberately left alone (they label lists that legitimately show mirrors). 28 tests. **No migration.** Product-owner decisions: progress denominators exclude mirrors (Option A), `current_phase` deferred, Coordinator dept row deferred. **Four findings.** The audit's enumeration was **stale and short**: the spec dropped to 5 mirrors per site from 11, so `dept_scm_pending` inflates by 95 not 570; and it **missed two sites** — the CEO project-card `task_total_count`/`task_done_count` pair, and a fourth copy of `current_phase` in `models.py`. The row-sum invariant the prompt called "pinned" **had no test at all** (deferred G5) — this session wrote it. And **`attach_residential_template()` never copies `is_mirror`**, so the whole exclusion is correct but inert until 1.3c wires it (**B19**). | ✅ |
-| 1.3c | **OPEX execution start.** Manual PM activation; drop `project_activate`'s `assigned_design_id` refusal (design allocation lives on `DesignAssignment.assigned_to`, so **only 5 of 96 OPEX sites carry that FK and 91 are structurally unactivatable**); stop minting M1/M2/M3 Residential milestones on tender sites (285 such rows already exist and are left alone by decision); attach the template. Adds the **R-18 mirror refusal in `_apply_task_status_change()`** — the helper, never a view. **Two traps recorded for it:** both status views refuse an *unassigned* task **before** the helper runs, so a refusal test must use an owned mirror or it passes without proving anything; and `calculate_due_dates()` on 22 Internal tasks at the default duration makes every site a 22-day project (§B18). | ☐ |
+| 1.3c | **OPEX execution start — the transition, and the line that made 1.3b real.** **① The seventh snapshot (B19, closed):** `is_mirror=t.is_mirror` added to the one `bulk_create`, which moved into a new `_attach_task_template()` shared by both project types. Until this line, no `Task` row could carry the flag and **all twelve of 1.3b's exclusions were correct and completely inert**. Verified on a real attached site: 5 mirrors, named. **② `attach_opex_template()`** — same core, none of the Residential afterthoughts (no Finance `raise`, no invoice name list), PM pre-assignment filtered to `is_mirror=False`, and **no virgin-DB bootstrap** (a missing active OPEX template raises rather than being invented). Extracted, **not renamed and not a sibling** — the Residential name has three call sites, two in test modules this prompt could not touch. **③ `opex_site_activate`, a SEPARATE VIEW** — `project_activate` was **not edited**, so the Residential path is untouched rather than merely guarded. No `assigned_design_id`, **no M1/M2/M3**, `REASON_EXECUTION_STARTED` on the ledger row, second activation refused. **④ One control**, branched on `project_type` in `project_overview.html`. **38 tests, no migration.** **Findings:** the human-write refusal promised to this prompt by three documents was **not built** (out of remit — **B22**); the PM dashboard's draft card still opens the designer modal (**B23**); a bulk route for the remaining 91 sites needs its own idempotency guard (**B24**); B18 now names the concrete dates (HOTO at `activated_at + 22`). **One file outside the stated MODE list: `projects/urls.py`**, one route line — a view is unreachable without it. | ✅ |
 | 1.4a | **Task dependencies — the model half.** `TaskTemplateTaskDependency` and `TaskDependency`, `DependencyCycle`, `incomplete_predecessors()` and `materialise_task_dependencies()` in the new `projects/task_dependencies.py`, migration `0073`. 42 tests. **Entirely additive — no view, no template, no permission file, no status-change behaviour, and nothing that can prevent a task from being started.** Closes B-08 at the model layer. | ✅ |
 | 1.4b | **Task dependencies — the enforcement half.** Wires the early-start **warning** and the **mandatory reason** into the status-change path, and records the override as a `StatusTransition` with a remark under a new `REASON_EARLY_START`. **No migration** — a `REASON_*` constant is module-level by R-10, and `SUBJECT_TASK` already exists. **The first user-visible change in this programme**, on the most-used write path in the product. **The write paths it must cover — enumerated by 1.4a's pre-flight, so this session does not rediscover them:**<br>① `views.py:task_status_update` — blocked branch (`update()` at ~3840)<br>② `views.py:task_status_update` — ordinary ladder (~3884)<br>③ `views.py:task_detail_status_update` — blocked branch (~4078)<br>④ `views.py:task_detail_status_update` — ordinary ladder (~4118)<br>⑤ `views.py:milestone_receive` — milestone→task sync (~6569)<br>⑥ `views.py:project_overview` — Finance `update_milestone` branch, milestone→task sync (~7142)<br>**①–④ are two near-identical copies of one ~180-line function** (§B8). The warning must land in **both**, or a user routes around it by using the other screen. **⑤ and ⑥ are not a user starting a task** — they are an automatic sync wrapped in `except Exception: pass`, and a mandatory reason must **not** be imposed on them. **A seventh path exists and is uninstrumented: the Django admin's `TaskAdmin` change form** (§B9) — out of 1.4b's scope, but it is why "every task status write is instrumented" is not quite true today. | ☐ |
+
+### Where phase 1 stands after 1.3c — 31 Aug 2026
+
+**The 1.3 sequence is complete.** 1.3a seeded the OPEX template, 1.3b excluded mirrors
+from the counters, and 1.3c attached the template, copied the seventh snapshot that made
+1.3b's work take effect, and shipped the opening transition. **The merge and the deploy
+are the next decision, and they are a separate plan.**
+
+**Phase 1 as a whole is NOT finished, and saying otherwise would hide two things:**
+
+| | State |
+|---|---|
+| **1.2b — `ProjectAssignment`** | ☐ **BLOCKED** on the product-owner answer to Q-E3 (do Finance and SCM get Program-level assignment, and who maintains it). Not a scheduling gap — nothing to build until that is answered. |
+| **1.4b — dependency enforcement** | ☐ Not started. 1.4a shipped the model layer; the warning and the mandatory reason on the status-change path are still owed. |
+
+**What ships if `execution-phase-1` is merged today.** The behaviour change on production
+is real but narrow: 91 previously unactivatable tender sites become activatable, one at a
+time, by their PM. Nothing activates itself. The three things to expect on the day the
+first sites move — none of them a fault:
+
+1. `activated_at` is the definition of "active" for the CEO per-user report and the EOD
+   digest, so each activated site joins both surfaces (§12, 30 Aug).
+2. Every OPEX task carries `due_date = NULL`, so those sites appear unscheduled rather
+   than overdue. That is deliberate — **B18**, still open, waiting on real durations.
+3. Mirrors are excluded from every count but still **visible** in task lists. A phase can
+   read 100% while its mirrors are Not Started; that is the accepted trade (R-20), not a
+   bug report.
+
+**And one thing that is genuinely owed before anyone leans on the mirror concept:** the
+human-write refusal (**B22**). Today a mirror is unwritable only because it has no
+assignee.
 
 ## Deferred-item prompts — run out of sequence, from `EXECUTION_MODULE_DEFERRED.md`
 
@@ -184,9 +215,13 @@ running them in the wrong order corrupts numbers that people have already looked
   is not one of them, so every exclusion 1.3b shipped is inert until 1.3c adds that line
   (**B19**). Wiring the attach without it means 1.3c ships the mirrors and none of the
   protection.
-- **1.3c — OPEX execution start**: manual PM activation, the `assigned_design_id` refusal
-  dropped, Residential milestones no longer minted on tender sites, the template attached,
-  and the R-18 mirror refusal added to `_apply_task_status_change()`.
+- **1.3c — OPEX execution start.** ✅ **Done 31 Aug.** Manual PM activation with no
+  precondition beyond ownership; no `assigned_design_id`; no Residential milestones; the
+  attach. **The pre-condition from 1.3b was met first and verified before anything else
+  was built** — `is_mirror` is copied, and a real attached OPEX site carries five flagged
+  rows. **B19 is closed.** The mirror **refusal** promised to this session was not built
+  and is now **B22**: it was the status path, not the opening transition, and every mirror
+  ships unassigned so nothing can write one today — by accident rather than by rule.
 
 **1.3b must land before 1.3c, and that is the whole reason for the middle session.** A
 mirror is nobody's task — it is another team's queue, displayed on this site's spine. The

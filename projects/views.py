@@ -41,7 +41,7 @@ from .models import (
     # Prompt 0.3 — reason vocabulary for the state ledger (R-10: constants, not a table).
     REASON_CREATED, REASON_BLOCKED, REASON_UNBLOCKED, REASON_MILESTONE_SYNC,
     REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
-    REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK,
+    REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
@@ -59,7 +59,8 @@ from .permissions import (
     user_is_design_head,
 )
 from .utils import (
-    attach_residential_template, calculate_due_dates, recalculate_from_task,
+    attach_residential_template, attach_opex_template,
+    calculate_due_dates, recalculate_from_task,
     get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
     assign_task_to, assign_tasks_to,
     # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
@@ -2856,6 +2857,108 @@ def project_activate(request, project_id):
             f'Set the first task due date to calculate all dates.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
+
+    return redirect('project_overview', project_id=project.project_id)
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def opex_site_activate(request, project_id):
+    """
+    Start execution on a Draft OPEX site: status=Active, activated_at, the ledger row,
+    and the OPEX task template (7 phases, 22 tasks, 5 mirrors).
+
+    WHY A SEPARATE VIEW AND NOT A BRANCH IN project_activate. The two exclusions this
+    needs — no `assigned_design_id`, no M1/M2/M3 — are both things project_activate does
+    UNCONDITIONALLY for every project type, and the milestone loop is inline. Branching
+    there means editing the function that 92 characterisation tests pin. A separate
+    entry point leaves the Residential path not merely guarded but UNTOUCHED, which is a
+    stronger guarantee than any `if` and is what makes "behaviourally unchanged"
+    provable rather than argued.
+
+    WHAT IT DELIBERATELY DOES NOT DO, and why each matters:
+
+      - NO `assigned_design_id`. Design allocation for OPEX lives on
+        `DesignAssignment.assigned_to`, not `Project.assigned_design`; 87 DesignAssignment
+        rows exist against 5 populated FKs. project_activate's designer gate is exactly
+        why 91 of the 96 tender sites cannot be activated today, and requiring a value
+        the design module does not read would strand them for a second reason.
+      - NO PaymentMilestone rows. M1 On Survey Completion / M2 On Material Supply /
+        M3 On Commissioning describe a three-milestone residential contract, not a
+        tender. The 285 such rows already sitting on tender sites are left alone; this
+        path simply stops adding more.
+      - NO calculate_due_dates(). Every OPEX v1 task carries duration_days=1 and is
+        Internal, so the chain would make HOTO fall due activated_at + 22 days and put
+        the whole tender portfolio overdue within a month. A null due date says "not
+        scheduled"; 22 sequential days says something specific and false. Durations are
+        the team's to set, as a template version bump (R-7). See B18.
+      - NOTHING ABOUT CLOSURE. No terminal status is reachable from here. Commissioned,
+        On Hold and Cancelled are phase 5 (D-4).
+
+    REFUSES a second activation rather than being idempotent, matching project_activate
+    and for a concrete reason: there is no uniqueness constraint on
+    (project, phase_order), so a second attach would silently produce 14 phases and 44
+    tasks. The refusal is `status != 'Draft'`, checked BEFORE the atomic block so a
+    repeat cannot leave partial state. It is status-based, not activated_at-based, and
+    does not travel — any future BULK activation route needs its own guard.
+
+    Authority is `_pm_owns_project()`, which is a thin adapter over
+    `user_can_manage_project()` (R-13). No role comparison lives here.
+    Access: assigned PM or a project Coordinator. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    project = _active_project(project_id)
+
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    # This view owns the NON-Residential opening transition and nothing else. A
+    # Residential project arriving here is a wiring mistake, and silently activating it
+    # without its milestones or its Finance assignee would be far worse than a refusal.
+    if project.project_type == 'Residential':
+        messages.error(request, 'Residential projects are activated from the Activate button.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    # Before any DB write — see the docstring on why this is a refusal and not a no-op.
+    if project.status != 'Draft':
+        messages.warning(request, 'Site is already active.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    with transaction.atomic():
+        _prev_project_status = project.status   # 'Draft' — checked above
+        project.status = 'Active'
+        project.activated_at = timezone.now()
+        project.save()
+
+        # R-2: the ledger row is written inside the same atomic block as the status
+        # change, so a template failure rolls both back together. Unlike the Residential
+        # call this one NAMES THE EVENT — reason_code carries no choices= and so cost no
+        # migration. Residential's call is left writing '' on purpose; see the constant.
+        record_transition(
+            project, to_status='Active', from_status=_prev_project_status,
+            actor=request.user.profile,
+            reason_code=REASON_EXECUTION_STARTED,
+        )
+
+        attach_opex_template(project)
+
+    # After the transaction commits, matching project_activate — the feed and the
+    # ledger are allowed to fail differently (R-3).
+    log_activity(
+        project, request.user.profile,
+        f"Activated project: {project.project_id}",
+        entity_type='Project', entity_id=project.pk,
+    )
+
+    # Counted rather than restated: the message must not claim a template size the
+    # template no longer has.
+    _created_task_count = Task.objects.filter(phase__project=project).count()
+    messages.success(
+        request,
+        f'Site activated. {_created_task_count} tasks created. '
+        f'Due dates are not set — durations are still to be decided.')
 
     return redirect('project_overview', project_id=project.project_id)
 

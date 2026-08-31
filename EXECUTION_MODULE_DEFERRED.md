@@ -896,11 +896,53 @@ reads as a 22-day project. Across the 95 tender sites that would put the entire 
 portfolio overdue within a month of activation — and the likely reaction to that is to
 distrust the overdue number, not to fix the durations.
 
-**Harmless today** because nothing calls `calculate_due_dates()` for OPEX: `project_activate`
-refuses OPEX sites, and `Task.due_date` is nullable and left null. **1.3c owns the decision**
-— call it with real durations, or do not call it and leave OPEX due dates null until the
-team supplies them. The second is the honest default: a null due date says "not scheduled",
-where 22 sequential days says something specific and false.
+**STILL OPEN after 1.3c, 31 Aug 2026 — and now open on a live path rather than a
+hypothetical one.** 1.3c took the second option: `opex_site_activate` does **not** call
+`calculate_due_dates()`, so all 22 tasks are created with `due_date = NULL` and an
+activated OPEX site is unscheduled rather than wrongly scheduled. A null due date says
+"not scheduled"; 22 sequential days says something specific and false.
+
+**What changed is the exposure.** The PM-facing **Recalculate dates** control
+(`project_recalculate_dates`) is on `project_overview`, is gated only on `status != 'Draft'`
+and `activated_at`, and is now reachable on every activated OPEX site. One press produces
+the table below. Nothing warns the PM.
+
+**The concrete dates, from `activated_at.date()`.** All 22 tasks are `Internal` with
+`duration_days = 1`, and `add_calendar_days()` does not skip weekends, so task *N* in
+template order falls due `activated_at + N` days:
+
+| Task | Phase | Due |
+|---|---|---|
+| Design | Design | **+1** |
+| Net Metering Approval | Approvals (Pre-Installation) | +2 |
+| CEIG Approval | Approvals (Pre-Installation) | +3 |
+| Inspection — Factory / Vendor | Procurement & Delivery | +4 |
+| Inspection — Post-Delivery / Unloading | Procurement & Delivery | +5 |
+| Material Delivery | Procurement & Delivery | +6 |
+| Civil Work and MMS Installation | Installation | +7 |
+| Module Installation | Installation | +8 |
+| LA and Earthing Installation | Installation | +9 |
+| DC Cable Laying with Conduit | Installation | +10 |
+| DCDB and ACDB Installation | Installation | +11 |
+| Inverter Installation | Installation | +12 |
+| AC Cable Laying | Installation | +13 |
+| RMS Installation | Installation | +14 |
+| Solar Generation Meter Installation | Installation | +15 |
+| Testing & Commissioning | Testing & Commissioning | +16 |
+| Net Meter Installation | Testing & Commissioning | +17 |
+| Post-Installation Approvals | Approvals (Post-Installation) | +18 |
+| COD | Closeout | +19 |
+| Completion Certificates (Paperwork) | Closeout | +20 |
+| As-Built Drawings | Closeout | +21 |
+| **HOTO** | Closeout | **+22** |
+
+A site activated on **31 Aug 2026** and recalculated the same day would show HOTO due
+**22 Sep 2026**, and would be entirely overdue by early October.
+
+**What closes this: the Tenders team supplying real durations.** Not a code change, and
+not something a session should invent — `tests_opex_activation.NoResidentialMilestonesTests
+.test_due_dates_are_left_null` pins the current behaviour so nobody wires the recalc in by
+accident before the numbers exist.
 
 Fixing it later is a template **version bump** (v2 as a draft, then `activate()`), not an
 `UPDATE` — R-7 forbids editing an active version in place, and in-flight projects keep the
@@ -908,27 +950,31 @@ durations they were built from regardless (B-10).
 
 ---
 
-### B19 — `attach_residential_template()` does not copy `is_mirror`, so every 1.3b exclusion is inert until 1.3c fixes it
+### ~~B19 — `attach_residential_template()` does not copy `is_mirror`, so every 1.3b exclusion is inert until 1.3c fixes it~~
 
-Found by prompt 1.3b's pre-flight, 30 Aug 2026. **This is a hard pre-condition on 1.3c, not a
-tidy-up.**
+**CLOSED 31 Aug 2026 by prompt 1.3c.** The seventh snapshot is copied.
 
-`models.py:418` documents `Task.is_mirror` as *"The seventh snapshot copied from
-`TaskTemplateTask`, following the six above."* The `bulk_create()` at `utils.py:1249` copies
-**six** — `task_name`, `task_order`, `assigned_role`, `duration_days`, `task_type`,
-`is_payment_milestone` — and **`is_mirror` is not among them.** Every `Task` row any attach
-path creates therefore takes the field default `False`, whatever its template row says.
+`is_mirror=t.is_mirror` now sits between `is_payment_milestone` and `template_task` in the
+one `bulk_create()`, which moved into `_attach_task_template()` — the single attach both
+project types go through. There is no second copy of that loop for it to be missing from,
+and that was the point of extracting rather than adding a sibling: a sibling would have
+been a second place to forget it.
 
-The consequence is precise: **1.3b's twelve counter exclusions are correct and completely
-inert.** They cannot fire, because no production row can be `is_mirror=True`. Every test in
-`tests_mirror_metrics.py` sets the flag by hand and says so in its docstring — those tests
-prove the counters, and cannot prove the pipeline that feeds them.
+**Verified on a real attached site, not by a fixture.** A shell activation of an OPEX
+project produces exactly five `Task` rows with `is_mirror=True` — **Design**, **Material
+Delivery**, **COD**, **As-Built Drawings**, **HOTO** — and 17 without. The Residential
+template flags nothing, so Residential activation produces zero mirrors and the 26 live
+projects are unaffected.
 
-**Not fixed by 1.3b**, deliberately: adding the line is beyond "the exclusion itself", and
-1.3c rewrites this function anyway when it generalises the attach beyond Residential. It also
-owns the neighbouring decision — whether a mirror is created with an assignee at all — and the
-two should be made together. **1.3c must add the copy in the same commit as the attach, or the
-whole of 1.3b silently does nothing.**
+**What this unlocks, which is the whole reason it mattered:** 1.3b's twelve counter
+exclusions are no longer inert. `tests_opex_activation.CountersOnARealSiteTests` asserts
+them on a site activated through the real view — `pending_approvals` 5 → 3, the project
+card 22 → 17, the CEO `dept_pm_pending` / `dept_design_pending` / `dept_scm_pending` rows —
+where every test in `tests_mirror_metrics.py` sets the flag by hand and could not.
+
+**What is still NOT built, and is the reason B19's closure is not the end of the mirror
+story:** the human-write refusal in `_apply_task_status_change()`. Recorded as **B22**
+below.
 
 ---
 
@@ -978,6 +1024,91 @@ is worse than fixing none: the copies would then disagree with each other about 
 project is in, which is harder to diagnose than a consistently wrong answer. **The fix is the
 consolidation, not the filter** — one helper, called by all four, with R-20's exclusion inside
 it. Whoever does it needs `models.py` in scope.
+
+---
+
+### B22 — the human-write refusal on a mirror is still not built, and a mirror is protected only by having no assignee
+
+Found by prompt 1.3c's pre-flight, 31 Aug 2026. **Promised to 1.3c by three earlier
+documents and NOT delivered by it**, because 1.3c's remit was the opening transition, not
+the status path. Recorded here rather than left in the earlier promises so it is not
+assumed done.
+
+`models.py`'s `Task.is_mirror` comment, migration `0075`'s header and
+`tests_opex_template.py`'s docstring all say the refusal lives in
+`_apply_task_status_change()` (R-18) and is 1.3c's. It is not there. Grepped: nothing in
+`views.py` reads `is_mirror` on a write path — all 30-odd references are counter
+querysets from 1.3b.
+
+**What actually stops a human writing a mirror today, and why it is not good enough.**
+Both status views refuse an unassigned task *before* `_apply_task_status_change()` runs:
+
+```python
+    if task.assigned_to is None:                              # task_status_update
+    if task.assigned_to is None or task.assigned_to != profile:  # task_detail_status_update
+```
+
+and 1.3c seeds every mirror with `assigned_to = NULL` (see §12, 31 Aug). So a mirror
+cannot be moved — **by accident, not by rule.** The day anybody assigns COD to the PM
+through `task_assign`, which nothing prevents, the protection disappears silently and
+that mirror becomes writable like any other task.
+
+**The trap for whoever builds it**, already flagged by the A-1.3 audit and worth
+restating: a refusal test written against a mirror as seeded will pass without proving
+anything, because the unassigned check fires first. The test must assign the mirror to
+the acting user and *then* assert the refusal, or it is testing the wrong branch.
+
+**Where it goes:** `_apply_task_status_change()`, not either view — a rule added to one
+view is not enforced, merely avoidable. `tests_task_status_path.py` is where the audit
+placed the test.
+
+---
+
+### B23 — the PM dashboard's draft card still opens the designer modal, so an OPEX site cannot be activated from there
+
+Found by prompt 1.3c, 31 Aug 2026. **Deliberately not fixed** — 1.3c's stop conditions
+allowed one control in one existing template, and this is a second.
+
+1.3c branched the Activate control on `project_overview.html`: Residential keeps the
+`#activateDesignerModal`, everything else posts to `opex_site_activate`. That is the
+screen `program_detail.html` links every OPEX site to, so the path a tender PM actually
+walks works.
+
+`dashboard/pm.html:88` carries **the same button with the same `data-activate-url`** and
+the same modal at line 470, unbranched. A PM whose draft OPEX site appears on their
+dashboard's draft card gets the designer picker and the same dead end 1.3c removed
+elsewhere — the `<select required>` will not submit, and there is no designer to pick.
+
+**Not a correctness bug** — nothing wrong is written, the activation simply cannot be
+started from that one card. **The fix is the same four lines** already applied to
+`project_overview.html` (`{% if project.project_type == 'Residential' %}` around the
+button, a plain POST form in the else branch), and it belongs in whatever session next
+opens the PM dashboard. Do not copy the JS; the else branch needs none.
+
+---
+
+### B24 — `opex_site_activate` is one view, and 91 sites is not one POST
+
+Found by prompt 1.3c, 31 Aug 2026. **Not a defect — a stated limit, recorded so the gap
+is not discovered by someone clicking 91 times.**
+
+1.3c ships the per-site transition a PM triggers from a screen. The production reality
+behind it is **95 Draft tender sites**, and the A-1.3 audit costed moving them at
+**≈ 3,040 queries, 2,755 `Task` rows and 760 `ProjectPhase` rows**. That is a management
+command or a data migration, not 95 POSTs through a browser.
+
+**What such a route must carry, and this is the load-bearing part:** its own idempotency
+guard. `opex_site_activate`'s double-run protection is `if project.status != 'Draft'`
+*inside the view*, and it **does not travel**. There is no uniqueness constraint on
+`(project, phase_order)`, so a bulk route without its own check silently double-attaches —
+14 phases, 44 tasks — and `_phase_progress_subqueries()` hides it by taking the lowest-pk
+phase.
+
+**Also note what activation does to two portfolio-wide surfaces**, per §12's 30 Aug
+ordering decision: `activated_at` *is* the definition of "active" for the CEO per-user
+report and the EOD digest, so a bulk run adds 95 sites to both on the day it runs. 1.3b's
+exclusions are now live, so the mirrors will not inflate the counts — but the sites
+themselves will appear, and that should be expected rather than investigated.
 
 ---
 

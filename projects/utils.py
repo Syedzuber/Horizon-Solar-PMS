@@ -1271,6 +1271,154 @@ def resolve_residential_template():
     return template
 
 
+def _attach_task_template(project, template):
+    """Create `project`'s phases and tasks from `template`. THE ONE ATTACH.
+
+    Shared by attach_residential_template() and attach_opex_template(), which differ
+    only in which template they resolve and which of the created tasks they pre-assign
+    afterwards. EXTRACTED by prompt 1.3c rather than copied: a second copy of this loop
+    is a second place for the seventh snapshot below to be forgotten, and forgetting it
+    once already made the whole of 1.3b inert (B19).
+
+    Does NOT open its own transaction. The caller owns the atomic block, because the
+    integrity assertions at the end must abort the caller's ACTIVATION and not merely
+    this function — and callers must resolve `template` inside that same block, so a
+    virgin database's bootstrap seed rolls back with the activation that triggered it
+    rather than surviving a failed one.
+
+    Returns the flat list of TaskTemplateTask rows attached, in template order.
+    """
+    # import inside function to avoid circular import at module level
+    from .models import ProjectPhase, Task
+
+    # Every task row of the template, in order, so the assertions below have
+    # something to compare the created rows against.
+    template_tasks = []
+
+    for tpl_phase in template.phases.all():
+        phase = ProjectPhase.objects.create(
+            project=project,
+            phase_name=tpl_phase.label,
+            phase_order=tpl_phase.sort_order,
+        )
+        tpl_tasks = list(tpl_phase.tasks.all())
+        template_tasks.extend(tpl_tasks)
+        Task.objects.bulk_create([
+            Task(
+                phase=phase,
+                task_name=t.label,
+                task_order=t.sort_order,
+                assigned_role=t.assigned_role,
+                duration_days=t.duration_days,
+                task_type=t.task_type,
+                is_payment_milestone=t.is_payment_milestone,
+                # THE SEVENTH SNAPSHOT — added by prompt 1.3c, closing B19. Absent
+                # from this list until now, so no Task row could ever carry
+                # is_mirror=True however its template row was flagged, and every
+                # counter exclusion 1.3b shipped was correct and completely inert.
+                # A SNAPSHOT like the six above, not a join through template_task:
+                # retiring or re-versioning a template must never rewrite which rows
+                # a live project treats as system-owned.
+                is_mirror=t.is_mirror,
+                template_task=t,   # provenance; nothing reads it back
+            )
+            for t in tpl_tasks
+        ])
+
+    # Integrity checks — roll back everything if the created rows do not match the
+    # template. These assertions run inside the caller's atomic block so a mismatch
+    # aborts the transaction, which is the whole point of them: a half-seeded project
+    # must never ship. The expected numbers are DERIVED FROM THE TEMPLATE rather than
+    # hardcoded, because the template is data and a second version — or a second
+    # project type — may legitimately have different counts. They still catch a
+    # partial write.
+    expected_phases   = len(template.phases.all())
+    expected_total    = len(template_tasks)
+    expected_internal = sum(1 for t in template_tasks if t.task_type == Task.INTERNAL)
+    expected_external = sum(1 for t in template_tasks if t.task_type == Task.EXTERNAL)
+
+    # An empty template would make every count assertion below pass trivially and
+    # ship a project with no work in it. Checked explicitly for that reason.
+    assert expected_total > 0, f"Task template {template} has no tasks"
+
+    phase_count = ProjectPhase.objects.filter(project=project).count()
+    assert phase_count == expected_phases, \
+        f"Expected {expected_phases} phases, got {phase_count}"
+
+    task_count = Task.objects.filter(phase__project=project).count()
+    assert task_count == expected_total, f"Expected {expected_total} tasks, got {task_count}"
+
+    internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
+    assert internal_count == expected_internal, \
+        f"Expected {expected_internal} internal tasks, got {internal_count}"
+
+    external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
+    assert external_count == expected_external, \
+        f"Expected {expected_external} external tasks, got {external_count}"
+
+    return template_tasks
+
+
+def attach_opex_template(project):
+    """
+    Create the phases and tasks for an OPEX site from the ACTIVE OPEX TaskTemplate.
+
+    The non-Residential half of the attach, added by prompt 1.3c so that the 91 tender
+    sites which cannot pass project_activate's designer gate can enter execution.
+    Same core as Residential — _attach_task_template() above — and deliberately NONE of
+    the three Residential-specific steps that follow it there:
+
+      - no Finance-assignee raise, and no invoice / finance-confirmation name list:
+        those tasks are Residential and do not exist in this template. Carrying the
+        raise across would make OPEX activation depend on an account it has no use for.
+      - PM pre-assignment EXCLUDES MIRRORS. The three real PM tasks (Net Metering,
+        CEIG, Post-Installation Approvals) go to the site's PM so they are workable on
+        day one; COD and HOTO — PM-role MIRRORS — are left with assigned_to NULL,
+        because an unassigned mirror is an accurate statement that the row is nobody's
+        task. Decided as OPEX_TEMPLATE_AUDIT.md §8 recommends. The owning ROLE is still
+        set on all five mirrors, by the template.
+
+    NO BOOTSTRAP, unlike resolve_residential_template(). Migration 0075 seeds OPEX v1 at
+    deploy; if no active OPEX template exists this RAISES rather than inventing one from
+    model state. There is no runtime OPEX builder to bootstrap from, and a silent
+    fallback here would be the same trap as an admin screen that saves a value nothing
+    reads. Under the test suite (test_settings disables migrations) callers seed by
+    calling migration 0075's own seed_opex_v1().
+
+    Resolves by `project.project_type` rather than a hardcoded 'OPEX', so a CAPEX
+    template becomes a seed and an activation route with no further change here.
+    Entire operation is atomic — any failure rolls back all phases and tasks.
+    """
+    from .models import Task, TaskTemplate
+
+    with transaction.atomic():
+
+        # Resolved inside the atomic block for the reason given on the core above.
+        template = resolve_active_task_template(project.project_type)
+        if template is None:
+            raise TaskTemplate.DoesNotExist(
+                f"No ACTIVE task template for project_type "
+                f"'{project.project_type}'. Seed and activate one before activating a "
+                f"{project.project_type} site; a version is not created automatically "
+                f"to cover this."
+            )
+
+        _attach_task_template(project, template)
+
+        # Pre-assign the PM's own NON-MIRROR tasks. `is_mirror=False` is the whole
+        # difference from the Residential filter below, and it is load-bearing: without
+        # it COD and HOTO land in every per-user counter as the PM's work, on 95 sites,
+        # protected only by 1.3b's exclusion rather than by being true.
+        assign_tasks_to(
+            Task.objects.filter(
+                phase__project=project,
+                assigned_role=Task.PM,
+                is_mirror=False,
+            ),
+            project.assigned_pm,
+        )
+
+
 def attach_residential_template(project):
     """
     Create the phases and tasks for a Residential project from the ACTIVE TaskTemplate.
@@ -1279,16 +1427,20 @@ def attach_residential_template(project):
     0.4 — the template is data, and can be changed by shipping a new version instead of
     a deploy. Everything else about this function is unchanged.
 
+    The phase/task creation and the integrity assertions moved into
+    _attach_task_template() in prompt 1.3c so OPEX could share them; what stays here is
+    exactly the Residential-specific part, and the behaviour is unchanged. The name is
+    kept because three call sites use it, two of them in test modules that prompt was
+    forbidden to touch.
+
     Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
     The send-invoice and finance-confirmation tasks are auto-assigned to
     RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL (required data — activation fails loudly
     and rolls back if that user is absent).
     Entire operation is atomic — any failure rolls back all phases and tasks.
-    Asserts at the end verify the created rows against the template; a failed assert
-    rolls back via the outer atomic().
     """
     # import inside function to avoid circular import at module level
-    from .models import ProjectPhase, Task, UserProfile
+    from .models import Task, UserProfile
 
     with transaction.atomic():
 
@@ -1297,31 +1449,7 @@ def attach_residential_template(project):
         # one. Raises rather than falling back if a template exists but none is active.
         template = resolve_residential_template()
 
-        # Every task row of the template, in order, so the assertions below have
-        # something to compare the created rows against.
-        template_tasks = []
-
-        for tpl_phase in template.phases.all():
-            phase = ProjectPhase.objects.create(
-                project=project,
-                phase_name=tpl_phase.label,
-                phase_order=tpl_phase.sort_order,
-            )
-            tpl_tasks = list(tpl_phase.tasks.all())
-            template_tasks.extend(tpl_tasks)
-            Task.objects.bulk_create([
-                Task(
-                    phase=phase,
-                    task_name=t.label,
-                    task_order=t.sort_order,
-                    assigned_role=t.assigned_role,
-                    duration_days=t.duration_days,
-                    task_type=t.task_type,
-                    is_payment_milestone=t.is_payment_milestone,
-                    template_task=t,   # provenance; nothing reads it back
-                )
-                for t in tpl_tasks
-            ])
+        _attach_task_template(project, template)
 
         # Pre-assign PM tasks to the named PM on this project.
         # SE-role tasks start unassigned — same as Design/SCM/Finance.
@@ -1339,7 +1467,7 @@ def attach_residential_template(project):
         # Finance user (by email), resolved in one place. This is required data:
         # if the account is missing, fail loudly so the whole atomic activation
         # rolls back — never create these tasks unassigned. Uses an explicit raise
-        # (not the assert pattern below) because asserts are stripped under
+        # (not the assert pattern in _attach_task_template) because asserts are stripped under
         # `python -O`, which would silently re-enable create-unassigned behavior.
         finance_assignee = (
             UserProfile.objects
@@ -1360,33 +1488,3 @@ def attach_residential_template(project):
             ),
             finance_assignee,
         )
-
-        # Integrity checks — roll back everything if the created rows do not match the
-        # template. These assertions run inside the atomic block so a mismatch aborts the
-        # transaction, which is the whole point of them: a half-seeded project must never
-        # ship. The expected numbers are now DERIVED FROM THE TEMPLATE rather than
-        # hardcoded to 52 and 44/8, because the template is data and a second version may
-        # legitimately have different counts. They still catch a partial write.
-        expected_phases   = len(template.phases.all())
-        expected_total    = len(template_tasks)
-        expected_internal = sum(1 for t in template_tasks if t.task_type == Task.INTERNAL)
-        expected_external = sum(1 for t in template_tasks if t.task_type == Task.EXTERNAL)
-
-        # An empty template would make every count assertion below pass trivially and
-        # ship a project with no work in it. Checked explicitly for that reason.
-        assert expected_total > 0, f"Task template {template} has no tasks"
-
-        phase_count = ProjectPhase.objects.filter(project=project).count()
-        assert phase_count == expected_phases, \
-            f"Expected {expected_phases} phases, got {phase_count}"
-
-        task_count = Task.objects.filter(phase__project=project).count()
-        assert task_count == expected_total, f"Expected {expected_total} tasks, got {task_count}"
-
-        internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        assert internal_count == expected_internal, \
-            f"Expected {expected_internal} internal tasks, got {internal_count}"
-
-        external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
-        assert external_count == expected_external, \
-            f"Expected {expected_external} external tasks, got {external_count}"

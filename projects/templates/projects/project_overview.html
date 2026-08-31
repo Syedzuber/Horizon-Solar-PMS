@@ -74,8 +74,25 @@
         {% if is_assigned_pm %}
           {% if project.status == 'Draft' %}
             <a href="{% url 'project_edit' project.project_id %}" class="btn btn-outline-secondary btn-sm">Edit</a>
-            <button type="button" class="btn btn-brand btn-sm"
-                    data-activate-url="{% url 'project_activate' project.project_id %}">Activate</button>
+            {% comment %}
+            Prompt 1.3c. ONE control, branched on type — this button already rendered for
+            an OPEX site, but it opens #activateDesignerModal whose designer <select> is
+            `required`, and OPEX design allocation lives on DesignAssignment, not on this
+            FK. That `required` is the visible half of why 91 tender sites could not be
+            activated. Residential keeps the modal, unchanged. Non-Residential posts
+            straight to opex_site_activate, which needs no designer and mints no
+            Residential payment milestones.
+            {% endcomment %}
+            {% if project.project_type == 'Residential' %}
+              <button type="button" class="btn btn-brand btn-sm"
+                      data-activate-url="{% url 'project_activate' project.project_id %}">Activate</button>
+            {% else %}
+              <form method="post" action="{% url 'opex_site_activate' project.project_id %}" class="d-inline"
+                    onsubmit="return confirm('Start execution on this site? This creates its phases and tasks and cannot be undone.')">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-brand btn-sm">Activate</button>
+              </form>
+            {% endif %}
           {% else %}
             <a href="{% url 'task_add' project.project_id %}" class="btn btn-brand btn-sm"
                hx-get="{% url 'task_add' project.project_id %}"
