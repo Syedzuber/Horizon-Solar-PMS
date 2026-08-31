@@ -329,3 +329,116 @@ Residential project to prove it is a well-behaved no-op against the shape produc
 actually builds. It deliberately does **not** use `bulk_create()`: that would bypass every
 guard the same session just wrote, and the materialiser must not be the thing that walks
 around them.
+
+---
+
+## DEMO-1 — a demo dataset you can throw away
+
+**Local-only tooling. Ships no product behaviour.** Nothing a user sees changes; no model,
+view, template, migration or existing test module was touched.
+
+### What it was for
+
+Nobody has ever opened an activated OPEX site in a browser. B22's mirror refusal has been
+proved in tests and in a shell and never seen by a human. `PHASE_0_BROWSER_TEST_PLAN.md` has
+never been run. Production holds 96 OPEX sites in Draft and almost no execution data, because
+the team is deliberately waiting for delivery. So the gap was a populated local environment to
+hand-test against before the merge.
+
+### Extend, not replace — and it cost three files, not two
+
+The three pre-existing seed commands **still ran**, on the current schema, after 75
+migrations: a full per-model census across a seed → seed → teardown cycle came back
+**identical**, and three consecutive cycles were clean. So "too stale to save" was never the
+argument. The argument was the *teardown's identification mechanism*, and it forced a
+consolidation either way.
+
+A second command pair would have taken the codebase from **2½ teardowns to 3½** —
+`seed_scm_handoff_data` already carried its own second one as `--reset`, and all three files
+were welded together by a shared `TEST_PREFIX` constant. That is the duplication B8 spent a
+session undoing. Extending meant rewriting all three and ending at **two commands and one
+manifest**:
+
+- `seed_opex_test_data` — the whole demo environment, and it writes the manifest
+- `seed_scm_handoff_data` — Part-6 SCM states layered on top, **appending to the same
+  manifest**; `--reset` deleted
+- `teardown_opex_test_data` — manifest-driven, and it refuses without one
+
+`_demo_support.py` holds the interlock and the manifest. The leading underscore is
+load-bearing: Django's `find_commands()` skips it, so it is importable by all three without
+appearing as a command.
+
+### The manifest, and the one thing it deletes that it should not be able to
+
+The teardown used to find its targets with `project_id__startswith='Test-'` — a delete whose
+blast radius was decided by a string comparison against live tables. It now deletes a recorded
+list of primary keys in reverse creation order and **runs no query that could select a row a
+seed did not create**. There is deliberately no fallback when the manifest is missing: a
+fallback that pattern-matched live tables would reintroduce the replaced mechanism *as the
+error path*, which is where it would be least tested.
+
+**The refusal message names the resulting regression** — `Test-` rows from the old seed cannot
+be removed by this version, and the fix is the old commit or a manual delete — because the
+first person to hit a bare "no manifest found" would reasonably conclude the tool is broken.
+
+**`StatusTransition` rows are deleted, through `QuerySet.delete()`, which bypasses the
+`AppendOnlyViolation` guard.** That is R-4's central guarantee being stepped around, and it
+reads as a decision in three places (the module docstring, the deletion loop, `docs/demo-
+data.md`). It is narrow: `StatusTransition.project` is `SET_NULL` precisely so a hard-deleted
+project cannot erase its own history, so without it every teardown would leave orphaned ledger
+rows behind permanently, one set per cycle, in the table the dwell-time reports read. It is
+only safe because the manifest bounds it to rows a seed created on a database the interlock
+has already proved local.
+
+A **leak sweep** closes the gap between "rows the seed constructs" and "rows the real code
+paths wrote on the way past". pk high-water marks are taken for every model before the first
+write; anything new and unrecorded is appended last, so the teardown deletes it first — the
+safe order, because side-effect rows are leaves. This is also where the one dangerous bug of
+the session was caught before it ran: the first draft of the SCM sweep passed a mark of `0`,
+which would have recorded **every `ActivityLog` and `StatusTransition` row in the database**
+into the manifest, and the teardown asks no questions about what is in the manifest.
+
+### Two namespace facts that the product decided, not the prompt
+
+- **OPEX demo IDs carry no hyphen** (`DEMOOPEX01`). `OpexSiteForm.clean_site_code()` runs the
+  entered code through `normalize_program_code()`, which strips everything outside `[A-Z0-9]`.
+  A `DEMO-` prefix is not achievable through the real creation path, and setting `project_id`
+  explicitly to defeat that would mean the seed bypassing its own creation path to satisfy a
+  cosmetic rule.
+- **The Residential ID does** (`DEMO-RES-01`), and that IS an explicit bypass of
+  `generate_project_id()`. Through the generator the demo project would take the next real
+  `HRP-RES-2026-NNN` number on a database that is a production restore, be indistinguishable
+  by eye from a real project, and hand the number back for reuse at teardown. What the bypass
+  forgoes is stated in the code and in `docs/demo-data.md` so nobody reads "created through the
+  real path" as including ID generation.
+
+### Seven demo roles, not eight
+
+`UserCreateForm.clean()` refuses a second Admin ("Only one Admin account is permitted") and
+every real database already has one. Not bypassed. Demo tooling is exactly where a "just this
+once" bypass gets copied later, and the rule is real. The operator is told to log in as the
+existing Admin.
+
+### The finding worth having
+
+Building this was an unusually direct audit of *can this state be reached through the product
+at all*, because a seed reaching for `objects.create()` has found a state the product cannot
+produce. **Six did**, recorded as §B23. The two that go beyond "not built yet":
+
+- **The three execution capability flags cannot be set even by an Admin.** They are absent
+  from both user forms *and* from `UserProfileAdmin`, which does carry `is_design_head` and
+  `is_design_qc`. Whichever consumer lands first (2.2 / 2.3 / 4.1) needs a writer; adding
+  three names to `UserProfileAdmin` would make them settable today.
+- **`_apply_task_status_change()` requires a `request`**, so the one decision path for task
+  status (R-18) has no non-HTTP home. That matters beyond seeding: the mirror derivation hooks
+  of phases 3–5 will write mirror statuses from source events and, per its own docstring,
+  "will not call this function" — so the transition table, `completed_at` and `blocked_since`
+  will have to be restated somewhere or diverge.
+
+### Verification
+
+`manage.py check` clean. Suite **984 tests, 1 failure + 1 error — the same two as baseline**
+(the SQLite constraint-name assertion in `tests_design_part46`, and the `test_whatsapp_templates`
+loader artefact; neither was this session's to fix). `tests_demo_data.py` adds 15 tests, all
+passing. Three full seed → seed → teardown cycles were run against the real local database and
+the per-model census came back identical each time.

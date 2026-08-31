@@ -1,223 +1,199 @@
 """
-Management command: completely remove the OPEX test tender created by
-`seed_opex_test_data`, including anything Part 2+ testing hung off it.
+Management command: remove exactly what `seed_opex_test_data` and
+`seed_scm_handoff_data` recorded creating, and nothing else.
 
-HARD DELETE, NOT SOFT DELETE
-----------------------------
-This calls `.delete()` and never sets `is_deleted=True`. A soft-deleted row keeps
-occupying its unique values: `Project.project_id` is UNIQUE at the DB level, and
-`Program.short_tender_code` is checked for uniqueness against the UNFILTERED manager
-in ProgramForm — so a soft-deleted tender would permanently reserve its code and block
-a re-seed. This codebase has already been bitten by that pattern with `zoho_deal_id`.
-Only a hard delete releases both cleanly, which is what makes seed -> teardown -> seed
-work.
+    python manage.py teardown_opex_test_data              # dry run — reports only
+    python manage.py teardown_opex_test_data --confirm    # delete
 
-DELETION ORDER IS LOAD-BEARING
-------------------------------
-`DesignFile.derived_from_arka` is PROTECT, and Django does NOT resolve a PROTECT inside
-a single cascade even when the protecting row is part of the same delete. Verified
-empirically: `project.delete()` on a site that has one DesignFile raises
+TYPE BOTH COMMAND NAMES IN FULL. `se`+Tab does not disambiguate `seed_opex_test_data`
+from `send_eod_digest`, which mails the whole company. The runbook already records
+that collision; it is repeated here because this is where somebody will be typing
+fast.
 
-    ProtectedError: Cannot delete some instances of model 'Project' because they are
-    referenced through protected foreign keys: 'DesignAssignment.project'
+THE MANIFEST IS THE ONLY THING THIS COMMAND READS
+-------------------------------------------------
+It deletes a list of primary keys. It does not search for rows to delete, and it runs
+no query that could select a row the seed did not create.
 
-So the design rows are deleted explicitly bottom-up before the Project, and the
-Projects before the Program (`Project.program` is also PROTECT). Deleting in this order
-is what makes the command work at all once Part 2 has created design artifacts —
-it is not merely for tidy per-model counts.
+Until this change it identified its targets by pattern-matching LIVE TABLES —
+`Project.objects.filter(project_id__startswith='Test-')` and the relation traversals
+hanging off it. That worked, and it was one mistyped constant away from not working.
+The `DEMO` namespace still exists, so anything that ever escapes the manifest is
+identifiable by eye, but nothing here reads it.
 
-STORAGE OBJECTS ARE DELETED TOO (E5)
-------------------------------------
-Deleting the rows alone used to leave every uploaded survey, CAD file and BOQ
-attachment sitting in the private Supabase bucket with nothing referencing it —
-`build_design_path()` mints a fresh uuid4 per upload, so replaced files never overwrite
-their predecessors and orphans accumulate with every seed/teardown cycle.
+WHY THERE IS NO FALLBACK, AND WHAT IT COSTS
+-------------------------------------------
+When the manifest is missing this command REFUSES. It does not fall back to matching
+names or prefixes: a fallback would reintroduce, as the error path, exactly the
+mechanism the manifest replaced — and the error path is where it would be least
+tested.
 
-The bucket and path are collected from `DesignFile` and from
-`DesignAssignment.survey_file_path` BEFORE any row is deleted (afterwards there is
-nothing left to read them from), and the objects are removed through
-`design_storage.delete_design_objects()`.
+The cost is a real regression, and the refusal message names it: `Test-` prefixed rows
+created by the OLD seed cannot be removed by this version. Whoever hits that needs to
+know it is a known consequence and not a broken tool, or they will spend an hour
+looking for the bug.
 
-STORAGE FAILURES ARE REPORTED, NOT FATAL. An unreachable bucket, a revoked key or an
-object someone already deleted by hand must never make the test rows undeletable — the
-whole point of this command is that it always works. Every object gets its own
-success/failure line and the row deletion proceeds regardless.
+DELETION ORDER
+--------------
+The manifest is written in creation order and walked in REVERSE, which puts children
+before parents and leaves before both. That matters: `DesignFile.derived_from_arka`
+and `Project.program` are PROTECT, and Django does not resolve a PROTECT inside a
+single cascade even when the protecting row is part of the same delete.
 
-THE PUBLIC BUCKET IS NEVER TOUCHED. `delete_design_objects()` refuses any pair whose
-bucket is not the private design bucket, so a hand-edited `bucket` column cannot aim a
-delete at `SUPABASE_BUCKET` or at the four existing public-bucket call sites.
+A row already gone — cascaded away by an earlier step, or deleted by hand — is
+reported and is NOT an error. Absence is the desired end state.
 
-SAFETY
-------
-Rows are identified ONLY by the literal `Test-` prefix, imported from the seed command
-so the two cannot drift. Every Project caught in the sweep is re-checked against that
-prefix immediately before deletion; a single non-prefixed row aborts the whole
-transaction rather than being deleted. Storage objects inherit that safety: they are
-read off rows that already passed the prefix guard, never located by listing the bucket.
+STATUS TRANSITIONS ARE DELETED, AND THAT IS A DELIBERATE EXCEPTION TO R-4
+-------------------------------------------------------------------------
+`StatusTransition` is append-only. `save()` refuses to touch an existing row and
+`delete()` raises `AppendOnlyViolation` outright — the ledger's central guarantee.
+`QuerySet.delete()` operates in SQL and bypasses both overrides, as the model's own
+docstring says out loud, and that is the route taken here.
+
+This is a decision, not an accident, and it is narrow on purpose:
+
+  * A demo site's ledger rows would otherwise SURVIVE the site. `StatusTransition.project`
+    is SET_NULL precisely so a hard-deleted project cannot erase its own history — so
+    every teardown would leave orphaned rows behind, permanently, growing by one set
+    per cycle, in the table the dwell-time reports read.
+  * It is only ever safe because the MANIFEST BOUNDS IT. These are rows this seed
+    created, on a database the interlock has already proved is local. Nothing here can
+    reach a transition somebody's real work wrote.
+
+Do not generalise it. There is no other caller and there must not be one.
+
+STORAGE OBJECTS
+---------------
+`DesignFile` rows and `DesignAssignment.survey_file_path` values point at objects in
+the private Supabase design bucket, which no row deletion touches. Bucket and path are
+collected from the manifest's own rows BEFORE anything is deleted and removed through
+`design_storage.delete_design_objects()`, which refuses any bucket that is not the
+private design bucket.
+
+STORAGE FAILURES ARE REPORTED, NOT FATAL. An unreachable bucket or a revoked key must
+never make demo rows undeletable — the whole point of this command is that it always
+works. The row deletion proceeds regardless.
 """
+from django.apps import apps
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from projects.design_storage import delete_design_objects
-from projects.management.commands.seed_opex_test_data import (
-    TEST_PREFIX, PROGRAM_NAME,
+from projects.management.commands._demo_support import (
+    DEFAULT_MANIFEST_PATH, MANIFEST_MISSING_MESSAGE, Manifest, OVERRIDE_FLAG,
+    print_db_banner, require_local_database,
 )
+
+WRITES = [
+    'DELETE every row listed in the manifest, in reverse creation order',
+    'including its StatusTransition rows, bypassing the append-only guard',
+    'and the Supabase objects its DesignFile rows point at',
+]
 
 
 class Command(BaseCommand):
-    help = ('Hard-delete the Test- prefixed OPEX tender and everything under it. '
-            'Dry run unless --confirm is passed.')
+    help = ('Delete exactly the rows a demo seed recorded creating. Refuses without a '
+            'manifest and refuses a non-local database. Dry run unless --confirm.')
 
     def add_arguments(self, parser):
-        parser.add_argument(
-            '--dry-run', action='store_true',
-            help='Print what would be deleted, per model. This is also the default.',
-        )
-        parser.add_argument(
-            '--confirm', action='store_true',
-            help='Actually delete. Without this the command only reports.',
-        )
+        parser.add_argument('--confirm', action='store_true',
+                            help='Actually delete. Without this the command only reports.')
+        parser.add_argument('--dry-run', action='store_true',
+                            help='Report only. This is also the default.')
+        parser.add_argument('--manifest', type=str, default='',
+                            help=f'Manifest to read. Default: {DEFAULT_MANIFEST_PATH}')
+        parser.add_argument(OVERRIDE_FLAG, action='store_true',
+                            help='Required to run against a non-local database.')
 
     def handle(self, *args, **options):
-        from projects.models import (
-            Program, Project, ProjectPhase, Task, BOQ, BOQItem, BOQRevision,
-            DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
-            DesignFile, DesignChangeRequest, SiteGroup, SiteGroupMembership,
-        )
+        # TASK 1 — always the first line of output, before anything else is decided.
+        print_db_banner(self)
+        require_local_database(
+            self, options.get('i_know_this_is_not_local', False), WRITES)
 
-        confirm = options['confirm']
+        confirm       = options['confirm']
+        manifest_path = options['manifest'].strip() or DEFAULT_MANIFEST_PATH
 
-        # ---- identify targets by prefix only ----
-        programs = Program.objects.filter(name__startswith=TEST_PREFIX)
-        # Both the tender's children AND any stray Test- prefixed project, so an
-        # orphaned site is not left behind holding its unique project_id.
-        projects = Project.objects.filter(project_id__startswith=TEST_PREFIX)
-        project_ids = list(projects.values_list('pk', flat=True))
-        for program in programs:
-            for pk in program.sites.values_list('pk', flat=True):
-                if pk not in project_ids:
-                    project_ids.append(pk)
+        manifest = Manifest.load(manifest_path)
+        if manifest is None:
+            raise CommandError(MANIFEST_MISSING_MESSAGE.format(path=manifest_path))
 
-        target_projects = Project.objects.filter(pk__in=project_ids)
+        self.stdout.write(f'Manifest      : {manifest_path}')
+        written_at = manifest.meta.get('written_at', '(unknown)')
+        seeded_db  = manifest.meta.get('database', {})
+        self.stdout.write(f'Written at    : {written_at}')
+        self.stdout.write(f'Seeded against: host={seeded_db.get("host", "?")} '
+                          f'name={seeded_db.get("name", "?")}')
+        self.stdout.write(f'Rows recorded : {len(manifest.entries)}')
+        self.stdout.write('')
 
-        if not programs.exists() and not target_projects.exists():
-            self.stdout.write('Nothing to delete — no Test- prefixed Program or Project found.')
+        if not manifest.entries:
+            self.stdout.write('Manifest is empty — nothing to delete.')
             return
 
-        # ---- SAFETY GUARD: refuse anything not prefixed ----
-        # A non-prefixed site can only get here by being a child of a Test- Program,
-        # i.e. something real was attached to the test tender. Abort rather than delete.
-        unsafe_projects = [p for p in target_projects if not p.project_id.startswith(TEST_PREFIX)]
-        unsafe_programs = [p for p in programs if not p.name.startswith(TEST_PREFIX)]
-        if unsafe_projects or unsafe_programs:
-            for p in unsafe_projects:
-                self.stderr.write(self.style.ERROR(
-                    f'REFUSING: Project pk={p.pk} project_id={p.project_id!r} '
-                    f'does not start with {TEST_PREFIX!r}'))
-            for p in unsafe_programs:
-                self.stderr.write(self.style.ERROR(
-                    f'REFUSING: Program pk={p.pk} name={p.name!r} '
-                    f'does not start with {TEST_PREFIX!r}'))
-            raise CommandError(
-                'Aborted: a row without the Test- prefix was caught in the sweep. '
-                'Nothing was deleted.'
-            )
+        # ---- resolve each entry to a model, in reverse creation order ----
+        # An entry naming a model this build does not have is reported, never guessed
+        # at: a manifest written before a model was renamed must not be silently
+        # half-applied.
+        plan, unknown = [], []
+        for row in reversed(manifest.entries):
+            model = self._resolve(row['model'])
+            if model is None:
+                unknown.append(row)
+                continue
+            plan.append((model, row))
 
-        # ---- collect, bottom-up, in deletion order ----
-        assignments = DesignAssignment.objects.filter(project__in=target_projects)
-        attempts    = DesignAttempt.objects.filter(assignment__in=assignments)
-        boqs        = BOQ.objects.filter(project__in=target_projects)
-        phases      = ProjectPhase.objects.filter(project__in=target_projects)
+        present, missing = [], []
+        for model, row in plan:
+            (present if model.objects.filter(pk=row['pk']).exists()
+             else missing).append((model, row))
 
-        # Ordered so that every entry's PROTECT/CASCADE dependencies are already gone
-        # by the time it is deleted. DesignFile MUST precede ArkaSubmission.
-        #
-        # SITE GROUPS (Part 6) are listed FIRST and deleted explicitly even though both
-        # FKs are CASCADE and would go anyway — the point is the inventory. Without these
-        # two rows the dry run silently under-reports what a --confirm is about to remove,
-        # which is the one thing this command exists to be trusted about. Memberships
-        # precede groups; a membership can also hang off a Test- site that belongs to a
-        # group under a NON-Test program, so it is filtered by project, not by group.
-        steps = [
-            ('SiteGroupMembership', SiteGroupMembership.objects.filter(
-                                        project__in=target_projects)),
-            ('SiteGroup',           SiteGroup.objects.filter(program__in=programs)),
-            ('DesignFile',          DesignFile.objects.filter(attempt__in=attempts)),
-            ('ArkaSubmission',      ArkaSubmission.objects.filter(attempt__in=attempts)),
-            ('DesignChangeRequest', DesignChangeRequest.objects.filter(attempt__in=attempts)),
-            ('DesignAttempt',       attempts),
-            ('DueDateCommitment',   DueDateCommitment.objects.filter(assignment__in=assignments)),
-            ('DesignAssignment',    assignments),
-            ('BOQItem',             BOQItem.objects.filter(boq__in=boqs)),
-            ('BOQRevision',         BOQRevision.objects.filter(boq__in=boqs)),
-            ('BOQ',                 boqs),
-            ('Task',                Task.objects.filter(phase__in=phases)),
-            ('ProjectPhase',        phases),
-            ('Project',             target_projects),
-            ('Program',             programs),
-        ]
-
-        counts = [(label, qs.count()) for label, qs in steps]
+        self.stdout.write('To delete, by model (deletion order is reverse of creation):')
+        for label, count in self._tally(present):
+            self.stdout.write(f'  {label:<34} {count}')
+        self.stdout.write(f'  {"TOTAL":<34} {len(present)}')
+        if missing:
+            self.stdout.write('')
+            self.stdout.write('Already gone (cascaded, or removed by hand) — not an error:')
+            for label, count in self._tally(missing):
+                self.stdout.write(f'  {label:<34} {count}')
+        if unknown:
+            self.stdout.write('')
+            for row in unknown:
+                self.stderr.write(self.style.WARNING(
+                    f'  UNKNOWN MODEL  {row["model"]} pk={row["pk"]} — this build has '
+                    f'no such model; left alone.'))
+        self.stdout.write('')
 
         # ---- collect storage objects BEFORE anything is deleted ----
-        # Read from the same querysets the deletion steps use, so the objects listed are
-        # exactly the objects belonging to the rows about to go. Ordered and labelled so
-        # the dry run reads as an inventory rather than a list of opaque uuids.
-        storage_targets = []   # (label, bucket, path)
-        for f in (DesignFile.objects
-                  .filter(attempt__in=attempts)
-                  .select_related('attempt__assignment__project')
-                  .order_by('attempt__assignment__project__project_id', 'kind', 'version')):
-            storage_targets.append((
-                f'{f.attempt.assignment.project.project_id} {f.kind} v{f.version}',
-                f.bucket, f.path,
-            ))
-        for a in (assignments.select_related('project').order_by('project__project_id')):
-            if a.survey_file_path:
-                storage_targets.append((
-                    f'{a.project.project_id} survey', a.survey_file_bucket, a.survey_file_path,
-                ))
-
-        self.stdout.write('Targets (identified by the %r prefix):' % TEST_PREFIX)
-        for p in programs.order_by('pk'):
-            self.stdout.write(f'  Program pk={p.pk} name={p.name!r} code={p.short_tender_code!r}')
-        for p in target_projects.order_by('project_id'):
-            self.stdout.write(f'  Project pk={p.pk} project_id={p.project_id!r} '
-                              f'is_deleted={p.is_deleted}')
-        self.stdout.write('')
-        self.stdout.write('Row counts, in deletion order:')
-        for label, n in counts:
-            self.stdout.write(f'  {label:<20} {n}')
-        total = sum(n for _, n in counts)
-        self.stdout.write(f'  {"TOTAL":<20} {total}')
-        self.stdout.write('')
-
-        self.stdout.write(f'Storage objects in the private design bucket ({len(storage_targets)}):')
-        if not storage_targets:
-            self.stdout.write('  (none)')
-        for label, bucket, path in storage_targets:
+        storage = self._storage_targets(present)
+        self.stdout.write(f'Storage objects in the private design bucket ({len(storage)}):')
+        for label, bucket, path in storage:
             self.stdout.write(f'  {label:<34} {bucket}/{path}')
+        if not storage:
+            self.stdout.write('  (none)')
         self.stdout.write('')
 
         if not confirm:
             self.stdout.write(self.style.WARNING(
-                'DRY RUN — nothing deleted, no storage object removed. '
-                'Re-run with --confirm to delete.'))
+                'DRY RUN — nothing deleted, no storage object removed, manifest left '
+                'in place. Re-run with --confirm to delete.'))
             return
 
-        # ---- storage first, per the E5 brief: collect, delete objects, then rows ----
-        # Deliberately OUTSIDE the transaction. Supabase cannot participate in a Postgres
-        # transaction, so wrapping it would buy nothing and a rollback could not put an
-        # object back. Failures are printed and the row deletion below runs regardless.
-        if storage_targets:
+        # ---- storage first: collect, delete objects, then rows ----
+        # Deliberately OUTSIDE the transaction. Supabase cannot participate in a
+        # Postgres transaction, so wrapping it would buy nothing and a rollback could
+        # not put an object back.
+        if storage:
             self.stdout.write('Removing storage objects:')
-            label_by_path = {(b, p): lbl for lbl, b, p in storage_targets}
-            results = delete_design_objects([(b, p) for _lbl, b, p in storage_targets])
+            labels  = {(b, p): lbl for lbl, b, p in storage}
+            results = delete_design_objects([(b, p) for _l, b, p in storage])
             failures = 0
             for bucket, path, ok, error in results:
-                label = label_by_path.get((bucket, path), '')
+                label = labels.get((bucket, path), '')
                 if ok:
-                    self.stdout.write(self.style.SUCCESS(f'  removed  {label:<34} {bucket}/{path}'))
+                    self.stdout.write(self.style.SUCCESS(
+                        f'  removed  {label:<34} {bucket}/{path}'))
                 else:
                     failures += 1
                     self.stderr.write(self.style.WARNING(
@@ -225,18 +201,90 @@ class Command(BaseCommand):
             if failures:
                 self.stdout.write(self.style.WARNING(
                     f'{failures} storage object(s) could not be removed. Row deletion '
-                    f'continues — an unreachable bucket must not make test data '
+                    f'continues — an unreachable bucket must not make demo data '
                     f'undeletable.'))
             self.stdout.write('')
 
-        deleted = []
+        # ---- delete rows, one manifest entry at a time, in reverse order ----
+        # Per-entry rather than one queryset per model, because ORDER is the whole
+        # mechanism: a bulk delete per model would re-sort the work by model and lose
+        # the dependency ordering the manifest encodes.
+        #
+        # Model.objects.filter(pk=...).delete() is a QuerySet delete: it does not call
+        # the instance's delete(), which is what lets StatusTransition rows go at all.
+        # See the module docstring — that is a bounded, deliberate exception to R-4.
+        deleted, vanished = {}, 0
         with transaction.atomic():
-            for label, qs in steps:
-                n, _detail = qs.delete()
-                deleted.append((label, n))
+            for model, row in plan:
+                label = row['model']
+                count, _detail = model.objects.filter(pk=row['pk']).delete()
+                if count:
+                    deleted[label] = deleted.get(label, 0) + 1
+                else:
+                    vanished += 1
 
-        self.stdout.write('Deleted (rows reported by Django per .delete() call):')
-        for label, n in deleted:
-            self.stdout.write(self.style.SUCCESS(f'  {label:<20} {n}'))
+        self.stdout.write('Deleted:')
+        for label in sorted(deleted):
+            self.stdout.write(self.style.SUCCESS(f'  {label:<34} {deleted[label]}'))
+        self.stdout.write(f'  {"TOTAL":<34} {sum(deleted.values())}')
+        if vanished:
+            self.stdout.write(f'{vanished} manifest row(s) were already gone — '
+                              f'cascaded or removed by hand. Not an error.')
         self.stdout.write('')
-        self.stdout.write(self.style.SUCCESS('Hard delete complete — no is_deleted flag was set.'))
+
+        # The manifest describes rows that no longer exist. Leaving it in place would
+        # make the next teardown report a database-wide "already gone", which reads as
+        # a failure; and the next seed writes a fresh one anyway.
+        try:
+            manifest.path.unlink()
+            self.stdout.write(f'Manifest consumed and removed: {manifest.path}')
+        except OSError as exc:
+            self.stdout.write(self.style.WARNING(
+                f'Rows deleted, but the manifest could not be removed '
+                f'({manifest.path}): {exc}. Delete it by hand.'))
+
+        self.stdout.write(self.style.SUCCESS(
+            'Teardown complete — hard delete, no is_deleted flag was set.'))
+
+    # ---------------------------------------------------------------- helpers
+    @staticmethod
+    def _resolve(label):
+        try:
+            app_label, model_name = label.split('.', 1)
+            return apps.get_model(app_label, model_name)
+        except (ValueError, LookupError):
+            return None
+
+    @staticmethod
+    def _tally(pairs):
+        counts = {}
+        for _model, row in pairs:
+            counts[row['model']] = counts.get(row['model'], 0) + 1
+        return sorted(counts.items())
+
+    @staticmethod
+    def _storage_targets(present):
+        """(label, bucket, path) for every storage object the manifest's own rows own.
+
+        Read off manifest rows only — never by listing the bucket — so the safety
+        property the row deletion has is the property the storage deletion has too.
+        """
+        from projects.models import DesignAssignment, DesignFile
+
+        file_pks   = [r['pk'] for m, r in present if m is DesignFile]
+        assign_pks = [r['pk'] for m, r in present if m is DesignAssignment]
+
+        targets = []
+        for f in (DesignFile.objects.filter(pk__in=file_pks)
+                  .select_related('attempt__assignment__project')
+                  .order_by('attempt__assignment__project__project_id', 'kind',
+                            'version')):
+            targets.append((
+                f'{f.attempt.assignment.project.project_id} {f.kind} v{f.version}',
+                f.bucket, f.path))
+        for a in (DesignAssignment.objects.filter(pk__in=assign_pks)
+                  .select_related('project').order_by('project__project_id')):
+            if a.survey_file_path:
+                targets.append((f'{a.project.project_id} survey',
+                                a.survey_file_bucket, a.survey_file_path))
+        return targets

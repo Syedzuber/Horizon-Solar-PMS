@@ -1500,3 +1500,65 @@ prompt's fixed scope.
 change adding a column or a relation to `build_user_status_rows()` has nothing standing guard
 over it. The scaffold is reconstructable from this entry; committing it as
 `projects/tests_user_status_report.py` is a small, self-contained follow-up.
+
+---
+
+### B23 — six things the demo seed could not build through any product code path
+
+Found by prompt DEMO-1, whose remit was tooling and which shipped **no product change**.
+Building a populated local environment is an unusually direct audit of "can this state be
+reached through the product at all", because a seed that must reach for `objects.create()`
+has found a state the product cannot produce. Six did.
+
+Each is marked `# NO PRODUCT PATH` at its call site in
+`projects/management/commands/seed_opex_test_data.py`, and listed in `docs/demo-data.md` so
+nobody reads demo data as evidence a workflow works.
+
+**1. `StockLocation` has no writer at all.** No view, no form, no `admin.site.register`. A
+warehouse can only be created from a shell or a migration. Deliberate as of 1.2a —
+`tests_capability_flags.py` calls it "one table with no writer" and its consumer arrives with
+4.1 — but it is worth stating that the table shipped and remains unreachable.
+
+**2. The three execution capability flags have no writer either.** `is_qaqc`, `is_hse` and
+`is_warehouse_keeper` are absent from `UserCreateForm`, from `UserEditForm`, and — the part
+that surprises — from `UserProfileAdmin.list_display` and `list_filter`, which do carry
+`is_design_head` and `is_design_qc`. So unlike the other two profile flags, these cannot be
+set even by an Admin through Django admin. Consumers arrive with 2.2 / 2.3 / 4.1 (R-12), but
+whichever lands first needs a writer, and adding the three to `UserProfileAdmin` is a
+one-line change that would make them settable today.
+
+**3. A `group_type='execution'` `SiteGroup` cannot be created by anybody.**
+`site_group_create` hardcodes `GROUP_TYPE_PROCUREMENT` and its own comment says the execution
+creator "will sit beside this one" when written. Until it is, D-1 is unreachable through the
+product: the column exists, the CHECK constraint
+`execution_groups_are_never_locked` guards it, `SiteGroupMembership.group_type` denormalises
+it, and no user can produce a single row with that value. The demo seed makes one directly so
+the state is at least visible on screen.
+
+**4. `DeliveryChallan` and `DCLineItem` have no extracted creation service.** Creation is
+inline in `delivery_challan_create` (`views.py` ~9507), including its `record_transition` and
+the deliberate absence of a `recalculate_dc_status()` call. Compare `create_opex_site()`,
+which was extracted precisely so a non-request caller could use it. Not a defect; a gap that
+makes the challan path untestable and unseedable without copying twenty lines.
+
+**5. Neither activation has an extracted core.** `opex_site_activate` and `project_activate`
+are views: the status write, `activated_at`, the ledger row and the template attach are
+inline. `attach_opex_template()` / `attach_residential_template()` and `record_transition()`
+are importable, so what the seed replicates is three field writes — but "activate this site"
+is not callable from anywhere that is not an HTTP request. Any future BULK activation route
+(and 91 tender sites are waiting for one) will either extract this or copy it.
+
+**6. Task status changes require a `request`.** `_apply_task_status_change()` is the one
+decision path for task status (R-18) and correctly so, but it reads `request.POST` for the
+block reason and the inline due date and writes `messages`, so no command, job or derivation
+hook can call it. That matters beyond seeding: the mirror **derivation** hooks of phases 3–5
+will write mirror statuses from source events, and the docstring already says they "will not
+call this function". So the rule set that lives in `_apply_task_status_change` — the
+transition table, `completed_at`, `blocked_since` — has no non-HTTP home, and the derivation
+hooks will have to restate it or diverge from it.
+
+**Also recorded, not a finding:** `UserCreateForm.clean()` refuses a second Admin account, so
+the demo set is **seven roles, not eight**. That is a real product rule working as intended;
+the seed does not bypass it, and `docs/demo-data.md` tells the operator to log in as the
+existing Admin. Noted here only so a later reader does not file the missing demo Admin as an
+omission.

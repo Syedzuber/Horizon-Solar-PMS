@@ -1115,3 +1115,36 @@ names this section as the thing to reconsider.
   adding a third refusal site is a deliberate pass of its own. Recorded under B18, and pinned
   as current behaviour by `ManualDueDatesOnMirrorsTests` so that a later session closing it
   gets a failure pointing at the record.
+
+---
+
+## 17. Demo data — a populated local environment, in `docs/demo-data.md`
+
+Nobody has ever opened an activated OPEX site in a browser. `seed_opex_test_data`,
+`seed_scm_handoff_data` and `teardown_opex_test_data` build a whole local environment to
+hand-test against, and remove it again exactly. **The runbook is
+[`docs/demo-data.md`](demo-data.md)** — what to type, what gets created, the manifest and
+the interlock. It is a separate file on purpose: this document is what the product IS, and
+that one is what to type.
+
+Three things belong here rather than there, because they are decisions rather than
+instructions:
+
+- **The teardown deletes a manifest of primary keys, not a name pattern.** It used to run
+  `Project.objects.filter(project_id__startswith='Test-')` — a delete whose blast radius was
+  decided by a string comparison against live tables. The seeds now record every pk they
+  create and the teardown deletes that list and refuses when it is missing. The `DEMO`
+  namespace survives as a second line of defence, read by nothing.
+- **Demo data is local-only, enforced.** Both commands print the database host first and
+  refuse a non-local one without `--i-know-this-is-not-local`. Demo rows in production would
+  pollute the CEO dashboard, the EOD digest and every counter §1.3b corrected.
+- **The teardown deletes `StatusTransition` rows through `QuerySet.delete()`, which bypasses
+  the append-only guard (R-4).** Deliberate and bounded: `StatusTransition.project` is
+  `SET_NULL`, so otherwise every teardown would leave orphaned ledger rows behind
+  permanently, one set per cycle. It is only safe because the manifest bounds it to rows a
+  seed created on a database the interlock proved local. §13's coverage table is unaffected —
+  no product path gained or lost a transition. **Do not generalise it; there is no other
+  caller and there must not be one.**
+
+What the seed could not build through a real code path is a set of **product** findings, not
+tooling notes, and they are in `EXECUTION_MODULE_DEFERRED.md` §B23.
