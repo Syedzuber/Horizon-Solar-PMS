@@ -950,6 +950,179 @@ class AdminCannotWriteTaskStatusTests(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 8b — The same door, on the mirror flag (B26, R-10)
+# ---------------------------------------------------------------------------
+
+class AdminCannotWriteTaskMirrorFlagTests(TestCase):
+    """`TaskAdmin` must not offer `Task.is_mirror` as an editable field.
+
+    WHY THIS LIVES HERE AND NOT IN A NEW MODULE. It is the second field on the same
+    `readonly_fields` line, on the same `ModelAdmin`, protected by the same mechanism
+    as B9's `status` guard directly above, and it fails for the same reason — someone
+    deleting an "unhelpfully read-only" field. A maintainer who removes
+    `readonly_fields` should be met by both guards at once, in one file, rather than
+    fixing one and discovering the other on the next run. `tests_admin_smoke.py` was
+    the other candidate and is the wrong home: it is a fixture-free sweep over
+    `admin.site._registry` asserting only that every page returns 200, and a
+    field-specific rule would break that character.
+
+    WHAT MAKES THIS A LIVE HOLE AND NOT A TIDY-UP. B22 proved that neither Finance
+    sync can reach a mirror, for three independent reasons, and concluded that
+    "read-only" therefore means what it says. That proof depended on no Residential
+    task carrying the flag. `is_mirror` was a bound field on this form, so:
+
+      - Ticked on a Residential *100% Payment Confirmation* task, the M3 sync writes
+        past a read-only row through `filter().update()` — outside R-18 by B16's
+        decision, so the mirror refusal on the status path never sees it.
+      - Ticked on any Residential task at all, it mints a mirror on a project type
+        the architecture never contemplated one for.
+
+    A `Task`'s mirror flag is a SNAPSHOT that `_attach_task_template()` copies from
+    `TaskTemplateTask.is_mirror` at activation. Setting it by hand produces a row no
+    derivation hook will ever write and no sync path excludes. After this change,
+    B22's proof holds by configuration rather than by the coincidence that nobody had
+    ticked the box.
+
+    Every assertion reads the admin's RESOLVED configuration and the form it actually
+    builds — the same pattern B9, B10 and B11 used — never a tuple copied from
+    `admin.py`.
+
+    `TaskTemplateTaskAdmin` leaves `is_mirror` editable and is deliberately left
+    alone: editing the flag on a TEMPLATE row is template authoring, which is a
+    different question. Recorded under B26 in EXECUTION_MODULE_DEFERRED.md.
+    """
+
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.superuser = User.objects.create_superuser(
+            'b26_admin', 'b26@example.com', 'pw')
+        self.model_admin = django_admin.site._registry[Task]
+
+        project = Project.objects.create(
+            customer_name='Admin Mirror Sidedoor', customer_phone='9000000002',
+            site_address='3 Sun Road', city='Lucknow', project_type='Residential',
+            capacity_kw=Decimal('5.00'), status='Draft',
+        )
+        phase = ProjectPhase.objects.create(
+            project=project, phase_order=1, phase_name='Phase 1')
+        self.task = Task.objects.create(
+            phase=phase, task_name='100% Payment Confirmation', task_order=1,
+            assigned_role=Task.PM,
+        )
+        self.assertFalse(self.task.is_mirror,
+                         'a new Task is supposed to default to is_mirror=False')
+
+    def _request(self):
+        request = self.factory.get('/')
+        request.user = self.superuser
+        return request
+
+    def test_is_mirror_is_read_only_on_the_change_form(self):
+        request = self._request()
+        self.assertIn('is_mirror',
+                      self.model_admin.get_readonly_fields(request, self.task),
+                      'TaskAdmin no longer marks is_mirror read-only — the admin is '
+                      'again the one way a Finance sync can reach a mirror (B26)')
+
+        form = self.model_admin.get_form(request, self.task)
+        self.assertNotIn('is_mirror', form.base_fields,
+                         'is_mirror is still a bound form field, so the change form '
+                         'writes it regardless of readonly_fields')
+
+    def test_is_mirror_is_not_in_list_editable(self):
+        """`list_editable` writes from the changelist and ignores `readonly_fields`
+        entirely, so read-only on the change form is only half the door."""
+        self.assertNotIn('is_mirror', self.model_admin.list_editable)
+
+    def test_a_post_carrying_is_mirror_is_ignored_rather_than_merely_unrendered(self):
+        """The end-to-end shape of the hole, and the distinction that matters.
+
+        An unrendered field is not a closed one — a hand-rolled POST still carries it.
+        This submits `is_mirror=on` through the form the admin actually builds; the
+        value must be dropped, not saved.
+        """
+        request = self._request()
+        form_class = self.model_admin.get_form(request, self.task)
+        form = form_class(
+            data={
+                'phase': self.task.phase_id,
+                'task_name': self.task.task_name,
+                'task_order': self.task.task_order,
+                'assigned_role': self.task.assigned_role,
+                'is_mirror': 'on',            # not a field on this form
+                'task_type': self.task.task_type,
+                'duration_days': self.task.duration_days,
+            },
+            instance=self.task,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.model_admin.save_model(request, form.save(commit=False), form, change=True)
+
+        self.task.refresh_from_db()
+        self.assertFalse(
+            self.task.is_mirror,
+            'a POST carrying is_mirror=on turned a Residential payment task into a '
+            'mirror. The M3 sync writes such a row through filter().update(), which '
+            'the status-path mirror refusal never sees (B22, B16).')
+
+    def test_the_add_form_still_creates_a_task_at_the_model_default(self):
+        """A read-only field is omitted from the add form, so a new task takes
+        `Task.is_mirror`'s default. Creating through the admin is unaffected."""
+        request = self._request()
+        form_class = self.model_admin.get_form(request, None)
+        self.assertNotIn('is_mirror', form_class.base_fields)
+
+        form = form_class(data={
+            'phase': self.task.phase_id,
+            'task_name': 'Mirror-Free Through Admin',
+            'task_order': 2,
+            'assigned_role': Task.PM,
+            'task_type': Task.INTERNAL,
+            'duration_days': 1,
+        })
+        self.assertTrue(form.is_valid(), form.errors)
+        obj = form.save(commit=False)
+        self.model_admin.save_model(request, obj, form, change=False)
+
+        created = Task.objects.get(task_name='Mirror-Free Through Admin')
+        self.assertFalse(created.is_mirror)
+        self.assertEqual(created.is_mirror,
+                         Task._meta.get_field('is_mirror').default)
+        # B9's field, re-asserted on the same object: the add form still has to
+        # produce a usable task, not merely one with the right flags.
+        self.assertEqual(created.status, Task.NOT_STARTED)
+
+    def test_an_existing_mirror_keeps_its_flag_through_an_admin_edit(self):
+        """Read-only means unwritable, not erased. Editing an OPEX mirror's name
+        through the admin must leave it a mirror — a `readonly_fields` entry that
+        silently reverted the value to the default would be a worse bug than the one
+        being fixed."""
+        self.task.is_mirror = True
+        self.task.save(update_fields=['is_mirror'])
+
+        request = self._request()
+        form_class = self.model_admin.get_form(request, self.task)
+        form = form_class(
+            data={
+                'phase': self.task.phase_id,
+                'task_name': 'Renamed Mirror',
+                'task_order': self.task.task_order,
+                'assigned_role': self.task.assigned_role,
+                'task_type': self.task.task_type,
+                'duration_days': self.task.duration_days,
+            },
+            instance=self.task,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        self.model_admin.save_model(request, form.save(commit=False), form, change=True)
+
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.task_name, 'Renamed Mirror')
+        self.assertTrue(self.task.is_mirror,
+                        'an admin edit cleared an existing mirror flag')
+
+
+# ---------------------------------------------------------------------------
 # 9 — The same door, on the project (B10, R-10)
 # ---------------------------------------------------------------------------
 

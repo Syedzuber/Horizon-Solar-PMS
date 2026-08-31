@@ -877,41 +877,82 @@ test, and it asserts against the five roles this template may use rather than ag
 
 ---
 
-### B18 — the OPEX template's durations are all 1, and that makes every site a 22-day project
+### B18 — the OPEX template's durations are all placeholders, and `compute_gantt_schedule` will read them
 
-Found by prompt 1.3a, 30 Aug 2026. **Not a defect today. It becomes one the moment 1.3c
-calls `calculate_due_dates()` for an OPEX site.**
+**REWRITTEN 31 Aug 2026 by prompt B18.** Found by 1.3a, 30 Aug. **The hazard this entry
+originally described is closed. The wrong data it described is not, and that is what the
+entry is now about.**
+
+**What is closed.** Nothing writes the 22-day chain onto an OPEX site any more:
+
+1. `opex_site_activate` does not call `calculate_due_dates()` (1.3c). An activated tender
+   site starts with 22 NULL due dates.
+2. `project_recalculate_dates` refuses `project_type != 'Residential'` (B18, this session).
+3. `enable_cascade_scheduling` refuses it too, view and template both (B18, this session).
+
+**The decision behind those three is recorded at `docs/execution-model.md` §16:
+auto-scheduling is not in OPEX v1; dates are set manually, per task, by the PM.**
+
+**Two corrections to what this entry used to say**, kept visible because the entry was
+acted on twice and both readings mattered:
+
+- **The *Recalculate dates* control is not on `project_overview`, and never was.** No
+  template in the tree renders `project_recalculate_dates` — `grep` returns zero hits for
+  any project type. Its exposure was the **view** accepting a direct POST, gated only on PM
+  ownership, `status != 'Draft'` and `activated_at`. So the fix was view-side only, and
+  `RecalculateControlIsNotRenderedTests` pins the absence so the claim cannot silently
+  reverse.
+- **The entry did not name the door that mattered.** `enable_cascade_scheduling` calls the
+  same `calculate_due_dates()`, **does** render on `project_overview`, is **irreversible by
+  design**, and once on makes `task_set_due_date` refuse every non-PM role owner outright —
+  nine of the 22 OPEX tasks are the Site Engineer's. It would have deleted the only
+  scheduling a tender site has, permanently. Latent only because
+  `SystemSettings.cascade_scheduling_enabled` defaults `False`; a switch an Admin can flip
+  is not a guarantee.
+
+---
+
+**WHAT IS STILL OPEN: the durations themselves.**
 
 Durations are unset in OPEX v1 by decision (spec §5 — *"the team decides per task later"*),
-so all 22 rows carry `duration_days`'s field default of **1**. All 22 are also `Internal`,
-and `calculate_due_dates()` chains Internal tasks strictly sequentially off `activated_at`:
+so all 22 rows carry `duration_days`'s field default of **1**. That is a **placeholder
+wearing the costume of a measurement**: nothing distinguishes "one day, decided" from "not
+decided", and the column reads as authoritative to anything that consults it.
 
-```python
-task.due_date = add_calendar_days(previous_internal_due, task.duration_days)
-previous_internal_due = task.due_date
-```
+It is **inert while nothing reads it** — and today, for OPEX, nothing does.
 
-So the last task, **HOTO, falls due `activated_at + 22 calendar days`**, and the whole site
-reads as a 22-day project. Across the 95 tender sites that would put the entire OPEX
-portfolio overdue within a month of activation — and the likely reaction to that is to
-distrust the overdue number, not to fix the durations.
+**But `compute_gantt_schedule()` exists, and it will.** `projects/utils.py` computes
+`(start, end)` per task in memory from a hybrid source: a task's end is its stored
+`due_date` when set, **otherwise the computed chain end — previous end plus
+`duration_days`**. It is precisely designed to render projects whose due dates are null,
+which is every OPEX site. The Gantt is Residential-only today (`gantt_available`); the day
+a tender Gantt is wired, all 95 sites render as 22-day bar charts anchored on
+`activated_at`, with **no view to refuse the POST** because nothing is being written. The
+three guards above stop dates being *written*. They do not stop the placeholder being
+*read*.
 
-**STILL OPEN after 1.3c, 31 Aug 2026 — and now open on a live path rather than a
-hypothetical one.** 1.3c took the second option: `opex_site_activate` does **not** call
-`calculate_due_dates()`, so all 22 tasks are created with `due_date = NULL` and an
-activated OPEX site is unscheduled rather than wrongly scheduled. A null due date says
-"not scheduled"; 22 sequential days says something specific and false.
+**TRIGGER TO FIX: before anything reads `duration_days` on an OPEX task.** Not before the
+next release, not on a schedule — before the first read. The candidates in order of
+likelihood are a tender Gantt, any OPEX critical-path or float computation, and any
+"expected completion" figure on a Program rollup.
 
-**What changed is the exposure.** The PM-facing **Recalculate dates** control
-(`project_recalculate_dates`) is on `project_overview`, is gated only on `status != 'Draft'`
-and `activated_at`, and is now reachable on every activated OPEX site. One press produces
-the table below. Nothing warns the PM.
+**HOW IT IS FIXED: a template version bump, not an `UPDATE`.** Real durations from the
+Tenders team, seeded as **OPEX v2** as a draft and then `activate()`d. R-7 forbids editing
+an active version in place, and in-flight projects keep the durations they were built from
+regardless (B-10). This is a data task with a code-shaped prerequisite (someone must ask
+the Tenders team), which is why it has sat.
 
-**The concrete dates, from `activated_at.date()`.** All 22 tasks are `Internal` with
-`duration_days = 1`, and `add_calendar_days()` does not skip weekends, so task *N* in
-template order falls due `activated_at + N` days:
+**What pins it.** `ActivatedOpexSiteStartsUnscheduledTests
+.test_every_task_still_carries_the_placeholder_duration` asserts the whole duration set is
+`{1}`. The day v2 lands with real numbers, that test fails and names §16 as the thing to
+reconsider — so the arrival of good data is the event that reopens the decision, rather
+than something anyone has to remember.
 
-| Task | Phase | Due |
+**The concrete dates the placeholder produces**, from `activated_at.date()`, kept from the
+original entry because they are what a Gantt would draw. `add_calendar_days()` does not
+skip weekends, so task *N* in template order falls at `activated_at + N` days:
+
+| Task | Phase | Offset |
 |---|---|---|
 | Design | Design | **+1** |
 | Net Metering Approval | Approvals (Pre-Installation) | +2 |
@@ -936,17 +977,25 @@ template order falls due `activated_at + N` days:
 | As-Built Drawings | Closeout | +21 |
 | **HOTO** | Closeout | **+22** |
 
-A site activated on **31 Aug 2026** and recalculated the same day would show HOTO due
-**22 Sep 2026**, and would be entirely overdue by early October.
+---
 
-**What closes this: the Tenders team supplying real durations.** Not a code change, and
-not something a session should invent — `tests_opex_activation.NoResidentialMilestonesTests
-.test_due_dates_are_left_null` pins the current behaviour so nobody wires the recalc in by
-accident before the numbers exist.
+**ALSO RECORDED HERE, found by B18's pre-flight: a due date can be set on a mirror.**
 
-Fixing it later is a template **version bump** (v2 as a draft, then `activate()`), not an
-`UPDATE` — R-7 forbids editing an active version in place, and in-flight projects keep the
-durations they were built from regardless (B-10).
+`task_set_due_date` has **no `is_mirror` gate** — B22's refusal lives on
+`_apply_task_status_change()` and nowhere else, and `_task_row.html`'s PM branch renders an
+editable date input for every row including mirrors. So a PM can date all five OPEX mirrors
+(Design, Material Delivery, COD, As-Built Drawings, HOTO).
+
+**Not built, deliberately, and not a stop condition.** A date on a mirror is **meaningless
+rather than harmful**: a mirror is nobody's work and is already excluded from the overdue
+counters (1.3b), so the date is never read as an obligation. It is also **not a one-line
+addition to an existing gate** — there is no gate on that view to extend, only the two
+`is_pm` branches, so a refusal means a new guard in both arms plus HTMX row-render handling
+plus template suppression. That belongs with B22's family in one deliberate pass, not
+bolted onto a scheduling session.
+
+`ManualDueDatesOnMirrorsTests` pins the **current** behaviour, so a later session that
+closes this gets a failure pointing at this paragraph rather than a mystery.
 
 ---
 
@@ -1102,7 +1151,28 @@ placed the test.
 
 ---
 
-### B23 — the PM dashboard's draft card still opens the designer modal, so an OPEX site cannot be activated from there
+### ~~B23 — the PM dashboard's draft card still opens the designer modal, so an OPEX site cannot be activated from there~~ — **CLOSED by prompt B18/B23/B26**
+
+**Closed 31 Aug 2026.** The four lines this entry specified, applied verbatim:
+`{% if dp.project_type == 'Residential' %}` around the existing button, a plain POST form
+to `opex_site_activate` in the else branch. **No JS was copied** — the else branch needs
+none, as the entry said. Nothing else on that page changed.
+
+The two surfaces are now pinned **against each other** rather than against a literal:
+`PmDashboardDraftCardActivatesOpexTests.test_the_dashboard_and_the_overview_agree_on_both
+_project_types` renders both `dashboard/pm.html` and `project_overview.html` for the same
+two drafts and asserts that whichever activation URL one offers, the other offers too —
+so a future divergence fails on either side, not only on the one a test happened to name.
+Verified negatively: with the branch collapsed to `{% if True %}`, three tests fail.
+
+**One correction to this entry's line references.** The file is
+`projects/templates/dashboard/pm.html`, not `projects/templates/projects/dashboard/pm.html`;
+the button was at line 84, not 88, and the modal at 459, not 470. The finding itself was
+exactly right.
+
+---
+
+### B23 (original) — the PM dashboard's draft card still opens the designer modal, so an OPEX site cannot be activated from there
 
 Found by prompt 1.3c, 31 Aug 2026. **Deliberately not fixed** — 1.3c's stop conditions
 allowed one control in one existing template, and this is a second.
@@ -1182,7 +1252,55 @@ and says in its own docstring that it should be replaced by its opposite when th
 
 ---
 
-### B26 — `TaskAdmin` leaves `is_mirror` editable, which is the one way a Finance sync could reach a mirror
+### ~~B26 — `TaskAdmin` leaves `is_mirror` editable, which is the one way a Finance sync could reach a mirror~~ — **CLOSED by prompt B18/B23/B26**
+
+**Closed 31 Aug 2026.** `is_mirror` joins `status` in `TaskAdmin.readonly_fields`, with
+B9's `DO NOT REMOVE — R-10` comment **extended rather than duplicated**: the line now
+carries two rules and says so, because a maintainer meeting one field's justification and
+not the other's is how half a guard gets deleted.
+
+**What it protects, stated plainly.** B22 proved that neither Finance sync can reach a
+mirror, for three independent reasons, and concluded that *read-only* means what it says.
+**That proof held by the coincidence that nobody had ticked the box.** It now holds by
+configuration. The reasoning is recorded on the field and in `docs/execution-model.md` §13:
+a `Task`'s mirror flag is a **snapshot** `_attach_task_template()` copies from
+`TaskTemplateTask.is_mirror` at activation, and setting it by hand creates a row **the
+derivation hooks will never write and the sync paths do not exclude** — the M3 sync reaching
+it through `filter().update()`, outside R-18 by B16's decision.
+
+**Confirmed from the resolved configuration, not the class body**, the pattern B10 and B11
+both used. Before: `readonly_fields=['status']`, `fields=None`, `exclude=None`,
+`list_editable=()`, `fieldsets=None`, and `is_mirror` **a bound field on both the change and
+add forms**. After: `readonly_fields=['status', 'is_mirror']` and `is_mirror` bound on
+neither. `AdminCannotWriteTaskMirrorFlagTests` asserts more than the absence — a POST
+carrying `is_mirror=on` through the form the admin actually builds is **ignored, not merely
+unrendered**, and an existing mirror **keeps** its flag through an admin edit rather than
+being reset to the default.
+
+**The tests live beside B9's in `projects/tests_status_transition.py` §8b**, not in a new
+module and not in `tests_admin_smoke.py`. Same `readonly_fields` line, same class, same
+mechanism, same failure mode — a maintainer removing that line should meet both guards at
+once. `tests_admin_smoke.py` was the other candidate and is the wrong home: it is a
+fixture-free sweep over `admin.site._registry` asserting only that every page returns 200,
+and a field-specific rule would break that character.
+
+**`is_mirror` IS still editable on one other `ModelAdmin`, and that is deliberate.** Read
+off the registry at runtime, exactly two registered models carry the field:
+
+| `ModelAdmin` | `is_mirror` editable? | State |
+|---|---|---|
+| `TaskAdmin` | No | Closed here. |
+| `TaskTemplateTaskAdmin` | **Yes** (`readonly_fields = ()`) | **Left alone, by decision.** Setting the flag on a *template* row is template authoring, which is what that admin is for, and R-7's draft/active gate already governs when it may happen. Editing a `Task`'s flag is not the same question. |
+
+**This entry's one deferred suggestion is NOT done.** It proposed `template_task` deserved
+the same treatment — it is provenance (B-10) and nothing should retype it. That was outside
+this session's remit (the prompt scoped `is_mirror` only) and remains **open**: a superuser
+can still repoint a `Task` at a different template row. It is inert today because nothing
+resolves behaviour through that FK, which is itself a B-10 decision that could change.
+
+---
+
+### B26 (original) — `TaskAdmin` leaves `is_mirror` editable, which is the one way a Finance sync could reach a mirror
 
 Found by prompt B22's pre-flight, 31 Aug 2026. **Reported, not fixed** — `admin.py` was
 outside that prompt's MODE. **Theoretical and superuser-only**, recorded because the

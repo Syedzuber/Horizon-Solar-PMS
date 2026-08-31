@@ -194,19 +194,35 @@ class TaskAdmin(admin.ModelAdmin):
     list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
     list_filter  = ['assigned_role', 'status']
     search_fields = ['task_name']
-    # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
-    # read-only field is exactly what a future maintainer will want to delete.
+    # DO NOT REMOVE — R-10. `status` and `is_mirror` are deliberately read-only here, and
+    # an unhelpfully read-only field is exactly what a future maintainer will want to
+    # delete. Two rules, one mechanism:
     #
-    # Every task status change must go through the view layer so record_transition()
-    # writes the StatusTransition row in the same transaction (R-2). ModelAdmin saves the
-    # form field straight to the column, so an admin edit would move the task and leave no
-    # ledger row — and a gap in the ledger cannot be reconstructed afterwards. Reading
-    # `status` is still fine: it stays in list_display and list_filter, which are read
-    # paths. It must never appear in list_editable, which writes past this.
+    # `status` (R-2). Every task status change must go through the view layer so
+    # record_transition() writes the StatusTransition row in the same transaction.
+    # ModelAdmin saves the form field straight to the column, so an admin edit would move
+    # the task and leave no ledger row — and a gap in the ledger cannot be reconstructed
+    # afterwards.
+    #
+    # `is_mirror` (B26). A Task's mirror flag is not an editable property: it is a
+    # SNAPSHOT that _attach_task_template() copies from TaskTemplateTask.is_mirror at
+    # activation. Setting it by hand creates a row in a state no derivation produces —
+    # the hooks that write a mirror's status will never write it, and the sync paths do
+    # not exclude it. Ticked on a Residential *100% Payment Confirmation* task, the M3
+    # payment sync writes past a read-only row via filter().update(), outside R-18 by
+    # B16's decision; ticked on any Residential task it mints a mirror on a project the
+    # architecture never contemplated one for. B22 proved no Finance sync can reach a
+    # mirror, for three independent reasons — this is what keeps that proof true by
+    # configuration rather than by the coincidence that nobody had ticked the box.
+    #
+    # Reading either field is still fine: `status` stays in list_display and list_filter,
+    # which are read paths. Neither must ever appear in list_editable, which writes past
+    # this.
     #
     # On the ADD form Django omits readonly fields entirely, so a new task takes the model
-    # default, Task.NOT_STARTED ('Not Started') — the same value it would have had.
-    readonly_fields = ['status']
+    # defaults — Task.NOT_STARTED ('Not Started') and is_mirror=False, the same values
+    # each would have had.
+    readonly_fields = ['status', 'is_mirror']
 
     def save_model(self, request, obj, form, change):
         """Route Task.assigned_to through the assignment chokepoint.

@@ -581,6 +581,9 @@ Found by 0.2a, read from source. None is one of the fifteen findings in `ACCESS_
 | **31 Aug** | **A second OPEX activation is REFUSED, not idempotent** — `status != 'Draft'`, checked before the atomic block, exactly as `project_activate` does it. Not a preference: there is **no uniqueness constraint on `(project, phase_order)`**, so an attach that ran twice would silently produce 14 phases and 44 tasks, and `_phase_progress_subqueries()` would paper over it by taking the lowest-pk phase. **The guard is status-based and does not travel** — any future BULK activation route (95 sites is a management command, not 95 POSTs) needs its own. |
 | **31 Aug** | **`calculate_due_dates()` is NOT called by OPEX activation, so all 22 due dates stay NULL.** With every duration at the field default of 1 and every task `Internal`, calling it would put HOTO at `activated_at + 22 days` and the whole tender portfolio overdue within a month — and the likely reaction to that is to distrust the overdue number, not to fix the durations. A null due date says "not scheduled"; 22 sequential days says something specific and false. Durations remain the team's to set, as a template **version bump** (R-7), not an `UPDATE`. B18 stays open and now names the concrete dates. |
 | **31 Aug** | **The mirror read-only refusal is ONE `if` at the TOP of `_apply_task_status_change()`, and returns the existing `_TASK_STATUS_REFUSED`.** Three alternatives were available and each is worse. **A fourth outcome constant** would make both callers grow a branch for a case they answer identically to every other refusal — the three outcomes exist only because a *missing block reason* is answered differently, and nothing about a mirror is. **A per-screen message** would let the wording drift between two screens the same person uses interchangeably, which is the drift B8 was extracted to end. **A row in the transition table** would make the refusal depend on which move was asked for, when the answer is the same for all of them — and would sit *below* the inline `due_date` write, so a refused move would still commit a column. Rung 0 is the only position from which "a refused mirror move writes nothing" is true; the message says *why* (`derived from the workspace that owns the work`) rather than "permission denied", because a user who reads the latter asks for permission that does not exist. |
+| **31 Aug** | **AUTO-SCHEDULING IS NOT IN OPEX v1. Due dates are set MANUALLY, per task, by the PM.** Not a gap and not a deferral of work — a product decision, recorded in full at §16 below. 1.3c stopped activation from computing dates; B18 closes the two paths that could still compute them onto an already-activated site, `project_recalculate_dates` and `enable_cascade_scheduling`, both refusing `project_type != 'Residential'` in the view and (for the one that renders) in the template. **Residential keeps the cascade exactly as it is.** The condition under which this changes is named and singular: real durations supplied by the Tenders team and seeded as an **OPEX v2 template version** (R-7). |
+| **31 Aug** | **`enable_cascade_scheduling` is refused for OPEX too, and it is the door that mattered.** B18 as written named only the *Recalculate dates* control. That control renders in **no template** and never did — its exposure was the view accepting a direct POST. The cascade control **does** render, is reachable by any assigned PM once the Admin flips `SystemSettings.cascade_scheduling_enabled`, is **irreversible by design**, and once on makes `task_set_due_date` refuse every non-PM role owner outright. Nine of the 22 OPEX tasks are the Site Engineer's. Turning it on would have permanently deleted the only scheduling a tender site has — a worse outcome than one bad recalculation, and undoable by nothing. The system-wide switch defaulting `False` made it latent, not safe. |
+| **31 Aug** | **`Task.is_mirror` is not editable in the Django admin (B26).** A `Task`'s mirror flag is a snapshot copied from the template at activation, not a property; the admin was the one path by which a Residential task could be given the flag and a Finance sync could then write past a read-only row through `filter().update()`. Same mechanism as B9's `status` and recorded in §13. **`TaskTemplateTaskAdmin` is untouched** — the flag on a *template* row is template authoring. |
 | **31 Aug** | **`REASON_EXECUTION_STARTED` added, and deliberately NOT retrofitted onto the Residential activation.** OPEX's ledger row names its event; `project_activate`'s keeps writing `reason_code=''`. A new value in a column that path has never written is a behaviour change, however small, and that path is the one pinned byte-for-byte. Cost nothing structural — `reason_code` carries no `choices=`, exactly as the note beside the constants promised, so no migration. |
 
 ---
@@ -669,7 +672,7 @@ which is the one thing this whole section exists to prevent. It cannot be recons
 
 | `ModelAdmin` | Status editable? | State |
 |---|---|---|
-| `TaskAdmin` (`projects/admin.py`) | No | **Closed 30 Aug 2026 by prompt B9** — `readonly_fields = ['status']`. `status` stays in `list_display`/`list_filter` (read paths) and must never enter `list_editable`, which writes past `readonly_fields`. Guarded by `AdminCannotWriteTaskStatusTests` in `projects/tests_status_transition.py`. |
+| `TaskAdmin` (`projects/admin.py`) | No | **Closed 30 Aug 2026 by prompt B9** — `readonly_fields = ['status', 'is_mirror']`. `status` stays in `list_display`/`list_filter` (read paths) and must never enter `list_editable`, which writes past `readonly_fields`. Guarded by `AdminCannotWriteTaskStatusTests` in `projects/tests_status_transition.py`. **`is_mirror` joined the same line on 31 Aug by prompt B26** — a different rule, same mechanism; see below. |
 | `ProjectAdmin` (`projects/admin.py`) | No | **Closed 30 Aug 2026 by prompt B10** — `status` added to `readonly_fields`. `list_editable` was already empty, so `readonly_fields` alone was the whole door. Guarded by `AdminCannotWriteProjectStatusTests`. |
 | `BOQ`, `DeliveryChallan`, `Issue`, `PaymentMilestone` | n/a | Not registered on `admin.site` at all. Safe by absence, not by decision — **registering any of them for shell verification reopens this hole**, so add `readonly_fields = ['status']` in the same edit. No longer safe *silently*: see the standing guard below. |
 
@@ -710,6 +713,29 @@ B11 also corrected the inline: the names map to `file_name`, `file_type` and `fi
 now **read-only and cannot add**, because a `ProjectDocument` row is a pointer into a Supabase
 bucket and the admin cannot put an object there — same rule as `DesignFileAdmin`'s frozen
 `bucket`/`path`.
+
+**A second field on `TaskAdmin` is read-only for a different reason — B26, 31 Aug 2026.**
+`Task.is_mirror` was a bound field on the change form. It is not an editable property: it is a
+**snapshot** that `_attach_task_template()` copies from `TaskTemplateTask.is_mirror` at
+activation, exactly as `Task.task_name` is (B-10). Setting it by hand produces a row no
+derivation hook will ever write and no sync path excludes:
+
+- Ticked on a Residential *100% Payment Confirmation* task, the M3 payment sync writes past the
+  read-only row through `filter().update()` — outside R-18 by B16's decision, so B22's mirror
+  refusal on `_apply_task_status_change()` never sees it.
+- Ticked on any Residential task at all, it mints a mirror on a project type the architecture
+  never contemplated one for.
+
+B22 proved that neither Finance sync can reach a mirror, for three independent reasons, and
+concluded that *read-only* means what it says. **That proof rested on no Residential task
+carrying the flag** — true by the coincidence that nobody had ticked the box, not by
+configuration. It now holds by configuration. Guarded by
+`AdminCannotWriteTaskMirrorFlagTests`, beside B9's guard in the same file because it is the same
+`readonly_fields` line on the same class and fails for the same reason.
+
+**`TaskTemplateTaskAdmin` leaves `is_mirror` editable, deliberately.** Editing the flag on a
+*template* row is template authoring — a different question, and one R-7's draft/active gate
+already governs. Only `Task` rows were changed.
 
 One editable status remains reachable from `ProjectAdmin`, and it is deliberate:
 `MilestoneInline` exposes `Milestone.status`. `Milestone` is the **legacy** model in the
@@ -966,3 +992,106 @@ checklist be created without passing through `activate()` in the first place.
 | **29 Aug** | **`ChecklistTaskLink` is not version content.** It names the family; `status` names the live version. `_checklist_for_task()` resolves through the family so publishing v2 moves the task onto it. |
 | **29 Aug** | **Archiving is terminal.** Republishing means publishing version+1 — a change from the old reversible Active checkbox, accepted as the cost of R-7. |
 | **29 Aug** | **Full R-7 parity chosen over keeping the regression net green.** Blocking *adds* as well as edits costs four fixture lines in files this session may not touch; a weaker guard would have cost a second immutability design. |
+
+---
+
+## 16. OPEX v1 scheduling — dates are MANUAL, and auto-scheduling is refused
+
+Added by prompt B18, 31 Aug 2026. **Read this before wiring anything that computes an OPEX
+due date.**
+
+### The decision
+
+**Auto-scheduling is not in OPEX v1. Due dates on a tender site are set manually, one task at a
+time, by the PM.** Residential is unchanged and keeps the cascade exactly as it is.
+
+### Why
+
+Every one of the 22 tasks in the OPEX v1 template carries `duration_days`'s field **default of
+1**. That is a placeholder, not a measurement: the spec (§5) leaves the durations to the team
+and the team has not supplied them. All 22 are also `Internal`, and `calculate_due_dates()`
+chains Internal tasks strictly one calendar day apart off `activated_at`, with
+`add_calendar_days()` not skipping weekends. So any bulk computation puts:
+
+| Task | Due |
+|---|---|
+| Design | `activated_at + 1` |
+| … | … |
+| **HOTO** | **`activated_at + 22`** |
+
+A site activated on 31 Aug 2026 reads HOTO due 22 Sep and is entirely overdue by early October.
+Across 95 tender sites that is not a slightly-wrong schedule — it is a specific false claim made
+95 times, and the likely reaction to a portfolio that goes fully overdue within a month is to
+**stop trusting the overdue number**, not to fix the durations. A NULL due date says "not
+scheduled", which is true.
+
+Manual dates are not a downgrade from the cascade here. There is nothing to cascade *from*:
+a chain of placeholders produces a schedule nobody entered.
+
+### What enforces it — three places, and why each
+
+1. **`opex_site_activate` does not call `calculate_due_dates()`** (1.3c). An activated site
+   starts with 22 nulls.
+2. **`project_recalculate_dates` refuses `project_type != 'Residential'`** (B18). This view
+   renders in **no template** and never did — the original B18 entry said it sat on
+   `project_overview`, which was wrong. Its exposure was always the view accepting a direct
+   POST, so a view-side refusal is the whole of the fix. `RecalculateControlIsNotRenderedTests`
+   pins the absence, so if the button is ever added the OPEX question is raised deliberately
+   rather than by accident.
+3. **`enable_cascade_scheduling` refuses `project_type != 'Residential'`**, view and template
+   both (B18). **This is the door that mattered**, and the original entry did not name it:
+   - It calls the same `calculate_due_dates()`, so it writes the same wrong chain.
+   - `cascade_scheduling` is **irreversible by design** — there is no path back.
+   - Once on, `task_set_due_date` refuses every non-PM role owner outright. Nine of the 22
+     OPEX tasks are the Site Engineer's, two are SCM's, one is the Coordinator's. Manual
+     per-task dates are the **only** scheduling a tender site has in v1, and this would
+     permanently remove them from everyone but the PM.
+
+   It was latent, not safe: `SystemSettings.cascade_scheduling_enabled` defaults `False`, and a
+   switch an Admin can flip is not a guarantee. `CascadeSchedulingRefusesOpexTests` turns the
+   switch **on** before asserting the refusal, which is the only arrangement that tests the
+   guard rather than the default.
+
+**Both halves, every time.** Hiding a control while its view still accepts the POST is not
+disabling it; a refusing view with a visible button sends PMs into an error message. The
+template half of (3) is `show_cascade_option`'s `project_type` term in `project_overview`'s
+context.
+
+### What the manual path actually is, and the gate that matters
+
+`task_set_due_date`. **A PM who owns the project can set a date on a task of any
+`assigned_role`** — the role-match rule lives entirely inside that view's `if not is_pm:` arm,
+and the PM path consults only `user_can_view_project()` and `_pm_owns_project()`. This has
+always been true and is not new work; `ManualDueDatesOnOpexTests` exists so it stays true.
+A later tightening that made the PM path role-aware would silently strand nine Site Engineer
+tasks, two SCM tasks and a Coordinator task per site across 95 sites, and nothing else in the
+suite would notice.
+
+Role owners can also set dates on their own tasks — **but only while `cascade_scheduling` is
+off**, which is precisely what (3) above guarantees for OPEX. The two rules are connected, not
+independent.
+
+### The condition under which this changes
+
+**The Tenders team supplies real durations, seeded as an OPEX v2 template version (R-7).** Not
+an `UPDATE` over live rows — a version bump, so in-flight sites keep the template they were
+built from (B-10). When that lands, revisit both refusals; until it does, there is no state in
+which pressing either control on a tender site is the right thing to do.
+
+`ActivatedOpexSiteStartsUnscheduledTests.test_every_task_still_carries_the_placeholder_duration`
+asserts `{1}` as the whole duration set, so the day real durations arrive that test fails and
+names this section as the thing to reconsider.
+
+### Two things this did NOT do
+
+- **`compute_gantt_schedule()` still reads `duration_days`** and will render an OPEX site as a
+  22-day bar chart the moment a tender Gantt is wired. The refusals stop dates being *written*;
+  they do not stop the placeholder being *read*. That is the live half of the rewritten B18 in
+  `EXECUTION_MODULE_DEFERRED.md`, and its trigger is *before anything reads `duration_days` on
+  an OPEX task*.
+- **A due date can still be set on a mirror.** `task_set_due_date` has no `is_mirror` gate —
+  B22's refusal lives on the status path and nowhere else. It is meaningless rather than
+  harmful (a mirror is nobody's work and is already excluded from the overdue counters), and
+  adding a third refusal site is a deliberate pass of its own. Recorded under B18, and pinned
+  as current behaviour by `ManualDueDatesOnMirrorsTests` so that a later session closing it
+  gets a failure pointing at the record.

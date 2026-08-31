@@ -82,12 +82,31 @@
             <i class="bi bi-pencil-square me-1"></i>Design change
           </a>
         {% endif %}
-        <button type="button"
-                class="btn btn-sm text-white"
-                style="background-color:#1a7a4a;"
-                data-activate-url="{% url 'project_activate' dp.project_id %}">
-          Activate
-        </button>
+        {% comment %}
+        Prompt B23. The same branch 1.3c applied to project_overview.html, which this
+        card had been left behind by. ONE control, branched on type: the unbranched
+        button opened #activateDesignerModal, whose designer <select> is `required`,
+        and OPEX design allocation lives on DesignAssignment rather than on that FK.
+        OPEX sites are created Draft and stay Draft, so this strip is the surface where
+        a PM most often meets them — leaving the modal here left them unactivatable from
+        the one place they are all visible. Residential keeps the modal, unchanged.
+        {% endcomment %}
+        {% if dp.project_type == 'Residential' %}
+          <button type="button"
+                  class="btn btn-sm text-white"
+                  style="background-color:#1a7a4a;"
+                  data-activate-url="{% url 'project_activate' dp.project_id %}">
+            Activate
+          </button>
+        {% else %}
+          <form method="post" action="{% url 'opex_site_activate' dp.project_id %}" class="d-inline"
+                onsubmit="return confirm('Start execution on this site? This creates its phases and tasks and cannot be undone.')">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm text-white" style="background-color:#1a7a4a;">
+              Activate
+            </button>
+          </form>
+        {% endif %}
       </div>
     </div>
   </div>

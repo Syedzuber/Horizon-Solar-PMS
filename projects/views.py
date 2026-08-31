@@ -2969,7 +2969,7 @@ def project_recalculate_dates(request, project_id):
     """
     Recalculate all task due dates from project.activated_at using the duration_days chain.
     Intended as a bulk reset; PM normally sets dates task-by-task via task_set_due_date.
-    Access: assigned PM only. POST only.
+    Access: assigned PM only. POST only. RESIDENTIAL ONLY — see the B18 note below.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
@@ -2978,6 +2978,30 @@ def project_recalculate_dates(request, project_id):
 
     if not _pm_owns_project(request, project):
         raise Http404
+
+    # DO NOT REMOVE — B18. Auto-scheduling is not in OPEX v1: dates are set manually,
+    # per task, by the PM (task_set_due_date). This refusal is the enforcing half.
+    #
+    # Every OPEX v1 template task carries duration_days's field DEFAULT of 1 — a
+    # placeholder, not a measurement, because the durations are the Tenders team's to
+    # decide. All 22 are also Internal, so calculate_due_dates() chains them one
+    # calendar day apart and HOTO lands on activated_at + 22 days. That is not a
+    # slightly-wrong schedule, it is a specific false claim: a site activated on
+    # 31 Aug would read HOTO due 22 Sep and be entirely overdue by early October,
+    # across 95 tender sites. A NULL due date says "not scheduled" and is correct.
+    #
+    # Correcting it is a template version bump (R-7) that seeds real durations as
+    # OPEX v2 — not an UPDATE over live rows — so there is no state in which pressing
+    # this on an OPEX site is the right thing to do before that bump lands.
+    #
+    # Residential is untouched: it has real durations and keeps the cascade exactly
+    # as it is.
+    if project.project_type != 'Residential':
+        messages.warning(
+            request,
+            'Due dates on this site are set manually, per task. '
+            'Automatic scheduling is not available for OPEX/CAPEX sites.')
+        return redirect('project_overview', project_id=project.project_id)
 
     if project.status == 'Draft':
         messages.warning(request, 'Project must be activated before calculating due dates.')
@@ -2996,7 +3020,7 @@ def project_recalculate_dates(request, project_id):
 def enable_cascade_scheduling(request, project_id):
     """
     Irreversibly enable cascading scheduling for a project.
-    POST only, PM only, feature gate must be ON.
+    POST only, PM only, feature gate must be ON. RESIDENTIAL ONLY — see the B18 note below.
     Once set to True, cascade_scheduling cannot be reverted.
     """
     if request.method != 'POST':
@@ -3006,6 +3030,29 @@ def enable_cascade_scheduling(request, project_id):
 
     if not _pm_owns_project(request, project):
         raise PermissionDenied
+
+    # DO NOT REMOVE — B18, second door. This is the SAME refusal as
+    # project_recalculate_dates and for the same reason (placeholder duration_days=1 on
+    # all 22 OPEX v1 tasks), but the consequence here is strictly worse, which is why
+    # the guard sits ahead of the feature gate rather than relying on it:
+    #
+    #   1. It calls calculate_due_dates() below, so it writes the same wrong 22-day chain.
+    #   2. cascade_scheduling is IRREVERSIBLE by design — there is no path back.
+    #   3. Once on, task_set_due_date refuses every non-PM role owner outright
+    #      ("Due dates are managed automatically by cascading scheduling"). Nine of the
+    #      22 OPEX tasks are Site Engineer's. Manual per-task dates are the ONLY
+    #      scheduling a tender site has in v1, and this would permanently remove them
+    #      from everyone but the PM.
+    #
+    # The system-wide SystemSettings.cascade_scheduling_enabled switch defaults False,
+    # so this is latent rather than live today — but a switch an Admin can flip is not
+    # a guarantee, and the failure it would cause here cannot be undone.
+    if project.project_type != 'Residential':
+        messages.error(
+            request,
+            'Cascading scheduling is not available for OPEX/CAPEX sites. '
+            'Due dates on this site are set manually, per task.')
+        return redirect('project_overview', project_id=project.project_id)
 
     settings_obj = SystemSettings.get()
     if not settings_obj.cascade_scheduling_enabled:
@@ -7510,9 +7557,19 @@ def project_overview(request, project_id):
     # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
-    # Cascade scheduling context — PM-only feature gate check
+    # Cascade scheduling context — PM-only feature gate check.
+    #
+    # B18: the project_type term is the visible half of the refusal in
+    # enable_cascade_scheduling. Hiding a control while the view still accepts the POST
+    # is not disabling it, so the view refuses too; this is only so a PM on a tender
+    # site never sees a button that would turn them away. Residential is unaffected.
     _sys = SystemSettings.get()
-    show_cascade_option = (_sys.cascade_scheduling_enabled and role == 'PM' and is_assigned_pm)
+    show_cascade_option = (
+        _sys.cascade_scheduling_enabled
+        and role == 'PM'
+        and is_assigned_pm
+        and project.project_type == 'Residential'
+    )
 
     # Payment requests for this project — Finance sees confirm actions, PM sees read-only
     # The queryset is shared; template role-gates control which actions are rendered.
