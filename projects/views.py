@@ -3955,6 +3955,48 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     the two screens. Returns one of _TASK_STATUS_APPLIED, _TASK_STATUS_REFUSED or
     _TASK_STATUS_NEEDS_BLOCK_REASON — see those constants for why three.
     """
+    # A MIRROR IS READ-ONLY TO EVERY HUMAN. This is rung 0 of the refusal ladder and
+    # belongs nowhere else (R-18, R-20; OPEX spec §2.2). Prompt B22.
+    #
+    # A mirror (Task.is_mirror) does not hold a status somebody types — it REPORTS the
+    # status of another object: the Design mirror follows its DesignAssignment, Material
+    # Delivery follows accepted delivery quantities, COD and HOTO follow the commissioning
+    # and handover records. A mirror a human can move can disagree with its source, and
+    # then neither number means anything. Five OPEX tasks carry the flag today (Design,
+    # Material Delivery, COD, As-Built Drawings, HOTO); the Residential template has none.
+    #
+    # WHY ABOVE THE TRANSITION TABLE, and not inside it. "May a human write this task at
+    # all" is a question about the TASK and has the same answer for every new_status, so
+    # checking it here makes "every transition the table would otherwise allow is refused"
+    # true by construction rather than by enumeration. It is also above the inline due_date
+    # update forty lines down, which writes a column BEFORE the guards below it refuse
+    # anything — rung 0 is the only position from which "a refused mirror move writes
+    # nothing" is actually true.
+    #
+    # WHY THIS IS THE RULE AND THE OLD BEHAVIOUR WAS A COINCIDENCE. Mirrors are seeded
+    # with no assignee, and both callers refuse an unassigned task before reaching this
+    # function — so until now a mirror was unwritable by ACCIDENT. Assign one through
+    # task_assign, an entirely reasonable thing to do to get it onto a dashboard, and
+    # that accident evaporates silently. This line is the rule.
+    #
+    # NOTHING IS WRITTEN HERE — no StatusTransition, no ActivityLog, no notification.
+    # A refused move is not an event.
+    #
+    # NOT THE WHOLE FEATURE. The derivation hooks that will WRITE these statuses are
+    # unbuilt. They belong to the source objects (phases 3-5), go through
+    # record_transition() like every other status change, and carry the SOURCE EVENT's
+    # actor (spec §2.4, §2.8) — they will not call this function, which exists to say no
+    # to people. Until they are wired a mirror sits at its seeded status, which is known
+    # and accepted.
+    if task.is_mirror:
+        messages.error(
+            request,
+            f"'{task.task_name}' is a mirror task — its status is derived from the "
+            f"workspace that owns the work and cannot be set here. It will update "
+            f"itself when that record changes."
+        )
+        return _TASK_STATUS_REFUSED
+
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
     if new_status not in valid_statuses:
         messages.error(request, 'Invalid status value.')

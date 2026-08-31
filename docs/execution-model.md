@@ -157,6 +157,8 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 **Why this is a rule and not a tidy-up.** Before B8 these were two near-identical ~180-line copies, reached from two screens the same person uses interchangeably. As 1.4a put it: *a rule added to one is not enforced, merely avoidable* — and the drift is silent, because the rule works on one screen and the person avoiding it never knows they are. Five features are queued behind this path (the mirror-task read-only refusal, the dependency early-start warning, two-step completion, the HSE gate, the QA/QC gate). Consolidated, each is written once.
 
+**The first of the five has landed, and it is the rule working as advertised.** Prompt **B22**, 31 Aug 2026, added the mirror read-only refusal as **one `if` at the top of the helper** — no view was edited, neither caller was touched, and no fourth outcome constant was invented: it returns the existing `_TASK_STATUS_REFUSED` and both callers shape their own response exactly as they do for every other refusal. Read that as the shape the remaining four take. See §14's mirror subsection for the refusal itself.
+
 **What stays in the view**, following the house precedent `_apply_boq_acknowledgement()` — extracted by 0.2b after the same defect, and whose docstring already rules that "gates and status preconditions stay with the callers": resolving the task, the permission gate, and the response. The helper never returns an `HttpResponse` and does not know which screen called it. **The permission gate is deliberately NOT shared** — the overview row is role-or-PM, the detail block is assignee-only, and those admit different people on purpose.
 
 **The two screens still differ in four preserved ways** — the project-scope gate, the unassigned-task answer, the HTMX refusal shape, and `?next=` handling. B8 found and preserved them rather than resolving them, because every non-preserve answer is a behaviour change and B8's remit was explicitly none; per R-12 they are recorded as **B12–B15** in `EXECUTION_MODULE_DEFERRED.md` rather than fixed, and each is pinned by a test in `tests_task_status_path.DecidedDifferenceTests`. **Preserved is not endorsed** — a later prompt decides them.
@@ -175,7 +177,7 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 **R-20 · A task metric excludes mirrors, and the exclusion goes through the one helper.** *(Established by prompt 1.3b, 30 Aug 2026.)*
 
-A **mirror** (`Task.is_mirror`) has its status derived from another object — a `DesignAssignment`, an accepted delivery quantity, a COD record — and no human may write it. Counting one as somebody's work attributes another team's queue to the wrong person: an OPEX site's two PM mirrors would sit on the PM's "pending approvals" card without the PM being able to touch either.
+A **mirror** (`Task.is_mirror`) has its status derived from another object — a `DesignAssignment`, an accepted delivery quantity, a COD record — and **no human may write it**, which since prompt B22 is enforced rather than merely stated: `_apply_task_status_change()` refuses a mirror outright, above the transition table (R-18). Counting one as somebody's work attributes another team's queue to the wrong person: an OPEX site's two PM mirrors would sit on the PM's "pending approvals" card without the PM being able to touch either.
 
 **The helper is `human_owned_tasks_q(prefix='')` in `projects/utils.py`**, with `is_human_owned(task)` beside it as the row-at-a-time form for prefetched lists. Named for the concept, not the column: a reader who meets `.filter(is_mirror=False)` twelve times cannot tell a rule from a coincidence.
 
@@ -280,13 +282,49 @@ built and live; the other is not.
 | The rule | Where it lives | State |
 |---|---|---|
 | A mirror is excluded from overdue and per-user workload counts | 12 querysets across 6 files, through `human_owned_tasks_q()` / `is_human_owned()` (R-20) | **BUILT — 1.3b, and live since 1.3c copied the snapshot** |
-| A human status write on a mirror is refused | `_apply_task_status_change()` (R-18) — the helper, never a view | **NOT BUILT.** 1.3c's remit was the opening transition, not the status path. See `EXECUTION_MODULE_DEFERRED.md` §B |
+| A human status write on a mirror is refused | `_apply_task_status_change()` (R-18) — the helper, never a view | **BUILT — prompt B22, 31 Aug 2026.** One check, in the one place, above the transition table |
 
-**Why the second one is not urgent, and why it is still a gap.** Every mirror is created
-with `assigned_to = NULL`, and both status views refuse an unassigned task *before*
-`_apply_task_status_change()` runs — so a mirror cannot be written today. That is
-protection **by accident**, not by rule: the day anybody assigns a mirror to a person,
-it disappears. The refusal is still owed.
+**The refusal — what was built, and what a reader needs to know it does not cover.**
+Added by prompt **B22** as the **first statement** of `_apply_task_status_change()`: if
+`task.is_mirror`, emit the helper's own message and return the existing
+`_TASK_STATUS_REFUSED`. No fourth outcome, no per-screen wording, and **nothing is
+written** — no `StatusTransition`, no `ActivityLog`, no notification, because a refused
+move is not an event. **One check in one place, per R-18**, so it holds on the
+project-overview row and the task-detail block identically and cannot be routed around by
+using the other screen.
+
+**Why it sits above the transition table and not inside it.** "May a human write this task
+at all" is a question about the **task**, and has the same answer for every requested
+status — so checking it first makes *"every transition the table would otherwise allow is
+refused"* true by construction rather than by enumeration. It is also above the inline
+`due_date` write forty lines further down, which commits a column **before** the guards
+below it can refuse anything; rung 0 is the only position from which "a refused mirror
+move writes nothing" is actually true.
+
+**What it replaced.** Every mirror is created with `assigned_to = NULL`, and both status
+views refuse an unassigned task *before* the helper runs — so until B22 a mirror was
+unwritable **by accident, not by rule**, and the day anybody assigned one through
+`task_assign` that protection vanished silently. Assignment is still permitted on a
+mirror (four paths can do it, one of them in bulk without intent — see
+`EXECUTION_MODULE_DEFERRED.md` §B), which is now a harmless inconsistency rather than a
+hole.
+
+**The other half is still unbuilt, and this matters for reading the numbers.** The
+derivation hooks that will *write* mirror statuses do not exist: they belong to the source
+objects and arrive in phases 3–5 as each source is built, going through
+`record_transition()` like any other status change and carrying the **source event's**
+actor (spec §2.4, §2.8). They will not call `_apply_task_status_change()` — that function
+exists to say no to people. **Until then a mirror stays at its seeded status forever**, so
+an OPEX site's Design, Material Delivery, COD, As-Built Drawings and HOTO rows read Not
+Started no matter what happens to the work they describe. That is known and accepted, and
+it is why mirrors leave both halves of a progress fraction (R-20).
+
+**Enforced by** `projects/tests_mirror_readonly.py` — 24 tests on a really activated OPEX
+site, the contract half run through **both** entry points. **Every test assigns the mirror
+before posting**, which is the whole design of the module: a refusal test written against
+a mirror *as seeded* passes without proving anything, because the unassigned gate refuses
+it first. `TheTrapTests` pins that distinction from the other side by showing what an
+unassigned mirror does on each screen, which is visibly not the mirror refusal.
 
 **1.3b landed before 1.3c**, as required — and until 1.3c copied `is_mirror` onto the
 `Task` row (B19), every one of 1.3b's exclusions was correct and completely inert.
@@ -542,6 +580,7 @@ Found by 0.2a, read from source. None is one of the fifteen findings in `ACCESS_
 | **31 Aug** | **Mirrors are created with an owning ROLE and NO ASSIGNEE — including the two PM-role ones, COD and HOTO.** The alternative was to assign them to the site's PM so that a future human-write refusal would fire for the right reason rather than for "task is unassigned". Rejected, following `OPEX_TEMPLATE_AUDIT.md` §8: an unassigned mirror is an **accurate statement that the row is nobody's task**, where assigning 190 rows across the portfolio to PMs who cannot act on them is a false one held back only by 1.3b's exclusion. The OPEX attach's PM pre-assignment therefore filters `is_mirror=False`, so the three real PM approvals go to the PM and the two mirrors do not. **Stated cost:** `build_user_status_rows` filters `assigned_to__isnull=False` before the mirror exclusion is reached, so on a real site that report now excludes mirrors for the *assignment* reason and its exclusion is untestable. `tests_opex_activation.CountersOnARealSiteTests` says so in its own comments and substitutes the project-card counts, which are assignment-blind, as the third genuine proof. |
 | **31 Aug** | **A second OPEX activation is REFUSED, not idempotent** — `status != 'Draft'`, checked before the atomic block, exactly as `project_activate` does it. Not a preference: there is **no uniqueness constraint on `(project, phase_order)`**, so an attach that ran twice would silently produce 14 phases and 44 tasks, and `_phase_progress_subqueries()` would paper over it by taking the lowest-pk phase. **The guard is status-based and does not travel** — any future BULK activation route (95 sites is a management command, not 95 POSTs) needs its own. |
 | **31 Aug** | **`calculate_due_dates()` is NOT called by OPEX activation, so all 22 due dates stay NULL.** With every duration at the field default of 1 and every task `Internal`, calling it would put HOTO at `activated_at + 22 days` and the whole tender portfolio overdue within a month — and the likely reaction to that is to distrust the overdue number, not to fix the durations. A null due date says "not scheduled"; 22 sequential days says something specific and false. Durations remain the team's to set, as a template **version bump** (R-7), not an `UPDATE`. B18 stays open and now names the concrete dates. |
+| **31 Aug** | **The mirror read-only refusal is ONE `if` at the TOP of `_apply_task_status_change()`, and returns the existing `_TASK_STATUS_REFUSED`.** Three alternatives were available and each is worse. **A fourth outcome constant** would make both callers grow a branch for a case they answer identically to every other refusal — the three outcomes exist only because a *missing block reason* is answered differently, and nothing about a mirror is. **A per-screen message** would let the wording drift between two screens the same person uses interchangeably, which is the drift B8 was extracted to end. **A row in the transition table** would make the refusal depend on which move was asked for, when the answer is the same for all of them — and would sit *below* the inline `due_date` write, so a refused move would still commit a column. Rung 0 is the only position from which "a refused mirror move writes nothing" is true; the message says *why* (`derived from the workspace that owns the work`) rather than "permission denied", because a user who reads the latter asks for permission that does not exist. |
 | **31 Aug** | **`REASON_EXECUTION_STARTED` added, and deliberately NOT retrofitted onto the Residential activation.** OPEX's ledger row names its event; `project_activate`'s keeps writing `reason_code=''`. A new value in a column that path has never written is a behaviour change, however small, and that path is the one pinned byte-for-byte. Cost nothing structural — `reason_code` carries no `choices=`, exactly as the note beside the constants promised, so no migration. |
 
 ---

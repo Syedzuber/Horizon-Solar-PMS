@@ -1027,7 +1027,45 @@ it. Whoever does it needs `models.py` in scope.
 
 ---
 
-### B22 — the human-write refusal on a mirror is still not built, and a mirror is protected only by having no assignee
+### ~~B22 — the human-write refusal on a mirror is still not built, and a mirror is protected only by having no assignee~~ — **CLOSED by prompt B22**
+
+**Closed 31 Aug 2026.** `_apply_task_status_change()` now refuses a mirror as its **first
+statement**, above the transition table and above the inline `due_date` write, returning
+the existing `_TASK_STATUS_REFUSED` — no fourth outcome, no per-screen wording, and
+nothing written on a refusal: no `StatusTransition`, no `ActivityLog`, no notification.
+One check, in the one place, per R-18; **neither caller was edited**, and no template,
+model, migration or existing test module was touched.
+
+The message names the rule rather than a permission, deliberately:
+
+> `'COD' is a mirror task — its status is derived from the workspace that owns the work and cannot be set here. It will update itself when that record changes.`
+
+**The trap this entry warned about was real, and the new module is built around it.**
+`projects/tests_mirror_readonly.py` — 24 tests, contract half run through **both** entry
+points, on a **really activated** OPEX site rather than hand-made rows. Every test assigns
+the mirror to the acting PM first, and `_assign_mirror()` asserts the assignment landed,
+so the module cannot quietly regress into testing the unassigned gate. `TheTrapTests` pins
+the distinction from the other side. Verified negatively as well: with the new `if`
+neutralised, 34 assertions across both entry points fail; with it in place, 921 tests pass
+against the same one pre-existing failure and one collection error as baseline.
+
+**Note the module name.** This entry, quoting the A-1.3 audit, placed the test in
+`tests_task_status_path.py`; that file is an existing module and prompt B22's MODE
+forbade editing one, so the tests are a new module instead. Nothing is lost — the two
+modules use the same contract-mixin shape for the same reason.
+
+**Two findings came out of the pre-flight and are open below as B25 and B26.** Neither is
+a hole in this refusal. **Neither `milestone_receive` nor `project_overview`'s Finance
+sync can reach a mirror** — checked, because if either could, "read-only" would have meant
+something weaker than it now does: both select by task **name** from a three-entry map
+(`Advance Payment Confirmation`, `Pre Dispatch Payment Confirmation`, `100% Payment
+Confirmation`), none of the five mirror names is in it, the Residential template contains
+no mirror at all, and both are keyed off a `PaymentMilestone` row that an OPEX site never
+gets. B26 is the one way that could stop being true.
+
+---
+
+### B22 (original) — the human-write refusal on a mirror is still not built, and a mirror is protected only by having no assignee
 
 Found by prompt 1.3c's pre-flight, 31 Aug 2026. **Promised to 1.3c by three earlier
 documents and NOT delivered by it**, because 1.3c's remit was the opening transition, not
@@ -1109,6 +1147,69 @@ ordering decision: `activated_at` *is* the definition of "active" for the CEO pe
 report and the EOD digest, so a bulk run adds 95 sites to both on the day it runs. 1.3b's
 exclusions are now live, so the mirrors will not inflate the counts — but the sites
 themselves will appear, and that should be expected rather than investigated.
+
+---
+
+### B25 — four paths can assign a mirror to a person who cannot act on it, and one of them does it in bulk with no intent
+
+Found by prompt B22's pre-flight, 31 Aug 2026. **Reported, not fixed** — B22's MODE was
+`_apply_task_status_change()` and nothing else, and every path below is a different
+function.
+
+`Task.assigned_to` is written in exactly two functions, `assign_task_to()` and
+`assign_tasks_to()` in `utils.py` (the chokepoint, `utils.py:173`). Neither looks at
+`is_mirror`. Callers that can therefore land a mirror on a person:
+
+| Path | Shape |
+|---|---|
+| `views.py:task_assign` | PM or Coordinator, one task. Candidates filtered by **role only**. This is the exact scenario B22 described — assign COD to the PM to get it onto a dashboard. |
+| `views.py:task_assign_design_head` | Design Head, any Design-role task — which includes **both** Design mirrors, `Design` and `As-Built Drawings`. |
+| `views.py:project_overview`, `assign_design` bulk (and its clear branch) | `filter(assigned_role=Task.DESIGN, status__in=['Not Started','In Progress'])` with **no `is_mirror=False`**. On an OPEX site one click assigns both Design mirrors to the design lead and logs *"Assigned Design lead X to N tasks"* with an inflated N. |
+| `admin.py:TaskAdmin.save_model` | Any task, any assignee. |
+
+**Since B22 this is an inconsistency, not a hole** — the status write is refused either
+way. What makes it worth an entry is the third row: it needs **no intent at all**, and it
+is the exact counterpart of the `is_mirror=False` filter 1.3c deliberately added to the
+OPEX attach's PM pre-assignment (`utils.py:1412`) for precisely this reason. The two
+disagree today.
+
+**The shape of the fix, if one is wanted: one refusal in the chokepoint**, not four in
+four views — same argument as R-18. Whether assigning a mirror should *refuse* or merely
+be *filtered out of the candidate set* is a product question, and is why this is recorded
+rather than guessed. `tests_mirror_readonly.TheTrapTests::`
+`test_assigning_a_mirror_is_still_permitted_and_still_pointless` pins today's behaviour
+and says in its own docstring that it should be replaced by its opposite when this closes.
+
+---
+
+### B26 — `TaskAdmin` leaves `is_mirror` editable, which is the one way a Finance sync could reach a mirror
+
+Found by prompt B22's pre-flight, 31 Aug 2026. **Reported, not fixed** — `admin.py` was
+outside that prompt's MODE. **Theoretical and superuser-only**, recorded because the
+argument that currently closes it is not visible from either file.
+
+B22 established that neither ⑤ `milestone_receive` nor ⑥ `project_overview`'s Finance
+sync can write a mirror: both select tasks by **name** from `_MILESTONE_TO_FINANCE_TASK`,
+whose three values are Residential Finance-confirmation task names, and the Residential
+template contains no mirror. That argument holds **only while no Residential task carries
+the flag.**
+
+`TaskAdmin` sets `readonly_fields = ['status']` (B9) but declares no `fields` and no
+`exclude`, so **every other column is editable on the change form, including
+`is_mirror`**. A superuser can tick it on `100% Payment Confirmation` for a Residential
+project. From that moment the M3 sync writes a task the helper calls read-only — through
+`filter().update()`, which is outside R-18 by decision (**B16**) and cannot be made to
+consult the refusal without the second, narrower helper B16 describes.
+
+**Why the flag is a worse admin field than `status` was.** `status` is one row's current
+value; `is_mirror` is a claim about **who owns that row's truth**, and the template is
+supposed to be its only source (R-7: content is versioned template data, and instances
+take copies). An admin tick manufactures a mirror with no source object and no template
+row saying so — a state `attach_opex_template()` cannot produce.
+
+**Fix, when `admin.py` is next open:** `is_mirror` joins `status` in `readonly_fields`,
+with the same DO-NOT-REMOVE comment. `template_task` deserves the same look for the same
+reason — it is provenance (B-10) and nothing should be able to retype it.
 
 ---
 

@@ -75,9 +75,14 @@ first sites move — none of them a fault:
    read 100% while its mirrors are Not Started; that is the accepted trade (R-20), not a
    bug report.
 
-**And one thing that is genuinely owed before anyone leans on the mirror concept:** the
+~~**And one thing that is genuinely owed before anyone leans on the mirror concept:** the
 human-write refusal (**B22**). Today a mirror is unwritable only because it has no
-assignee.
+assignee.~~ — **paid 31 Aug 2026 by prompt B22.** The refusal is one check at the top of
+`_apply_task_status_change()`; a mirror is now unwritable by rule, whether or not it has
+an assignee. What remains owed is the other half — the derivation hooks that will *write*
+mirror statuses, which belong to the source objects in phases 3–5. Until they exist a
+mirror sits at its seeded status, which is stated in `docs/execution-model.md` §14 rather
+than left to be discovered.
 
 ## Deferred-item prompts — run out of sequence, from `EXECUTION_MODULE_DEFERRED.md`
 
@@ -91,6 +96,7 @@ forbidden to fix (R-12), and each is numbered by the entry it closes.
 | B8 | **One task status-change path.** `_apply_task_status_change()` extracted from two near-identical ~180-line copies; **R-18** added. `views.py` 11,417 → 11,288. 49 new tests, the contract half run through **both** entry points. Closed §B8, opened §B12–§B16. **No rule added, removed or altered** — the four behavioural differences between the copies were preserved and pinned, not resolved. | ✅ |
 | B11 | **Both admin project pages were 500ing, and nothing could tell you.** `DocumentInline.fields` named three columns `ProjectDocument` has never had. `manage.py check` reported no issues and structurally cannot — an unknown `fields` entry is presumed form-contributed — so the defect survived with every signal green. Inline corrected to real names and made **read-only**: the row is a pointer into a Supabase bucket the admin cannot write. The durable half is `EveryRegisteredAdminPageLoadsTests`, which GETs the changelist and add form of **every** model in `admin.site._registry`. Closed §B11. | ✅ |
 | K5 | **One profile↔task role mapping, and Project Coordinator wired through it.** The two local `_TASK_TO_PROFILE_ROLE` copies became one module-level constant **derived** from `_PROFILE_TO_TASK_ROLE`; **R-19** added. 16 tests, four of them structural. Closed §A3 and `DESIGN_MODULE_DEFERRED` §K5 — the latter half-closed since 0.2b. **No migration, no model file, no `permissions.py` edit, no behaviour change.** Two findings: **Project Coordinator needed no map entry** (differences-only map, identical strings, `.get(x, x)` passthrough), and **the forward map is unreachable for that role on the status path** — `user_can_view_project()` and `user_can_manage_project()` are the same predicate for a coordinator, and the 0.2 scope lockdown runs first. The `assigned_role` match-site enumeration in the prompt said four; **there are eight in Python plus five in templates.** | ✅ |
+| B22 | **Mirrors become read-only for real.** One `if task.is_mirror:` as the **first statement** of `_apply_task_status_change()` — above the transition table, above the inline `due_date` write — returning the existing `_TASK_STATUS_REFUSED`. **No fourth outcome constant, no per-screen message, neither caller edited**, and nothing written on a refusal: no `StatusTransition`, no `ActivityLog`, no notification. The message names the rule rather than a permission, because a user who reads "permission denied" asks for permission that cannot exist. **Before this, a mirror was unwritable by accident** — the five mirrors seed unassigned and both views refuse an unassigned task first — so assigning COD to a PM made it writable and nothing said otherwise. **24 tests in a new `tests_mirror_readonly.py`**, contract half through **both** entry points, on a **really activated** OPEX site; every test assigns the mirror first, and `_assign_mirror()` asserts the assignment landed, which is the trap this entry existed to warn about. Verified negatively: with the `if` neutralised, 34 assertions fail. 897 → 921 tests, same one pre-existing failure and one collection error. **No migration, no model, no template, no existing test module.** Closed §B22; **opened §B25 and §B26.** Two pre-flight findings: **neither Finance sync can reach a mirror** (both select by task name from a three-entry map, no mirror name is in it, and an OPEX site has no `PaymentMilestone` at all) — so the refusal has no hole the helper cannot close; but **`TaskAdmin` leaves `is_mirror` editable**, which is the one way that could stop being true. **Four paths can assign a mirror**, one of them — `project_overview`'s `assign_design` bulk — in bulk with no intent, missing the `is_mirror=False` filter its OPEX-attach counterpart has. | ✅ |
 
 ---
 
