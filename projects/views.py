@@ -72,6 +72,10 @@ from .utils import (
     # Prompt 1.3b — the metric chokepoint (R-20). Every task COUNT below goes through
     # one of these two; task LISTS deliberately do not.
     human_owned_tasks_q, is_human_owned,
+    # Prompt B21 — the ONE implementation of "current phase" (R-21), mirrors
+    # excluded. Aliased because all three dashboards below already use
+    # `current_phase` as a local name. Never recompute this inline.
+    current_phase as get_current_phase,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -614,7 +618,19 @@ def dashboard_pm(request):
     )
 
     projects_with_progress = []
-    for project in Project.objects.filter(id__in=managed_project_ids, status__in=['Active', 'In Progress'], is_deleted=False):
+    # The Prefetch is what makes get_current_phase() below free (R-21). Without it
+    # the helper's Python loop would fire one query per PHASE per project; with it
+    # the whole dashboard pays two constant queries instead of the 1–2 PER PROJECT
+    # the old inline queryset cost. Same clause dashboard_bd and admin_project_list
+    # already carry, ordered by phase_order for the same reason.
+    for project in (
+        Project.objects
+        .filter(id__in=managed_project_ids, status__in=['Active', 'In Progress'], is_deleted=False)
+        .prefetch_related(
+            Prefetch('phases',
+                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+        )
+    ):
         try:
             project.boq_status = project.boq.status
             project.boq_url    = f'/projects/{project.project_id}/boq/'
@@ -669,12 +685,9 @@ def dashboard_pm(request):
             (date.today() - project.target_commissioning_date).days
             if is_delayed else None
         )
-        current_phase  = (
-            project.phases
-            .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
-            .order_by('phase_order').first()
-            or project.phases.order_by('-phase_order').first()
-        )
+        # R-21: the one implementation, mirrors excluded. Free here — the loop
+        # queryset prefetches phases and tasks for exactly this call.
+        current_phase  = get_current_phase(project)
         # Per-project due-today count on the same card.
         due_today_for_project = Task.objects.filter(
             phase__project=project,
@@ -871,7 +884,13 @@ def dashboard_site_engineer(request):
         is_deleted=False,
         status__in=['Active', 'In Progress'],
         phases__tasks__assigned_to=se_profile,
-    ).distinct().annotate(
+    ).distinct().prefetch_related(
+        # Added by B21 for get_current_phase() in the loop below (R-21) — see the
+        # identical clause on the PM dashboard. Two constant queries in place of
+        # the 1–2 per project the old inline phase queryset cost.
+        Prefetch('phases',
+                 queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+    ).annotate(
         # Per-project overdue / blocked for this SE. The exclusion rides INSIDE the
         # Count filter, not on the queryset: the project SELECTION above
         # (phases__tasks__assigned_to) is a visibility rule and must keep matching on
@@ -928,13 +947,10 @@ def dashboard_site_engineer(request):
         )
         delay_days = (today - project.target_commissioning_date).days if is_delayed else 0
 
-        # Current phase: first phase with an incomplete task (same query pattern as PM dashboard)
-        current_phase_obj = (
-            project.phases
-            .filter(tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])
-            .order_by('phase_order').first()
-            or project.phases.order_by('-phase_order').first()
-        )
+        # R-21: the one implementation, mirrors excluded. Free — the queryset above
+        # prefetches phases and tasks for exactly this call. The template prints a
+        # name, so take it off the phase here rather than passing the object.
+        current_phase_obj = get_current_phase(project)
         phase_name = current_phase_obj.phase_name if current_phase_obj else None
 
         # Next task: earliest not-done SE-assigned task ordered by due_date.
@@ -7020,15 +7036,12 @@ def dashboard_bd(request):
             if is_delayed else None
         )
 
-        # Current phase: first phase with an incomplete task; uses prefetched data — no extra query
-        current_phase_name = None
-        for phase in project.phases.all():
-            for task in phase.tasks.all():
-                if task.status != Task.DONE:
-                    current_phase_name = phase.phase_name
-                    break
-            if current_phase_name:
-                break
+        # R-21: the one implementation, mirrors excluded. The inline loop that stood
+        # here — the fourth copy of the rule — is GONE rather than kept as a fast
+        # path; it was already reading the same prefetched data this helper reads,
+        # so there was no speed in it to keep, only a second answer to the question.
+        current_phase_obj  = get_current_phase(project)
+        current_phase_name = current_phase_obj.phase_name if current_phase_obj else None
 
         # Trigger 3: milestone summary — same prefetch as Finance dashboard session.
         # milestones_awaiting = 'Invoiced' status: Finance has invoiced, BD nudges client for receipt.

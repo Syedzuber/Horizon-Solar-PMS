@@ -1052,27 +1052,80 @@ role is added in three places and the eighth is forgotten in one of them.
 
 ---
 
-### B21 — `current_phase` is computed four times, one copy is in `models.py`, and a stuck mirror pins all four
+### ~~B21 — `current_phase` is computed four times, one copy is in `models.py`, and a stuck mirror pins all four~~ — **CLOSED by prompt B21**
 
-Found by prompt 1.3b, 30 Aug 2026. **Deferred by decision, not by oversight** (30 Aug).
+**Closed 31 Aug 2026.** The four copies are one: **`utils.current_phase(project)`** (R-21), called by
+`Project.get_current_phase()` — now a delegate returning `.phase_name` — and by all three dashboards.
+The inline loop in `dashboard_bd` was **removed entirely** rather than kept as a fast path; it was
+already reading the same prefetched data the helper reads, so there was no speed in it to keep, only
+a second answer to the question. **Mirrors are excluded through `is_human_owned()`**, the existing
+R-20 helper, not a second predicate. No migration, no template, no existing test module touched.
 
-"First phase holding a not-Done task" exists in four independent copies:
+**The effect this was urgent for.** A freshly activated OPEX site now reads
+**`Approvals (Pre-Installation)`**, not `Design`, on all four screens. Phase 1 holds exactly one task
+— the `Design` mirror — so once mirrors are out, **Design can never be an OPEX site's current phase
+at any point in its life**, which `OpexIsNotStuckOnDesignTests::test_03` walks the whole site forward
+to prove.
 
-| Site | Shape |
+---
+
+#### FINDING — the four copies ALREADY DISAGREED, and it was a visible defect, not a latent one
+
+This entry described four copies of one rule. They were not four copies of one rule. On a project
+with every task Done:
+
+| Copy | Answer, before B21 |
 |---|---|
-| `views.py` `dashboard_pm` | `project.phases.filter(tasks__status__in=[...])` |
-| `views.py` `dashboard_site_engineer` | the same queryset |
-| `views.py` `dashboard_bd` | an **inline Python loop** over prefetched phases |
-| `models.py` `Project.get_current_phase()` | an inline Python loop |
+| `models.py` `Project.get_current_phase()` | `None` — the Admin project list printed **“—”** |
+| `views.py` `dashboard_bd` | `None` |
+| `views.py` `dashboard_pm` | the **last phase** (`order_by('-phase_order').first()`) |
+| `views.py` `dashboard_site_engineer` | the **last phase**'s name |
 
-A mirror that never completes — and COD, HOTO and As-Built have no source object in existence
-to complete them — pins a site at its earliest mirror-bearing phase permanently, on all four.
+**A completed Residential project therefore read “Finance Closure” on the PM dashboard and “—” on the
+Admin project list, at the same moment, from the same data.** Nothing in production would have made
+that legible — the two screens have different audiences — and it predates mirrors entirely. Reported
+at pre-flight rather than absorbed into the refactor; **settled by decision on 31 Aug**: the current
+phase is the **last phase HOLDING a human-owned task**. That equals the old PM/SE answer for both
+templates shipping today, so the two most-used screens did not move.
 
-1.3b left every one of them alone. `models.py` is outside its MODE, and fixing three of four
-is worse than fixing none: the copies would then disagree with each other about what phase a
-project is in, which is harder to diagnose than a consistently wrong answer. **The fix is the
-consolidation, not the filter** — one helper, called by all four, with R-20's exclusion inside
-it. Whoever does it needs `models.py` in scope.
+Everything else about the four agreed and was verified rather than assumed: ordering (all four
+`phase_order`, since `ProjectPhase.Meta.ordering` supplies it to the two that do not say so),
+the not-Done predicate (`!= 'Done'` and `status__in=['Not Started','In Progress','Blocked']` are
+extensionally identical **only because `STATUS_CHOICES` has exactly four values** — a fifth status
+would have split them, and `AgreementTests::test_06` now pins the Blocked half), the empty-phase case,
+and the absence of any task-type, role or soft-delete filter.
+
+#### FINDING — the return type split is a template constraint in BOTH directions
+
+`dashboard/pm.html` renders `{{ row.current_phase.phase_name }}`, so the PM context must hold a
+**ProjectPhase object**; `admin/projects_list.html` renders `{{ project.get_current_phase }}` through
+`|default:"—"`, so the model method must return a **string or None** (a `ProjectPhase` renders as
+`"HRP-RES-2026-001 — Design"`). Templates were outside B21's MODE and both constraints hold in the
+shipped shape: the helper returns the object, the model method takes `.phase_name` off it.
+
+#### FINDING — `projects/templates/projects/project_list.html` is DEAD, and holds one of the two callers
+
+Nothing renders it. `project_list` in `views.py` is a three-line redirect to
+`admin_project_list` / `dashboard_ceo` / `dashboard_pm`, and no other view, include or `{% extends %}`
+names the template. It contains the second `{% with cp=project.get_current_phase %}` block, which is
+why the file looks live to a grep. **Not deleted by B21** — templates were outside its MODE, and a
+dead template is not a defect, only a trap for the next person auditing callers of a method.
+Whoever next has templates in scope should delete it.
+
+#### FINDING — the three dashboards do not agree on how a context row identifies its project
+
+`dashboard_pm` and `dashboard_bd` rows carry the fetched `Project` under `'project'` — the shape
+`_apply_project_sections()` requires. `dashboard_site_engineer` rows carry a bare `'pk'` and
+`'project_id'` and no object, so that dashboard cannot use `_apply_project_sections()` and does not.
+Not a defect and not B21's to change; recorded because the new test module needed a two-branch
+helper (`_row_pk`) to read the three of them, and the next person writing a cross-dashboard test
+will hit the same thing.
+
+#### NOT A DEFECT, but it is why the queryset form was rejected
+
+`dashboard_pm` / `dashboard_site_engineer` joined `phases.filter(tasks__status__in=[...])` without
+`.distinct()`, so a phase with three open tasks produced three duplicate rows. Correct as written —
+`.first()` on the ordered result is still the right phase — and it disappears with the loop form.
 
 ---
 

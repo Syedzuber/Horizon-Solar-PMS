@@ -259,6 +259,80 @@ def is_human_owned(task):
 
 
 # ---------------------------------------------------------------------------
+# CURRENT PHASE — one implementation, and it excludes mirrors (R-21)
+#
+# Prompt B21, 31 Aug 2026. This replaces FOUR independent copies of "first
+# phase holding a not-Done task": `Project.get_current_phase()`, `dashboard_pm`,
+# `dashboard_site_engineer`, and an inline Python loop in `dashboard_bd`. All
+# four now call this and nothing else computes it.
+#
+# WHY MIRRORS ARE OUT, and it is not an arbitrary extension of R-20's metric
+# rule to a non-metric: a mirror's status is derived from another object and no
+# human may write it (R-18, R-20). A phase is "current" as an answer to "what
+# is this site waiting on" — so a phase is not current because a mirror in it
+# is open, since nobody can act on a mirror to close it. The OPEX template made
+# this urgent rather than tidy: its Phase 1 is `Design`, whose ONLY task is a
+# mirror, and COD / HOTO / As-Built have no source object in existence to ever
+# complete them. Without the exclusion every OPEX site reports "Design" as its
+# current phase permanently, on all four screens, with all nine installation
+# tasks done.
+#
+# WHAT THE FOUR COPIES DISAGREED ABOUT, and how it was settled (recorded here
+# because a reader will otherwise assume they were identical):
+#   • return type — PM returned a ProjectPhase, the other three a name string.
+#     This returns the OBJECT; `Project.get_current_phase()` takes `.phase_name`
+#     off it, because two templates print that method's result directly.
+#   • the empty case — models.py and dashboard_bd returned None, PM and SE
+#     returned the LAST phase. A fully-completed project therefore read
+#     "Finance Closure" on the PM dashboard and "—" on the Admin project list,
+#     a live defect before mirrors were involved. SETTLED BY DECISION on
+#     31 Aug: the last phase that HOLDS a human-owned task. That equals the
+#     old PM/SE answer for both templates shipping today, so the two most-used
+#     screens are unchanged; it differs only for a future template ending in an
+#     all-mirror phase — the shape OPEX Phase 1 has at the front.
+# Ordering and the not-Done predicate were already identical across all four.
+#
+# A PYTHON LOOP, NOT A QUERYSET, and that is the whole performance argument.
+# `phases.filter(...)` ignores the prefetch cache, so the queryset form cost
+# 1–2 queries PER PROJECT at every call site — including the two that already
+# prefetch (`admin_project_list`, 50 rows a page, and `dashboard_bd`). This
+# form costs ZERO extra queries wherever phases and tasks are prefetched, which
+# is now all four call sites: prompt B21 added the same `Prefetch` clause to
+# `dashboard_pm` and `dashboard_site_engineer` that the other two already had.
+#
+# Pinned by projects/tests_current_phase.py.
+# ---------------------------------------------------------------------------
+
+def current_phase(project):
+    """The ProjectPhase a site is currently working, or None.
+
+    "Current" = the first phase, in `phase_order`, that still holds a
+    HUMAN-OWNED task which is not Done. Mirrors are excluded via
+    `is_human_owned()` — see R-20 and the block comment above: a mirror is
+    nobody's work, so an open one does not make its phase current.
+
+    When every human-owned task is Done, returns the LAST phase holding a
+    human-owned task (decided 31 Aug 2026). Returns None only when the project
+    has no phases, or no phase holds a human-owned task at all.
+
+    Reads `project.phases.all()` and `phase.tasks.all()`, so it is free on a
+    caller that prefetched both and expensive on one that did not. Every call
+    site prefetches; a new one must too.
+    """
+    from .models import Task
+
+    last_human_phase = None
+    for phase in project.phases.all():
+        for task in phase.tasks.all():
+            if not is_human_owned(task):
+                continue
+            last_human_phase = phase
+            if task.status != Task.DONE:
+                return phase
+    return last_human_phase
+
+
+# ---------------------------------------------------------------------------
 # State-ledger chokepoint — prompt 0.3 (rules R-2, R-3, R-4, R-9, R-14)
 #
 # StatusTransition rows are written HERE AND NOWHERE ELSE. Same pattern as

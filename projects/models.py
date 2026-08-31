@@ -122,12 +122,21 @@ class Project(models.Model):
         return f"{self.project_id} - {self.customer_name}"
 
     def get_current_phase(self):
-        """First phase that still has an incomplete task; works with prefetched data."""
-        for phase in self.phases.all():
-            for task in phase.tasks.all():
-                if task.status != 'Done':
-                    return phase.phase_name
-        return None
+        """The current phase's NAME, or None. Works with prefetched data.
+
+        A delegate since prompt B21 (R-21). The rule — first phase holding a
+        not-Done HUMAN-OWNED task, mirrors excluded — lives in exactly one
+        place, `utils.current_phase()`, which this and the three dashboards all
+        call. Do not reimplement it here; that is the defect B21 closed.
+
+        Returns the name rather than the phase because two templates print this
+        method's result directly (`admin/projects_list.html`,
+        `projects/project_list.html`) and a ProjectPhase renders as
+        "HSP-0001 — Design". Callers wanting the object call the helper.
+        """
+        from .utils import current_phase
+        phase = current_phase(self)
+        return phase.phase_name if phase else None
 
     def _validate_program_link(self):
         """Enforce the Program-linkage invariants at save time (spec §4 edge cases).
