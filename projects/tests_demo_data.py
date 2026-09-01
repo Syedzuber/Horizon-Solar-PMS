@@ -20,7 +20,7 @@ dangerous rather than merely broken:
   4. Seed → teardown → seed → teardown runs clean. Two known hazards make repeat runs
      the interesting case: a soft-deleted row keeps reserving its unique values, and
      `generate_project_id()` hands a hard-deleted row's number back for reuse.
-  5. An activated demo OPEX site really does carry 22 tasks and exactly 5 mirrors,
+  5. An activated demo OPEX site really does carry 23 tasks and exactly 8 mirrors,
      BY NAME. Counting alone would pass if the template changed shape underneath.
 
 FIXTURES. `test_settings` disables migrations, so the schema is built from model state
@@ -44,18 +44,22 @@ from .models import BOQItemMaster, Project, Task, UserProfile
 from .tests_opex_activation import _seed_opex
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL
 
-# The five OPEX template rows that carry is_mirror=True, stated LITERALLY rather than
+# The eight OPEX template rows that carry is_mirror=True, stated LITERALLY rather than
 # imported. This is a pin: if the template's mirror set changes, this test is supposed
 # to fail and make somebody say so out loud, which importing the set would prevent.
 EXPECTED_MIRROR_NAMES = {
     'Design',
-    'Material Delivery',
+    # Spec v1.4 split Material Delivery into four and removed the two SCM inspections.
+    'Delivery — Solar Panels',
+    'Delivery — Inverters',
+    'Delivery — BOS Kit',
+    'Delivery — MMS',
     'COD',
     'As-Built Drawings',
     'HOTO',
 }
 
-EXPECTED_TASK_COUNT  = 22
+EXPECTED_TASK_COUNT  = 23
 EXPECTED_PHASE_COUNT = 7
 
 REMOTE_DATABASES = {
@@ -247,7 +251,7 @@ class DemoDataCommandTests(TestCase):
         self.assertEqual(User.objects.filter(username__startswith='demo.').count(), 7)
 
     # ------------------------------------------------------------------ 5
-    def test_an_activated_demo_opex_site_has_22_tasks_and_5_mirrors_by_name(self):
+    def test_an_activated_demo_opex_site_has_23_tasks_and_8_mirrors_by_name(self):
         self._seed()
         site = Project.objects.get(project_id='DEMOOPEX01')
 
@@ -258,7 +262,7 @@ class DemoDataCommandTests(TestCase):
         self.assertEqual(tasks.count(), EXPECTED_TASK_COUNT)
 
         mirrors = tasks.filter(is_mirror=True)
-        self.assertEqual(mirrors.count(), 5)
+        self.assertEqual(mirrors.count(), 8)
         self.assertEqual(set(mirrors.values_list('task_name', flat=True)),
                          EXPECTED_MIRROR_NAMES)
 

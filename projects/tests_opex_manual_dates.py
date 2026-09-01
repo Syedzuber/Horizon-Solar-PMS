@@ -86,9 +86,16 @@ from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, resolve_residential_templ
 # 'Design' has no non-mirror task in the OPEX template — both its tasks are mirrors —
 # so the Design row is covered by the mirror case in ManualDueDatesOnMirrorsTests
 # instead, and its absence here is deliberate rather than an oversight.
+#
+# 'SCM' JOINED DESIGN IN THAT CATEGORY, and it is worth stating why rather than just
+# deleting the row. SCM's entry here was 'Inspection — Factory / Vendor', one of the two
+# inspections spec v1.4 REMOVED (an inspection at a vendor's works covers a consignment,
+# not a site — phase 4.5 owns it). The same revision split Material Delivery into four
+# mirrors. So SCM now owns four mirrors and no entered task at all, and there is no SCM
+# row a PM can hand-schedule. That is a real consequence of the template change, not a
+# gap in this test: see EXECUTION_MODULE_DEFERRED.md §B27.
 MANUAL_DATE_TASKS = {
     'PM':                 'Net Metering Approval',
-    'SCM':                'Inspection — Factory / Vendor',
     'Site Engineer':      'Civil Work and MMS Installation',
     'Project Coordinator': 'Completion Certificates (Paperwork)',
 }
@@ -282,10 +289,10 @@ class ActivatedOpexSiteStartsUnscheduledTests(ManualDatesFixture):
     real cause, instead of the refusal tests failing and pointing at the guard.
     """
 
-    def test_all_twenty_two_tasks_are_created_with_a_null_due_date(self):
+    def test_all_twenty_three_tasks_are_created_with_a_null_due_date(self):
         due_dates = self._due_dates(self.site)
-        self.assertEqual(len(due_dates), 22,
-                         'the OPEX attach no longer produces 22 tasks')
+        self.assertEqual(len(due_dates), 23,
+                         'the OPEX attach no longer produces 23 tasks')
         self.assertEqual(
             [d for d in due_dates if d is not None], [],
             'an activated OPEX site now carries due dates — activation is calling '
@@ -318,7 +325,7 @@ class RecalculateRefusesOpexTests(ManualDatesFixture):
         self.assertEqual(
             [d for d in self._due_dates(self.site) if d is not None], [],
             'the recalculate view wrote due dates onto an OPEX site — every one of '
-            'the 22 tasks carries duration_days=1, so this is the 22-day chain B18 '
+            'the 23 tasks carries duration_days=1, so this is the 23-day chain B18 '
             'exists to prevent')
 
     def test_the_refusal_writes_no_recalculation_activity_row(self):
@@ -824,7 +831,7 @@ class PmDashboardDraftCardActivatesOpexTests(ManualDatesFixture):
 
         self.draft_opex.refresh_from_db()
         self.assertEqual(self.draft_opex.status, 'Active')
-        self.assertEqual(self._tasks(self.draft_opex).count(), 22)
+        self.assertEqual(self._tasks(self.draft_opex).count(), 23)
         self.assertEqual(
             [d for d in self._due_dates(self.draft_opex) if d is not None], [],
             'a site activated from the dashboard path came out scheduled')

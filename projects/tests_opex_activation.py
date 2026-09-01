@@ -47,13 +47,19 @@ from .utils import resolve_residential_template
 
 RESIDENTIAL_FINANCE_EMAIL = 'santosh@horizonrenewablepower.com'
 
-# The five mirrors, BY NAME. A count of 5 passes perfectly well when the wrong five rows
-# are flagged, which is why every assertion below compares this set and not `.count()`.
-# A third independent transcription of docs/OPEX_task_template_spec.md v1.3 §3 — migration
-# 0075 holds the first, tests_opex_template.py the second.
+# The eight mirrors, BY NAME. A count of 8 passes perfectly well when the wrong eight
+# rows are flagged, which is why every assertion below compares this set and not
+# `.count()`. A third independent transcription of docs/OPEX_task_template_spec.md
+# v1.5 §3 — migration 0075 holds the first, tests_opex_template.py the second.
 EXPECTED_MIRROR_NAMES = {
     'Design',
-    'Material Delivery',
+    # Material Delivery split four ways in spec v1.4; the two SCM inspections that
+    # stood beside it were removed in the same revision (phase 4.5 owns them). SCM
+    # therefore owns FOUR MIRRORS AND NO ENTERED TASK on an OPEX site.
+    'Delivery — Solar Panels',
+    'Delivery — Inverters',
+    'Delivery — BOS Kit',
+    'Delivery — MMS',
     'COD',
     'As-Built Drawings',
     'HOTO',
@@ -210,9 +216,9 @@ class OpexActivationTests(OpexActivationBase):
              ('Approvals (Post-Installation)', 6),
              ('Closeout', 7)])
 
-    def test_activation_creates_twenty_two_tasks(self):
+    def test_activation_creates_twenty_three_tasks(self):
         self._activate()
-        self.assertEqual(self._tasks(self.site).count(), 22)
+        self.assertEqual(self._tasks(self.site).count(), 23)
 
     def test_no_terminal_status_becomes_reachable(self):
         """1.3c ships the OPENING transition only; closure is phase 5 (D-4)."""
@@ -245,11 +251,11 @@ class MirrorsSurviveTheAttachTests(OpexActivationBase):
             'the seventh snapshot is missing from the bulk_create again — every '
             'counter exclusion 1.3b shipped is inert without it')
 
-    def test_the_other_seventeen_are_not_mirrors(self):
+    def test_the_other_fifteen_are_not_mirrors(self):
         """A blanket is_mirror=True would satisfy the assertion above by count."""
         self._activate()
         non_mirrors = self._tasks(self.site).filter(is_mirror=False)
-        self.assertEqual(non_mirrors.count(), 17)
+        self.assertEqual(non_mirrors.count(), 15)
         self.assertEqual(
             non_mirrors.filter(task_name__in=EXPECTED_MIRROR_NAMES).count(), 0)
 
@@ -310,10 +316,10 @@ class NoResidentialMilestonesTests(OpexActivationBase):
             self._tasks(self.site).filter(is_payment_milestone=True).count(), 0)
 
     def test_due_dates_are_left_null(self):
-        """B18. All 22 tasks are Internal with duration_days=1, so calculate_due_dates()
-        would put HOTO at activated_at + 22 days and the whole tender portfolio overdue
+        """B18. All 23 tasks are Internal with duration_days=1, so calculate_due_dates()
+        would put HOTO at activated_at + 23 days and the whole tender portfolio overdue
         within a month. Activation deliberately does not call it: a null due date says
-        'not scheduled', where 22 sequential days says something specific and false.
+        'not scheduled', where 23 sequential days says something specific and false.
         """
         self._activate()
         self.assertEqual(
@@ -410,7 +416,7 @@ class SecondActivationIsRefusedTests(OpexActivationBase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(ProjectPhase.objects.filter(project=self.site).count(), 7)
-        self.assertEqual(self._tasks(self.site).count(), 22)
+        self.assertEqual(self._tasks(self.site).count(), 23)
         self.assertEqual(
             self.site.activated_at, first_activated_at,
             'the second activation re-stamped activated_at')
@@ -596,14 +602,33 @@ class CountersOnARealSiteTests(OpexActivationBase):
             'the CEO department rollup is counting COD and HOTO as PM work')
 
     def test_ceo_dept_design_and_scm_pending_exclude_their_mirrors(self):
-        """Design carries two mirrors and no real task on this template; SCM carries
-        one mirror and two real inspections. Both must read as if the mirrors are not
-        there — Design 0, SCM 2."""
+        """Both read 0, and SCM's 0 IS A REAL FINDING, not a weaker test.
+
+        SCM used to carry one mirror and two entered inspections, so this asserted 2
+        and the exclusion was what made it 2 rather than 3. Spec v1.4 removed both
+        inspections — a vendor inspection covers a consignment, not a site — and split
+        Material Delivery into four mirrors. SCM therefore now owns FOUR MIRRORS AND
+        NOTHING ELSE on an OPEX site, exactly as Design already did.
+
+        SO THE ASSERTION IS WEAKER THAN IT WAS, and honestly so: 0 is what both the
+        correct exclusion and a deleted exclusion would produce IF the mirrors were
+        unassigned, and it is only the exclusion that produces it once they are
+        assigned — which `_assign_every_mirror()` in this class does. Read it as
+        pinning the consequence of the template change, not as proof of R-20; the
+        project-card test above is the load-bearing proof.
+
+        WHAT IT MEANS FOR A REAL USER: no SCM or Design person has a single actionable
+        OPEX task, and none of their six mirrors can move until B-18 and SCM's
+        catalogue mapping land. Recorded in EXECUTION_MODULE_DEFERRED.md §B27.
+        """
         from .views import _get_ceo_dashboard_context
         context = _get_ceo_dashboard_context()
         rows = {r['label']: r for r in context['dept_rows']}
         self.assertEqual(rows['Design']['pending'], 0)
-        self.assertEqual(rows['SCM']['pending'], 2)
+        self.assertEqual(
+            rows['SCM']['pending'], 0,
+            'SCM owns only the four delivery mirrors since spec v1.4 removed the two '
+            'inspections; anything above 0 means a mirror is being counted as work.')
 
     # -- counter 3: build_user_status_rows ----------------------------------------
     #
@@ -623,17 +648,17 @@ class CountersOnARealSiteTests(OpexActivationBase):
 
     # -- counter 4: the project card counts, which ARE assignment-blind -----------
 
-    def test_the_project_card_counts_exclude_all_five_mirrors(self):
+    def test_the_project_card_counts_exclude_all_eight_mirrors(self):
         """A genuine third proof, substituted for the report above. These counts are
-        project-scoped with no assignment term, so all five mirrors would land in them
+        project-scoped with no assignment term, so all eight mirrors would land in them
         and only human_owned_tasks_q() keeps them out."""
         response = _client_for(self.pm).get(reverse('dashboard_pm'))
         card = next(c for c in response.context['projects_with_progress']
                     if c['project'].pk == self.site.pk)
-        self.assertEqual(self._tasks(self.site).count(), 22)
+        self.assertEqual(self._tasks(self.site).count(), 23)
         self.assertEqual(
-            card['total_tasks'], 17,
-            'the project card is counting the five mirrors as work')
+            card['total_tasks'], 15,
+            'the project card is counting the eight mirrors as work')
 
     # -- and the negative: the mirrors are still VISIBLE ---------------------------
 

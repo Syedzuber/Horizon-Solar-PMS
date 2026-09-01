@@ -442,3 +442,97 @@ produce. **Six did**, recorded as §B23. The two that go beyond "not built yet":
 loader artefact; neither was this session's to fix). `tests_demo_data.py` adds 15 tests, all
 passing. Three full seed → seed → teardown cycles were run against the real local database and
 the per-model census came back identical each time.
+
+---
+
+## 1.5 — OPEX template v2, and three things the screen got wrong
+
+**1 Sep 2026 · branch `execution-phase-1`.** The last session before deploy planning. The
+browser test had passed every blocker and then found three things no test could, because all
+three were about what the screen SAYS rather than what the database holds.
+
+### It ran twice, and the first run stopped
+
+The prompt required `docs/OPEX_task_template_spec.md` at **v1.4** and the file was at **v1.3** —
+tree clean, no v1.4 anywhere in the repo. Pre-flight ran read-only, reported the stop, and
+nothing was written. The spec then landed as **v1.5** (`8796e57`), which is what was built from.
+
+Two of v1.5's own corrections mattered to this session:
+
+- **The "285 Residential milestones on tender sites" do not exist.** §2a establishes 285 was the
+  A-1.3 audit's *projection* of what activating 95 sites would mint, not a count of anything.
+  The narrower "hide the card only when empty" gate that figure had justified was dropped for a
+  plain `project_type` gate.
+- **§6 reversed the prompt's central instruction.** The prompt said "Do not edit OPEX v1 in
+  place. R-7 forbids it. This is a new version." §6 says correct 0075 in place and do **not**
+  bump to a v2. Its precondition was verified before acting on it, not taken on trust:
+  `origin/main` is at migration **0064** and `0074`/`0075` are not on it.
+
+### The two things the prompt did not anticipate
+
+**Editing 0075 in place breaks 20 tests across five modules the MODE forbade.** They seed by
+calling `seed_opex_v1()` directly (`test_settings` disables migrations), so correcting the
+literal corrects their fixtures too — the exact cost a v2 bump would have avoided. All 20 were
+stale-count assertions; none was weakened or deleted. MODE was widened by explicit decision to
+`tests_opex_template`, `tests_opex_activation`, `tests_mirror_readonly`, `tests_opex_manual_dates`,
+`tests_demo_data`, `tests_mirror_metrics` and `tests_current_phase`.
+
+**A seventh module broke, and the full suite is what found it.** `tests_current_phase.py`
+pins R-21's phase walk, and Procurement & Delivery holding only mirrors means R-21 now steps
+over it exactly as it has always stepped over Design — so "phase 2 done" reads `Installation`
+and the walk visits **five** human phases, not six. **R-21's implementation is untouched**; the
+template changed underneath its tests. One test was rewritten rather than renumbered: it used to
+complete the phase's two inspections and show it advanced with the mirror still open, and there
+is nothing left in the phase to complete — the phase is now skipped on the strength of the flag
+alone, which is a stronger statement of the same rule.
+
+**Removing the two inspections left SCM with no entered task at all.** They were SCM's only
+non-mirror rows. SCM now owns four mirrors and nothing else, the position Design was already in.
+Confirmed as intended and recorded as **§B27** rather than absorbed silently: no SCM or Design
+person has an actionable OPEX task, and none of their six mirrors can move until B-18 *and*
+SCM's catalogue mapping both land.
+
+### The mirrors-only phase, and the one carve-out of R-20
+
+Phase 1 and Phase 3 both hold only mirrors and rendered **"0/0 done" above an empty bar** while
+their own card headers said "1 task" and "4 tasks". The decision taken was that **one mirror not
+updated is one task pending**, so the per-phase bar counts mirrors and Phase 3 reads `0/4`.
+
+**Scoped deliberately to that one loop.** Overdue, per-user workload, the CEO rollup and every
+drill-down still exclude mirrors. **R-21 is untouched**, so a mirror still never makes its phase
+current and the B21 bug does not return. `tests_mirror_metrics.py` was updated on both sides: the
+behavioural test now asserts the bar counts the pair (its old docstring said the opposite
+asymmetry was "pinned so it is not 'fixed'", so the reversal is spelled out in place), and the
+two `phase_data_json` keys joined `ALLOWED_BROKEN_COUNTS` with the reason. One of that module's
+own self-tests had to move its probe to `ext_pending`, because the key it used to prove the sweep
+bites is now legitimately allow-listed.
+
+### The marker is not the guard
+
+The `Derived` badge names the cause rather than the symptom, and the status `<select>` is not
+rendered for a mirror — it falls through the read-only branch that already existed, so no new
+markup and no new branch. **B22's refusal is unchanged and no second check was added in the
+view.** `TheRefusalIsUnchangedTests` assigns every mirror first (so a refusal cannot come from the
+unassigned gate) and posts to both entry points, asserting the message text to prove which rung
+answered. That is the premortem's second risk arriving from the opposite direction — the risk was
+a UI-only refusal; this is a UI affordance added *over* a real one — and being answered.
+
+### Two bugs caught in the writing
+
+- A Django `{# … #}` comment **cannot span lines**. Three multi-line ones raised
+  `TemplateSyntaxError` and became `{% comment %}` blocks.
+- `{% if project.project_type == 'Residential' and role == 'PM' or role == 'Finance' … %}`
+  parses as `(Residential and PM) or Finance or …` — Django binds `and` tighter than `or` and
+  templates have no parentheses. Finance, CEO, Admin and BD would still have seen the card on an
+  OPEX site. The outer `{% if %}` is the parenthesis.
+
+### Verification
+
+`manage.py check` clean. Migration round trip run against the real local database: `migrate
+projects 0074` removed OPEX and left RESIDENTIAL intact, `migrate` re-seeded **7 phases / 23 tasks
+/ 8 mirrors**. Demo data torn down and re-seeded; both demo OPEX sites carry 23/8. The rendered
+overview shows **8 `Derived` badges, 15 status controls, no Payment Milestones card**, and Phase 3
+reading `0/4`; the Residential demo project shows the card and no badges. `tests_opex_template_correction.py`
+adds **29 tests**. Suite **1028 tests, 1 failure + 1 error — the same two as baseline** (the SQLite
+constraint-name assertion in `tests_design_part46` and the `test_whatsapp_templates` loader
+artefact; neither was this session's).

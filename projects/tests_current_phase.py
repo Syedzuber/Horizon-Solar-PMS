@@ -352,8 +352,16 @@ class AgreementTests(CurrentPhaseFixture):
         self._assert_all_agree(self.opex, OPEX_PRE_APPROVALS, 'nothing done')
 
     def test_02_opex_part_way(self):
+        """Phase 2 done now lands on INSTALLATION, skipping Procurement & Delivery.
+
+        Not a change to R-21 — a change to the template underneath it. Spec v1.4
+        removed the two SCM inspections from Procurement & Delivery and split Material
+        Delivery into four mirrors, so that phase holds ONLY mirrors and R-21 steps
+        straight over it: "current" means the first phase still holding a HUMAN-OWNED
+        task that is not Done, and a mirror is nobody's work.
+        """
         self._complete(self._tasks_in(self.opex, OPEX_PRE_APPROVALS))
-        self._assert_all_agree(self.opex, OPEX_PROCUREMENT, 'phase 2 done')
+        self._assert_all_agree(self.opex, OPEX_INSTALLATION, 'phase 2 done')
 
     def test_03_opex_everything_human_done(self):
         self._complete_all_human(self.opex)
@@ -471,27 +479,43 @@ class AdvanceTests(CurrentPhaseFixture):
     """Completing a phase's human-owned tasks advances the phase even though a mirror
     in it is still Not Started. This is the half of R-21 that is not about Design."""
 
-    def test_01_procurement_advances_with_its_mirror_still_open(self):
-        self._complete(self._tasks_in(self.opex, OPEX_PRE_APPROVALS))
-        self.assertEqual(current_phase(self.opex).phase_name, OPEX_PROCUREMENT)
+    def test_01_procurement_is_skipped_entirely_because_it_is_all_mirrors(self):
+        """REWRITTEN FOR THE v1.4 TEMPLATE. It used to prove a WEAKER thing.
 
+        Procurement & Delivery used to hold two entered inspections and one mirror, so
+        this test completed the two and showed the phase advanced with the mirror still
+        open. Spec v1.4 removed both inspections (an inspection at a vendor's works
+        covers a consignment, not a site) and split Material Delivery into four mirrors,
+        so the phase now holds FOUR MIRRORS AND NOTHING ELSE.
+
+        There is no longer anything in it to complete, and R-21 steps over it the moment
+        Phase 2 closes — the same way it has always stepped over Phase 1 (Design). That
+        is a stronger statement of the same rule, not a lost assertion: the phase is
+        skipped on the strength of the flag alone.
+        """
         procurement = self._tasks_in(self.opex, OPEX_PROCUREMENT, human_only=False)
-        self.assertEqual(procurement.filter(is_mirror=True).count(), 1,
-                         'Procurement & Delivery should hold exactly one mirror '
-                         '(Material Delivery)')
-        self._complete(procurement.filter(is_mirror=False))
+        self.assertEqual(procurement.count(), 4)
+        self.assertEqual(procurement.filter(is_mirror=True).count(), 4,
+                         'Procurement & Delivery should hold four mirrors and no '
+                         'entered task (spec v1.4)')
 
-        self.assertEqual(current_phase(self.opex).phase_name, OPEX_INSTALLATION)
+        self._complete(self._tasks_in(self.opex, OPEX_PRE_APPROVALS))
+
         self.assertEqual(
-            procurement.get(is_mirror=True).status, Task.NOT_STARTED,
-            'the mirror must still be Not Started — if the fixture completed it, this '
-            'test proved nothing about the exclusion.'
+            current_phase(self.opex).phase_name, OPEX_INSTALLATION,
+            'a phase holding only mirrors must never be current')
+        self.assertEqual(
+            set(procurement.values_list('status', flat=True)), {Task.NOT_STARTED},
+            'the mirrors must still be Not Started — if the fixture completed them, '
+            'this test proved nothing about the exclusion.'
         )
 
     def test_02_the_full_walk_visits_every_human_phase_in_order(self):
-        """Six phases, in phase_order, Design absent. Pins the ordering as well as
-        the exclusion: the four copies agreed on phase_order and this keeps them
-        agreeing after the consolidation."""
+        """FIVE phases, in phase_order, Design AND Procurement & Delivery absent.
+
+        Both are all-mirror phases since spec v1.4, and R-21 skips both for the same
+        reason. Pins the ordering as well as the exclusion: the four copies agreed on
+        phase_order and this keeps them agreeing after the consolidation."""
         visited = []
         for _ in range(10):
             phase = current_phase(self.opex)
@@ -500,7 +524,7 @@ class AdvanceTests(CurrentPhaseFixture):
             visited.append(phase.phase_name)
             self._complete(self._tasks_in(self.opex, phase.phase_name))
         self.assertEqual(visited, [
-            OPEX_PRE_APPROVALS, OPEX_PROCUREMENT, OPEX_INSTALLATION,
+            OPEX_PRE_APPROVALS, OPEX_INSTALLATION,
             OPEX_COMMISSIONING, OPEX_POST_APPROVALS, OPEX_CLOSEOUT,
         ])
 
@@ -524,8 +548,8 @@ class EmptyCaseTests(CurrentPhaseFixture):
         self.assertEqual(current_phase(self.opex).phase_name, OPEX_CLOSEOUT)
         self.assertEqual(
             Task.objects.filter(phase__project=self.opex, is_mirror=True,
-                                status=Task.NOT_STARTED).count(), 5,
-            'all five mirrors must still be Not Started, or this is not the empty case'
+                                status=Task.NOT_STARTED).count(), 8,
+            'all eight mirrors must still be Not Started, or this is not the empty case'
         )
 
     def test_02_residential_with_all_work_done_reads_finance_closure(self):

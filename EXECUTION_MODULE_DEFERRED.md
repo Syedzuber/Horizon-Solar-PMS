@@ -1384,6 +1384,48 @@ reason — it is provenance (B-10) and nothing should be able to retype it.
 
 ---
 
+### B27 — the four delivery mirrors need SCM's catalogue mapping **and** B-18, and neither alone is sufficient
+
+Found and recorded by prompt 1.5, 1 Sep 2026. **Not a defect — a dependency**, written as
+one entry because splitting it into two would let somebody close half of it and believe
+the mirrors could then derive.
+
+Spec v1.4 split `Material Delivery` into four mirrors — `Delivery — Solar Panels`,
+`Delivery — Inverters`, `Delivery — BOS Kit`, `Delivery — MMS` — because material arrival
+is what a PM looks at first and one undifferentiated row does not say whether panels have
+landed or only cable. All four read **Not Started permanently** today, and will until BOTH
+of the following land:
+
+1. **B-18 — the join key does not exist.** `DCLineItem` carries `boq_category` as a plain
+   string and has no FK to `BOQItem`, so there is nothing to join accepted quantity to
+   site BOQ quantity on. Without it the derivation rule (Not Started = none accepted ·
+   In Progress = some, below BOQ · Done = accepted ≥ BOQ, damaged excluded) has no
+   left-hand side. Tracked separately as **B18** for the durations question; this is the
+   other half of the same gap.
+
+2. **SCM's catalogue mapping does not exist, and the split made it BIGGER.** Of the 207
+   OPEX catalogue rows (migration 0057, a frozen literal that asserts its own length),
+   these four buckets match `Module`, `Inverter`, `BOS` and `MMS` — **52 rows. 155 map to
+   nothing.** The figure of 120 that circulated until v1.5 was v1.2's, for a different set
+   of six buckets, under which 84 map and 123 do not. No grouping has a category named RMS.
+
+**Neither is sufficient alone.** B-18 without the mapping gives a join that resolves 52 of
+207 items and silently reports three of the four mirrors Done on a site whose panels have
+not arrived. The mapping without B-18 gives a correct bucket list and no way to read a
+delivery against it. **Do not ship a derivation hook until both are in place** — a mirror
+that can disagree with its source is the failure the whole mirror design exists to prevent.
+
+**A consequence worth stating separately.** Removing the two inspections (spec v1.4 — an
+inspection at a vendor's works covers a consignment, not a site) took away SCM's only
+**entered** tasks. SCM now owns four mirrors and nothing else on an OPEX site, the position
+Design was already in with `Design` and `As-Built Drawings`. So **no SCM or Design person
+has a single actionable OPEX task today**, and none of their six mirrors can move until
+the two dependencies above land. That is the specced behaviour, not a bug — but it means
+an SCM user opening an OPEX site sees six rows they cannot touch and nothing they can, and
+whoever demos this should say so before someone else notices.
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

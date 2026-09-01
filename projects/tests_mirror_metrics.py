@@ -371,14 +371,33 @@ class MirrorsStayVisibleTests(TestCase):
         names = {t.task_name for p in phases for t in p.tasks.all()}
         self.assertEqual(names, {'Net Metering Approval', 'COD'})
 
-    def test_but_the_phase_progress_metric_drops_it(self):
-        """Same page, same phase: the list shows 2, the progress bar is out
-        of 1. That is the intended asymmetry, pinned so it is not 'fixed'."""
+    def test_and_the_phase_progress_metric_counts_it(self):
+        """REVERSED BY PROMPT 1.5, deliberately. Read the reason before restoring it.
+
+        This test used to assert the opposite — `internal_total == 1`, the bar out
+        of 1 while the list showed 2 — and called that "the intended asymmetry,
+        pinned so it is not 'fixed'". The asymmetry was intended; what it produced
+        on screen was not. A phase holding ONLY mirrors rendered "0/0 done" above
+        an empty bar while its own card header said "4 tasks", and OPEX has two
+        such phases (Design, and Procurement & Delivery's four delivery mirrors).
+
+        The product decision, 1 Sep 2026: one mirror not updated is one task
+        pending. So the per-phase bar counts mirrors in BOTH halves.
+
+        THIS IS THE ONLY METRIC THAT COUNTS THEM. Everything else in this module
+        still asserts exclusion, and that is the point of the split — R-20 was
+        narrowed here, not repealed. The overdue counters, the per-user workload
+        counts and R-21's current_phase are all unchanged and still tested above.
+        """
         resp = self.client.get(
             reverse('project_overview', args=[self.project.project_id]))
         data = json.loads(resp.context['phase_data_json'])
         row = [d for d in data if d['pk'] == self.phase.pk][0]
-        self.assertEqual(row['internal_total'], 1)
+        self.assertEqual(
+            row['internal_total'], 2,
+            'The per-phase progress bar must count the mirror alongside the '
+            'entered task (prompt 1.5). If this reads 1, the R-20 exclusion has '
+            'been restored to project_overview\'s phase_data_json loop.')
         self.assertEqual(row['pct'], 0)
 
 
@@ -401,7 +420,22 @@ BROKEN_COUNT = MIRRORS_PER_FIXTURE + 1
 # Context keys that may legitimately hold BROKEN_COUNT, each with its reason.
 # THIS SET IS THE PIN: adding to it is a deliberate, visible diff, and
 # forgetting the exclusion on a new counter is not possible without a red test.
-ALLOWED_BROKEN_COUNTS = set()
+ALLOWED_BROKEN_COUNTS = {
+    # PROMPT 1.5 — the per-phase progress bar counts mirrors ON PURPOSE, the one
+    # carve-out of R-20 in the codebase. A phase holding only mirrors read
+    # "0/0 done" above an empty bar while its card header said "4 tasks"; the
+    # product decision is that one mirror not updated is one task pending. The
+    # sweep's fixture is 1 non-mirror + 6 mirrors in ONE phase, so this metric
+    # legitimately reads 7 here — the very number the sweep treats as the tell.
+    #
+    # THESE TWO KEYS ONLY. Every other counter in every dashboard context is still
+    # swept, so a NEW counter that forgets the exclusion still fails without being
+    # registered anywhere. If a second phase is ever added to that fixture these
+    # keys gain a [1] sibling and must be listed too — the index is part of the key.
+    'phase_data_json[0].internal_total',
+    # Reached only by the 'done today' shape, where all seven are Done.
+    'phase_data_json[0].internal_done',
+}
 
 # Key segments that are identities or template machinery, never task metrics.
 # A primary key that happens to equal BROKEN_COUNT is noise, not a finding.
@@ -602,12 +636,20 @@ class SweepBitesTests(TestCase):
 
     def test_the_sweep_decodes_serialised_json(self):
         """`phase_data_json` reaches the template as a string. A sweep that
-        stopped there would skip the per-phase progress metric entirely."""
+        stopped there would skip the per-phase progress metric entirely.
+
+        Probes `ext_pending` rather than `internal_total`. Prompt 1.5 put
+        `phase_data_json[0].internal_total` into ALLOWED_BROKEN_COUNTS — the
+        progress bar counts mirrors on purpose now — so that key can no longer
+        demonstrate that the sweep BITES. `ext_pending` is a sibling inside the
+        same serialised string, so it still proves the decoding step and would
+        still fail if `_walk` stopped at the string.
+        """
         sweep, resp = self._sweep_over(
-            {'phase_data_json': json.dumps([{'internal_total': BROKEN_COUNT}])})
+            {'phase_data_json': json.dumps([{'ext_pending': BROKEN_COUNT}])})
         with self.assertRaises(AssertionError) as caught:
             sweep._sweep(resp, 'open', 'dashboard_pm')
-        self.assertIn('phase_data_json[0].internal_total', str(caught.exception))
+        self.assertIn('phase_data_json[0].ext_pending', str(caught.exception))
 
     def test_the_sweep_passes_a_correct_counter(self):
         """The other half of 'it bites': it must not fire on 0 or 1."""

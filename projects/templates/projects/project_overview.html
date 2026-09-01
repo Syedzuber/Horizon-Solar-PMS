@@ -214,7 +214,30 @@
   </div>
   {% endif %}
 
-  {# Payment milestones #}
+  {% comment %}Payment milestones — RESIDENTIAL ONLY.
+
+     M1 On Survey Completion / M2 On Material Supply / M3 On Commissioning describe a
+     three-milestone residential contract, not a tender. `opex_site_activate` refuses to
+     mint them, so on an OPEX site this card rendered "No milestones yet" above a
+     Create M1 / M2 / M3 button — the screen offering what the backend declines.
+
+     THE WHOLE CARD GOES, NOT JUST THE BUTTON. A card reading "No milestones yet" implies
+     there should be some. `milestone_create` grew a matching project_type guard in the
+     same prompt: a hidden control is not a disabled one, and that view is reachable by
+     POST regardless of what this template renders.
+
+     Gated on project_type rather than on `milestones` being empty. An earlier reading of
+     this held back for "285 milestone rows already on tender sites"; spec v1.5 §2a
+     establishes that those rows never existed — 285 was the A-1.3 audit's PROJECTION of
+     what activating 95 sites would mint, not a count. There is no live OPEX milestone
+     data for a narrower gate to protect.
+
+     NESTED rather than added to the role condition with `and`: Django binds `and` tighter
+     than `or`, so `project_type == 'Residential' and role == 'PM' or role == 'Finance'`
+     parses as `(Residential and PM) or Finance or ...` and would still show the card to
+     Finance, CEO, Admin and BD on an OPEX site. Template `{% if %}` has no parentheses,
+     so the outer tag IS the parenthesis.{% endcomment %}
+  {% if project.project_type == 'Residential' %}
   {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}
   <div class="col-12 col-md-4">
     <div class="card shadow-sm h-100">
@@ -361,6 +384,7 @@
     </div>
   </div>
   {% endif %}
+  {% endif %}{# /project_type == 'Residential' — payment milestones card #}
 
   <div class="col-12 {% if role == 'PM' or role == 'Finance' or role == 'CEO' or role == 'Admin' or role == 'BD' %}col-md-4{% else %}col-md-6{% endif %}">
     <div class="card h-100 shadow-sm">

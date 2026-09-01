@@ -4,7 +4,7 @@ A mirror task refuses a human status write. Prompt B22.
 WHY THIS FILE EXISTS
 --------------------
 `Task.is_mirror` marks a task whose status is DERIVED from another object — the
-Design mirror follows its `DesignAssignment`, Material Delivery follows accepted
+Design mirror follows its `DesignAssignment`, the four delivery mirrors follow accepted
 delivery quantities, COD and HOTO follow the commissioning and handover records.
 Nobody types into a mirror; a mirror that a human can move can disagree with its
 source, and then neither number means anything. The OPEX spec calls the refusal
@@ -63,13 +63,17 @@ from .utils import (
 )
 
 
-# The five OPEX mirrors, transcribed from docs/OPEX_task_template_spec.md §3 rather
+# The eight OPEX mirrors, transcribed from docs/OPEX_task_template_spec.md v1.5 §3 rather
 # than read out of migration 0075. Two transcriptions on purpose (same argument as
 # tests_opex_template.py): a test that imports the seed's own data agrees with any
 # typo the seed contains.
 EXPECTED_MIRROR_NAMES = {
     'Design',
-    'Material Delivery',
+    # Spec v1.4 split Material Delivery into four and removed the two SCM inspections.
+    'Delivery — Solar Panels',
+    'Delivery — Inverters',
+    'Delivery — BOS Kit',
+    'Delivery — MMS',
     'COD',
     'As-Built Drawings',
     'HOTO',
@@ -395,11 +399,11 @@ class TaskDetailPathTests(MirrorReadOnlyContract, MirrorReadOnlyFixture):
 
 
 # ---------------------------------------------------------------------------
-# 7. All five mirrors, on the site the pipeline built
+# 7. All eight mirrors, on the site the pipeline built
 # ---------------------------------------------------------------------------
 
 class EveryMirrorOnARealSiteTests(MirrorReadOnlyFixture):
-    """Not one hand-made row with the flag set — all five, from the real attach.
+    """Not one hand-made row with the flag set — all eight, from the real attach.
 
     A test that builds `Task(is_mirror=True)` itself proves the `if` works and
     nothing about whether production rows carry the flag. That distinction is not
@@ -408,12 +412,12 @@ class EveryMirrorOnARealSiteTests(MirrorReadOnlyFixture):
     mirror-aware queryset in the codebase was correct and firing on nothing (B19).
     """
 
-    def test_the_attach_produced_exactly_the_five_expected_mirrors(self):
+    def test_the_attach_produced_exactly_the_eight_expected_mirrors(self):
         names = set(self._mirrors().values_list('task_name', flat=True))
         self.assertEqual(names, EXPECTED_MIRROR_NAMES)
-        self.assertEqual(self._mirrors().count(), 5)
+        self.assertEqual(self._mirrors().count(), 8)
 
-    def test_all_five_mirrors_are_refused_through_both_entry_points(self):
+    def test_all_eight_mirrors_are_refused_through_both_entry_points(self):
         for mirror in self._mirrors():
             assign_task_to(mirror, self.pm, notify=False)
             mirror.refresh_from_db()
@@ -437,11 +441,11 @@ class EveryMirrorOnARealSiteTests(MirrorReadOnlyFixture):
                         f'{mirror.task_name}: refused for the wrong reason')
                     self.assertEqual(self._ledger(mirror), [])
 
-    def test_the_seventeen_entered_tasks_are_not_caught_by_the_flag(self):
-        """The other side of the same claim: 22 tasks, 5 mirrors, 17 writable rows."""
+    def test_the_fifteen_entered_tasks_are_not_caught_by_the_flag(self):
+        """The other side of the same claim: 23 tasks, 8 mirrors, 15 writable rows."""
         entered = Task.objects.filter(phase__project=self.site, is_mirror=False)
-        self.assertEqual(entered.count(), 17)
-        self.assertEqual(Task.objects.filter(phase__project=self.site).count(), 22)
+        self.assertEqual(entered.count(), 15)
+        self.assertEqual(Task.objects.filter(phase__project=self.site).count(), 23)
 
 
 # ---------------------------------------------------------------------------

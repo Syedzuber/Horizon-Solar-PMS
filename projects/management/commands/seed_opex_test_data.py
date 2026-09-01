@@ -143,7 +143,7 @@ WRITES = [
     f'{len(DEMO_USERS)} demo users (@{DEMO_EMAIL_DOMAIN}) with a shared known password',
     f'{len(DEMO_WAREHOUSES)} StockLocation rows',
     f'1 OPEX Program ({PROGRAM_NAME!r}) with {len(OPEX_SITES)} sites, '
-    f'{len(ACTIVATED_SITE_CODES)} of them activated (7 phases / 22 tasks / 5 mirrors each)',
+    f'{len(ACTIVATED_SITE_CODES)} of them activated (7 phases / 23 tasks / 8 mirrors each)',
     f'1 Residential project ({RESIDENTIAL_PROJECT_ID}) activated with its full template',
     '2 DesignAssignments, 2 SiteGroups, 2 BOQs, 1 DeliveryChallan, 1 Issue',
     'the ActivityLog and StatusTransition rows those paths write on the way past',
@@ -387,7 +387,7 @@ class Command(BaseCommand):
         no extracted core, so the three field writes are replicated here EXACTLY as it
         performs them. The two things that actually produce the rows worth testing are
         real: `record_transition()` and `attach_opex_template()`, which is what gives
-        each site its 7 phases, 22 tasks and 5 mirrors.
+        each site its 7 phases, 23 tasks and 8 mirrors.
 
         Deliberately not replicated, because the view does not do them either: no
         PaymentMilestone rows and no calculate_due_dates(). OPEX due dates are set by

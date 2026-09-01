@@ -187,7 +187,15 @@ A **mirror** (`Task.is_mirror`) has its status derived from another object — a
 
 **METRICS, NOT VIEWS — the distinction is the rule's other half.** A site dashboard must still *show* its mirrors; displaying derived state is the entire reason they exist. The exclusion applies to counts, sums, percentages and gates. The three `{{ phase.tasks.count }}` captions in `project_overview.html` and `project_detail.html` are therefore **deliberately unfiltered** — each labels a table that lists every task, and filtering the caption would print "5 tasks" above seven rows. The one exception is a list that exists to itemise a metric — `tasks_drill_down` and the PM card's five-row blocked/overdue evidence lists — which must reconcile with the number it hangs off.
 
-**Progress denominators: mirrors leave the numerator AND the denominator** (decided 30 Aug, Option A). A 7-task phase holding 2 mirrors reads out of 5. The cost is accepted and stated: a phase can read 100% while its mirrors are still Not Started. The alternative stalls every OPEX site permanently, because COD, HOTO and As-Built have no source object in existence to complete them, and a percentage that can never reach 100 teaches people to ignore it.
+**Progress denominators: REVERSED FOR THE PER-PHASE BAR ON 1 SEP 2026 (prompt 1.5), and nowhere else.**
+
+The original decision (30 Aug, Option A) was that mirrors leave the numerator AND the denominator, so a 7-task phase holding 2 mirrors read out of 5. The stated cost was that a phase can read 100% while its mirrors are Not Started. **The cost that actually showed up was different, and it showed up on screen.** OPEX Phase 1 (`Design`) holds one task and it is a mirror; after prompt 1.5's template correction Phase 3 (`Procurement & Delivery`) holds four and all four are mirrors. Both rendered **"0/0 done" above an empty bar, while the card header three lines above printed "1 task" and "4 tasks"** — one phase, two numbers, neither wrong on its own terms and the pair unreadable.
+
+**The product decision: one mirror not updated is one task pending.** `project_overview`'s per-phase `phase_data_json` loop therefore counts mirrors in both halves, and Phase 3 reads **0/4**. The denominator now always equals the phase's own task count, which is what makes the bar and the card header agree.
+
+**THIS IS THE ONLY METRIC IN THE CODEBASE THAT COUNTS MIRRORS.** Overdue counts, per-user workload, the CEO department rollup, the project cards and every drill-down still exclude them through `human_owned_tasks_q()` / `is_human_owned()`, for the reason that has not changed: counting a mirror as somebody's work attributes another team's queue to the wrong person. **R-21 is untouched** — a mirror still never makes its phase current, so an OPEX site does not go back to reading "Design" forever (the bug B21 was written to fix). The carve-out is one loop, and the two `phase_data_json` keys it produces are listed in `ALLOWED_BROKEN_COUNTS` in `tests_mirror_metrics.py` with this reason, so the structural sweep still covers every other counter.
+
+**The originally-stated cost is now inverted and worth restating:** a mirrors-only phase can never reach 100% until derivation lands, because no human can close a mirror. That is accepted deliberately — it is a true statement about the site, and B27 records that the four delivery mirrors need both B-18 and SCM's catalogue mapping before any of them can move.
 
 **`current_phase` was explicitly NOT covered by this rule, and is now covered by its own — see R-21 below.** 1.3b left all four copies alone deliberately; prompt B21 consolidated them on 31 Aug 2026 and closed the deferral.
 
@@ -256,7 +264,7 @@ Assignments are **effective-dated rows**, never a foreign key on `Project`. Ther
 | Need | Existing model | Verified note |
 |---|---|---|
 | Execution phases and tasks | `ProjectPhase`, `Task` | **52** tasks across 9 phases for Residential ✔ — asserted at `utils.py:908` inside the atomic block, so a mismatch rolls back activation. 44 internal / 8 external. ~~**OPEX/CAPEX have no template at all**~~ — **superseded 30 Aug by 1.3a** (an OPEX template EXISTS as data) **and again 31 Aug by 1.3c** (`opex_site_activate` attaches it: **22** tasks across **7** phases, all Internal, **5 of them mirrors**). CAPEX still has none, and would need only a seeded template — `attach_opex_template()` resolves by `project.project_type` |
-| Task template | `TaskTemplate`, `TaskTemplatePhase`, `TaskTemplateTask` | **Built by 0.4** (migrations `0066`, `0067`). Versioned data — `RESIDENTIAL` v1 is 9 phases / 52 tasks. `attach_residential_template()` reads the active version at activation. **1.3a added `OPEX` v1** (migrations `0074`, `0075`): 7 phases / 22 tasks / 5 mirrors, active. **1.3c attaches it** — `_attach_task_template()` is now the one attach, wrapped by `attach_residential_template()` and `attach_opex_template()`, and it copies **seven** snapshots (`is_mirror` was the missing seventh — B19). See §14 and the subsection below |
+| Task template | `TaskTemplate`, `TaskTemplatePhase`, `TaskTemplateTask` | **Built by 0.4** (migrations `0066`, `0067`). Versioned data — `RESIDENTIAL` v1 is 9 phases / 52 tasks. `attach_residential_template()` reads the active version at activation. **1.3a added `OPEX` v1** (migrations `0074`, `0075`): 7 phases / **23 tasks / 8 mirrors**, active — corrected IN PLACE by prompt 1.5 to spec v1.5 §3 rather than bumped to a v2, see below. **1.3c attaches it** — `_attach_task_template()` is now the one attach, wrapped by `attach_residential_template()` and `attach_opex_template()`, and it copies **seven** snapshots (`is_mirror` was the missing seventh — B19). See §14 and the subsection below |
 | Task dependencies | `TaskTemplateTaskDependency`, `TaskDependency` | **Built by 1.4a** (migration `0073`), answering B-08. **Finish-to-Start only, no lag, no `dependency_type`** — all three are decisions, see §12. The template-side model is **content of a template version** (R-7, guarded through the shared `_require_draft_template()`); the instance-side model is the project's **own copy**, written at activation by `materialise_task_dependencies()`, with **no FK back to the template edge** — the copy is the point (B-10 restated for edges). Both refuse self-edges (a database `CHECK`, so `bulk_create()` cannot get past it), duplicate edges (`UniqueConstraint`), cross-scope edges and **cycles** (`DependencyCycle`, naming the closing edge). `on_delete=CASCADE` on both ends of `TaskDependency`, chosen rather than inherited — an edge whose task is gone has no subject left. **1.4a did NOT wire `materialise_task_dependencies()` into `attach_residential_template()`**, and **no template version authors any edge today**, so the predicate is empty everywhere in production until somebody authors one |
 | Task durations (superseded) | `TaskDurationTemplate` | `unique_together = ('project_type', 'task_name')` ✔ — **`phase_name` is stored and displayed but never matched on**. No version, no snapshot ✔. **Superseded by 0.4:** nothing reads it at runtime any more, its two editor screens are read-only and render the active `TaskTemplate`, and the table is deliberately not dropped. Do not repoint anything back at it |
 | Checklists | `Checklist`, `ChecklistItem`, `ChecklistTaskLink`, `ChecklistItemCompletion` | Linked by `(task_name, project_type)` string match ✔ — still, until 2.4. **Corrected 29 Aug by 0.5:** the completion now carries `item_text_snapshot`, and the item FK is nullable `SET_NULL`, not `CASCADE`. `Checklist` is versioned (`code`/`version_no`/`status`) and its content is immutable once active. See §15 |
@@ -276,14 +284,56 @@ Assignments are **effective-dated rows**, never a foreign key on `Project`. Ther
 
 **Read this before assuming an OPEX site does anything with these rows.** It does not.
 
-`OPEX` v1 is 7 phases and 22 tasks, seeded by migration `0075` from
-`docs/OPEX_task_template_spec.md` v1.2, created as a draft and activated at the end —
-the only order R-7's `save()` guard permits. All 22 are `Internal`, none is a payment
-milestone, and every `duration_days` is the field default of `1`.
+`OPEX` v1 is 7 phases and **23 tasks, 8 of them mirrors**, seeded by migration `0075`
+from `docs/OPEX_task_template_spec.md` **v1.5**, created as a draft and activated at the
+end — the only order R-7's `save()` guard permits. All 23 are `Internal`, none is a
+payment milestone, and every `duration_days` is the field default of `1`.
+
+**CORRECTED IN PLACE ON 1 SEP 2026 (prompt 1.5), AND v1 STAYS THE ONLY VERSION.** Spec
+v1.4 removed the two SCM inspections — an inspection at a vendor's works covers a
+consignment, not a site, so recording it once per site asks many people to record one
+event; phase 4.5 owns it — and split `Material Delivery` into four delivery mirrors
+(`Solar Panels`, `Inverters`, `BOS Kit`, `MMS`), reversing v1.1's collapse to one because
+material arrival is what a PM looks at first. That took the table from 22/5 to **23/8**.
+
+**Why this edited 0075's seed literal instead of seeding an OPEX v2, which R-7 would
+normally require.** R-7 freezes a version that is LIVE; this one never was. `origin/main`
+was at migration **0064**, and `0074`, `0075` and the whole execution phase had never been
+deployed — production had never held an OPEX template, an OPEX task, or an active project
+of any type. Seeding a v2 would archive a v1 that no site was ever attached to: a version
+record of something that never existed, shipped to a production that would then see a
+wrong template followed immediately by its correction. Editing the literal lets production
+see the right table once. The local upgrade path is `migrate projects 0074` then `migrate`,
+because `unseed_opex_v1` is a real reverse.
+
+**THE CONDITION IS NARROW AND NOT PERMANENT.** It is that no database except a developer
+machine has applied 0075. That was verified on 1 Sep 2026, not assumed. **If it ever stops
+holding, the answer flips back to a v2 bump and R-7 decides it, not convenience** — every
+later correction to this table is a new migration seeding OPEX v2 as a draft and activating
+it. `tests_opex_template_correction.py::OpexIsStillOneVersionTests` pins that there is
+exactly one OPEX version, so a v2 appearing later is a red test rather than a quiet drift.
+
+**Phase 1 and Phase 3 now BOTH hold only mirrors** — `Design` alone in Phase 1, the four
+delivery mirrors in Phase 3. Neither can ever be a site's current phase under R-21, because
+"current" means the first phase still holding a human-owned task that is not Done and a
+mirror is nobody's work. Their progress bars read `0/1` and `0/4` and cannot reach 100%
+until derivation lands (B27). A fresh OPEX site's current phase is therefore
+`Approvals (Pre-Installation)`.
+
+**The current-phase WALK is now five phases, not six.** With Phase 3 joining Phase 1 as
+all-mirror, closing `Approvals (Pre-Installation)` advances a site straight to
+`Installation`. R-21's implementation is unchanged — this is the template moving under it —
+and `tests_current_phase.py` was updated to match. **No OPEX phase between Pre-Approvals and
+Installation is ever presented as the site's current work**, which is correct: there is no
+human work there to present.
+
+**A consequence of removing the inspections:** SCM's only entered tasks went with them, so
+**SCM and Design each own mirrors and nothing else** — no SCM or Design person has an
+actionable task on an OPEX site. Recorded in `EXECUTION_MODULE_DEFERRED.md` §B27.
 
 ~~**Nothing attaches it.**~~ **SUPERSEDED 31 Aug 2026 by prompt 1.3c — see "OPEX
 activation" below.** `attach_opex_template()` attaches it, `opex_site_activate` calls
-that, and an activated OPEX site really is 7 phases and 22 tasks. `project_activate` is
+that, and an activated OPEX site really is 7 phases and 23 tasks. `project_activate` is
 untouched and still does all three of the things named here — that is the point: OPEX
 does not go through it.
 
@@ -360,7 +410,7 @@ the Residential path not merely guarded but untouched.
 | URL | `…/activate/` | `…/activate-site/` |
 | Authority | `_pm_owns_project()` → `user_can_manage_project()` | the same, unchanged (R-13) |
 | Designer required | **yes** | **no** — design allocation lives on `DesignAssignment.assigned_to`, which that gate does not read |
-| Template attached | `RESIDENTIAL` v1 — 9 phases / 52 tasks | `OPEX` v1 — 7 phases / 22 tasks / **5 mirrors** |
+| Template attached | `RESIDENTIAL` v1 — 9 phases / 52 tasks | `OPEX` v1 — 7 phases / 23 tasks / **8 mirrors** |
 | `PaymentMilestone` | M1/M2/M3 created | **none** |
 | `record_transition` | `to_status='Active'`, `reason_code=''` | same, `reason_code=REASON_EXECUTION_STARTED` |
 | Second activation | refused (`status != 'Draft'`) | refused, identically |
@@ -474,7 +524,7 @@ If a prompt appears to require one of these, **stop and ask**. Do not build a sm
 | B-06 | Does a PM rejection of a design package open a design attempt, and under which reason? | 3.2 |
 | B-07 | Who may mark a drawing not-applicable — designer, or Design Head at review? | 3.1 |
 | ~~B-08~~ | ~~Can a site override a template task dependency?~~ **CLOSED 30 Aug 2026 — answered by the product owner and built at the model layer by prompt 1.4a.** The answer is **yes, by anyone, with a mandatory reason and a warning — no hard block and no role gate.** A dependent task may be started early; the system says what is being jumped and refuses to record it without a stated reason, and then allows it. Deliberately **not** a PM-only waiver and **not** a refusal: site sequence slips for reasons the template cannot know about, and a hard block would be routed around by marking the predecessor Done, which destroys the record the block existed to protect. The reason text is the deliverable — an override nobody explained is the failure mode, not an override itself. **What 1.4a built:** `TaskTemplateTaskDependency` and `TaskDependency` (migration `0073`), and `incomplete_predecessors()` in `projects/task_dependencies.py`, whose docstring *is* the design — *"Read-only. Empty result means nothing blocks a normal start. A non-empty result does NOT forbid the start."* **What is not built yet is the enforcement half — the warning and the mandatory reason on the status-change path — which is 1.4b**, tracked in `EXECUTION_PROMPT_LOG.md` rather than here, because the *question* is settled and only the wiring remains. **The way this decision gets undone is a future session reading the word "dependency" and adding a block**; `tests_task_dependencies.PredicateReportsNeverRefusesTests.test_incomplete_predecessors_returns_rather_than_raises` exists to fail loudly when one does. | — |
-| ~~B-09~~ | ~~Final phase and task list for the execution template (Residential is 52 tasks / 9 phases; OPEX has none).~~ **CLOSED 31 Aug 2026 across prompts 1.3a–1.3c.** Residential is 52/9; **OPEX is 22 tasks across 7 phases**, signed off by the Tenders team as `docs/OPEX_task_template_spec.md` v1.3, seeded by migration `0075` and attached by `opex_site_activate`. What is *not* settled and is not this question: the **durations**, which are all the field default of 1 (B18) and are a template version bump when the team supplies them. CAPEX has no list and no template. | — |
+| ~~B-09~~ | ~~Final phase and task list for the execution template (Residential is 52 tasks / 9 phases; OPEX has none).~~ **CLOSED 31 Aug 2026 across prompts 1.3a–1.3c.** Residential is 52/9; **OPEX is 23 tasks across 7 phases, 8 of them mirrors**, signed off by the Tenders team as `docs/OPEX_task_template_spec.md` v1.5, seeded by migration `0075` (corrected in place by prompt 1.5, not bumped to a v2) and attached by `opex_site_activate`. What is *not* settled and is not this question: the **durations**, which are all the field default of 1 (B18) and are a template version bump when the team supplies them. CAPEX has no list and no template. | — |
 | ~~B-10~~ | ~~What happens to an in-flight project when its template is upgraded?~~ **CLOSED 28 Aug 2026 by prompt 0.4 — see §14.** The answer is *nothing*, and it is structural rather than a matter of policy: `Task.task_name`, `assigned_role`, `task_type`, `duration_days` and `is_payment_milestone` are **copies taken at `bulk_create`**, not reads through a foreign key, so an in-flight project holds its own rows and cannot be reached by a later version. Publishing v2 changes what the *next* activation produces and nothing else. `tests_task_template.InFlightProjectIsolationTests` proves it, and guards the one thing that would reopen the question — a code path resolving a task's name, role or duration *through* `Task.template_task`, which is provenance only. | — |
 | B-12 | Who may waive a punch point, and does it need senior approval? **ANSWERED 30 Aug 2026 by the product owner — RECORDED, NOT CLOSED. It stays open until 2.3 builds it.** **The PM alone waives, at any severity, with no second signature.** Explicitly: **no severity threshold** — a critical punch point is waived by the same person and the same act as a trivial one, because a threshold only moves the argument to what counts as critical; and **no counter-signature** — there is no second approver role, and none is to be invented. The PM owns the site and the waiver is recorded against their name. Note this does **not** make the waiver a QA/QC act: `is_qaqc` grants raising a punch point and recording a verdict, never waiving one. | 2.3 |
 | ~~B-14~~ | ~~How many warehouses, and how are keepers assigned to them?~~ **CLOSED 30 Aug 2026 by the product owner, built by prompt 1.2a.** **Three warehouses today — and the count must not be structural.** That is the substance of the answer, not a footnote to it: warehouses are **rows in `StockLocation`**, added through a screen when 4.1 builds one. Not a `choices` list, not a settings constant, not seeded by a migration — each of those spellings would make a fourth warehouse a code change and a deploy. **1.2a therefore seeds nothing**; entering the three that exist is a data task for the product owner. **One keeper per warehouse** (`StockLocation.keeper`, a single FK, not an M2M), and the FK is deliberately **not unique** — nothing says one person cannot cover two buildings, and on a three-warehouse operation with someone on leave they will. **Authority follows the warehouse, not the tender:** a keeper acts on everything inside their building — receiving, holding, issuing — whatever programme or tender paid for it, and on nothing inside any other building. This matches how SCM already works, where material lands at one shared drop point and cost is attributed **at issue, not at receipt**; a keeper who could only touch their own tender's material could not sign for the lorry that brought all of it. `is_warehouse_keeper` is a **flag on `UserProfile`**, not a role (R-15, §4). **Still open beside this: B-19** — who confirms a GRN — which is a process question about the same person and is not answered here. | — |
@@ -601,6 +651,10 @@ Found by 0.2a, read from source. None is one of the fifteen findings in `ACCESS_
 | **31 Aug** | **AUTO-SCHEDULING IS NOT IN OPEX v1. Due dates are set MANUALLY, per task, by the PM.** Not a gap and not a deferral of work — a product decision, recorded in full at §16 below. 1.3c stopped activation from computing dates; B18 closes the two paths that could still compute them onto an already-activated site, `project_recalculate_dates` and `enable_cascade_scheduling`, both refusing `project_type != 'Residential'` in the view and (for the one that renders) in the template. **Residential keeps the cascade exactly as it is.** The condition under which this changes is named and singular: real durations supplied by the Tenders team and seeded as an **OPEX v2 template version** (R-7). |
 | **31 Aug** | **`enable_cascade_scheduling` is refused for OPEX too, and it is the door that mattered.** B18 as written named only the *Recalculate dates* control. That control renders in **no template** and never did — its exposure was the view accepting a direct POST. The cascade control **does** render, is reachable by any assigned PM once the Admin flips `SystemSettings.cascade_scheduling_enabled`, is **irreversible by design**, and once on makes `task_set_due_date` refuse every non-PM role owner outright. Nine of the 22 OPEX tasks are the Site Engineer's. Turning it on would have permanently deleted the only scheduling a tender site has — a worse outcome than one bad recalculation, and undoable by nothing. The system-wide switch defaulting `False` made it latent, not safe. |
 | **31 Aug** | **`Task.is_mirror` is not editable in the Django admin (B26).** A `Task`'s mirror flag is a snapshot copied from the template at activation, not a property; the admin was the one path by which a Residential task could be given the flag and a Finance sync could then write past a read-only row through `filter().update()`. Same mechanism as B9's `status` and recorded in §13. **`TaskTemplateTaskAdmin` is untouched** — the flag on a *template* row is template authoring. |
+| **1 Sep** | **The OPEX template is corrected IN PLACE in migration 0075 — 23 tasks, 8 mirrors — and there is no OPEX v2.** Spec v1.4 removed the two SCM inspections (a vendor inspection covers a consignment, not a site; phase 4.5 owns it) and split `Material Delivery` into four delivery mirrors. R-7 would normally make that a version bump, and it does not here **because R-7 freezes a version that is LIVE and this one never was**: `origin/main` was at migration **0064**, `0074`/`0075` had never been deployed, and production had never held an OPEX template, an OPEX task or an active project of any type. A v2 would archive a v1 no site was ever attached to and ship production a wrong table followed by its correction. **The condition is narrow and not permanent — if any non-developer database ever applies 0075, the answer flips back to a v2 bump and R-7 decides it, not convenience.** `tests_opex_template_correction.py::OpexIsStillOneVersionTests` pins the single version so a later v2 is a red test, not a quiet drift. |
+| **1 Sep** | **The per-phase progress bar COUNTS mirrors — the one carve-out of R-20 in the codebase.** Phase 1 and Phase 3 both hold only mirrors and rendered "0/0 done" above an empty bar while their own card headers said "1 task" and "4 tasks". The decision is that **one mirror not updated is one task pending**, so Phase 3 reads `0/4` and every denominator now equals the phase's task count. **Scoped to that one loop:** overdue, per-user workload, the CEO rollup and every drill-down still exclude mirrors, and **R-21 is untouched** so a mirror still never makes its phase current (the B21 bug does not return). The two `phase_data_json` keys are listed in `ALLOWED_BROKEN_COUNTS` with the reason, so the structural sweep still covers every other counter. **Accepted cost:** a mirrors-only phase can never reach 100% until derivation lands (B27). |
+| **1 Sep** | **The Payment Milestones card is Residential-only, and `milestone_create` grew the matching guard.** The card was gated on ROLE alone, so an OPEX site rendered "No milestones yet" above a **Create M1 / M2 / M3** button for the exact rows `opex_site_activate` refuses to mint — the screen offering what the backend declines. The whole card is hidden, not just the button, because a card reading "No milestones yet" implies there should be some. **The endpoint was guarded too:** a hidden control is not a disabled one, and `milestone_create` is reachable by POST from a stale tab regardless of what the template renders. The "285 milestone rows already on tender sites" that an earlier reading held back for **do not exist** — spec v1.5 §2a establishes 285 was the A-1.3 audit's *projection*, not a count. |
+| **1 Sep** | **A mirror row is marked on screen, and the marker is NOT the guard.** Eight rows per OPEX site never change status and the page gave no reason. The task row now carries a `Derived` badge naming the cause (its status is owned elsewhere) rather than the symptom (it is disabled), and the status `<select>` is not rendered at all — a mirror falls through to the read-only badge branch that already existed. **B22's refusal in `_apply_task_status_change()` is unchanged and no second check was added in the view**; `tests_opex_template_correction.py::TheRefusalIsUnchangedTests` assigns every mirror and posts to both entry points to prove the refusal, not the markup, is what says no. This is the premortem's second risk arriving from the other direction and being answered. |
 | **31 Aug** | **`REASON_EXECUTION_STARTED` added, and deliberately NOT retrofitted onto the Residential activation.** OPEX's ledger row names its event; `project_activate`'s keeps writing `reason_code=''`. A new value in a column that path has never written is a behaviour change, however small, and that path is the one pinned byte-for-byte. Cost nothing structural — `reason_code` carries no `choices=`, exactly as the note beside the constants promised, so no migration. |
 | **31 Aug** | **"Current phase" is consolidated into `utils.current_phase()` and excludes mirrors (R-21).** Four copies became one. The trigger was not tidiness: OPEX Phase 1 is `Design`, its only task is a mirror with no derivation hook, so every OPEX site displayed "Design" as its current phase permanently on all four screens. Residential carries no mirror at all and is unmoved. |
 | **31 Aug** | **The empty case is the LAST PHASE HOLDING A HUMAN-OWNED TASK — chosen over `None` and over "the last phase".** The four copies disagreed here already: `models.py` and `dashboard_bd` returned `None`, the PM and SE dashboards returned the last phase, so a finished Residential project read "Finance Closure" on one screen and "—" on another. The chosen answer equals the old PM/SE answer for both templates shipping today, so the two most-used screens do not move; it differs only for a template ending in an all-mirror phase, and it never names a phase in which no human had anything to do. |
@@ -1027,9 +1081,9 @@ time, by the PM.** Residential is unchanged and keeps the cascade exactly as it 
 
 ### Why
 
-Every one of the 22 tasks in the OPEX v1 template carries `duration_days`'s field **default of
+Every one of the 23 tasks in the OPEX v1 template carries `duration_days`'s field **default of
 1**. That is a placeholder, not a measurement: the spec (§5) leaves the durations to the team
-and the team has not supplied them. All 22 are also `Internal`, and `calculate_due_dates()`
+and the team has not supplied them. All 23 are also `Internal`, and `calculate_due_dates()`
 chains Internal tasks strictly one calendar day apart off `activated_at`, with
 `add_calendar_days()` not skipping weekends. So any bulk computation puts:
 
@@ -1037,9 +1091,9 @@ chains Internal tasks strictly one calendar day apart off `activated_at`, with
 |---|---|
 | Design | `activated_at + 1` |
 | … | … |
-| **HOTO** | **`activated_at + 22`** |
+| **HOTO** | **`activated_at + 23`** |
 
-A site activated on 31 Aug 2026 reads HOTO due 22 Sep and is entirely overdue by early October.
+A site activated on 31 Aug 2026 reads HOTO due 23 Sep and is entirely overdue by early October.
 Across 95 tender sites that is not a slightly-wrong schedule — it is a specific false claim made
 95 times, and the likely reaction to a portfolio that goes fully overdue within a month is to
 **stop trusting the overdue number**, not to fix the durations. A NULL due date says "not
@@ -1105,7 +1159,7 @@ names this section as the thing to reconsider.
 ### Two things this did NOT do
 
 - **`compute_gantt_schedule()` still reads `duration_days`** and will render an OPEX site as a
-  22-day bar chart the moment a tender Gantt is wired. The refusals stop dates being *written*;
+  23-day bar chart the moment a tender Gantt is wired. The refusals stop dates being *written*;
   they do not stop the placeholder being *read*. That is the live half of the rewritten B18 in
   `EXECUTION_MODULE_DEFERRED.md`, and its trigger is *before anything reads `duration_days` on
   an OPEX task*.
@@ -1147,4 +1201,4 @@ instructions:
   caller and there must not be one.**
 
 What the seed could not build through a real code path is a set of **product** findings, not
-tooling notes, and they are in `EXECUTION_MODULE_DEFERRED.md` §B23.
+tooling notes, and they are in `EXECUTION_MODULE_DEFERRED.md` §B27.

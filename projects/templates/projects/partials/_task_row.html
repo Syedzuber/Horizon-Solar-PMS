@@ -22,7 +22,26 @@ Expected context:
     data-attachment-count="{{ task.active_attachment_count }}">
   <td class="text-muted small">{{ task.task_order }}</td>
   <td><a href="{% url 'task_detail' project.project_id task.pk %}"
-         class="text-decoration-none text-body small">{{ task.task_name }}</a></td>
+         class="text-decoration-none text-body small">{{ task.task_name }}</a>
+    {% if task.is_mirror %}
+      {% comment %}A MIRROR SAYS WHY IT CANNOT BE EDITED, not merely that it is special.
+
+         Eight rows on an OPEX site never change status and, until this, the page gave
+         no reason — the first PM to notice files it as a bug. The badge names the cause
+         (the status is derived elsewhere) rather than the symptom (it is disabled),
+         because "Derived" is answerable and "Read-only" invites "by whom?".
+
+         PRESENTATION ONLY. The guarantee is B22's check at rung 0 of
+         `_apply_task_status_change()`, which refuses a human write on is_mirror for both
+         entry points. Nothing here is a permission check and no second check was added
+         in the view — if this badge were deleted the refusal would be unchanged.{% endcomment %}
+      <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-1"
+            style="font-size:.62rem;font-weight:500;vertical-align:middle;"
+            title="Derived from the workspace that owns this work — its status updates itself and cannot be set here.">
+        <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
+      </span>
+    {% endif %}
+  </td>
   <td class="small">
     {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
     {% else %}<span class="text-muted">Unassigned</span>{% endif %}
@@ -49,7 +68,12 @@ Expected context:
     {% endif %}
   </td>
   <td>
-    {% if is_assigned_pm or user_task_role == task.assigned_role %}
+    {% comment %}`not task.is_mirror` added by prompt 1.5. A mirror falls through to the read-only
+       badge branch below, which already existed for people who may look but not edit —
+       so the status control is never rendered for one, rather than rendered and then
+       refusing on submit. NO NEW MARKUP and no new branch: the disabled-select and
+       due-date-prompt logic below is untouched for every other row.{% endcomment %}
+    {% if not task.is_mirror and is_assigned_pm or not task.is_mirror and user_task_role == task.assigned_role %}
       <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline"
             hx-post="{% url 'task_status_update' project.project_id task.pk %}"
             hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">

@@ -16,7 +16,7 @@ bootstrapped the way the rest of the suite gets it, through
 `resolve_residential_template()`.
 
 EXPECTED_PHASES below is a SECOND, INDEPENDENT TRANSCRIPTION of
-docs/OPEX_task_template_spec.md v1.2 §3. Migration 0075 holds the first. Two
+docs/OPEX_task_template_spec.md v1.5 §3. Migration 0075 holds the first. Two
 transcriptions is the whole point — a typo in one fails against the other, where a test
 that imported the migration's own data would agree with any typo it contained.
 """
@@ -42,10 +42,14 @@ EXPECTED_PHASES = [
         (1, 'Net Metering Approval', 'PM', False),
         (2, 'CEIG Approval',         'PM', False),
     ]),
+    # Spec v1.5 §3: the two inspections are GONE (a consignment inspection is not a
+    # site task — phase 4.5 owns it) and Material Delivery split into four. This phase
+    # now holds only mirrors, which is why it can never be a current phase under R-21.
     ('Procurement & Delivery', 3, [
-        (1, 'Inspection — Factory / Vendor',          'SCM', False),
-        (2, 'Inspection — Post-Delivery / Unloading', 'SCM', False),
-        (3, 'Material Delivery',                      'SCM', True),
+        (1, 'Delivery — Solar Panels', 'SCM', True),
+        (2, 'Delivery — Inverters',    'SCM', True),
+        (3, 'Delivery — BOS Kit',      'SCM', True),
+        (4, 'Delivery — MMS',          'SCM', True),
     ]),
     ('Installation', 4, [
         (1, 'Civil Work and MMS Installation',     'Site Engineer', False),
@@ -73,11 +77,17 @@ EXPECTED_PHASES = [
     ]),
 ]
 
-# The five the spec names. Asserted BY NAME, not by count — a count of 5 passes
-# perfectly well when the wrong five rows are flagged.
+# The eight the spec names. Asserted BY NAME, not by count — a count of 8 passes
+# perfectly well when the wrong eight rows are flagged.
 EXPECTED_MIRROR_NAMES = {
     'Design',
-    'Material Delivery',
+    # Material Delivery split into these four in spec v1.4 (kept by v1.5), reversing
+    # v1.1's collapse to one. All four read Not Started until B-18 and SCM's catalogue
+    # mapping both land — neither alone is sufficient.
+    'Delivery — Solar Panels',
+    'Delivery — Inverters',
+    'Delivery — BOS Kit',
+    'Delivery — MMS',
     'COD',
     'As-Built Drawings',
     'HOTO',
@@ -143,7 +153,7 @@ class OpexTemplateBase(TestCase):
 # --- Task 3.1 – 3.4 --------------------------------------------------------------
 
 class OpexTemplateShapeTests(OpexTemplateBase):
-    """The seeded template matches docs/OPEX_task_template_spec.md v1.2, row for row."""
+    """The seeded template matches docs/OPEX_task_template_spec.md v1.5, row for row."""
 
     def test_opex_v1_exists_and_is_active(self):
         template = _opex_v1()
@@ -155,12 +165,12 @@ class OpexTemplateShapeTests(OpexTemplateBase):
             'activate() stamps effective_from; a null one would mean the row was '
             'created active instead of being flipped from draft.')
 
-    def test_exactly_seven_phases_and_twenty_two_tasks(self):
+    def test_exactly_seven_phases_and_twenty_three_tasks(self):
         template = _opex_v1()
         self.assertEqual(
             TaskTemplatePhase.objects.filter(template=template).count(), 7)
         self.assertEqual(
-            TaskTemplateTask.objects.filter(phase__template=template).count(), 22)
+            TaskTemplateTask.objects.filter(phase__template=template).count(), 23)
 
     def test_every_phase_and_task_matches_the_spec(self):
         """Names, order, roles and mirror flags — the whole table, in order."""
@@ -195,7 +205,7 @@ class OpexTemplateShapeTests(OpexTemplateBase):
             with self.subTest(task=task.label):
                 self.assertIn(task.assigned_role, VALID_OPEX_ROLES)
 
-    def test_exactly_the_five_named_tasks_are_mirrors(self):
+    def test_exactly_the_eight_named_tasks_are_mirrors(self):
         """Task 3.3. By name, and both directions — nothing missing, nothing extra."""
         tasks = TaskTemplateTask.objects.filter(phase__template=_opex_v1())
 
@@ -203,7 +213,7 @@ class OpexTemplateShapeTests(OpexTemplateBase):
         self.assertEqual(
             {t.label for t in tasks if not t.is_mirror},
             {t.label for t in tasks} - EXPECTED_MIRROR_NAMES)
-        self.assertEqual(tasks.filter(is_mirror=True).count(), 5)
+        self.assertEqual(tasks.filter(is_mirror=True).count(), 8)
 
     def test_every_mirror_carries_an_owning_role(self):
         """Task 3.4, and the A-1.3 audit's trap behind it: both status views refuse an
@@ -211,7 +221,7 @@ class OpexTemplateShapeTests(OpexTemplateBase):
         owner would make 1.3c's refusal test pass without proving the refusal exists."""
         mirrors = TaskTemplateTask.objects.filter(
             phase__template=_opex_v1(), is_mirror=True)
-        self.assertEqual(mirrors.count(), 5, 'fixture sanity')
+        self.assertEqual(mirrors.count(), 8, 'fixture sanity')
 
         for task in mirrors:
             with self.subTest(task=task.label):

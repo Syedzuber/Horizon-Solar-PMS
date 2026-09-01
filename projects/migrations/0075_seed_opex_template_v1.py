@@ -1,12 +1,32 @@
 # Prompt 1.3a — seed the OPEX execution task template as OPEX v1.
 #
-# The template exists as versioned data and NOTHING ATTACHES IT. `project_activate`
-# still refuses OPEX sites, still mints Residential milestones, and still resolves only
-# the RESIDENTIAL template; prompt 1.3c changes all three. Until then this is 7 phases
-# and 22 rows nothing reads. `is_mirror` is likewise inert — the human-write refusal is
-# 1.3c's (in `_apply_task_status_change()`) and the counter exclusion is 1.3b's.
+# CORRECTED IN PLACE BY PROMPT 1.5 to docs/OPEX_task_template_spec.md v1.5 §3:
+# 7 phases, 23 tasks, 8 mirrors. The two inspections left Phase 3 and Material Delivery
+# split into four. THE SEED LITERAL WAS EDITED RATHER THAN SUPERSEDED BY AN OPEX v2, and
+# that is a departure from R-7 that spec §6 argues and this comment records, because the
+# next person to change this table must know which rule applies to them.
 #
-# Transcribed verbatim from docs/OPEX_task_template_spec.md v1.2 §3 — same names, same
+# R-7 FREEZES A VERSION THAT IS LIVE. THIS ONE NEVER WAS. `origin/main` is at migration
+# 0064; 0074, 0075 and the whole execution phase have never been deployed, so no database
+# but a developer's has ever applied this migration and production has never held an OPEX
+# template, an OPEX task, or an active project of any type. Seeding a v2 would archive a
+# v1 that no site was ever attached to — a version record of something that never existed
+# — and ship production a wrong template followed by its correction, when it can see the
+# right one once. A local re-seed is `migrate projects 0074` then `migrate`, because
+# `unseed_opex_v1` below is a real reverse.
+#
+# THE CONDITION IS NARROW AND IT IS NOT PERMANENT. It is that no database except a
+# developer machine has applied 0075. That held on 1 Sep 2026 and was verified, not
+# assumed. IF IT EVER STOPS HOLDING, THE ANSWER FLIPS BACK TO A v2 BUMP and R-7 decides
+# it, not convenience — every later correction to this table is a new migration seeding
+# OPEX v2 as a draft and activating it, exactly as TaskTemplate.activate() is built for.
+#
+# The template is attached by `opex_site_activate` (1.3c), which resolves the ACTIVE OPEX
+# version — so correcting this literal is what a fresh activation gets. `is_mirror` is
+# read by the human-write refusal in `_apply_task_status_change()` (B22) and by the
+# counter exclusion (1.3b).
+#
+# Transcribed verbatim from docs/OPEX_task_template_spec.md v1.5 §3 — same names, same
 # order, same owning roles, is_mirror per the M/E column. projects/tests_opex_template.py
 # holds a SECOND, INDEPENDENT transcription of the same table and asserts the seeded rows
 # against it, so a typo here fails a test rather than shipping.
@@ -32,11 +52,11 @@ OPEX_TEMPLATE_LABEL = 'OPEX Execution'
 # decides per task later."), so every task takes the duration_days field default of 1.
 #
 # WHAT THAT PRODUCES, stated because it is a real hazard and 1.3c owns it:
-# calculate_due_dates() chains INTERNAL tasks sequentially off activated_at, and all 22
-# of these are Internal — so if 1.3c calls it, the last task (HOTO) falls due
-# activated_at + 22 calendar days and every OPEX site reads as a 22-day project, going
-# overdue en masse within a month. Nothing calls it for OPEX today. See
-# EXECUTION_MODULE_DEFERRED.md §B.
+# calculate_due_dates() chains INTERNAL tasks sequentially off activated_at, and all 23
+# of these are Internal — so if it were called, the last task (HOTO) falls due
+# activated_at + 23 calendar days and every OPEX site reads as a 23-day project, going
+# overdue en masse within a month. `opex_site_activate` deliberately does NOT call it.
+# See EXECUTION_MODULE_DEFERRED.md §B.
 OPEX_DEFAULT_DURATION_DAYS = 1
 
 
@@ -70,17 +90,31 @@ def build_opex_phases():
         {
             'phase_name': 'Procurement & Delivery',
             'phase_order': 3,
+            # THE TWO INSPECTIONS THAT STOOD HERE ARE REMOVED (spec v1.4, kept by v1.5).
+            # An inspection at a vendor's works covers a CONSIGNMENT, not a site, so
+            # recording it once per site asks 95 people to record one event. SCM and
+            # inventory own it at phase 4.5. Do not re-add them here.
+            #
+            # MATERIAL DELIVERY SPLITS INTO FOUR, reversing v1.1's collapse to one: a PM
+            # reads material arrival first, and one undifferentiated row does not say
+            # whether panels have landed or only cable. The reason for v1.1's collapse
+            # has NOT gone away — all four read Not Started until B-18 lands and SCM maps
+            # the catalogue, and four rows now is honest structure, not more information.
+            #
+            # Derivation, once it exists: DCLineItem accepted quantity against the site
+            # BOQ via the BOQItem FK (B-18). Not Started = none accepted · In Progress =
+            # some, below BOQ · Done = accepted >= BOQ. Damaged excluded.
+            #
+            # THE MAPPING IS FURTHER AWAY THAN THE SPLIT MAKES IT LOOK. Of the 207 OPEX
+            # catalogue rows (migration 0057), these four buckets match Module, Inverter,
+            # BOS and MMS — 52 rows. 155 map to nothing. Both dependencies are recorded
+            # as ONE entry in EXECUTION_MODULE_DEFERRED.md §B27, because neither alone is
+            # sufficient.
             'tasks': [
-                # Both inspections entered; no inspection record until phase 4.5.
-                {'task_order': 1, 'task_name': 'Inspection — Factory / Vendor',           'assigned_role': 'SCM', 'task_type': 'Internal'},
-                {'task_order': 2, 'task_name': 'Inspection — Post-Delivery / Unloading',  'assigned_role': 'SCM', 'task_type': 'Internal'},
-                # ONE task covering all materials. DCLineItem accepted quantity against
-                # the site BOQ via the BOQItem FK (B-18): Not Started = none accepted ·
-                # In Progress = some, below BOQ · Done = accepted >= BOQ. Damaged
-                # excluded. Reads Not Started until B-18 lands, deliberately. Expands to
-                # six once SCM maps all 207 OPEX catalogue items to buckets — 120 map to
-                # none today and no category is named RMS.
-                {'task_order': 3, 'task_name': 'Material Delivery',                        'assigned_role': 'SCM', 'task_type': 'Internal', 'is_mirror': True},
+                {'task_order': 1, 'task_name': 'Delivery — Solar Panels', 'assigned_role': 'SCM', 'task_type': 'Internal', 'is_mirror': True},
+                {'task_order': 2, 'task_name': 'Delivery — Inverters',    'assigned_role': 'SCM', 'task_type': 'Internal', 'is_mirror': True},
+                {'task_order': 3, 'task_name': 'Delivery — BOS Kit',      'assigned_role': 'SCM', 'task_type': 'Internal', 'is_mirror': True},
+                {'task_order': 4, 'task_name': 'Delivery — MMS',          'assigned_role': 'SCM', 'task_type': 'Internal', 'is_mirror': True},
             ],
         },
         {

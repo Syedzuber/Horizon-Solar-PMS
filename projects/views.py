@@ -70,8 +70,14 @@ from .utils import (
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
     # Prompt 1.3b — the metric chokepoint (R-20). Every task COUNT below goes through
-    # one of these two; task LISTS deliberately do not.
-    human_owned_tasks_q, is_human_owned,
+    # it; task LISTS deliberately do not.
+    #
+    # `is_human_owned` — the row-at-a-time form — is NO LONGER IMPORTED HERE. Its only
+    # caller in this module was project_overview's per-phase progress loop, and prompt
+    # 1.5 made that loop count mirrors on purpose (the one carve-out of R-20; see the
+    # comment at the loop). The helper is still exported by utils and still used by
+    # utils.current_phase() for R-21 — it is unused HERE, not dead.
+    human_owned_tasks_q,
     # Prompt B21 — the ONE implementation of "current phase" (R-21), mirrors
     # excluded. Aliased because all three dashboards below already use
     # `current_phase` as a local name. Never recompute this inline.
@@ -6775,6 +6781,31 @@ def milestone_create(request, project_id):
     if not _pm_owns_project(request, project):
         raise Http404
 
+    # M1/M2/M3 ARE RESIDENTIAL. Prompt 1.5.
+    #
+    # `opex_site_activate` deliberately mints no milestones (spec v1.5 §2a) — M1 On
+    # Survey Completion / M2 On Material Supply / M3 On Commissioning describe a
+    # three-milestone residential contract, not a tender. This view is that decision's
+    # blind spot: it is the manual fallback for projects activated before milestones
+    # existed, and it checked POST and PM ownership and nothing else, so a PM could put
+    # the exact three rows onto a tender site that activation refuses to create.
+    #
+    # THE TEMPLATE HIDING THE CARD IS NOT THIS CHECK. project_overview.html stops
+    # rendering the card and its Create button for a non-Residential project in the same
+    # prompt, but a hidden control is not a disabled one — this endpoint is reachable by
+    # POST from a stale tab, a bookmarked form or curl. The refusal has to be here.
+    #
+    # A redirect with a message, not a 404: the project is real and the actor is its PM,
+    # so the honest answer is "this does not apply to this kind of project", not
+    # "no such thing".
+    if project.project_type != 'Residential':
+        messages.error(
+            request,
+            f'Payment milestones M1/M2/M3 describe a Residential contract and do not '
+            f'apply to a {project.project_type} project.'
+        )
+        return redirect('project_overview', project_id=project_id)
+
     if not project.milestones.exists():
         milestone_defaults = [
             ('M1', 'On Survey Completion'),
@@ -7435,13 +7466,35 @@ def project_overview(request, project_id):
             tasks = list(phase.tasks.all())
             if not tasks:
                 continue
-            # Per-phase progress bar. Mirrors out of numerator and denominator (R-20,
-            # Option A) — a 7-task phase holding 2 mirrors reads out of 5. `phases`
-            # itself is NOT filtered: the task TABLE below this bar still lists every
-            # task including mirrors, which is the whole point of them. Only the
-            # metric drops them, which is why the filter is here and not on the
-            # queryset above.
-            countable     = [t for t in tasks if is_human_owned(t)]
+            # Per-phase progress bar. MIRRORS ARE COUNTED HERE — a deliberate, narrow
+            # carve-out of R-20 taken by prompt 1.5, and the ONLY metric in the codebase
+            # that counts them.
+            #
+            # WHY. This bar answers "how much of this phase is finished", and an
+            # undelivered consignment is unfinished work whoever is responsible for
+            # recording it. Excluding mirrors made a phase holding only mirrors read
+            # "0/0 done" above an empty bar — OPEX Phase 1 (Design) and now Phase 3
+            # (the four delivery mirrors) both do — while the card header three lines
+            # above it says "4 tasks". One phase, two numbers, neither wrong on its own
+            # terms. Counting them gives "0/4 done": one mirror not updated is one task
+            # pending, which is what a PM reading the bar actually wants to know.
+            #
+            # WHAT THIS DOES NOT CHANGE, because the reasons R-20 exists are still true
+            # everywhere else. Overdue counts, per-user workload and every dashboard
+            # counter still exclude mirrors through `human_owned_tasks_q()` /
+            # `is_human_owned()` — counting a mirror as somebody's work attributes
+            # another team's queue to the wrong person, and no filter here touches that.
+            # R-21 (`utils.current_phase()`) is likewise unchanged: a mirror still never
+            # makes its phase current, so an OPEX site does not go back to reading
+            # "Design" forever, which is the bug B21 was written to fix.
+            #
+            # `phases` itself is NOT filtered and never was: the task TABLE below this
+            # bar lists every task including mirrors, which is the whole point of them.
+            #
+            # tests_mirror_metrics.py pins this from both sides — the behavioural test
+            # asserts the bar now counts the pair, and the structural sweep carries the
+            # two phase_data_json keys in ALLOWED_BROKEN_COUNTS with this reason.
+            countable      = tasks
             internal       = [t for t in countable if t.task_type == 'Internal']
             internal_done  = sum(1 for t in internal if t.status == 'Done')
             internal_total = len(internal)
