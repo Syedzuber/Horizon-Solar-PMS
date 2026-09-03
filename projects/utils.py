@@ -1252,6 +1252,44 @@ def resolve_active_task_template(project_type):
     )
 
 
+def kwargs_for_model_state(model, *, required, optional):
+    """Model kwargs that survive being handed a HISTORICAL model class.
+
+    A migration's apps.get_model() returns the model as it stood at THAT point in the
+    chain, not as models.py defines it today. A helper shared by an old migration and a
+    new one therefore cannot assume every field it wants to write exists yet: passing one
+    that does not raises TypeError and takes the whole migrate down with it. That is
+    exactly what happened on 03 Sep 2026 — see rule R-22 in docs/execution-model.md.
+
+    `required` is passed through untouched, and a field named there that the model state
+    does not have is a real error raised HERE, with the model named, rather than as an
+    opaque TypeError from Django's __init__.
+
+    `optional` is the tolerance: each entry is included only if this model state actually
+    carries that field, so a field added by a FUTURE migration for a FUTURE caller
+    silently no-ops on the older ones instead of breaking them. That is the whole point:
+    the next `is_mirror` should need no edit here.
+
+    WHERE THE LINE FALLS, so this is not a judgement call each time: a per-task flag the
+    seed data reads with `t.get(name, default)` is optional — the data itself already says
+    that omitting it is fine, and its model-level default is that same value. A field read
+    as `t[name]` is required — the seed would be WRONG without it, and silence is worse
+    than a crash.
+    """
+    names = {f.name for f in model._meta.get_fields()}
+    missing = sorted(k for k in required if k not in names)
+    if missing:
+        raise TypeError(
+            f'{model.__name__} (model state as of this migration) has no field(s) '
+            f'{missing}. These are required to seed the row, so this cannot be skipped: '
+            f'either the migration is ordered before the field was added, or the field '
+            f'was renamed and this helper was not updated.'
+        )
+    out = dict(required)
+    out.update({k: v for k, v in optional.items() if k in names})
+    return out
+
+
 def seed_task_template_version(*, template_model, phase_model, task_model,
                                code, label, project_type, version_no, phases,
                                duration_resolver, created_by=None):
@@ -1265,46 +1303,68 @@ def seed_task_template_version(*, template_model, phase_model, task_model,
     passed in rather than imported because the migration hands over historical classes
     from apps.get_model(), which are different objects from the concrete ones.
 
+    AND THAT ALONE IS NOT ENOUGH, which is why every write below goes through
+    kwargs_for_model_state(). Handing over the historical class stops this function
+    READING the wrong model; it does not stop it WRITING a field that model does not have
+    yet. 0067 seeds Residential and 0075 seeds OPEX, seven migrations apart — a field
+    added for the later caller reaches the earlier one too. `is_mirror` did exactly that
+    on 03 Sep 2026 and took production down. See R-22.
+
     Created as a draft and flipped to active at the end, never created active: that is
     the order the real authoring flow uses, and the only order the R-7 save() guards on
     the concrete models permit.
     """
-    template = template_model.objects.create(
-        code=code,
-        label=label,
-        project_type=project_type,
-        version_no=version_no,
-        status='draft',
-        effective_from=timezone.now().date(),
-        created_by=created_by,
-    )
+    template = template_model.objects.create(**kwargs_for_model_state(
+        template_model,
+        required={
+            'code': code,
+            'label': label,
+            'project_type': project_type,
+            'version_no': version_no,
+            'status': 'draft',
+            'effective_from': timezone.now().date(),
+        },
+        optional={'created_by': created_by},
+    ))
 
     for phase_data in phases:
-        phase = phase_model.objects.create(
-            template=template,
-            code=template_code_from_label(phase_data['phase_name'], 50),
-            label=phase_data['phase_name'],
-            sort_order=phase_data['phase_order'],
-        )
+        phase = phase_model.objects.create(**kwargs_for_model_state(
+            phase_model,
+            required={
+                'template': template,
+                'code': template_code_from_label(phase_data['phase_name'], 50),
+                'label': phase_data['phase_name'],
+                'sort_order': phase_data['phase_order'],
+            },
+            optional={},
+        ))
         task_model.objects.bulk_create([
-            task_model(
-                phase=phase,
-                code=template_code_from_label(t['task_name'], 100),
-                label=t['task_name'],
-                sort_order=t['task_order'],
-                assigned_role=t['assigned_role'],
-                task_type=t['task_type'],
-                duration_days=duration_resolver(t['task_name']),
-                is_payment_milestone=t.get('is_payment_milestone', False),
-                # Optional, exactly like is_payment_milestone above: the Residential
-                # phase dicts carry no 'is_mirror' key and so seed False, unchanged.
+            task_model(**kwargs_for_model_state(
+                task_model,
+                required={
+                    'phase': phase,
+                    'code': template_code_from_label(t['task_name'], 100),
+                    'label': t['task_name'],
+                    'sort_order': t['task_order'],
+                    'assigned_role': t['assigned_role'],
+                    'task_type': t['task_type'],
+                    'duration_days': duration_resolver(t['task_name']),
+                },
+                # Per-task flags. The Residential phase dicts carry neither key and so
+                # seed False, unchanged. `is_mirror` arrives in migration 0074, which is
+                # AFTER 0067 — passing it unconditionally is what took production down on
+                # 03 Sep 2026, and routing it through optional= is the fix.
+                #
                 # Set HERE, while the version is still a draft, rather than by a
                 # QuerySet.update() after activate() — the R-7 guard is meant to make
                 # post-activation content writes impossible, and leaning on the
                 # documented update() bypass to author content would set the wrong
                 # precedent in the very migration that introduces the field.
-                is_mirror=t.get('is_mirror', False),
-            )
+                optional={
+                    'is_payment_milestone': t.get('is_payment_milestone', False),
+                    'is_mirror': t.get('is_mirror', False),
+                },
+            ))
             for t in phase_data['tasks']
         ])
 

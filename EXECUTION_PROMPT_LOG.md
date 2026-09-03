@@ -99,6 +99,7 @@ forbidden to fix (R-12), and each is numbered by the entry it closes.
 | B22 | **Mirrors become read-only for real.** One `if task.is_mirror:` as the **first statement** of `_apply_task_status_change()` — above the transition table, above the inline `due_date` write — returning the existing `_TASK_STATUS_REFUSED`. **No fourth outcome constant, no per-screen message, neither caller edited**, and nothing written on a refusal: no `StatusTransition`, no `ActivityLog`, no notification. The message names the rule rather than a permission, because a user who reads "permission denied" asks for permission that cannot exist. **Before this, a mirror was unwritable by accident** — the five mirrors seed unassigned and both views refuse an unassigned task first — so assigning COD to a PM made it writable and nothing said otherwise. **24 tests in a new `tests_mirror_readonly.py`**, contract half through **both** entry points, on a **really activated** OPEX site; every test assigns the mirror first, and `_assign_mirror()` asserts the assignment landed, which is the trap this entry existed to warn about. Verified negatively: with the `if` neutralised, 34 assertions fail. 897 → 921 tests, same one pre-existing failure and one collection error. **No migration, no model, no template, no existing test module.** Closed §B22; **opened §B25 and §B26.** Two pre-flight findings: **neither Finance sync can reach a mirror** (both select by task name from a three-entry map, no mirror name is in it, and an OPEX site has no `PaymentMilestone` at all) — so the refusal has no hole the helper cannot close; but **`TaskAdmin` leaves `is_mirror` editable**, which is the one way that could stop being true. **Four paths can assign a mirror**, one of them — `project_overview`'s `assign_design` bulk — in bulk with no intent, missing the `is_mirror=False` filter its OPEX-attach counterpart has. | ✅ |
 | B18 / B23 / B26 | **Manual dates only, and three controls that lied.** **① B18 — auto-scheduling is not in OPEX v1** (product decision, `docs/execution-model.md` §16). All 22 OPEX tasks carry `duration_days`'s default of **1** and all are `Internal`, so any bulk computation puts HOTO at `activated_at + 22` and the whole tender portfolio overdue within a month. `project_recalculate_dates` **and** `enable_cascade_scheduling` now refuse `project_type != 'Residential'`, view-side, with the template half where one renders. **② B23** — `dashboard/pm.html`'s draft card got the same four-line branch 1.3c applied to `project_overview.html`; no JS copied. **③ B26** — `is_mirror` joins `status` in `TaskAdmin.readonly_fields`, B9's `DO NOT REMOVE — R-10` comment **extended, not duplicated**. **36 tests** — a new `tests_opex_manual_dates.py` plus `AdminCannotWriteTaskMirrorFlagTests` beside B9's guard in `tests_status_transition.py` §8b. 921 → 957, same one pre-existing failure and one collection error. **No migration, no model, no `utils.py`, no `permissions.py`, no other `ModelAdmin`, no other existing test module.** Closed §B23 and §B26; **rewrote §B18** rather than closing it. **Two pre-flight corrections to B18's own text:** the *Recalculate dates* control is **on no template and never was** — its exposure was the view accepting a direct POST — and the entry **did not name the door that mattered**, `enable_cascade_scheduling`, which is rendered, irreversible, and once on locks every non-PM role owner out of `task_set_due_date`. **A PM can set a due date on a task of any role** (the role match lives inside `task_set_due_date`'s `if not is_pm:` arm), so manual scheduling was already possible and is now pinned. **A due date can still be set on a mirror** — reported, not built, recorded under B18. All four guards verified negatively: 14 tests fail with them neutralised. | ✅ |
 | B21 | **One answer to "which phase is this site on".** Four copies of "first phase holding a not-Done task" — `Project.get_current_phase()`, `dashboard_pm`, `dashboard_site_engineer` and an inline loop in `dashboard_bd` — became **`utils.current_phase()`** (**R-21**), with mirrors excluded through the existing `is_human_owned()`. The BD loop was removed, not kept as a fast path. **A fresh OPEX site now reads `Approvals (Pre-Installation)`, not `Design`** — Phase 1 holds only the `Design` mirror, which no hook can ever complete, so before this every OPEX site displayed "Design" forever on all four screens with all nine installation tasks done. Pre-flight found the four **already disagreed** on completed projects (`None` vs the last phase), which was a live visible defect; settled by decision. `dashboard_pm` and `dashboard_site_engineer` gained the `Prefetch` the other two already had — six projects, **13 queries before, 0 after**. 27 new tests in `tests_current_phase.py`, `AgreementTests` parameterised over all four call sites. Closed §B21, four findings recorded. | ✅ |
+| HOTFIX-1 | **The migration chain became a thing that is tested.** The 3 Sep merge to `main` **could not deploy**: migration `0067` raised `TypeError: TaskTemplateTask() got unexpected keyword arguments: 'is_mirror'`, `migrate` exited non-zero, gunicorn never started and production was rolled back to 0066. `seed_task_template_version()` is shared by 0067 and 0075; prompt 1.3a added `is_mirror=` for 0075, and `is_mirror` arrives in **0074 — seven migrations after 0067**. **Fixed at the helper, not the migration** — `utils.kwargs_for_model_state()` drops optional fields the handed-over model state does not carry, so the *next* field added for a future caller cannot break an older one. **R-22** added; **§18** added. The guard is a test module inside `projects/`, so the ordinary suite run executes it and no session has to remember a second command. **0067 was the only broken migration** — the whole chain now applies to an empty Postgres database. The larger finding is that `test_settings.py` disables migrations, so **no test in this programme had ever run one**, and a developer's local `migrate` was equally blind because 0067 had applied there months earlier. The shim **survives**, measured: **~75 s** here against **~1,350 s** under real settings, which reports **3 failures and 308 errors** — none of them product defects, and **306 of them one collision**: a shared fixture creating `BOQItemMaster` rows that migrations 0047/0057 already seeded. The disagreement runs both ways — `tests_design_part46`'s standing SQLite failure passes on Postgres. Opened §B30 and §B31. **No model, no view, no template, no existing test module, and no new migration.** | ✅ |
 
 ---
 
@@ -677,3 +678,113 @@ records what it asserted before and why that stopped being right. The class keep
 the WORKLOAD half regardless: counters 1 and 2 in the same class are the CEO `dept_rows` for
 Design and SCM, which are workload numbers and still excluded. Suite back to baseline —
 **1060 tests, 1 failure + 1 error**, both pre-existing.
+
+---
+
+## HOTFIX-1 — the migration chain, and why nothing caught it (3 Sep 2026)
+
+### The failed deploy
+
+The phase 1 merge (`89d8e6f`) was pushed to `main` on **3 Sep 2026**. Railway's start
+command is `migrate --run-syncdb && collectstatic && gunicorn`. **Migration 0067 raised,
+`migrate` exited non-zero, and gunicorn never started.** Production was down until the
+previous deployment was restored, and now sits at **0066** — 0065 and 0066 applied, 0067
+rolled back cleanly, 144 projects and 1,861 tasks intact and nothing half-written.
+
+```
+TypeError: TaskTemplateTask() got unexpected keyword arguments: 'is_mirror'
+```
+
+`seed_task_template_version()` is shared by **0067** and **0075**. Prompt 1.3a added
+`is_mirror=` to it for 0075's benefit. **`is_mirror` arrives in 0074 — seven migrations
+after 0067** — so against 0067's model state the keyword does not exist.
+
+**0067 was the only broken migration.** The whole chain, run against a genuinely empty
+Postgres database, now reaches `Applying projects.0075… OK`. Nothing between 0068 and 0075
+is broken, and nothing before 0067 is either.
+
+### The fix is in the helper, and that is the whole point
+
+Three options were on the table: pass field values through a caller-controlled dict,
+introspect the model, or give 0067 and 0075 different signatures. **Introspection won on
+one criterion — not brevity, but that a future field added for a future migration cannot
+break an older one.** The dict form moves the same trap into two call sites, and separate
+signatures fix `is_mirror` and nothing else.
+
+`utils.kwargs_for_model_state(model, required=…, optional=…)`: `required` raises **here**,
+naming the model, when a field is genuinely absent; `optional` is included only if that
+model state carries it. The line between them is not re-argued each time — **`t.get(name,
+default)` in the seed data means optional, `t[name]` means required.**
+
+**No migration was fixed, because none was broken.** 0067's body is byte-identical; only its
+header comment changed, to correct an argument it made that was half right. It claimed
+safety because the helper "takes its model classes as arguments" — true, and insufficient:
+that stops the helper **reading** the wrong model and does nothing to stop it **writing** a
+field the model does not have yet. The migration-editing licence this session was granted —
+valid only while 0067–0075 have never applied on production — **was not needed and is
+recorded as unspent.**
+
+### The larger half: nothing could have caught it
+
+`solarpms/test_settings.py` disables migrations. **No test in this programme has ever run
+one.** All 1,060 build their tables from today's `models.py`. Every "migrate forward,
+reverse, forward" a session reported ran against a local database where 0067 had applied
+months earlier, so it stepped back one migration and forward again and **0067 never
+re-ran**. This was not a bug that slipped through a good process; it was one the process
+structurally could not see, and had been since phase 0.
+
+`projects/tests_migration_chain.py` closes it: a throwaway Postgres database, a subprocess
+running `manage.py migrate --run-syncdb` — Railway's command verbatim — under
+`DJANGO_SETTINGS_MODULE=solarpms.settings`, so it holds **whichever settings the suite was
+launched with**. It fails rather than skips when Postgres is unreachable. Proved by
+deliberate breakage: re-passing `is_mirror` unconditionally makes it fail with
+`FAILING MIGRATION: projects.0067_seed_residential_template_v1`.
+
+### The shim survives, and the numbers are the argument
+
+Both reasons its docstring gave are gone — the `CREATEDB` grant has been made, and the
+Postgres-only raw SQL it names is `0005_project_redesign`'s `DROP TABLE … CASCADE`, which is
+no longer a problem on Postgres. It was kept anyway, on measurement:
+
+| | shim | real settings |
+|---|---|---|
+| Wall time | **~75 s** | **~1,350 s (22 min, 18×)** |
+| Result | 1 failure (the standing SQLite constraint-name one) | **3 failures, 308 errors** |
+
+**The 308 errors are the finding, not a regression.** VERIFY step 4 asked whether the two
+runs agree on failures; they do not, by 310 — **and in both directions**, since
+`tests_design_part46`'s standing SQLite failure passes under Postgres. None are product
+defects. The suite is written against a schema with **no rows in it**, which is what the
+shim produces; run the real chain and the data migrations have run too. **306 of the 308 are
+a single collision** — a shared fixture creating `BOQItemMaster` rows whose codes migrations
+0047 and 0057 already seeded (`Key (code)=(OPX-001) already exists`) — across
+`tests_residential_baseline` (92), `tests_task_status_path` (49), `tests_boq_upload` (47),
+`tests_status_transition` (39), `tests_soft_delete` (32), `tests_design_part11` (32) and
+`tests_demo_data` (15). The other two errors and all three failures are
+`TaskDurationTemplate` the same way: 0034 seeds 50 rows, the tests assert 0.
+
+Making the suite pass under real settings is a programme across every test module, and every
+one of them was outside this session's MODE. **Deleting the shim today would not give a
+stricter suite; it would give a red one nobody could read.**
+
+So the guard is a **test module inside `projects/`**, not a separate script: the ordinary
+suite run picks it up — 11 s of the 75 — and **no session has to remember a second command**,
+which is the only way a check like this stays true. It is also runnable alone in ~15 s after
+touching a migration. `docs/execution-model.md` **§18** states both, and **§B31** records what
+keeping the shim still costs along with the trigger that retires it.
+
+### Verification
+
+`manage.py check` clean. `makemigrations --check --dry-run` reports no changes, and is now
+also a test. The chain applies from empty. The guard bites when a migration is broken and
+names it. Suite under the shim: **1061 tests, 1 pre-existing failure, ~75 s** — the baseline
+1059 plus this session's 2, and the standing `tests_design_part46` SQLite constraint-name
+failure is the one. The guard passes inside both runs.
+
+### Findings recorded
+
+**§B30** — three migrations import live application code. 0067 and 0075 are fixed at the
+helper; **0069 is still exposed** through `models.derive_checklist_code`, narrowly (one
+field, `Checklist.code`) and not imminently. Not fixed: it is not broken, its trigger is a
+rename of that field, and fixing an unbroken migration is a change with no test to prove it
+right. **§B31** — the two suite runs check different things and nothing reconciles them.
