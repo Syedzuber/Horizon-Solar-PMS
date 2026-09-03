@@ -252,6 +252,24 @@ The set of keys whose integer *changed* is therefore the set of counters that co
 
 **Enforced by** `projects/tests_current_phase.py`. `AgreementTests` is the guard that matters: it is **parameterised over the four call sites** and asserts they return the same phase for the same project in six states, so a reintroduced copy fails by name rather than becoming a support ticket. `OpexIsNotStuckOnDesignTests` pins the defect that made this urgent, `EmptyCaseTests::test_03` pins "last HUMAN phase" against the weaker "last phase", and `QueryCostTests` pins the zero-query claim at one, three and six projects.
 
+**R-22 · A migration must never call live application code whose signature can change. A shared helper that crosses that boundary must tolerate fields that did not exist yet.** *(Established by prompt HOTFIX-1, 3 Sep 2026, after the phase 1 merge took production down.)*
+
+**The incident.** The phase 1 merge was pushed to `main` on **3 Sep 2026**. Railway's start command is `migrate --run-syncdb && collectstatic && gunicorn`. Migration **0067** raised `TypeError: TaskTemplateTask() got unexpected keyword arguments: 'is_mirror'`, `migrate` exited non-zero, **gunicorn never started, and production was down until the previous deployment was restored.** Production is at 0066; 0067 rolled back cleanly and no data was half-written.
+
+**The mechanism, which is more general than the instance.** `seed_task_template_version()` in `projects/utils.py` is shared by migrations 0067 and 0075. Prompt 1.3a added `is_mirror=` to it for 0075. **`is_mirror` arrives in migration 0074 — seven migrations after 0067.** A migration runs against the model state at its own point in the chain, so 0067's `TaskTemplateTask` has no such field and Django's `Model.__init__` refuses the keyword.
+
+**0067's header already argued this was safe, and the argument was half right.** It said the helper "takes its model classes as arguments, so it operates on the HISTORICAL models". True, and insufficient. Passing the historical class stops the helper **reading** the wrong model. It does nothing to stop the helper **writing** a field that model does not have yet. *Today's helper and a two-year-old model state are not compatible by default*, and passing the class across the boundary does not make them so.
+
+**The rule, in the form that prevents the next one rather than this one.** A helper called from a migration writes its model kwargs through **`utils.kwargs_for_model_state(model, required=..., optional=...)`**. `required` is passed through and a missing field raises **there**, naming the model — the seed would be wrong without it, and silence is worse than a crash. `optional` is included **only if that model state carries the field**. The line between them is not a judgement call: **a per-task flag the seed data reads with `t.get(name, default)` is optional** — the data already says omitting it is fine, and the model default is the same value — **a field read as `t[name]` is required.** A field added by a future migration for a future caller therefore no-ops on the older ones instead of breaking them.
+
+**Only three migrations import live code**, and each is listed in `EXECUTION_MODULE_DEFERRED.md` §B with its exposure: **0067** and **0075** (`utils.seed_task_template_version`) — fixed here; **0069** (`models.derive_checklist_code`) — still exposed, though narrowly, because it reads only `Checklist.code`. Prefer not to add a fourth.
+
+**Why nothing caught it, which is the larger half of the incident.** `solarpms/test_settings.py` disabled migrations — its own docstring says so — so **no test in this programme had ever run one.** All 1,060 built their tables from today's `models.py`. A developer's local `migrate` was equally blind: 0067 had applied months earlier, so stepping back one migration and forward again never re-ran it. This was not a bug that slipped through a good process; it was one the process **structurally could not see**, and had been since phase 0.
+
+**Enforced by** `projects/tests_migration_chain.py`. `MigrationChainAppliesFromEmptyTests` creates a throwaway Postgres database and shells out to `manage.py migrate` under `DJANGO_SETTINGS_MODULE=solarpms.settings`, so it exercises the real chain on the real engine **whichever settings the suite itself was launched with** — a guard that inherited the suite's settings could inherit the shim that hid the bug. On failure it names the migration that broke. It **fails rather than skips** when Postgres is unreachable: a skip is how this class of bug hides. A second test runs `makemigrations --check` for the companion question — the chain being *runnable* is not the chain being *complete*.
+
+**The module lives in `projects/`, so the ordinary suite run executes it** — no session has to remember a second command, which is the only way this stays true. Run it alone (`python manage.py test projects.tests_migration_chain`, ~15 s) after touching a migration or a helper one imports. See §18 for why the shim survives and what that costs.
+
 ---
 
 ## 4. Roles and ownership
@@ -1236,3 +1254,98 @@ instructions:
 
 What the seed could not build through a real code path is a set of **product** findings, not
 tooling notes, and they are in `EXECUTION_MODULE_DEFERRED.md` §B27.
+
+---
+
+## 18. How the suite is run — two commands, and why there are two
+
+**Added by prompt HOTFIX-1, 3 Sep 2026, with R-22.**
+
+### The chain guard lives INSIDE the suite, and that is deliberate
+
+```
+python manage.py test projects --settings=solarpms.test_settings   # 1061 tests, ~75s
+python manage.py test projects.tests_migration_chain               # just the chain, ~15s
+```
+
+`tests_migration_chain.py` sits in `projects/`, so **the ordinary suite run picks it up and
+a session cannot miss it by running the suite the way it always has.** It shells out to real
+settings and a real Postgres from inside a SQLite run, so it holds regardless of how the
+suite was launched. It costs about **11 seconds of the 75**.
+
+That is why it is a test module and not a separate script: a check that has to be remembered
+is a check that will be forgotten, and the prompt template's "run the suite" line now covers
+it for free. **The second command exists for a different job** — checking the chain in
+fifteen seconds after touching a migration or a seeding helper, without paying for the other
+1,059 tests. Run it whenever `projects/migrations/` or a helper a migration imports changes.
+
+The reason any of this exists is R-22: the phase 1 merge could not deploy, and all 1,060
+tests were green.
+
+### `solarpms/test_settings.py` survives, and this is a measured decision, not inertia
+
+Both reasons its docstring gives are **gone**: `ALTER ROLE solarpms_user CREATEDB` has been
+granted, and the Postgres-only raw SQL it names is `0005_project_redesign` —
+`DROP TABLE … CASCADE`, which SQLite rejects — which is not a problem on Postgres. On the
+stated reasoning the shim should have been deleted. It was not, on two numbers found by
+running the suite both ways on the same commit:
+
+| | shim (SQLite, no migrations) | real settings (Postgres, migrations) |
+|---|---|---|
+| Wall time | **~75 s** | **~1,350 s — 22 minutes, 18×** |
+| Result | 1 failure | **3 failures, 308 errors** |
+
+**The 308 errors are not product defects, and that is the point.** The suite is written
+against a schema with **no data in it**, because that is what the shim produces. Under the
+real chain the data migrations have run too: `0034` seeds 50 `TaskDurationTemplate` rows,
+`0047` and `0057` seed **244 `BOQItemMaster` rows**, and `0067` seeds the whole
+`RESIDENTIAL` template.
+
+**306 of the 308 are one cause**, which is why this is a fixture problem and not 308
+problems: a shared setup creates `BOQItemMaster` rows with codes the catalogue migrations
+already own —
+
+```
+django.db.utils.IntegrityError: duplicate key value violates unique constraint
+  "projects_boqitemmaster_code_key"
+DETAIL:  Key (code)=(OPX-001) already exists.
+```
+
+— spread across `tests_residential_baseline` (92), `tests_task_status_path` (49),
+`tests_boq_upload` (47), `tests_status_transition` (39), `tests_soft_delete` (32),
+`tests_design_part11` (32) and `tests_demo_data` (15). The remaining two are the same shape
+against `TaskDurationTemplate`, and the three failures are `tests_task_template` asserting
+`TaskDurationTemplate.objects.count() == 0` and reading 50.
+
+**The disagreement runs both ways.** `tests_design_part46`'s standing failure — asserting a
+constraint name that SQLite does not report — **passes** under Postgres. Neither run is a
+superset of the other.
+
+So the honest statement is: **the suite does not currently pass under real settings, and
+making it do so is a programme of work across every test module — not a session.** Deleting
+the shim today would not give a stricter suite; it would give a red one that nobody could
+read.
+
+### What that leaves owed, stated rather than implied
+
+Keeping the shim keeps a second way to run the suite that checks less, and **a fast suite
+nobody has to reconcile against a slow one is exactly how the 0067 failure happened.**
+`tests_migration_chain.py` closes the part of the gap that took production down and no
+more. Still invisible under the shim: every SQLite/Postgres behaviour difference —
+constraint names (`tests_design_part46`'s standing failure is one), `0005`'s
+`DROP TABLE … CASCADE`, the ordering of unordered querysets — and the *effects* of every
+data migration. Recorded as **§B31** in `EXECUTION_MODULE_DEFERRED.md` with its trigger:
+**if the two runs ever disagree on a failure that is not already on the baseline list, the
+shim's cost has exceeded its benefit and it goes.**
+
+### Why the guard is a subprocess and not just "run the suite properly"
+
+`tests_migration_chain.py` creates a throwaway Postgres database and shells out to
+`manage.py migrate --run-syncdb` — Railway's start command verbatim — with
+`DJANGO_SETTINGS_MODULE=solarpms.settings`. It therefore exercises the real chain on the
+real engine **whichever settings the suite was launched under**, including the shim. A guard
+that inherited the suite's settings could inherit the shim that hid the bug, and would be
+worth nothing. It **fails rather than skips** when Postgres is unreachable: a green suite
+that quietly declined to check the chain is the state the repository was in on 02 Sep.
+
+**Reporting a session done without having run it is not reporting it done.**

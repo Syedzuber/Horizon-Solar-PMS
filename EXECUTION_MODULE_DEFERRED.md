@@ -1512,6 +1512,67 @@ line. The suite returned to its baseline of 1 failure + 1 error, both pre-existi
 
 ---
 
+### B30 — migration 0069 still calls live application code, and has simply not broken yet
+
+**Found by prompt HOTFIX-1, 3 Sep 2026, while fixing the 0067 deploy failure (R-22). Not
+fixed: it is not broken, and fixing an unbroken migration is a change with no test to prove
+it right.**
+
+Three migrations import from live modules. That is the general shape of the bug that took
+production down, and `is_mirror` was one instance of it, not the class.
+
+| Migration | Imports | Exposure |
+|---|---|---|
+| `0067_seed_residential_template_v1` | `utils.RESIDENTIAL_TEMPLATE_CODE`, `RESIDENTIAL_TEMPLATE_LABEL`, `_get_duration`, `build_residential_phases`, `seed_task_template_version` | **WAS the failure.** Fixed at the helper by `utils.kwargs_for_model_state()`; the migration body is unchanged |
+| `0075_seed_opex_template_v1` | `utils.seed_task_template_version` | Same helper, and it is the caller `is_mirror` was added FOR. Safe today because 0075 is the chain head, so its model state is current — **that stops being true the moment a 0076 adds a field to `TaskTemplateTask`**, and the tolerance now in the helper is what will absorb it |
+| `0069_backfill_checklist_versions` | `models.derive_checklist_code` | **STILL EXPOSED, narrowly.** The function is pure, takes its model class as an argument, and touches exactly one field — `Checklist.code`, added by 0068, one migration earlier. It breaks if `code` is renamed or dropped, or if the function grows a second field read. Neither is imminent; both are silent |
+
+**Also carried by 0069 and worth naming, because it is the same shape one level down:**
+the migration calls `checklist.save(update_fields=[...])` on a **historical** model class,
+whose `save()` is the plain Django one. Any rule the concrete `Checklist.save()` enforces —
+the R-7 versioning guards — is therefore not applied here. That is correct for a backfill
+and deliberate, but it is the second thing about 0069 that depends on today's `models.py`
+not moving.
+
+**What would close this.** Not much: `derive_checklist_code` could take the field name, or
+0069 could inline the ~15 lines it needs. Neither is worth a migration edit while the chain
+is green and `tests_migration_chain.py` now fails loudly if it stops being. **The trigger is
+a rename or removal of `Checklist.code`** — do it in the same session as that change, not
+before.
+
+**Do not add a fourth.** Three is the whole population and R-22 says prefer zero.
+
+---
+
+### B31 — the fast suite and the migrating suite are two runs, and nothing reconciles them
+
+**Recorded by prompt HOTFIX-1, 3 Sep 2026. Accepted, not fixed — see R-22 and §18.**
+
+`solarpms/test_settings.py` survives for speed, so there remain two ways to run the suite
+and they do not check the same thing. `tests_migration_chain.py` closes the gap that
+mattered — the chain now gets exercised under either — but it does not make the two runs
+equivalent, and **a fast suite nobody has to reconcile against a slow one is how the 0067
+failure happened.**
+
+**Measured on this commit: 1 failure / ~75 s under the shim, against 3 failures + 308 errors
+/ ~1,350 s under real settings.** None of the 308 are product defects — **306 are one
+collision**, a shared fixture creating `BOQItemMaster` rows whose codes migrations 0047 and
+0057 already seeded (`Key (code)=(OPX-001) already exists`), across seven modules:
+`tests_residential_baseline` 92, `tests_task_status_path` 49, `tests_boq_upload` 47,
+`tests_status_transition` 39, `tests_soft_delete` 32, `tests_design_part11` 32,
+`tests_demo_data` 15. The other two errors and all three failures are `TaskDurationTemplate`
+the same way — 0034 seeds 50 rows, the tests assert 0.
+
+**The disagreement runs both ways**, which is the part that makes this a real gap rather
+than a slow duplicate: `tests_design_part46`'s standing SQLite constraint-name failure
+**passes** under Postgres. Neither run is a superset of the other. Also invisible under the
+shim: `DROP TABLE … CASCADE` in `0005`, and the ordering of unordered querysets.
+
+**The trigger to revisit:** if the two runs ever disagree on a failure that is not already
+on the baseline list, the shim's cost has exceeded its benefit and it should go.
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

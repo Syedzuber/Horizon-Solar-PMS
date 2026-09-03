@@ -7,6 +7,25 @@
 # migration" caution is accepted here deliberately — the seeding helper takes its model
 # classes as arguments, so it operates on the HISTORICAL models handed over below and not
 # on the concrete ones.
+#
+# THAT REASONING WAS INCOMPLETE, AND IT COST A DEPLOY. Handing over the historical class
+# stops the helper reading the WRONG model; it does nothing to stop the helper writing a
+# field that model does not have YET. Prompt 1.3a added `is_mirror=` to
+# seed_task_template_version() for migration 0075's benefit. `is_mirror` arrives in 0074 —
+# seven migrations after this one — so on any database where 0067 had not already applied,
+# this line raised `TypeError: TaskTemplateTask() got unexpected keyword arguments:
+# 'is_mirror'`, migrate exited non-zero, and gunicorn never started. Production was rolled
+# back on 03 Sep 2026.
+#
+# The fix is in the helper, not here: optional fields now go through
+# utils.kwargs_for_model_state(), which drops any the handed-over model state does not
+# carry. NOTHING IN THIS FILE CHANGED except this comment — the incompatibility was never
+# in the migration. See rule R-22 in docs/execution-model.md, and the guard in
+# projects/tests_migration_chain.py that would have caught it.
+#
+# Nothing else here may be edited. 0067 has NOT applied on production as of 03 Sep 2026
+# (production sits at 0066), which is the only reason editing a committed migration was on
+# the table at all. That licence expires the moment this chain applies to production.
 from django.db import migrations
 
 from projects.utils import (
