@@ -7,6 +7,7 @@ from .models import (
     Program,
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
+    TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
 )
 from .utils import assign_task_to
 
@@ -18,9 +19,36 @@ class MilestoneInline(admin.TabularInline):
 
 
 class DocumentInline(admin.TabularInline):
+    """B11 — a READ panel. `ProjectDocument` is a pointer, not a document.
+
+    This inline named `doc_type`, `title` and `file`; the model has never had any of
+    the three. `modelform_factory` raised `FieldError` and BOTH admin project pages
+    returned 500. `manage.py check` cannot see it — an unknown `fields` entry is
+    assumed to be a field the form contributes — so `tests_admin_smoke` is what
+    catches this class of defect now.
+
+    The names map one-to-one onto real columns: doc_type -> file_type,
+    title -> file_name, file -> file_url. What does NOT survive the correction is
+    the write path. A row here is a pointer into a Supabase bucket, and the two
+    columns that make it resolvable are `file_url` and `supabase_path` — the latter
+    is what `purge_deleted_files` passes to `storage.remove()`. A row typed into
+    this inline would name a file nobody uploaded and, with `supabase_path` empty,
+    could never be purged either. The admin cannot put an object in the bucket, so
+    it must not create the row that claims one is there.
+
+    Same rule and same reason as `DesignFileAdmin` below, which freezes `bucket` and
+    `path` because rewriting them orphans the file. Uploading and deleting documents
+    stay where they already are: the view layer, which does both halves.
+    """
+
     model = ProjectDocument
-    extra = 1
-    fields = ['doc_type', 'title', 'file']
+    extra = 0
+    fields = ['file_name', 'file_type', 'file_url']
+    readonly_fields = ['file_name', 'file_type', 'file_url']
+    can_delete = False
+
+    def has_add_permission(self, request, obj=None):
+        return False
 
 
 class PhaseInline(admin.TabularInline):
@@ -67,7 +95,30 @@ class ProjectAdmin(admin.ModelAdmin):
                        'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
     list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
-    readonly_fields = ['project_id', 'created_at', 'activated_at', 'deleted_at']
+    # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
+    # read-only field is exactly what a future maintainer will want to delete.
+    #
+    # Same reason as TaskAdmin below, plus one this admin has and that one does not.
+    #
+    # First: every project status change must go through the view layer so
+    # record_transition() writes the StatusTransition row in the same transaction (R-2).
+    # ModelAdmin saves the form field straight to the column, so an admin edit would move
+    # the project and leave no ledger row — and a gap in the ledger cannot be
+    # reconstructed afterwards.
+    #
+    # Second, and worse: ACTIVATION IS A VIEW-LAYER ACTION AND THIS ADMIN IS NOT AN
+    # ACTIVATION ROUTE. project_activate() is the only path that attaches the phase and
+    # task template and stamps activated_at. Typing 'Active' into this form did none of
+    # that — it left the project Active and empty, a state the product itself cannot
+    # produce, with nothing raising. An admin who cannot set status also cannot activate
+    # a project here, and that is the correct outcome, not a lost capability.
+    #
+    # Reading `status` is still fine: it stays in list_display and list_filter, which are
+    # read paths. It must never appear in list_editable, which writes past this.
+    #
+    # On the ADD form Django omits readonly fields entirely, so a new project takes the
+    # model default, Project.status's 'Draft' — the same value project_create gives it.
+    readonly_fields = ['project_id', 'status', 'created_at', 'activated_at', 'deleted_at']
     inlines         = [PhaseInline, MilestoneInline, DocumentInline]
     actions         = ['soft_delete_selected', 'restore_selected']
 
@@ -143,6 +194,35 @@ class TaskAdmin(admin.ModelAdmin):
     list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
     list_filter  = ['assigned_role', 'status']
     search_fields = ['task_name']
+    # DO NOT REMOVE — R-10. `status` and `is_mirror` are deliberately read-only here, and
+    # an unhelpfully read-only field is exactly what a future maintainer will want to
+    # delete. Two rules, one mechanism:
+    #
+    # `status` (R-2). Every task status change must go through the view layer so
+    # record_transition() writes the StatusTransition row in the same transaction.
+    # ModelAdmin saves the form field straight to the column, so an admin edit would move
+    # the task and leave no ledger row — and a gap in the ledger cannot be reconstructed
+    # afterwards.
+    #
+    # `is_mirror` (B26). A Task's mirror flag is not an editable property: it is a
+    # SNAPSHOT that _attach_task_template() copies from TaskTemplateTask.is_mirror at
+    # activation. Setting it by hand creates a row in a state no derivation produces —
+    # the hooks that write a mirror's status will never write it, and the sync paths do
+    # not exclude it. Ticked on a Residential *100% Payment Confirmation* task, the M3
+    # payment sync writes past a read-only row via filter().update(), outside R-18 by
+    # B16's decision; ticked on any Residential task it mints a mirror on a project the
+    # architecture never contemplated one for. B22 proved no Finance sync can reach a
+    # mirror, for three independent reasons — this is what keeps that proof true by
+    # configuration rather than by the coincidence that nobody had ticked the box.
+    #
+    # Reading either field is still fine: `status` stays in list_display and list_filter,
+    # which are read paths. Neither must ever appear in list_editable, which writes past
+    # this.
+    #
+    # On the ADD form Django omits readonly fields entirely, so a new task takes the model
+    # defaults — Task.NOT_STARTED ('Not Started') and is_mirror=False, the same values
+    # each would have had.
+    readonly_fields = ['status', 'is_mirror']
 
     def save_model(self, request, obj, form, change):
         """Route Task.assigned_to through the assignment chokepoint.
@@ -200,12 +280,39 @@ class NotificationLogAdmin(admin.ModelAdmin):
 
 
 class ChecklistItemInline(admin.TabularInline):
+    """Items are CONTENT of a checklist version (R-7) — editable only while it is a
+    draft. Same rule, and the same reason, as TaskTemplatePhase/TaskTemplateTask: the
+    model's save() already raises, and these hooks stop the admin offering the form at
+    all so a user gets "you may not change this" rather than a 500 on save."""
+
     model = ChecklistItem
     extra = 1
     fields = ['order', 'label']
 
+    def _is_draft(self, obj):
+        return obj is None or obj.is_editable
+
+    def has_add_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_add_permission(request, obj)
+
+    def has_change_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if not self._is_draft(obj):
+            return False
+        return super().has_delete_permission(request, obj)
+
 
 class ChecklistTaskLinkInline(admin.TabularInline):
+    # NOT version content. The link records which checklist FAMILY is assigned to a task
+    # name; status records which version of it is live. Locking it to drafts would make
+    # a task's assignment un-editable the moment its checklist went live, and v1 and v2
+    # cannot both hold a link to the same task_name — unique_together forbids it.
     model = ChecklistTaskLink
     extra = 1
     fields = ['task_name', 'project_type']
@@ -213,10 +320,21 @@ class ChecklistTaskLinkInline(admin.TabularInline):
 
 @admin.register(Checklist)
 class ChecklistAdmin(admin.ModelAdmin):
-    list_display  = ['name', 'is_active', 'created_by', 'created_at']
-    list_filter   = ['is_active']
-    search_fields = ['name']
+    list_display  = ['name', 'code', 'version_no', 'status', 'effective_from',
+                     'created_by', 'created_at']
+    list_filter   = ['status', 'code']
+    search_fields = ['name', 'code']
+    # status is set by activate(), which archives the outgoing version in the same
+    # transaction. Editing it here would activate a version without archiving its
+    # predecessor and hit the partial unique constraint as an IntegrityError.
+    readonly_fields = ['status', 'created_at']
     inlines       = [ChecklistItemInline, ChecklistTaskLinkInline]
+
+    def has_change_permission(self, request, obj=None):
+        # The version's OWN row (its name, effective_from) is editable while draft.
+        if obj is not None and not obj.is_editable:
+            return False
+        return super().has_change_permission(request, obj)
 
 
 @admin.register(ChecklistTaskLink)
@@ -228,9 +346,19 @@ class ChecklistTaskLinkAdmin(admin.ModelAdmin):
 
 @admin.register(ChecklistItemCompletion)
 class ChecklistItemCompletionAdmin(admin.ModelAdmin):
-    list_display  = ['item', 'task', 'is_checked', 'checked_by', 'checked_at']
+    # R-8 read path: the column shows the text that was ANSWERED, not the item's current
+    # label. 'item' used to sit here and rendered ChecklistItem.__str__ — which reworded
+    # itself under the reader, and renders as None once the item has been deleted.
+    list_display  = ['answered_text', 'task', 'is_checked', 'checked_by', 'checked_at']
     list_filter   = ['is_checked']
-    readonly_fields = ['item', 'task', 'checked_by', 'checked_at', 'created_at']
+    readonly_fields = ['item', 'item_text_snapshot', 'task', 'checked_by', 'checked_at',
+                       'created_at']
+
+    @admin.display(description='Answered text')
+    def answered_text(self, obj):
+        # Falls back to the live label only for a row that was never checked and so
+        # never took a snapshot.
+        return obj.item_text_snapshot or (obj.item.label if obj.item_id else '—')
 
 
 @admin.register(SystemSettings)
@@ -320,3 +448,77 @@ class DesignChangeRequestAdmin(admin.ModelAdmin):
                      'rejection_reason']
     raw_id_fields = ['attempt', 'resulting_attempt', 'decided_by']
     readonly_fields = ['requested_at']
+
+
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The only authoring surface for a template until a real UI exists (phase 1 at the
+# earliest). Everything here refuses to edit a version that is not a draft, so the
+# admin cannot walk into the TemplateVersionLocked guard on the models and turn it
+# into a 500. Editing an active template means adding version+1 as a draft, changing
+# that, and activating it.
+# ---------------------------------------------------------------------------
+
+
+class _DraftOnlyContentAdmin(admin.ModelAdmin):
+    """Shared authority rules for template CONTENT (phases and tasks).
+
+    Content of an active or archived version is immutable (R-7). The model's save()
+    already raises; these two hooks stop the admin from offering the form at all, so a
+    user gets "you may not change this" rather than a server error on save.
+    """
+
+    def _template_of(self, obj):
+        raise NotImplementedError
+
+    def has_change_permission(self, request, obj=None):
+        if obj is not None and not self._template_of(obj).is_editable:
+            return False
+        return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and not self._template_of(obj).is_editable:
+            return False
+        return super().has_delete_permission(request, obj)
+
+
+@admin.register(TaskTemplate)
+class TaskTemplateAdmin(admin.ModelAdmin):
+    list_display  = ['code', 'version_no', 'label', 'project_type', 'status',
+                     'effective_from', 'created_by', 'created_at']
+    list_filter   = ['code', 'project_type', 'status']
+    search_fields = ['code', 'label']
+    # status is set by activate(), which archives the outgoing version in the same
+    # transaction. Editing it here would activate a version without archiving its
+    # predecessor and hit the partial unique constraint as an IntegrityError.
+    readonly_fields = ['status', 'created_at']
+
+    def has_change_permission(self, request, obj=None):
+        # The version's OWN row (its label, effective_from) is editable while draft.
+        if obj is not None and not obj.is_editable:
+            return False
+        return super().has_change_permission(request, obj)
+
+
+@admin.register(TaskTemplatePhase)
+class TaskTemplatePhaseAdmin(_DraftOnlyContentAdmin):
+    list_display  = ['template', 'sort_order', 'code', 'label']
+    list_filter   = ['template']
+    search_fields = ['code', 'label']
+    raw_id_fields = ['template']
+
+    def _template_of(self, obj):
+        return obj.template
+
+
+@admin.register(TaskTemplateTask)
+class TaskTemplateTaskAdmin(_DraftOnlyContentAdmin):
+    list_display  = ['phase', 'sort_order', 'label', 'assigned_role', 'task_type',
+                     'duration_days', 'is_payment_milestone']
+    list_filter   = ['phase__template', 'assigned_role', 'task_type', 'is_payment_milestone']
+    search_fields = ['code', 'label']
+    raw_id_fields = ['phase']
+
+    def _template_of(self, obj):
+        return obj.phase.template

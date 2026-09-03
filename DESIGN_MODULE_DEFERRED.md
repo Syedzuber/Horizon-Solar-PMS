@@ -995,7 +995,51 @@ cluster that matters to this module.
 
 **Location:** `projects/views.py`, `projects/design_views.py`, `projects/models.py:75`
 
-### K5 — Four copies of `_PROFILE_TO_TASK_ROLE`, two of its inverse
+### ~~K5 — Four copies of `_PROFILE_TO_TASK_ROLE`, two of its inverse~~ — **CLOSED**
+
+> **CLOSED by prompt K5 (execution phase 1), 30 Aug 2026.** Fully closed, having been half
+> closed since 0.2b. The four forward copies became one module-level constant in **prompt 0.2b**
+> (`views.py:413`, now `:429`); the two inverse copies — by then at `views.py:4123` in
+> `task_assign` and `views.py:7243` in `project_overview`, not the line numbers recorded below —
+> went in **this session**. Six local dicts are now **one constant plus one derived from it**:
+>
+> ```python
+> _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+> _TASK_TO_PROFILE_ROLE = {
+>     task_role: profile_role
+>     for profile_role, task_role in _PROFILE_TO_TASK_ROLE.items()
+> }
+> ```
+>
+> Derived, not written a second time — two constants drift, a derived one cannot.
+>
+> The rule is recorded as **R-19** in `docs/execution-model.md`: *the profile↔task role mapping
+> lives in one place, and a new role is added there and nowhere else.* It is enforced
+> structurally, not by discipline — `projects/tests_role_mapping.py::RoleMappingStructureTests`
+> walks `Task.ROLE_CHOICES` (derived from the choices, never a hardcoded tuple) and asserts every
+> value maps back to a real `UserProfile.ROLE_CHOICES` value. The guard was verified to bite by
+> injecting a junk role at runtime; it fails and names the role.
+>
+> **This entry's own prediction came true and was the reason the session ran.** K5 wrote that
+> *"any future role that needs to act on tasks must be added in six places, not one"* — and
+> prompt 1.3a then added `'Project Coordinator'` to `Task.ROLE_CHOICES` for the OPEX template.
+> Two corrections to the original text, for the record:
+>
+> - **That role needed no map entry.** The map is differences-only and read through `.get(x, x)`;
+>   `'Project Coordinator'` is spelled identically on both sides, so passthrough already resolved
+>   it. The Design Head failure this entry cites was a *different* shape: `'Design Head'` existed
+>   on `UserProfile` and matched **no** `Task.assigned_role`, which the new structural guard now
+>   catches in both directions.
+> - **For Project Coordinator the forward map is unreachable on the status path anyway.**
+>   `user_can_view_project()` and `user_can_manage_project()` are the same predicate for this
+>   role, and the 0.2 view-scope lockdown runs before the role gate. See §4 of
+>   `docs/execution-model.md`.
+
+The original entry follows.
+
+---
+
+### K5 (original) — Four copies of `_PROFILE_TO_TASK_ROLE`, two of its inverse
 
 `_PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}` is redefined inline at `views.py:1967`,
 `views.py:3189`, `views.py:3786` and `views.py:5570`; `_TASK_TO_PROFILE_ROLE =

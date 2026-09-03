@@ -6,7 +6,11 @@ by _checklist_response.html. Items come from the Checklist linked to this task
 authoring/assignment is done in portal-admin, NOT here — this surface is completion-only.
 
 Expected context:
-  checklist_rows [{item, completion}], checklist, project, task, can_complete_items
+  checklist_rows [{item, completion, label}], checklist, project, task, can_complete_items
+
+row.label is the R-8 read path: for a CHECKED row it is completion.item_text_snapshot —
+the wording as it stood when the item was answered — and for an unchecked row it is the
+item's current label. Never render row.item.label here; that is the defect 0.5 fixed.
 {% endcomment %}
 {% if checklist_rows %}
 <div class="table-responsive">
@@ -23,7 +27,7 @@ Expected context:
       {% for row in checklist_rows %}
       <tr>
         <td class="text-muted small">{{ forloop.counter }}</td>
-        <td>{{ row.item.label }}</td>
+        <td>{{ row.label }}</td>
         <td>
           {% if row.completion.photo_url %}
             <a href="{{ row.completion.photo_url }}" target="_blank" rel="noopener">

@@ -1,5 +1,9 @@
-from django.db import models
+import re
+
+from django.core.exceptions import ValidationError
+from django.db import models, transaction
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 
 class Project(models.Model):
@@ -118,12 +122,21 @@ class Project(models.Model):
         return f"{self.project_id} - {self.customer_name}"
 
     def get_current_phase(self):
-        """First phase that still has an incomplete task; works with prefetched data."""
-        for phase in self.phases.all():
-            for task in phase.tasks.all():
-                if task.status != 'Done':
-                    return phase.phase_name
-        return None
+        """The current phase's NAME, or None. Works with prefetched data.
+
+        A delegate since prompt B21 (R-21). The rule — first phase holding a
+        not-Done HUMAN-OWNED task, mirrors excluded — lives in exactly one
+        place, `utils.current_phase()`, which this and the three dashboards all
+        call. Do not reimplement it here; that is the defect B21 closed.
+
+        Returns the name rather than the phase because two templates print this
+        method's result directly (`admin/projects_list.html`,
+        `projects/project_list.html`) and a ProjectPhase renders as
+        "HSP-0001 — Design". Callers wanting the object call the helper.
+        """
+        from .utils import current_phase
+        phase = current_phase(self)
+        return phase.phase_name if phase else None
 
     def _validate_program_link(self):
         """Enforce the Program-linkage invariants at save time (spec §4 edge cases).
@@ -317,20 +330,35 @@ class Task(models.Model):
     """A single unit of work within a phase, owned by a role and tracked to completion."""
 
     # Role constants — mirror UserProfile.ROLE_CHOICES where relevant
-    PM            = 'PM'
-    SITE_ENGINEER = 'Site Engineer'
-    FINANCE       = 'Finance'
-    SCM           = 'SCM'
-    BD            = 'BD / Sales'
-    DESIGN        = 'Design'
+    PM                  = 'PM'
+    SITE_ENGINEER       = 'Site Engineer'
+    FINANCE             = 'Finance'
+    SCM                 = 'SCM'
+    BD                  = 'BD / Sales'
+    DESIGN              = 'Design'
+    # Added by 1.3a for the OPEX template's "Completion Certificates (Paperwork)",
+    # which the OPEX spec owns jointly between the PM and the Coordinator. Added on
+    # the TASK side of a pair that already existed on the profile side — the exact
+    # OPPOSITE of the Design Head mistake documented under UserProfile.ROLE_CHOICES
+    # below, which put a role on UserProfile that no Task surface admitted and so
+    # cost its holder every assigned_role match. 'Project Coordinator' is already a
+    # UserProfile.ROLE_CHOICES value, and _PROFILE_TO_TASK_ROLE in views.py maps only
+    # BD, passing every other role through unchanged — so a Coordinator's profile.role
+    # already equals this string and every role-match comparison works untouched.
+    #
+    # KNOWN GAP, deliberately left to 1.3b: the CEO dashboard's six dept_* counter
+    # blocks (views.py) have no Coordinator block, so a task with this role is counted
+    # by no department. Nothing creates such a Task before 1.3c attaches the template.
+    PROJECT_COORDINATOR = 'Project Coordinator'   # 19 chars — fits max_length=20
 
     ROLE_CHOICES = [
-        (PM,            'PM'),
-        (SITE_ENGINEER, 'Site Engineer'),
-        (FINANCE,       'Finance'),
-        (SCM,           'SCM'),
-        (BD,            'BD / Sales'),
-        (DESIGN,        'Design'),
+        (PM,                  'PM'),
+        (SITE_ENGINEER,       'Site Engineer'),
+        (FINANCE,             'Finance'),
+        (SCM,                 'SCM'),
+        (BD,                  'BD / Sales'),
+        (DESIGN,              'Design'),
+        (PROJECT_COORDINATOR, 'Project Coordinator'),
     ]
 
     NOT_STARTED = 'Not Started'
@@ -372,6 +400,49 @@ class Task(models.Model):
     completed_at         = models.DateTimeField(blank=True, null=True)  # Set when status transitions to Done
     blocked_since        = models.DateTimeField(blank=True, null=True)  # Set when status transitions TO 'Blocked'; cleared on un-block so re-blocks re-age from zero
     is_payment_milestone = models.BooleanField(default=False)  # When marked Done, triggers payment_notification to Finance
+    # A mirror task's status is derived from another object and NO HUMAN MAY WRITE IT.
+    #
+    # The refusal belongs in `_apply_task_status_change()` (R-18) — this column only
+    # marks which rows it applies to. A mirror is excluded from overdue and workload
+    # counts, and that exclusion SHIPPED IN PROMPT 1.3b.
+    #
+    # STATE OF PLAY, corrected by prompt 1.3c. The counter exclusions are live and, since
+    # the snapshot below is copied, are no longer inert: an activated OPEX site really
+    # does carry five is_mirror=True rows and every metric really does drop them.
+    # THE HUMAN-WRITE REFUSAL IS STILL NOT BUILT — 1.3c's remit was the opening
+    # transition, not the status path. Until it lands, a mirror is protected only by
+    # having no assignee (both status views refuse an unassigned task first), which is
+    # protection by accident. See EXECUTION_MODULE_DEFERRED.md §B.
+    #
+    # What it is NOT: it is not "has a source object". COD, HOTO and As-Built are
+    # mirrors with no source object in existence today, and they must still be
+    # unwritable. That is why this is a boolean and not a nullable derivation_source
+    # enum — under `source IS NOT NULL ⇒ read-only`, those three would be NULL and
+    # therefore writable by anyone. `derivation_source` is added BESIDE this in phases
+    # 3–5, under a check constraint `derivation_source IS NULL OR is_mirror`.
+    #
+    # A trap for 1.3c's refusal test, from the A-1.3 audit: BOTH status views refuse an
+    # unassigned task BEFORE `_apply_task_status_change()` runs. A mirror seeded with no
+    # assignee would be refused for the wrong reason and the test would pass without
+    # proving the refusal exists. Every mirror in the OPEX template carries an owning
+    # ROLE for this reason; whether it also carries an assignee is 1.3c's decision.
+    #
+    # Indexed because 1.3b filters on it in a dozen counter querysets, and the audit
+    # asked for the index now rather than as a second migration over a larger table.
+    # The seventh snapshot copied from TaskTemplateTask, following the six above.
+    is_mirror            = models.BooleanField(default=False, db_index=True)
+    # PROVENANCE ONLY — which TaskTemplateTask this task was created from. Nothing reads
+    # it back to decide behaviour, and it is null for every task added by hand. There is
+    # deliberately NO label_snapshot beside it: task_name above is ALREADY a copy taken
+    # at bulk_create, not a lookup, so R-8 is satisfied and a second copy of the same
+    # text would only be a second thing to keep in sync. SET_NULL so retiring a template
+    # version can never cascade a project's tasks away.
+    template_task        = models.ForeignKey(
+        'TaskTemplateTask',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='tasks',
+    )
     created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -565,6 +636,36 @@ class UserProfile(models.Model):
         on_delete=models.SET_NULL,
         related_name='deputy_for',
     )
+
+    # EXECUTION CAPABILITY FLAGS (R-15, §4 "New capabilities in this module")
+    # — BOOLEANS, NOT ROLE_CHOICES VALUES.
+    #
+    # READ THIS BEFORE "FIXING" IT BY ADDING A ROLE STRING. That has been tried. Part 1
+    # added 'Design Head' to ROLE_CHOICES (migration 0048) and Part 6.5b took it back out
+    # (migration 0053); the comment on ROLE_CHOICES above enumerates what it cost. The
+    # load-bearing part is `Task.assigned_role`, which is matched against `role` as a
+    # plain string — a holder of a NEW role string matches no template task and therefore
+    # cannot change a task's status, move its due date, or tick a checklist item. Every
+    # @role_required decorator, every `role='...'` queryset and _SA_EDITABLE_ROLE_CHOICES
+    # would need widening alongside it, and missing one of them fails silently rather than
+    # loudly.
+    #
+    # QA/QC, HSE clearance and warehouse keeping are things a person may do IN ADDITION
+    # to their role, not instead of it. The site engineer who also holds the HSE clearance
+    # is still a site engineer and must keep every task his role gives him. A boolean
+    # beside the role says exactly that and costs none of the above.
+    #
+    # NOTHING READS THESE YET, AND THAT IS THE DECISION, NOT AN OVERSIGHT. Consumers
+    # arrive with 2.2 (is_hse), 2.3 (is_qaqc) and 4.1 (is_warehouse_keeper); until then
+    # they are set from the shell or Django admin and there is no UI for them. No
+    # permission helper ships here either — an unconsumed predicate is written against an
+    # imagined call site (R-12), so `user_is_keeper_of()` and its kind belong with their
+    # first caller. On its own a capability flag grants NOTHING: it changes no role, no
+    # queryset and no existing permission check.
+    is_qaqc                 = models.BooleanField(default=False)  # May record a QA/QC verdict on a site's work, and raise a punch point against it
+    is_hse                  = models.BooleanField(default=False)  # May grant a site its HSE mobilisation clearance, without which execution may not start
+    is_warehouse_keeper     = models.BooleanField(default=False)  # Runs a StockLocation — receives, holds and issues the material in it; see StockLocation.keeper
+
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)
     created_at              = models.DateTimeField(auto_now_add=True)
@@ -1294,7 +1395,7 @@ def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
     return 'amber'  # Shortfall only, or full qty with some damage
 
 
-def recalculate_dc_status(challan):
+def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
     """
     Recalculate and save DeliveryChallan.status using per-line-item severity rollup.
     Severity per item (via _dc_item_severity): green / amber / red.
@@ -1303,33 +1404,52 @@ def recalculate_dc_status(challan):
       amber  → Partially Received
       red    → Rejected  (repurposed: severe delivery failure — shortfall+damage or nothing received)
     Must be called ONCE after all line items are saved — never inside the save loop.
+
+    `actor`/`reason_code`/`remark` feed the state ledger (prompt 0.3, R-2). They are
+    optional so no existing caller breaks, and instrumenting HERE rather than at the
+    call sites is deliberate: this is the only place DeliveryChallan.status is
+    recomputed, so every one of its four outcomes is covered by one row of code
+    instead of one per GRN endpoint. A row is written only when the status actually
+    CHANGES — an idempotent recalculation is not a transition, and recording it as
+    one would put dwell times of zero all through the delivery history.
     """
+    from .utils import record_transition
+
+    previous = challan.status
+
     items     = list(challan.line_items.all())
     confirmed = [item for item in items if item.received_quantity is not None]
 
     if not confirmed:
         # No items have GRN data yet
         challan.status = DeliveryChallan.EXPECTED
-        challan.save()
-        return
-
-    worst = 'green'
-    for item in confirmed:
-        sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
-        if sev == 'red':
-            worst = 'red'
-            break          # Can't get worse; short-circuit
-        elif sev == 'amber':
-            worst = 'amber'
-
-    if worst == 'green':
-        challan.status = DeliveryChallan.RECEIVED
-    elif worst == 'amber':
-        challan.status = DeliveryChallan.PARTIALLY_RECEIVED
     else:
-        # 'red': severe delivery failure — quantity short AND damage, or nothing received
-        challan.status = DeliveryChallan.REJECTED
-    challan.save()
+        worst = 'green'
+        for item in confirmed:
+            sev = _dc_item_severity(item.received_quantity, item.ordered_quantity, item.damaged_quantity)
+            if sev == 'red':
+                worst = 'red'
+                break          # Can't get worse; short-circuit
+            elif sev == 'amber':
+                worst = 'amber'
+
+        if worst == 'green':
+            challan.status = DeliveryChallan.RECEIVED
+        elif worst == 'amber':
+            challan.status = DeliveryChallan.PARTIALLY_RECEIVED
+        else:
+            # 'red': severe delivery failure — quantity short AND damage, or nothing received
+            challan.status = DeliveryChallan.REJECTED
+
+    # The save() still happens unconditionally, exactly as before — only the ledger
+    # row is conditional on the status having moved.
+    with transaction.atomic():
+        challan.save()
+        if challan.status != previous:
+            record_transition(
+                challan, to_status=challan.status, from_status=previous,
+                actor=actor, reason_code=reason_code, remark=remark,
+            )
 
 
 def get_material_status(project):
@@ -1419,6 +1539,176 @@ def log_activity(project, actor, action, entity_type='', entity_id=None, action_
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"ActivityLog failed: {e}")
+
+
+# ---------------------------------------------------------------------------
+# The state ledger — StatusTransition (prompt 0.3; rules R-2, R-3, R-4, R-9)
+#
+# THIS IS NOT A SECOND ActivityLog, and the two must never be merged (R-3).
+# ActivityLog is the human-readable feed: an actor, a sentence, an entity
+# reference. It answers "what has been happening on this project". It has no
+# from-status, no to-status, no reason and no actor role, so it cannot answer
+# "how long did this sit in Blocked" or "who moved it, and why" — which is the
+# whole point of this table.
+#
+# Written ONLY by utils.record_transition(), inside the same transaction as the
+# status change it records. Nothing else writes here.
+# ---------------------------------------------------------------------------
+
+# Subject vocabulary. Flat strings, matching ActivityLog.entity_type's pattern
+# rather than a GenericForeignKey: the value must mean the same thing on every
+# deployment forever, and a django_content_type row id does not (it is renumbered
+# by a fresh database). A string also still reads correctly after its subject has
+# been hard-deleted, where a GFK dereference raises.
+SUBJECT_PROJECT           = 'project'
+SUBJECT_TASK              = 'task'
+SUBJECT_BOQ               = 'boq'
+SUBJECT_DELIVERY_CHALLAN  = 'delivery_challan'
+SUBJECT_ISSUE             = 'issue'
+SUBJECT_PAYMENT_MILESTONE = 'payment_milestone'
+
+SUBJECT_TYPE_CHOICES = [
+    (SUBJECT_PROJECT,           'Project'),
+    (SUBJECT_TASK,              'Task'),
+    (SUBJECT_BOQ,               'BOQ'),
+    (SUBJECT_DELIVERY_CHALLAN,  'Delivery Challan'),
+    (SUBJECT_ISSUE,             'Issue'),
+    (SUBJECT_PAYMENT_MILESTONE, 'Payment Milestone'),
+]
+
+# Reason vocabulary — module-level constants per R-10, NOT a lookup table and
+# deliberately NOT a `choices=` list on the field. subject_type gets choices
+# because it is structural (a seventh subject type means new instrumentation and
+# a code change anyway); a seventh REASON must not cost an AlterField migration.
+REASON_CREATED            = 'created'             # first state; there is no from-status
+REASON_BLOCKED            = 'blocked'             # task blocked, blocking Issue raised alongside
+REASON_UNBLOCKED          = 'unblocked'
+REASON_MILESTONE_SYNC     = 'milestone_sync'      # task<->milestone auto-sync, not a direct act
+REASON_GRN_CONFIRMED      = 'grn_confirmed'
+REASON_GRN_OVERRIDDEN     = 'grn_overridden'
+REASON_REVISION_REQUESTED = 'revision_requested'
+REASON_RESUBMITTED        = 'resubmitted'
+REASON_ZOHO_WEBHOOK       = 'zoho_webhook'
+# Added by prompt 1.3c for OPEX activation, which is the first status change in this
+# codebase to name its own reason. Costs no migration, exactly as the note above
+# promised: reason_code carries no choices=. NOT retrofitted onto the Residential
+# activation's record_transition() call, which still writes reason_code='' — that path
+# is pinned byte-for-byte by 92 characterisation tests and a new value in a column it
+# has never written is a behaviour change, however small.
+REASON_EXECUTION_STARTED  = 'execution_started'  # Draft -> Active, template attached
+
+# Written into actor_role_code when no human performed the change. The Zoho
+# webhook creates projects with created_by=None and no request user at all;
+# actor_role_code is required, so "nobody" needs a spelling of its own.
+ACTOR_ROLE_SYSTEM = 'system'
+
+# Subject types whose transitions MUST carry a remark (R-9).
+#
+# EMPTY TODAY, ON PURPOSE. R-9 wants remarks mandatory, but that cannot be a
+# database constraint in this session: prompt 0.3 retrofits six existing paths
+# that do not collect a remark today and never have, so a NOT NULL column would
+# 500 every task status change on the first deploy. Enforcement therefore lives
+# in record_transition(), driven by this set. Phase 2 adds SUBJECT_TASK when
+# two-step completion ships and the UI actually collects the text.
+REMARK_REQUIRED_SUBJECT_TYPES = frozenset()
+
+
+class AppendOnlyViolation(Exception):
+    """Raised when something tries to mutate or delete an append-only ledger row."""
+
+
+class StatusTransition(models.Model):
+    """One recorded state change: subject, from, to, who, their role then, why, when.
+
+    Append-only (R-4). A correction is a NEW row; nothing is ever updated or
+    deleted. save() refuses to touch an existing row and delete() refuses
+    outright.
+
+    THE ENFORCEMENT HERE IS APPLICATION-LEVEL, AND THAT IS A DELIBERATE HALF
+    MEASURE, NOT AN OVERSIGHT. QuerySet.update() and QuerySet.delete() operate in
+    SQL and bypass both overrides entirely. The stronger form is a database-level
+    `REVOKE UPDATE, DELETE ON projects_statustransition` for the application role;
+    that belongs to a deployment task, not to a model definition, and is left for
+    one. What is here is testable and honest about its own limits.
+
+    Not registered in Django admin — the admin's change form is an UPDATE.
+    """
+
+    subject_type = models.CharField(
+        max_length=30, choices=SUBJECT_TYPE_CHOICES, db_index=True,
+    )
+    # Not a FK: the subject is polymorphic across six unrelated models.
+    subject_id   = models.PositiveIntegerField()
+
+    # Denormalised so "this project's whole history" is one indexed query instead
+    # of a six-way union. SET_NULL rather than CASCADE: a hard-deleted Project
+    # must not erase the ledger that explains what happened to it.
+    project      = models.ForeignKey(
+        'Project', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='status_transitions',
+    )
+
+    from_status  = models.CharField(max_length=50, blank=True, default='')  # blank = creation
+    to_status    = models.CharField(max_length=50)
+
+    actor        = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='status_transitions',
+    )
+    # COPIED AT WRITE TIME, NEVER JOINED. When someone changes role next year,
+    # last year's history must still say what they were when they acted.
+    # ACTOR_ROLE_SYSTEM where no human was involved.
+    actor_role_code = models.CharField(max_length=30)
+
+    reason_code  = models.CharField(max_length=40, blank=True, default='')
+
+    # Blank is allowed AT THE DATABASE LEVEL and must stay that way: the 0.3
+    # retrofit instruments six paths that collect no remark today. R-9 is enforced
+    # by record_transition() against REMARK_REQUIRED_SUBJECT_TYPES instead. Do not
+    # "fix" this by making it NOT NULL (which breaks every retrofitted path) or by
+    # deleting the enforcement set (which discards R-9).
+    remark       = models.TextField(blank=True, default='')
+
+    # R-14 idempotency key. A site engineer will write these from the field in
+    # phase 2 and a queued offline submission must replay safely. null (not '')
+    # so the unique index admits unlimited keyless rows — NULLs are distinct,
+    # empty strings are not. Costs nothing now; cannot be retrofitted once real
+    # rows exist.
+    client_uuid  = models.CharField(max_length=64, null=True, blank=True, unique=True)
+
+    # default=, NOT auto_now_add= (which is what ActivityLog.timestamp uses).
+    # auto_now_add cannot be set explicitly, so a replayed offline submission
+    # could not carry the time it actually happened at, and a backfill would be
+    # impossible.
+    occurred_at  = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        ordering = ['-occurred_at']
+        indexes = [
+            # One subject's own history — the dwell-time query.
+            models.Index(fields=['subject_type', 'subject_id', 'occurred_at'],
+                         name='sttrans_subject_idx'),
+            # One project's whole timeline, across all six subject types.
+            models.Index(fields=['project', 'occurred_at'],
+                         name='sttrans_project_idx'),
+        ]
+
+    def __str__(self):
+        origin = self.from_status or '(new)'
+        return f"{self.subject_type}#{self.subject_id}: {origin} -> {self.to_status}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'StatusTransition is append-only (R-4) — a correction is a new row, '
+                'never an edit to an existing one.'
+            )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'StatusTransition is append-only (R-4) — rows are never deleted.'
+        )
 
 
 class NotificationLog(models.Model):
@@ -1608,9 +1898,23 @@ class DesignSubmission(models.Model):
 
 class TaskDurationTemplate(models.Model):
     """
-    Admin-editable default duration_days for each task in the residential project template.
-    Seeded from the hardcoded values in attach_residential_template(); changes apply to
-    new projects only — existing tasks are never touched.
+    SUPERSEDED BY TaskTemplateTask.duration_days — NO LONGER READ BY ANYTHING.
+
+    Was: admin-editable default duration_days for each task in the residential project
+    template. Since prompt 0.4 the durations that activation actually uses live on
+    TaskTemplateTask, and migration 0067 read this table once to seed them. Nothing
+    reads it now.
+
+    The table is deliberately NOT dropped — that is a separate decision with its own
+    migration — and the two screens that used to edit it (admin_task_durations,
+    subadmin_task_durations) are read-only and now render the active TaskTemplate
+    instead. Do not repoint anything back at this model: a saved edit here would have
+    no effect anywhere, which is worse than the screen not existing.
+
+    Note also that its unique_together is ('project_type', 'task_name') — phase_name is
+    stored and displayed but never matched on, so two identically-named tasks in
+    different phases could not carry different durations. TaskTemplateTask has no such
+    limit: its uniqueness is per-phase.
     """
 
     PROJECT_TYPE_CHOICES = [
@@ -1638,35 +1942,672 @@ class TaskDurationTemplate(models.Model):
         return f"{self.project_type} | {self.phase_name} | {self.task_name} ({self.duration_days}d)"
 
 
-class Checklist(models.Model):
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The phase/task list a project is built from at activation. Before prompt 0.4 this
+# lived in Python source as build_residential_phases(); it is data now, so a template
+# can be changed without a deploy and last month's version is still on record.
+# ---------------------------------------------------------------------------
+
+
+class TemplateVersionLocked(Exception):
+    """Raised when something tries to change the content of a non-draft template version."""
+
+
+def _require_draft_template(template, what):
+    """Guard for R-7: template content is editable only while the version is a draft.
+
+    Archived is frozen as hard as active — an archived version is the record of what
+    a project built last month was built from, and rewriting it would make that record
+    a lie.
+
+    SHARED BY BOTH VERSIONED FAMILIES — TaskTemplate (0.4) and Checklist (0.5). It reads
+    `template.DRAFT` off the version rather than naming one class, so the two families
+    cannot drift into two different answers to the same question. Any third versioned
+    template must expose DRAFT/ACTIVE/ARCHIVED, `status` and `version_no` and reuse this.
     """
-    A named, reusable checklist template authored once in portal-admin and surfaced on
-    a task by explicitly linking it to one or more (task_name, project_type) pairs via
-    ChecklistTaskLink. Its line items live in ChecklistItem; per-task completion state
-    lives in ChecklistItemCompletion. Replaces the prior per-task-instance checklist
-    model — checklists are now reusable across every task with the linked name/type.
+    if template is None:          # unsaved parent; the parent's own save() will fail first
+        return
+    if template.status != template.DRAFT:
+        raise TemplateVersionLocked(
+            f"Cannot modify {what}: {template} is '{template.status}', not a draft. "
+            f"Editing an active template means creating version {template.version_no + 1} "
+            f"as a draft, changing that, and calling activate() (R-7)."
+        )
+
+
+class TaskTemplate(models.Model):
+    """One numbered version of a project task template — the phase/task list a project
+    is built from at activation.
+
+    R-7: a version's content is editable ONLY while it is `draft`. Editing an active
+    template means creating version+1 as a draft, changing that, then calling
+    activate(), which archives version N in the same transaction. Rows in an active or
+    archived version are never modified in place.
+
+    Versioned by an integer on the row, matching the BOQ.version / DesignFile.version
+    precedent already in this codebase rather than introducing a separate version model.
+
+    A PROJECT DOES NOT HOLD A REFERENCE TO THE VERSION IT WAS BUILT FROM, and does not
+    need one. Task.task_name, assigned_role, task_type and duration_days are plain
+    COPIES taken at bulk_create, so an in-flight project is structurally immune to its
+    template being upgraded — that is the answer to B-10. Task.template_task records
+    which template row a task came from for provenance only; nothing reads it back to
+    decide behaviour.
+
+    ENFORCEMENT LIMIT, stated rather than implied: the R-7 guards below are save()/
+    delete() overrides on the child models. QuerySet.update(), QuerySet.delete() and
+    the FK cascade from deleting a TaskTemplate all operate in SQL and bypass them
+    entirely — the same honest half-measure as StatusTransition's append-only overrides.
     """
 
-    name       = models.CharField(max_length=200)
-    is_active  = models.BooleanField(default=True)  # Inactive checklists are hidden on task detail
-    created_by = models.ForeignKey(
+    DRAFT    = 'draft'
+    ACTIVE   = 'active'
+    ARCHIVED = 'archived'
+
+    STATUS_CHOICES = [
+        (DRAFT,    'Draft'),
+        (ACTIVE,   'Active'),
+        (ARCHIVED, 'Archived'),
+    ]
+
+    code           = models.CharField(max_length=50)   # Cross-version identity: v1 and v2 of one template share it
+    label          = models.CharField(max_length=100)
+    # Project.project_type vocabulary ('Residential'), NOT TaskDurationTemplate's
+    # lowercase 'residential' — this value is compared directly to project.project_type.
+    project_type   = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
+    version_no     = models.PositiveIntegerField(default=1)
+    status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
+    effective_from = models.DateField(null=True, blank=True)   # Stamped by activate()
+    created_by     = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='task_templates_created',
+    )
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['code', '-version_no']
+        indexes = [
+            # Activation's hot path is filter(project_type=..., status='active').
+            models.Index(fields=['project_type', 'status'], name='tasktmpl_type_status_idx'),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code', 'version_no'],
+                name='uniq_task_template_code_version',
+            ),
+            # At most ONE active version per template code. Partial (condition=) so any
+            # number of draft and archived versions may coexist beside it — the history
+            # is kept, the exclusivity is not weakened by keeping it. Same shape as
+            # uniq_active_site_group_membership_per_type (renamed from
+            # uniq_active_site_group_membership by 1.1a).
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(status='active'),   # literal: a nested Meta cannot see the outer class body's ACTIVE
+                name='uniq_active_task_template_per_code',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.code} v{self.version_no} ({self.status})"
+
+    @property
+    def is_editable(self):
+        """Content may be changed only while the version is a draft (R-7)."""
+        return self.status == self.DRAFT
+
+    def activate(self):
+        """Make this draft the active version, archiving the current active one.
+
+        Both writes happen in ONE transaction, so there is no instant at which a
+        template code has two active versions or none. The partial unique constraint
+        would reject the former regardless; doing it explicitly states the intent
+        rather than leaning on an IntegrityError to express it.
+        """
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be activated; {self} is '{self.status}'."
+            )
+        with transaction.atomic():
+            # filter().update() rather than load-and-save: the archive and the
+            # activation must not interleave with a concurrent activate() of a third
+            # version, and the partial unique constraint is what adjudicates a race.
+            TaskTemplate.objects.filter(
+                code=self.code, status=self.ACTIVE,
+            ).exclude(pk=self.pk).update(status=self.ARCHIVED)
+
+            self.status = self.ACTIVE
+            if self.effective_from is None:
+                self.effective_from = timezone.now().date()
+            self.save(update_fields=['status', 'effective_from'])
+        return self
+
+
+class TaskTemplatePhase(models.Model):
+    """One phase of a template version. Becomes a ProjectPhase at activation."""
+
+    template   = models.ForeignKey(TaskTemplate, related_name='phases', on_delete=models.CASCADE)
+    code       = models.CharField(max_length=50)    # Stable across versions; label may be reworded
+    label      = models.CharField(max_length=100)   # Copied verbatim into ProjectPhase.phase_name
+    sort_order = models.PositiveIntegerField()      # Becomes ProjectPhase.phase_order
+
+    class Meta:
+        ordering = ['sort_order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['template', 'code'],
+                name='uniq_task_template_phase_code',
+            ),
+            # sort_order is deliberately NOT unique: reordering two phases in a draft
+            # would otherwise need a temporary-value dance for no gain, and a duplicate
+            # sort_order degrades to a stable tie-break, not to corruption.
+        ]
+
+    def __str__(self):
+        return f"{self.template.code} v{self.template.version_no} / {self.label}"
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.template, f"phase '{self.label}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.template, f"phase '{self.label}'")
+        return super().delete(*args, **kwargs)
+
+
+class TaskTemplateTask(models.Model):
+    """One task of a template phase. Becomes a Task at activation.
+
+    assigned_role and task_type use Task.ROLE_CHOICES and Task.TYPE_CHOICES — the same
+    constants, not a parallel vocabulary.
+    """
+
+    phase                = models.ForeignKey(TaskTemplatePhase, related_name='tasks', on_delete=models.CASCADE)
+    code                 = models.CharField(max_length=100)   # Stable across versions; label may be reworded
+    label                = models.CharField(max_length=200)   # Copied verbatim into Task.task_name
+    sort_order           = models.PositiveIntegerField()      # Becomes Task.task_order
+    assigned_role        = models.CharField(max_length=20, choices=Task.ROLE_CHOICES, default=Task.PM)
+    task_type            = models.CharField(max_length=10, choices=Task.TYPE_CHOICES, default=Task.INTERNAL)
+    duration_days        = models.PositiveIntegerField(default=1)
+    is_payment_milestone = models.BooleanField(default=False)
+    # A mirror task's status is derived from another object and NO HUMAN MAY WRITE IT.
+    #
+    # Authored here on the template row and COPIED onto every Task built from it, the
+    # same way the six fields above are copied — see Task.is_mirror, which carries the
+    # full rationale. The refusal itself lives in `_apply_task_status_change()` (R-18)
+    # and is ADDED BY PROMPT 1.3c; the counter exclusion is ADDED BY PROMPT 1.3b. As of
+    # this migration NOTHING READS THIS FIELD.
+    #
+    # NOT indexed here, unlike on Task: this table holds 74 rows across both templates
+    # and is only ever read whole, at activation.
+    is_mirror            = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ['sort_order']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['phase', 'code'],
+                name='uniq_task_template_task_code',
+            ),
+        ]
+
+    def __str__(self):
+        return self.label
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.phase.template, f"task '{self.label}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable.
+        _require_draft_template(self.phase.template, f"task '{self.label}'")
+        return super().delete(*args, **kwargs)
+
+
+
+# ---------------------------------------------------------------------------
+# Task dependencies (B-08) — Finish-to-Start, authored on the template,
+# materialised onto the instance.
+#
+# Two models, deliberately, and TaskDependency's docstring says why. Read it
+# before changing either.
+#
+# NOTHING HERE BLOCKS ANYTHING. B-08 was answered by the product owner on
+# 30 Aug 2026: a dependent task may be started before its predecessor is Done,
+# by ANYONE, with a mandatory reason and a warning. There is no hard block, no
+# role gate and no approval step, and none is to be added. The predicate that
+# reports an early start lives in projects/task_dependencies.py and is called
+# incomplete_predecessors(); it reports, it never refuses.
+# ---------------------------------------------------------------------------
+
+
+class DependencyCycle(Exception):
+    """Raised when an edge would close a loop in a task dependency graph.
+
+    A specific exception rather than a generic ValidationError, because whoever hits
+    this needs to be told WHICH edge closed the loop and by what existing path — a
+    cycle makes every task in it permanently 'waiting on a predecessor', and the loop
+    is invisible until somebody tries to work. The message carries the closing edge
+    and the chain the new edge would join up.
+
+    A plain Exception, matching TemplateVersionLocked and AppendOnlyViolation — this
+    codebase's two other structural-refusal exceptions — rather than a ValidationError
+    subclass. There is no form and no admin over these models today; when one is
+    written, it catches this by name.
+    """
+
+
+def _reject_dependency_cycle(edge_rows, predecessor, successor, exclude_pk=None):
+    """Refuse `predecessor -> successor` if `successor` can already reach `predecessor`.
+
+    `edge_rows` is an iterable of (predecessor_id, successor_id) pairs, ALREADY NARROWED
+    to the one scope the new edge lives in — one template version, or one project. The
+    caller owns that narrowing because the two models scope differently; this function
+    issues no query of its own.
+
+    A straightforward breadth-first walk forward from `successor` over the existing
+    edges. A template is tens of tasks, so the graph is small and fits in memory, and a
+    cleverer algorithm would buy nothing but a harder thing to read. If the walk reaches
+    `predecessor`, the proposed edge closes a loop and the path found is the proof.
+    """
+    if predecessor.pk is None or successor.pk is None:
+        return                      # unsaved endpoints; the FK write will fail first
+
+    forward = {}
+    for pred_id, succ_id in edge_rows:
+        if exclude_pk is not None and (pred_id, succ_id) == (predecessor.pk, successor.pk):
+            continue                # re-saving this very edge is not a new cycle
+        forward.setdefault(pred_id, []).append(succ_id)
+
+    # BFS from successor, remembering how each node was reached, so the message can
+    # print the actual chain rather than merely assert that one exists.
+    came_from = {successor.pk: None}
+    queue     = [successor.pk]
+    while queue:
+        node = queue.pop(0)
+        if node == predecessor.pk:
+            chain = []
+            while node is not None:
+                chain.append(node)
+                node = came_from[node]
+            chain.reverse()         # successor ... -> predecessor
+            raise DependencyCycle(
+                f"'{predecessor}' -> '{successor}' would close a dependency loop: "
+                f"'{successor}' already reaches '{predecessor}' through "
+                f"{len(chain) - 1} edge(s) (ids {' -> '.join(str(n) for n in chain)}). "
+                f"A cycle makes every task in it permanently waiting on a predecessor."
+            )
+        for nxt in forward.get(node, ()):
+            if nxt not in came_from:
+                came_from[nxt] = node
+                queue.append(nxt)
+
+
+class TaskTemplateTaskDependency(models.Model):
+    """Within one template version, `successor` may not start until `predecessor` is Done.
+
+    FINISH-TO-START ONLY, AND NO LAG — both are narrowings decided on 30 Aug 2026, not
+    omissions (docs/execution-model.md §12). There is deliberately no `dependency_type`
+    column: nothing in the business has asked for start-to-start or finish-to-finish,
+    and a type column holding one value forever is worse than no column. Add either
+    when a real task list needs it.
+
+    R-7, AND IT SITS INSIDE TaskTemplate's VERSIONING SCHEME RATHER THAN BESIDE IT. An
+    edge is content of a template version, so it is editable only while that version is
+    a draft, enforced through the shared _require_draft_template() that
+    TaskTemplatePhase, TaskTemplateTask and ChecklistItem already raise from. Adding an
+    edge to a live version would retroactively make in-flight work wait on something it
+    was never told about — the same class of harm as adding a question to a live
+    checklist, which is why 0.5's guard blocks adds as well as edits.
+
+    BOTH SIDES MUST BELONG TO THE SAME TEMPLATE VERSION. That cannot be a
+    CheckConstraint: the two versions are reached through two FK hops and a constraint's
+    fields must be local columns — the same wall audit F-1 hit on D-1. It is therefore
+    clean() plus a guard in save(), and the honest limit of that is stated once for both
+    models on TaskDependency below.
+    """
+
+    predecessor = models.ForeignKey(
+        'TaskTemplateTask', on_delete=models.CASCADE, related_name='dependents',
+    )
+    successor   = models.ForeignKey(
+        'TaskTemplateTask', on_delete=models.CASCADE, related_name='dependencies',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'task template task dependency'
+        verbose_name_plural = 'task template task dependencies'
+        constraints = [
+            # The same edge twice is meaningless.
+            models.UniqueConstraint(
+                fields=['predecessor', 'successor'],
+                name='uniq_task_template_task_dependency',
+            ),
+            # A task may not depend on itself. BOTH columns are local, so unlike the
+            # same-version rule this one IS expressible as a database CHECK — and is
+            # written as one for the reason 1.2a wrote execution_groups_are_never_locked
+            # as one: a rule the database enforces stops being a rule the code has to
+            # remember. The save() guard beside it exists only to raise a readable
+            # message instead of an IntegrityError.
+            models.CheckConstraint(
+                condition=~models.Q(predecessor=models.F('successor')),
+                name='task_template_task_dependency_not_self',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.predecessor} -> {self.successor}"
+
+    def clean(self):
+        # A task may not depend on itself.
+        if self.predecessor_id is not None and self.predecessor_id == self.successor_id:
+            raise ValidationError(
+                f"A template task cannot depend on itself ('{self.predecessor}')."
+            )
+
+        if self.predecessor_id is None or self.successor_id is None:
+            return
+
+        # Both sides must belong to the same template version. An edge spanning two
+        # versions would mean a project waiting on a row from a version it was never
+        # built from.
+        pred_template = self.predecessor.phase.template_id
+        succ_template = self.successor.phase.template_id
+        if pred_template != succ_template:
+            raise ValidationError(
+                f"A dependency must join two tasks of the SAME template version: "
+                f"'{self.predecessor}' belongs to {self.predecessor.phase.template} and "
+                f"'{self.successor}' belongs to {self.successor.phase.template}."
+            )
+
+        # Cycle check, scoped to this template version's own edges.
+        _reject_dependency_cycle(
+            TaskTemplateTaskDependency.objects
+            .filter(predecessor__phase__template_id=pred_template)
+            .values_list('predecessor_id', 'successor_id'),
+            self.predecessor, self.successor, exclude_pk=self.pk,
+        )
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived version is immutable. Checked FIRST, so
+        # a change to a live version is refused for being live rather than for whatever
+        # else might also be wrong with it.
+        if self.predecessor_id is not None:
+            _require_draft_template(self.predecessor.phase.template, f"dependency '{self}'")
+        if self.successor_id is not None:
+            _require_draft_template(self.successor.phase.template, f"dependency '{self}'")
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: removing an edge is a content change like any other.
+        if self.predecessor_id is not None:
+            _require_draft_template(self.predecessor.phase.template, f"dependency '{self}'")
+        return super().delete(*args, **kwargs)
+
+
+class TaskDependency(models.Model):
+    """On ONE project, `successor` may not start until `predecessor` is Done.
+
+    WHY THIS EXISTS RATHER THAN RESOLVING THROUGH THE TEMPLATE AT READ TIME: a template
+    version could later be superseded, and an in-flight project's dependencies must not
+    change underneath it. This is the same reasoning that made Task.task_name a snapshot
+    and closed B-10.
+
+    Rows are COPIES, taken from TaskTemplateTaskDependency at activation by
+    materialise_task_dependencies() in projects/task_dependencies.py, exactly as
+    Task.task_name is a copy taken at bulk_create. There is deliberately NO FK back to
+    the template edge: the copy is the whole point, and a provenance FK here would be
+    the first thing a later session resolved behaviour through.
+
+    ON_DELETE IS CASCADE ON BOTH SIDES, CHOSEN RATHER THAN INHERITED. An edge is a
+    statement about two tasks; when either task ceases to exist, the statement has no
+    subject left. SET_NULL would leave half-edges that incomplete_predecessors() must
+    filter out at every single read — a permanent tax to preserve a row that says
+    nothing. PROTECT would make deleting a task fail for a reason the user cannot see
+    and cannot fix from the screen they are on. Tasks are already CASCADEd away by their
+    phase and their project, so CASCADE is also what the surrounding schema does.
+
+    ENFORCEMENT LIMIT, STATED FOR BOTH MODELS RATHER THAN IMPLIED. Same-project (and,
+    on the template side, same-version), no-self-reference and no-cycles are clean()/
+    save() guards. QuerySet.update(), bulk_create() and QuerySet.delete() operate in SQL
+    and bypass them entirely — the identical honest half-measure that StatusTransition
+    (R-4), TaskTemplate (R-7) and SiteGroupMembership (D-1) each document about
+    themselves. The ONE exception is no-self-reference, which is a database CHECK on
+    both models and holds against all three. materialise_task_dependencies() therefore
+    writes edges one save() at a time and does not use bulk_create; see its docstring.
+    """
+
+    predecessor = models.ForeignKey(
+        'Task', on_delete=models.CASCADE, related_name='dependents',
+    )
+    successor   = models.ForeignKey(
+        'Task', on_delete=models.CASCADE, related_name='dependencies',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name        = 'task dependency'
+        verbose_name_plural = 'task dependencies'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['predecessor', 'successor'],
+                name='uniq_task_dependency',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(predecessor=models.F('successor')),
+                name='task_dependency_not_self',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.predecessor} -> {self.successor}"
+
+    def clean(self):
+        if self.predecessor_id is not None and self.predecessor_id == self.successor_id:
+            raise ValidationError(
+                f"A task cannot depend on itself ('{self.predecessor}')."
+            )
+
+        if self.predecessor_id is None or self.successor_id is None:
+            return
+
+        # Both sides must belong to the same project. Task has no project FK — it is
+        # reached through its phase (feedback_task_project_path), which is exactly why
+        # this cannot be a CheckConstraint either.
+        pred_project = self.predecessor.phase.project_id
+        succ_project = self.successor.phase.project_id
+        if pred_project != succ_project:
+            raise ValidationError(
+                f"A dependency must join two tasks of the SAME project: "
+                f"'{self.predecessor}' belongs to {self.predecessor.phase.project} and "
+                f"'{self.successor}' belongs to {self.successor.phase.project}."
+            )
+
+        _reject_dependency_cycle(
+            TaskDependency.objects
+            .filter(predecessor__phase__project_id=pred_project)
+            .values_list('predecessor_id', 'successor_id'),
+            self.predecessor, self.successor, exclude_pk=self.pk,
+        )
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
+
+
+def derive_checklist_code(name, checklist_model, exclude_pk=None):
+    """Derive a stable, unique family code for a Checklist from its human name.
+
+    TaskTemplate.code is always supplied explicitly because templates are seeded by
+    migrations. Checklists are created through a screen where the admin types only a
+    name, so the code is derived here rather than made the admin's problem.
+
+    VERSION 2 AND LATER MUST PASS THE FAMILY'S CODE EXPLICITLY. Deriving it again from
+    the same name would find v1's code already taken and hand back a disambiguated one,
+    which would make v2 a separate family rather than the next version of this one.
+    """
+    base = re.sub(r'[^A-Z0-9]+', '-', (name or '').upper()).strip('-')[:50]
+    if not base:
+        base = 'CHECKLIST'
+
+    qs = checklist_model.objects.all()
+    if exclude_pk is not None:
+        qs = qs.exclude(pk=exclude_pk)
+    taken = set(qs.values_list('code', flat=True))
+
+    if base not in taken:
+        return base
+    n = 2
+    while True:
+        suffix    = f'-{n}'
+        candidate = f'{base[:50 - len(suffix)]}{suffix}'
+        if candidate not in taken:
+            return candidate
+        n += 1
+
+
+class Checklist(models.Model):
+    """
+    One numbered version of a reusable checklist, authored in portal-admin and surfaced
+    on a task by linking it to one or more (task_name, project_type) pairs via
+    ChecklistTaskLink. Its line items live in ChecklistItem; per-task completion state
+    lives in ChecklistItemCompletion.
+
+    R-7 — VERSIONED AND IMMUTABLE ONCE ACTIVE, exactly as TaskTemplate is. Editing an
+    active checklist means creating version+1 as a draft, changing that, then calling
+    activate(), which archives version N in the same transaction. `code` is the identity
+    that survives across versions: when v2 rewords a label, `code` is what says it is
+    still the same checklist. The shape, the constraint style and the immutability
+    enforcement are deliberately identical to TaskTemplate's — two versioned template
+    families in one codebase must not carry two different designs.
+
+    `is_active` USED TO BE A COLUMN AND IS NOW A PROPERTY over `status` (migration 0070).
+    Two stored columns answering "is this live" is exactly the drift this model existed
+    to demonstrate; there is one answer now, and the property is a compatibility shim
+    over it, not a second source of truth.
+
+    ENFORCEMENT LIMIT, stated rather than implied: the R-7 guards are save()/delete()
+    overrides on ChecklistItem. QuerySet.update(), QuerySet.delete() and the FK cascade
+    from deleting a Checklist all operate in SQL and bypass them entirely — the same
+    honest half-measure as TaskTemplate's and StatusTransition's.
+    """
+
+    DRAFT    = 'draft'
+    ACTIVE   = 'active'
+    ARCHIVED = 'archived'
+
+    STATUS_CHOICES = [
+        (DRAFT,    'Draft'),
+        (ACTIVE,   'Active'),
+        (ARCHIVED, 'Archived'),
+    ]
+
+    code           = models.CharField(max_length=50)   # Cross-version identity: v1 and v2 of one checklist share it
+    name           = models.CharField(max_length=200)
+    version_no     = models.PositiveIntegerField(default=1)
+    status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
+    effective_from = models.DateField(null=True, blank=True)   # Stamped by activate()
+    created_by     = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='created_checklists',
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['name']
+        ordering = ['name', '-version_no']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['code', 'version_no'],
+                name='uniq_checklist_code_version',
+            ),
+            # At most ONE active version per checklist code. Partial (condition=) so any
+            # number of draft and archived versions may coexist beside it — the history
+            # is kept, the exclusivity is not weakened by keeping it. Same shape as
+            # uniq_active_task_template_per_code.
+            models.UniqueConstraint(
+                fields=['code'],
+                condition=models.Q(status='active'),   # literal: a nested Meta cannot see the outer class body's ACTIVE
+                name='uniq_active_checklist_per_code',
+            ),
+        ]
 
     def __str__(self):
-        return self.name
+        return f"{self.name} v{self.version_no} ({self.status})"
+
+    @property
+    def is_active(self):
+        """DEPRECATED SHIM over `status`, kept so existing callers keep reading one truth.
+
+        There is no is_active column any more. Reads answer "is this the live version",
+        which is what the column meant; writes map True → active and False → archived,
+        because an inactive checklist was one that had been offered and withdrawn, not
+        one that had never been published.
+        """
+        return self.status == self.ACTIVE
+
+    @is_active.setter
+    def is_active(self, value):
+        self.status = self.ACTIVE if value else self.ARCHIVED
+
+    @property
+    def is_editable(self):
+        """Content may be changed only while the version is a draft (R-7)."""
+        return self.status == self.DRAFT
+
+    def save(self, *args, **kwargs):
+        # A checklist created through the admin screen carries only a name; derive the
+        # family code from it. Never overwrites a code that was supplied — which is how
+        # version 2 of a family stays in the family.
+        if not self.code:
+            self.code = derive_checklist_code(self.name, Checklist, exclude_pk=self.pk)
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None and 'code' not in update_fields:
+                kwargs['update_fields'] = list(update_fields) + ['code']
+        return super().save(*args, **kwargs)
+
+    def activate(self):
+        """Make this draft the active version, archiving the current active one.
+
+        Both writes happen in ONE transaction, so there is no instant at which a
+        checklist code has two active versions or none. Byte-for-byte the same body as
+        TaskTemplate.activate() by intent, not by accident.
+        """
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be activated; {self} is '{self.status}'."
+            )
+        with transaction.atomic():
+            # filter().update() rather than load-and-save: the archive and the
+            # activation must not interleave with a concurrent activate() of a third
+            # version, and the partial unique constraint is what adjudicates a race.
+            Checklist.objects.filter(
+                code=self.code, status=self.ACTIVE,
+            ).exclude(pk=self.pk).update(status=self.ARCHIVED)
+
+            self.status = self.ACTIVE
+            if self.effective_from is None:
+                self.effective_from = timezone.now().date()
+            self.save(update_fields=['status', 'effective_from'])
+        return self
 
 
 class ChecklistItem(models.Model):
     """
     One line item belonging to a Checklist. `order` is ascending within the checklist and
     is swapped by the admin up/down actions (no drag library). Deleting the parent
-    Checklist cascades to its items (and each item cascades to its completions).
+    Checklist cascades to its items — but an item's completions are NO LONGER destroyed
+    with it: ChecklistItemCompletion.item is SET_NULL and the answered text lives on the
+    completion as a snapshot.
+
+    R-7: content is editable only while the parent checklist is a draft. That covers
+    adding a line as well as rewording or removing one — adding a question to a live
+    checklist retroactively makes every site that already completed it incomplete.
     """
 
     checklist = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='items')
@@ -1678,6 +2619,16 @@ class ChecklistItem(models.Model):
 
     def __str__(self):
         return f"Checklist {self.checklist_id} — {self.label[:40]}"
+
+    def save(self, *args, **kwargs):
+        # R-7: content of an active or archived checklist is immutable.
+        _require_draft_template(self.checklist, f"checklist item '{self.label[:40]}'")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        # R-7: content of an active or archived checklist is immutable.
+        _require_draft_template(self.checklist, f"checklist item '{self.label[:40]}'")
+        return super().delete(*args, **kwargs)
 
 
 class ChecklistTaskLink(models.Model):
@@ -1709,11 +2660,29 @@ class ChecklistItemCompletion(models.Model):
     an item requires BOTH a tick and a photo: is_checked is only ever set True together
     with the three photo_* fields in the same save, so a checked item can never lack a
     photo. Reuses the same three-field Supabase convention as the rest of the app.
+
+    R-8 — IT STORES THE TEXT IT WAS ANSWERING. `item_text_snapshot` is written from the
+    item's label at the instant the item is checked, and every read path renders the
+    snapshot rather than item.label. Without it, rewording a checklist line silently
+    rewrote history: forty sites completed in March displayed April's wording, and a
+    "Yes" recorded against the old question appeared to answer the new one.
+
+    THE FK IS SET_NULL, NOT CASCADE. Deleting a checklist item must never delete the
+    record of answering it — the tick, the photo, who checked it and when. The FK is
+    kept for provenance; the snapshot is the record. A completion whose item is null is
+    an answer to a question that no longer exists, and it is still evidence.
     """
 
-    item       = models.ForeignKey(ChecklistItem, on_delete=models.CASCADE, related_name='completions')
+    item       = models.ForeignKey(
+        ChecklistItem, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='completions',
+    )
     task       = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='checklist_completions')
     is_checked = models.BooleanField(default=False)
+
+    # The item's label as it stood when this item was checked (R-8). Blank only on a row
+    # that has never been checked, and on pre-0069 rows the backfill could not reach.
+    item_text_snapshot = models.TextField(blank=True, default='')
 
     # Supabase storage — same three-field convention as PaymentRequest / TaskAttachment.
     # One photo per completion; blank until the item is checked.
@@ -1729,8 +2698,22 @@ class ChecklistItemCompletion(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ('item', 'task')
-        ordering        = ['pk']
+        ordering = ['pk']
+        constraints = [
+            # Was unique_together ('item', 'task'). Now PARTIAL, because `item` is
+            # nullable: both Postgres and SQLite treat NULLs as distinct in a unique
+            # index, so the plain form would silently degrade to "orphans are
+            # unconstrained". That degraded behaviour is the one we want — two orphaned
+            # completions on one task were two genuinely different items and both must
+            # survive — but leaning on per-backend NULL semantics to express a business
+            # rule is the implicit-rule class this module has been removing. Live rows
+            # keep exactly the old guarantee: one completion per (item, task).
+            models.UniqueConstraint(
+                fields=['item', 'task'],
+                condition=models.Q(item__isnull=False),
+                name='uniq_checklist_completion_item_task',
+            ),
+        ]
 
     def __str__(self):
         state = 'checked' if self.is_checked else 'pending'
@@ -2798,9 +3781,16 @@ class DesignChangeRequest(models.Model):
 # or supersedes a BOQ row, because per-site profitability and expense tracking
 # (out of scope for this version) need the per-site figures to stay intact.
 #
-# NO save() OVERRIDES AND NO SIGNALS, matching every prior part. Both transitions —
-# locking a group, and soft-removing a membership — live in the view layer next to
-# the permission check that authorises them.
+# NO SIGNALS. Both lifecycle transitions — locking a group, and soft-removing a
+# membership — live in the view layer next to the permission check that authorises them.
+#
+# THIS PART ORIGINALLY HAD NO save() OVERRIDES EITHER, AND PROMPT 1.1a REVERSED THAT
+# DELIBERATELY. `group_type` is denormalised onto SiteGroupMembership so a partial
+# UniqueConstraint can be written over it (audit F-1: a constraint's fields must be
+# local columns), and a denormalised copy has nowhere else to be set — a view that
+# forgot it would silently write the wrong exclusivity key. The two save() guards below
+# are therefore about a column's integrity, not about a lifecycle transition; the rule
+# above still holds for everything else on these two models.
 # ---------------------------------------------------------------------------
 
 SITE_GROUP_DRAFT  = 'draft'
@@ -2810,6 +3800,54 @@ SITE_GROUP_STATUS_CHOICES = [
     (SITE_GROUP_DRAFT,  'Draft'),
     (SITE_GROUP_LOCKED, 'Locked'),
 ]
+
+# D-1: a SiteGroup serves two purposes. SCM's procurement batch (everything built
+# before 1.1a) and the PM's execution batch are different groupings of the same sites,
+# and a project may hold one live membership of each at the same time.
+GROUP_TYPE_PROCUREMENT = 'procurement'
+GROUP_TYPE_EXECUTION   = 'execution'
+
+GROUP_TYPE_CHOICES = [
+    (GROUP_TYPE_PROCUREMENT, 'Procurement'),
+    (GROUP_TYPE_EXECUTION,   'Execution'),
+]
+
+
+class SiteGroupTypeImmutable(Exception):
+    """Raised when something tries to change `group_type` on a row that already exists."""
+
+
+def _require_unchanged_group_type(instance, what):
+    """Guard: `group_type` is set once, at insert, and never again.
+
+    Same shape as `_require_draft_template()` — a module-level function called from
+    save(), raising a named exception rather than returning a boolean, so the caller
+    that ignores it cannot ignore it quietly.
+
+    Two rows enforce one rule between them, so neither may drift:
+
+      * A SiteGroup that changed type would leave every membership it owns holding a
+        stale copy, and the partial unique constraint would then be enforcing the old
+        answer.
+      * A membership that changed type would move a site between exclusivity keys
+        without the constraint ever seeing the transition.
+
+    A group does not become a different kind of thing, and a site does not change what
+    kind of thing it belongs to. Both are re-created, not edited.
+    """
+    if instance.pk is None:                     # insert; nothing to compare against
+        return
+    previous = type(instance).objects.filter(pk=instance.pk).values_list(
+        'group_type', flat=True).first()
+    if previous is None:                        # row vanished under us; let save() decide
+        return
+    if previous != instance.group_type:
+        raise SiteGroupTypeImmutable(
+            f"Cannot change group_type on {what}: it is '{previous}' and may not become "
+            f"'{instance.group_type}'. group_type is fixed at creation — the partial "
+            f"unique constraint is written over it, so changing it would move a site "
+            f"between exclusivity keys without the database ever seeing the transition."
+        )
 
 
 class SiteGroup(models.Model):
@@ -2833,6 +3871,17 @@ class SiteGroup(models.Model):
         max_length=10, choices=SITE_GROUP_STATUS_CHOICES, default=SITE_GROUP_DRAFT,
     )
 
+    # D-1. Defaults to procurement because every group that existed before 1.1a is an
+    # SCM procurement batch — `site_group_create` was the only writer.
+    #
+    # DELIBERATELY NOT db_index=True, contrary to the audit's draft. Two values over a
+    # table this size is an index the planner would never choose over the existing
+    # program_id one, and it is one more object to carry through every future migration.
+    # Do not add it back reflexively; add it when a query plan asks for it.
+    group_type = models.CharField(
+        max_length=12, choices=GROUP_TYPE_CHOICES, default=GROUP_TYPE_PROCUREMENT,
+    )
+
     created_by = models.ForeignKey(
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='created_site_groups',
@@ -2849,6 +3898,38 @@ class SiteGroup(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            # A LOCK IS A PROCUREMENT ACT, AND NOW THE DATABASE SAYS SO. Locking freezes
+            # the member sites' BOQ quantities because a purchase order is about to be
+            # raised against their aggregate; an execution batch has no order behind it,
+            # so a locked one would freeze a BOQ for no reason anyone could name.
+            #
+            # THIS RETIRES A PIECE OF PROSE (EXECUTION_MODULE_DEFERRED §B7). `boq_detail`
+            # reads a site's memberships WITHOUT asking what type they are, and is correct
+            # today only because no execution group can be `locked` — a rule that until now
+            # was upheld by six filter terms spread across the views and by nothing else.
+            # A CHECK makes it a guarantee instead of a coincidence, so B7's remaining fix
+            # is cosmetic rather than load-bearing.
+            #
+            # Expressible as a CHECK because both columns are local to this row, which is
+            # the same reason F-1 forced `group_type` onto the membership.
+            models.CheckConstraint(
+                condition=~models.Q(group_type=GROUP_TYPE_EXECUTION,
+                                    status=SITE_GROUP_LOCKED),
+                name='execution_groups_are_never_locked',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # A group does not change type. Without this, every denormalised copy on the
+        # memberships below drifts the moment someone edits a group.
+        #
+        # LIMIT, STATED HONESTLY (§13, R-17): QuerySet.update() and bulk_create() do not
+        # call save() and therefore do not reach this guard. That is the same half-measure
+        # the codebase already documents elsewhere, and it is not a reason to skip it —
+        # every production write goes through objects.create() or an instance save().
+        _require_unchanged_group_type(self, f"group '{self.name}'")
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} — {self.program.name} ({self.status})"
@@ -2864,9 +3945,16 @@ class SiteGroupMembership(models.Model):
     request pulls a site out (settled decision 6).
 
     The partial unique constraint is the real enforcement of "a site belongs to at most
-    one group at a time" (settled decision 2). The view checks it too, for a decent error
-    message, but the database is what makes it true — a view check alone loses to a
-    concurrent add.
+    one group OF EACH TYPE at a time" (settled decision 2, widened by D-1). The view
+    checks it too, for a decent error message, but the database is what makes it true —
+    a view check alone loses to a concurrent add.
+
+    `group_type` HERE IS A COPY, NOT A FACT. It is taken from `group.group_type` at
+    insert and exists for exactly one reason: a UniqueConstraint's `fields` must be
+    local columns, so `(project, group_type)` cannot be expressed by joining to
+    SiteGroup (audit F-1). `StatusTransition.actor_role_code` is the precedent —
+    "COPIED AT WRITE TIME, NEVER JOINED". Read the type off `self.group` when you want
+    to know what kind of group this is; this column answers the database, not you.
     """
 
     group = models.ForeignKey(
@@ -2874,6 +3962,14 @@ class SiteGroupMembership(models.Model):
     )
     project = models.ForeignKey(
         Project, on_delete=models.CASCADE, related_name='group_memberships',
+    )
+
+    # NEVER SET BY A CALLER. save() overwrites whatever is passed here with the group's
+    # own value on insert — see the docstring above and the guard below. The default
+    # exists so the 1.1a migration can add the column to existing rows without a NULL
+    # window; it is not a fallback anyone should be relying on.
+    group_type = models.CharField(
+        max_length=12, choices=GROUP_TYPE_CHOICES, default=GROUP_TYPE_PROCUREMENT,
     )
 
     added_by = models.ForeignKey(
@@ -2892,15 +3988,38 @@ class SiteGroupMembership(models.Model):
     class Meta:
         ordering = ['added_at']
         constraints = [
-            # At most ONE live membership per project, across every group in the system.
+            # At most ONE live membership per project PER TYPE, across every group in
+            # the system — so one procurement batch and one execution batch may hold the
+            # same site, and a second of either may not (D-1).
+            #
             # Partial (condition=) so any number of removed rows may coexist with it —
             # the history is kept, the exclusivity is not weakened by keeping it.
+            #
+            # RENAMED, NOT REUSED. This name reaches SCM: `_add_sites()` catches the
+            # IntegrityError it raises and turns it into the refusal message, and the
+            # name should say what the rule now is rather than what it used to be.
             models.UniqueConstraint(
-                fields=['project'],
+                fields=['project', 'group_type'],
                 condition=models.Q(removed_at__isnull=True),
-                name='uniq_active_site_group_membership',
+                name='uniq_active_site_group_membership_per_type',
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        # On insert the copy is taken from the group, OVERWRITING whatever a caller
+        # passed — this column is not a caller's to set (see the docstring). On update
+        # it may not move at all.
+        #
+        # LIMIT, STATED HONESTLY (§13, R-17): QuerySet.update() and bulk_create() bypass
+        # save() and therefore bypass both halves of this. `_add_sites()` — the only
+        # production writer — uses objects.create() per row, deliberately and for its own
+        # reasons, so it is covered. Anything that reaches for bulk_create() here must
+        # set group_type itself.
+        if self.pk is None:
+            self.group_type = self.group.group_type
+        else:
+            _require_unchanged_group_type(self, f"membership {self.pk}")
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         state = 'removed' if self.removed_at else 'active'
@@ -2951,3 +4070,72 @@ class DesignAnalyticsPreference(models.Model):
 
     def __str__(self):
         return f"Design analytics selection — {self.profile.user.username}"
+
+
+# ---------------------------------------------------------------------------
+# Execution 1.2a — physical stock locations (B-14)
+#
+# HORIZON RUNS THREE WAREHOUSES TODAY. THE COUNT IS NOT STRUCTURAL, AND THAT IS THE
+# WHOLE POINT OF THIS TABLE. Three is what the business happens to have this year, not
+# a fact about the system: warehouses are ROWS, added through a screen when 4.1 builds
+# one. They are not a choices list, not a settings constant, and not seeded by a
+# migration — every one of those spellings would make a fourth warehouse a code change
+# and a deploy instead of a form submission.
+#
+# NOTHING IS SEEDED HERE FOR THE SAME REASON. The three that exist in the world are the
+# product owner's data to enter, and hardcoding them into a migration is precisely what
+# "the count must not be structural" forbids.
+#
+# AUTHORITY FOLLOWS THE WAREHOUSE, NOT THE TENDER (B-14's answer). A keeper acts on
+# whatever is inside their building — receiving it, holding it, issuing it — regardless
+# of which tender or programme paid for it. This is not a convenience; it matches how
+# SCM already works, where material lands at one shared drop point and cost is attributed
+# AT ISSUE rather than at receipt. A keeper who could only touch their own tender's
+# material would be unable to sign for the lorry that brought all of it.
+# ---------------------------------------------------------------------------
+
+
+class StockLocation(models.Model):
+    """One physical place material is received into, held at, and issued from.
+
+    A warehouse, a store, or a site container — anywhere stock physically rests. Rows,
+    not constants: see the section note above for why the number of them must never be
+    written into the code.
+
+    NO `is_deleted`, DELIBERATELY. `is_active` is enough for a warehouse — one that
+    closes stops receiving, but its history has to stay readable — and this codebase has
+    NO custom managers, so every soft-deleted model is one more thing that every future
+    queryset has to remember to filter out by hand. `Project.is_deleted` already costs
+    exactly that (see the soft-delete note on `project_delete`). One flag, one meaning.
+    """
+
+    name    = models.CharField(max_length=120)
+    #: Short human identifier used on documents and in pickers — 'HYD-1', 'MUM-CENTRAL'.
+    code    = models.CharField(max_length=20, unique=True)
+    address = models.TextField(blank=True, default='')
+
+    # THE KEEPER'S AUTHORITY FOLLOWS THIS WAREHOUSE, NOT A TENDER. Whoever is named here
+    # acts on everything inside this location — whatever programme, tender or project it
+    # was bought for — and on nothing inside any other location. That is B-14's answer,
+    # and it is the thing a later session will otherwise guess at.
+    #
+    # ONE KEEPER PER WAREHOUSE is the rule, which is why this is a single FK and not a
+    # M2M. It is deliberately NOT unique: nothing says one person cannot cover two
+    # buildings, and on a three-warehouse operation with someone on leave, they will.
+    #
+    # SET_NULL so retiring a person's profile leaves the warehouse standing with nobody
+    # in charge of it — a state an admin can see and fix. CASCADE here would delete a
+    # building because its keeper left.
+    keeper  = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='keeper_of',
+    )
+
+    is_active  = models.BooleanField(default=True)  # A closed warehouse stops receiving; its history stays readable
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} — {self.name}"

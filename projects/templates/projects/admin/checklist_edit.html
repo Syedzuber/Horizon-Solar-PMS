@@ -11,20 +11,35 @@
   </a>
 </div>
 
-{# ── Name + active ─────────────────────────────────────────────────────────── #}
+{% comment %}
+Name + version lifecycle. The old "Active" checkbox is gone: there is no is_active
+column behind it any more. A version is published or archived, and its items are
+editable only while it is a draft (R-7).
+{% endcomment %}
 <div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="text-sm text-gray-500">{{ checklist.code }} · version {{ checklist.version_no }}</span>
+    {% if checklist.status == 'active' %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+    {% elif checklist.status == 'draft' %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Draft</span>
+    {% else %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">Archived</span>
+    {% endif %}
+    {% if checklist.effective_from %}
+      <span class="text-xs text-gray-400">published {{ checklist.effective_from|date:"d M Y" }}</span>
+    {% endif %}
+  </div>
+
+  {% if checklist.is_editable %}
   <form method="POST" action="{% url 'admin_checklist_update' checklist.pk %}" class="flex items-end gap-4 flex-wrap">
     {% csrf_token %}
+    <input type="hidden" name="action" value="rename">
     <div class="flex-1 min-w-[16rem]">
       <label class="block text-xs font-medium text-gray-500 mb-1">Checklist name</label>
       <input type="text" name="name" value="{{ checklist.name }}" required maxlength="200"
              class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
     </div>
-    <label class="flex items-center gap-2 text-sm text-gray-700 pb-2">
-      <input type="checkbox" name="is_active" {% if checklist.is_active %}checked{% endif %}
-             class="rounded border-gray-300 text-green-600 focus:ring-green-500">
-      Active
-    </label>
     <button type="submit"
             class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
             style="background:#1a7a4a;"
@@ -32,7 +47,52 @@
       <i data-lucide="save" class="w-4 h-4"></i> Save
     </button>
   </form>
-  <p class="text-xs text-gray-400 mt-2">Inactive checklists are hidden on task detail pages.</p>
+  <div class="flex items-center gap-3 mt-4 pt-4 border-t border-gray-100">
+    <form method="POST" action="{% url 'admin_checklist_update' checklist.pk %}"
+          onsubmit="return confirm('Publish this version? Its items are frozen from then on, and the previously published version is archived.');">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="publish">
+      <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+        <i data-lucide="check" class="w-4 h-4"></i> Publish this version
+      </button>
+    </form>
+    <p class="text-xs text-gray-400">A draft is shown on no task. Publishing archives the previously published version.</p>
+  </div>
+  {% else %}
+  <p class="text-sm text-gray-800 font-medium">{{ checklist.name }}</p>
+  <p class="text-xs text-gray-500 mt-2">
+    {% if checklist.status == 'active' %}
+      This version is published, so its items are frozen — that is what keeps the
+      completions already recorded against them honest. To change the wording, publish
+      version {{ checklist.version_no|add:1 }}.
+    {% else %}
+      This version is archived. It is shown on no task, and its items stay frozen as the
+      record of what was answered while it was live.
+    {% endif %}
+  </p>
+  {% if checklist.status == 'active' %}
+  <form method="POST" action="{% url 'admin_checklist_update' checklist.pk %}" class="mt-4"
+        onsubmit="return confirm('Archive this checklist? It will no longer be shown on any task, and archiving cannot be undone — republishing means publishing a new version.');">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="archive">
+    <button type="submit" class="inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">
+      <i data-lucide="archive" class="w-4 h-4"></i> Archive
+    </button>
+  </form>
+  {% endif %}
+  {% endif %}
+
+  {% if sibling_versions %}
+  <div class="mt-4 pt-4 border-t border-gray-100">
+    <p class="text-xs font-medium text-gray-500 mb-1">Other versions of {{ checklist.code }}</p>
+    {% for other in sibling_versions %}
+      <a href="{% url 'admin_checklist_edit' other.pk %}"
+         class="inline-flex items-center px-2 py-0.5 mr-1 mb-1 rounded text-xs bg-gray-100 text-gray-600 hover:bg-gray-200">
+        v{{ other.version_no }} · {{ other.get_status_display }}
+      </a>
+    {% endfor %}
+  </div>
+  {% endif %}
 </div>
 
 <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -44,6 +104,7 @@
     {% for item in items %}
     <div class="flex items-center gap-2 py-2 border-b border-gray-100">
       <span class="text-xs text-gray-400 w-5 text-right">{{ forloop.counter }}</span>
+      {% if checklist.is_editable %}
       <form method="POST" action="{% url 'admin_checklist_item_edit' checklist.pk item.pk %}" class="flex-1 flex items-center gap-2">
         {% csrf_token %}
         <input type="text" name="label" value="{{ item.label }}" required
@@ -59,17 +120,22 @@
         <button type="submit" class="text-gray-400 hover:text-gray-700 px-1" title="Move down" {% if forloop.last %}disabled{% endif %}>↓</button>
       </form>
       <form method="POST" action="{% url 'admin_checklist_item_delete' checklist.pk item.pk %}" class="inline"
-            onsubmit="return confirm('Delete this item?');">
+            onsubmit="return confirm('Delete this item? Completions already recorded against it are kept, with the text that was answered.');">
         {% csrf_token %}
         <button type="submit" class="text-gray-400 hover:text-red-600 px-1" title="Delete">
           <i data-lucide="trash-2" class="w-4 h-4"></i>
         </button>
       </form>
+      {% else %}
+      {# Frozen version (R-7): read-only, rather than a form that would be refused. #}
+      <span class="flex-1 text-sm text-gray-700">{{ item.label }}</span>
+      {% endif %}
     </div>
     {% empty %}
     <p class="text-sm text-gray-400 py-2">No items yet.</p>
     {% endfor %}
 
+    {% if checklist.is_editable %}
     <form method="POST" action="{% url 'admin_checklist_item_add' checklist.pk %}" class="flex items-center gap-2 mt-4">
       {% csrf_token %}
       <input type="text" name="label" required placeholder="New item…"
@@ -78,6 +144,12 @@
         <i data-lucide="plus" class="w-4 h-4"></i> Add
       </button>
     </form>
+    {% else %}
+    <p class="text-xs text-gray-400 mt-4">
+      Items are frozen on a {{ checklist.get_status_display|lower }} version. Publishing a
+      new version is how the wording changes.
+    </p>
+    {% endif %}
   </div>
 
   {# ── Assigned tasks ──────────────────────────────────────────────────────── #}
@@ -135,7 +207,7 @@
 {# ── Danger zone ───────────────────────────────────────────────────────────── #}
 <div class="mt-6 flex justify-end">
   <form method="POST" action="{% url 'admin_checklist_delete' checklist.pk %}"
-        onsubmit="return confirm('Delete this checklist? Its items, task assignments, and all completion records will be permanently removed.');">
+        onsubmit="return confirm('Delete this checklist version? Its items and task assignments are removed. Completion records are KEPT, each holding the text it answered.');">
     {% csrf_token %}
     <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50">
       <i data-lucide="trash-2" class="w-4 h-4"></i> Delete checklist

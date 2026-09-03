@@ -33,12 +33,15 @@ from .models import (
     Issue, ActivityLog, Comment, log_activity,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
-    TaskDurationTemplate,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     Program, program_rollup_annotations, get_program_rollup,
     DesignAssignment,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
     DESIGN_QC_FAILED, DESIGN_RELEASED,
+    # Prompt 0.3 — reason vocabulary for the state ledger (R-10: constants, not a table).
+    REASON_CREATED, REASON_BLOCKED, REASON_UNBLOCKED, REASON_MILESTONE_SYNC,
+    REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
+    REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
@@ -47,7 +50,8 @@ from .decorators import (
     get_post_login_url, LANDING_ROLES,
 )
 from .permissions import (
-    user_can_manage_project, project_managers, user_can_manage_program,
+    user_can_manage_project, user_can_view_project, manageable_projects_q,
+    project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
@@ -55,9 +59,36 @@ from .permissions import (
     user_is_design_head,
 )
 from .utils import (
-    attach_residential_template, calculate_due_dates, recalculate_from_task,
+    attach_residential_template, attach_opex_template,
+    calculate_due_dates, recalculate_from_task,
     get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
     assign_task_to, assign_tasks_to,
+    # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
+    # row, inside the same transaction as the change itself.
+    record_transition,
+    # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
+    # screens render the active version and nothing in views writes a template.
+    resolve_active_task_template,
+    # The metric chokepoint (R-20) — 1.3b, SPLIT IN TWO BY PROMPT 1.6. Every task
+    # COUNT below goes through exactly one of these; task LISTS deliberately do not.
+    #
+    # WHICH ONE A CALL SITE TAKES IS DECIDED BY THE QUESTION IT ANSWERS, never by
+    # what the number looks like:
+    #   human_owned_tasks_q / is_human_owned  — "how much work does this person or
+    #       team owe": overdue, pending, blocked, workload, department rollups.
+    #       Mirrors OUT, because a mirror is nobody's task.
+    #   site_progress_tasks_q                 — "how much of this SITE is done":
+    #       progress bars, percentages, per-project completion pairs. Mirrors IN,
+    #       because a site is not finished when only the humans are.
+    #
+    # `site_progress_tasks_q` matches everything and filters nothing. It is imported
+    # and called anyway so that a counter which deliberately includes mirrors is
+    # distinguishable from one that forgot to exclude them — see its docstring.
+    human_owned_tasks_q, is_human_owned, site_progress_tasks_q,
+    # Prompt B21 — the ONE implementation of "current phase" (R-21), mirrors
+    # excluded. Aliased because all three dashboards below already use
+    # `current_phase` as a local name. Never recompute this inline.
+    current_phase as get_current_phase,
 )
 from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NAME_MAP
 # Dashboard integration for the OPEX design module (Part 4.5). Context helpers only —
@@ -235,7 +266,12 @@ def login_view(request):
     role goes straight to its role dashboard exactly as before. Access: public.
     """
     if request.user.is_authenticated:
-        return redirect(get_post_login_url(request.user))
+        # 0.2 lockdown: a profile-less user now resolves to NO_PROFILE_URL ('/login/'),
+        # so redirecting unconditionally would loop this page against itself. Falling
+        # through to render instead gives them the one page they can actually see.
+        target = get_post_login_url(request.user)
+        if target != request.path:
+            return redirect(target)
 
     if request.method == 'POST':
         username = request.POST.get('username', '').strip()
@@ -376,6 +412,52 @@ _FILTER_TITLES = {
     'overdue':   'Overdue Tasks',
 }
 
+# --- Finance confirmation task <-> PaymentMilestone mapping -----------------
+# One definition for the whole module; four copies previously drifted, three of
+# them still naming 'Finance Confirmation', which was deleted from the
+# Residential template. Its M2 role passed to 'Pre Dispatch Payment
+# Confirmation' (see RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES in utils.py).
+# The reverse map is DERIVED, so the two directions cannot drift apart.
+_FINANCE_TASK_TO_MILESTONE = {
+    'Advance Payment Confirmation':      'M1',
+    'Pre Dispatch Payment Confirmation': 'M2',
+    '100% Payment Confirmation':         'M3',
+}
+_MILESTONE_TO_FINANCE_TASK = {
+    milestone: task_name
+    for task_name, milestone in _FINANCE_TASK_TO_MILESTONE.items()
+}
+
+# UserProfile.role and Task.assigned_role use the same strings for every role
+# except BD, which the task template spells 'BD / Sales'. Normalise through this
+# before comparing the two.
+#
+# THIS PAIR DECIDES WHETHER A USER MAY ACT ON A TASK. Read through `.get(x, x)`,
+# it is what `task_status_update`, `task_detail_status_update`'s sibling role gate,
+# `task_set_due_date` and `_user_can_complete_checklist_item` compare against
+# `Task.assigned_role` — so a role the mapping resolves wrongly loses status
+# changes, due dates and checklist ticks, and loses them SILENTLY: the holder gets
+# a permission refusal, not an error, so nothing logs and nothing names the cause.
+# That is exactly what 'Design Head' cost its holder (see UserProfile.ROLE_CHOICES).
+# `task_assign` and `project_overview` read the inverse to build candidate lists.
+#
+# DIFFERENCES ONLY, DELIBERATELY. Every other role's two strings are byte-identical,
+# so `.get(x, x)` passes them through unchanged and an identity entry would add a
+# line that proves nothing — `{'Foo': 'Foo'}` does not make 'Foo' a real profile
+# role. The invariant that actually matters is enforced structurally instead, by
+# `tests_role_mapping.py`: every Task.ROLE_CHOICES value, mapped backwards, must
+# land on a real UserProfile.ROLE_CHOICES value. A NEW ROLE IS ADDED HERE AND
+# NOWHERE ELSE (R-19).
+_PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
+
+# Derived, never written as a second literal — two constants drift, a derived one
+# cannot. Strict inverse: the forward map's values are unique, so this round-trips.
+# Same idiom as _MILESTONE_TO_FINANCE_TASK above.
+_TASK_TO_PROFILE_ROLE = {
+    task_role: profile_role
+    for profile_role, task_role in _PROFILE_TO_TASK_ROLE.items()
+}
+
 
 @login_required
 def tasks_drill_down(request, filter_type):
@@ -388,19 +470,37 @@ def tasks_drill_down(request, filter_type):
     profile = request.user.profile
     role    = profile.role
 
+    # Grouped task lists + a total_count, per due-date window. This is a LIST, but it
+    # is the drill-through for the four dashboard stat blocks (_pm/_se/_design/_scm
+    # task bases), so it must exclude mirrors for the same reason they do — otherwise
+    # the card says 3 and the page it links to lists 4.
     base_qs = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    ).select_related('phase__project')
+    ).filter(human_owned_tasks_q()).select_related('phase__project')
 
+    # 0.2 lockdown: EVERY role now has an explicit branch. Six roles previously reached
+    # the whole portfolio through a trailing `# SCM and others` comment rather than a
+    # decision — so a blank role, or any role added to ROLE_CHOICES later, silently
+    # inherited portfolio-wide task visibility by falling off the end of the chain. The
+    # final `else` below is now a deny, so a new role gets nothing until somebody chooses
+    # what it should see.
+    #
+    # This changes NO existing role's scope. The portfolio branch lists exactly the roles
+    # that already fell through, and it is the same policy as PORTFOLIO_VIEW_ROLES + BD +
+    # System Admin — Finance, SCM and BD stay portfolio-wide by the 25 Aug decision.
     if role in ('PM', 'Project Coordinator'):
         # Coordinators are scoped exactly like a PM, but to the projects they
         # coordinate. For a pure PM the coordinators clause matches nothing, so
         # this is identical to the old assigned_pm-only filter (additive-only).
+        #
+        # Routed through permissions.manageable_projects_q() rather than hand-writing
+        # `Q(assigned_pm=...) | Q(coordinators=...)` here for a second time — it is the
+        # queryset form of the same canonical rule user_can_manage_project() applies to a
+        # single project, and the two are pinned to each other by that helper's invariant.
         base_qs = base_qs.filter(
-            Q(phase__project__assigned_pm=profile) |
-            Q(phase__project__coordinators=profile)
+            manageable_projects_q(profile, 'phase__project__')
         ).distinct()
     elif role == 'Design':
         # Union: FK-owned projects (assigned_design) plus projects where this
@@ -412,7 +512,16 @@ def tasks_drill_down(request, filter_type):
         ).distinct()
     elif role == 'Site Engineer':
         base_qs = base_qs.filter(assigned_to=profile)
-    # SCM and others: all active non-deleted projects
+    elif role in ('CEO', 'Finance', 'SCM', 'Admin', 'System Admin', 'BD'):
+        # Portfolio-wide by remit — unchanged behaviour, now stated as a branch instead of
+        # inherited from a fall-through. Finance, SCM and BD are portfolio-wide by the
+        # 25 Aug decision (execution-model §12); narrowing them is deferred, not forgotten.
+        pass
+    else:
+        # A role with no branch — today only a blank role, tomorrow whatever gets added to
+        # ROLE_CHOICES next — sees nothing. Deny by default: a new role must be given
+        # visibility deliberately, never by omission.
+        base_qs = base_qs.none()
 
     active_statuses = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
 
@@ -481,30 +590,36 @@ def dashboard_pm(request):
         status__in=['Active', 'In Progress'],
     ).count()
 
+    # The four headline cards. All four exclude mirrors, uniformly and including the
+    # two where no mirror can appear today (no OPEX mirror is External, and none is
+    # seeded Blocked): a rule applied to three of four reads as a coincidence to the
+    # next person, and `pending_approvals` is the one that most needs it — it matches
+    # on assigned_role with NO assignment term, so an OPEX site's two PM mirrors (COD,
+    # HOTO) would land on this card whether or not anyone was assigned to them.
     due_today = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         due_date=date.today(),
         due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     blocked_tasks = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         status='Blocked',
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     pending_approvals = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         assigned_role=Task.PM,
         status='Not Started',
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     external_pending = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         task_type=Task.EXTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).count()
+    ).filter(human_owned_tasks_q()).count()
 
     # Draft projects assigned to this PM (Zoho-created or manually created and not yet activated)
     draft_projects = list(
@@ -516,7 +631,19 @@ def dashboard_pm(request):
     )
 
     projects_with_progress = []
-    for project in Project.objects.filter(id__in=managed_project_ids, status__in=['Active', 'In Progress'], is_deleted=False):
+    # The Prefetch is what makes get_current_phase() below free (R-21). Without it
+    # the helper's Python loop would fire one query per PHASE per project; with it
+    # the whole dashboard pays two constant queries instead of the 1–2 PER PROJECT
+    # the old inline queryset cost. Same clause dashboard_bd and admin_project_list
+    # already carry, ordered by phase_order for the same reason.
+    for project in (
+        Project.objects
+        .filter(id__in=managed_project_ids, status__in=['Active', 'In Progress'], is_deleted=False)
+        .prefetch_related(
+            Prefetch('phases',
+                     queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+        )
+    ):
         try:
             project.boq_status = project.boq.status
             project.boq_url    = f'/projects/{project.project_id}/boq/'
@@ -524,25 +651,53 @@ def dashboard_pm(request):
             project.boq_status = None
             project.boq_url    = None
 
-        total_tasks    = Task.objects.filter(phase__project=project).count()
-        done_tasks     = Task.objects.filter(phase__project=project, status='Done').count()
-        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').count()
+        # THIS IS SITE COMPLETENESS, SO DERIVED WORK COUNTS. All four numbers ask
+        # "how much of this site is done" — not "how much does this PM owe" — and a
+        # site is not finished because the humans finished. An undelivered
+        # consignment and an unissued design are outstanding work on the site whoever
+        # is responsible for recording them, so they belong in both halves.
+        # `site_progress_tasks_q()` is a no-op that says so; see R-20's PROGRESS half.
+        #
+        # CHANGED BY PROMPT 1.6, and the reason is the bar three lines below in the
+        # template. 1.3b excluded mirrors here, and 1.5 stopped excluding them in
+        # `project_overview`'s per-phase bar — on that screen only. The same OPEX site
+        # then reported its completeness out of 15 here and out of 23 there. Two
+        # progress numbers for one project, from the same data at the same moment.
+        # `internal_percent` (the only one of the four the template draws, at
+        # dashboard/pm.html:215) and the overview's per-phase bars now share a
+        # denominator, and tests_progress_vs_workload.py asserts they agree.
+        #
+        # THE COST, unchanged from 1.5 and accepted: a site with open mirrors can
+        # never read 100% until derivation lands, because no human can close one.
+        # That is a TRUE statement about the site. The 1.3b-era alternative — reading
+        # 100% with four deliveries outstanding — was not.
+        #
+        # The per-project OVERDUE, BLOCKED, PENDING and DUE-TODAY counts a few lines
+        # down are the other question and still exclude mirrors. Do not make these
+        # match those.
+        total_tasks    = Task.objects.filter(phase__project=project).filter(site_progress_tasks_q()).count()
+        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(site_progress_tasks_q()).count()
+        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(site_progress_tasks_q()).count()
+        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(site_progress_tasks_q()).count()
         internal_percent = int(internal_done / internal_total * 100) if internal_total else 0
         ext_pending    = Task.objects.filter(
             phase__project=project, task_type=Task.EXTERNAL,
             status__in=['Not Started', 'In Progress'],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
         overdue_count  = Task.objects.filter(
             phase__project=project, task_type=Task.INTERNAL,
             due_date__lt=date.today(), due_date__isnull=False,
             status__in=['Not Started', 'In Progress'],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
         blocked_count = Task.objects.filter(
             phase__project=project, status='Blocked',
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
+        # The two five-row evidence lists under the counts above. Filtered to match:
+        # they itemise blocked_count and overdue_count, so a mirror appearing in a list
+        # whose own headline number excludes it would contradict the card.
         blocked_tasks_for_project = list(
             Task.objects.filter(phase__project=project, status='Blocked')
+            .filter(human_owned_tasks_q())
             .select_related('phase')[:5]
         )
         overdue_tasks_for_project = list(
@@ -550,7 +705,7 @@ def dashboard_pm(request):
                 phase__project=project, task_type=Task.INTERNAL,
                 due_date__lt=date.today(), due_date__isnull=False,
                 status__in=['Not Started', 'In Progress'],
-            ).select_related('phase')[:5]
+            ).filter(human_owned_tasks_q()).select_related('phase')[:5]
         )
         is_delayed = bool(
             project.target_commissioning_date
@@ -560,17 +715,15 @@ def dashboard_pm(request):
             (date.today() - project.target_commissioning_date).days
             if is_delayed else None
         )
-        current_phase  = (
-            project.phases
-            .filter(tasks__status__in=['Not Started', 'In Progress', 'Blocked'])
-            .order_by('phase_order').first()
-            or project.phases.order_by('-phase_order').first()
-        )
+        # R-21: the one implementation, mirrors excluded. Free here — the loop
+        # queryset prefetches phases and tasks for exactly this call.
+        current_phase  = get_current_phase(project)
+        # Per-project due-today count on the same card.
         due_today_for_project = Task.objects.filter(
             phase__project=project,
             due_date=date.today(), due_date__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-        ).count()
+        ).filter(human_owned_tasks_q()).count()
 
         milestones_list = []
         for _m in project.milestones.all():
@@ -694,12 +847,14 @@ def dashboard_pm(request):
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
 
+    # Due-today / due-soon / overdue stat block. Drills through to tasks_drill_down,
+    # which carries the same exclusion so the card and the list agree.
     _pm_task_base = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    )
+    ).filter(human_owned_tasks_q())
     _active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _soon   = date.today() + timedelta(days=7)
     tasks_due_today_count = _pm_task_base.filter(due_date=date.today(), status__in=_active).count()
@@ -759,7 +914,18 @@ def dashboard_site_engineer(request):
         is_deleted=False,
         status__in=['Active', 'In Progress'],
         phases__tasks__assigned_to=se_profile,
-    ).distinct().annotate(
+    ).distinct().prefetch_related(
+        # Added by B21 for get_current_phase() in the loop below (R-21) — see the
+        # identical clause on the PM dashboard. Two constant queries in place of
+        # the 1–2 per project the old inline phase queryset cost.
+        Prefetch('phases',
+                 queryset=ProjectPhase.objects.prefetch_related('tasks').order_by('phase_order'))
+    ).annotate(
+        # Per-project overdue / blocked for this SE. The exclusion rides INSIDE the
+        # Count filter, not on the queryset: the project SELECTION above
+        # (phases__tasks__assigned_to) is a visibility rule and must keep matching on
+        # mirrors, or an SE assigned only a mirror would lose the site off their
+        # dashboard entirely. Metrics out, visibility untouched.
         overdue_count=Count(
             'phases__tasks',
             filter=Q(
@@ -768,7 +934,7 @@ def dashboard_site_engineer(request):
                 phases__tasks__due_date__lt=today,
                 phases__tasks__due_date__isnull=False,
                 phases__tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ),
+            ) & human_owned_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         blocked_count=Count(
@@ -776,7 +942,7 @@ def dashboard_site_engineer(request):
             filter=Q(
                 phases__tasks__assigned_to=se_profile,
                 phases__tasks__status=Task.BLOCKED,
-            ),
+            ) & human_owned_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         pending_grn_count=Count(
@@ -793,8 +959,24 @@ def dashboard_site_engineer(request):
 
     projects_data = []
     for project in projects:
-        # Compute SE task progress: done / total for tasks explicitly assigned to this SE
-        se_tasks_qs = Task.objects.filter(phase__project=project, assigned_to=se_profile)
+        # IT LOOKS LIKE PROGRESS AND IT IS NOT. DO NOT "FIX" THIS TO MATCH THE
+        # DASHBOARD_PM PERCENTAGE — prompt 1.6 examined it and left it deliberately.
+        #
+        # It renders as a percentage, so the obvious reading is site completeness. But
+        # `assigned_to=se_profile` makes it a PERSON's queue: it answers "how much of
+        # MY work is done", and the proof is that two Site Engineers on one project get
+        # two different percentages out of it. A site-completeness number cannot do
+        # that. So it takes the WORKLOAD helper like every other person-scoped count —
+        # a mirror in here would put another team's queue in this engineer's bar.
+        #
+        # `dashboard_pm`'s percentage and the overview's phase bars have NO assignment
+        # term and are the other question; 1.6 moved those and not this one.
+        #
+        # Inert either way today: no OPEX mirror carries the Site Engineer role. Here
+        # so the rule is uniform when one does.
+        se_tasks_qs = Task.objects.filter(
+            phase__project=project, assigned_to=se_profile,
+        ).filter(human_owned_tasks_q())
         se_total    = se_tasks_qs.count()
         se_done     = se_tasks_qs.filter(status=Task.DONE).count()
         progress    = int(se_done / se_total * 100) if se_total else 0
@@ -806,13 +988,10 @@ def dashboard_site_engineer(request):
         )
         delay_days = (today - project.target_commissioning_date).days if is_delayed else 0
 
-        # Current phase: first phase with an incomplete task (same query pattern as PM dashboard)
-        current_phase_obj = (
-            project.phases
-            .filter(tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])
-            .order_by('phase_order').first()
-            or project.phases.order_by('-phase_order').first()
-        )
+        # R-21: the one implementation, mirrors excluded. Free — the queryset above
+        # prefetches phases and tasks for exactly this call. The template prints a
+        # name, so take it off the phase here rather than passing the object.
+        current_phase_obj = get_current_phase(project)
         phase_name = current_phase_obj.phase_name if current_phase_obj else None
 
         # Next task: earliest not-done SE-assigned task ordered by due_date.
@@ -874,12 +1053,13 @@ def dashboard_site_engineer(request):
     total_issues      = sum(p['issue_count'] for p in projects_data)
     total_urgent      = sum(p['urgency_count'] for p in projects_data)
 
+    # Due-today / due-soon / overdue stat block — drills through to tasks_drill_down.
     _se_task_base = Task.objects.filter(
         assigned_to=se_profile,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    )
+    ).filter(human_owned_tasks_q())
     _se_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _se_soon   = today + timedelta(days=7)
     se_tasks_due_today = _se_task_base.filter(due_date=today, status__in=_se_active).count()
@@ -1018,10 +1198,13 @@ def dashboard_design(request):
     # phase__project__in=projects_qs guarantees this stat block counts tasks
     # from exactly the same project set as the cards above — no drift between
     # the two if the visibility union ever changes.
+    # Counts every task on the visible projects with NO assignment or role term, so an
+    # OPEX site's two Design mirrors would land here on assignment alone. The project
+    # SELECTION (projects_qs, above) is left alone — that is visibility.
     _design_task_base = Task.objects.filter(
         phase__project__in=projects_qs,
         due_date__isnull=False,
-    ).distinct()
+    ).filter(human_owned_tasks_q()).distinct()
     _d_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _d_soon   = today + timedelta(days=7)
     design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
@@ -1497,12 +1680,15 @@ def dashboard_scm(request):
         .values('id', 'name')
     )
 
+    # Portfolio-wide task stat block with no role term — the OPEX Material Delivery
+    # mirror is SCM-owned and would count here. (The delivery figures above are
+    # DeliveryChallan-derived by design and are not touched.)
     _scm_task_base = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
         **_context_filter(ctx, 'phase__project__'),
-    )
+    ).filter(human_owned_tasks_q())
     _s_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _s_soon   = today + timedelta(days=7)
     scm_tasks_due_today = _scm_task_base.filter(due_date=today, status__in=_s_active).count()
@@ -1593,12 +1779,18 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
 # cross-checking against the SCM models — the two will disagree, and the disagreement
 # is not a bug in either. See SECONDARY_FINDINGS.md.
 #
-# Positions come from build_residential_phases() and are RESIDENTIAL-ONLY. There is no
-# OPEX/CAPEX phase template in this codebase at all (attach_residential_template is the
-# only builder; non-Residential activation tells the PM to add tasks by hand), and no
-# non-Residential project on production has a single phase row. Phase 6 of a tender site
-# would therefore be whatever someone happened to create sixth, so both subqueries carry
-# their own project_type term and both rows hide for those types.
+# Positions come from build_residential_phases() and are RESIDENTIAL-ONLY. Phase 6 of a
+# tender site is NOT the Residential phase 6, so both subqueries carry their own
+# project_type term and both rows hide for those types.
+#
+# CORRECTED 30 Aug 2026 (prompt 1.3b). This block used to justify itself by asserting
+# "there is no OPEX/CAPEX phase template in this codebase at all" and "no non-Residential
+# project on production has a single phase row". Migration 0075 falsified the first —
+# an OPEX template (7 phases, 22 tasks) is seeded and active — and 1.3c will falsify the
+# second the moment it attaches one. THE GUARD ITSELF IS UNAFFECTED: it is a
+# project_type equality test, not an inference from the absence of a template, so it
+# keeps holding for exactly the reason stated in the paragraph above. Only the
+# now-false rationale is removed, so the next reader does not act on it.
 RESIDENTIAL_DELIVERY_PHASE_ORDER = 6   # phase 'Delivery', 5 tasks
 RESIDENTIAL_BOQ_PHASE_ORDER      = 3   # phase 'Design'
 RESIDENTIAL_BOQ_TASK_ORDER       = 5   # task  'BOQ Preparation' — the only BOQ task in the template
@@ -1839,8 +2031,37 @@ def _get_ceo_dashboard_context(context=None):
             # construction. A Count(filter=~Q(phases__tasks__status=DONE)) would not be
             # equivalent — a negated Q across a multi-valued relation takes Django's
             # exclude() subquery path instead of a plain SQL FILTER.
-            task_total_count=Count('phases__tasks'),
-            task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)),
+            #
+            # THIS PAIR IS PER-PROJECT COMPLETENESS, SO DERIVED WORK COUNTS. The
+            # card renders them as Pending / Completed over ONE project, and
+            # `pending` is total MINUS done (see the loop below) — so this is not
+            # anybody's queue, it is a two-way partition of one site's work. A site
+            # is not finished because the humans finished, so the deliveries and the
+            # design are in. R-20's PROGRESS half; `site_progress_tasks_q()` says so
+            # at the call site rather than leaving a bare Count() that a reader
+            # cannot distinguish from a forgotten exclusion.
+            #
+            # CHANGED BY PROMPT 1.6. 1.3b excluded mirrors here; 1.5 stopped
+            # excluding them in `project_overview`'s phase bars. The same OPEX site
+            # then reported 15 tasks on this card and 23 on its own overview.
+            #
+            # BOTH TERMS MOVE TOGETHER OR THE PARTITION BREAKS — that was true of the
+            # exclusion and is equally true of its removal. Pending + Completed ==
+            # total holds only because `total` is annotated and `pending` derived
+            # from it; changing one filter and not the other would break it silently.
+            # Pinned by tests_progress_vs_workload.py.
+            #
+            # The no-op Q is passed INSIDE the FILTER clause rather than dropping the
+            # argument, so both counts keep the identical `FILTER (WHERE ...)` shape
+            # and ride the same single LEFT JOIN. Dropping it on one and not the
+            # other is the shape that changes fan-out.
+            #
+            # QUERY 2's ~40 conditional counts below are a SEPARATE queryset asking a
+            # separate question — 18 of them are department workload — and still
+            # exclude mirrors. Changing this does not touch that.
+            task_total_count=Count('phases__tasks', filter=site_progress_tasks_q('phases__tasks__')),
+            task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)
+                                                         & site_progress_tasks_q('phases__tasks__')),
         )
         .order_by('target_commissioning_date', 'project_id')
     )
@@ -1911,11 +2132,17 @@ def _get_ceo_dashboard_context(context=None):
         })
 
     # -- QUERY 2: Task aggregate — single .aggregate() call, ~40 conditional Counts --
+    # Every one of the ~40 conditional counts below excludes mirrors, because the
+    # exclusion sits on the BASE rather than on each Count. That is deliberate: the 18
+    # dept_* terms match on assigned_role with NO assignment term, so they are the one
+    # place a mirror inflates whether or not anybody is assigned to it — an OPEX site
+    # adds 2 to dept_pm_pending, 2 to dept_design_pending and 1 to dept_scm_pending on
+    # attach alone. There is no values()/group-by here, so the base filter adds no join.
     task_agg = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
         **_context_filter(context, 'phase__project__'),
-    ).aggregate(
+    ).filter(human_owned_tasks_q()).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
         task_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -2082,6 +2309,12 @@ def _get_ceo_dashboard_context(context=None):
     # Session 2 added exactly two things here, neither of which can change which rows
     # or counts come back: `assigned_to__role` (role is 1:1 with the profile already in
     # the GROUP BY, so it is a display column only), and the `assigned_to` tie-break.
+    #
+    # Session 1.3b added a third: the mirror exclusion (R-20). It DOES change what
+    # comes back, and that is the point — this card ranks people by workload, and a PM
+    # holding 190 COD/HOTO mirrors across the OPEX portfolio would top it on work
+    # nobody can do. Applied to the base, before the grouping, so the counts partition
+    # the same rows.
     top_assignees = list(
         Task.objects.filter(
             phase__project__is_deleted=False,
@@ -2090,6 +2323,7 @@ def _get_ceo_dashboard_context(context=None):
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
             **_context_filter(context, 'phase__project__'),
         )
+        .filter(human_owned_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -2106,6 +2340,10 @@ def _get_ceo_dashboard_context(context=None):
     # completed_at is REQUIRED, not merely preferred: it is what "in the last 30 days"
     # is measured on, so a Done task without one cannot be placed in the window and is
     # excluded rather than guessed at. Production has 0 such rows.
+    #
+    # Mirrors excluded (R-20): a Design mirror reaching Done writes completed_at like
+    # any other task, and crediting that completion to its nominal owner attributes
+    # another team's finished work to them.
     top_completed = list(
         Task.objects.filter(
             phase__project__is_deleted=False,
@@ -2117,6 +2355,7 @@ def _get_ceo_dashboard_context(context=None):
             completed_at__gte=top_people_cutoff,
             **_context_filter(context, 'phase__project__'),
         )
+        .filter(human_owned_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -2208,8 +2447,18 @@ def _get_ceo_dashboard_context(context=None):
 
 
 @login_required
+@role_required(['CEO', 'Admin', 'System Admin'])
 def dashboard_ceo(request):
-    """CEO portfolio overview. Access: CEO role only. Renders in 3 DB queries via _get_ceo_dashboard_context."""
+    """CEO portfolio overview. Renders in 3 DB queries via _get_ceo_dashboard_context.
+
+    Access: CEO, plus Admin and System Admin per execution-model §2 D-4 (the
+    administrative roles are unrestricted).
+
+    0.2 lockdown: this decorator is NEW. The docstring already claimed "Access: CEO role
+    only" while the view carried @login_required alone, so every authenticated user — every
+    site engineer, every designer — reached the full portfolio: contract values, payment
+    positions and per-project financials for the whole company. The gate now says what the
+    docstring always said."""
     # Display context (EPC Residential / Tenders). None => no filter => the exact
     # portfolio-wide behaviour this dashboard had before the context feature.
     selected_context = _read_context(request)
@@ -2337,6 +2586,32 @@ def _get_user_role(request):
         return None
 
 
+def _active_project(project_id, select_related=None):
+    """Resolve a Project by its public project_id or 404, refusing a soft-deleted one.
+
+    THE SINGLE RESOLUTION PATH. No view in this module may resolve a Project any other
+    way. `_opex_site()` in design_views.py is the precedent this copies: every design
+    endpoint resolves through it, and that is exactly why the design module carried none
+    of the soft-delete findings the A-0.2 audit raised against this file.
+
+    The filter is not tidiness. `project_delete` sets `is_deleted=True` and leaves
+    `status` untouched, so a deleted project keeps `status='Draft'` or `'Active'` and
+    still satisfies every status-based precondition in the codebase. There are no custom
+    model managers (execution-model.md §6), so nothing applies the filter for us. Without
+    this helper `project_activate` will activate a deleted Draft — 52 tasks, 3 milestones
+    and six tasks back-assigned to the Finance user, on a record the Admin believes is
+    gone. (The A-0.2 audit adds "and fires an assignment notification". It does not:
+    activation reaches the Finance user through utils.assign_tasks_to(), which is silent
+    by design and takes no notify parameter.)
+
+    `select_related` takes the same field names QuerySet.select_related() does, for the
+    callers that need them; passing them here rather than fetching and re-querying keeps
+    the single resolution path single.
+    """
+    queryset = Project.objects.select_related(*select_related) if select_related else Project.objects
+    return get_object_or_404(queryset, project_id=project_id, is_deleted=False)
+
+
 def _pm_owns_project(request, project):
     """Return True if the request user is the assigned PM on this project.
 
@@ -2362,7 +2637,6 @@ def _user_can_complete_checklist_item(user, task, project):
     if user_can_manage_project(user, project):
         return True
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
     return normalised_user_role == task.assigned_role
 
@@ -2402,6 +2676,12 @@ def project_create(request):
                 project.status = 'Draft'
                 project.created_by = request.user
                 project.save()
+                # R-2, inside the block that already existed. Creation transition:
+                # blank from_status, because there is no from.
+                record_transition(
+                    project, to_status='Draft', actor=request.user.profile,
+                    reason_code=REASON_CREATED,
+                )
 
             messages.success(request, f"Project {project.project_id} created successfully.")
             return redirect('project_overview', project_id=project.project_id)
@@ -2417,7 +2697,20 @@ def project_create(request):
 
 @login_required
 def project_detail(request, project_id):
-    """Merged into project_overview — redirect all traffic there."""
+    """Merged into project_overview — redirect all traffic there.
+
+    NO SCOPE GATE HERE, AND THAT IS THE CORRECT ANSWER, not an omission. This endpoint is
+    on the 0.2 audit's A.5 list, but since the merge it loads no object, touches no
+    queryset and renders nothing — it is three lines that hand the caller to
+    project_overview, which now carries the scope check for both. There is nothing here to
+    disclose, so a gate could only re-ask the question the target already answers, at the
+    cost of a second Project fetch on every hit.
+
+    An unrelated caller therefore gets 302-then-404 rather than a bare 404. That reveals no
+    more than the 404 does: the redirect is unconditional and identical for a project that
+    does not exist at all.
+
+    If this ever grows a body again, it needs the gate the rest of A.5 got."""
     return redirect('project_overview', project_id=project_id)
 
 
@@ -2442,7 +2735,7 @@ def project_edit(request, project_id):
     Edit a Draft project's fields. Active+ projects are locked — edit is blocked
     with a warning redirect. Access: assigned PM only, Draft status only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2500,7 +2793,7 @@ def project_field_edit(request, project_id):
     no role-string / assigned_pm comparison here. GET returns the modal body; POST
     validates, saves, logs, and (HTMX) OOB-swaps the header pills.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # Server-side authority check — the button is only rendered for managers, but the
     # POST handler must not rely on that (see spec §5).
@@ -2584,7 +2877,7 @@ def project_activate(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2602,10 +2895,17 @@ def project_activate(request, project_id):
     designer = get_object_or_404(UserProfile, pk=assigned_design_id, role='Design', is_active=True)
 
     with transaction.atomic():
+        _prev_project_status = project.status   # 'Draft' — checked above
         project.assigned_design = designer
         project.status = 'Active'
         project.activated_at = timezone.now()
         project.save()
+        # R-2, inside the activation block that already existed — so a template or
+        # milestone failure rolls the ledger row back with everything else.
+        record_transition(
+            project, to_status='Active', from_status=_prev_project_status,
+            actor=request.user.profile,
+        )
 
         if project.project_type == 'Residential':
             attach_residential_template(project)
@@ -2627,9 +2927,123 @@ def project_activate(request, project_id):
     log_activity(project, request.user.profile, f"Activated project: {project.project_id}", entity_type='Project', entity_id=project.pk)
 
     if project.project_type == 'Residential':
-        messages.success(request, 'Project activated. 53 tasks created. Set the first task due date to calculate all dates.')
+        # Count the rows actually created rather than restating the template size — the
+        # message said 53 while the template has always created (and asserted) 52.
+        _created_task_count = Task.objects.filter(phase__project=project).count()
+        messages.success(
+            request,
+            f'Project activated. {_created_task_count} tasks created. '
+            f'Set the first task due date to calculate all dates.')
     else:
         messages.success(request, 'Project activated. Add tasks manually using Add Task.')
+
+    return redirect('project_overview', project_id=project.project_id)
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def opex_site_activate(request, project_id):
+    """
+    Start execution on a Draft OPEX site: status=Active, activated_at, the ledger row,
+    and the OPEX task template (7 phases, 22 tasks, 5 mirrors).
+
+    WHY A SEPARATE VIEW AND NOT A BRANCH IN project_activate. The two exclusions this
+    needs — no `assigned_design_id`, no M1/M2/M3 — are both things project_activate does
+    UNCONDITIONALLY for every project type, and the milestone loop is inline. Branching
+    there means editing the function that 92 characterisation tests pin. A separate
+    entry point leaves the Residential path not merely guarded but UNTOUCHED, which is a
+    stronger guarantee than any `if` and is what makes "behaviourally unchanged"
+    provable rather than argued.
+
+    WHAT IT DELIBERATELY DOES NOT DO, and why each matters:
+
+      - NO `assigned_design_id`. Design allocation for OPEX lives on
+        `DesignAssignment.assigned_to`, not `Project.assigned_design`; 87 DesignAssignment
+        rows exist against 5 populated FKs. project_activate's designer gate is exactly
+        why 91 of the 96 tender sites cannot be activated today, and requiring a value
+        the design module does not read would strand them for a second reason.
+      - NO PaymentMilestone rows. M1 On Survey Completion / M2 On Material Supply /
+        M3 On Commissioning describe a three-milestone residential contract, not a
+        tender. The 12 such rows already sitting on non-Residential projects are left
+        alone; this path simply stops adding more. (The figure was written here as 285
+        until 1 Sep 2026 — that was the A-1.3 audit's PROJECTION of what activating 95
+        sites WOULD mint, repeated as if it were a count. The real number is 12,
+        confirmed by query against production on 01 Sep 2026. Nobody yet knows which
+        path created those 12: spec v1.5 §2a argues both creation paths need an
+        activated project and production has none, which would make the count zero, so
+        one of its premises is wrong. Recorded as B28.)
+      - NO calculate_due_dates(). Every OPEX v1 task carries duration_days=1 and is
+        Internal, so the chain would make HOTO fall due activated_at + 22 days and put
+        the whole tender portfolio overdue within a month. A null due date says "not
+        scheduled"; 22 sequential days says something specific and false. Durations are
+        the team's to set, as a template version bump (R-7). See B18.
+      - NOTHING ABOUT CLOSURE. No terminal status is reachable from here. Commissioned,
+        On Hold and Cancelled are phase 5 (D-4).
+
+    REFUSES a second activation rather than being idempotent, matching project_activate
+    and for a concrete reason: there is no uniqueness constraint on
+    (project, phase_order), so a second attach would silently produce 14 phases and 44
+    tasks. The refusal is `status != 'Draft'`, checked BEFORE the atomic block so a
+    repeat cannot leave partial state. It is status-based, not activated_at-based, and
+    does not travel — any future BULK activation route needs its own guard.
+
+    Authority is `_pm_owns_project()`, which is a thin adapter over
+    `user_can_manage_project()` (R-13). No role comparison lives here.
+    Access: assigned PM or a project Coordinator. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    project = _active_project(project_id)
+
+    if not _pm_owns_project(request, project):
+        raise Http404
+
+    # This view owns the NON-Residential opening transition and nothing else. A
+    # Residential project arriving here is a wiring mistake, and silently activating it
+    # without its milestones or its Finance assignee would be far worse than a refusal.
+    if project.project_type == 'Residential':
+        messages.error(request, 'Residential projects are activated from the Activate button.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    # Before any DB write — see the docstring on why this is a refusal and not a no-op.
+    if project.status != 'Draft':
+        messages.warning(request, 'Site is already active.')
+        return redirect('project_overview', project_id=project.project_id)
+
+    with transaction.atomic():
+        _prev_project_status = project.status   # 'Draft' — checked above
+        project.status = 'Active'
+        project.activated_at = timezone.now()
+        project.save()
+
+        # R-2: the ledger row is written inside the same atomic block as the status
+        # change, so a template failure rolls both back together. Unlike the Residential
+        # call this one NAMES THE EVENT — reason_code carries no choices= and so cost no
+        # migration. Residential's call is left writing '' on purpose; see the constant.
+        record_transition(
+            project, to_status='Active', from_status=_prev_project_status,
+            actor=request.user.profile,
+            reason_code=REASON_EXECUTION_STARTED,
+        )
+
+        attach_opex_template(project)
+
+    # After the transaction commits, matching project_activate — the feed and the
+    # ledger are allowed to fail differently (R-3).
+    log_activity(
+        project, request.user.profile,
+        f"Activated project: {project.project_id}",
+        entity_type='Project', entity_id=project.pk,
+    )
+
+    # Counted rather than restated: the message must not claim a template size the
+    # template no longer has.
+    _created_task_count = Task.objects.filter(phase__project=project).count()
+    messages.success(
+        request,
+        f'Site activated. {_created_task_count} tasks created. '
+        f'Due dates are not set — durations are still to be decided.')
 
     return redirect('project_overview', project_id=project.project_id)
 
@@ -2640,15 +3054,39 @@ def project_recalculate_dates(request, project_id):
     """
     Recalculate all task due dates from project.activated_at using the duration_days chain.
     Intended as a bulk reset; PM normally sets dates task-by-task via task_set_due_date.
-    Access: assigned PM only. POST only.
+    Access: assigned PM only. POST only. RESIDENTIAL ONLY — see the B18 note below.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
+
+    # DO NOT REMOVE — B18. Auto-scheduling is not in OPEX v1: dates are set manually,
+    # per task, by the PM (task_set_due_date). This refusal is the enforcing half.
+    #
+    # Every OPEX v1 template task carries duration_days's field DEFAULT of 1 — a
+    # placeholder, not a measurement, because the durations are the Tenders team's to
+    # decide. All 22 are also Internal, so calculate_due_dates() chains them one
+    # calendar day apart and HOTO lands on activated_at + 22 days. That is not a
+    # slightly-wrong schedule, it is a specific false claim: a site activated on
+    # 31 Aug would read HOTO due 22 Sep and be entirely overdue by early October,
+    # across 95 tender sites. A NULL due date says "not scheduled" and is correct.
+    #
+    # Correcting it is a template version bump (R-7) that seeds real durations as
+    # OPEX v2 — not an UPDATE over live rows — so there is no state in which pressing
+    # this on an OPEX site is the right thing to do before that bump lands.
+    #
+    # Residential is untouched: it has real durations and keeps the cascade exactly
+    # as it is.
+    if project.project_type != 'Residential':
+        messages.warning(
+            request,
+            'Due dates on this site are set manually, per task. '
+            'Automatic scheduling is not available for OPEX/CAPEX sites.')
+        return redirect('project_overview', project_id=project.project_id)
 
     if project.status == 'Draft':
         messages.warning(request, 'Project must be activated before calculating due dates.')
@@ -2667,16 +3105,39 @@ def project_recalculate_dates(request, project_id):
 def enable_cascade_scheduling(request, project_id):
     """
     Irreversibly enable cascading scheduling for a project.
-    POST only, PM only, feature gate must be ON.
+    POST only, PM only, feature gate must be ON. RESIDENTIAL ONLY — see the B18 note below.
     Once set to True, cascade_scheduling cannot be reverted.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise PermissionDenied
+
+    # DO NOT REMOVE — B18, second door. This is the SAME refusal as
+    # project_recalculate_dates and for the same reason (placeholder duration_days=1 on
+    # all 22 OPEX v1 tasks), but the consequence here is strictly worse, which is why
+    # the guard sits ahead of the feature gate rather than relying on it:
+    #
+    #   1. It calls calculate_due_dates() below, so it writes the same wrong 22-day chain.
+    #   2. cascade_scheduling is IRREVERSIBLE by design — there is no path back.
+    #   3. Once on, task_set_due_date refuses every non-PM role owner outright
+    #      ("Due dates are managed automatically by cascading scheduling"). Nine of the
+    #      22 OPEX tasks are Site Engineer's. Manual per-task dates are the ONLY
+    #      scheduling a tender site has in v1, and this would permanently remove them
+    #      from everyone but the PM.
+    #
+    # The system-wide SystemSettings.cascade_scheduling_enabled switch defaults False,
+    # so this is latent rather than live today — but a switch an Admin can flip is not
+    # a guarantee, and the failure it would cause here cannot be undone.
+    if project.project_type != 'Residential':
+        messages.error(
+            request,
+            'Cascading scheduling is not available for OPEX/CAPEX sites. '
+            'Due dates on this site are set manually, per task.')
+        return redirect('project_overview', project_id=project.project_id)
 
     settings_obj = SystemSettings.get()
     if not settings_obj.cascade_scheduling_enabled:
@@ -2714,7 +3175,7 @@ def task_add(request, project_id):
     task_order is set to last+1 within the chosen phase.
     Access: assigned PM only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
@@ -2979,6 +3440,12 @@ def create_opex_site(program, data, creator, profile=None):
         site.created_by = creator
         site.project_id = form.composed_project_id   # explicit → skips generate_project_id()
         site.save()
+        # R-2. This is the THIRD write to Project.status in the codebase (the 0.3
+        # prompt named only two); an OPEX site that never appears in the ledger
+        # would read as a project that was never created.
+        record_transition(
+            site, to_status='Draft', actor=profile, reason_code=REASON_CREATED,
+        )
     log_activity(
         site, profile,
         f"Created OPEX site {site.project_id} under program {program.name}",
@@ -3409,7 +3876,6 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
     permission context the page uses so role-gating is identical to a full render."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
     is_assigned_pm = _pm_owns_project(request, project)
     gate_pk        = _gate_task_pk(project)
@@ -3469,15 +3935,28 @@ def _render_comments_hx(request, project, task):
 
 
 def _checklist_for_task(task, project):
-    """Resolve the active Checklist assigned to this task via ChecklistTaskLink
-    (task_name + project_type), or None. Inactive checklists are treated as unassigned."""
+    """Resolve the ACTIVE version of the Checklist assigned to this task via
+    ChecklistTaskLink (task_name + project_type), or None. A draft or archived checklist
+    is treated as unassigned — exactly as is_active=False was.
+
+    RESOLUTION IS THROUGH THE FAMILY, NOT THE LINKED ROW. The link records which
+    checklist family is assigned to this task name; `status='active'` records which
+    version of that family is live. Before versioning existed every family had exactly
+    one version, so for every task that exists today this returns the same row
+    link.checklist.is_active returned, and None wherever it returned None. Without the
+    family lookup, activating v2 would leave the link pointing at the archived v1 and
+    the checklist would vanish from the task."""
     link = (ChecklistTaskLink.objects
             .select_related('checklist')
             .filter(task_name=task.task_name, project_type=project.project_type)
             .first())
-    if link is None or not link.checklist.is_active:
+    if link is None:
         return None
-    return link.checklist
+    if link.checklist.status == Checklist.ACTIVE:
+        return link.checklist              # fast path: the linked row IS the live version
+    return (Checklist.objects
+            .filter(code=link.checklist.code, status=Checklist.ACTIVE)
+            .first())
 
 
 def _checklist_context(request, project, task):
@@ -3496,7 +3975,19 @@ def _checklist_context(request, project, task):
             for c in ChecklistItemCompletion.objects.filter(task=task, item__in=items)
                                                     .select_related('checked_by')
         }
-    rows = [{'item': it, 'completion': completions.get(it.id)} for it in items]
+    # R-8 read path: a CHECKED row renders the text that was actually answered, never
+    # the item's current label — that is the whole point of the snapshot. An unchecked
+    # row has no snapshot to render and shows the live label, which is the question
+    # being asked now. Computed here rather than in the template so there is exactly
+    # one place that decides which of the two a reader sees.
+    rows = []
+    for it in items:
+        completion = completions.get(it.id)
+        if completion is not None and completion.is_checked and completion.item_text_snapshot:
+            label = completion.item_text_snapshot
+        else:
+            label = it.label
+        rows.append({'item': it, 'completion': completion, 'label': label})
     return {
         'project':            project,
         'task':               task,
@@ -3522,7 +4013,6 @@ def _render_task_assign_design_success_hx(request, project, task):
     be the PM)."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
         'row_task':            task,
@@ -3543,7 +4033,6 @@ def _render_task_add_success_hx(request, project, phase):
     page order and correctly places the new row."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     phase_tasks = list(phase.tasks.all())
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
@@ -3560,20 +4049,321 @@ def _render_task_add_success_hx(request, project, phase):
     return resp
 
 
+# Outcomes of _apply_task_status_change(). Three values and not a bool, because the
+# two callers respond differently to a MISSING BLOCK REASON than to the other
+# refusals: task_status_update honours ?next= on that one and on success, and
+# ignores it on the rest. A bool could not tell those apart without the caller
+# re-deriving the rule the helper just applied.
+_TASK_STATUS_APPLIED            = 'applied'
+_TASK_STATUS_REFUSED            = 'refused'
+_TASK_STATUS_NEEDS_BLOCK_REASON = 'needs_block_reason'
+
+
+def _apply_task_status_change(task, new_status, profile, request, project):
+    """
+    Apply a user-initiated change to a Task's status: validation, the field writes,
+    the StatusTransition row, the ActivityLog row, and the downstream milestone sync
+    and notification.
+
+    THE ONE DECISION PATH FOR TASK STATUS (R-18). Single implementation shared by
+    task_status_update (the project-overview row control) and task_detail_status_update
+    (the task-detail status block) — two screens the same person uses interchangeably.
+    Previously each was a ~180-line copy of the other, so a rule added to one was not
+    enforced, merely avoidable. A NEW TASK-STATUS RULE IS ADDED HERE, NEVER TO A VIEW.
+
+    Gates and response shaping stay with the callers, as in _apply_boq_acknowledgement:
+    each keeps its own answer to "may you move this task" (role-or-PM on the overview,
+    assignee-only on the detail page) and its own redirect or HTMX partial. This helper
+    never returns an HttpResponse and does not know which screen called it.
+
+    `task` is NOT refreshed here — `task.status` stays the pre-change value throughout,
+    because it is the from-status every record_transition() call needs. Callers refresh
+    before rendering.
+
+    `project` is passed rather than read from `task.phase.project`: both callers already
+    hold it, and dereferencing would cost a query on the hottest write path in the app.
+
+    Emits its own user-facing messages so the wording of a refusal cannot drift between
+    the two screens. Returns one of _TASK_STATUS_APPLIED, _TASK_STATUS_REFUSED or
+    _TASK_STATUS_NEEDS_BLOCK_REASON — see those constants for why three.
+    """
+    # A MIRROR IS READ-ONLY TO EVERY HUMAN. This is rung 0 of the refusal ladder and
+    # belongs nowhere else (R-18, R-20; OPEX spec §2.2). Prompt B22.
+    #
+    # A mirror (Task.is_mirror) does not hold a status somebody types — it REPORTS the
+    # status of another object: the Design mirror follows its DesignAssignment, Material
+    # Delivery follows accepted delivery quantities, COD and HOTO follow the commissioning
+    # and handover records. A mirror a human can move can disagree with its source, and
+    # then neither number means anything. Five OPEX tasks carry the flag today (Design,
+    # Material Delivery, COD, As-Built Drawings, HOTO); the Residential template has none.
+    #
+    # WHY ABOVE THE TRANSITION TABLE, and not inside it. "May a human write this task at
+    # all" is a question about the TASK and has the same answer for every new_status, so
+    # checking it here makes "every transition the table would otherwise allow is refused"
+    # true by construction rather than by enumeration. It is also above the inline due_date
+    # update forty lines down, which writes a column BEFORE the guards below it refuse
+    # anything — rung 0 is the only position from which "a refused mirror move writes
+    # nothing" is actually true.
+    #
+    # WHY THIS IS THE RULE AND THE OLD BEHAVIOUR WAS A COINCIDENCE. Mirrors are seeded
+    # with no assignee, and both callers refuse an unassigned task before reaching this
+    # function — so until now a mirror was unwritable by ACCIDENT. Assign one through
+    # task_assign, an entirely reasonable thing to do to get it onto a dashboard, and
+    # that accident evaporates silently. This line is the rule.
+    #
+    # NOTHING IS WRITTEN HERE — no StatusTransition, no ActivityLog, no notification.
+    # A refused move is not an event.
+    #
+    # NOT THE WHOLE FEATURE. The derivation hooks that will WRITE these statuses are
+    # unbuilt. They belong to the source objects (phases 3-5), go through
+    # record_transition() like every other status change, and carry the SOURCE EVENT's
+    # actor (spec §2.4, §2.8) — they will not call this function, which exists to say no
+    # to people. Until they are wired a mirror sits at its seeded status, which is known
+    # and accepted.
+    if task.is_mirror:
+        messages.error(
+            request,
+            f"'{task.task_name}' is a mirror task — its status is derived from the "
+            f"workspace that owns the work and cannot be set here. It will update "
+            f"itself when that record changes."
+        )
+        return _TASK_STATUS_REFUSED
+
+    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
+    if new_status not in valid_statuses:
+        messages.error(request, 'Invalid status value.')
+        return _TASK_STATUS_REFUSED
+
+    # State machine: defines allowed next states for each current state.
+    # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
+    VALID_TRANSITIONS = {
+        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
+        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
+        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
+        Task.DONE:        {Task.BLOCKED},
+    }
+
+    allowed = VALID_TRANSITIONS.get(task.status, set())
+    if new_status not in allowed:
+        messages.error(
+            request,
+            f"Cannot move task from '{task.status}' to '{new_status}'."
+        )
+        return _TASK_STATUS_REFUSED
+
+    # Finance can supply due_date inline when switching to In Progress — save before the guard
+    _due_date_str = request.POST.get('due_date', '').strip()
+    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
+        try:
+            _parsed_due = date.fromisoformat(_due_date_str)
+            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
+            task.due_date = _parsed_due
+        except ValueError:
+            pass
+
+    # Server-side guard: In Progress requires a due date
+    if new_status == Task.IN_PROGRESS and not task.due_date:
+        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
+        return _TASK_STATUS_REFUSED
+
+    update_kwargs = {'status': new_status}
+    if new_status == Task.DONE:
+        update_kwargs['completed_at'] = timezone.now()
+    # Track when a task first becomes blocked so the CEO aged-KPI can measure how long it has been stuck
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        update_kwargs['blocked_since'] = timezone.now()
+    # Clear on un-block so any future re-block re-ages from zero, not from the original block date
+    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
+        update_kwargs['blocked_since'] = None
+
+    # Blocked requires a stated blocking issue (fresh transition only)
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        block_issue_title = request.POST.get('block_issue_title', '').strip()
+        if not block_issue_title:
+            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
+            return _TASK_STATUS_NEEDS_BLOCK_REASON
+
+        # R-2: the status write and its ledger row commit together or not at all.
+        # The atomic block is deliberately TIGHT — it holds the pair and nothing
+        # else, so the Issue creation and notifications below keep exactly the
+        # failure behaviour they had before this was instrumented.
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(**update_kwargs)
+            record_transition(
+                task, to_status=new_status, from_status=task.status,
+                actor=profile, reason_code=REASON_BLOCKED,
+                # The hold reason, captured where one exists — this branch is the
+                # only task path that collects any free text at all.
+                remark=block_issue_title,
+            )
+
+        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
+        if block_severity not in dict(Issue.SEVERITY_CHOICES):
+            block_severity = Issue.HIGH
+        block_assignee = None
+        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
+        if block_assignee_id:
+            try:
+                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
+            except UserProfile.DoesNotExist:
+                pass
+        with transaction.atomic():
+            issue = Issue.objects.create(
+                project=project,
+                task=task,
+                title=block_issue_title,
+                description=request.POST.get('block_issue_description', '').strip(),
+                severity=block_severity,
+                status=Issue.OPEN,
+                raised_by=profile,
+                assigned_to=block_assignee,
+            )
+            # Creation transition: from_status is blank because there is no from.
+            record_transition(
+                issue, to_status=Issue.OPEN, actor=profile,
+                reason_code=REASON_BLOCKED, remark=block_issue_title,
+            )
+        log_activity(
+            project, profile,
+            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
+            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
+        )
+        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
+        return _TASK_STATUS_APPLIED
+
+    # R-2, same tight pair as the blocked branch above.
+    with transaction.atomic():
+        Task.objects.filter(pk=task.pk).update(**update_kwargs)
+        record_transition(
+            task, to_status=new_status, from_status=task.status,
+            actor=profile,
+            # Only leaving Blocked carries a reason here; the ordinary ladder
+            # moves have none, and inventing one would be a lie in a column
+            # people will later group by.
+            reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
+        )
+    # Log status changes for all non-blocked transitions (blocked has its own log above)
+    log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
+                 action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
+
+    # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
+    # Mapping by task name — names are fixed in the residential template.
+    # Map lives at module level (_FINANCE_TASK_TO_MILESTONE).
+    if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
+        _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
+        _ms_update = {'status': 'Received', 'received_date': date.today()}
+        _ar_str    = request.POST.get('amount_received', '').strip()
+        _vr_str    = request.POST.get('variance_reason', '').strip()
+        if _ar_str:
+            try:
+                _ms_update['amount_received'] = Decimal(_ar_str)
+            except InvalidOperation:
+                pass
+        if _vr_str:
+            _ms_update['variance_reason'] = _vr_str
+        try:
+            # Read the rows BEFORE the set-based update — a .update() cannot
+            # report the from-status it overwrote, and the ledger needs one per
+            # milestone. At most one row matches in practice.
+            _ms_before = list(PaymentMilestone.objects.filter(
+                project=project,
+                milestone_name=_ms_label,
+                status__in=['Pending', 'Invoiced'],
+            ))
+            with transaction.atomic():
+                _ms_updated = PaymentMilestone.objects.filter(
+                    project=project,
+                    milestone_name=_ms_label,
+                    status__in=['Pending', 'Invoiced'],
+                ).update(**_ms_update)
+                for _ms_row in _ms_before:
+                    record_transition(
+                        _ms_row, to_status='Received', from_status=_ms_row.status,
+                        actor=profile, project=project,
+                        reason_code=REASON_MILESTONE_SYNC,
+                    )
+            # Attribution: this Finance-confirmation task can be completed by the PM
+            # OR a Project Coordinator (drizzle-down authority), which auto-flips the
+            # milestone to Received. Log WHO did it — by name and role — so Finance can
+            # identify the specific person, never attributed generically to "PM".
+            if _ms_updated:
+                _actor_name = profile.user.get_full_name() or profile.user.username
+                log_activity(
+                    project, profile,
+                    f"Milestone {_ms_label} auto-marked Received via completion of "
+                    f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
+                    entity_type='Milestone',
+                )
+        except Exception:
+            pass  # Non-critical — never block the task update
+
+    # Payment milestone notification: task.is_payment_milestone is read from the pre-update
+    # object — the flag never changes during a status update, so this is safe.
+    if new_status == Task.DONE and task.is_payment_milestone:
+        seen_pks = set()
+        milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
+        milestone_recipients += project_managers(project)
+        milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
+        for recipient in milestone_recipients:
+            if recipient.pk in seen_pks:
+                continue
+            seen_pks.add(recipient.pk)
+            _pm_link = f'/projects/{project.project_id}/'
+            _pm_message = (
+                f'Project {project.project_id} ({project.customer_name}) has reached '
+                f'payment milestone: "{task.task_name}".\n\n'
+                f'Please initiate collection at the earliest.'
+            )
+            _pm_email_message = (
+                f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
+                f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
+            )
+            send_notification(
+                recipient=recipient,
+                message=_pm_email_message,
+                channels=['in_app', 'whatsapp', 'email'],
+                link=_pm_link,
+                subject=f'Payment Milestone Reached — {project.customer_name}',
+                template='payment_notification',
+                template_params=[project.customer_name, task.task_name, project.customer_name],
+                related_project=project,
+                actor=profile,
+            )
+
+    return _TASK_STATUS_APPLIED
+
+
 @login_required
 def task_status_update(request, project_id, task_id):
     """
-    Update a task's status. Enforces a transition table so invalid moves are rejected.
-    The assigned role or the project PM may update. Blocking a task requires a title
-    for a new Issue — the issue is auto-created and linked to the task.
-    filter().update() used instead of .save() to prevent race condition on concurrent
-    status changes from two users.
+    Update a task's status from the project-overview task row. Enforces a transition
+    table so invalid moves are rejected. The assigned role or the project PM may update.
+    Blocking a task requires a title for a new Issue — the issue is auto-created and
+    linked to the task.
+
+    The decision itself lives in _apply_task_status_change() and is shared with
+    task_detail_status_update. What stays here is the permission model (role-or-PM,
+    which the detail screen deliberately does not share), the unassigned-task
+    precondition, and the response — the HTMX row swap or a ?next=-aware redirect.
+
     Access: task's assigned_role or project PM. POST only.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below, not merged
+    # into it. Two independent questions: "may you see this project" (here) and "is this
+    # your role's task, or are you its PM" (below). Before this, the role-matcher alone
+    # let any Site Engineer move any Site Engineer task in the portfolio.
+    #
+    # B8 note: task_detail_status_update has NO equivalent of this check. That asymmetry
+    # was found by B8's pre-flight and deliberately preserved rather than resolved —
+    # see EXECUTION_MODULE_DEFERRED.md B12.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     if task.assigned_to is None:
@@ -3596,7 +4386,6 @@ def task_status_update(request, project_id, task_id):
     is_pm = _pm_owns_project(request, project)
 
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(user_role, user_role)
 
     if normalised_user_role != task.assigned_role and not is_pm:
@@ -3605,191 +4394,24 @@ def task_status_update(request, project_id, task_id):
             return _render_task_row_hx(request, project, task)
         return HttpResponseForbidden()
 
-    new_status = request.POST.get('status', '').strip()
-    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
-    if new_status not in valid_statuses:
-        messages.error(request, 'Invalid status value.')
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
+    outcome = _apply_task_status_change(
+        task, request.POST.get('status', '').strip(),
+        request.user.profile, request, project,
+    )
 
-    # State machine: defines allowed next states for each current state.
-    # DONE can only go to BLOCKED (not back to In Progress) — prevents gaming completion.
-    VALID_TRANSITIONS = {
-        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
-        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
-        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
-        Task.DONE:        {Task.BLOCKED},
-    }
-
-    allowed = VALID_TRANSITIONS.get(task.status, set())
-    if new_status not in allowed:
-        messages.error(
-            request,
-            f"Cannot move task from '{task.status}' to '{new_status}'."
-        )
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
-
-    # Finance can supply due_date inline when switching to In Progress — save before the guard
-    _due_date_str = request.POST.get('due_date', '').strip()
-    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
-        try:
-            _parsed_due = date.fromisoformat(_due_date_str)
-            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-            task.due_date = _parsed_due
-        except ValueError:
-            pass
-
-    # Server-side guard: In Progress requires a due date
-    if new_status == Task.IN_PROGRESS and not task.due_date:
-        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
-        if _is_hx(request):
-            return _render_task_row_hx(request, project, task)
-        return redirect('project_overview', project_id=project.project_id)
-
-    update_kwargs = {'status': new_status}
-    if new_status == Task.DONE:
-        update_kwargs['completed_at'] = timezone.now()
-    # Track when a task first becomes blocked so the CEO aged-KPI can measure how long it has been stuck
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        update_kwargs['blocked_since'] = timezone.now()
-    # Clear on un-block so any future re-block re-ages from zero, not from the original block date
-    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
-        update_kwargs['blocked_since'] = None
-
-    # Blocked requires a stated blocking issue (fresh transition only)
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        block_issue_title = request.POST.get('block_issue_title', '').strip()
-        if not block_issue_title:
-            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
-            if _is_hx(request):
-                return _render_task_row_hx(request, project, task)
-            next_url = request.POST.get('next', '')
-            if next_url and not _urlparse(next_url).netloc:
-                return redirect(next_url)
-            return redirect('project_overview', project_id=project.project_id)
-
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
-
-        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
-        if block_severity not in dict(Issue.SEVERITY_CHOICES):
-            block_severity = Issue.HIGH
-        block_assignee = None
-        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
-        if block_assignee_id:
-            try:
-                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
-            except UserProfile.DoesNotExist:
-                pass
-        issue = Issue.objects.create(
-            project=project,
-            task=task,
-            title=block_issue_title,
-            description=request.POST.get('block_issue_description', '').strip(),
-            severity=block_severity,
-            status=Issue.OPEN,
-            raised_by=request.user.profile,
-            assigned_to=block_assignee,
-        )
-        log_activity(
-            project, request.user.profile,
-            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
-        )
-        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
-    else:
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
-        # Log status changes for all non-blocked transitions (blocked has its own log above)
-        log_activity(project, request.user.profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
-                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
-
-        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received.
-        # Mapping by task name — names are fixed in the residential template.
-        _FINANCE_TASK_TO_MILESTONE = {
-            'Advance Payment Confirmation':      'M1',
-            'Pre Dispatch Payment Confirmation': 'M2',
-            '100% Payment Confirmation':         'M3',
-        }
-        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
-            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
-            _ms_update = {'status': 'Received', 'received_date': date.today()}
-            _ar_str    = request.POST.get('amount_received', '').strip()
-            _vr_str    = request.POST.get('variance_reason', '').strip()
-            if _ar_str:
-                try:
-                    _ms_update['amount_received'] = Decimal(_ar_str)
-                except InvalidOperation:
-                    pass
-            if _vr_str:
-                _ms_update['variance_reason'] = _vr_str
-            try:
-                _ms_updated = PaymentMilestone.objects.filter(
-                    project=project,
-                    milestone_name=_ms_label,
-                    status__in=['Pending', 'Invoiced'],
-                ).update(**_ms_update)
-                # Attribution: this Finance-confirmation task can be completed by the PM
-                # OR a Project Coordinator (drizzle-down authority), which auto-flips the
-                # milestone to Received. Log WHO did it — by name and role — so Finance can
-                # identify the specific person, never attributed generically to "PM".
-                if _ms_updated:
-                    _actor = request.user.profile
-                    _actor_name = _actor.user.get_full_name() or _actor.user.username
-                    log_activity(
-                        project, _actor,
-                        f"Milestone {_ms_label} auto-marked Received via completion of "
-                        f"Finance task '{task.task_name}' by {_actor_name} ({_actor.role})",
-                        entity_type='Milestone',
-                    )
-            except Exception:
-                pass  # Non-critical — never block the task update
-
-        # Payment milestone notification: task.is_payment_milestone is read from the pre-update
-        # object — the flag never changes during a status update, so this is safe.
-        if new_status == Task.DONE and task.is_payment_milestone:
-            seen_pks = set()
-            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            milestone_recipients += project_managers(project)
-            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
-            for recipient in milestone_recipients:
-                if recipient.pk in seen_pks:
-                    continue
-                seen_pks.add(recipient.pk)
-                _pm_link = f'/projects/{project.project_id}/'
-                _pm_message = (
-                    f'Project {project.project_id} ({project.customer_name}) has reached '
-                    f'payment milestone: "{task.task_name}".\n\n'
-                    f'Please initiate collection at the earliest.'
-                )
-                _pm_email_message = (
-                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
-                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
-                )
-                send_notification(
-                    recipient=recipient,
-                    message=_pm_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=_pm_link,
-                    subject=f'Payment Milestone Reached — {project.customer_name}',
-                    template='payment_notification',
-                    template_params=[project.customer_name, task.task_name, project.customer_name],
-                    related_project=project,
-                    actor=request.user.profile,
-                )
-
-    # HTMX success: swap just this row with its new status/completed date. task was
-    # updated via filter().update() so refresh the in-memory copy before rendering.
+    # HTMX: swap just this row with its new status/completed date, on refusal as well as
+    # on success — the flash fragment carries the helper's message. task was updated via
+    # filter().update() so refresh the in-memory copy before rendering.
     if _is_hx(request):
         task.refresh_from_db()
         return _render_task_row_hx(request, project, task)
 
-    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain)
-    next_url = request.POST.get('next', None)
-    if next_url:
-        from urllib.parse import urlparse
-        if urlparse(next_url).netloc == '':
+    # Honour the ?next= redirect if it's a local URL (netloc empty = same domain). Applied
+    # on success and on a missing block reason, and NOT on the other refusals — which is
+    # what the two pre-B8 copies of this tail did.
+    if outcome in (_TASK_STATUS_APPLIED, _TASK_STATUS_NEEDS_BLOCK_REASON):
+        next_url = request.POST.get('next', '')
+        if next_url and not _urlparse(next_url).netloc:
             return redirect(next_url)
     return redirect('project_overview', project_id=project.project_id)
 
@@ -3799,14 +4421,19 @@ def task_detail_status_update(request, project_id, task_id):
     """
     Status update submitted from the task detail page.
     Only the user specifically assigned to the task (task.assigned_to) may change status.
-    Uses the same transition table and notification flows as task_status_update, but
-    permission is user-level (not role-level) and the redirect returns to the task detail page.
+
+    Shares the whole decision with task_status_update via _apply_task_status_change(),
+    so the transition table, the guards, the ledger row and the notifications cannot
+    drift between the two screens. What differs, and stays here, is that permission is
+    user-level rather than role-level, and that the response returns to the task detail
+    page and never honours ?next= (see EXECUTION_MODULE_DEFERRED.md B12).
+
     POST only.
     """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     try:
@@ -3818,160 +4445,9 @@ def task_detail_status_update(request, project_id, task_id):
     if task.assigned_to is None or task.assigned_to != profile:
         return HttpResponseForbidden()
 
-    new_status = request.POST.get('status', '').strip()
-    valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
-    if new_status not in valid_statuses:
-        messages.error(request, 'Invalid status value.')
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    VALID_TRANSITIONS = {
-        Task.NOT_STARTED: {Task.IN_PROGRESS, Task.BLOCKED, Task.DONE},
-        Task.IN_PROGRESS: {Task.DONE, Task.BLOCKED},
-        Task.BLOCKED:     {Task.IN_PROGRESS, Task.BLOCKED},
-        Task.DONE:        {Task.BLOCKED},
-    }
-
-    allowed = VALID_TRANSITIONS.get(task.status, set())
-    if new_status not in allowed:
-        messages.error(request, f"Cannot move task from '{task.status}' to '{new_status}'.")
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    # In Progress requires a due date — Finance users may supply one inline
-    _due_date_str = request.POST.get('due_date', '').strip()
-    if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
-        try:
-            _parsed_due = date.fromisoformat(_due_date_str)
-            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-            task.due_date = _parsed_due
-        except ValueError:
-            pass
-
-    if new_status == Task.IN_PROGRESS and not task.due_date:
-        messages.warning(request, 'Please set a due date before marking this task as In Progress.')
-        if _is_hx(request):
-            return _render_task_status_hx(request, project, task)
-        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-    update_kwargs = {'status': new_status}
-    if new_status == Task.DONE:
-        update_kwargs['completed_at'] = timezone.now()
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        update_kwargs['blocked_since'] = timezone.now()
-    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
-        update_kwargs['blocked_since'] = None
-
-    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
-        block_issue_title = request.POST.get('block_issue_title', '').strip()
-        if not block_issue_title:
-            messages.error(request, 'Please state the blocking issue before marking this task as Blocked.')
-            if _is_hx(request):
-                return _render_task_status_hx(request, project, task)
-            return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
-
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
-
-        block_severity = request.POST.get('block_issue_severity', Issue.HIGH)
-        if block_severity not in dict(Issue.SEVERITY_CHOICES):
-            block_severity = Issue.HIGH
-        block_assignee = None
-        block_assignee_id = request.POST.get('block_issue_assigned_to', '').strip()
-        if block_assignee_id:
-            try:
-                block_assignee = UserProfile.objects.get(pk=block_assignee_id)
-            except UserProfile.DoesNotExist:
-                pass
-        issue = Issue.objects.create(
-            project=project,
-            task=task,
-            title=block_issue_title,
-            description=request.POST.get('block_issue_description', '').strip(),
-            severity=block_severity,
-            status=Issue.OPEN,
-            raised_by=profile,
-            assigned_to=block_assignee,
-        )
-        log_activity(
-            project, profile,
-            f"Blocked task '{task.task_name}' — issue: {block_issue_title}",
-            entity_type='Issue', entity_id=issue.pk, action_code='issue_created',
-        )
-        messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
-    else:
-        Task.objects.filter(pk=task.pk).update(**update_kwargs)
-        log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
-                     action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
-
-        # Bidirectional sync: Finance confirmation tasks → PaymentMilestone Received
-        _FINANCE_TASK_TO_MILESTONE = {
-            'Advance Payment Confirmation': 'M1',
-            'Finance Confirmation':         'M2',
-            '100% Payment Confirmation':    'M3',
-        }
-        if new_status == Task.DONE and task.task_name in _FINANCE_TASK_TO_MILESTONE:
-            _ms_label  = _FINANCE_TASK_TO_MILESTONE[task.task_name]
-            _ms_update = {'status': 'Received', 'received_date': date.today()}
-            _ar_str    = request.POST.get('amount_received', '').strip()
-            _vr_str    = request.POST.get('variance_reason', '').strip()
-            if _ar_str:
-                try:
-                    _ms_update['amount_received'] = Decimal(_ar_str)
-                except InvalidOperation:
-                    pass
-            if _vr_str:
-                _ms_update['variance_reason'] = _vr_str
-            try:
-                _ms_updated = PaymentMilestone.objects.filter(
-                    project=project,
-                    milestone_name=_ms_label,
-                    status__in=['Pending', 'Invoiced'],
-                ).update(**_ms_update)
-                # Attribution (see task_status_update): record the specific person who
-                # completed the Finance-confirmation task and thereby flipped the milestone.
-                if _ms_updated:
-                    _actor_name = profile.user.get_full_name() or profile.user.username
-                    log_activity(
-                        project, profile,
-                        f"Milestone {_ms_label} auto-marked Received via completion of "
-                        f"Finance task '{task.task_name}' by {_actor_name} ({profile.role})",
-                        entity_type='Milestone',
-                    )
-            except Exception:
-                pass
-
-        if new_status == Task.DONE and task.is_payment_milestone:
-            seen_pks = set()
-            milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
-            milestone_recipients += project_managers(project)
-            milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
-            for recipient in milestone_recipients:
-                if recipient.pk in seen_pks:
-                    continue
-                seen_pks.add(recipient.pk)
-                _pm_link = f'/projects/{project.project_id}/'
-                _pm_message = (
-                    f'Project {project.project_id} ({project.customer_name}) has reached '
-                    f'payment milestone: "{task.task_name}".\n\n'
-                    f'Please initiate collection at the earliest.'
-                )
-                _pm_email_message = (
-                    f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
-                    f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
-                )
-                send_notification(
-                    recipient=recipient,
-                    message=_pm_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
-                    link=_pm_link,
-                    subject=f'Payment Milestone Reached — {project.customer_name}',
-                    template='payment_notification',
-                    template_params=[project.customer_name, task.task_name, project.customer_name],
-                    related_project=project,
-                    actor=profile,
-                )
+    _apply_task_status_change(
+        task, request.POST.get('status', '').strip(), profile, request, project,
+    )
 
     if _is_hx(request):
         task.refresh_from_db()
@@ -4013,15 +4489,15 @@ def task_assign(request, project_id, task_id):
     filter().update() used to avoid overwriting other task fields via .save().
     Access: assigned PM only.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not _pm_owns_project(request, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD'
-    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD' — module-level
+    # constant since K5; was a local copy of the same dict here and in project_overview
     profile_role = _TASK_TO_PROFILE_ROLE.get(task.assigned_role, task.assigned_role)
 
     # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task
@@ -4124,14 +4600,20 @@ def task_set_due_date(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE the role-match rule below. The
+    # assigned_role comparison is portfolio-blind on its own -- it asks which role owns
+    # the task, never which project the caller has any business on.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     profile = request.user.profile
     is_pm = _pm_owns_project(request, project)
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     if not is_pm:
         # Map UserProfile.role to Task.assigned_role (BD → BD / Sales)
-        _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
         user_task_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
 
         if task.assigned_role != user_task_role:
@@ -4207,7 +4689,7 @@ def assign_coordinators(request, project_id):
     assigned_pm, so PM ownership can never be transferred or lost through it
     (the Overwrite bug the invariant warns against is impossible here by construction).
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # Only someone who already manages this project (PM or a coordinator on it) may edit.
     if not user_can_manage_project(request.user, project):
@@ -4526,6 +5008,45 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
         )
 
 
+def _apply_boq_acknowledgement(boq, profile, request):
+    """
+    Apply the SCM acknowledgement of a BOQ: status write, ActivityLog, notification.
+
+    Single implementation shared by the inline `acknowledge_scm` branch of boq_detail and
+    the standalone `boq_acknowledge` endpoint. Previously each path did part of the work —
+    the inline one notified but never logged, the standalone one logged but never notified,
+    so whether the PM heard about an acknowledgement depended on which control was clicked
+    (defect B-5).
+
+    Gates and status preconditions stay with the callers: each keeps its own
+    `profile.role != 'SCM'` check and its own view of which statuses may be acknowledged.
+    The revision snapshot also stays with the inline caller — only that path has ever
+    written one (see the 0.2b report).
+    """
+    # R-2. Instrumenting HERE rather than at the two callers is the payoff from
+    # 0.2b's consolidation: one business act, one status write, one ledger row,
+    # whichever button was pressed.
+    with transaction.atomic():
+        _boq_prev_status = boq.status
+        boq.status = 'Acknowledged'
+        boq.save(update_fields=['status'])
+        record_transition(
+            boq, to_status='Acknowledged', from_status=_boq_prev_status,
+            actor=profile, project=boq.project,
+        )
+
+    log_activity(
+        boq.project, profile,
+        f"BOQ Acknowledged for project: {boq.project.project_id}",
+        entity_type='BOQ', entity_id=boq.pk,
+    )
+
+    # _notify_boq_acknowledged dereferences boq.submitted_by.user — a BOQ acknowledged
+    # without a recorded submitter has no Design user to notify.
+    if boq.submitted_by:
+        _notify_boq_acknowledged(boq, profile, request)
+
+
 def _build_vendors_by_category():
     """
     Return dict mapping category name → list of {id, name, make_brand} for active vendors.
@@ -4612,7 +5133,7 @@ def boq_detail(request, project_id):
     NOTHING ELSE CHANGES FOR EITHER TYPE. SCM still acknowledges an OPEX BOQ here, PM and
     Admin still read one here, and the Residential path — seeding included — is untouched.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
     role    = profile.role
 
@@ -4740,20 +5261,32 @@ def boq_detail(request, project_id):
                 return redirect('boq_detail', project_id=project_id)
 
             try:
+                _boq_prev_status = boq.status   # for the ledger, before the mutation
                 is_revision  = boq.status in ('Revision Requested', 'Acknowledged')
                 new_version  = boq.version + 1 if is_revision else boq.version
                 reason       = f'Revision v{new_version}' if is_revision else 'Initial submission'
                 snapshot     = _boq_snapshot(boq)
-                BOQRevision.objects.create(
-                    boq=boq, revised_by=profile,
-                    version=new_version, reason=reason, snapshot=snapshot,
-                )
-                boq.status       = 'Submitted'
-                boq.submitted_by = profile
-                boq.submitted_at = timezone.now()
-                if is_revision:
-                    boq.version = new_version
-                boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
+                # R-2. The atomic block sits INSIDE the existing try, so a ledger
+                # failure rolls the submission back and then surfaces through the
+                # same 'Submit failed' path any other failure here already uses —
+                # never a submitted BOQ with no record of who submitted it.
+                with transaction.atomic():
+                    BOQRevision.objects.create(
+                        boq=boq, revised_by=profile,
+                        version=new_version, reason=reason, snapshot=snapshot,
+                    )
+                    boq.status       = 'Submitted'
+                    boq.submitted_by = profile
+                    boq.submitted_at = timezone.now()
+                    if is_revision:
+                        boq.version = new_version
+                    boq.save(update_fields=['status', 'submitted_by', 'submitted_at', 'version'])
+                    record_transition(
+                        boq, to_status='Submitted', from_status=_boq_prev_status,
+                        actor=profile,
+                        reason_code=REASON_RESUBMITTED if is_revision else '',
+                        remark=reason,
+                    )
                 messages.success(request, 'BOQ submitted to SCM for review.')
                 return redirect('boq_detail', project_id=project_id)
             except Exception as exc:
@@ -4787,13 +5320,7 @@ def boq_detail(request, project_id):
                 reason=f'SCM Acknowledged v{boq.version}',
                 snapshot=snapshot,
             )
-            boq.status = 'Acknowledged'
-            boq.save(update_fields=['status'])
-
-            # Notify the Design user who submitted this BOQ
-            if boq.submitted_by:
-                _notify_boq_acknowledged(boq, profile, request)
-
+            _apply_boq_acknowledgement(boq, profile, request)
             messages.success(request, 'BOQ acknowledged.')
             return redirect('boq_detail', project_id=project_id)
 
@@ -4933,7 +5460,7 @@ def opex_boq_entry(request, project_id):
     rows they added arrive as catalogue pks and are created. Doing it any other way would
     make "remove" a second round trip that could half-apply.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
         raise Http404('The BOQ picker is for OPEX sites. Residential BOQs are entered on '
@@ -5295,7 +5822,7 @@ def opex_boq_download(request, project_id):
     nothing but `code` and `quantity` from the file. Do not add a check that trusts
     what the file says about an item.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     # OPEX only, the same refusal the picker makes and for the same reason: a
     # Residential BOQ is a different sheet with a different catalogue behind it.
@@ -5673,7 +6200,7 @@ def opex_boq_upload(request, project_id):
     database. Validity here is set membership in a dict already in memory, so
     preview reaches no row at all — which is also why it cannot create the BOQ.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
         raise Http404('The BOQ upload is for OPEX sites. Residential BOQs are entered on '
@@ -5934,7 +6461,7 @@ def boq_submit(request, project_id):
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     if not user_can_edit_project_boq(request.user, project):
@@ -5953,7 +6480,10 @@ def boq_submit(request, project_id):
     # other project is unreachable through this endpoint.
     boq = get_object_or_404(BOQ, project=project)
 
-    if boq.status not in ('Draft', 'Revision Requested'):
+    # Status precondition matches the inline submit_design branch in boq_detail — that is
+    # the path the UI actually posts to, and 'Acknowledged' is a legitimate starting point
+    # for a resubmission there. Keeping the two rules identical is the point of 0.2b.
+    if boq.status not in ('Draft', 'Revision Requested', 'Acknowledged'):
         messages.error(request, 'BOQ cannot be submitted in its current state.')
         return redirect('boq_detail', project_id=project_id)
 
@@ -5961,27 +6491,40 @@ def boq_submit(request, project_id):
         messages.error(request, 'At least one item must have a BOQ quantity before submitting.')
         return redirect('boq_detail', project_id=project_id)
 
-    is_resubmission = boq.status == 'Revision Requested'
+    _boq_prev_status = boq.status   # captured before the mutation below, for the ledger
+    is_resubmission = boq.status in ('Revision Requested', 'Acknowledged')
     new_version     = boq.version + 1 if is_resubmission else boq.version
     reason          = f'Revision v{new_version}' if is_resubmission else 'Initial submission'
 
-    snapshot = list(boq.items.values(
-        'serial_no', 'category', 'description', 'uom',
-        'boq_quantity', 'ordered_quantity',
-        'make_preference__name', 'ordered_vendor__name',
-    ))
+    # Single snapshot implementation, shared with the inline branch. Building the rows
+    # from a raw .values() here left Decimal quantities uncoerced and raised an unhandled
+    # TypeError on every submission that reached this line (defect B-7).
+    snapshot = _boq_snapshot(boq)
 
-    BOQRevision.objects.create(
-        boq=boq, revised_by=profile,
-        version=new_version, reason=reason, snapshot=snapshot,
-    )
+    # R-2. NOTE FOR A LATER SESSION: this is one of TWO places that write
+    # boq.status = 'Submitted' — the other is the inline `submit_design` branch of
+    # boq_detail, which is the path the UI actually posts to. 0.2b consolidated the
+    # snapshot (_boq_snapshot) and the acknowledgement (_apply_boq_acknowledgement)
+    # but NOT this pair. Both are instrumented; consolidating them is 0.2b-shaped
+    # work and out of scope here (R-12 — recorded, not fixed in passing).
+    with transaction.atomic():
+        BOQRevision.objects.create(
+            boq=boq, revised_by=profile,
+            version=new_version, reason=reason, snapshot=snapshot,
+        )
 
-    boq.status       = 'Submitted'
-    boq.submitted_by = profile
-    boq.submitted_at = timezone.now()
-    if is_resubmission:
-        boq.version = new_version
-    boq.save()
+        boq.status       = 'Submitted'
+        boq.submitted_by = profile
+        boq.submitted_at = timezone.now()
+        if is_resubmission:
+            boq.version = new_version
+        boq.save()
+        record_transition(
+            boq, to_status='Submitted', from_status=_boq_prev_status,
+            actor=profile,
+            reason_code=REASON_RESUBMITTED if is_resubmission else '',
+            remark=reason,
+        )
 
     # Log BOQ submission event
     log_activity(project, profile, f"Submitted BOQ for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
@@ -5998,7 +6541,7 @@ def boq_acknowledge(request, project_id):
     if request.method != 'POST':
         return redirect('boq_detail', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # DELIBERATELY role-only, with no project relationship requirement. SCM is portfolio-wide
@@ -6014,11 +6557,7 @@ def boq_acknowledge(request, project_id):
         messages.error(request, 'Only submitted BOQs can be acknowledged.')
         return redirect('boq_detail', project_id=project_id)
 
-    boq.status = 'Acknowledged'
-    boq.save()
-
-    # Log BOQ acknowledgment event
-    log_activity(project, profile, f"BOQ Acknowledged for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
+    _apply_boq_acknowledgement(boq, profile, request)
     messages.success(request, 'BOQ acknowledged.')
     return redirect('boq_detail', project_id=project_id)
 
@@ -6035,7 +6574,7 @@ def boq_request_revision(request, project_id):
     user_can_manage_project() treats them as PM-equivalent, so routing through it keeps the
     two in step. (The docstring previously said "PM only", which the role tuple never was.)
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     if not user_can_manage_project(request.user, project):
@@ -6059,13 +6598,22 @@ def boq_request_revision(request, project_id):
 
         try:
             snapshot = _boq_snapshot(boq)
-            BOQRevision.objects.create(
-                boq=boq, revised_by=profile,
-                version=boq.version, reason=f'Revision requested: {reason}',
-                snapshot=snapshot,
-            )
-            boq.status = 'Revision Requested'
-            boq.save(update_fields=['status'])
+            _boq_prev_status = boq.status
+            # R-2, inside the existing try for the same reason as submit_design.
+            with transaction.atomic():
+                BOQRevision.objects.create(
+                    boq=boq, revised_by=profile,
+                    version=boq.version, reason=f'Revision requested: {reason}',
+                    snapshot=snapshot,
+                )
+                boq.status = 'Revision Requested'
+                boq.save(update_fields=['status'])
+                record_transition(
+                    boq, to_status='Revision Requested', from_status=_boq_prev_status,
+                    actor=profile, reason_code=REASON_REVISION_REQUESTED,
+                    # The PM's stated reason — already mandatory on this path.
+                    remark=reason,
+                )
             # Log BOQ revision request event
             log_activity(project, profile, f"BOQ Revision Requested for project: {project.project_id}", entity_type='BOQ', entity_id=boq.pk)
             messages.success(request, 'Revision requested. Design team will be notified.')
@@ -6089,7 +6637,7 @@ def boq_history(request, project_id):
     Access: same read gate as boq_detail — the history is the BOQ's own audit trail, so
     anyone who may read the BOQ may read how it got there, and nobody else.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     if not user_can_view_project_boq(request.user, project):
         return HttpResponseForbidden()
@@ -6178,9 +6726,15 @@ def milestone_invoice(request, project_id, milestone_pk):
         messages.error(request, 'Only Pending milestones can be marked as Invoiced.')
         return redirect('dashboard_finance')
 
-    milestone.status       = 'Invoiced'
-    milestone.invoice_date = date.today()
-    milestone.save(update_fields=['status', 'invoice_date'])
+    with transaction.atomic():
+        _ms_prev_status        = milestone.status   # 'Pending' — checked above
+        milestone.status       = 'Invoiced'
+        milestone.invoice_date = date.today()
+        milestone.save(update_fields=['status', 'invoice_date'])
+        record_transition(
+            milestone, to_status='Invoiced', from_status=_ms_prev_status,
+            actor=request.user.profile,
+        )
     # Log milestone invoiced — project accessed via FK to avoid extra query
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Invoiced", entity_type='Milestone', entity_id=milestone.pk)
     messages.success(request, f'{milestone.milestone_name} marked as Invoiced.')
@@ -6220,28 +6774,53 @@ def milestone_receive(request, project_id, milestone_pk):
     if milestone.amount and amount_received > milestone.amount and not variance_reason:
         variance_reason = 'Overpayment'
 
-    milestone.status          = 'Received'
-    milestone.received_date   = date.today()
-    milestone.amount_received = amount_received
-    milestone.variance_reason = variance_reason
-    milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+    with transaction.atomic():
+        _ms_prev_status           = milestone.status
+        milestone.status          = 'Received'
+        milestone.received_date   = date.today()
+        milestone.amount_received = amount_received
+        milestone.variance_reason = variance_reason
+        milestone.save(update_fields=['status', 'received_date', 'amount_received', 'variance_reason'])
+        record_transition(
+            milestone, to_status='Received', from_status=_ms_prev_status,
+            actor=request.user.profile,
+            # Only populated when the amount differs from what was invoiced — the
+            # nearest thing this path has to a stated reason.
+            remark=variance_reason,
+        )
     # Log milestone received — project accessed via FK to avoid extra query
     log_activity(milestone.project, request.user.profile, f"Marked {milestone.milestone_name} as Received", entity_type='Milestone', entity_id=milestone.pk)
 
     # Bidirectional sync: PaymentMilestone Received → Finance confirmation task Done.
-    _MILESTONE_TO_FINANCE_TASK = {
-        'M1': 'Advance Payment Confirmation',
-        'M2': 'Finance Confirmation',
-        'M3': '100% Payment Confirmation',
-    }
+    # Map lives at module level (_MILESTONE_TO_FINANCE_TASK), derived from the forward map.
     _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
     if _sync_task_name:
         try:
-            Task.objects.filter(
+            # Pre-read for the from-status: a set-based .update() cannot report what
+            # it overwrote, and each synced task needs its own row.
+            _sync_before = list(Task.objects.filter(
                 phase__project=milestone.project,
                 task_name=_sync_task_name,
                 status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ).update(status=Task.DONE, completed_at=timezone.now())
+            ).select_related('phase__project'))
+            # The atomic block sits INSIDE the existing try, which is deliberate and
+            # is NOT the helper swallowing anything. If the ledger write fails here,
+            # the sync rolls back and the except below leaves the milestone update
+            # alone — so the outcome is neither the status change nor the row, never
+            # one without the other. Removing that except would change this path's
+            # documented "never block the milestone update" behaviour.
+            with transaction.atomic():
+                Task.objects.filter(
+                    phase__project=milestone.project,
+                    task_name=_sync_task_name,
+                    status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+                ).update(status=Task.DONE, completed_at=timezone.now())
+                for _sync_task in _sync_before:
+                    record_transition(
+                        _sync_task, to_status=Task.DONE, from_status=_sync_task.status,
+                        actor=request.user.profile, project=milestone.project,
+                        reason_code=REASON_MILESTONE_SYNC,
+                    )
         except Exception:
             pass  # Non-critical — never block the milestone update
 
@@ -6261,9 +6840,34 @@ def milestone_create(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     if not _pm_owns_project(request, project):
         raise Http404
+
+    # M1/M2/M3 ARE RESIDENTIAL. Prompt 1.5.
+    #
+    # `opex_site_activate` deliberately mints no milestones (spec v1.5 §2a) — M1 On
+    # Survey Completion / M2 On Material Supply / M3 On Commissioning describe a
+    # three-milestone residential contract, not a tender. This view is that decision's
+    # blind spot: it is the manual fallback for projects activated before milestones
+    # existed, and it checked POST and PM ownership and nothing else, so a PM could put
+    # the exact three rows onto a tender site that activation refuses to create.
+    #
+    # THE TEMPLATE HIDING THE CARD IS NOT THIS CHECK. project_overview.html stops
+    # rendering the card and its Create button for a non-Residential project in the same
+    # prompt, but a hidden control is not a disabled one — this endpoint is reachable by
+    # POST from a stale tab, a bookmarked form or curl. The refusal has to be here.
+    #
+    # A redirect with a message, not a 404: the project is real and the actor is its PM,
+    # so the honest answer is "this does not apply to this kind of project", not
+    # "no such thing".
+    if project.project_type != 'Residential':
+        messages.error(
+            request,
+            f'Payment milestones M1/M2/M3 describe a Residential contract and do not '
+            f'apply to a {project.project_type} project.'
+        )
+        return redirect('project_overview', project_id=project_id)
 
     if not project.milestones.exists():
         milestone_defaults = [
@@ -6299,7 +6903,7 @@ def raise_payment_request(request, project_id):
     if profile.role != 'SCM':
         return HttpResponse(status=403)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
 
     vendor_id      = request.POST.get('vendor_id', '').strip()
     boq_item_id    = request.POST.get('boq_item_id', '').strip()
@@ -6395,7 +6999,7 @@ def confirm_payment_request(request, project_id, request_id):
     if profile.role != 'Finance':
         return HttpResponse(status=403)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     pr = get_object_or_404(
         PaymentRequest.objects.select_related('vendor', 'boq_item'),
         pk=request_id, project=project, status=PaymentRequest.PENDING,
@@ -6526,15 +7130,12 @@ def dashboard_bd(request):
             if is_delayed else None
         )
 
-        # Current phase: first phase with an incomplete task; uses prefetched data — no extra query
-        current_phase_name = None
-        for phase in project.phases.all():
-            for task in phase.tasks.all():
-                if task.status != Task.DONE:
-                    current_phase_name = phase.phase_name
-                    break
-            if current_phase_name:
-                break
+        # R-21: the one implementation, mirrors excluded. The inline loop that stood
+        # here — the fourth copy of the rule — is GONE rather than kept as a fast
+        # path; it was already reading the same prefetched data this helper reads,
+        # so there was no speed in it to keep, only a second answer to the question.
+        current_phase_obj  = get_current_phase(project)
+        current_phase_name = current_phase_obj.phase_name if current_phase_obj else None
 
         # Trigger 3: milestone summary — same prefetch as Finance dashboard session.
         # milestones_awaiting = 'Invoiced' status: Finance has invoiced, BD nudges client for receipt.
@@ -6649,7 +7250,24 @@ def set_milestone_amounts(request, project_id):
     if request.method != 'POST':
         return JsonResponse({'success': False, 'error': 'POST only'}, status=405)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
+
+    # 0.2 lockdown — THE PM ARM ONLY, and the asymmetry is deliberate.
+    #
+    # PM: gated on management authority. Without this, the @role_required above let any PM
+    # in the company rewrite the agreed M1/M2/M3 amounts on any project in the portfolio —
+    # a write straight onto the commercial terms of somebody else's contract.
+    #
+    # BD: LEFT EXACTLY AS IT WAS, by decision, not oversight. Narrowing BD is deferred
+    # (execution-model §12, 25 Aug: "BD and Design Head unchanged. Neither has a per-user
+    # term to scope on"). BD has no assignment field on Project and no task relationship to
+    # key off, so there is nothing to scope BD on without inventing a relationship this
+    # module does not have. Setting these amounts is also BD's own act — it is called from
+    # the Phase 1 Task 1 Done gate and the BD dashboard pencil — so a scope term that
+    # refused every BD would break the primary path. When BD gets a per-user term, this is
+    # the branch to change.
+    if request.user.profile.role == 'PM' and not user_can_manage_project(request.user, project):
+        raise Http404
 
     try:
         data = json.loads(request.body)
@@ -6721,17 +7339,18 @@ def project_overview(request, project_id):
     Merges the former project_detail (task management) and project_overview (status summary)
     into a single URL. Access: all roles; PM and SE isolation applies.
     """
-    project = get_object_or_404(
-        Project.objects.select_related(
-            'assigned_pm__user', 'assigned_design__user', 'created_by',
-        ),
-        project_id=project_id,
+    project = _active_project(
+        project_id,
+        select_related=('assigned_pm__user', 'assigned_design__user', 'created_by'),
     )
     profile = request.user.profile
     role    = profile.role
 
-    # Role isolation
-    if role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     is_assigned_pm    = user_can_manage_project(request.user, project)
@@ -6751,6 +7370,7 @@ def project_overview(request, project_id):
                     if _actor_role == 'Finance':
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
                         _save_fields = ['milestone_description']
+                        _ms_prev_status = milestone.status
                         _amount_received_str = request.POST.get('amount_received', '').strip()
                         if _amount_received_str and milestone.status != 'Received':
                             try:
@@ -6760,22 +7380,43 @@ def project_overview(request, project_id):
                                 _save_fields += ['amount_received', 'status', 'received_date']
                             except InvalidOperation:
                                 pass
-                        milestone.save(update_fields=_save_fields)
+                        # R-2. This branch writes a status only SOMETIMES — when a
+                        # parsable amount arrives on a not-yet-Received milestone — so
+                        # the ledger row is conditional on the same test, not on the
+                        # save. A description-only edit is not a transition.
+                        with transaction.atomic():
+                            milestone.save(update_fields=_save_fields)
+                            if 'status' in _save_fields:
+                                record_transition(
+                                    milestone, to_status='Received',
+                                    from_status=_ms_prev_status,
+                                    actor=request.user.profile, project=project,
+                                )
                         log_activity(project, request.user.profile, f"Updated {milestone.milestone_name}", entity_type='Milestone', entity_id=milestone.pk)
                         if 'status' in _save_fields:
-                            _MILESTONE_TO_FINANCE_TASK = {
-                                'M1': 'Advance Payment Confirmation',
-                                'M2': 'Finance Confirmation',
-                                'M3': '100% Payment Confirmation',
-                            }
+                            # Map lives at module level (_MILESTONE_TO_FINANCE_TASK).
                             _sync_task_name = _MILESTONE_TO_FINANCE_TASK.get(milestone.milestone_name)
                             if _sync_task_name:
                                 try:
-                                    Task.objects.filter(
+                                    # Pre-read for the from-status — see milestone_receive.
+                                    _sync_before = list(Task.objects.filter(
                                         phase__project=project,
                                         task_name=_sync_task_name,
                                         status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-                                    ).update(status=Task.DONE, completed_at=timezone.now())
+                                    ).select_related('phase__project'))
+                                    with transaction.atomic():
+                                        Task.objects.filter(
+                                            phase__project=project,
+                                            task_name=_sync_task_name,
+                                            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
+                                        ).update(status=Task.DONE, completed_at=timezone.now())
+                                        for _sync_task in _sync_before:
+                                            record_transition(
+                                                _sync_task, to_status=Task.DONE,
+                                                from_status=_sync_task.status,
+                                                actor=request.user.profile, project=project,
+                                                reason_code=REASON_MILESTONE_SYNC,
+                                            )
                                 except Exception:
                                     pass
                     else:
@@ -6888,11 +7529,63 @@ def project_overview(request, project_id):
             tasks = list(phase.tasks.all())
             if not tasks:
                 continue
+            # THIS IS PHASE COMPLETENESS, SO DERIVED WORK COUNTS. The bar answers
+            # "how much of this phase is finished", and an undelivered consignment is
+            # unfinished work whoever is responsible for recording it. R-20's PROGRESS
+            # half, established here by prompt 1.5 and extended to the two other
+            # progress sites by 1.6.
+            #
+            # WHY, on the screen rather than in the abstract. Excluding mirrors made a
+            # phase holding only mirrors read "0/0 done" above an empty bar — OPEX
+            # Phase 1 (Design) and Phase 3 (the four delivery mirrors) both do — while
+            # the card header three lines above it says "4 tasks". One phase, two
+            # numbers, neither wrong on its own terms and the pair unreadable. Counting
+            # them gives "0/4": one mirror not updated is one task pending, which is
+            # what a PM reading the bar actually wants to know.
+            #
+            # NO LONGER THE ONLY METRIC THAT COUNTS MIRRORS, and that is the point of
+            # prompt 1.6. From 1.5 to 1.6 it WAS the only one, which meant this bar and
+            # `dashboard_pm`'s percentage reported the same project's completeness on
+            # different denominators. `dashboard_pm` (views.py ~660) and the CEO project
+            # cards (views.py ~2010) now ask the same question the same way, and
+            # tests_progress_vs_workload.py asserts this loop and dashboard_pm agree.
+            #
+            # WHAT STILL EXCLUDES MIRRORS, because it asks the other question. Overdue,
+            # blocked, due-today, per-user workload, the department rollup, the digest —
+            # all through `human_owned_tasks_q()` / `is_human_owned()`, because counting
+            # a mirror as somebody's work attributes another team's queue to them. That
+            # includes `ext_pending` BELOW, computed in this very loop. R-21
+            # (`utils.current_phase()`) is likewise unchanged: a mirror never makes its
+            # phase current, which is the bug B21 was written to fix.
+            #
+            # `phases` itself is NOT filtered and never was: the task TABLE below this
+            # bar lists every task including mirrors, which is the whole point of them.
+            #
+            # tests_mirror_metrics.py pins this from both sides — the behavioural test
+            # asserts the bar counts the pair, and the differential sweep carries these
+            # two keys in PROGRESS_KEYS as numbers that MUST move when mirrors arrive.
+            # The two BAR numbers ask "how much of this phase is done", so mirrors
+            # count. The row-at-a-time form of the rule; no queryset exists here.
             internal       = [t for t in tasks if t.task_type == 'Internal']
             internal_done  = sum(1 for t in internal if t.status == 'Done')
             internal_total = len(internal)
             pct            = int(internal_done / internal_total * 100) if internal_total else 0
-            ext_pending    = sum(1 for t in tasks if t.task_type == 'External' and t.status != 'Done')
+            # `ext_pending` IS NOT ONE OF THEM, and prompt 1.6 split it back out.
+            # It is a PENDING count — outstanding external work, the other question —
+            # so it takes `is_human_owned()` like every other pending, overdue and
+            # blocked number in the codebase. 1.5 swept it in by accident: it changed
+            # ONE binding (`countable = tasks`) that three outputs read, and only two
+            # of them were the bar.
+            #
+            # INERT TODAY AND FIXED ANYWAY. All eight OPEX mirrors are `Internal`
+            # (migration 0075) and Residential has none, so no mirror is External and
+            # this line cannot differ from the 1.5 form on any row in existence. It is
+            # corrected now because a misclassified number that nothing exercises is
+            # the kind that surfaces the day someone adds an External mirror and
+            # cannot work out why one screen disagrees with the rest.
+            ext_pending    = sum(1 for t in tasks
+                                 if t.task_type == 'External' and t.status != 'Done'
+                                 and is_human_owned(t))
             phase_data_json.append({
                 'pk':             phase.pk,
                 'pct':            pct,
@@ -6997,8 +7690,8 @@ def project_overview(request, project_id):
         })
 
     # Design assignment candidates (PM only, for assign-design dropdown)
-    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD'
-    _TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}
+    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD' — module-level
+    # constant since K5; was a local copy of the same dict here and in task_assign
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
@@ -7014,12 +7707,21 @@ def project_overview(request, project_id):
     dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if role == 'SCM' else []
 
     # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons
-    _PROFILE_TO_TASK_ROLE = {'BD': 'BD / Sales'}
     user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
 
-    # Cascade scheduling context — PM-only feature gate check
+    # Cascade scheduling context — PM-only feature gate check.
+    #
+    # B18: the project_type term is the visible half of the refusal in
+    # enable_cascade_scheduling. Hiding a control while the view still accepts the POST
+    # is not disabling it, so the view refuses too; this is only so a PM on a tender
+    # site never sees a button that would turn them away. Residential is unaffected.
     _sys = SystemSettings.get()
-    show_cascade_option = (_sys.cascade_scheduling_enabled and role == 'PM' and is_assigned_pm)
+    show_cascade_option = (
+        _sys.cascade_scheduling_enabled
+        and role == 'PM'
+        and is_assigned_pm
+        and project.project_type == 'Residential'
+    )
 
     # Payment requests for this project — Finance sees confirm actions, PM sees read-only
     # The queryset is shared; template role-gates control which actions are rendered.
@@ -7188,23 +7890,33 @@ def zoho_deal_closed_webhook(request):
 
     # Create project
     try:
-        project = Project.objects.create(
-            customer_name=customer_name or 'Unknown',
-            customer_contact_person=customer_contact_person,
-            customer_phone=customer_phone,
-            customer_email=(deal.get('Customer_Email', '') or '').strip() or None,
-            site_address='',
-            city=(deal.get('City', '') or '').strip(),
-            state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
-            project_type='Residential',
-            capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
-            contract_value=_safe_decimal(deal.get('Amount')),
-            assigned_pm=assigned_pm,
-            target_commissioning_date=target_commissioning_date,
-            status='Draft',
-            zoho_deal_id=record_id,
-            created_by=None,
-        )
+        # R-2. The FOURTH write to Project.status, and the only one with no human
+        # behind it — actor stays None and actor_role_code becomes ACTOR_ROLE_SYSTEM.
+        # The atomic block keeps the existing failure contract intact: if the ledger
+        # write fails, the project creation rolls back with it and the except below
+        # still returns 200, because a non-200 makes Zoho retry and duplicate.
+        with transaction.atomic():
+            project = Project.objects.create(
+                customer_name=customer_name or 'Unknown',
+                customer_contact_person=customer_contact_person,
+                customer_phone=customer_phone,
+                customer_email=(deal.get('Customer_Email', '') or '').strip() or None,
+                site_address='',
+                city=(deal.get('City', '') or '').strip(),
+                state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
+                project_type='Residential',
+                capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
+                contract_value=_safe_decimal(deal.get('Amount')),
+                assigned_pm=assigned_pm,
+                target_commissioning_date=target_commissioning_date,
+                status='Draft',
+                zoho_deal_id=record_id,
+                created_by=None,
+            )
+            record_transition(
+                project, to_status='Draft', actor=None,
+                reason_code=REASON_ZOHO_WEBHOOK,
+            )
     except Exception as exc:
         logger.error('Webhook: project creation failed for deal %s — %s', record_id, exc)
         # Return 200 even on failure — non-200 would cause Zoho to retry and create duplicates
@@ -7337,11 +8049,15 @@ def task_detail(request, project_id, task_id):
     Task detail page: attachments, issues, and threaded comments for this task.
     Access: all roles; PM isolation applies.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task        = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7395,10 +8111,14 @@ def upload_project_document(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     files = request.FILES.getlist('files')
@@ -7489,10 +8209,16 @@ def delete_project_document(request, project_id, doc_pk):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so Project Coordinator, Site Engineer and Design reached any
+    # project in the portfolio. 0.2 fixed the upload sibling of this endpoint and missed
+    # this one, which left an unrelated user unable to upload a file to a project but
+    # still able to reach the delete endpoint for one. The uploader-or-Admin check below
+    # is unchanged -- authority and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     doc = get_object_or_404(ProjectDocument, pk=doc_pk, project=project, is_deleted=False)
@@ -7529,10 +8255,14 @@ def upload_task_attachment(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7622,10 +8352,16 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so Project Coordinator, Site Engineer and Design reached any
+    # project in the portfolio. 0.2 fixed the upload sibling of this endpoint and missed
+    # this one, which left an unrelated user unable to upload a file to a project but
+    # still able to reach the delete endpoint for one. The uploader-or-Admin check below
+    # is unchanged -- authority and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task   = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7683,7 +8419,16 @@ def checklist_item_complete(request, project_id, task_id, item_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
+
+    # 0.2 lockdown: project scope, added ALONGSIDE _user_can_complete_checklist_item()
+    # below, not merged into it. That helper answers "may this person tick items on a task
+    # of this shape" -- a role question -- and is shared with the template context, so
+    # narrowing it would silently change what the page renders. Scope is asked here, once,
+    # and the completer rule is left exactly as it was.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
 
     # The item must belong to the checklist currently linked to this task — never trust a
@@ -7740,21 +8485,26 @@ def checklist_item_complete(request, project_id, task_id, item_id):
         f"{settings.SUPABASE_BUCKET}/{supabase_path}"
     )
 
-    # Atomic completion: tick + all three photo fields written together on the (item, task) row.
+    # Atomic completion: tick + all three photo fields + the text snapshot written
+    # together on the (item, task) row. item_text_snapshot joins that same save
+    # deliberately (R-8) — a checked item can no more lack the question it answered than
+    # it can lack its photo.
+    answered_text = item.label
     completion, _created = ChecklistItemCompletion.objects.get_or_create(item=item, task=task)
     completion.photo_file_name     = photo.name
     completion.photo_url           = file_url
     completion.photo_supabase_path = supabase_path
     completion.is_checked          = True
+    completion.item_text_snapshot  = answered_text
     completion.checked_by          = request.user
     completion.checked_at          = timezone.now()
     completion.save(update_fields=[
         'photo_file_name', 'photo_url', 'photo_supabase_path',
-        'is_checked', 'checked_by', 'checked_at',
+        'is_checked', 'item_text_snapshot', 'checked_by', 'checked_at',
     ])
 
     log_activity(project, profile,
-                 f"Completed checklist item '{item.label}' on task: {task.task_name}",
+                 f"Completed checklist item '{answered_text}' on task: {task.task_name}",
                  entity_type='ChecklistItemCompletion', entity_id=completion.pk)
     messages.success(request, 'Checklist item checked.')
 
@@ -7768,8 +8518,19 @@ def checklist_item_complete(request, project_id, task_id, item_id):
 # ---------------------------------------------------------------------------
 
 def _issue_base_qs():
-    """Base Issue queryset with actor relations pre-joined — used in issue detail views."""
-    return Issue.objects.select_related('raised_by__user', 'assigned_to__user', 'task')
+    """Base Issue queryset with actor relations pre-joined — used in issue detail views.
+
+    Excludes issues whose project has been soft-deleted. Issue has no is_deleted field of
+    its own, so the filter has to sit on the parent; and because deletion is soft, the
+    CASCADE on Issue.project never fires to remove the row. Without this, resolve_issue
+    sends WhatsApp and email about an issue on a project deleted months ago.
+
+    THE SINGLE ISSUE RESOLUTION PATH — the sibling of _active_project(). Every view that
+    resolves an Issue goes through here rather than hitting Issue.objects directly.
+    """
+    return Issue.objects.select_related(
+        'raised_by__user', 'assigned_to__user', 'task',
+    ).filter(project__is_deleted=False)
 
 
 def _is_project_pm(profile, project):
@@ -7784,6 +8545,52 @@ def _is_project_pm(profile, project):
     return profile.role in ('PM', 'Project Coordinator') and user_can_manage_project(profile.user, project)
 
 
+def _issue_assignable_profiles(project):
+    """The UserProfiles an issue on `project` may be assigned to: everyone with an actual
+    relationship to it — its PM, its coordinators, and anyone holding a task on it.
+
+    0.2 lockdown. This replaces `UserProfile.objects.filter(is_active=True)`, which put
+    EVERY active person in the company into the assignee dropdown on every issue — a
+    company directory rendered to anyone who could open an issue page, and a way to put a
+    colleague's name on work they have no connection to.
+
+    ONE DEFINITION, TWO CALL SITES, DELIBERATELY. issue_detail() renders it and
+    assign_issue() validates against it. A dropdown that is narrowed on the page but not
+    revalidated on POST is decoration, not a gate — the pk goes straight into the form
+    body and nothing stops a hand-rolled request. Defined here once so the two cannot
+    drift, exactly as _user_can_complete_checklist_item() is shared between its view and
+    its template context.
+
+    Active profiles only, matching the queryset this replaced. `assigned_pm` is included
+    even where that profile does not hold the PM role, because it is a real relationship to
+    the project (and reachable via the Zoho webhook, which matches on email with no role
+    filter) — the same reason user_can_manage_project() compares the FK rather than the
+    role. Distinct + ordered to match the previous dropdown's ordering.
+
+    `assigned_design` IS INCLUDED, and it is one term wider than the 0.2 prompt's
+    enumeration (PM, coordinators, task-holders). It is here because it is a relationship
+    to this project by exactly the same standard as `assigned_pm` — user_can_view_project()
+    admits the stamped designer on the strength of that FK alone — and activation leaves
+    design tasks assignable rather than assigned, so a designer frequently holds no Task
+    row on their own site. Without this term the two BOQ/drawing error categories that most
+    need an issue raised against them could not be assigned to the one person who has to
+    fix them. Omitting it would have been an over-narrowing, which is the failure mode a
+    lockdown actually has.
+    """
+    return (
+        UserProfile.objects.select_related('user')
+        .filter(is_active=True)
+        .filter(
+            Q(pm_projects=project)
+            | Q(coordinated_projects=project)
+            | Q(design_projects=project)
+            | Q(assigned_tasks__phase__project=project)
+        )
+        .distinct()
+        .order_by('user__first_name')
+    )
+
+
 @login_required
 def create_project_issue(request, project_id):
     """
@@ -7793,10 +8600,14 @@ def create_project_issue(request, project_id):
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     title       = request.POST.get('title', '').strip()
@@ -7826,17 +8637,23 @@ def create_project_issue(request, project_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        task=None,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            task=None,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        # R-2 creation transition — blank from_status.
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
@@ -7887,10 +8704,14 @@ def create_task_issue(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
@@ -7922,17 +8743,22 @@ def create_task_issue(request, project_id, task_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        task=task,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            task=task,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
@@ -7984,15 +8810,19 @@ def create_delivery_issue(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PMs can only interact with their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -8023,18 +8853,23 @@ def create_delivery_issue(request, project_id, dc_id):
         except UserProfile.DoesNotExist:
             pass
 
-    issue = Issue.objects.create(
-        project=project,
-        delivery_challan=challan,
-        task=None,
-        title=title,
-        description=description,
-        severity=severity,
-        status=Issue.OPEN,
-        raised_by=profile,
-        assigned_to=assigned_to,
-        due_date=due_date,
-    )
+    with transaction.atomic():
+        issue = Issue.objects.create(
+            project=project,
+            delivery_challan=challan,
+            task=None,
+            title=title,
+            description=description,
+            severity=severity,
+            status=Issue.OPEN,
+            raised_by=profile,
+            assigned_to=assigned_to,
+            due_date=due_date,
+        )
+        record_transition(
+            issue, to_status=Issue.OPEN, actor=profile,
+            reason_code=REASON_CREATED, remark=title,
+        )
     log_activity(
         project, profile,
         f"Raised delivery issue: {title} ({severity}) on DC {challan.dc_number}",
@@ -8090,10 +8925,17 @@ def issue_detail(request, issue_id):
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
-    all_profiles = UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name')
+    # 0.2 lockdown: the assignee dropdown was every active UserProfile in the company.
+    # Narrowed to people with an actual relationship to this project, and revalidated on
+    # POST by assign_issue() against the SAME helper.
+    all_profiles = _issue_assignable_profiles(project)
     is_pm        = _is_project_pm(profile, project)
 
     # Prefetch replies to avoid N+1 — template iterates comment.replies.all()
@@ -8125,11 +8967,15 @@ def update_issue_status(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8145,7 +8991,16 @@ def update_issue_status(request, issue_id):
 
     # filter().update() with status condition prevents race condition — updated==0 means
     # another request already changed the status between our read and this write
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
+    # R-2. The row is written only when the guarded update actually moved something:
+    # updated == 0 means another request won the race and there is no transition here
+    # to record — theirs already wrote one.
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.OPEN).update(status=Issue.IN_PROGRESS)
+        if updated:
+            record_transition(
+                issue, to_status=Issue.IN_PROGRESS, from_status=Issue.OPEN,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8165,11 +9020,15 @@ def resolve_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8184,11 +9043,20 @@ def resolve_issue(request, issue_id):
         messages.error(request, 'Resolution note is required.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.IN_PROGRESS).update(
-        status=Issue.RESOLVED,
-        resolved_at=timezone.now(),
-        resolution_note=resolution_note,
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.IN_PROGRESS).update(
+            status=Issue.RESOLVED,
+            resolved_at=timezone.now(),
+            resolution_note=resolution_note,
+        )
+        if updated:
+            record_transition(
+                issue, to_status=Issue.RESOLVED, from_status=Issue.IN_PROGRESS,
+                actor=profile, project=project,
+                # Already mandatory on this path — the one place today that meets
+                # R-9's bar without any change to the UI.
+                remark=resolution_note,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8234,7 +9102,7 @@ def close_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8245,10 +9113,16 @@ def close_issue(request, issue_id):
         messages.warning(request, 'Issue must be Resolved before it can be closed.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
-        status=Issue.CLOSED,
-        closed_at=timezone.now(),
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+            status=Issue.CLOSED,
+            closed_at=timezone.now(),
+        )
+        if updated:
+            record_transition(
+                issue, to_status=Issue.CLOSED, from_status=Issue.RESOLVED,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8267,7 +9141,7 @@ def reopen_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
@@ -8278,11 +9152,21 @@ def reopen_issue(request, issue_id):
         messages.warning(request, 'Only Resolved issues can be reopened.')
         return redirect('issue_detail', issue_id=issue_id)
 
-    updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
-        status=Issue.OPEN,
-        resolved_at=None,
-        resolution_note='',
-    )
+    with transaction.atomic():
+        updated = Issue.objects.filter(pk=issue.pk, status=Issue.RESOLVED).update(
+            status=Issue.OPEN,
+            resolved_at=None,
+            resolution_note='',
+        )
+        if updated:
+            # A reopen CLEARS resolution_note on the Issue row. The ledger keeps the
+            # earlier resolve transition and its remark, so what was claimed as the
+            # resolution is still readable after the claim has been wiped off the
+            # issue itself — the append-only rule (R-4) earning its keep.
+            record_transition(
+                issue, to_status=Issue.OPEN, from_status=Issue.RESOLVED,
+                actor=profile, project=project,
+            )
     if updated == 0:
         messages.warning(request, 'Issue status was already updated.')
     else:
@@ -8301,11 +9185,15 @@ def assign_issue(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     if issue.status == Issue.CLOSED:
@@ -8313,9 +9201,13 @@ def assign_issue(request, issue_id):
 
     assignee_id = request.POST.get('assigned_to', '').strip()
     if assignee_id:
+        # 0.2 lockdown: resolve the pk WITHIN the set of people related to this project,
+        # not across every UserProfile in the company. issue_detail() renders the same
+        # helper, so this is the POST-side half of that narrowing — without it the
+        # dropdown is cosmetic and any pk in the form body is still accepted.
         try:
-            new_assignee = UserProfile.objects.get(pk=assignee_id)
-        except UserProfile.DoesNotExist:
+            new_assignee = _issue_assignable_profiles(project).get(pk=assignee_id)
+        except (UserProfile.DoesNotExist, ValueError):
             messages.error(request, 'Invalid user selected.')
             return redirect('issue_detail', issue_id=issue_id)
         Issue.objects.filter(pk=issue.pk).update(assigned_to=new_assignee)
@@ -8342,12 +9234,16 @@ def create_task_comment(request, project_id, task_id):
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -8403,12 +9299,16 @@ def create_issue_comment(request, issue_id):
     if request.method != 'POST':
         return redirect('issue_detail', issue_id=issue_id)
 
-    issue   = get_object_or_404(Issue, pk=issue_id)
+    issue   = get_object_or_404(_issue_base_qs(), pk=issue_id)
     project = issue.project
     profile = request.user.profile
 
     # PM isolation: PM can only access their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     body = request.POST.get('body', '').strip()
@@ -8490,11 +9390,15 @@ def project_timeline(request, project_id):
     """Project activity timeline. All roles — PM isolation applies."""
     from django.core.paginator import Paginator
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # PM isolation: PM can only view their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown: project scope for EVERY role, not just PM. This was a PM-only
+    # guard, so Project Coordinator, Site Engineer and Design reached any project in
+    # the portfolio. Role and authority checks elsewhere in this view are unchanged --
+    # scope is a separate question and gets its own answer.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # All activity logs for this project, newest first, with actor data
@@ -8662,7 +9566,7 @@ def create_delivery_challan(request, project_id):
     Minimum 1 line item required — zero items rejected with a validation error.
     GET renders the form; POST creates the DC + line items in one transaction.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
     vendors = Vendor.objects.filter(is_active=True).order_by('name')
 
@@ -8750,6 +9654,14 @@ def create_delivery_challan(request, project_id):
             notes=notes,
             created_by=profile,
         )
+        # R-2. recalculate_dc_status() is NOT called here (see below) so it cannot
+        # write this one — and without it a challan's ledger would open at
+        # 'Expected → Received' with no record of when it started waiting, which is
+        # exactly the dwell time SCM will want.
+        record_transition(
+            challan, to_status=DeliveryChallan.EXPECTED, actor=profile,
+            reason_code=REASON_CREATED,
+        )
         # Create line items after challan exists; recalculate_dc_status is NOT called
         # here because all new items have no received_quantity → status stays Expected
         for item_data in line_items_data:
@@ -8773,19 +9685,22 @@ def delivery_challan_detail(request, project_id, dc_id):
     to prevent cross-project data leakage via URL manipulation.
     Access: SCM, PM, SE, Admin.
     """
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # Only SCM, PM, SE, Admin can view DC pages
     if profile.role not in ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin'):
         return HttpResponseForbidden()
 
-    # PM isolation: PM sees only their own projects
-    if profile.role == 'PM' and not user_can_manage_project(request.user, project):
+    # 0.2 lockdown (completed in 0.2c): project scope for EVERY role, not just PM. This
+    # was a PM-only guard, so a Project Coordinator or Site Engineer on any project read
+    # the delivery detail of every project in the portfolio. The role list above is
+    # unchanged -- role and scope are separate questions with separate answers.
+    if not user_can_view_project(request.user, project):
         raise Http404
 
     # Cross-project guard: DC must belong to the project in the URL
-    challan    = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan    = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -8824,11 +9739,29 @@ def confirm_grn(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
+    # 0.2 lockdown, AUDIT FINDING 1 -- the reason a site engineer could not be given a
+    # login until this shipped. The @role_required above asks only "are you a Site
+    # Engineer", with no project term of any kind, so ANY site engineer in the company
+    # could confirm a GRN on ANY challan in the portfolio -- signing off receipt of
+    # materials at a site they have never been to.
+    #
+    # The role gate is KEPT and this is added beside it: two independent questions, two
+    # independent answers. This one is scope.
+    #
+    # user_can_view_project() IS the task-holding test here, not merely the minimum. This
+    # endpoint is Site-Engineer-only, and that helper's Site Engineer branch is exactly
+    # `project.phases.filter(tasks__assigned_to=profile).exists()` -- the same relationship
+    # dashboard_site_engineer scopes on. Routing through the canonical helper gives the
+    # stricter rule without a second copy of it here, and the legitimate case pinned by
+    # DeliveryGRNWorkflowTests (the SE holding tasks on this project) is unaffected.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     # Cross-project guard
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -8876,8 +9809,9 @@ def confirm_grn(request, project_id, dc_id):
         item.save()
 
     # Recalculate DC status ONCE after all line items saved — never inside the loop
-    # (calling it inside the loop causes status to oscillate incorrectly)
-    recalculate_dc_status(challan)
+    # (calling it inside the loop causes status to oscillate incorrectly).
+    # actor/reason feed the state ledger; recalculate_dc_status owns the row (R-2).
+    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_CONFIRMED)
     challan.refresh_from_db()
 
     log_activity(
@@ -8903,11 +9837,11 @@ def override_grn(request, project_id, dc_id):
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     profile = request.user.profile
 
     # Cross-project guard
-    challan = get_object_or_404(DeliveryChallan, pk=dc_id)
+    challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
@@ -8949,8 +9883,11 @@ def override_grn(request, project_id, dc_id):
         # grn_confirmed_by NOT overwritten — original SE submitter is preserved
         item.save()
 
-    # Recalculate DC status ONCE after all line items saved
-    recalculate_dc_status(challan)
+    # Recalculate DC status ONCE after all line items saved.
+    # The ledger records the SCM overrider here, not the original SE submitter —
+    # grn_confirmed_by deliberately keeps the latter, and the two answer different
+    # questions.
+    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
     challan.refresh_from_db()
 
     log_activity(
@@ -9035,15 +9972,21 @@ def my_documents(request):
     profile = request.user.profile
     role    = profile.role
 
+    # Every section below filters the PARENT project's is_deleted as well as any
+    # is_deleted the row itself carries. Deleting a project is soft and does not cascade,
+    # so without the parent term this archive keeps listing a deleted project's documents,
+    # BOQs and challans — each linking to a detail view that now 404s.
     # Section A — Uploaded Files (all roles)
     task_attachments = TaskAttachment.objects.filter(
         uploaded_by=profile,
         is_deleted=False,
+        task__phase__project__is_deleted=False,
     ).select_related('task', 'task__phase', 'task__phase__project').order_by('-uploaded_at')[:50]
 
     project_docs = ProjectDocument.objects.filter(
         uploaded_by=profile,
         is_deleted=False,
+        project__is_deleted=False,
     ).select_related('project').order_by('-uploaded_at')[:50]
 
     # Section B — BOQ Submissions (Design only)
@@ -9051,6 +9994,7 @@ def my_documents(request):
     if role == 'Design':
         boq_list = BOQ.objects.filter(
             submitted_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-submitted_at')[:50]
 
     # Section C — Design Submissions (Design only)
@@ -9058,6 +10002,7 @@ def my_documents(request):
     if role == 'Design':
         design_list = DesignSubmission.objects.filter(
             submitted_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-submitted_at')[:50]
 
     # Section D — Delivery Challans (SCM only)
@@ -9065,6 +10010,7 @@ def my_documents(request):
     if role == 'SCM':
         dc_list = DeliveryChallan.objects.filter(
             created_by=profile,
+            project__is_deleted=False,
         ).select_related('project').order_by('-created_at')[:50]
 
     # Section E — Payment Requests (SCM only)
@@ -9073,6 +10019,7 @@ def my_documents(request):
     if role == 'SCM':
         pr_list = PaymentRequest.objects.filter(
             requested_by=request.user,
+            project__is_deleted=False,
         ).select_related('project', 'vendor').order_by('-requested_date')[:50]
 
     context = {
@@ -9090,7 +10037,10 @@ def my_documents(request):
 @login_required
 def design_submission_detail(request, pk):
     """Read-only detail view for a DesignSubmission. Submitter, PM, or Admin only."""
-    submission = get_object_or_404(DesignSubmission, pk=pk)
+    # Resolved by pk, not project_id, so _active_project() cannot be used — the
+    # is_deleted term goes on the parent instead. DesignSubmission has no is_deleted
+    # field of its own, and CASCADE from Project never fires because deletion is soft.
+    submission = get_object_or_404(DesignSubmission, pk=pk, project__is_deleted=False)
     profile    = request.user.profile
     if profile != submission.submitted_by and profile.role not in ('PM', 'Admin'):
         messages.error(request, "You don't have access to this submission.")
@@ -9101,9 +10051,17 @@ def design_submission_detail(request, pk):
 @login_required
 def payment_request_detail(request, project_id, request_id):
     """Read-only detail view for a PaymentRequest. SCM, Finance, PM, or Admin only."""
-    project = get_object_or_404(Project, project_id=project_id)
+    project = _active_project(project_id)
     pr      = get_object_or_404(PaymentRequest, pk=request_id, project=project)
     profile = request.user.profile
+
+    # 0.2 lockdown: project scope, added BESIDE the role allowlist below, not merged into
+    # it. The allowlist has no project term, so any PM could read any project's vendor
+    # invoice, amount and document URL. Finance / SCM / Admin are portfolio-wide under
+    # current policy and so are unaffected by this line; it is the PM arm it narrows.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     if profile.role not in ('SCM', 'Finance', 'PM', 'Admin'):
         messages.error(request, "You don't have access to this payment request.")
         return redirect('my_documents')
@@ -9767,96 +10725,59 @@ def admin_assign_pm(request, project_id):
     return redirect('admin_project_list')
 
 
+def _residential_template_duration_rows():
+    """Return (grouped, total, template) for the read-only duration screens.
+
+    Sourced from the ACTIVE TaskTemplate — the rows activation actually reads — not from
+    TaskDurationTemplate, which nothing reads any more. Showing the stale table read-only
+    would still be misleading, which is the whole problem being closed here.
+
+    `grouped` is [(phase_label, [TaskTemplateTask, ...]), ...] in template order, which is
+    the same shape the templates already iterate. Returns ([], 0, None) when no template
+    is active, so the page renders an explanation instead of raising.
+    """
+    template = resolve_active_task_template('Residential')
+    if template is None:
+        return [], 0, None
+
+    grouped = [
+        (phase.label, list(phase.tasks.all()))
+        for phase in template.phases.all()
+    ]
+    total = sum(len(tasks) for _, tasks in grouped)
+    return grouped, total, template
+
+
 @login_required
 @role_required(['Admin'])
 def admin_task_durations(request):
     """
-    Admin view to edit default duration_days for each task in the residential project template.
-    Changes apply to new projects only — existing project tasks are never modified.
-    GET: render grouped table. POST: validate and save changed values.
+    Admin view listing the task durations of the active Residential template. READ-ONLY.
+    Access: Admin only.
+
+    Was an editor over TaskDurationTemplate. Since prompt 0.4 the durations activation
+    uses live on TaskTemplateTask inside a versioned template, and a template version is
+    immutable once active (R-7) — so editing a duration in place is not a thing that can
+    be allowed, and continuing to accept a POST here would have saved a value that
+    changes nothing anywhere. Changing a duration means shipping template version+1.
+    A version-authoring UI is explicitly out of scope for this session.
     """
+    # POST is refused rather than removed from the URLconf: a bookmarked form or a
+    # double-submitted old page must get a clear answer, not a 405 or a silent no-op.
     if request.method == 'POST':
-        actor = request.user.profile
-        changed = 0
-        errors = []
-
-        for key, raw_val in request.POST.items():
-            if not key.startswith('duration_'):
-                continue
-            try:
-                pk = int(key.split('_', 1)[1])
-            except (ValueError, IndexError):
-                continue
-
-            raw_val = raw_val.strip()
-            if not raw_val.isdigit():
-                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
-                continue
-            new_days = int(raw_val)
-
-            try:
-                record = TaskDurationTemplate.objects.get(pk=pk)
-            except TaskDurationTemplate.DoesNotExist:
-                continue
-
-            if new_days == record.duration_days:
-                continue
-
-            old_days = record.duration_days
-            record.duration_days = new_days
-            record.updated_by = request.user
-            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
-            changed += 1
-
-            log_activity(
-                project=None,
-                actor=actor,
-                action=(
-                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
-                    f"changed from {old_days}d to {new_days}d [residential template]"
-                ),
-                entity_type='TaskDurationTemplate',
-                entity_id=record.pk,
-            )
-
-        if errors:
-            for msg in errors:
-                messages.error(request, msg)
-        else:
-            messages.success(request, f'Saved. {changed} duration(s) updated.')
-
+        messages.info(
+            request,
+            'Task durations are no longer edited here. They live on the versioned '
+            'Residential task template, which is immutable once active — changing a '
+            'duration means publishing a new template version.'
+        )
         return redirect('admin_task_durations')
 
-    # GET — group records by phase_name preserving the natural phase order
-    PHASE_ORDER = [
-        'Sales & Documentation',
-        'Detail Engineering Visit',
-        'Design',
-        'Pre-Installation Approvals',
-        'Procurement',
-        'Delivery',
-        'Installation',
-        'Commissioning',
-        'Finance Closure',
-    ]
-    records = list(
-        TaskDurationTemplate.objects
-        .filter(project_type='residential')
-        .select_related('updated_by')
-        .order_by('phase_name', 'task_name')
-    )
-
-    phase_groups = {phase: [] for phase in PHASE_ORDER}
-    for rec in records:
-        if rec.phase_name in phase_groups:
-            phase_groups[rec.phase_name].append(rec)
-
-    # Build ordered list of (phase_name, [records]) skipping empty phases
-    grouped = [(phase, phase_groups[phase]) for phase in PHASE_ORDER if phase_groups[phase]]
-
+    grouped, total, template = _residential_template_duration_rows()
     return render(request, 'projects/admin/task_durations.html', {
-        'grouped': grouped,
-        'total': len(records),
+        'grouped':  grouped,
+        'total':    total,
+        'template': template,
     })
 
 
@@ -9870,6 +10791,16 @@ def admin_task_durations(request):
 # hardcoded Residential template via utils.get_residential_template_task_names(). All
 # mutations are Admin-only and log_activity(entity_type='Checklist'). Item CRUD lives
 # here (NOT on task detail); task detail is completion-only.
+#
+# R-7 SINCE 0.5: a Checklist is one numbered VERSION of a family. Items may be added,
+# reworded, reordered and deleted only while the version is a DRAFT; activating it
+# freezes the content and archives the previous active version of the same code in one
+# transaction. Task LINKS are not version content and stay editable throughout — the
+# link says which family a task uses, `status` says which version of it is live.
+#
+# Creating version 2 is not a screen this module builds (prompt 0.5, task 4). It is done
+# through the Django admin or a migration, and the only thing that makes v2 the next
+# version of a family rather than a new family is passing the SAME `code`.
 # ---------------------------------------------------------------------------
 
 def _checklist_task_name_choices():
@@ -9879,11 +10810,29 @@ def _checklist_task_name_choices():
     return get_residential_template_task_names()
 
 
+def _checklist_locked_redirect(request, checklist):
+    """R-7 refusal shared by every portal-admin action that edits checklist CONTENT.
+
+    Returns a redirect when the version is not a draft, or None when the caller may
+    proceed. The model's save()/delete() already raise TemplateVersionLocked; this turns
+    that into a message on the screen the admin is standing on, rather than a 500 —
+    the same choice _DraftOnlyContentAdmin makes in the Django admin."""
+    if checklist.is_editable:
+        return None
+    messages.error(
+        request,
+        f'"{checklist.name}" is {checklist.get_status_display().lower()}, not a draft, and its '
+        f'items cannot be changed (R-7). Editing a live checklist means publishing '
+        f'version {checklist.version_no + 1}.'
+    )
+    return redirect('admin_checklist_edit', checklist_id=checklist.pk)
+
+
 @login_required
 @role_required(['Admin'])
 def admin_checklists(request):
-    """List all Checklists (name, item count, assigned task_name/project_type pairs, active
-    toggle). Access: Admin only."""
+    """List all Checklist versions (name, version, status, item count, assigned
+    task_name/project_type pairs). Access: Admin only."""
     checklists = (
         Checklist.objects
         .prefetch_related('items', 'task_links')
@@ -9897,7 +10846,11 @@ def admin_checklists(request):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_create(request):
-    """Create a new empty Checklist, then redirect to its editor. Access: Admin only. POST only."""
+    """Create a new Checklist as version 1, in DRAFT, then redirect to its editor.
+
+    Draft, not live: items are addable only while the version is a draft (R-7), so the
+    order is author-then-publish. `code` is derived from the name by Checklist.save().
+    Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklists')
 
@@ -9908,17 +10861,25 @@ def admin_checklist_create(request):
 
     checklist = Checklist.objects.create(name=name, created_by=request.user)
     log_activity(None, request.user.profile,
-                 f"Created checklist '{name}'",
+                 f"Created checklist '{name}' as {checklist.code} v1 (draft)",
                  entity_type='Checklist', entity_id=checklist.pk)
-    messages.success(request, f'Checklist "{name}" created. Add items and assign tasks below.')
+    messages.success(
+        request,
+        f'Checklist "{name}" created as a draft. Add its items, then publish it — '
+        f'a draft is not shown on any task until it is published.'
+    )
     return redirect('admin_checklist_edit', checklist_id=checklist.pk)
 
 
 @login_required
 @role_required(['Admin'])
 def admin_checklist_edit(request, checklist_id):
-    """Editor for one Checklist: rename/active toggle, item add/edit/delete/reorder, and
-    task-link assign/unassign. GET only — mutations POST to the dedicated actions below."""
+    """Editor for one Checklist version: rename, publish/archive, item
+    add/edit/delete/reorder, and task-link assign/unassign. GET only — mutations POST to
+    the dedicated actions below.
+
+    `is_editable` drives the whole screen: on a published or archived version the item
+    forms are replaced with read-only rows (R-7), while the task links stay editable."""
     checklist = get_object_or_404(Checklist, pk=checklist_id)
     items = checklist.items.all()
     links = checklist.task_links.all()
@@ -9927,6 +10888,12 @@ def admin_checklist_edit(request, checklist_id):
         'checklist':       checklist,
         'items':           items,
         'links':           links,
+        # Other versions of the same family, so the editor shows the history rather than
+        # presenting a version as if it stood alone.
+        'sibling_versions': (Checklist.objects
+                             .filter(code=checklist.code)
+                             .exclude(pk=checklist.pk)
+                             .order_by('-version_no')),
         'task_name_pairs': _checklist_task_name_choices(),
         'project_types':   Project.PROJECT_TYPE_CHOICES,
     })
@@ -9935,23 +10902,79 @@ def admin_checklist_edit(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_update(request, checklist_id):
-    """Rename a Checklist and/or toggle its active flag. Access: Admin only. POST only."""
+    """Rename a DRAFT Checklist, or move a version through its lifecycle.
+
+    Replaces the old is_active checkbox, which no longer has a column behind it. Two
+    actions, and only one of them can apply to a given version:
+
+      publish  — draft → active, archiving the previous active version of the same code
+                 in the same transaction (Checklist.activate()). Freezes the content.
+      archive  — active → archived. Withdraws the checklist from every task that links
+                 to it, which is what unticking "Active" used to do.
+
+    ARCHIVING IS NOT REVERSIBLE, deliberately, and this is a change from the old
+    checkbox. An archived version is the record of what last month's sites answered;
+    bringing it back would mean its content had been frozen for a period and then
+    resumed. Republishing means publishing version+1. Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    action = request.POST.get('action', 'rename').strip()
+
+    if action == 'publish':
+        if not checklist.is_editable:
+            messages.error(request, f'Only a draft can be published; this version is '
+                                    f'{checklist.get_status_display().lower()}.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+        if not checklist.items.exists():
+            messages.error(request, 'Add at least one item before publishing this checklist.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+        superseded = (Checklist.objects
+                      .filter(code=checklist.code, status=Checklist.ACTIVE)
+                      .exclude(pk=checklist.pk)
+                      .values_list('version_no', flat=True).first())
+        checklist.activate()
+        note = f' (v{superseded} archived)' if superseded else ''
+        log_activity(None, request.user.profile,
+                     f"Published checklist '{checklist.name}' {checklist.code} "
+                     f"v{checklist.version_no}{note}",
+                     entity_type='Checklist', entity_id=checklist.pk)
+        messages.success(request, f'Published version {checklist.version_no}. '
+                                  f'Its items are now frozen.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    if action == 'archive':
+        if checklist.status != Checklist.ACTIVE:
+            messages.error(request, 'Only the active version can be archived.')
+            return redirect('admin_checklist_edit', checklist_id=checklist_id)
+        checklist.status = Checklist.ARCHIVED
+        checklist.save(update_fields=['status'])
+        log_activity(None, request.user.profile,
+                     f"Archived checklist '{checklist.name}' {checklist.code} "
+                     f"v{checklist.version_no}",
+                     entity_type='Checklist', entity_id=checklist.pk)
+        messages.success(request, 'Checklist archived. It is no longer shown on any task.')
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
+    # --- rename -------------------------------------------------------------------
+    # The name is the version's own label, not its content, but it is still what the
+    # version was published as. Editable while draft only, matching TaskTemplateAdmin.
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     name = request.POST.get('name', '').strip()
     if not name:
         messages.error(request, 'Checklist name cannot be empty.')
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
-    is_active = request.POST.get('is_active') == 'on'
     checklist.name = name
-    checklist.is_active = is_active
-    checklist.save(update_fields=['name', 'is_active'])
+    checklist.save(update_fields=['name'])
 
     log_activity(None, request.user.profile,
-                 f"Updated checklist '{name}' (active={is_active})",
+                 f"Renamed checklist {checklist.code} v{checklist.version_no} to '{name}'",
                  entity_type='Checklist', entity_id=checklist.pk)
     messages.success(request, 'Checklist saved.')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)
@@ -9960,17 +10983,23 @@ def admin_checklist_update(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_delete(request, checklist_id):
-    """Delete a Checklist. Cascades to its items, task links, and item completions.
+    """Delete a Checklist version. Cascades to its items and task links.
+
+    IT NO LONGER DESTROYS COMPLETION HISTORY. ChecklistItemCompletion.item is SET_NULL,
+    so every tick, photo, checker and timestamp survives with the answered text held in
+    item_text_snapshot. That is the point of 0.5: an admin tidying up a checklist used
+    to erase the inspection record of every site that had ever answered it.
+
     Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklists')
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
     name = checklist.name
-    checklist.delete()  # CASCADE: items → completions, and task_links
+    checklist.delete()  # CASCADE: items and task_links. Completions survive, item=NULL.
 
     log_activity(None, request.user.profile,
-                 f"Deleted checklist '{name}' (and its items, links, and completions)",
+                 f"Deleted checklist '{name}' (its items and links; completion records kept)",
                  entity_type='Checklist', entity_id=None)
     messages.success(request, f'Checklist "{name}" deleted.')
     return redirect('admin_checklists')
@@ -9979,11 +11008,18 @@ def admin_checklist_delete(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_add(request, checklist_id):
-    """Append one item to a Checklist. Access: Admin only. POST only."""
+    """Append one item to a DRAFT Checklist. Access: Admin only. POST only.
+
+    Adding is content too (R-7): a question added to a live checklist retroactively
+    makes every site that already completed it incomplete."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     label = request.POST.get('label', '').strip()
     if not label:
         messages.error(request, 'Please enter a label for the item.')
@@ -10002,11 +11038,18 @@ def admin_checklist_item_add(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_edit(request, checklist_id, item_id):
-    """Edit one Checklist item's label. Access: Admin only. POST only."""
+    """Edit one DRAFT Checklist item's label. Access: Admin only. POST only.
+
+    This is the defect 0.5 exists for: rewording a live item used to change the wording
+    displayed against every completion already recorded against it."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     label = request.POST.get('label', '').strip()
     if not label:
@@ -10026,11 +11069,18 @@ def admin_checklist_item_edit(request, checklist_id, item_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_delete(request, checklist_id, item_id):
-    """Delete one Checklist item (cascades to its completions). Access: Admin only. POST only."""
+    """Delete one item from a DRAFT Checklist. Access: Admin only. POST only.
+
+    It does NOT cascade to completions any more — the FK is SET_NULL and each completion
+    keeps its tick, photo, checker, timestamp and the text it answered."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     label = item.label
     item.delete()
@@ -10045,12 +11095,16 @@ def admin_checklist_item_delete(request, checklist_id, item_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_item_move(request, checklist_id, item_id):
-    """Reorder a Checklist item up or down by swapping `order` with its neighbour (no drag
-    library). Access: Admin only. POST only."""
+    """Reorder a DRAFT Checklist item up or down by swapping `order` with its neighbour
+    (no drag library). Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    locked = _checklist_locked_redirect(request, checklist)
+    if locked is not None:
+        return locked
+
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
     direction = request.POST.get('direction', '')
 
@@ -10381,20 +11435,6 @@ _SA_DEPT_NAMES = {
     'BD':                  'Sales & Business Development',
 }
 
-# Phase order for task duration template
-_PHASE_ORDER = [
-    'Sales & Documentation',
-    'Detail Engineering Visit',
-    'Design',
-    'Pre-Installation Approvals',
-    'Procurement',
-    'Delivery',
-    'Installation',
-    'Commissioning',
-    'Finance Closure',
-]
-
-
 @system_admin_required
 def subadmin_projects(request):
     """System Admin: view all projects and assign unassigned ones to a PM (first-time only)."""
@@ -10681,74 +11721,29 @@ def _subadmin_create_user(request):
 
 @system_admin_required
 def subadmin_task_durations(request):
-    """System Admin view for task duration templates — same data as admin version, own template."""
+    """
+    System Admin view listing the task durations of the active Residential template.
+    READ-ONLY. Access: System Admin only.
+
+    The System Admin twin of admin_task_durations — same data, own template. Both were
+    editors over TaskDurationTemplate and both are read-only for the same reason; see
+    admin_task_durations for it. They are repointed together deliberately: leaving one
+    editable would be the precise "the same act behaves differently depending on which
+    screen you pressed" defect this codebase already carries three of (B-2, B-5, B-7).
+    """
+    # POST refused, not removed — see admin_task_durations.
     if request.method == 'POST':
-        actor   = request.user.profile
-        changed = 0
-        errors  = []
-
-        for key, raw_val in request.POST.items():
-            if not key.startswith('duration_'):
-                continue
-            try:
-                pk = int(key.split('_', 1)[1])
-            except (ValueError, IndexError):
-                continue
-
-            raw_val = raw_val.strip()
-            if not raw_val.isdigit():
-                errors.append(f"Invalid value '{raw_val}' — must be a non-negative whole number.")
-                continue
-            new_days = int(raw_val)
-
-            try:
-                record = TaskDurationTemplate.objects.get(pk=pk)
-            except TaskDurationTemplate.DoesNotExist:
-                continue
-
-            if new_days == record.duration_days:
-                continue
-
-            old_days = record.duration_days
-            record.duration_days = new_days
-            record.updated_by    = request.user
-            record.save(update_fields=['duration_days', 'updated_by', 'updated_at'])
-            changed += 1
-
-            log_activity(
-                project=None,
-                actor=actor,
-                action=(
-                    f"Updated task duration: '{record.task_name}' ({record.phase_name}) "
-                    f"changed from {old_days}d to {new_days}d [residential template]"
-                ),
-                entity_type='TaskDurationTemplate',
-                entity_id=record.pk,
-            )
-
-        if errors:
-            for msg in errors:
-                messages.error(request, msg)
-        else:
-            messages.success(request, f'Saved. {changed} duration(s) updated.')
-
+        messages.info(
+            request,
+            'Task durations are no longer edited here. They live on the versioned '
+            'Residential task template, which is immutable once active — changing a '
+            'duration means publishing a new template version.'
+        )
         return redirect('subadmin_task_durations')
 
-    records = list(
-        TaskDurationTemplate.objects
-        .filter(project_type='residential')
-        .select_related('updated_by')
-        .order_by('phase_name', 'task_name')
-    )
-
-    phase_groups = {phase: [] for phase in _PHASE_ORDER}
-    for rec in records:
-        if rec.phase_name in phase_groups:
-            phase_groups[rec.phase_name].append(rec)
-
-    grouped = [(phase, phase_groups[phase]) for phase in _PHASE_ORDER if phase_groups[phase]]
-
+    grouped, total, template = _residential_template_duration_rows()
     return render(request, 'projects/subadmin/task_durations.html', {
-        'grouped': grouped,
-        'total':   len(records),
+        'grouped':  grouped,
+        'total':    total,
+        'template': template,
     })

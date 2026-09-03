@@ -1,8 +1,9 @@
 ﻿import logging
+import re
 
 from datetime import timedelta
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -192,6 +193,365 @@ def assign_tasks_to(queryset, user):
     that are already atomic, for no behavioural gain.
     """
     return queryset.update(assigned_to=user)
+
+
+# ---------------------------------------------------------------------------
+# Metric chokepoint — prompt 1.3b (rule R-20), SPLIT IN TWO BY PROMPT 1.6
+#
+# THE QUESTION A NUMBER ANSWERS DECIDES WHETHER MIRRORS ARE IN IT. There are
+# exactly two questions and therefore exactly two helpers, and every task
+# METRIC in this codebase routes through one of them:
+#
+#   "How much of this SITE is done"  -> site_progress_tasks_q().  INCLUDES
+#       mirrors. A site is not finished because the humans finished; the
+#       deliveries and the design are part of the work. Progress bars,
+#       percentages, per-project completion pairs.
+#
+#   "How much work does this PERSON or TEAM owe" -> human_owned_tasks_q().
+#       EXCLUDES mirrors. A mirror is nobody's task; counting it against
+#       somebody attributes another team's queue to them. Overdue, pending,
+#       blocked, workload, department rollups, the EOD digest, the user
+#       status report.
+#
+# WHY THIS IS TWO RULES AND NOT ONE, recorded because it WAS one and a reader
+# will find the single-rule version in the history. From 1.3b (30 Aug) to 1.5
+# (1 Sep) the rule was "a task metric excludes mirrors", full stop, applied at
+# 32 call sites. 1.5 removed the exclusion from `project_overview`'s per-phase
+# bar so a delivery phase read 0/4 rather than 0/0 — right, because 0/4 tells a
+# PM four deliveries are outstanding and 0/0 tells them nothing. But it was
+# changed on ONE SCREEN, which left `dashboard_pm`'s percentage and the CEO
+# project cards computing the same project's completeness on a DIFFERENT
+# DENOMINATOR from the overview. Two progress numbers for one project. 1.6
+# split the rule rather than picking a screen.
+#
+# A mirror task's status is DERIVED from another object (a DesignAssignment, a
+# delivery quantity, a COD record) and no human may write it. Counting one as a
+# person's work attributes another team's queue to the wrong person: an OPEX
+# site's two PM mirrors are the PM's "pending approvals" without the PM ever
+# being able to act on either, and an EOD digest gated on open work would email
+# somebody about tasks they cannot touch.
+#
+# WHAT THIS IS NOT: it is not a visibility rule. A site dashboard must still
+# SHOW its mirrors — displaying the derived state is the entire reason mirrors
+# exist. This removes them from metrics, never from lists. The one exception is
+# a list that exists to itemise a metric (`tasks_drill_down`, and the PM card's
+# five-row blocked/overdue evidence lists), which must reconcile with the number
+# it hangs off or the page contradicts itself.
+#
+# WHY A `Q` AND NOT A FILTERED QUERYSET: three consumers have no queryset to
+# filter — two conditional aggregates (`Count(..., filter=...)` on the CEO
+# dashboard and the SE dashboard, where a base filter would change what the
+# other annotations on the same join count) and one prefetched Python list
+# (`project_overview`'s per-phase progress). A `Q` serves all three plus the
+# plain `.filter()` sites; `is_human_owned()` is the row-at-a-time form.
+#
+# WHY NOT A CUSTOM MANAGER: there are no custom managers anywhere in this
+# codebase, deliberately — soft delete relies on `Task.objects` meaning
+# "everything", so that every queryset has to state its own predicate and no
+# reader has to guess whether one is already applied. See the module docstring
+# of reports.py. Adding a manager for the second predicate while the first
+# still has none would make both harder to reason about.
+#
+# WHY THE PROGRESS HELPER IS A NO-OP `Q()` AND EXISTS ANYWAY. It matches every
+# task; it adds `FILTER (WHERE True)` and nothing else. It is not there to
+# filter — it is there so a reader can tell a call site that DELIBERATELY counts
+# mirrors from one that FORGOT to exclude them. Those two are byte-identical
+# without it, and that ambiguity is the entire defect 1.6 exists to close.
+# `.filter(site_progress_tasks_q())` states the question; a bare `.count()`
+# states nothing.
+#
+# The `prefix` convention is `reports._active_project_filter()`'s.
+# ---------------------------------------------------------------------------
+
+def human_owned_tasks_q(prefix=''):
+    """Q() matching only the tasks a human is accountable for.
+
+    `prefix` is the relation path to Task — '' when querying Task itself,
+    'phases__tasks__' when querying Project, 'tasks__' when querying
+    ProjectPhase.
+
+    Positive, never a negation, and that is load-bearing on the CEO dashboard:
+    a negated Q across the multi-valued `phases__tasks` relation takes Django's
+    exclude() subquery path instead of a plain SQL FILTER, which would change
+    the join fan-out the two card counts deliberately share.
+    """
+    from django.db.models import Q
+
+    return Q(**{f'{prefix}is_mirror': False})
+
+
+def is_human_owned(task):
+    """Row-at-a-time form of human_owned_tasks_q(), for prefetched lists.
+
+    Same rule, applied in Python where no queryset exists to filter.
+    """
+    return not task.is_mirror
+
+
+def site_progress_tasks_q(prefix=''):
+    """Q() matching every task that counts toward SITE COMPLETENESS.
+
+    The other half of the pair. This one answers "how much of this site is
+    done", so mirrors are IN: an undelivered consignment is unfinished work
+    whoever is responsible for recording it, and a site is not complete because
+    the humans finished their share. Use it for progress bars, percentages and
+    per-project completion pairs.
+
+    Do NOT use it for anything scoped to a person or a team — overdue, pending,
+    blocked, workload, department rollups, the digest. Those ask a different
+    question and take `human_owned_tasks_q()`.
+
+    DELIBERATELY EMPTY. It matches everything and compiles to
+    `FILTER (WHERE True)`, which is semantically identical to passing no filter
+    at all. Its whole value is that it NAMES THE QUESTION at the call site: a
+    counter that means to include mirrors and a counter that forgot to exclude
+    them are otherwise indistinguishable to a reader and to review. `prefix` is
+    accepted and ignored, so the two helpers stay interchangeable at a call
+    site and swapping one for the other is a one-word diff.
+    """
+    from django.db.models import Q
+
+    return Q()
+
+
+# ---------------------------------------------------------------------------
+# CURRENT PHASE — one implementation, and it excludes mirrors (R-21)
+#
+# Prompt B21, 31 Aug 2026. This replaces FOUR independent copies of "first
+# phase holding a not-Done task": `Project.get_current_phase()`, `dashboard_pm`,
+# `dashboard_site_engineer`, and an inline Python loop in `dashboard_bd`. All
+# four now call this and nothing else computes it.
+#
+# WHY MIRRORS ARE OUT, and it is not an arbitrary extension of R-20's metric
+# rule to a non-metric: a mirror's status is derived from another object and no
+# human may write it (R-18, R-20). A phase is "current" as an answer to "what
+# is this site waiting on" — so a phase is not current because a mirror in it
+# is open, since nobody can act on a mirror to close it. The OPEX template made
+# this urgent rather than tidy: its Phase 1 is `Design`, whose ONLY task is a
+# mirror, and COD / HOTO / As-Built have no source object in existence to ever
+# complete them. Without the exclusion every OPEX site reports "Design" as its
+# current phase permanently, on all four screens, with all nine installation
+# tasks done.
+#
+# WHAT THE FOUR COPIES DISAGREED ABOUT, and how it was settled (recorded here
+# because a reader will otherwise assume they were identical):
+#   • return type — PM returned a ProjectPhase, the other three a name string.
+#     This returns the OBJECT; `Project.get_current_phase()` takes `.phase_name`
+#     off it, because two templates print that method's result directly.
+#   • the empty case — models.py and dashboard_bd returned None, PM and SE
+#     returned the LAST phase. A fully-completed project therefore read
+#     "Finance Closure" on the PM dashboard and "—" on the Admin project list,
+#     a live defect before mirrors were involved. SETTLED BY DECISION on
+#     31 Aug: the last phase that HOLDS a human-owned task. That equals the
+#     old PM/SE answer for both templates shipping today, so the two most-used
+#     screens are unchanged; it differs only for a future template ending in an
+#     all-mirror phase — the shape OPEX Phase 1 has at the front.
+# Ordering and the not-Done predicate were already identical across all four.
+#
+# A PYTHON LOOP, NOT A QUERYSET, and that is the whole performance argument.
+# `phases.filter(...)` ignores the prefetch cache, so the queryset form cost
+# 1–2 queries PER PROJECT at every call site — including the two that already
+# prefetch (`admin_project_list`, 50 rows a page, and `dashboard_bd`). This
+# form costs ZERO extra queries wherever phases and tasks are prefetched, which
+# is now all four call sites: prompt B21 added the same `Prefetch` clause to
+# `dashboard_pm` and `dashboard_site_engineer` that the other two already had.
+#
+# Pinned by projects/tests_current_phase.py.
+# ---------------------------------------------------------------------------
+
+def current_phase(project):
+    """The ProjectPhase a site is currently working, or None.
+
+    "Current" = the first phase, in `phase_order`, that still holds a
+    HUMAN-OWNED task which is not Done. Mirrors are excluded via
+    `is_human_owned()` — see R-20 and the block comment above: a mirror is
+    nobody's work, so an open one does not make its phase current.
+
+    When every human-owned task is Done, returns the LAST phase holding a
+    human-owned task (decided 31 Aug 2026). Returns None only when the project
+    has no phases, or no phase holds a human-owned task at all.
+
+    Reads `project.phases.all()` and `phase.tasks.all()`, so it is free on a
+    caller that prefetched both and expensive on one that did not. Every call
+    site prefetches; a new one must too.
+    """
+    from .models import Task
+
+    last_human_phase = None
+    for phase in project.phases.all():
+        for task in phase.tasks.all():
+            if not is_human_owned(task):
+                continue
+            last_human_phase = phase
+            if task.status != Task.DONE:
+                return phase
+    return last_human_phase
+
+
+# ---------------------------------------------------------------------------
+# State-ledger chokepoint — prompt 0.3 (rules R-2, R-3, R-4, R-9, R-14)
+#
+# StatusTransition rows are written HERE AND NOWHERE ELSE. Same pattern as
+# assign_task_to() above and send_notification(): one function owns one table's
+# writes, no signals, no save() overrides.
+# ---------------------------------------------------------------------------
+
+# Model class -> subject_type. subject_type is DERIVED FROM THE MODEL through
+# this one registry and is never a string the caller passes: a caller-supplied
+# string is how these vocabularies drift, and a typo would be indistinguishable
+# from a subject type that genuinely has no rows.
+#
+# Built lazily and cached — utils cannot import models at module level.
+_SUBJECT_TYPE_REGISTRY = None
+
+# How to reach the owning Project from each subject. Task is the odd one: it has
+# no project FK and must go through its phase (see feedback_task_project_path).
+_SUBJECT_PROJECT_RESOLVERS = {
+    'Project':          lambda s: s,
+    'Task':             lambda s: s.phase.project,
+    'BOQ':              lambda s: s.project,
+    'DeliveryChallan':  lambda s: s.project,
+    'Issue':            lambda s: s.project,
+    'PaymentMilestone': lambda s: s.project,
+}
+
+
+def _subject_type_registry():
+    """Model class -> subject_type constant. Cached after the first call."""
+    global _SUBJECT_TYPE_REGISTRY
+    if _SUBJECT_TYPE_REGISTRY is None:
+        from .models import (
+            Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
+            SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
+            SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
+        )
+        _SUBJECT_TYPE_REGISTRY = {
+            Project:          SUBJECT_PROJECT,
+            Task:             SUBJECT_TASK,
+            BOQ:              SUBJECT_BOQ,
+            DeliveryChallan:  SUBJECT_DELIVERY_CHALLAN,
+            Issue:            SUBJECT_ISSUE,
+            PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
+        }
+    return _SUBJECT_TYPE_REGISTRY
+
+
+def record_transition(subject, to_status, from_status='', actor=None,
+                      reason_code='', remark='', project=None,
+                      client_uuid=None, occurred_at=None):
+    """
+    Write one StatusTransition row. MUST be called inside the same
+    transaction.atomic() block as the status change it records.
+
+    A transition row without its status change, or a status change without its
+    row, is worse than neither — the first is a history of something that never
+    happened, the second is a gap indistinguishable from "we never instrumented
+    this path". Callers own the atomic block; this function does not open one,
+    because opening its own would defeat the point.
+
+    THIS FUNCTION RAISES. IT NEVER SWALLOWS. That is the whole difference from
+    log_activity(), which catches bare `Exception` and logs it, so a failure
+    there loses one line of a feed and nothing more. Here a swallowed failure
+    would leave a status change with no record of who made it, silently, and the
+    caller's atomic block would commit the change anyway. If someone later
+    "harmonises" the two helpers by wrapping this body in try/except, they will
+    have reintroduced exactly that defect. R-3: the feed and the ledger are
+    different things and are allowed to fail differently.
+
+    Args:
+        subject:     the model INSTANCE whose status changed. Its class decides
+                     subject_type via _subject_type_registry() — never a string.
+        to_status:   required, the new status.
+        from_status: the previous status; '' for a creation transition.
+        actor:       UserProfile, or None where no human acted (the Zoho
+                     webhook). actor.role is COPIED into actor_role_code, never
+                     joined, so a later role change cannot rewrite history.
+        reason_code: one of the REASON_* constants in models.
+        remark:      free text. Mandatory for subject types listed in
+                     REMARK_REQUIRED_SUBJECT_TYPES (R-9) — empty today.
+        project:     override for the derived project. Pass it only where the
+                     resolver cannot work (e.g. a subject not yet saved).
+        client_uuid: R-14 idempotency key. A repeat is IGNORED — same row
+                     returned, nothing duplicated, no exception.
+        occurred_at: override for "now", for a replayed offline submission.
+
+    Returns the StatusTransition row (existing one on an idempotent repeat).
+    """
+    from django.db import IntegrityError
+    from .models import (
+        StatusTransition, ACTOR_ROLE_SYSTEM, REMARK_REQUIRED_SUBJECT_TYPES,
+    )
+
+    subject_type = _subject_type_registry().get(type(subject))
+    if subject_type is None:
+        raise ValueError(
+            f"record_transition(): {type(subject).__name__} is not an instrumented "
+            f"subject type. Add it to the registry and to SUBJECT_TYPE_CHOICES, and "
+            f"record it in docs/execution-model.md §13 — a subject type that writes "
+            f"rows without being documented makes the ledger's gaps unreadable."
+        )
+
+    if not to_status:
+        raise ValueError('record_transition(): to_status is required.')
+
+    # R-9, enforced here rather than by the database — see the note on
+    # StatusTransition.remark for why it cannot be a NOT NULL column yet.
+    if subject_type in REMARK_REQUIRED_SUBJECT_TYPES and not (remark or '').strip():
+        raise ValueError(
+            f"record_transition(): a remark is mandatory for '{subject_type}' "
+            f"transitions (R-9)."
+        )
+
+    if client_uuid:
+        # Fast path: the replay we have already seen. The savepoint below is what
+        # actually makes this safe under concurrency; this just avoids the
+        # round-trip in the common case.
+        existing = StatusTransition.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            return existing
+
+    if project is None:
+        resolver = _SUBJECT_PROJECT_RESOLVERS.get(type(subject).__name__)
+        if resolver is not None:
+            project = resolver(subject)
+
+    # Copied, not joined. A departed or re-roled user must not be able to change
+    # what this row says they were at the time.
+    if actor is not None:
+        actor_role_code = actor.role or ACTOR_ROLE_SYSTEM
+    else:
+        actor_role_code = ACTOR_ROLE_SYSTEM
+
+    row = StatusTransition(
+        subject_type=subject_type,
+        subject_id=subject.pk,
+        project=project,
+        from_status=from_status or '',
+        to_status=to_status,
+        actor=actor,
+        actor_role_code=actor_role_code,
+        reason_code=reason_code or '',
+        remark=remark or '',
+        client_uuid=client_uuid or None,
+        occurred_at=occurred_at or timezone.now(),
+    )
+
+    if not client_uuid:
+        row.save()
+        return row
+
+    # Idempotent replay, race included. The nested atomic() is a SAVEPOINT: without
+    # it an IntegrityError here would poison the CALLER's transaction, so recovering
+    # from a duplicate key would abort the status change we were called to record.
+    try:
+        with transaction.atomic():
+            row.save()
+        return row
+    except IntegrityError:
+        existing = StatusTransition.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            return existing
+        raise  # some other integrity problem — never swallow it
 
 
 def generate_project_id(project_type):
@@ -697,9 +1057,15 @@ RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES = (
 def build_residential_phases():
     """
     Return the Residential EPC template as a list of phase dicts (9 phases / 52 tasks).
-    Single source of truth: attach_residential_template() builds projects from this, and
-    the checklist admin's task-name picker sources its known task names from it. Task is
-    imported inside to avoid a module-level circular import.
+
+    NO LONGER EXECUTED AT RUNTIME. Prompt 0.4 moved the template into the database as
+    TaskTemplate 'RESIDENTIAL' v1; attach_residential_template() now reads that instead
+    of calling this. This function stays because it IS the seed migration 0067 read, and
+    because the runtime bootstrap re-seeds a virgin database from it — deleting it would
+    make both unreproducible. Change the template by shipping version+1, never by
+    editing these literals.
+
+    Task is imported inside to avoid a module-level circular import.
     """
     from .models import Task
     PHASES = [
@@ -815,59 +1181,405 @@ def build_residential_phases():
 
 def get_residential_template_task_names():
     """Return the ordered, de-duplicated list of (phase_name, task_name) pairs for the
-    Residential template — the known task names the checklist admin can assign to."""
+    Residential template — the known task names the checklist admin can assign to.
+
+    Reads the ACTIVE template so the picker cannot drift from what activation actually
+    creates. Falls back to build_residential_phases() only when no template row exists
+    at all, which is a virgin database; the two are identical by construction until a
+    version 2 is authored, and once one is, an active template exists and the fallback
+    can no longer fire.
+    """
+    template = resolve_active_task_template('Residential')
+    if template is not None:
+        source = [
+            (phase.label, [t.label for t in phase.tasks.all()])
+            for phase in template.phases.all()
+        ]
+    else:
+        source = [
+            (phase['phase_name'], [t['task_name'] for t in phase['tasks']])
+            for phase in build_residential_phases()
+        ]
+
     pairs = []
     seen = set()
-    for phase in build_residential_phases():
-        for t in phase['tasks']:
-            name = t['task_name']
+    for phase_name, task_names in source:
+        for name in task_names:
             if name not in seen:
                 seen.add(name)
-                pairs.append((phase['phase_name'], name))
+                pairs.append((phase_name, name))
     return pairs
+
+
+# ---------------------------------------------------------------------------
+# Versioned task templates (R-7)
+#
+# The template a project is built from lives in TaskTemplate / TaskTemplatePhase /
+# TaskTemplateTask, not in Python source. Everything here is the read and seed side of
+# that; the immutability rules live on the models.
+# ---------------------------------------------------------------------------
+
+RESIDENTIAL_TEMPLATE_CODE  = 'RESIDENTIAL'
+RESIDENTIAL_TEMPLATE_LABEL = 'Residential EPC'
+
+
+def template_code_from_label(label, max_length=100):
+    """Stable uppercase identifier derived from a label.
+
+    `code` is the cross-version identity of a phase or task: when version 2 rewords a
+    label, `code` is what says it is still the same row. Derived rather than authored so
+    version 1 needed no hand-written mapping. Verified collision-free across all 9 phase
+    names and all 52 task names of the Residential template.
+    """
+    return re.sub(r'[^A-Za-z0-9]+', '_', label).strip('_').upper()[:max_length]
+
+
+def resolve_active_task_template(project_type):
+    """Return the active TaskTemplate for a project type, or None if there is none.
+
+    prefetch_related because every caller immediately walks phases and their tasks —
+    without it activation is 1 + 9 queries instead of 3.
+
+    Import inside the function to avoid a module-level circular import.
+    """
+    from .models import TaskTemplate
+
+    return (
+        TaskTemplate.objects
+        .filter(project_type=project_type, status=TaskTemplate.ACTIVE)
+        .prefetch_related('phases__tasks')
+        .first()
+    )
+
+
+def seed_task_template_version(*, template_model, phase_model, task_model,
+                               code, label, project_type, version_no, phases,
+                               duration_resolver, created_by=None):
+    """Write one TaskTemplate version and its phases and tasks, then activate it.
+
+    `phases` is a list of phase dicts in build_residential_phases() shape.
+    `duration_resolver` is called as duration_resolver(task_name) -> int.
+
+    Shared by migration 0067 and the virgin-database bootstrap below, so a template
+    seeded from model state is byte-identical to the migrated one. The model CLASSES are
+    passed in rather than imported because the migration hands over historical classes
+    from apps.get_model(), which are different objects from the concrete ones.
+
+    Created as a draft and flipped to active at the end, never created active: that is
+    the order the real authoring flow uses, and the only order the R-7 save() guards on
+    the concrete models permit.
+    """
+    template = template_model.objects.create(
+        code=code,
+        label=label,
+        project_type=project_type,
+        version_no=version_no,
+        status='draft',
+        effective_from=timezone.now().date(),
+        created_by=created_by,
+    )
+
+    for phase_data in phases:
+        phase = phase_model.objects.create(
+            template=template,
+            code=template_code_from_label(phase_data['phase_name'], 50),
+            label=phase_data['phase_name'],
+            sort_order=phase_data['phase_order'],
+        )
+        task_model.objects.bulk_create([
+            task_model(
+                phase=phase,
+                code=template_code_from_label(t['task_name'], 100),
+                label=t['task_name'],
+                sort_order=t['task_order'],
+                assigned_role=t['assigned_role'],
+                task_type=t['task_type'],
+                duration_days=duration_resolver(t['task_name']),
+                is_payment_milestone=t.get('is_payment_milestone', False),
+                # Optional, exactly like is_payment_milestone above: the Residential
+                # phase dicts carry no 'is_mirror' key and so seed False, unchanged.
+                # Set HERE, while the version is still a draft, rather than by a
+                # QuerySet.update() after activate() — the R-7 guard is meant to make
+                # post-activation content writes impossible, and leaning on the
+                # documented update() bypass to author content would set the wrong
+                # precedent in the very migration that introduces the field.
+                is_mirror=t.get('is_mirror', False),
+            )
+            for t in phase_data['tasks']
+        ])
+
+    # Activate by hand rather than via TaskTemplate.activate(): a historical model class
+    # carries no methods, and this function must work for both.
+    # filter().update() so the archive and the activation cannot interleave with a
+    # concurrent activation of a third version.
+    template_model.objects.filter(
+        code=code, status='active',
+    ).exclude(pk=template.pk).update(status='archived')
+    template.status = 'active'
+    template.save(update_fields=['status'])
+    return template
+
+
+def _residential_duration_resolver():
+    """Return a duration_resolver bound to the live TaskDurationTemplate overrides.
+
+    Resolves exactly as _get_duration() always has — a TaskDurationTemplate row where
+    one exists, else RESIDENTIAL_DURATION_DEFAULTS, else 1 — so a template seeded now
+    gives the durations a project activated yesterday received.
+
+    Import inside the function to avoid a module-level circular import.
+    """
+    from .models import TaskDurationTemplate
+
+    # Note the case difference: this table stores 'residential' lowercase while
+    # Project.project_type stores 'Residential'. Two vocabularies, never compared.
+    overrides = {
+        obj.task_name: obj.duration_days
+        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
+    }
+    return lambda task_name: _get_duration(task_name, overrides)
+
+
+def resolve_residential_template():
+    """Resolve the active RESIDENTIAL template, bootstrapping version 1 if the database
+    has never held one.
+
+    Three outcomes, and none of them is a silent fallback to build_residential_phases():
+
+      - an active version exists      -> use it. The only path production ever takes,
+                                         because migration 0067 seeded it at deploy.
+      - NO row with this code at all   -> seed version 1 from build_residential_phases().
+                                         A virgin database: the test suite (test_settings
+                                         disables migrations, so 0067 never runs) or a
+                                         schema built with --run-syncdb.
+      - rows exist but none is active  -> RAISE. Someone archived every version. That is
+                                         an operator error, and inventing a version to
+                                         paper over it would hide it.
+
+    The bootstrap is what stops this from needing a silent fallback, which would be the
+    same trap as an admin screen that saves a value nothing reads.
+    """
+    from .models import TaskTemplate, TaskTemplatePhase, TaskTemplateTask
+
+    template = resolve_active_task_template('Residential')
+    if template is not None:
+        return template
+
+    if TaskTemplate.objects.filter(code=RESIDENTIAL_TEMPLATE_CODE).exists():
+        raise TaskTemplate.DoesNotExist(
+            f"Task template '{RESIDENTIAL_TEMPLATE_CODE}' exists but no version of it "
+            f"is active. Activate one before activating a Residential project; a "
+            f"version is not created automatically to cover this."
+        )
+
+    try:
+        # Savepoint: a concurrent first activation losing the unique constraint must not
+        # poison the outer activation transaction.
+        with transaction.atomic():
+            seed_task_template_version(
+                template_model=TaskTemplate,
+                phase_model=TaskTemplatePhase,
+                task_model=TaskTemplateTask,
+                code=RESIDENTIAL_TEMPLATE_CODE,
+                label=RESIDENTIAL_TEMPLATE_LABEL,
+                project_type='Residential',
+                version_no=1,
+                phases=build_residential_phases(),
+                duration_resolver=_residential_duration_resolver(),
+            )
+    except IntegrityError:
+        # Another activation seeded version 1 first. Re-read rather than fail: this can
+        # only happen on a virgin database and both writers wanted the same rows.
+        pass
+
+    template = resolve_active_task_template('Residential')
+    if template is None:
+        raise TaskTemplate.DoesNotExist(
+            f"Failed to resolve or bootstrap task template "
+            f"'{RESIDENTIAL_TEMPLATE_CODE}'."
+        )
+    return template
+
+
+def _attach_task_template(project, template):
+    """Create `project`'s phases and tasks from `template`. THE ONE ATTACH.
+
+    Shared by attach_residential_template() and attach_opex_template(), which differ
+    only in which template they resolve and which of the created tasks they pre-assign
+    afterwards. EXTRACTED by prompt 1.3c rather than copied: a second copy of this loop
+    is a second place for the seventh snapshot below to be forgotten, and forgetting it
+    once already made the whole of 1.3b inert (B19).
+
+    Does NOT open its own transaction. The caller owns the atomic block, because the
+    integrity assertions at the end must abort the caller's ACTIVATION and not merely
+    this function — and callers must resolve `template` inside that same block, so a
+    virgin database's bootstrap seed rolls back with the activation that triggered it
+    rather than surviving a failed one.
+
+    Returns the flat list of TaskTemplateTask rows attached, in template order.
+    """
+    # import inside function to avoid circular import at module level
+    from .models import ProjectPhase, Task
+
+    # Every task row of the template, in order, so the assertions below have
+    # something to compare the created rows against.
+    template_tasks = []
+
+    for tpl_phase in template.phases.all():
+        phase = ProjectPhase.objects.create(
+            project=project,
+            phase_name=tpl_phase.label,
+            phase_order=tpl_phase.sort_order,
+        )
+        tpl_tasks = list(tpl_phase.tasks.all())
+        template_tasks.extend(tpl_tasks)
+        Task.objects.bulk_create([
+            Task(
+                phase=phase,
+                task_name=t.label,
+                task_order=t.sort_order,
+                assigned_role=t.assigned_role,
+                duration_days=t.duration_days,
+                task_type=t.task_type,
+                is_payment_milestone=t.is_payment_milestone,
+                # THE SEVENTH SNAPSHOT — added by prompt 1.3c, closing B19. Absent
+                # from this list until now, so no Task row could ever carry
+                # is_mirror=True however its template row was flagged, and every
+                # counter exclusion 1.3b shipped was correct and completely inert.
+                # A SNAPSHOT like the six above, not a join through template_task:
+                # retiring or re-versioning a template must never rewrite which rows
+                # a live project treats as system-owned.
+                is_mirror=t.is_mirror,
+                template_task=t,   # provenance; nothing reads it back
+            )
+            for t in tpl_tasks
+        ])
+
+    # Integrity checks — roll back everything if the created rows do not match the
+    # template. These assertions run inside the caller's atomic block so a mismatch
+    # aborts the transaction, which is the whole point of them: a half-seeded project
+    # must never ship. The expected numbers are DERIVED FROM THE TEMPLATE rather than
+    # hardcoded, because the template is data and a second version — or a second
+    # project type — may legitimately have different counts. They still catch a
+    # partial write.
+    expected_phases   = len(template.phases.all())
+    expected_total    = len(template_tasks)
+    expected_internal = sum(1 for t in template_tasks if t.task_type == Task.INTERNAL)
+    expected_external = sum(1 for t in template_tasks if t.task_type == Task.EXTERNAL)
+
+    # An empty template would make every count assertion below pass trivially and
+    # ship a project with no work in it. Checked explicitly for that reason.
+    assert expected_total > 0, f"Task template {template} has no tasks"
+
+    phase_count = ProjectPhase.objects.filter(project=project).count()
+    assert phase_count == expected_phases, \
+        f"Expected {expected_phases} phases, got {phase_count}"
+
+    task_count = Task.objects.filter(phase__project=project).count()
+    assert task_count == expected_total, f"Expected {expected_total} tasks, got {task_count}"
+
+    internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
+    assert internal_count == expected_internal, \
+        f"Expected {expected_internal} internal tasks, got {internal_count}"
+
+    external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
+    assert external_count == expected_external, \
+        f"Expected {expected_external} external tasks, got {external_count}"
+
+    return template_tasks
+
+
+def attach_opex_template(project):
+    """
+    Create the phases and tasks for an OPEX site from the ACTIVE OPEX TaskTemplate.
+
+    The non-Residential half of the attach, added by prompt 1.3c so that the 91 tender
+    sites which cannot pass project_activate's designer gate can enter execution.
+    Same core as Residential — _attach_task_template() above — and deliberately NONE of
+    the three Residential-specific steps that follow it there:
+
+      - no Finance-assignee raise, and no invoice / finance-confirmation name list:
+        those tasks are Residential and do not exist in this template. Carrying the
+        raise across would make OPEX activation depend on an account it has no use for.
+      - PM pre-assignment EXCLUDES MIRRORS. The three real PM tasks (Net Metering,
+        CEIG, Post-Installation Approvals) go to the site's PM so they are workable on
+        day one; COD and HOTO — PM-role MIRRORS — are left with assigned_to NULL,
+        because an unassigned mirror is an accurate statement that the row is nobody's
+        task. Decided as OPEX_TEMPLATE_AUDIT.md §8 recommends. The owning ROLE is still
+        set on all five mirrors, by the template.
+
+    NO BOOTSTRAP, unlike resolve_residential_template(). Migration 0075 seeds OPEX v1 at
+    deploy; if no active OPEX template exists this RAISES rather than inventing one from
+    model state. There is no runtime OPEX builder to bootstrap from, and a silent
+    fallback here would be the same trap as an admin screen that saves a value nothing
+    reads. Under the test suite (test_settings disables migrations) callers seed by
+    calling migration 0075's own seed_opex_v1().
+
+    Resolves by `project.project_type` rather than a hardcoded 'OPEX', so a CAPEX
+    template becomes a seed and an activation route with no further change here.
+    Entire operation is atomic — any failure rolls back all phases and tasks.
+    """
+    from .models import Task, TaskTemplate
+
+    with transaction.atomic():
+
+        # Resolved inside the atomic block for the reason given on the core above.
+        template = resolve_active_task_template(project.project_type)
+        if template is None:
+            raise TaskTemplate.DoesNotExist(
+                f"No ACTIVE task template for project_type "
+                f"'{project.project_type}'. Seed and activate one before activating a "
+                f"{project.project_type} site; a version is not created automatically "
+                f"to cover this."
+            )
+
+        _attach_task_template(project, template)
+
+        # Pre-assign the PM's own NON-MIRROR tasks. `is_mirror=False` is the whole
+        # difference from the Residential filter below, and it is load-bearing: without
+        # it COD and HOTO land in every per-user counter as the PM's work, on 95 sites,
+        # protected only by 1.3b's exclusion rather than by being true.
+        assign_tasks_to(
+            Task.objects.filter(
+                phase__project=project,
+                assigned_role=Task.PM,
+                is_mirror=False,
+            ),
+            project.assigned_pm,
+        )
 
 
 def attach_residential_template(project):
     """
-    Create all 9 phases and 52 tasks for a Residential project.
+    Create the phases and tasks for a Residential project from the ACTIVE TaskTemplate.
+
+    Reads TaskTemplate 'RESIDENTIAL' rather than build_residential_phases() since prompt
+    0.4 — the template is data, and can be changed by shipping a new version instead of
+    a deploy. Everything else about this function is unchanged.
+
+    The phase/task creation and the integrity assertions moved into
+    _attach_task_template() in prompt 1.3c so OPEX could share them; what stays here is
+    exactly the Residential-specific part, and the behaviour is unchanged. The name is
+    kept because three call sites use it, two of them in test modules that prompt was
+    forbidden to touch.
+
     Pre-assigns PM-role tasks to assigned_pm. SE-role tasks start unassigned.
     The send-invoice and finance-confirmation tasks are auto-assigned to
     RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL (required data — activation fails loudly
     and rolls back if that user is absent).
     Entire operation is atomic — any failure rolls back all phases and tasks.
-    Asserts at the end verify the expected task counts; a failed assert rolls back via the outer atomic().
     """
     # import inside function to avoid circular import at module level
-    from .models import ProjectPhase, Task, TaskDurationTemplate, UserProfile
-
-    # DB-first duration lookup — falls back to RESIDENTIAL_DURATION_DEFAULTS if table is empty
-    duration_overrides = {
-        obj.task_name: obj.duration_days
-        for obj in TaskDurationTemplate.objects.filter(project_type='residential')
-    }
+    from .models import Task, UserProfile
 
     with transaction.atomic():
 
-        PHASES = build_residential_phases()
+        # Resolved INSIDE the atomic block so a virgin database's bootstrap seed rolls
+        # back with the activation it was triggered by, rather than surviving a failed
+        # one. Raises rather than falling back if a template exists but none is active.
+        template = resolve_residential_template()
 
-        for phase_data in PHASES:
-            phase = ProjectPhase.objects.create(
-                project=project,
-                phase_name=phase_data['phase_name'],
-                phase_order=phase_data['phase_order'],
-            )
-            Task.objects.bulk_create([
-                Task(
-                    phase=phase,
-                    task_name=t['task_name'],
-                    task_order=t['task_order'],
-                    assigned_role=t['assigned_role'],
-                    duration_days=_get_duration(t['task_name'], duration_overrides),
-                    task_type=t['task_type'],
-                    is_payment_milestone=t.get('is_payment_milestone', False),
-                )
-                for t in phase_data['tasks']
-            ])
+        _attach_task_template(project, template)
 
         # Pre-assign PM tasks to the named PM on this project.
         # SE-role tasks start unassigned — same as Design/SCM/Finance.
@@ -885,7 +1597,7 @@ def attach_residential_template(project):
         # Finance user (by email), resolved in one place. This is required data:
         # if the account is missing, fail loudly so the whole atomic activation
         # rolls back — never create these tasks unassigned. Uses an explicit raise
-        # (not the assert pattern below) because asserts are stripped under
+        # (not the assert pattern in _attach_task_template) because asserts are stripped under
         # `python -O`, which would silently re-enable create-unassigned behavior.
         finance_assignee = (
             UserProfile.objects
@@ -906,14 +1618,3 @@ def attach_residential_template(project):
             ),
             finance_assignee,
         )
-
-        # Integrity checks — roll back everything if counts are wrong.
-        # These assertions run inside the atomic block so a mismatch aborts the transaction.
-        task_count = Task.objects.filter(phase__project=project).count()
-        assert task_count == 52, f"Expected 52 tasks, got {task_count}"
-
-        internal_count = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).count()
-        assert internal_count == 44, f"Expected 44 internal tasks, got {internal_count}"
-
-        external_count = Task.objects.filter(phase__project=project, task_type=Task.EXTERNAL).count()
-        assert external_count == 8, f"Expected 8 external tasks, got {external_count}"

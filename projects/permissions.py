@@ -21,6 +21,13 @@ above as: do not compare them AT A CALL SITE — route the comparison through he
 instead, so there is still exactly one place to change.
 """
 
+# The ONLY import in this module, and deliberately so. `Q` is the ORM query API, not a
+# model — importing it keeps the "no model imports" property that has kept this module
+# free of circular imports across every phase (every relationship below is still reached
+# by reverse relation). It is needed by manageable_projects_q(), which gives list views
+# the same canonical ownership rule the per-object helpers already have.
+from django.db.models import Q
+
 # Roles whose remit is the whole portfolio by definition — they are never scoped to
 # individual projects at any surface in the product, and their dashboards already
 # query every active project with no per-user term (dashboard_finance, dashboard_scm,
@@ -59,6 +66,34 @@ def user_can_manage_project(user, project):
     return project.coordinators.filter(pk=profile.pk).exists()  # additive coordinator authority
 
 
+def manageable_projects_q(profile, prefix=''):
+    """Return the Q() selecting the projects `profile` manages — the QUERYSET form of
+    user_can_manage_project().
+
+    `prefix` is the ORM path from the model being filtered to Project, including its
+    trailing '__'. Filtering Project itself takes the default ''; filtering Task takes
+    'phase__project__'.
+
+    WHY THIS EXISTS. user_can_manage_project() answers the question for ONE project in
+    hand, and a list view cannot use it without loading the whole portfolio and filtering
+    in Python. So the rule was being hand-written as `Q(assigned_pm=...) |
+    Q(coordinators=...)` at each list surface instead — exactly the duplication the
+    module docstring's "do not compare assigned_pm anywhere else" rule exists to prevent.
+    This gives the list surfaces the canonical path the object surfaces already have.
+
+    INVARIANT: this must select precisely the projects user_can_manage_project() returns
+    True for — assigned PM OR coordinator, unconditionally OR'd, additive-only. If one of
+    the pair changes, change the other in the same edit. They are two encodings of one
+    rule, and the same additive-only warning applies here: do not restructure this as
+    "coordinators if any, else PM".
+
+    CALLERS MUST .distinct(). The coordinators leg traverses an M2M, so the join can
+    duplicate rows.
+    """
+    return (Q(**{f'{prefix}assigned_pm': profile})
+            | Q(**{f'{prefix}coordinators': profile}))
+
+
 def user_can_view_project(user, project):
     """
     Return True if `user` may SEE `project`. This is visibility only — it confers no
@@ -68,6 +103,7 @@ def user_can_view_project(user, project):
 
       PORTFOLIO-WIDE (True for every project)
         CEO / Finance / SCM / Admin  — portfolio-wide by remit (PORTFOLIO_VIEW_ROLES)
+        System Admin                 — its own branch, see below
         Design Head                  — portfolio-wide by remit (see the flag note below)
         Sales & BD                   — its own branch, see below
 
@@ -89,10 +125,10 @@ def user_can_view_project(user, project):
     task relation for Design — so this function agrees with what each dashboard
     already shows them, rather than inventing a second, narrower scoping rule.
 
-    Roles with no branch of their own (System Admin, and a blank role) fall through
-    to management authority alone: visible only where the user is assigned PM or
-    coordinator. This is the conservative default — a role is portfolio-wide only by
-    being listed explicitly, never by omission.
+    Roles with no branch of their own (today: a blank role) fall through to management
+    authority alone: visible only where the user is assigned PM or coordinator. This is
+    the conservative default — a role is portfolio-wide only by being listed explicitly,
+    never by omission.
 
     Returns False rather than raising for a null `project` or a user with no
     UserProfile (e.g. a superuser created via `createsuperuser`), matching
@@ -120,6 +156,31 @@ def user_can_view_project(user, project):
         return True
 
     if role in PORTFOLIO_VIEW_ROLES:
+        return True
+
+    # System Admin — unrestricted, exactly as Admin is. `docs/execution-model.md` §2 D-4:
+    # "Admin and System Admin are unrestricted."
+    #
+    # THIS BRANCH IS LOAD-BEARING AND MUST STAY ABOVE THE FALL-THROUGH. Before the 0.2
+    # lockdown this function had no System Admin branch and returned False for them on
+    # every project they did not personally manage — they reached projects only because
+    # the endpoints' PM-only guard (`role == 'PM' and not user_can_manage_project(...)`)
+    # never named them. The lockdown removes that guard, so without this line System
+    # Admin loses the entire product in the same edit.
+    #
+    # Kept as its own branch rather than added to PORTFOLIO_VIEW_ROLES on purpose, for the
+    # same reason the BD branch below is separate. That set is documented as roles whose
+    # DASHBOARDS already query every active project with no per-user term (dashboard_ceo,
+    # dashboard_finance, dashboard_scm, admin_project_list). System Admin is not one of
+    # those — it is unrestricted because D-4 says the administrative roles are, which is a
+    # different reason for the same answer. Same outcome, isolated branch, and the set's
+    # own comment stays true.
+    #
+    # DELIBERATELY DOES NOT WIDEN BOQ. user_can_view_project_boq() does not call this
+    # function; it branches on its own BOQ_PORTFOLIO_READ_ROLES frozenset, which does not
+    # list System Admin. That separation is exactly what the frozenset exists for (see its
+    # comment), so this grants project visibility and no BOQ read.
+    if role == 'System Admin':
         return True
 
     # Sales & BD — portfolio-wide read. This is SETTLED CURRENT POLICY, decided by the
@@ -800,11 +861,31 @@ def project_boq_is_group_locked(project):
     this module import-free like the rest of it. A removed membership does not count —
     a site that has left a group is free again, which is what makes settled decision 6
     (a PM change request pulls the site out of a draft group) work at all.
+
+    PROCUREMENT ONLY (prompt 1.1b, D-1). A BOQ freeze is a procurement act: it means a
+    purchase order has gone out against these quantities, which is why there is no
+    unlock. An execution group is the PM's delivery batch and has its own re-plannable
+    lifecycle — it must NEVER freeze a BOQ, and this is the predicate that would let it.
+
+    NOTHING BREAKS TODAY WITHOUT THIS FILTER, AND THAT IS THE WHOLE REASON TO ADD IT.
+    `group__status='locked'` already restricts the match to a status only procurement
+    groups use, so the unnarrowed query is correct — by coincidence, and only until an
+    execution lifecycle reuses that word or shares this column. The narrowing makes the
+    guarantee structural rather than a fact about which strings happen to be in use.
+
+    `group_type` IS SPELLED ON THE MEMBERSHIP, NOT `group__group_type`. The two cannot
+    disagree (SiteGroupMembership.save() copies one from the other and refuses any later
+    change), and the local column is the one the partial unique constraint is written
+    over — so this filter states the same condition the exclusivity guarantee does, and
+    adds no join. `'procurement'` is a literal here rather than GROUP_TYPE_PROCUREMENT
+    for the same reason `'locked'` on the line below is: this module imports no models,
+    deliberately, and that is not being changed for one constant.
     """
     if project is None:
         return False
     return project.group_memberships.filter(
         removed_at__isnull=True, group__status='locked',
+        group_type='procurement',
     ).exists()
 
 

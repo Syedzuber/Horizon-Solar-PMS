@@ -52,6 +52,9 @@ from .models import (
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
     SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
+    # D-1 (prompt 1.1b). Every membership read in this module is a PROCUREMENT read,
+    # and now says so at the call site rather than by being the only kind that exists.
+    GROUP_TYPE_PROCUREMENT,
     # Part 10 — the ONLY row this session's screen writes.
     DesignAnalyticsPreference,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
@@ -3104,7 +3107,10 @@ def design_change_request(request, project_id):
     if attempt is None:
         return _back(f'{project.project_id}: design has not started on this site yet.')
 
-    membership = active_group_membership(project)
+    # PROCUREMENT: the gate below asks whether this site's BOQ has been committed to a
+    # purchase, and only a procurement group commits one. A PM's execution batch says
+    # nothing about whether the design may still be changed.
+    membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
 
     if membership is not None and membership.group.status == SITE_GROUP_LOCKED:
         return _back(f'{project.project_id}: the BOQ is locked — this site is in the '
@@ -4050,7 +4056,9 @@ def design_change_request_form(request, project_id):
     # Part 6: the window the FORM offers must agree with the one design_change_request()
     # enforces, or the PM gets a button that 403s or a missing button that would have
     # worked. Same three cases, same order — see that view's docstring.
-    membership   = active_group_membership(project)
+    # PROCUREMENT, and it must be the SAME type the POST view asks for or the form and
+    # the gate stop agreeing — which is the one thing this block exists to prevent.
+    membership   = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
     group_locked = membership is not None and membership.group.status == SITE_GROUP_LOCKED
     in_draft_group = membership is not None and not group_locked
     allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
@@ -4115,15 +4123,34 @@ def design_change_request_form(request, project_id):
 CHANGE_REQUEST_REMOVAL_REASON = 'PM change request'
 
 
-def active_group_membership(project):
-    """The site's one live membership, or None.
+def active_group_membership(project, group_type):
+    """The site's one live membership OF `group_type`, or None.
 
-    "One" is guaranteed by the partial unique constraint on
-    SiteGroupMembership, not by this query — `.first()` here is picking the only row
-    that can exist, not the first of several.
+    "One" is guaranteed by the partial unique constraint on SiteGroupMembership, not by
+    this query — but only once the type is named. The constraint is
+    `uniq_active_site_group_membership_per_type` over `(project, group_type)` where
+    `removed_at IS NULL`, so a project may hold one live PROCUREMENT membership and one
+    live EXECUTION membership at the same time (D-1). `.first()` here is picking the
+    only row that can exist FOR THIS TYPE, not the first of several; without the type
+    filter it would be picking the first of up to two, in undefined order.
+
+    `group_type` IS REQUIRED AND IS DELIBERATELY NOT DEFAULTED to procurement. A default
+    is precisely the failure D-1 introduces: a future execution caller that forgets the
+    argument would get a procurement membership back, silently, and every fact computed
+    from it — lock state, group name, `in_draft_group` — would be an answer to a
+    question it did not ask. Required means every call site states its intent in
+    writing, and a new one cannot be written without deciding.
+
+    Pass a GROUP_TYPE_* constant, not a literal.
+
+    THE FILTER IS THE MEMBERSHIP'S OWN COLUMN, NOT `group__group_type`. The two always
+    agree — `save()` copies one from the other and refuses any later change — but only
+    the local column is the one the constraint is written over, so filtering on it makes
+    this query and the uniqueness guarantee it relies on state the same condition. It
+    also costs no join.
     """
     return (project.group_memberships
-            .filter(removed_at__isnull=True)
+            .filter(removed_at__isnull=True, group_type=group_type)
             .select_related('group', 'group__program').first())
 
 
@@ -4137,13 +4164,26 @@ def remove_from_group(membership, actor, reason):
 
     The caller owns the transaction. The change-request path has one open for its own
     writes and the removal must share it.
+
+    NOT NARROWED BY TYPE, DELIBERATELY (prompt 1.1b, D-1). This function scopes nothing
+    — it is handed a row that a caller already resolved, and both of today's callers now
+    resolve procurement explicitly. Its mechanism is type-agnostic: stamp three fields,
+    log, return. An execution removal will want exactly this, and giving it a second
+    copy is how the two drift into disagreeing about whether a departure is logged.
+
+    WHAT DID NEED FIXING IS THE LOG TEXT. It hardcoded the word "procurement", which was
+    true only because procurement was the only type that could exist. That made it a
+    sentence guaranteed to become false rather than to fail — an execution removal would
+    have written "procurement group" into the activity feed and nothing would have
+    complained. It now comes from the row. The procurement wording is unchanged.
     """
     membership.removed_at     = timezone.now()
     membership.removed_by     = actor
     membership.removal_reason = reason
     membership.save(update_fields=['removed_at', 'removed_by', 'removal_reason'])
+    kind = membership.get_group_type_display().lower()
     log_activity(membership.project, actor,
-                 f'Removed from procurement group "{membership.group.name}": {reason}',
+                 f'Removed from {kind} group "{membership.group.name}": {reason}',
                  entity_type='SiteGroupMembership', entity_id=membership.pk,
                  action_code='site_group_site_removed')
     return membership
@@ -4234,9 +4274,19 @@ def post_qc_pool(program, now=None):
     procurement receives nothing — the failure is silent on both sides, because Design
     has finished and SCM was never told. Age is days since `released_at`.
 
-    Sites with a LIVE membership are dropped; a site whose membership was REMOVED is back
-    in the pool, which is what makes settled decision 6 recoverable — a change request
-    returns the site to the queue rather than losing it.
+    Sites with a LIVE PROCUREMENT membership are dropped; a site whose membership was
+    REMOVED is back in the pool, which is what makes settled decision 6 recoverable — a
+    change request returns the site to the queue rather than losing it.
+
+    PROCUREMENT, AND THIS IS THE NARROWING THAT MATTERS (prompt 1.1b, D-1). The question
+    this screen asks is "has SCM taken this site yet", and only a procurement membership
+    answers it. An execution membership means the PM has put the site in a delivery
+    batch — which says nothing about whether it has been procured, and under D-1 may
+    exist alongside a procurement membership or entirely without one. Left unnarrowed,
+    the first execution group ever created would silently delete its sites from this
+    queue: they would be released, unprocured, and invisible to the only screen that
+    would have said so. That is precisely the failure the paragraph above says this
+    function exists to prevent, arriving by a second route.
 
     THE EXCLUSION IS AN EXPLICIT SUBQUERY ON project_id, NOT
     `.exclude(project__group_memberships__removed_at__isnull=True)`. That spelling is
@@ -4262,7 +4312,8 @@ def post_qc_pool(program, now=None):
         .filter(project__program=program, project__is_deleted=False,
                 status=DESIGN_RELEASED)
         .exclude(project__in=SiteGroupMembership.objects
-                 .filter(removed_at__isnull=True).values('project_id'))
+                 .filter(removed_at__isnull=True,
+                         group_type=GROUP_TYPE_PROCUREMENT).values('project_id'))
         .select_related('project', 'released_by__user')
         .order_by('released_at')
     )
@@ -4308,9 +4359,16 @@ def pending_change_requests_for(member_ids):
 
 
 def _group_rows(program):
-    """Every group under a tender with its member count and lock state, newest first."""
+    """Every PROCUREMENT group under a tender with its member count and lock state,
+    newest first.
+
+    PROCUREMENT: this feeds SCM's group screen and the SCM dashboard, and both render a
+    Lock button beside every row. Listing a PM's execution batch there would offer SCM
+    an action D-1 says does not exist for it, on a grouping they do not own.
+    """
     return list(
         program.site_groups
+        .filter(group_type=GROUP_TYPE_PROCUREMENT)
         .select_related('created_by__user', 'locked_by__user')
         .annotate(member_count=Count(
             'memberships', filter=Q(memberships__removed_at__isnull=True)))
@@ -4323,8 +4381,22 @@ def _tender_or_404(pk):
 
 
 def _group_or_404(pk):
+    """Resolve one SCM PROCUREMENT batch by pk, or 404.
+
+    THE HIGHEST-LEVERAGE NARROWING IN THIS FILE (audit Task B). Six views resolve their
+    group through here, including both write paths — adding sites and locking. Every one
+    of them is procurement UI: the lock is procurement-only by D-1, and an execution
+    group reaching `site_group_lock` through a hand-typed pk would freeze a BOQ that no
+    purchase order was ever raised against.
+
+    Narrowing HERE rather than in each view is deliberate. It is also why
+    `site_group_detail`, `site_group_remove_site` and `_group_member_ids` need no type
+    filter of their own — they are scoped to a group this function already vouched for,
+    and duplicating the check in them would create four places for it to drift.
+    """
     return get_object_or_404(
-        SiteGroup, pk=pk, program__is_deleted=False, program__program_type='OPEX')
+        SiteGroup, pk=pk, program__is_deleted=False, program__program_type='OPEX',
+        group_type=GROUP_TYPE_PROCUREMENT)
 
 
 # ---------------------------------------------------------------------------
@@ -4380,8 +4452,16 @@ def site_group_create(request, pk):
 
     profile = request.user.profile
     with transaction.atomic():
+        # PROCUREMENT, STATED RATHER THAN INHERITED. This endpoint is SCM's and only
+        # SCM's — `user_can_manage_site_groups` above is the procurement authority — so
+        # what it creates is a procurement batch. The model default says the same thing,
+        # but a default is a safety net for rows nobody thought about; this row was
+        # thought about. When an execution-group creator is written it will sit beside
+        # this one and pass the other constant, and neither will be relying on which way
+        # the default happens to point.
         group = SiteGroup.objects.create(
             program=program, name=name, status=SITE_GROUP_DRAFT,
+            group_type=GROUP_TYPE_PROCUREMENT,
             created_by=profile, notes=(request.POST.get('notes') or '').strip())
 
     added, refused = _add_sites(group, request.POST.getlist('project_ids'), profile)
@@ -4426,7 +4506,13 @@ def _add_sites(group, project_ids, actor):
                            f'sites can be grouped for procurement.')
             continue
 
-        existing = active_group_membership(project)
+        # PROCUREMENT: the exclusivity being pre-checked is procurement exclusivity —
+        # the constraint below refuses a second live PROCUREMENT membership, and this
+        # pre-check exists only to produce a better message than the IntegrityError
+        # would. Asking a wider question here would refuse a legitimate procurement add
+        # because the PM had put the site in an execution batch, which the database
+        # would have allowed.
+        existing = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
         if existing is not None:
             refused.append(f'{project.project_id}: already in group '
                            f'"{existing.group.name}" ({existing.group.status}).')
