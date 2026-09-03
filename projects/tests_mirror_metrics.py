@@ -417,25 +417,69 @@ class MirrorsStayVisibleTests(TestCase):
 MIRRORS_PER_FIXTURE = 6
 BROKEN_COUNT = MIRRORS_PER_FIXTURE + 1
 
-# Context keys that may legitimately hold BROKEN_COUNT, each with its reason.
-# THIS SET IS THE PIN: adding to it is a deliberate, visible diff, and
-# forgetting the exclusion on a new counter is not possible without a red test.
-ALLOWED_BROKEN_COUNTS = {
-    # PROMPT 1.5 — the per-phase progress bar counts mirrors ON PURPOSE, the one
-    # carve-out of R-20 in the codebase. A phase holding only mirrors read
-    # "0/0 done" above an empty bar while its card header said "4 tasks"; the
-    # product decision is that one mirror not updated is one task pending. The
-    # sweep's fixture is 1 non-mirror + 6 mirrors in ONE phase, so this metric
-    # legitimately reads 7 here — the very number the sweep treats as the tell.
-    #
-    # THESE TWO KEYS ONLY. Every other counter in every dashboard context is still
-    # swept, so a NEW counter that forgets the exclusion still fails without being
-    # registered anywhere. If a second phase is ever added to that fixture these
-    # keys gain a [1] sibling and must be listed too — the index is part of the key.
+# ---------------------------------------------------------------------------
+# THE PROGRESS CATEGORY, DECLARED POSITIVELY. Prompt 1.6.
+#
+# This set WAS `ALLOWED_BROKEN_COUNTS` — an allow-list of exceptions to the one
+# rule "everything excludes mirrors". That rule stopped being true when 1.5
+# carved out the phase bar, and an allow-list of exceptions to a false rule is
+# worse than useless. It is now a POSITIVE DECLARATION of the second category,
+# and it is load-bearing in BOTH directions:
+#
+#   * a WORKLOAD counter that starts counting mirrors reads BROKEN_COUNT, is not
+#     in this set, and MirrorExclusionSweepTests names it;
+#   * a PROGRESS counter that starts excluding them stops moving between the two
+#     differential runs, is still in this set, and
+#     ProgressWorkloadDifferentialSweepTests names it.
+#
+# WHAT BELONGS HERE: a context key whose integer MUST MOVE when mirrors are
+# added to a project — a completeness numerator or denominator.
+#
+# WHAT DOES NOT, AND THIS IS NOT AN OVERSIGHT: **ratios**. `internal_percent`
+# and `phase_data_json[…].pct` are progress numbers, but adding mirrors
+# proportionally does not move them — 0/1 and 0/7 are both 0%, 1/1 and 7/7 are
+# both 100%. They are correctly invariant, so listing them would make the
+# differential sweep fail on correct code. The set means "keys that must move",
+# not "all progress numbers".
+#
+# THE INDEX IS PART OF THE KEY. The fixture is one project with one phase, so
+# every entry is `[0]`. A second phase or project would give each key a `[1]`
+# sibling that must be listed too.
+PROGRESS_KEYS = {
+    # --- project_overview: the per-phase progress bar (prompt 1.5) ------------
+    # A phase holding only mirrors read "0/0 done" above an empty bar while its
+    # card header said "4 tasks". One mirror not updated is one task pending.
     'phase_data_json[0].internal_total',
     # Reached only by the 'done today' shape, where all seven are Done.
     'phase_data_json[0].internal_done',
+
+    # --- dashboard_pm: the per-project completion pair (prompt 1.6) -----------
+    # "How much of this site is done", not "how much does this PM owe".
+    # `internal_total` / `internal_done` feed `internal_percent`, the bar the
+    # template actually draws; `total_tasks` / `done_tasks` are the same
+    # question over every task type. Before 1.6 these excluded mirrors while the
+    # overview's bars counted them, so one OPEX site reported its completeness
+    # out of 15 on one screen and out of 23 on the other.
+    'projects_with_progress[0].total_tasks',
+    'projects_with_progress[0].done_tasks',
+    'projects_with_progress[0].internal_total',
+    'projects_with_progress[0].internal_done',
+
+    # --- dashboard_ceo: QUERY 1's project card pair (prompt 1.6) -------------
+    # Rendered as Pending / Completed on ONE project's card, with `pending`
+    # DERIVED as total - done. A two-way partition of one site's work, not
+    # anybody's queue. Both must move together or Pending + Completed stops
+    # equalling the total — pinned by tests_progress_vs_workload.py.
+    #
+    # QUERY 2's 18 dept_* counts are a separate queryset asking a separate
+    # question and are NOT here: they are department workload and still exclude.
+    'project_cards[0].pending',
+    'project_cards[0].completed',
 }
+
+# The old name, kept as an alias for one release so a stale reference fails
+# loudly at import rather than silently sweeping against an empty set.
+ALLOWED_BROKEN_COUNTS = PROGRESS_KEYS
 
 # Key segments that are identities or template machinery, never task metrics.
 # A primary key that happens to equal BROKEN_COUNT is noise, not a finding.
@@ -528,7 +572,7 @@ class MirrorExclusionSweepTests(TestCase):
             if isinstance(value, bool):
                 return
             if isinstance(value, int):
-                if value == BROKEN_COUNT and key not in ALLOWED_BROKEN_COUNTS:
+                if value == BROKEN_COUNT and key not in PROGRESS_KEYS:
                     offenders.append(key)
             elif isinstance(value, dict):
                 for k, v in value.items():
@@ -560,7 +604,7 @@ class MirrorExclusionSweepTests(TestCase):
               'utils.human_owned_tasks_q() (or is_human_owned() for a '
               'prefetched list). If the value is not a task count and '
               f'{BROKEN_COUNT} is legitimate, add its key to '
-              'ALLOWED_BROKEN_COUNTS in this module with the reason.'
+              'PROGRESS_KEYS in this module with the reason.'
         )
 
     def _run(self, user, url, view_name, owner, role):
@@ -602,6 +646,233 @@ class MirrorExclusionSweepTests(TestCase):
             self._run(self.pm_user, reverse(route), route, self.pm, Task.PM)
 
 
+# ---------------------------------------------------------------------------
+# 6 — THE DIFFERENTIAL SWEEP. Prompt 1.6, and the guard that knows two
+#     categories rather than one.
+# ---------------------------------------------------------------------------
+
+class ProgressWorkloadDifferentialSweepTests(TestCase):
+    """Renders each dashboard TWICE — with 0 mirrors and with 6 — and diffs the
+    two context walks key by key.
+
+    THE INVARIANT, and it is a property rather than a magic value:
+
+        A WORKLOAD number does not move when mirrors are added.
+        A PROGRESS number does.
+
+    So the set of keys whose integer CHANGED between the two runs is exactly the
+    set of counters that count mirrors, derived from the running code rather
+    than asserted about it. One comparison then enforces both categories:
+
+        changed_keys == PROGRESS_KEYS
+
+      * a WORKLOAD counter that forgets the exclusion APPEARS in `changed` and
+        is not declared -> named as an unexpected mover;
+      * a PROGRESS counter that gains one DISAPPEARS from `changed` while still
+        declared -> named as a counter that stopped moving.
+
+    WHY THIS AND NOT THE VALUE SWEEP ABOVE. `MirrorExclusionSweepTests` asks
+    "is any integer 7", which can only ever catch the first direction, and needs
+    every legitimate 7 registered as an exception. Both guards are kept: the
+    value sweep is cheap, already green, and pins "no unexpected 7 anywhere";
+    this one is what enforces the split.
+
+    THE GAP, STATED PLAINLY RATHER THAN IMPLIED AWAY. A counter that was MEANT
+    to be progress but was written with the exclusion passes both guards
+    silently. Nothing in a template context records what question a number was
+    meant to answer, so no value-diffing sweep can know. What IS guaranteed is
+    that a new counter cannot be added silently in the WORKLOAD direction: if it
+    counts mirrors it moves, and an undeclared mover fails. That forces a
+    decision on every new counter that includes them; it cannot force one on a
+    counter that excludes them. Do not read more coverage into this than that.
+
+    WHY RATIOS ARE ABSENT FROM `PROGRESS_KEYS`. `internal_percent` and
+    `phase_data_json[...].pct` are progress numbers that correctly do NOT move —
+    0/1 and 0/7 are both 0%. Listing them would fail on correct code. See the
+    comment on `PROGRESS_KEYS`.
+    """
+
+    SHAPES = MirrorExclusionSweepTests.SHAPES
+
+    def setUp(self):
+        self.client = Client(SERVER_NAME='localhost')
+        self.ceo_user, self.ceo = _make_user('mm_diff_ceo', 'CEO')
+        self.pm_user, self.pm = _make_user('mm_diff_pm', 'PM')
+        self.se_user, self.se = _make_user('mm_diff_se', 'Site Engineer')
+        self.design_user, self.design = _make_user('mm_diff_design', 'Design')
+        self.scm_user, self.scm = _make_user('mm_diff_scm', 'SCM')
+
+        self.project = _make_project(self.pm, design_profile=self.design)
+        self.phase = ProjectPhase.objects.create(
+            project=self.project, phase_name='Closeout', phase_order=1)
+
+    def _build(self, n_mirrors, status, due_offset, completed, owner, role):
+        """One non-mirror plus `n_mirrors` identical mirrors.
+
+        Identical in every field a counter can filter on, so the ONLY thing that
+        can differ between the two runs is the mirror flag.
+        """
+        Task.objects.filter(phase=self.phase).delete()
+        common = dict(
+            status=status,
+            due_date=date.today() + timedelta(days=due_offset),
+            assigned_to=owner,
+            assigned_role=role,
+            task_type=Task.INTERNAL,
+        )
+        made = [Task.objects.create(
+            phase=self.phase, task_name='Net Metering Approval',
+            task_order=1, is_mirror=False, **common)]
+        made += [
+            Task.objects.create(
+                phase=self.phase, task_name=f'COD {i}', task_order=2 + i,
+                is_mirror=True, **common)
+            for i in range(n_mirrors)
+        ]
+        if completed:
+            Task.objects.filter(pk__in=[t.pk for t in made]).update(
+                completed_at=timezone.now())
+
+    @staticmethod
+    def _integers(response):
+        """Flatten a response context to {dotted key: int}.
+
+        Same walk and the same identity-key filter as the value sweep, so the
+        two guards agree on what is and is not a metric.
+        """
+        found = {}
+
+        def _walk(key, value, depth=0):
+            if depth > 4 or _is_ignorable_key(key):
+                return
+            if isinstance(value, bool):
+                return
+            if isinstance(value, int):
+                found[key] = value
+            elif isinstance(value, dict):
+                for k, v in value.items():
+                    _walk(f'{key}.{k}', v, depth + 1)
+            elif isinstance(value, (list, tuple)):
+                for i, v in enumerate(value):
+                    _walk(f'{key}[{i}]', v, depth + 1)
+            elif isinstance(value, str) and value[:1] in '[{':
+                try:
+                    decoded = json.loads(value)
+                except ValueError:
+                    return
+                _walk(key, decoded, depth)
+
+        for ctx in (response.context or []):
+            for d in ctx.dicts:
+                for key, value in d.items():
+                    _walk(key, value)
+        return found
+
+    def _movers(self, user, url, view_name, owner, role):
+        """Keys whose integer differs between the 0-mirror and 6-mirror runs.
+
+        Unioned across all four status shapes, because a key can legitimately be
+        equal in one shape and move in another — `project_cards[0].pending` is
+        0 in both runs of the 'done today' shape and 7-vs-1 in the others.
+        """
+        self.client.force_login(user)
+        movers, seen = set(), set()
+        for label, status, offset, completed in self.SHAPES:
+            self._build(0, status, offset, completed, owner, role)
+            without = self._integers(self.client.get(url))
+            self._build(MIRRORS_PER_FIXTURE, status, offset, completed, owner, role)
+            resp = self.client.get(url)
+            self.assertEqual(resp.status_code, 200, view_name)
+            with_mirrors = self._integers(resp)
+
+            seen |= set(with_mirrors)
+            for key, value in with_mirrors.items():
+                if key in without and without[key] != value:
+                    movers.add(key)
+        return movers, seen
+
+    def _assert_categories(self, user, url, view_name, owner, role):
+        movers, seen = self._movers(user, url, view_name, owner, role)
+        expected = {k for k in PROGRESS_KEYS if k in seen}
+
+        unexpected = sorted(movers - expected)
+        stopped = sorted(expected - movers)
+
+        self.assertEqual(
+            (unexpected, stopped), ([], []),
+            f'\n\n{view_name}: the two categories no longer match the code.\n\n'
+            f'COUNTED MIRRORS BUT IS NOT DECLARED PROGRESS:\n  '
+            + ('\n  '.join(unexpected) or '(none)')
+            + '\n\nThese moved when 6 mirrors were added to the project. If the '
+              'number answers "how much work does this person or team owe", route '
+              'it through utils.human_owned_tasks_q() / is_human_owned() — a mirror '
+              'is nobody\'s task. If it answers "how much of this SITE is done", it '
+              'is correct: switch it to utils.site_progress_tasks_q() so the call '
+              'site says so, and add its key to PROGRESS_KEYS with the reason.\n\n'
+            f'DECLARED PROGRESS BUT STOPPED MOVING:\n  '
+            + ('\n  '.join(stopped) or '(none)')
+            + '\n\nThese are declared as site-completeness numbers and did NOT '
+              'change when mirrors were added, so something re-applied the workload '
+              'exclusion to them. A site is not finished because the humans '
+              'finished. Either restore utils.site_progress_tasks_q() at the call '
+              'site, or — if the number genuinely became workload — remove its key '
+              'from PROGRESS_KEYS in the same commit.'
+        )
+
+    def test_pm_dashboard(self):
+        self._assert_categories(self.pm_user, reverse('dashboard_pm'),
+                                'dashboard_pm', self.pm, Task.PM)
+
+    def test_ceo_dashboard(self):
+        self._assert_categories(self.ceo_user, reverse('dashboard_ceo'),
+                                'dashboard_ceo', self.pm, Task.PM)
+
+    def test_site_engineer_dashboard(self):
+        self._assert_categories(self.se_user, reverse('dashboard_site_engineer'),
+                                'dashboard_site_engineer', self.se,
+                                Task.SITE_ENGINEER)
+
+    def test_design_dashboard(self):
+        self._assert_categories(self.design_user, reverse('dashboard_design'),
+                                'dashboard_design', self.design, Task.DESIGN)
+
+    def test_scm_dashboard(self):
+        self._assert_categories(self.scm_user, reverse('dashboard_scm'),
+                                'dashboard_scm', self.scm, Task.SCM)
+
+    def test_project_overview(self):
+        self._assert_categories(
+            self.pm_user,
+            reverse('project_overview', args=[self.project.project_id]),
+            'project_overview', self.pm, Task.PM)
+
+    def test_task_drill_downs(self):
+        for route in ('tasks_due_today', 'tasks_overdue', 'tasks_due_soon'):
+            with self.subTest(route=route):
+                self._assert_categories(self.pm_user, reverse(route), route,
+                                        self.pm, Task.PM)
+
+    def test_every_declared_progress_key_is_actually_reached(self):
+        """A key in PROGRESS_KEYS that no view produces proves nothing and hides
+        a rename. Every entry must be seen by at least one of the three screens
+        that carry progress numbers."""
+        seen = set()
+        for user, url, name, owner, role in (
+            (self.pm_user, reverse('dashboard_pm'), 'dashboard_pm', self.pm, Task.PM),
+            (self.ceo_user, reverse('dashboard_ceo'), 'dashboard_ceo', self.pm, Task.PM),
+            (self.pm_user,
+             reverse('project_overview', args=[self.project.project_id]),
+             'project_overview', self.pm, Task.PM),
+        ):
+            seen |= self._movers(user, url, name, owner, role)[1]
+        self.assertEqual(
+            sorted(PROGRESS_KEYS - seen), [],
+            'These keys are declared in PROGRESS_KEYS but no dashboard context '
+            'produces them. Either the context key was renamed, or the counter '
+            'was removed and its declaration left behind.'
+        )
+
+
 class SweepBitesTests(TestCase):
     """Proof the sweep is not vacuous: the same walk, over a context that DOES
     count the mirror, must fail and name the key.
@@ -639,7 +910,7 @@ class SweepBitesTests(TestCase):
         stopped there would skip the per-phase progress metric entirely.
 
         Probes `ext_pending` rather than `internal_total`. Prompt 1.5 put
-        `phase_data_json[0].internal_total` into ALLOWED_BROKEN_COUNTS — the
+        `phase_data_json[0].internal_total` into PROGRESS_KEYS — the
         progress bar counts mirrors on purpose now — so that key can no longer
         demonstrate that the sweep BITES. `ext_pending` is a sibling inside the
         same serialised string, so it still proves the decoding step and would

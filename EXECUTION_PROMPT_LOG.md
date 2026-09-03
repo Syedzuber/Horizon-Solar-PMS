@@ -462,7 +462,9 @@ Two of v1.5's own corrections mattered to this session:
 - **The "285 Residential milestones on tender sites" do not exist.** §2a establishes 285 was the
   A-1.3 audit's *projection* of what activating 95 sites would mint, not a count of anything.
   The narrower "hide the card only when empty" gate that figure had justified was dropped for a
-  plain `project_type` gate.
+  plain `project_type` gate. **Corrected again by 1.6: the real number is 12**, counted in
+  production 01 Sep 2026 — so §2a's *conclusion* ("no such rows exist") is wrong as well, and
+  one of its premises must be. See **B28**; §2a itself is still uncorrected on disk.
 - **§6 reversed the prompt's central instruction.** The prompt said "Do not edit OPEX v1 in
   place. R-7 forbids it. This is a new version." §6 says correct 0075 in place and do **not**
   bump to a v2. Its precondition was verified before acting on it, not taken on trust:
@@ -536,3 +538,142 @@ reading `0/4`; the Residential demo project shows the card and no badges. `tests
 adds **29 tests**. Suite **1028 tests, 1 failure + 1 error — the same two as baseline** (the SQLite
 constraint-name assertion in `tests_design_part46` and the `test_whatsapp_templates` loader
 artefact; neither was this session's).
+
+---
+
+## 1.6 — progress and workload are different questions
+
+Run 1 Sep 2026 on `execution-phase-1`, after 1.5 (`f022b7d`). Baseline **1028 tests, 1
+failure + 1 error**, both pre-existing (the SQLite constraint-name assertion in
+`tests_design_part46`, and `test_whatsapp_templates` — a root-level module the loader
+cannot import). Neither was this session's.
+
+**A note on the invocation, because the counts disagree.** `manage.py test projects` gives
+**1027 / 1 failure / 0 errors**; the bare `manage.py test` gives **1028 / 1 / 1**.
+`test_whatsapp_templates.py` sits at the repo root, outside the `projects` package, so the
+label form never loads it and the error never appears. The bare form is the baseline.
+
+### What the session was for
+
+1.3b applied one rule — *a task metric excludes mirrors* (R-20) — at 32 call sites. 1.5
+removed the exclusion from `project_overview`'s per-phase bar so a delivery phase read 0/4
+rather than 0/0, which was right: 0/4 tells a PM four deliveries are outstanding and 0/0
+tells them nothing. **But it changed one screen.** `dashboard_pm`'s percentage and the CEO
+project cards went on excluding mirrors, so one activated OPEX site reported its
+completeness **out of 15 in two places and out of 23 in a third**, from the same rows at
+the same moment. R-20 as written had become false.
+
+### The rule, and the classification
+
+**The question a number answers decides whether mirrors are in it.** "How much of this
+SITE is done" includes them; "how much work does this PERSON or TEAM owe" excludes them.
+R-20 was rewritten to state both halves.
+
+All 32 live call sites were classified. **Seven are PROGRESS** (`dashboard_pm`'s four
+per-project counts, the CEO card pair, `phase_data_json`'s two bar numbers); **twenty-five
+are WORKLOAD** and kept 1.3b's exclusion unchanged. **Six lines actually changed** —
+`phase_data_json` was already correct from 1.5.
+
+**Two sites went to the product owner rather than being decided in the build**, both
+because the rule and the prompt's own framing pointed different ways:
+
+- **The SE progress figure** (`views.py` ~965) renders as a percentage, but its queryset
+  carries `assigned_to=se_profile`, so two engineers on one project get two different
+  numbers out of it — which a site-completeness figure cannot do. **Ruled WORKLOAD,
+  unchanged**, and commented in place saying it looks like progress and is not, so nobody
+  later "fixes" it to match the PM card.
+- **`phase_data_json`'s `ext_pending`.** 1.5 changed one binding (`countable = tasks`) that
+  **three** outputs read, and only two were the bar. `ext_pending` is a pending count and
+  belongs to WORKLOAD; it was swept in by accident. **Restored**, three lines. Inert on
+  every row in existence — all eight OPEX mirrors are `Internal` and Residential has none —
+  and fixed anyway rather than filed, because a misclassified number nothing exercises is
+  the kind that surfaces eighteen months later.
+
+### One place, again
+
+`utils.site_progress_tasks_q(prefix='')` sits beside `human_owned_tasks_q()`, named for the
+question rather than the mechanism. **It returns an empty `Q()` and filters nothing** —
+`FILTER (WHERE True)`, semantically identical to no filter at all. Its entire value is that
+a counter which *deliberately* counts mirrors and one that *forgot* to exclude them are
+otherwise byte-identical, and that ambiguity is the defect this session exists to close. It
+accepts and ignores `prefix` so swapping the two helpers is a one-word diff.
+
+### The structural guard now enforces two categories
+
+1.3b's `ALLOWED_BROKEN_COUNTS` was an allow-list of exceptions to a rule that had stopped
+being true, and after this session it would have needed six more entries. It became
+**`PROGRESS_KEYS`** — a positive declaration of the second category — and a new guard reads
+it in both directions.
+
+`ProgressWorkloadDifferentialSweepTests` renders each dashboard **twice over the same
+fixture, with 0 mirrors and with 6**, and diffs the two context walks key by key:
+
+> **A WORKLOAD number does not move when mirrors are added. A PROGRESS number does.**
+
+The changed set is therefore derived from the running code, and `changed == PROGRESS_KEYS`
+catches a workload counter that starts counting mirrors (an undeclared mover) *and* a
+progress counter that stops (a declared non-mover). **Proven to bite both ways**: breaking
+`pending_approvals` to include mirrors named `summary.pending_approvals`; breaking
+`total_tasks` to exclude them named `projects_with_progress[0].total_tasks`. The 1.3b
+value sweep is kept alongside it.
+
+**The categories could not be derived from anything live, and the entry says so.**
+`is_mirror` is a property of a task; the category is a property of a *question*, and a
+template-context integer carries no provenance back to the queryset that made it. What
+changed is the polarity of the declaration, not its existence.
+
+**Two properties written into the module docstring rather than implied away.** Ratios are
+absent from `PROGRESS_KEYS` on purpose — `internal_percent` and `pct` do not move when
+mirrors are added proportionally, so the set means "keys that must move", not "all progress
+numbers". And there is one irreducible gap: a counter *meant* to be progress but written
+with the exclusion passes both guards silently, because nothing records what question a
+number was meant to answer. The guarantee is one-directional and is stated as such.
+
+### Tests
+
+`projects/tests_progress_vs_workload.py`, **24 tests**, all against a site taken through
+the real `opex_site_activate` view rather than a hand-built fixture. Every PROGRESS number
+counts all 23; every WORKLOAD number counts only the 15 entered; the CEO card invariant
+(`pending + completed == total`) holds in three states including the real end state of an
+OPEX site — **8 pending / 15 completed**, every human task done and no mirror closable; the
+CEO report's row-sum invariant is unmoved; Residential is asserted identical under both
+categories. `PmAndOverviewAgreeTests` is the one the session existed to create.
+
+### The 285 figure
+
+Corrected to **12** in `views.py`'s `opex_site_activate` docstring and in one comment line
+of `tests_opex_activation.py`. Found but not corrected: `OPEX_TEMPLATE_AUDIT.md` (left
+deliberately — it should keep its own record of what it projected) and
+`docs/OPEX_task_template_spec.md` §2a, which says "No such rows exist" and is **wrong** —
+outside this session's MODE. Recorded as **B28**: twelve rows exist, §2a's reasoning is
+sound and its conclusion false, and nobody knows which path created them.
+
+### Verification
+
+`manage.py check` clean; `makemigrations --check --dry-run` reports no changes. No template
+changed and none needed to. Suite **1060 tests** — the baseline 1028 plus 24 new plus 8
+from the differential sweep — with the two pre-existing problems and **one new failure**
+(below).
+
+The shell artefact was produced by activating one OPEX site and one Residential project
+through the real views, completing six human tasks on each, assigning the eight mirrors to
+a real person so the workload counters had something to exclude, and printing every number
+with its category. **Nothing disagreed.** PM `internal_total` 23 = overview 23; PM
+`internal_done` 6 = overview 6; CEO card 17 + 6 = 23 while the department aggregate reads
+15; Residential 52 tasks, both categories 52, both denominators 44, phase bars summing to
+the card.
+
+### One stop condition, raised and then closed
+
+**B29.** `tests_opex_activation.CountersOnARealSiteTests.test_the_project_card_counts_exclude_all_eight_mirrors`
+asserted `card['total_tasks'] == 15` and read 23 after the change. **Not a defect in the
+change** — a correct 1.3b-era pin of the rule this session replaced. `tests_opex_activation.py`
+sits outside MODE beyond the one 285 comment line, so the session stopped and reported rather
+than editing it.
+
+The product owner lifted MODE for that single method. It is now
+`test_the_project_card_counts_every_task_including_mirrors`, asserts **23**, and its docstring
+records what it asserted before and why that stopped being right. The class keeps its proof of
+the WORKLOAD half regardless: counters 1 and 2 in the same class are the CEO `dept_rows` for
+Design and SCM, which are workload numbers and still excluded. Suite back to baseline —
+**1060 tests, 1 failure + 1 error**, both pre-existing.

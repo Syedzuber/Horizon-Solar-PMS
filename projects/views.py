@@ -69,15 +69,22 @@ from .utils import (
     # Prompt 0.4 — the versioned task template (R-7). Read-only here; the two duration
     # screens render the active version and nothing in views writes a template.
     resolve_active_task_template,
-    # Prompt 1.3b — the metric chokepoint (R-20). Every task COUNT below goes through
-    # it; task LISTS deliberately do not.
+    # The metric chokepoint (R-20) — 1.3b, SPLIT IN TWO BY PROMPT 1.6. Every task
+    # COUNT below goes through exactly one of these; task LISTS deliberately do not.
     #
-    # `is_human_owned` — the row-at-a-time form — is NO LONGER IMPORTED HERE. Its only
-    # caller in this module was project_overview's per-phase progress loop, and prompt
-    # 1.5 made that loop count mirrors on purpose (the one carve-out of R-20; see the
-    # comment at the loop). The helper is still exported by utils and still used by
-    # utils.current_phase() for R-21 — it is unused HERE, not dead.
-    human_owned_tasks_q,
+    # WHICH ONE A CALL SITE TAKES IS DECIDED BY THE QUESTION IT ANSWERS, never by
+    # what the number looks like:
+    #   human_owned_tasks_q / is_human_owned  — "how much work does this person or
+    #       team owe": overdue, pending, blocked, workload, department rollups.
+    #       Mirrors OUT, because a mirror is nobody's task.
+    #   site_progress_tasks_q                 — "how much of this SITE is done":
+    #       progress bars, percentages, per-project completion pairs. Mirrors IN,
+    #       because a site is not finished when only the humans are.
+    #
+    # `site_progress_tasks_q` matches everything and filters nothing. It is imported
+    # and called anyway so that a counter which deliberately includes mirrors is
+    # distinguishable from one that forgot to exclude them — see its docstring.
+    human_owned_tasks_q, is_human_owned, site_progress_tasks_q,
     # Prompt B21 — the ONE implementation of "current phase" (R-21), mirrors
     # excluded. Aliased because all three dashboards below already use
     # `current_phase` as a local name. Never recompute this inline.
@@ -644,17 +651,34 @@ def dashboard_pm(request):
             project.boq_status = None
             project.boq_url    = None
 
-        # Per-project progress. Mirrors are out of BOTH the numerator and the
-        # denominator (decision of 30 Aug, execution-model R-20): a site's percentage
-        # answers "how much of the work you can do is done". The alternative — keeping
-        # mirrors in the denominator — stalls every OPEX site permanently, because COD,
-        # HOTO and As-Built have no source object in existence to complete them.
-        # The cost, stated plainly: a phase can read 100% while its mirrors are still
-        # Not Started. That is the accepted trade, not an oversight.
-        total_tasks    = Task.objects.filter(phase__project=project).filter(human_owned_tasks_q()).count()
-        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(human_owned_tasks_q()).count()
-        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(human_owned_tasks_q()).count()
-        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(human_owned_tasks_q()).count()
+        # THIS IS SITE COMPLETENESS, SO DERIVED WORK COUNTS. All four numbers ask
+        # "how much of this site is done" — not "how much does this PM owe" — and a
+        # site is not finished because the humans finished. An undelivered
+        # consignment and an unissued design are outstanding work on the site whoever
+        # is responsible for recording them, so they belong in both halves.
+        # `site_progress_tasks_q()` is a no-op that says so; see R-20's PROGRESS half.
+        #
+        # CHANGED BY PROMPT 1.6, and the reason is the bar three lines below in the
+        # template. 1.3b excluded mirrors here, and 1.5 stopped excluding them in
+        # `project_overview`'s per-phase bar — on that screen only. The same OPEX site
+        # then reported its completeness out of 15 here and out of 23 there. Two
+        # progress numbers for one project, from the same data at the same moment.
+        # `internal_percent` (the only one of the four the template draws, at
+        # dashboard/pm.html:215) and the overview's per-phase bars now share a
+        # denominator, and tests_progress_vs_workload.py asserts they agree.
+        #
+        # THE COST, unchanged from 1.5 and accepted: a site with open mirrors can
+        # never read 100% until derivation lands, because no human can close one.
+        # That is a TRUE statement about the site. The 1.3b-era alternative — reading
+        # 100% with four deliveries outstanding — was not.
+        #
+        # The per-project OVERDUE, BLOCKED, PENDING and DUE-TODAY counts a few lines
+        # down are the other question and still exclude mirrors. Do not make these
+        # match those.
+        total_tasks    = Task.objects.filter(phase__project=project).filter(site_progress_tasks_q()).count()
+        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(site_progress_tasks_q()).count()
+        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(site_progress_tasks_q()).count()
+        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(site_progress_tasks_q()).count()
         internal_percent = int(internal_done / internal_total * 100) if internal_total else 0
         ext_pending    = Task.objects.filter(
             phase__project=project, task_type=Task.EXTERNAL,
@@ -935,10 +959,21 @@ def dashboard_site_engineer(request):
 
     projects_data = []
     for project in projects:
-        # Compute SE task progress: done / total for tasks explicitly assigned to this SE
-        # Progress over the SE's own tasks, mirrors out of numerator and denominator
-        # (R-20, Option A). No OPEX mirror carries the Site Engineer role today, so
-        # this changes nothing now; it is here so the rule is uniform when one does.
+        # IT LOOKS LIKE PROGRESS AND IT IS NOT. DO NOT "FIX" THIS TO MATCH THE
+        # DASHBOARD_PM PERCENTAGE — prompt 1.6 examined it and left it deliberately.
+        #
+        # It renders as a percentage, so the obvious reading is site completeness. But
+        # `assigned_to=se_profile` makes it a PERSON's queue: it answers "how much of
+        # MY work is done", and the proof is that two Site Engineers on one project get
+        # two different percentages out of it. A site-completeness number cannot do
+        # that. So it takes the WORKLOAD helper like every other person-scoped count —
+        # a mirror in here would put another team's queue in this engineer's bar.
+        #
+        # `dashboard_pm`'s percentage and the overview's phase bars have NO assignment
+        # term and are the other question; 1.6 moved those and not this one.
+        #
+        # Inert either way today: no OPEX mirror carries the Site Engineer role. Here
+        # so the rule is uniform when one does.
         se_tasks_qs = Task.objects.filter(
             phase__project=project, assigned_to=se_profile,
         ).filter(human_owned_tasks_q())
@@ -1997,14 +2032,36 @@ def _get_ceo_dashboard_context(context=None):
             # equivalent — a negated Q across a multi-valued relation takes Django's
             # exclude() subquery path instead of a plain SQL FILTER.
             #
-            # Both counts exclude mirrors (R-20), and BOTH must or the partition
-            # breaks. The exclusion is a POSITIVE Q inside the FILTER clause, so it
-            # rides the same single join and adds no fan-out — a negated form would
-            # take Django's exclude() subquery path, which is exactly what the note
-            # above warns against.
-            task_total_count=Count('phases__tasks', filter=human_owned_tasks_q('phases__tasks__')),
+            # THIS PAIR IS PER-PROJECT COMPLETENESS, SO DERIVED WORK COUNTS. The
+            # card renders them as Pending / Completed over ONE project, and
+            # `pending` is total MINUS done (see the loop below) — so this is not
+            # anybody's queue, it is a two-way partition of one site's work. A site
+            # is not finished because the humans finished, so the deliveries and the
+            # design are in. R-20's PROGRESS half; `site_progress_tasks_q()` says so
+            # at the call site rather than leaving a bare Count() that a reader
+            # cannot distinguish from a forgotten exclusion.
+            #
+            # CHANGED BY PROMPT 1.6. 1.3b excluded mirrors here; 1.5 stopped
+            # excluding them in `project_overview`'s phase bars. The same OPEX site
+            # then reported 15 tasks on this card and 23 on its own overview.
+            #
+            # BOTH TERMS MOVE TOGETHER OR THE PARTITION BREAKS — that was true of the
+            # exclusion and is equally true of its removal. Pending + Completed ==
+            # total holds only because `total` is annotated and `pending` derived
+            # from it; changing one filter and not the other would break it silently.
+            # Pinned by tests_progress_vs_workload.py.
+            #
+            # The no-op Q is passed INSIDE the FILTER clause rather than dropping the
+            # argument, so both counts keep the identical `FILTER (WHERE ...)` shape
+            # and ride the same single LEFT JOIN. Dropping it on one and not the
+            # other is the shape that changes fan-out.
+            #
+            # QUERY 2's ~40 conditional counts below are a SEPARATE queryset asking a
+            # separate question — 18 of them are department workload — and still
+            # exclude mirrors. Changing this does not touch that.
+            task_total_count=Count('phases__tasks', filter=site_progress_tasks_q('phases__tasks__')),
             task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)
-                                                         & human_owned_tasks_q('phases__tasks__')),
+                                                         & site_progress_tasks_q('phases__tasks__')),
         )
         .order_by('target_commissioning_date', 'project_id')
     )
@@ -2907,8 +2964,14 @@ def opex_site_activate(request, project_id):
         the design module does not read would strand them for a second reason.
       - NO PaymentMilestone rows. M1 On Survey Completion / M2 On Material Supply /
         M3 On Commissioning describe a three-milestone residential contract, not a
-        tender. The 285 such rows already sitting on tender sites are left alone; this
-        path simply stops adding more.
+        tender. The 12 such rows already sitting on non-Residential projects are left
+        alone; this path simply stops adding more. (The figure was written here as 285
+        until 1 Sep 2026 — that was the A-1.3 audit's PROJECTION of what activating 95
+        sites WOULD mint, repeated as if it were a count. The real number is 12,
+        confirmed by query against production on 01 Sep 2026. Nobody yet knows which
+        path created those 12: spec v1.5 §2a argues both creation paths need an
+        activated project and production has none, which would make the count zero, so
+        one of its premises is wrong. Recorded as B28.)
       - NO calculate_due_dates(). Every OPEX v1 task carries duration_days=1 and is
         Internal, so the chain would make HOTO fall due activated_at + 22 days and put
         the whole tender portfolio overdue within a month. A null due date says "not
@@ -7466,40 +7529,63 @@ def project_overview(request, project_id):
             tasks = list(phase.tasks.all())
             if not tasks:
                 continue
-            # Per-phase progress bar. MIRRORS ARE COUNTED HERE — a deliberate, narrow
-            # carve-out of R-20 taken by prompt 1.5, and the ONLY metric in the codebase
-            # that counts them.
+            # THIS IS PHASE COMPLETENESS, SO DERIVED WORK COUNTS. The bar answers
+            # "how much of this phase is finished", and an undelivered consignment is
+            # unfinished work whoever is responsible for recording it. R-20's PROGRESS
+            # half, established here by prompt 1.5 and extended to the two other
+            # progress sites by 1.6.
             #
-            # WHY. This bar answers "how much of this phase is finished", and an
-            # undelivered consignment is unfinished work whoever is responsible for
-            # recording it. Excluding mirrors made a phase holding only mirrors read
-            # "0/0 done" above an empty bar — OPEX Phase 1 (Design) and now Phase 3
-            # (the four delivery mirrors) both do — while the card header three lines
-            # above it says "4 tasks". One phase, two numbers, neither wrong on its own
-            # terms. Counting them gives "0/4 done": one mirror not updated is one task
-            # pending, which is what a PM reading the bar actually wants to know.
+            # WHY, on the screen rather than in the abstract. Excluding mirrors made a
+            # phase holding only mirrors read "0/0 done" above an empty bar — OPEX
+            # Phase 1 (Design) and Phase 3 (the four delivery mirrors) both do — while
+            # the card header three lines above it says "4 tasks". One phase, two
+            # numbers, neither wrong on its own terms and the pair unreadable. Counting
+            # them gives "0/4": one mirror not updated is one task pending, which is
+            # what a PM reading the bar actually wants to know.
             #
-            # WHAT THIS DOES NOT CHANGE, because the reasons R-20 exists are still true
-            # everywhere else. Overdue counts, per-user workload and every dashboard
-            # counter still exclude mirrors through `human_owned_tasks_q()` /
-            # `is_human_owned()` — counting a mirror as somebody's work attributes
-            # another team's queue to the wrong person, and no filter here touches that.
-            # R-21 (`utils.current_phase()`) is likewise unchanged: a mirror still never
-            # makes its phase current, so an OPEX site does not go back to reading
-            # "Design" forever, which is the bug B21 was written to fix.
+            # NO LONGER THE ONLY METRIC THAT COUNTS MIRRORS, and that is the point of
+            # prompt 1.6. From 1.5 to 1.6 it WAS the only one, which meant this bar and
+            # `dashboard_pm`'s percentage reported the same project's completeness on
+            # different denominators. `dashboard_pm` (views.py ~660) and the CEO project
+            # cards (views.py ~2010) now ask the same question the same way, and
+            # tests_progress_vs_workload.py asserts this loop and dashboard_pm agree.
+            #
+            # WHAT STILL EXCLUDES MIRRORS, because it asks the other question. Overdue,
+            # blocked, due-today, per-user workload, the department rollup, the digest —
+            # all through `human_owned_tasks_q()` / `is_human_owned()`, because counting
+            # a mirror as somebody's work attributes another team's queue to them. That
+            # includes `ext_pending` BELOW, computed in this very loop. R-21
+            # (`utils.current_phase()`) is likewise unchanged: a mirror never makes its
+            # phase current, which is the bug B21 was written to fix.
             #
             # `phases` itself is NOT filtered and never was: the task TABLE below this
             # bar lists every task including mirrors, which is the whole point of them.
             #
             # tests_mirror_metrics.py pins this from both sides — the behavioural test
-            # asserts the bar now counts the pair, and the structural sweep carries the
-            # two phase_data_json keys in ALLOWED_BROKEN_COUNTS with this reason.
-            countable      = tasks
-            internal       = [t for t in countable if t.task_type == 'Internal']
+            # asserts the bar counts the pair, and the differential sweep carries these
+            # two keys in PROGRESS_KEYS as numbers that MUST move when mirrors arrive.
+            # The two BAR numbers ask "how much of this phase is done", so mirrors
+            # count. The row-at-a-time form of the rule; no queryset exists here.
+            internal       = [t for t in tasks if t.task_type == 'Internal']
             internal_done  = sum(1 for t in internal if t.status == 'Done')
             internal_total = len(internal)
             pct            = int(internal_done / internal_total * 100) if internal_total else 0
-            ext_pending    = sum(1 for t in countable if t.task_type == 'External' and t.status != 'Done')
+            # `ext_pending` IS NOT ONE OF THEM, and prompt 1.6 split it back out.
+            # It is a PENDING count — outstanding external work, the other question —
+            # so it takes `is_human_owned()` like every other pending, overdue and
+            # blocked number in the codebase. 1.5 swept it in by accident: it changed
+            # ONE binding (`countable = tasks`) that three outputs read, and only two
+            # of them were the bar.
+            #
+            # INERT TODAY AND FIXED ANYWAY. All eight OPEX mirrors are `Internal`
+            # (migration 0075) and Residential has none, so no mirror is External and
+            # this line cannot differ from the 1.5 form on any row in existence. It is
+            # corrected now because a misclassified number that nothing exercises is
+            # the kind that surfaces the day someone adds an External mirror and
+            # cannot work out why one screen disagrees with the rest.
+            ext_pending    = sum(1 for t in tasks
+                                 if t.task_type == 'External' and t.status != 'Done'
+                                 and is_human_owned(t))
             phase_data_json.append({
                 'pk':             phase.pk,
                 'pct':            pct,

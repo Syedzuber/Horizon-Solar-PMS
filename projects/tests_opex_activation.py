@@ -302,7 +302,9 @@ class NoResidentialMilestonesTests(OpexActivationBase):
         """M1/M2/M3 describe a three-milestone residential contract, not a tender.
 
         project_activate mints them UNCONDITIONALLY for every project type, which is how
-        285 of them ended up on tender sites. This path must add none.
+        12 of them ended up on non-Residential projects (counted in production 01 Sep
+        2026; the 285 this docstring used to name was the A-1.3 audit's projection, not
+        a count). This path must add none.
         """
         self._activate()
         self.assertEqual(
@@ -646,19 +648,37 @@ class CountersOnARealSiteTests(OpexActivationBase):
             row['tasks_assigned'], 3,
             'the per-user report is attributing mirror rows to the PM')
 
-    # -- counter 4: the project card counts, which ARE assignment-blind -----------
+    # -- counter 4: the project card counts, which are the OTHER half of R-20 -----
 
-    def test_the_project_card_counts_exclude_all_eight_mirrors(self):
-        """A genuine third proof, substituted for the report above. These counts are
-        project-scoped with no assignment term, so all eight mirrors would land in them
-        and only human_owned_tasks_q() keeps them out."""
+    def test_the_project_card_counts_every_task_including_mirrors(self):
+        """R-20's PROGRESS half. This card asks "how much of this SITE is done", and a
+        site is not finished because the humans finished — four undelivered
+        consignments are outstanding work on the site whoever records them. So all 23
+        count, mirrors included, through `site_progress_tasks_q()`.
+
+        CHANGED BY PROMPT 1.6, 1 Sep 2026. From 1.3b until then this method was
+        `test_the_project_card_counts_exclude_all_eight_mirrors` and asserted **15**,
+        because R-20 was a single rule — "a task metric excludes mirrors" — and this
+        card was its strongest available proof: the counts are project-scoped with no
+        assignment term, so all eight mirrors would land in them and only the helper
+        kept them out.
+
+        THE CLASS DOES NOT LOSE THAT PROOF. Counters 1 and 2 above — the CEO
+        `dept_rows` for Design and SCM — are WORKLOAD numbers, still excluded, and
+        still demonstrate exactly what this method used to. What changed is that this
+        particular card turned out to be asking the other question, and 1.6 split the
+        rule rather than leaving `dashboard_pm` measuring a site out of 15 while
+        `project_overview`'s phase bars measured the same site out of 23.
+        """
         response = _client_for(self.pm).get(reverse('dashboard_pm'))
         card = next(c for c in response.context['projects_with_progress']
                     if c['project'].pk == self.site.pk)
         self.assertEqual(self._tasks(self.site).count(), 23)
         self.assertEqual(
-            card['total_tasks'], 15,
-            'the project card is counting the eight mirrors as work')
+            card['total_tasks'], 23,
+            'the project card is measuring this site out of its ENTERED tasks. It is '
+            'a completeness figure, not a workload one — route it through '
+            'utils.site_progress_tasks_q().')
 
     # -- and the negative: the mirrors are still VISIBLE ---------------------------
 

@@ -1426,6 +1426,92 @@ whoever demos this should say so before someone else notices.
 
 ---
 
+### B28 — twelve `PaymentMilestone` rows exist on non-Residential projects, and spec §2a says they cannot
+
+Found and recorded by prompt 1.6, 1 Sep 2026. **Not urgent and not a deploy blocker — it is
+twelve rows. The unexplained mechanism matters more than the rows do.**
+
+**The count, and how it moved twice.** The A-1.3 audit projected that activating 95 OPEX
+sites through `project_activate` *would* mint **285** `PaymentMilestone` rows — M1 / M2 / M3
+per site, a three-milestone residential contract on a tender. That projection was then
+repeated as if it were a **count** of rows already in production, into spec v1.4 §5 (which
+decided to "leave them alone") and into `opex_site_activate`'s own docstring. Spec **v1.5
+§2a** corrected the number to **zero** and reasoned it out: both creation paths require an
+activated project plus a PM action, and production has no active projects, so no such row
+can exist.
+
+**The query, run against production on 01 Sep 2026:**
+
+```sql
+SELECT COUNT(*) FROM projects_paymentmilestone m
+  JOIN projects_project p ON p.id = m.project_id
+ WHERE p.project_type != 'Residential';
+-- 12
+```
+
+**So §2a's reasoning is sound and its conclusion is empirically false**, which means one of
+its premises is wrong. Twelve rows exist and something made them. Nobody currently knows
+what. The candidates, none verified:
+
+- a project that *was* activated and later moved back to `Draft` or was soft-deleted —
+  `is_deleted` and `status` are independent, and `project_delete` only sets the flag
+  (see the soft-delete note in the memory index);
+- a `project_type` changed **after** a Residential activation, which would move existing
+  M1/M2/M3 rows onto a non-Residential project without any milestone path running;
+- direct creation through the Django admin or a shell, which no product-code audit reaches;
+- a data import or restore predating the current constraints.
+
+**Why it matters more than twelve rows.** §2a is currently used as evidence that a whole
+class of bad data does not exist. If the premise it rests on is wrong, the same reasoning
+is wrong wherever else it appears — and "both creation paths require an activated project"
+is exactly the kind of claim later sessions build guards on top of.
+
+**What 1.6 did about it.** Corrected the *figure* everywhere it could reach: `views.py`'s
+`opex_site_activate` docstring and `tests_opex_activation.py`'s one comment line both now
+say **12**, with the provenance. It did **not** touch `docs/OPEX_task_template_spec.md`
+(outside that session's MODE) — **§2a still says "No such rows exist", and is wrong.** Nor
+`OPEX_TEMPLATE_AUDIT.md`, deliberately: that document should keep its own record of what
+it projected.
+
+**What closing this looks like:** identify which of the twelve projects hold the rows and
+what their `status` / `is_deleted` / `activated_at` say, decide whether the rows are
+harmful (they are M1/M2/M3 on a tender, so almost certainly meaningless rather than
+dangerous), and correct spec §2a to state the count and the mechanism rather than a
+negative.
+
+---
+
+### ~~B29 — one 1.3b-era test pins the rule 1.6 replaced, and 1.6's MODE could not edit it~~ — **CLOSED by prompt 1.6**
+
+Found by prompt 1.6, 1 Sep 2026, reported as that session's one stop condition, and
+**closed in the same session** once the product owner lifted MODE for the single method.
+Recorded rather than deleted because the reasoning is what a later reader needs: this is
+what it looks like when a correct test pins a rule that has since been replaced.
+
+`tests_opex_activation.CountersOnARealSiteTests.test_the_project_card_counts_exclude_all_eight_mirrors`
+asserts `card['total_tasks'] == 15` on `dashboard_pm`'s OPEX project card. That number is
+**23** under R-20's PROGRESS half — the card asks "how much of this site is done", and 1.6
+moved it accordingly. The test is not wrong about the code; it is a correct pin of the rule
+that was replaced, and it now reads `AssertionError: 23 != 15`.
+
+`tests_opex_activation.py` is outside 1.6's MODE (every existing test module is), and the
+only two resolutions are to edit that test or to revert the decision.
+
+**The class does not lose its proof if the test is retargeted.** Its docstring calls this
+"counter 4 … a genuine third proof, substituted for the report above", because the card
+counts are assignment-blind and so were the strongest available evidence that the exclusion
+fired. Counters 1 and 2 in the same class — the CEO `dept_rows` for Design and SCM — are
+**WORKLOAD** numbers, still excluded, and still prove exactly that. What the card now proves
+is the other half of the rule, which is worth asserting under a name that says so.
+
+**What was done.** The method was renamed to
+`test_the_project_card_counts_every_task_including_mirrors` and now asserts **23**, with a
+docstring recording that it asserted 15 from 1.3b until 1.6 and why that stopped being
+right. Nothing else in `tests_opex_activation.py` was touched beyond the one 285 comment
+line. The suite returned to its baseline of 1 failure + 1 error, both pre-existing.
+
+---
+
 ## C. Phase 2 — installation, HSE, QA/QC and punch points (prompts 2.1 – 2.4)
 
 _No entries yet._

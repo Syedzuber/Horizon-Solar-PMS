@@ -196,11 +196,33 @@ def assign_tasks_to(queryset, user):
 
 
 # ---------------------------------------------------------------------------
-# Metric chokepoint — prompt 1.3b (rule R-20)
+# Metric chokepoint — prompt 1.3b (rule R-20), SPLIT IN TWO BY PROMPT 1.6
 #
-# WHAT COUNTS AS SOMEBODY'S WORK. Every task METRIC in this codebase — overdue,
-# pending, workload, progress, digest gating — routes through the two callables
-# below, and they are the only place the rule is written down.
+# THE QUESTION A NUMBER ANSWERS DECIDES WHETHER MIRRORS ARE IN IT. There are
+# exactly two questions and therefore exactly two helpers, and every task
+# METRIC in this codebase routes through one of them:
+#
+#   "How much of this SITE is done"  -> site_progress_tasks_q().  INCLUDES
+#       mirrors. A site is not finished because the humans finished; the
+#       deliveries and the design are part of the work. Progress bars,
+#       percentages, per-project completion pairs.
+#
+#   "How much work does this PERSON or TEAM owe" -> human_owned_tasks_q().
+#       EXCLUDES mirrors. A mirror is nobody's task; counting it against
+#       somebody attributes another team's queue to them. Overdue, pending,
+#       blocked, workload, department rollups, the EOD digest, the user
+#       status report.
+#
+# WHY THIS IS TWO RULES AND NOT ONE, recorded because it WAS one and a reader
+# will find the single-rule version in the history. From 1.3b (30 Aug) to 1.5
+# (1 Sep) the rule was "a task metric excludes mirrors", full stop, applied at
+# 32 call sites. 1.5 removed the exclusion from `project_overview`'s per-phase
+# bar so a delivery phase read 0/4 rather than 0/0 — right, because 0/4 tells a
+# PM four deliveries are outstanding and 0/0 tells them nothing. But it was
+# changed on ONE SCREEN, which left `dashboard_pm`'s percentage and the CEO
+# project cards computing the same project's completeness on a DIFFERENT
+# DENOMINATOR from the overview. Two progress numbers for one project. 1.6
+# split the rule rather than picking a screen.
 #
 # A mirror task's status is DERIVED from another object (a DesignAssignment, a
 # delivery quantity, a COD record) and no human may write it. Counting one as a
@@ -230,6 +252,14 @@ def assign_tasks_to(queryset, user):
 # of reports.py. Adding a manager for the second predicate while the first
 # still has none would make both harder to reason about.
 #
+# WHY THE PROGRESS HELPER IS A NO-OP `Q()` AND EXISTS ANYWAY. It matches every
+# task; it adds `FILTER (WHERE True)` and nothing else. It is not there to
+# filter — it is there so a reader can tell a call site that DELIBERATELY counts
+# mirrors from one that FORGOT to exclude them. Those two are byte-identical
+# without it, and that ambiguity is the entire defect 1.6 exists to close.
+# `.filter(site_progress_tasks_q())` states the question; a bare `.count()`
+# states nothing.
+#
 # The `prefix` convention is `reports._active_project_filter()`'s.
 # ---------------------------------------------------------------------------
 
@@ -256,6 +286,32 @@ def is_human_owned(task):
     Same rule, applied in Python where no queryset exists to filter.
     """
     return not task.is_mirror
+
+
+def site_progress_tasks_q(prefix=''):
+    """Q() matching every task that counts toward SITE COMPLETENESS.
+
+    The other half of the pair. This one answers "how much of this site is
+    done", so mirrors are IN: an undelivered consignment is unfinished work
+    whoever is responsible for recording it, and a site is not complete because
+    the humans finished their share. Use it for progress bars, percentages and
+    per-project completion pairs.
+
+    Do NOT use it for anything scoped to a person or a team — overdue, pending,
+    blocked, workload, department rollups, the digest. Those ask a different
+    question and take `human_owned_tasks_q()`.
+
+    DELIBERATELY EMPTY. It matches everything and compiles to
+    `FILTER (WHERE True)`, which is semantically identical to passing no filter
+    at all. Its whole value is that it NAMES THE QUESTION at the call site: a
+    counter that means to include mirrors and a counter that forgot to exclude
+    them are otherwise indistinguishable to a reader and to review. `prefix` is
+    accepted and ignored, so the two helpers stay interchangeable at a call
+    site and swapping one for the other is a one-word diff.
+    """
+    from django.db.models import Q
+
+    return Q()
 
 
 # ---------------------------------------------------------------------------
