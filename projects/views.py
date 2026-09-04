@@ -27,6 +27,9 @@ from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
     Vendor, VendorCategory, VendorBrand,
     BOQ, BOQItem, BOQItemMaster, BOQRevision, Notification, get_standard_boq_items,
+    # Session B - the per-row reviewer correction record. Append-only audit; nothing
+    # in the product branches on it. See models.BOQCorrection.
+    BOQCorrection, BOQ_CORRECTION_LINE_ADDED, BOQ_CORRECTION_QUANTITY_CHANGED,
     get_opex_boq_catalogue, opex_catalogue_category_order, get_opex_mandatory_items,
     split_opex_boq_rows, group_boq_rows_by_category,
     PaymentMilestone, ProjectDocument, TaskAttachment,
@@ -56,6 +59,10 @@ from .permissions import (
     project_managers, user_can_manage_program,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
+    # Session B - reviewer correction. A THIRD write authority, not a widening of the
+    # second: user_can_edit_project_boq() is unchanged and still refuses a reviewer.
+    # can_view_boq_corrections is the READ side of the trail it writes - Admin/CEO.
+    user_can_correct_boq, can_view_boq_corrections,
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
@@ -5938,6 +5945,11 @@ def boq_detail(request, project_id):
         'boq_group_locked':    boq_group_locked,
         'locked_group':        locked_group,
         'design_form_open':    design_form_open,
+        # SESSION B — whether the reader of this sheet is a design reviewer who may correct
+        # it. Drives ONE header link and nothing else on this page: no input, no button and
+        # no form here changes behaviour, and in particular the Design write branches above
+        # are untouched. False on every Residential project by construction.
+        'can_correct_boq':     user_can_correct_boq(request.user, project),
         'vendors_by_category': _build_vendors_by_category(),
         'category_choices':    BOQItem.CATEGORY_CHOICES,
         'uom_choices':         BOQItem.UOM_CHOICES,
@@ -6977,6 +6989,259 @@ def _boq_upload_apply(project, clean):
     return boq, added, changed, readded
 
 
+# ---------------------------------------------------------------------------
+# SESSION B — reviewer correction of a BOQ (quantities, and lines that were missed)
+#
+# THE HOLE THIS FILLS. A designer marks the BOQ complete, `boq_submitted_at` goes on, and
+# `project_boq_is_design_locked()` closes every author path — the picker, this module's
+# `boq_detail` write branches, and the spreadsheet upload. That is correct and stays
+# correct. But the reviewer reading the sheet at that exact moment is the person most
+# likely to find a wrong quantity or a missing line, and until now their only lever was to
+# FAIL THE ATTEMPT: a `boq_quantity` verdict, a new attempt, the whole package back to the
+# designer, and the rework counted against them — to change one number the reviewer
+# already knew the right value for.
+#
+# SCOPE, AND IT IS NARROW ON PURPOSE (confirmed with Praveen): QUANTITIES AND ADDING LINES.
+# REMOVING A LINE IS NOT BUILT AND IS NOT STUBBED. It is a different decision — an item the
+# designer put on the bill is a claim about the site, and taking it off is closer to
+# overruling the design than to correcting it — and it is deferred whole rather than half
+# implemented here.
+#
+# WHY THIS IS NOT A MODE OF THE PICKER, HAVING TRIED TO MAKE IT ONE. `opex_boq_entry`'s
+# POST is a FULL RECONCILIATION of the posted sheet against the stored one: a row that is
+# absent from the POST is DELETED. That is right for the author, who is looking at the
+# whole sheet and whose removals are expressed as absence — and it is exactly wrong here,
+# because running a reviewer through it would hand them line removal as a side effect of
+# the mechanism, silently, by omission, which is the one capability this session is told
+# not to give them. Constraining it would mean editing the picker's two delete loops, and
+# a delete path is not this session's to touch.
+#
+# SO THE ADD MECHANISM IS REUSED WHERE IT COUNTS AND THE RECONCILIATION WRAPPER IS NOT.
+# A line this view creates is written from the SAME catalogue master, with the same field
+# mapping and the same `serial_no = master.sort_order` rule the picker and
+# `_boq_upload_apply()` use, so a corrected row is indistinguishable from an authored one
+# — it carries `item_master`, so Part 6 aggregation sums it, and `is_standard_item=True`,
+# so `delete_item` will not remove it later either. THERE IS NO BRANCH IN THIS VIEW THAT
+# CAN DELETE A BOQItem, which is the same sentence `_boq_upload_apply()` already carries
+# and the same reason: absence of a delete is a property to state, not to infer.
+#
+# THE THREE LOCKS, ANSWERED SEPARATELY:
+#   design lock (boq_submitted_at)  — BYPASSED, and only here. This is the window the
+#                                     correction exists for. The author paths still AND it
+#                                     against user_can_edit_project_boq() unchanged.
+#   group lock (procurement)        — REFUSED. Part 6's lock is final: those quantities are
+#                                     committed to a purchase and the answer is a variance
+#                                     against the order, not an edit. A reviewer is not an
+#                                     exception to that and must not become a way round it.
+#   BOQ.status                      — NOT CONSULTED, matching the picker and the upload,
+#                                     which do not consult it either on an OPEX site. It is
+#                                     one of the three unreconciled "finished" signals
+#                                     (DESIGN_MODULE_DEFERRED J8) and reading it here in a
+#                                     fourth way would deepen that, not settle it.
+# ---------------------------------------------------------------------------
+
+
+def _boq_correction_identity(row):
+    """(code, description) for the audit record — the row's identity at correction time.
+
+    Copied onto BOQCorrection rather than read through the FK at display time, because the
+    FK is SET_NULL: the designer's own picker can remove a line on a later attempt, and a
+    correction record that can no longer say which row it corrected is not an audit trail.
+    An ad-hoc row has no master and so no code; the empty string is the honest answer.
+    """
+    return ((row.item_master.code if row.item_master_id else ''), row.description)
+
+
+@login_required
+def boq_correct(request, project_id):
+    """The reviewer's correction screen — change a quantity, or add a line that was missed.
+
+    GET renders this site's sheet with a quantity box per row and the catalogue rows that
+    are not on it yet. POST takes one of exactly two actions, ONE ROW AT A TIME:
+
+        add_line      — put a catalogue item on the sheet, optionally with a quantity
+        set_quantity  — change one existing row's quantity to a stated number
+
+    ONE ROW PER POST, NOT A SHEET SAVE, and that is the design rather than an omission. A
+    whole-sheet POST is what makes absence meaningful, and absence meaning "delete" is the
+    property this screen must not have. Each action names the row it acts on, so a
+    truncated, stale or hand-built POST can add or change — never remove.
+
+    A BLANK QUANTITY IS REFUSED ON set_quantity, unlike either author path. The picker
+    reads an empty box as "clear this" and the upload reads an empty cell as "leave it
+    alone"; neither reading is right for a correction, which is the statement "this number
+    should be Y". Clearing a quantity is closer to removing the line than to correcting it,
+    and removal is out of scope, so it is refused with a message rather than guessed at.
+
+    NOTHING HERE CREATES A BOQ. If the site has none there is nothing to correct and the
+    screen says so — the lazy-create rule the picker and the upload both keep (a BOQ row
+    appears on a save, never on a page load) is stricter here, because a reviewer must not
+    be able to bring a BOQ into existence on a site the designer never opened.
+    """
+    project = _active_project(project_id)
+
+    if project.project_type != 'OPEX':
+        raise Http404('BOQ correction is an OPEX design-review action. A Residential '
+                      'project has no design assignment and no reviewer to correct it.')
+
+    # Read gate first and separately from the correction gate, exactly as boq_detail and
+    # the picker order theirs: they are different questions and one must not stand in for
+    # the other.
+    if not user_can_view_project_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    if not user_can_correct_boq(request.user, project):
+        return HttpResponseForbidden()
+
+    profile      = request.user.profile
+    group_locked = project_boq_is_group_locked(project)
+
+    catalogue       = get_opex_boq_catalogue()
+    catalogue_by_id = {m.pk: m for m in catalogue}
+    category_order  = opex_catalogue_category_order()
+
+    try:
+        boq = project.boq
+    except BOQ.DoesNotExist:
+        boq = None
+
+    if request.method == 'POST':
+        # The procurement lock is final and is answered before anything else is read.
+        if group_locked:
+            messages.error(request, 'This site is in a locked procurement group — its BOQ '
+                                    'quantities are final and can no longer be changed, by '
+                                    'a reviewer either. A correction now needs a variance '
+                                    'against the order, raised with SCM.')
+            return redirect('boq_correct', project_id=project_id)
+
+        if boq is None:
+            messages.error(request, 'This site has no BOQ yet, so there is nothing to '
+                                    'correct. The designer creates it by entering one.')
+            return redirect('boq_correct', project_id=project_id)
+
+        action = request.POST.get('action', '')
+
+        if action == 'add_line':
+            raw = request.POST.get('master_id', '')
+            if not raw.isdigit() or int(raw) not in catalogue_by_id:
+                messages.error(request, 'Choose a catalogue item to add.')
+                return redirect('boq_correct', project_id=project_id)
+            master = catalogue_by_id[int(raw)]
+
+            if boq.items.filter(item_master=master).exists():
+                messages.error(request, f'{master.code} {master.description} is already on '
+                                        f'this BOQ — correct its quantity instead.')
+                return redirect('boq_correct', project_id=project_id)
+
+            quantity, qty_error = _boq_upload_quantity(request.POST.get('quantity', ''))
+            if qty_error:
+                messages.error(request, f'That quantity is not usable: {qty_error}.')
+                return redirect('boq_correct', project_id=project_id)
+
+            # THE PICKER'S CREATE, FIELD FOR FIELD. serial_no from the catalogue's
+            # sort_order, category / description / uom from the MASTER and never from the
+            # POST, item_master set so Part 6 aggregation can sum the row, and
+            # is_standard_item True so it is a real catalogue line rather than an ad-hoc
+            # one. A reviewer's line is not a second class of row.
+            with transaction.atomic():
+                item = BOQItem.objects.create(
+                    boq=boq, item_master=master, serial_no=master.sort_order,
+                    category=master.category, description=master.description,
+                    uom=master.unit, boq_quantity=quantity, is_standard_item=True,
+                )
+                BOQCorrection.objects.create(
+                    boq=boq, item=item,
+                    item_code=master.code, item_description=master.description,
+                    action=BOQ_CORRECTION_LINE_ADDED,
+                    quantity_before=None, quantity_after=quantity,
+                    corrected_by=profile,
+                )
+            messages.success(request, f'Added {master.code} {master.description}. The '
+                                      f'correction is recorded against your name.')
+            return redirect('boq_correct', project_id=project_id)
+
+        if action == 'set_quantity':
+            raw = request.POST.get('item_id', '')
+            if not raw.isdigit():
+                messages.error(request, 'Choose a row to correct.')
+                return redirect('boq_correct', project_id=project_id)
+            # Object consistency, the same rule delete_item applies: the row must belong to
+            # THIS project's BOQ. An id from another site's sheet is a 404, not a silent
+            # no-op reported as success.
+            item = get_object_or_404(BOQItem, pk=int(raw), boq=boq)
+
+            posted = (request.POST.get('quantity', '') or '').strip()
+            if not posted:
+                messages.error(request, 'Enter the quantity this row should carry. A '
+                                        'correction states a number — clearing a quantity '
+                                        'is not a reviewer action.')
+                return redirect('boq_correct', project_id=project_id)
+
+            quantity, qty_error = _boq_upload_quantity(posted)
+            if qty_error:
+                messages.error(request, f'That quantity is not usable: {qty_error}.')
+                return redirect('boq_correct', project_id=project_id)
+
+            before = item.boq_quantity
+            if before is not None and quantity == before:
+                messages.info(request, 'That row already carries that quantity — nothing '
+                                       'was changed and nothing was recorded.')
+                return redirect('boq_correct', project_id=project_id)
+
+            code, description = _boq_correction_identity(item)
+            with transaction.atomic():
+                item.boq_quantity = quantity
+                item.save(update_fields=['boq_quantity'])
+                BOQCorrection.objects.create(
+                    boq=boq, item=item,
+                    item_code=code, item_description=description,
+                    action=BOQ_CORRECTION_QUANTITY_CHANGED,
+                    quantity_before=before, quantity_after=quantity,
+                    corrected_by=profile,
+                )
+            messages.success(
+                request,
+                f'{code or description[:40]} — quantity corrected from '
+                f'{"blank" if before is None else before} to {quantity}. The correction is '
+                f'recorded against your name.')
+            return redirect('boq_correct', project_id=project_id)
+
+        # NO OTHER ACTION EXISTS ON THIS ENDPOINT, and an unrecognised one is refused
+        # rather than falling through to a bare redirect that would read as success. In
+        # particular there is no delete: a POST naming one is answered here.
+        messages.error(request, 'That is not an action this screen can take. A reviewer '
+                                'may correct a quantity or add a missed line; removing a '
+                                'line is not a reviewer action.')
+        return redirect('boq_correct', project_id=project_id)
+
+    # ---- GET ----
+    rows_on, rows_off = split_opex_boq_rows(boq, set(catalogue_by_id))
+    on_master_ids     = {row.item_master_id for row in rows_on}
+
+    # What can still be added: the catalogue minus what is already on the sheet, grouped
+    # for a <select> the reviewer can scan. Grouped in catalogue order, the same order the
+    # picker and the Part 9 review panel use, so all three screens read alike.
+    addable = {}
+    for master in catalogue:
+        if master.pk not in on_master_ids:
+            addable.setdefault(master.category, []).append(master)
+    addable_groups = [(c, addable[c]) for c in category_order if c in addable]
+
+    corrections = list(boq.corrections.select_related('corrected_by__user')) if boq else []
+
+    return render(request, 'projects/boq_correct.html', {
+        'project':         project,
+        'boq':             boq,
+        'rows_by_category': group_boq_rows_by_category(rows_on, category_order),
+        'rows_off':        rows_off,
+        'addable_groups':  addable_groups,
+        'addable_count':   sum(len(v) for v in addable.values()),
+        'group_locked':    group_locked,
+        'design_locked':   project_boq_is_design_locked(project),
+        'corrections':     corrections,
+    })
+
+
 @login_required
 def boq_submit(request, project_id):
     """
@@ -7208,10 +7473,29 @@ def boq_history(request, project_id):
 
     revisions = [_annotate(rev) for rev in raw_revisions]
 
+    # SESSION B — the reviewer-correction trail, for Admin/CEO only.
+    #
+    # ON THIS PAGE RATHER THAN A NEW ONE, because this page already IS the BOQ's audit
+    # trail and a second audit screen for the same object is how two of them start
+    # disagreeing. Alongside the revisions rather than merged into them: a BOQRevision is a
+    # whole-sheet snapshot at a workflow transition and a BOQCorrection is one row changing
+    # between transitions, so interleaving them would imply a single timeline of comparable
+    # events that these two are not.
+    #
+    # NARROWER THAN THE PAGE, not wider. can_view_boq_corrections() is ANDed with the read
+    # gate already passed above, so this can only ever refuse somebody who is already here
+    # — a PM, a designer or SCM reads the revisions exactly as before and sees no trail.
+    # The designer's exclusion is the deliberate one: this is an audit record, NOT rework
+    # accounting, and it is not counted against them anywhere.
+    corrections = []
+    if can_view_boq_corrections(request.user):
+        corrections = list(boq.corrections.select_related('corrected_by__user'))
+
     return render(request, 'projects/boq_history.html', {
-        'project':   project,
-        'boq':       boq,
-        'revisions': revisions,
+        'project':     project,
+        'boq':         boq,
+        'revisions':   revisions,
+        'corrections': corrections,
     })
 
 

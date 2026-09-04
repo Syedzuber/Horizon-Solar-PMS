@@ -222,6 +222,12 @@ urlpatterns = [
     # takes the W-narrow edit gate and both locks. Its own screen because rejecting a file
     # means listing every offending row, and boq/entry/ has no validation-error render.
     path('projects/<str:project_id>/boq/upload/',            views.opex_boq_upload,      name='opex_boq_upload'),       # OPEX Design only
+    # SESSION B — the REVIEWER's correction screen, and the only BOQ write path that is
+    # exempt from the design lock. It takes permissions.user_can_correct_boq() — verdict
+    # authority at either design gate, which structurally excludes the site's own designer
+    # — and the procurement lock still refuses it. Quantities and adding lines ONLY:
+    # nothing on this endpoint can delete a row, and no action naming a delete exists.
+    path('projects/<str:project_id>/boq/correct/',           views.boq_correct,          name='boq_correct'),           # OPEX design reviewers
     path('projects/<str:project_id>/boq/submit/',            views.boq_submit,           name='boq_submit'),            # Design only
     path('projects/<str:project_id>/boq/acknowledge/',       views.boq_acknowledge,      name='boq_acknowledge'),       # SCM only
     path('projects/<str:project_id>/boq/request-revision/',  views.boq_request_revision, name='boq_request_revision'),  # PM only

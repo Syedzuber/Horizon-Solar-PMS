@@ -22,6 +22,16 @@
       {% endif %}
       <span class="text-muted small">v{{ boq.version }}</span>
       <a href="{% url 'boq_history' project.project_id %}" class="btn btn-outline-secondary btn-sm">History</a>
+      {% comment %}
+      SESSION B — the design reviewer's way in. Quantities and missed lines only; the
+      correction screen has no remove control and its endpoint refuses any action but
+      those two. Rendered on the same predicate views.boq_correct() enforces, so it cannot
+      offer a screen that would 403. False for the site's own designer, for every
+      non-reviewer, and on every Residential project.
+      {% endcomment %}
+      {% if can_correct_boq %}
+        <a href="{% url 'boq_correct' project.project_id %}" class="btn btn-outline-primary btn-sm">Correct BOQ</a>
+      {% endif %}
     {% endif %}
     <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
   </div>

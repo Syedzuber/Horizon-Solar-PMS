@@ -656,6 +656,64 @@ def user_can_head_gate_design(user, assignment):
     return user_can_qc_design(user, assignment)
 
 
+def user_can_correct_boq(user, project):
+    """Return True if `user` may CORRECT `project`'s BOQ as a reviewer — change a quantity
+    on a row that is already there, or add a catalogue line the designer missed.
+
+    THIS IS A THIRD BOQ WRITE AUTHORITY AND IT IS DELIBERATELY NOT A WIDENING OF THE
+    SECOND. `user_can_edit_project_boq()` answers "is this person the author of this BOQ",
+    is W-narrow, and is NOT MODIFIED — a reviewer is still not an author and still cannot
+    submit, seed, upload or delete. This answers a different question: "may this person
+    correct what the author handed them", which is a reviewer's act and nobody else's.
+
+        Correction authority == VERDICT authority at either design gate.
+
+    If you may fail this attempt for `boq_quantity`, you may fix the quantity. Expressed by
+    delegating to the two gate predicates rather than re-deriving "is this the QC reviewer"
+    from `qc_assigned_to` here — that rule has two branches (a named reviewer, or the open
+    `is_design_qc` pool on an unnamed site) and a second copy of it would drift. A site
+    with `qc_assigned_to` null is the deliberate default, so a re-derived narrow rule would
+    leave correction dead on most sites.
+
+    THE ASSIGNED DESIGNER IS FALSE, STRUCTURALLY RATHER THAN BY A LINE HERE. Both gate
+    predicates already refuse `assignment.assigned_to` (settled decision 3), so the
+    exclusion this needs is the exclusion they already carry. Restating it would be a
+    fourth copy of the self-review rule.
+
+    OPEX ONLY, STRUCTURALLY. A DesignAssignment only ever exists on an OPEX site, so this
+    returns False on every Residential project at the first guard — the same property that
+    makes `project_boq_is_design_locked()` safe to AND into the shared write gate. A
+    Residential BOQ has no reviewer to correct it and nothing here changes that.
+
+    INDEPENDENT OF project_boq_is_design_locked() BY DESIGN, and that is the whole point of
+    it being a separate predicate. The correction window IS the locked window: the designer
+    marked the BOQ complete, the stamp went on, and their own path closed. A reviewer
+    reading it then finds the wrong quantity and has nowhere to put the fix. So this
+    function does not consult that lock, and the LOCK IS NOT LOOSENED EITHER — it is still
+    ANDed against `user_can_edit_project_boq()` at every author path exactly as before
+    (boq_detail, opex_boq_entry, opex_boq_upload are unchanged). The designer stays locked
+    out of their own BOQ once they submit it; only this separate path is exempt.
+
+    NOT INDEPENDENT OF THE PROCUREMENT LOCK, which is a different thing and is ANDed at the
+    caller the way Part 6 requires. `project_boq_is_group_locked()` is final — the
+    quantities have been committed to a purchase and the answer is a variance against the
+    order, not an edit. Correction must not become a way around it, and the correction view
+    refuses on it before it looks at anything else.
+
+    CONFERS NO DELETE. Removing a line is not in this authority and is not built anywhere
+    for a reviewer: `delete_item` and the picker's reconciliation both take
+    `user_can_edit_project_boq()`, which this does not touch, and both refuse a reviewer
+    today for the same reason they always did.
+    """
+    if project is None:
+        return False
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return False
+    return (user_can_qc_gate_design(user, assignment)
+            or user_can_head_gate_design(user, assignment))
+
+
 def user_can_view_design_qc_dashboard(user):
     """Return True if `user` may open the Design QC dashboard (Part 9 §6).
 
@@ -972,6 +1030,34 @@ def can_view_user_status_report(user):
     if profile is None:
         return False
     return profile.role in USER_STATUS_REPORT_ROLES
+
+
+# Who may read the reviewer-correction trail on a BOQ's history page — who changed which
+# quantity on somebody else's bill, and when.
+#
+# ITS OWN FROZENSET, for exactly the reason USER_STATUS_REPORT_ROLES is its own and not
+# PORTFOLIO_VIEW_ROLES: so widening one visibility can never silently widen another.
+# BOQ_PORTFOLIO_READ_ROLES admits SCM, whose portfolio-wide remit is over the QUANTITIES
+# they will order — not over which of two reviewers overruled the other on the way there.
+#
+# NOT THE PM AND NOT THE DESIGNER, deliberately, and the designer's exclusion is the
+# load-bearing one: this trail is an audit record and NOT designer rework accounting (prior
+# decision). Putting it on the designer's own screen is how it starts being read as a tally
+# against them.
+BOQ_CORRECTION_AUDIT_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def can_view_boq_corrections(user):
+    """Who may see the reviewer-correction trail on a BOQ.
+
+    Takes the user alone, not a project: it is a question about a role's remit, and the
+    per-BOQ read gate (user_can_view_project_boq) is ANDed at the caller — this can only
+    narrow who reaches the trail, never widen who reaches the BOQ.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in BOQ_CORRECTION_AUDIT_ROLES
 
 
 def project_managers(project):

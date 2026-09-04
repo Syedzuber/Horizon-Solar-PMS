@@ -1132,6 +1132,93 @@ class BOQRevision(models.Model):
         return f"BOQ {self.boq.project.project_id} — v{self.version} by {self.revised_by}"
 
 
+#: What a single reviewer correction did. Two values and no third — removing a line is
+#: NOT a reviewer capability and is deliberately not representable here.
+BOQ_CORRECTION_LINE_ADDED       = 'line_added'
+BOQ_CORRECTION_QUANTITY_CHANGED = 'quantity_changed'
+
+BOQ_CORRECTION_ACTIONS = [
+    (BOQ_CORRECTION_LINE_ADDED,       'Line added'),
+    (BOQ_CORRECTION_QUANTITY_CHANGED, 'Quantity changed'),
+]
+
+
+class BOQCorrection(models.Model):
+    """One reviewer correction to one BOQ row — who, when, which row, and what changed.
+
+    APPEND-ONLY, AND PER-ROW. BOQRevision is the existing BOQ audit and it is neither: it
+    stores a WHOLE-SHEET JSON snapshot, written only at a workflow transition (submit,
+    resubmit, SCM acknowledge), so "the QC reviewer raised OPX-042 from 12 to 18 on
+    Tuesday" is not a question it can answer — the change would have to be found by
+    diffing two snapshots that only exist if a transition happened to bracket it, and the
+    row that names the actor names the person who SUBMITTED, not the person who corrected.
+    This is the per-row record that does not exist anywhere else. It does not replace
+    BOQRevision and nothing here is written at a transition.
+
+    A HISTORY, NOT A FIELD ON THE ROW. More than one reviewer can correct the same BOQ, and
+    the same row twice; a `corrected_by` / `corrected_at` pair on BOQItem would keep only
+    the last one and silently lose the rest.
+
+    IT SAYS NOTHING ABOUT WHETHER THE BOQ IS DONE, and that is the load-bearing constraint
+    on this table rather than an observation about it. This BOQ already has THREE
+    unreconciled "finished" signals — `BOQ.status`, `DesignAttempt.boq_submitted_at` and
+    the SiteGroup procurement lock (DESIGN_MODULE_DEFERRED J8) — and a fourth would be
+    worse than the three. So there is no status field here, no `is_applied`, no
+    `superseded_by` and no flag any gate could ever read. Every field below is a fact about
+    an edit that already happened. NOTHING IN THE PRODUCT BRANCHES ON THIS TABLE: it is
+    written by the correction view and read by Admin/CEO. If a future part finds itself
+    wanting to gate on a row here, that is the signal to reconcile the three, not to add
+    a fourth.
+
+    NOT DESIGNER REWORK, BY PRIOR DECISION. Rework accounting runs on DesignReview error
+    categories through `category_counts_as_designer_rework()`, and rework loops are
+    DesignAttempt rows. This model has a foreign key to neither, on purpose — a reviewer
+    fixing a number in place is the alternative to failing the attempt, and counting it as
+    rework would charge the designer for the loop that was avoided.
+
+    THE ROW'S IDENTITY IS DENORMALISED BESIDE THE FK. `item` is SET_NULL because a
+    correction is an audit fact that must outlive the row it touched — the designer's own
+    picker can still remove a line on a later attempt — and a null FK with nothing beside
+    it would leave a record that cannot say what was corrected. `item_code` and
+    `item_description` are point-in-time copies, the same convention BOQItem.description
+    already uses against BOQItemMaster.
+    """
+
+    boq = models.ForeignKey(
+        BOQ, on_delete=models.CASCADE, related_name='corrections',
+    )
+    item = models.ForeignKey(
+        BOQItem, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='corrections',
+    )
+    #: Point-in-time identity of the row, so the record survives the row.
+    item_code        = models.CharField(max_length=30, blank=True, default='')
+    item_description = models.TextField(blank=True, default='')
+
+    action = models.CharField(max_length=20, choices=BOQ_CORRECTION_ACTIONS)
+
+    #: Both null on a line_added row that was created without a quantity; `quantity_before`
+    #: is always null for line_added, because there was no row to have a quantity.
+    quantity_before = models.DecimalField(max_digits=10, decimal_places=2,
+                                          null=True, blank=True)
+    quantity_after  = models.DecimalField(max_digits=10, decimal_places=2,
+                                          null=True, blank=True)
+
+    corrected_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='boq_corrections',
+    )
+    corrected_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-corrected_at', '-pk']
+
+    def __str__(self):
+        who = self.corrected_by or 'unknown'
+        return (f"BOQ correction — {self.boq.project.project_id} "
+                f"{self.item_code or '(ad-hoc)'} {self.action} by {who}")
+
+
 class Notification(models.Model):
     """In-app notification for a UserProfile. Marked read when they visit the notifications page."""
 

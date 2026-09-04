@@ -90,6 +90,9 @@ from .permissions import (
     user_can_qc_gate_design, user_can_head_gate_design, user_is_design_qc,
     user_can_view_design_qc_dashboard, user_can_view_qc_queue,
     user_is_assigned_qc_reviewer,
+    # Session B - reviewer BOQ correction. Read here only to decide whether the QC review
+    # screen renders the link; the authority itself is enforced in views.boq_correct().
+    user_can_correct_boq,
 )
 
 logger = logging.getLogger(__name__)
@@ -3708,6 +3711,11 @@ def design_qc_review(request, project_id):
             ctx['arka'] is not None and ctx['arka'].head_verdict == ARKA_APPROVED),
     })
     ctx.update(_boq_review_panel(ctx['boq']))
+    # Session B - whether this reviewer may CORRECT the bill they are reading, rather than
+    # only fail the attempt over it. Taken from the permission helper rather than spelled
+    # as `can_qc_gate or can_head_gate` here: the rule has one home, and the screen must
+    # not be able to offer a link the endpoint would refuse.
+    ctx['can_correct_boq'] = user_can_correct_boq(request.user, project)
     return render(request, 'projects/design/qc_review.html', ctx)
 
 

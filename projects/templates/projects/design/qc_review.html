@@ -165,8 +165,23 @@ reviewer and the designer are looking at the same document in the same sequence.
         · {{ boq_quantity_count }} with a quantity
       {% endif %}
     </span>
-    <a href="{% url 'boq_detail' project.project_id %}"
-       class="btn btn-sm btn-outline-secondary ms-auto py-0">Open full BOQ</a>
+    {% comment %}
+    SESSION B — the correction link. It is the alternative to failing an attempt over a
+    number the reviewer already knows the right value for: quantities and missed lines,
+    NEVER removals. Rendered on `can_correct_boq`, which is the same predicate
+    views.boq_correct() enforces, so this link cannot offer a screen the endpoint refuses.
+    It stays visible while the BOQ is design-locked — that lock is precisely the window
+    this exists for.
+    {% endcomment %}
+    {% if can_correct_boq %}
+      <a href="{% url 'boq_correct' project.project_id %}"
+         class="btn btn-sm btn-outline-primary ms-auto py-0">Correct quantities / add a line</a>
+      <a href="{% url 'boq_detail' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary ms-2 py-0">Open full BOQ</a>
+    {% else %}
+      <a href="{% url 'boq_detail' project.project_id %}"
+         class="btn btn-sm btn-outline-secondary ms-auto py-0">Open full BOQ</a>
+    {% endif %}
   </div>
   <div class="card-body p-0">
     {% if boq_by_category or boq_off_catalogue %}

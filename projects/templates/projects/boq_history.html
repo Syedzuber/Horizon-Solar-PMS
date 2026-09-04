@@ -98,4 +98,70 @@
 </div>
 
 {% endif %}
+
+{% comment %}
+SESSION B — the reviewer-correction trail. Admin/CEO only: `corrections` is an empty list
+for everybody else, gated in boq_history() by permissions.can_view_boq_corrections(), so
+this block is invisible rather than conditionally rendered on a role string here.
+
+A SEPARATE TABLE FROM THE REVISION TIMELINE ABOVE, deliberately. A BOQRevision is a
+whole-sheet snapshot taken at a workflow transition; a BOQCorrection is one row moving
+between transitions. Interleaving them would present a single timeline of comparable
+events, and they are not comparable.
+
+THIS IS NOT A TALLY AGAINST THE DESIGNER. Reviewer corrections do not feed rework
+accounting — that runs on DesignReview error categories — and the designer is not among
+the roles that see this.
+{% endcomment %}
+{% if corrections %}
+<div class="card shadow-sm mt-3">
+  <div class="card-header bg-white py-2 fw-semibold small">
+    Reviewer corrections
+    <span class="text-muted fw-normal ms-1">{{ corrections|length }}</span>
+    <span class="text-muted fw-normal ms-2">
+      · quantities changed and lines added by a design reviewer, outside the revision
+      timeline above
+    </span>
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr class="small">
+          <th style="width:150px">When</th>
+          <th style="width:180px">By</th>
+          <th style="width:90px">Item</th>
+          <th>What changed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in corrections %}
+          <tr class="small">
+            <td class="text-muted">{{ c.corrected_at|date:"d M Y H:i" }}</td>
+            <td>
+              {% if c.corrected_by %}
+                {{ c.corrected_by.user.get_full_name|default:c.corrected_by.user.username }}
+              {% else %}
+                <span class="text-muted">(deleted user)</span>
+              {% endif %}
+            </td>
+            <td class="text-muted">{{ c.item_code|default:"—" }}</td>
+            <td>
+              {% if c.action == 'line_added' %}
+                <span class="badge text-bg-success">Line added</span>
+                {{ c.item_description }}
+                {% if c.quantity_after is not None %} · quantity {{ c.quantity_after }}{% endif %}
+              {% else %}
+                <span class="badge text-bg-warning">Quantity</span>
+                {{ c.item_description }} ·
+                {% if c.quantity_before is None %}blank{% else %}{{ c.quantity_before }}{% endif %}
+                → {{ c.quantity_after }}
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
 {% endblock %}
