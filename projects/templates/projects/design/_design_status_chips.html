@@ -45,11 +45,17 @@ designer's screen and the Head's screen can never disagree about the state.
   {% endif %}
 
   {% comment %}
-  Arka verdict — THE GATE THAT UNLOCKS CAD AND BOQ, which Part 9 moved to the SECOND
-  gate. `arka_approved` is _approved_arka() and now tests head_verdict, so the green pill
-  means both reviewers have signed off. An Arka Design QC has passed but the Head has not
-  gets its own amber pill naming who is holding it — showing green there would tell the
-  designer to upload files the view would then refuse.
+  Arka verdict — THE GATE THE PACKAGE WAITS ON. It gates no artifact any more: this
+  comment used to call it "the gate that unlocks CAD and BOQ" and that stopped being true
+  when the CAD moved to travelling with the Arka submission and the BOQ stopped being
+  gated on the Arka at all. What `arka_approved` still decides is whether the ATTEMPT can
+  reach `artifacts_uploaded` — _maybe_advance_to_artifacts_uploaded() is its one consumer.
+
+  `arka_approved` is _approved_arka() and tests head_verdict (Part 9's second gate), so
+  the green pill means both reviewers have signed off. An Arka Design QC has passed but
+  the Head has not gets its own amber pill naming who is holding it — not because
+  anything of the designer's is blocked on it, but because a reader chasing a stalled
+  tender needs to know whose desk it is on.
   {% endcomment %}
   {% if arka_approved %}
     <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>

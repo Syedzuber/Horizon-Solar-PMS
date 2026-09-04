@@ -3675,9 +3675,21 @@ class ArkaSubmission(models.Model):
     'pending'. A QC REJECTION ENDS THE VERSION — the Head never sees it — so a row with
     verdict='rejected' keeps head_verdict='pending' forever. 'pending' means NOT JUDGED.
 
-    CAD AND BOQ UPLOAD NOW GATE ON head_verdict='approved', NOT verdict='approved'
-    (design_views._require_approved_arka). An Arka that only Design QC has passed is not
-    yet a layout anybody may build against.
+    NEITHER VERDICT GATES AN ARTIFACT ANY MORE. This used to read "CAD and BOQ upload now
+    gate on head_verdict='approved', not verdict='approved'", and named
+    `design_views._require_approved_arka` as the enforcement point. That function no
+    longer exists: it was RENAMED to `_require_current_arka()` and its four verdict
+    branches deleted, so what it now enforces is that an Arka EXISTS — not that anyone has
+    approved it. The BOQ calls neither, having no derivation from a layout to go stale.
+
+    WHAT head_verdict='approved' STILL DECIDES is whether the attempt may reach
+    `artifacts_uploaded`. `design_views._approved_arka()` survives unchanged and is read
+    by `_maybe_advance_to_artifacts_uploaded()`, which is now its only gate-like consumer.
+
+    THE CONSEQUENCE, RECORDED HERE BECAUSE THIS IS THE MODEL IT FALLS ON: a DesignFile may
+    now point at a version this row later supersedes. `derived_from_arka` is what makes
+    that visible, and it is the only thing that does — nothing stands an artifact down
+    when the Arka it names is rejected within the same attempt.
     """
 
     attempt = models.ForeignKey(

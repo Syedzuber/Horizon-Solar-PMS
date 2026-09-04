@@ -78,8 +78,14 @@ URL is refused exactly as a hidden button would have prevented.
 
     {% if can_qc_verdict %}
       {% comment %}
-      GATE 1 — Design QC. Approval hands the Arka to the Head; it does NOT unlock CAD or
-      BOQ, which now need head_verdict='approved'.
+      GATE 1 — Design QC. Approval hands the Arka to the Head, and that is ALL it does.
+
+      It used to say "it does NOT unlock CAD or BOQ, which now need
+      head_verdict='approved'" — true when both artifacts were gated on the Arka, false
+      since. Neither gate unlocks anything now: the CAD travels with the Arka submission
+      (it records which version it was drawn against, but that version needs no verdict)
+      and the BOQ is not gated on the Arka at all. What the two verdicts still decide is
+      whether the PACKAGE may complete.
       {% endcomment %}
       <div class="row g-3">
         <div class="col-md-4">
@@ -87,7 +93,8 @@ URL is refused exactly as a hidden button would have prevented.
             {% csrf_token %}
             <button class="btn btn-sm btn-success">Pass QC — Arka v{{ arka.version }}</button>
             <div class="text-muted mt-1" style="font-size:.7rem;">
-              Sends it to the Design Head. CAD and BOQ stay locked until he approves.
+              Sends it to the Design Head. The designer is not waiting on this — CAD and
+              BOQ can be submitted independently; only the package needs both verdicts.
             </div>
           </form>
         </div>
@@ -122,14 +129,19 @@ URL is refused exactly as a hidden button would have prevented.
       </div>
 
     {% elif can_head_verdict %}
-      {# ── GATE 2 — the Design Head. THIS approval unlocks CAD and BOQ. ── #}
+      {% comment %}
+      GATE 2 — the Design Head. This used to be labelled "THIS approval unlocks CAD and
+      BOQ"; it unlocks neither, and nothing else is waiting on it either. It is the
+      verdict the PACKAGE waits on: with the CAD and the BOQ already in, this approval is
+      the event that completes the attempt.
+      {% endcomment %}
       <div class="row g-3">
         <div class="col-md-4">
           <form method="post" action="{% url 'design_arka_head_approve' project_id=project.project_id %}">
             {% csrf_token %}
             <button class="btn btn-sm btn-success">Approve Arka v{{ arka.version }}</button>
             <div class="text-muted mt-1" style="font-size:.7rem;">
-              Unlocks CAD and BOQ upload for the designer.
+              Completes the design package, if the CAD and BOQ are already in.
             </div>
           </form>
         </div>

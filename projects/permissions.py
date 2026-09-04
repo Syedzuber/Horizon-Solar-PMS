@@ -971,6 +971,29 @@ def project_boq_is_design_locked(project):
         Design Head approves          same attempt    -> DESIGN LOCK
         PM change request             new attempt     -> reopens
 
+    READ THAT TABLE AS A LIST OF EVENTS, NOT AS AN ORDER. It once doubled as a narrative —
+    complete the BOQ, then the reviewers rule on it — and that reading is no longer
+    available: the BOQ is not gated on the Arka, so a designer may stamp it before the
+    Arka is submitted, before either gate has ruled, or long after. The rows above say
+    what each EVENT does to the stamp; none of them says which happens first.
+
+    Three consequences worth naming, because a reader who assumed the old order would get
+    each of them wrong:
+
+      * "DESIGN LOCK" on the Head-approval row is the stamp SURVIVING that event on the
+        same attempt, not the approval conferring a lock. A BOQ stamped before any Arka
+        existed is frozen from the moment of the stamp, with no verdict anywhere in sight.
+      * The rows are not exhaustive of the Arka's life. An Arka REJECTED and replaced
+        within one attempt opens no attempt, so it appears nowhere above and does nothing
+        to the stamp — a BOQ completed against Arka v1 stays frozen and stays stamped
+        under Arka v2. That is a real gap, surfaced by the "completed under Arka vN, not
+        the current version" badge on the reviewer screens and closed by nothing.
+      * The lock is state, not authority, and it always was — which is why the reviewer's
+        correction path (user_can_correct_boq) sits outside it rather than loosening it.
+
+    The PREDICATE below is unaffected by all of this and is deliberately not touched: one
+    field, read live. Only the story around it needed correcting.
+
     REOPENING IS TOTAL, NOT QUANTITY-ONLY. Nothing here is per-row: when the stamp clears,
     the whole entry screen comes back with its picker, so the designer can add an item that
     was never on the sheet. That is the point — 14 of the 16 error categories map to a redo

@@ -1645,6 +1645,44 @@ def _attempt_files(attempt):
                 .order_by('kind', '-version'))
 
 
+def _boq_provenance(attempt, arka, arka_history):
+    """Which Arka version was live when the BOQ was marked complete, and whether that is
+    still the current one. Returns (provenance_arka_or_None, is_stale).
+
+    THE BOQ'S ANSWER TO `DesignFile.derived_from_arka`, AND IT IS NOT AS GOOD. A CAD row
+    STORES the version it was drawn against, so the artifacts table renders "not the
+    current Arka" from a pk comparison that cannot be wrong. The BOQ has no such field and
+    is not getting one: what this module records is a completion STAMP on the attempt, and
+    a fourth "is the BOQ finished" signal beside the three that already disagree
+    (DESIGN_MODULE_DEFERRED J8) would cost more than it explains.
+
+    SO THE PAIRING IS INFERRED, LIVE, FROM THE STAMP'S TIMESTAMP: the highest-versioned
+    Arka on this attempt that had already been submitted when the stamp was written. Same
+    shape of answer as the CAD's, same freshness — computed at render, stored nowhere —
+    but derived rather than recorded, and it should be read as "which layout was on the
+    table at the time", not as a claim about what the designer actually priced.
+
+    WHY IT IS WORTH SHOWING ANYWAY. A BOQ completed under Arka v1 stays stamped and stays
+    frozen when v1 is rejected and replaced by v2, because an in-attempt Arka rejection
+    opens no attempt and so never reaches the redo scoping that would have re-asked for
+    it. Nothing else on any screen says so. This is the only signal, it blocks nothing,
+    and it closes nothing — it makes an existing silent gap legible to the reviewer who
+    is about to judge the bill.
+
+    NO ARKA, NO BADGE — mirroring `{% if arka and ... %}` on the CAD row. With no current
+    Arka there is no version for the BOQ to be stale against, and an attempt whose BOQ was
+    stamped before any Arka existed is reported as stale only once one arrives.
+    """
+    if attempt is None or attempt.boq_submitted_at is None or arka is None:
+        return None, False
+    # `arka_history` is already in hand for the version panel — reuse it rather than
+    # issuing a second query per screen. It is newest-version-first.
+    submitted_by_then = [a for a in arka_history
+                         if a.submitted_at <= attempt.boq_submitted_at]
+    provenance = max(submitted_by_then, key=lambda a: a.version, default=None)
+    return provenance, (provenance is None or provenance.pk != arka.pk)
+
+
 def _designer_boq(project):
     """The project's BOQ, or None. Read-only — this module never creates, seeds or
     writes a BOQ row (settled decision 4); `boq_detail` owns all of that."""
@@ -1704,16 +1742,20 @@ def _workspace_context(project, assignment):
     arka    = _current_arka(attempt)
     boq     = _designer_boq(project)
     files   = _attempt_files(attempt)
+    # Hoisted out of the dict literal so _boq_provenance() can read it without a second
+    # query — it was already being fetched for the version panel.
+    arka_history = (list(attempt.arka_submissions.select_related(
+                        'submitted_by__user', 'reviewed_by__user',
+                        'head_reviewed_by__user')
+                        .order_by('-version')) if attempt else [])
+    boq_provenance_arka, boq_is_stale = _boq_provenance(attempt, arka, arka_history)
     return {
         'project':        project,
         'assignment':     assignment,
         'attempt':        attempt,
         'arka':           arka,
         'arka_approved':  _approved_arka(attempt) is not None,
-        'arka_history':   (list(attempt.arka_submissions.select_related(
-                               'submitted_by__user', 'reviewed_by__user',
-                               'head_reviewed_by__user')
-                               .order_by('-version')) if attempt else []),
+        'arka_history':   arka_history,
         'files':          files,
         # Reports the PROGRESSION rule, not "any CAD-ish file exists" — a chip saying
         # "CAD: Uploaded" while the gate still refuses to advance would be a lie the
@@ -1723,6 +1765,12 @@ def _workspace_context(project, assignment):
                               for f in files),
         'boq':            boq,
         'boq_complete':   bool(attempt and attempt.boq_submitted_at),
+        # The BOQ's counterpart to the CAD row's "not the current Arka" badge. See
+        # _boq_provenance() for why this is inferred rather than read off a field, and for
+        # why it is worth showing despite that. `boq_provenance_arka` may be None while
+        # `boq_is_stale` is True: that is a BOQ stamped before any Arka existed.
+        'boq_provenance_arka': boq_provenance_arka,
+        'boq_is_stale':        boq_is_stale,
         'cad_kinds':      [(k, KIND_LABELS[k]) for k in UPLOADABLE_KINDS],
         'status':         assignment.status,
     }
@@ -3796,21 +3844,49 @@ def designer_dashboard_context(profile, projects):
         # rather than on the status alone, so it is resolved here instead of in the table.
         kind, label, waiting = _DESIGNER_ACTIONS.get(
             assignment.status, ('none', '', ''))
-        # PART 9: the unlock is head_verdict, not verdict — an Arka that only Design QC
-        # has passed does not let the designer upload anything, so telling them to
-        # "Upload CAD" at that point would send them into a refusal.
+        # THE VERDICT NO LONGER DECIDES WHAT THE DESIGNER MAY DO, ONLY WHAT THE PACKAGE
+        # NEEDS. This branch used to read the Arka's head_verdict FIRST and offer nothing
+        # at all until both gates had passed — correct while CAD and BOQ were gated on the
+        # approval, and a card that hides real work now that they are not. A designer at
+        # `arka_submitted` with a pending Arka may upload the CAD (it records the current
+        # version, which needs no verdict) and may complete the BOQ (which never derived
+        # from the layout). So the outstanding ARTIFACT is what the card offers, and the
+        # verdict only changes what it says while waiting.
         if assignment.status == DESIGN_ARKA_SUBMITTED:
-            if arka is not None and arka.head_verdict == ARKA_APPROVED:
-                has_cad = bool(attempt and attempt.design_files.filter(
-                    kind__in=CAD_KINDS, is_current=True).exists())
-                if not has_cad:
-                    kind, label, waiting = 'link', 'Upload CAD', ''
-                elif attempt.boq_submitted_at is None:
-                    kind, label, waiting = 'link', 'Enter BOQ', ''
-                else:
-                    kind, label, waiting = 'none', '', 'Package complete — waiting for Design QC.'
+            # UNCHANGED, DELIBERATELY: CAD_KINDS, not PROGRESSION_CAD_KINDS. A lone legacy
+            # cad_pdf satisfies this test but does NOT satisfy the progression rule, so a
+            # site carrying one is told there is nothing to upload while
+            # _maybe_advance_to_artifacts_uploaded() still waits for a zip. That mismatch
+            # predates this change and is left alone rather than quietly altered here —
+            # the legacy kinds can no longer be uploaded, so no attempt still in flight
+            # can enter the state.
+            has_cad  = bool(attempt and attempt.design_files.filter(
+                kind__in=CAD_KINDS, is_current=True).exists())
+            boq_done = bool(attempt and attempt.boq_submitted_at)
+            approved = arka is not None and arka.head_verdict == ARKA_APPROVED
+
+            if not has_cad:
+                kind, label, waiting = 'link', 'Upload CAD', ''
+            elif not boq_done:
+                kind, label, waiting = 'link', 'Enter BOQ', ''
+            elif approved:
+                # Reachable only as a belt-and-braces case: the write that completed the
+                # package would already have advanced the status off `arka_submitted`.
+                kind, label, waiting = 'none', '', 'Package complete — waiting for Design QC.'
             else:
-                kind, label, waiting = 'none', '', 'Waiting for Design QC to review your Arka.'
+                # Everything the designer owes is in; the Arka verdict is the only thing
+                # left, and now it genuinely IS the thing being waited on.
+                kind, label, waiting = ('none', '', 'CAD and BOQ are in — waiting for the '
+                                                   'Arka verdict to complete the package.')
+
+            # THE ARKA-PENDING FACT IS NOT DROPPED WHEN AN ACTION IS OFFERED. The card
+            # renders `waiting` only when no action is available (see
+            # _dashboard_design_actions.html), but the same card's status chip already
+            # reads "Design: Arka awaiting Design QC" from _dashboard_design_chips.html —
+            # so the designer sees both the button and who is holding the Arka, and this
+            # key stays populated for any other reader of the context.
+            if not approved and not waiting:
+                waiting = 'Arka is with Design QC — your CAD and BOQ do not wait for it.'
 
         # The remarks the designer has to act on: the most recent FAILED attempt, at
         # EITHER gate. Part 9 made this two fields — a package failed by the Head carries

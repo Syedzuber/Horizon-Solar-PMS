@@ -120,6 +120,54 @@ stored anywhere (settled decision 8).
       </table>
     </div>
   {% endif %}
+
+  {% comment %}
+  THE BOQ'S PROVENANCE, IN THE SAME CARD AS THE CAD'S AND SAYING THE SAME KIND OF THING.
+
+  It is a FOOTER rather than a row in the table above for two reasons. The table lists
+  DesignFiles and the BOQ completion is not one — it is a stamp on the attempt — and the
+  table does not render at all when no file has been uploaded, which is exactly the case
+  a BOQ completed before any Arka produces. A footer says it in both states.
+
+  READ THE BADGE AS "WHICH LAYOUT WAS ON THE TABLE", NOT AS A PAIRING. The CAD row above
+  compares a stored FK; this compares the stamp's timestamp against the Arka versions'.
+  _boq_provenance() carries the full reasoning and the reason no field was added.
+
+  Purely informational. Nothing here blocks a verdict, changes a status, or re-asks the
+  designer for anything — it makes visible a staleness that has always been possible and
+  has never been shown.
+  {% endcomment %}
+  {% if boq_complete %}
+    <div class="card-footer bg-white py-2 small">
+      <span class="ver-tag">BOQ completion</span>
+      {% if boq_is_stale %}
+        {% if boq_provenance_arka %}
+          <span class="badge bg-warning text-dark">
+            completed under Arka v{{ boq_provenance_arka.version }}, not the current version
+          </span>
+        {% else %}
+          <span class="badge bg-warning text-dark">
+            completed before any Arka was submitted
+          </span>
+        {% endif %}
+      {% elif boq_provenance_arka %}
+        <span class="text-muted">under Arka v{{ boq_provenance_arka.version }} (current)</span>
+      {% endif %}
+      <span class="text-muted ms-1">
+        marked complete {{ attempt.boq_submitted_at|date:"d M Y H:i" }}
+        {% if attempt.boq_submitted_by %}
+          by {{ attempt.boq_submitted_by.user.get_full_name|default:attempt.boq_submitted_by.user.username }}
+        {% endif %}
+      </span>
+      {% if boq_is_stale %}
+        <div class="text-muted mt-1" style="font-size:.7rem;">
+          The bill was marked complete before the Arka now on this attempt. Nothing re-asks
+          for it — an Arka rejected and replaced within one attempt opens no rework loop —
+          so check it against the current layout before recording a verdict.
+        </div>
+      {% endif %}
+    </div>
+  {% endif %}
 </div>
 
 {% comment %} Arka version history — every version, its verdict and its reason. {% endcomment %}
