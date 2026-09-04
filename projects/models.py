@@ -2695,21 +2695,84 @@ class ChecklistItem(models.Model):
 
 class ChecklistTaskLink(models.Model):
     """
-    Assigns a Checklist to a task, keyed by (task_name, project_type) rather than a
-    concrete Task row, so every task instance with that name in that project type shows
-    the checklist. UNIQUE on (task_name, project_type): a given task can have at most one
-    checklist. Assigning a second checklist to an already-linked pair is rejected at the
-    admin-view layer with a clear error, not silently overwritten. Deleting the Checklist
+    Assigns a Checklist to a task — not to a concrete Task row, so every task instance
+    that came from the same template task shows the checklist. Deleting the Checklist
     cascades away its links.
+
+    KEYED BY TEMPLATE TASK SINCE 2.4, NOT BY NAME. `template_task` is the key; task_name
+    and project_type are kept beside it and stay populated, but they are no longer what a
+    lookup matches on. The string key was wrong in two directions at once:
+
+      - Rewording a template task's label silently detached its checklist. The label is
+        content and moves with a template version (R-7); the checklist assignment is not
+        content and must not move with it.
+      - The picker that authored these strings offered Residential names only, so no OPEX
+        link could be created at all — the string match had nothing to match against.
+
+    WHY THE FK POINTS AT A CONCRETE ROW BUT LOOKUPS GO THROUGH `code`. A new template
+    version writes FRESH TaskTemplateTask rows with fresh pks, so a pk is stable only
+    within one version; `code` is what one task is called across all of them. The FK
+    records WHICH ROW AUTHORED THE LINK (provenance, and the thing the admin picks), and
+    every read joins on template_task__code — see `_checklist_for_task()`. A link
+    authored against v1 therefore keeps resolving after v2 goes live, which a bare pk
+    match would not.
+
+    UNIQUENESS, TWO CONSTRAINTS AND NEITHER IS REDUNDANT. unique_together
+    (task_name, project_type) is kept exactly as it was, because the string columns are
+    still populated and still describe one assignment per task. The partial constraint on
+    template_task states the same rule on the new key, and is partial because the column
+    is nullable: rows that could not be resolved to a template task (see the 2.4 backfill)
+    must be allowed to coexist rather than collapse into one. Cross-version duplicates
+    — two links whose different labels share one `code` — are refused at the
+    admin-view layer, which is the only layer that can name the other checklist.
     """
 
-    checklist    = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='task_links')
-    task_name    = models.CharField(max_length=200)
-    project_type = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
+    checklist     = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='task_links')
+    # THE KEY. Nullable because the backfill cannot invent a template task for a link
+    # whose name predates the current template, and SET_NULL because retiring a template
+    # version must never cascade a checklist assignment away — same reasoning, and the
+    # same on_delete, as Task.template_task.
+    template_task = models.ForeignKey(
+        'TaskTemplateTask',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='checklist_links',
+    )
+    # Kept and kept in sync, no longer the source of truth. Populated from template_task
+    # by save() below whenever one is set, so anything still reading these strings —
+    # the admin list, the fallback in `_checklist_for_task()` — reads the same answer
+    # the FK gives.
+    task_name     = models.CharField(max_length=200)
+    project_type  = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
 
     class Meta:
         unique_together = ('task_name', 'project_type')
         ordering        = ['project_type', 'task_name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['template_task'],
+                condition=models.Q(template_task__isnull=False),
+                name='uniq_checklist_task_link_template_task',
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # The strings are a PROJECTION of the FK, not a parallel record. Deriving them
+        # here rather than at each call site means the portal-admin screen, the Django
+        # admin and any future writer all produce the same pair, and a link can never
+        # name one task through its FK and a different one through its columns.
+        #
+        # Only ever writes when a template_task is set: a link with none (the backfill's
+        # unmatched rows) keeps the strings it was created with, because they are then
+        # the only record of what it points at.
+        if self.template_task_id is not None:
+            tt = self.template_task
+            self.task_name    = tt.label
+            self.project_type = tt.phase.template.project_type
+            if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+                kwargs['update_fields'] = set(kwargs['update_fields']) | {
+                    'task_name', 'project_type'}
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.task_name} [{self.project_type}] → checklist {self.checklist_id}"

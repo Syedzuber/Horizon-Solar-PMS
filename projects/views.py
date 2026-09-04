@@ -34,6 +34,8 @@ from .models import (
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
+    # 2.4 - the checklist picker resolves its POST back to a concrete template row.
+    TaskTemplateTask,
     Program, program_rollup_annotations, get_program_rollup,
     DesignAssignment,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
@@ -64,7 +66,7 @@ from .permissions import (
 from .utils import (
     attach_residential_template, attach_opex_template,
     calculate_due_dates, recalculate_from_task,
-    get_residential_template_task_names, compute_gantt_schedule, build_gantt_view,
+    compute_gantt_schedule, build_gantt_view,
     assign_task_to, assign_tasks_to,
     # Prompt 0.3 — the state ledger. R-2: every status change writes a transition
     # row, inside the same transaction as the change itself.
@@ -3982,22 +3984,75 @@ def _render_comments_hx(request, project, task):
     })
 
 
+def _checklist_task_link_for(task, project):
+    """The ChecklistTaskLink covering this task, or None — the whole of 2.4's key change.
+
+    TWO PATHS, AND THE ORDER IS THE POINT.
+
+    1. BY TEMPLATE TASK CODE. `task.template_task` says which template row the task was
+       built from; `code` is what that row is called across every version of the template
+       (its pk is not — a new version writes fresh rows). Joining the link on
+       template_task__code therefore survives both a template upgrade and a label
+       rewording, which is exactly what the string key did not.
+
+       Note it joins on CODE, not on the link's template_task_id. The link's FK points at
+       whichever version's row authored it, the task's FK at whichever version built the
+       task, and those are only the same row until a v2 exists. `code` is the thing they
+       share, so it is the thing matched. project_type is carried on the join so a
+       Residential code can never pick up an OPEX link that happens to share it.
+
+    2. BY NAME, the pre-2.4 behaviour, kept as a fallback and LOGGED EVERY TIME. It is
+       reached by the ~2% of tasks that were added by hand and have no template
+       provenance at all, and by links the 2.4 backfill could not resolve. Both are real
+       and must keep working — silently dropping their checklist would be a regression
+       dressed up as a migration — but neither should be invisible: the warning is how
+       anyone can see which tasks are still on the old path and why.
+    """
+    if task.template_task_id is not None:
+        code = task.template_task.code
+        link = (ChecklistTaskLink.objects
+                .select_related('checklist')
+                .filter(template_task__code=code,
+                        template_task__phase__template__project_type=project.project_type)
+                .first())
+        if link is not None:
+            return link
+
+    reason = ('task has no template_task (added by hand)'
+              if task.template_task_id is None
+              else f"no link keyed to template task code "
+                   f"'{task.template_task.code}'")
+    link = (ChecklistTaskLink.objects
+            .select_related('checklist')
+            .filter(task_name=task.task_name, project_type=project.project_type)
+            .first())
+    if link is None:
+        return None
+    logger.warning(
+        "Checklist link for task %s ('%s') on project %s resolved by NAME, not by "
+        "template task code — %s. Link pk=%s. This is the pre-2.4 path: the link "
+        "detaches if either name is reworded.",
+        task.pk, task.task_name, project.project_id, reason, link.pk,
+    )
+    return link
+
+
 def _checklist_for_task(task, project):
-    """Resolve the ACTIVE version of the Checklist assigned to this task via
-    ChecklistTaskLink (task_name + project_type), or None. A draft or archived checklist
-    is treated as unassigned — exactly as is_active=False was.
+    """Resolve the ACTIVE version of the Checklist assigned to this task, or None. A draft
+    or archived checklist is treated as unassigned — exactly as is_active=False was.
+
+    WHICH TASK the link covers is `_checklist_task_link_for()`'s question (2.4); WHICH
+    VERSION of the linked checklist is live is this function's, and the two are
+    deliberately separate.
 
     RESOLUTION IS THROUGH THE FAMILY, NOT THE LINKED ROW. The link records which
-    checklist family is assigned to this task name; `status='active'` records which
+    checklist family is assigned to this task; `status='active'` records which
     version of that family is live. Before versioning existed every family had exactly
     one version, so for every task that exists today this returns the same row
     link.checklist.is_active returned, and None wherever it returned None. Without the
     family lookup, activating v2 would leave the link pointing at the archived v1 and
     the checklist would vanish from the task."""
-    link = (ChecklistTaskLink.objects
-            .select_related('checklist')
-            .filter(task_name=task.task_name, project_type=project.project_type)
-            .first())
+    link = _checklist_task_link_for(task, project)
     if link is None:
         return None
     if link.checklist.status == Checklist.ACTIVE:
@@ -11266,13 +11321,19 @@ def admin_task_durations(request):
 # ---------------------------------------------------------------------------
 # Portal-admin: reusable Checklists
 #
-# A Checklist is authored once here (name + ordered items) and surfaced on a task
-# by linking it to one or more (task_name, project_type) pairs. UNIQUE on that pair
-# — a task can have at most one checklist; a second assignment is rejected here with a
-# clear error (not just at the DB level). Task names for the picker are sourced from the
-# hardcoded Residential template via utils.get_residential_template_task_names(). All
+# A Checklist is authored once here (name + ordered items) and surfaced on a task by
+# linking it to one or more TEMPLATE TASKS. A task can have at most one checklist; a
+# second assignment is rejected here with a clear error (not just at the DB level). All
 # mutations are Admin-only and log_activity(entity_type='Checklist'). Item CRUD lives
 # here (NOT on task detail); task detail is completion-only.
+#
+# SINCE 2.4 THE PICKER OFFERS BOTH PROJECT TYPES AND POSTS A TEMPLATE TASK, NOT A NAME.
+# It reads the ACTIVE TaskTemplate of each project type, so it cannot drift from what
+# activation actually builds, and one select carries the project type with the task —
+# the old pair of independent selects let an admin combine a Residential task name with
+# an OPEX project type and create a link that could never match anything. That the
+# Residential-only name list was the picker's whole vocabulary is why, before 2.4, zero
+# OPEX links existed: not a policy, just a list nobody had extended.
 #
 # R-7 SINCE 0.5: a Checklist is one numbered VERSION of a family. Items may be added,
 # reworded, reordered and deleted only while the version is a DRAFT; activating it
@@ -11286,10 +11347,84 @@ def admin_task_durations(request):
 # ---------------------------------------------------------------------------
 
 def _checklist_task_name_choices():
-    """Ordered (phase_name, task_name) pairs the admin may assign — from the Residential
-    template. Reported source: projects.utils.get_residential_template_task_names(), which
-    reads the single hardcoded PHASES structure shared with attach_residential_template()."""
-    return get_residential_template_task_names()
+    """The template tasks a checklist may be assigned to, grouped by project type.
+
+    Returns [(project_type, type_label, [{'pk','code','task_name','phase_name'}, ...])],
+    ordered by TaskTemplate.PROJECT_TYPE_CHOICES then by phase and task sort order. A
+    project type whose template has no active version contributes no group rather than an
+    empty one — there is nothing to assign to and an empty heading only invites a
+    bug report.
+
+    SOURCED FROM THE ACTIVE TaskTemplateTask ROWS OF EVERY PROJECT TYPE, which is the
+    2.4 change. It read Residential's names alone before, via
+    utils.get_residential_template_task_names(). That helper is NOT deleted and NOT
+    changed — it is the Gantt's desync guard's, which asserts the hardcoded Gantt
+    display maps against the Residential template and has nothing to do with checklists.
+    This module simply stops importing it. Nothing here is hardcoded per type: adding a
+    third project type with an active template adds a group without touching this
+    function.
+
+    `pk` is what the form posts and it is a WITHIN-REQUEST identifier only — resolved
+    back to a row in the same POST, never stored as the key. What gets stored is the FK,
+    and what gets matched is its `code`; see ChecklistTaskLink.
+    """
+    groups = []
+    for project_type, type_label in Project.PROJECT_TYPE_CHOICES:
+        template = resolve_active_task_template(project_type)
+        if template is None:
+            continue
+        tasks = []
+        for phase in template.phases.all():
+            for tt in phase.tasks.all():
+                tasks.append({
+                    'pk':         tt.pk,
+                    'code':       tt.code,
+                    'task_name':  tt.label,
+                    'phase_name': phase.label,
+                })
+        if tasks:
+            groups.append((project_type, type_label, tasks))
+    return groups
+
+
+def _resolve_checklist_link_target(request_post):
+    """Turn one link-add POST into the TaskTemplateTask it means, or None.
+
+    TWO ACCEPTED SHAPES, one current and one kept:
+      template_task=<pk>              — what the picker posts since 2.4.
+      task_name=<label>&project_type= — the pre-2.4 pair, resolved by looking the label
+                                        up in that type's active template.
+
+    The old shape is not deprecated-but-tolerated, it is resolved the same way and ends
+    at the same FK, so a post from an old form or a script creates a code-keyed link too.
+    A name that no active template contains resolves to None and is refused by the
+    caller, which is stricter than the old membership test only in that it now checks
+    against both types' live templates rather than one hardcoded list.
+    """
+    groups = _checklist_task_name_choices()
+
+    raw_pk = (request_post.get('template_task') or '').strip()
+    if raw_pk:
+        valid_pks = {t['pk'] for _type, _label, tasks in groups for t in tasks}
+        try:
+            pk = int(raw_pk)
+        except (TypeError, ValueError):
+            return None
+        if pk not in valid_pks:
+            return None
+        return TaskTemplateTask.objects.filter(pk=pk).first()
+
+    task_name    = (request_post.get('task_name') or '').strip()
+    project_type = (request_post.get('project_type') or '').strip()
+    if not task_name or not project_type:
+        return None
+    for group_type, _label, tasks in groups:
+        if group_type != project_type:
+            continue
+        for t in tasks:
+            if t['task_name'] == task_name:
+                return TaskTemplateTask.objects.filter(pk=t['pk']).first()
+    return None
 
 
 def _checklist_locked_redirect(request, checklist):
@@ -11364,7 +11499,9 @@ def admin_checklist_edit(request, checklist_id):
     forms are replaced with read-only rows (R-7), while the task links stay editable."""
     checklist = get_object_or_404(Checklist, pk=checklist_id)
     items = checklist.items.all()
-    links = checklist.task_links.all()
+    # select_related: the row template reads link.template_task.code to show which links
+    # are keyed and which are still name-only (2.4).
+    links = checklist.task_links.select_related('template_task').all()
 
     return render(request, 'projects/admin/checklist_edit.html', {
         'checklist':       checklist,
@@ -11376,8 +11513,10 @@ def admin_checklist_edit(request, checklist_id):
                              .filter(code=checklist.code)
                              .exclude(pk=checklist.pk)
                              .order_by('-version_no')),
+        # Grouped by project type since 2.4, and it carries the type — so the separate
+        # project_type select the template used to render is gone, and with it the
+        # mismatched pair it allowed.
         'task_name_pairs': _checklist_task_name_choices(),
-        'project_types':   Project.PROJECT_TYPE_CHOICES,
     })
 
 
@@ -11616,27 +11755,38 @@ def admin_checklist_item_move(request, checklist_id, item_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_link_add(request, checklist_id):
-    """Assign this Checklist to a (task_name, project_type) pair. Enforces the
-    one-checklist-per-task-name+type rule at this layer with a clear error before the DB
-    unique constraint is ever hit. Access: Admin only. POST only."""
+    """Assign this Checklist to a template task. Enforces the one-checklist-per-task rule
+    at this layer with a clear error before either DB constraint is hit. Access: Admin
+    only. POST only.
+
+    SINCE 2.4 THE LINK IS CREATED AGAINST THE TEMPLATE TASK. task_name and project_type
+    are still stored, but they are written by ChecklistTaskLink.save() from the FK rather
+    than taken from the request, so the row cannot name one task and point at another.
+    The POST may still carry the old (task_name, project_type) pair — see
+    `_resolve_checklist_link_target()` — and it lands on the same FK.
+
+    THE DUPLICATE CHECK IS BY CODE, NOT BY NAME. unique_together on the strings catches a
+    same-label collision, but two links can hold one `code` under two different labels
+    (v1's wording and v2's), and it is `code` the lookup matches on — so it is `code`
+    that has to be unique for an answer to be well defined. Checking it here is also the
+    only place that can say WHICH other checklist already holds it."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
-    task_name = request.POST.get('task_name', '').strip()
-    project_type = request.POST.get('project_type', '').strip()
-
-    valid_task_names = {name for _phase, name in _checklist_task_name_choices()}
-    valid_types = {value for value, _label in Project.PROJECT_TYPE_CHOICES}
-    if task_name not in valid_task_names or project_type not in valid_types:
-        messages.error(request, 'Please choose a valid task name and project type.')
+    template_task = _resolve_checklist_link_target(request.POST)
+    if template_task is None:
+        messages.error(request, 'Please choose a valid task from an active project template.')
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
-    # Uniqueness enforced here with a clear message — a second checklist on an already-linked
-    # (task_name, project_type) is rejected, never silently overwritten.
+    task_name    = template_task.label
+    project_type = template_task.phase.template.project_type
+
     existing = (ChecklistTaskLink.objects
                 .select_related('checklist')
-                .filter(task_name=task_name, project_type=project_type)
+                .filter(Q(template_task__code=template_task.code,
+                          template_task__phase__template__project_type=project_type)
+                        | Q(task_name=task_name, project_type=project_type))
                 .first())
     if existing is not None:
         if existing.checklist_id == checklist.pk:
@@ -11649,11 +11799,13 @@ def admin_checklist_link_add(request, checklist_id):
             )
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
+    # task_name/project_type are deliberately NOT passed: save() derives them from the FK.
     link = ChecklistTaskLink.objects.create(
-        checklist=checklist, task_name=task_name, project_type=project_type,
+        checklist=checklist, template_task=template_task,
     )
     log_activity(None, request.user.profile,
-                 f"Assigned checklist '{checklist.name}' to task '{task_name}' ({project_type})",
+                 f"Assigned checklist '{checklist.name}' to task '{task_name}' "
+                 f"({project_type}, template task {template_task.code})",
                  entity_type='Checklist', entity_id=checklist.pk)
     messages.success(request, f'Assigned to "{task_name}" ({project_type}).')
     return redirect('admin_checklist_edit', checklist_id=checklist_id)

@@ -160,6 +160,14 @@ editable only while it is a draft (R-7).
     <div class="flex items-center justify-between gap-2 py-2 border-b border-gray-100">
       <span class="text-sm text-gray-800">{{ link.task_name }}
         <span class="text-xs text-gray-400 ml-1">· {{ link.project_type }}</span>
+        {% comment %} A link with no template task is one the 2.4 backfill could not
+           resolve. It still works — through the name fallback — and saying so is
+           better than letting it look identical to a keyed link. {% endcomment %}
+        {% if link.template_task_id %}
+        <span class="text-xs text-gray-400 ml-1">· {{ link.template_task.code }}</span>
+        {% else %}
+        <span class="text-xs text-amber-600 ml-1" title="No template task — this link still matches by name, and detaches if the task is renamed.">· unkeyed</span>
+        {% endif %}
       </span>
       <form method="POST" action="{% url 'admin_checklist_link_delete' checklist.pk link.pk %}" class="inline"
             onsubmit="return confirm('Unassign this task?');">
@@ -171,24 +179,27 @@ editable only while it is a draft (R-7).
     <p class="text-sm text-gray-400 py-2">Not assigned to any task yet.</p>
     {% endfor %}
 
+    {% comment %} 2.4: ONE select, not two. The project type is a property of the chosen
+       task, not a separate answer — two independent selects let an admin pair a
+       Residential task name with an OPEX project type and save a link that could never
+       match a task. The option value is the template task's pk, resolved back to the row
+       in the same POST; what gets STORED is the FK, and what gets matched is its code.
+    {% endcomment %}
     <form method="POST" action="{% url 'admin_checklist_link_add' checklist.pk %}" class="mt-4 space-y-2">
       {% csrf_token %}
       <div>
-        <label class="block text-xs font-medium text-gray-500 mb-1">Task name</label>
-        <select name="task_name" required
+        <label class="block text-xs font-medium text-gray-500 mb-1">Task</label>
+        <select name="template_task" required
                 class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
           <option value="">Select a task…</option>
-          {% for phase_name, task_name in task_name_pairs %}
-          <option value="{{ task_name }}">{{ task_name }} — {{ phase_name }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div>
-        <label class="block text-xs font-medium text-gray-500 mb-1">Project type</label>
-        <select name="project_type" required
-                class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
-          {% for value, label in project_types %}
-          <option value="{{ value }}">{{ label }}</option>
+          {% for project_type, type_label, tasks in task_name_pairs %}
+          <optgroup label="{{ type_label }}">
+            {% for t in tasks %}
+            <option value="{{ t.pk }}">{{ t.task_name }} — {{ t.phase_name }}</option>
+            {% endfor %}
+          </optgroup>
+          {% empty %}
+          <option value="" disabled>No active project template to assign to</option>
           {% endfor %}
         </select>
       </div>
@@ -197,7 +208,8 @@ editable only while it is a draft (R-7).
       </button>
     </form>
     <p class="text-xs text-gray-400 mt-2">
-      Task names are sourced from the Residential project template. A task already assigned
+      Tasks are sourced from the ACTIVE task template of each project type, so the list
+      cannot drift from what project activation actually creates. A task already assigned
       to another checklist is rejected — unassign it there first.
     </p>
   </div>

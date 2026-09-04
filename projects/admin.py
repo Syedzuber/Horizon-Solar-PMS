@@ -309,13 +309,21 @@ class ChecklistItemInline(admin.TabularInline):
 
 
 class ChecklistTaskLinkInline(admin.TabularInline):
-    # NOT version content. The link records which checklist FAMILY is assigned to a task
-    # name; status records which version of it is live. Locking it to drafts would make
-    # a task's assignment un-editable the moment its checklist went live, and v1 and v2
-    # cannot both hold a link to the same task_name — unique_together forbids it.
+    # NOT version content. The link records which checklist FAMILY is assigned to a task;
+    # status records which version of it is live. Locking it to drafts would make a task's
+    # assignment un-editable the moment its checklist went live, and v1 and v2 cannot both
+    # hold a link to the same task — the uniqueness rules forbid it.
+    #
+    # 2.4: template_task IS THE FIELD TO FILL IN. task_name and project_type are shown
+    # read-only beside it because they are now derived — ChecklistTaskLink.save() writes
+    # them from the FK, so an editable copy here would only be a box whose value is
+    # overwritten on save. A row saved with no template_task keeps whatever strings it
+    # already had, which is what the backfill's unresolvable rows need.
     model = ChecklistTaskLink
     extra = 1
-    fields = ['task_name', 'project_type']
+    fields      = ['template_task', 'task_name', 'project_type']
+    readonly_fields = ['task_name', 'project_type']
+    autocomplete_fields = ['template_task']
 
 
 @admin.register(Checklist)
@@ -339,9 +347,25 @@ class ChecklistAdmin(admin.ModelAdmin):
 
 @admin.register(ChecklistTaskLink)
 class ChecklistTaskLinkAdmin(admin.ModelAdmin):
-    list_display = ['task_name', 'project_type', 'checklist']
-    list_filter  = ['project_type']
-    search_fields = ['task_name']
+    # `template_task_code` rather than the row itself: the code is what a lookup matches
+    # on across template versions, so it is the column that answers "which task is this
+    # checklist on". task_name/project_type stay visible and stay read-only — derived
+    # from the FK by save(), never typed.
+    list_display  = ['task_name', 'project_type', 'template_task_code', 'checklist']
+    list_filter   = ['project_type']
+    search_fields = ['task_name', 'template_task__code', 'template_task__label']
+    readonly_fields     = ['task_name', 'project_type']
+    autocomplete_fields = ['template_task']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related(
+            'template_task__phase__template', 'checklist')
+
+    @admin.display(description='Template task', ordering='template_task__code')
+    def template_task_code(self, obj):
+        # An em dash, not a blank: a link with no template task is the pre-2.4 shape
+        # still matching by name, and that is worth seeing in the list.
+        return obj.template_task.code if obj.template_task_id else '— (name only)'
 
 
 @admin.register(ChecklistItemCompletion)
