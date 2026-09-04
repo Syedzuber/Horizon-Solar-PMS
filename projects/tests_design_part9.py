@@ -23,6 +23,7 @@ Numbered VERIFICATION comments map to the session brief's verification list.
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
@@ -201,8 +202,16 @@ class ArkaGateTests(Part9Base):
         self.assertEqual(self.arka.head_verdict, ARKA_PENDING)
         self.assertEqual(self.a.status, DESIGN_AWAITING_HEAD_ARKA)
 
-    def test_05_cad_upload_refused_while_head_verdict_pending(self):
-        """VERIFICATION 5 — by direct POST, the whole point of the Part 3 gate move."""
+    def test_05_cad_upload_is_no_longer_refused_while_head_verdict_pending(self):
+        """WAS "refused while head_verdict pending" — INVERTED BY THE COMBINED-SUBMISSION
+        CHANGE, and kept rather than deleted so the reversal is on the record.
+
+        Part 9 moved the CAD gate from `verdict` to `head_verdict`; this test pinned that
+        an Arka passed by Design QC alone still refused the upload. The gate itself is now
+        gone — CAD travels with the Arka submission — so the assertion it makes is the
+        opposite one. What it still proves is that the refusal is not merely relocated:
+        the POST is rejected here only for the missing FILE, never for the verdict.
+        """
         self._login(self.qc)
         self._post('design_arka_approve', self.site)
 
@@ -210,9 +219,20 @@ class ArkaGateTests(Part9Base):
         response = self.client.post(
             reverse('design_artifact_upload', kwargs={'project_id': self.site.project_id}),
             {'kind': 'cad_zip'})
-        # Refused before storage is touched; no DesignFile row exists either way.
+        # Still no row — this POST carries no file — but the message says so, where it used
+        # to name the verdict. That difference is the whole change.
         self.assertEqual(self.attempt.design_files.count(), 0)
-        self.assertIn(response.status_code, (302, 403))
+        self.assertEqual(response.status_code, 302)
+        text = ' '.join(str(m) for m in get_messages(response.wsgi_request)).lower()
+        self.assertIn('choose a file', text)
+        # The removed helper's own refusals, asserted by their exact wording. A blunter
+        # test on the word "approval" would fail on gate 1's SUCCESS notice, which is
+        # still queued from the POST above and legitimately contains it.
+        for gone in ('cannot be uploaded until',
+                     'before uploading cad or boq',
+                     'can only be uploaded against an approved arka'):
+            self.assertNotIn(gone, text,
+                             'the verdict must no longer be a reason to refuse an upload')
 
     def test_06_head_approval_unlocks_and_returns_to_arka_submitted(self):
         """VERIFICATION 6."""
@@ -230,9 +250,12 @@ class ArkaGateTests(Part9Base):
         # note in design_views.
         self.assertEqual(self.a.status, DESIGN_ARKA_SUBMITTED)
 
-        # And the gate helper now admits the upload.
-        from .design_views import _require_approved_arka, _current_attempt
-        self.assertIsNotNone(_require_approved_arka(_current_attempt(self.a)))
+        # And both gates have now cleared. This used to assert through
+        # _require_approved_arka(), the upload gate; that helper is gone and upload no
+        # longer consults the verdict at all, so the assertion moves to _approved_arka(),
+        # which is what still decides whether the PACKAGE may complete.
+        from .design_views import _approved_arka, _current_attempt
+        self.assertIsNotNone(_approved_arka(_current_attempt(self.a)))
 
     def test_07a_dual_flag_holder_cannot_record_both_verdicts(self):
         """VERIFICATION 7, first half — settled decision 2, by direct POST."""

@@ -125,17 +125,19 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
     {% elif arka and arka.verdict == 'pending' %}
       <div class="small text-muted">
         Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) is with Design QC.
-        It then goes to the Design Head; CAD and BOQ unlock once <em>they</em> approve it.
+        It then goes to the Design Head. You can upload CAD and mark the BOQ complete
+        while you wait — neither is held up by the verdict any more.
       </div>
     {% elif arka and arka.verdict == 'approved' and arka.head_verdict == 'pending' %}
       {% comment %}
-      Half-way through the gates. Naming who holds it matters — otherwise the designer
-      chases the wrong person, or assumes the approval they can see is the one that
-      unlocks upload. It is not.
+      Half-way through the gates. Naming who holds it still matters — otherwise the
+      designer chases the wrong person. What it NO LONGER means is that anything of
+      theirs is blocked: CAD and BOQ stopped waiting on this verdict.
       {% endcomment %}
       <div class="small text-muted">
         Arka v{{ arka.version }} ({{ arka.capacity_kw }} kW) passed Design QC and is now
-        with the Design Head. CAD and BOQ unlock once they approve it.
+        with the Design Head. The package cannot complete until they approve it, but your
+        CAD and BOQ do not have to wait for that.
       </div>
     {% elif arka_approved %}
       <div class="small">
@@ -156,10 +158,17 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
 <div class="card shadow-sm mb-3">
   <div class="card-header bg-white py-2 fw-semibold small">2 · CAD &amp; attachments</div>
   <div class="card-body py-3">
-    {% if not arka_approved %}
+    {% comment %}
+    THE TEST IS `arka`, NOT `arka_approved`, AND THAT IS THE CHANGE ON THIS SCREEN.
+    Every uploaded file records the Arka version it was drawn against, so one has to
+    EXIST — but it no longer has to have been approved. The form is offered from the
+    moment the Arka is submitted, which is the point: designer and drawing arrive
+    together and the file no longer waits on two reviewers.
+    {% endcomment %}
+    {% if not arka %}
       <div class="alert alert-warning py-2 small mb-0">
-        CAD and BOQ files can only be uploaded once the current Arka is approved.
-        Uploading earlier guarantees rework against a layout that may still change.
+        Submit the Arka first. Every uploaded file is recorded against the Arka version
+        it was drawn from, so there has to be one — it does not have to be approved.
       </div>
     {% elif is_designer %}
       <form method="post" enctype="multipart/form-data"
@@ -192,6 +201,21 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
             <span class="ver-tag">Arka v{{ arka.version }}</span>. Re-uploading a kind
             creates the next version and supersedes the previous one.
           </div>
+          {% if not arka_approved %}
+            {% comment %}
+            Said HERE and not only in the panel above, because this is the moment the
+            designer takes the risk on. Nothing stands an uploaded CAD down if the Arka
+            it names is rejected — the file stays current against a superseded layout —
+            so the re-upload is theirs to remember.
+            {% endcomment %}
+            <div class="text-muted small mt-1">
+              <i class="bi bi-exclamation-triangle me-1"></i>
+              <span class="ver-tag">Arka v{{ arka.version }}</span> is still under review.
+              If it is rejected, this file stays on the site paired to a layout that has
+              been replaced — <strong>re-upload it against the new version yourself</strong>;
+              nothing removes it for you.
+            </div>
+          {% endif %}
           <div class="text-muted small mt-1">
             <i class="bi bi-file-earmark-zip me-1"></i>
             <strong>CAD (zip)</strong> must be a single .zip containing at least one PDF
@@ -235,8 +259,13 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
           Marked complete {{ attempt.boq_submitted_at|date:"d M Y H:i" }}
           by {{ attempt.boq_submitted_by.user.get_full_name|default:attempt.boq_submitted_by.user.username }}
         </span>
-      {% elif is_designer and arka_approved %}
+      {% elif is_designer %}
         {% comment %}
+        NO `arka_approved` TERM ANY MORE. The BOQ is assembled from the shared catalogue
+        and carries no reference to an Arka version — there is nothing for the layout's
+        approval to make stale — so it is offered whenever the designer has quantities to
+        record, including before an Arka has been submitted at all.
+
         The SECOND route to design_boq_complete — the picker's own button is the other.
         It carries the same optional remark field, so which button the designer happened
         to use does not decide whether their note is captured.
@@ -274,9 +303,15 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
     {% endif %}
 
     {% if not arka_approved %}
+      {% comment %}
+      This used to say the BOQ could not be marked complete until both gates had passed
+      the Arka. It can. What is still true — and is the only thing worth saying here — is
+      that a complete BOQ does not finish the PACKAGE on its own.
+      {% endcomment %}
       <div class="text-muted small mt-2">
-        The BOQ can only be marked complete once the current Arka has been approved by
-        <strong>both</strong> Design QC and the Design Head.
+        The BOQ can be marked complete at any time; it does not wait on the Arka. The
+        design package itself is only complete once the Arka is approved by
+        <strong>both</strong> Design QC and the Design Head and the CAD is uploaded.
       </div>
     {% endif %}
   </div>

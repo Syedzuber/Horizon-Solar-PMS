@@ -1368,19 +1368,33 @@ def design_mark_blocked(request, project_id):
 #
 # THE ONE RULE THIS SECTION EXISTS TO ENFORCE
 # -------------------------------------------
-# No CAD file and no BOQ submission may exist until the CURRENT Arka version has
-# verdict='approved', and every artifact records WHICH Arka version it was drawn
-# against (DesignFile.derived_from_arka, NOT NULL from Part 1).
+# Every CAD file records WHICH Arka version it was drawn against
+# (DesignFile.derived_from_arka, NOT NULL from Part 1).
 #
-# Both halves are enforced HERE, in the view, not by hiding a button: every write
-# endpoint below calls _require_approved_arka() before it touches storage or the
-# database, so a direct POST to a bare URL is refused exactly as a click would be.
-# Verified by direct POST — see the session's verification run.
+# THE SECOND HALF OF THAT RULE IS GONE. It used to read "and no CAD file and no BOQ
+# submission may exist until the current Arka is approved". Both halves of THAT are
+# now dropped, separately and for different reasons:
 #
-# WHY THE PAIRING MATTERS: CAD and BOQ both derive from the approved layout. A CAD
-# drawn against a superseded Arka is rework that QC has no way to detect once the
-# versions have moved on, so the version it was built from is recorded at write time
-# rather than inferred later from timestamps.
+#   CAD  may be uploaded alongside the Arka submission. The pairing survives — a CAD
+#        still names its Arka version — but the version no longer has to be approved.
+#        A designer holding a finished drawing while two reviewers work through the
+#        layout was queueing, not checking. _require_current_arka() is what is left.
+#
+#   BOQ  is no longer gated on the Arka at all. It never had an FK to an Arka version
+#        the way CAD does — the bill is built from the shared catalogue, and what this
+#        module records is a per-attempt COMPLETION STAMP, not a derivation. Gating a
+#        thing that does not derive from the layout on the layout's approval was the
+#        weaker half of the rule and it has been removed outright.
+#
+# Enforcement is still HERE, in the view, not by hiding a button: design_artifact_upload
+# calls _require_current_arka() before it touches storage, so a direct POST to a bare URL
+# is refused exactly as a click would be. design_boq_complete() calls neither, by design.
+#
+# WHY THE PAIRING STILL MATTERS: a CAD drawn against a superseded Arka is rework that QC
+# has no way to detect once the versions have moved on, so the version it was built from
+# is recorded at write time rather than inferred later from timestamps. Recording it is
+# now the ONLY protection — see the warning in _require_current_arka() about a CAD whose
+# Arka is rejected after upload.
 #
 # ATTEMPTS ARE OPENED LAZILY. Part 2 left `current_attempt_number` at 0 and created
 # no DesignAttempt rows, so the first Arka submission opens attempt 1
@@ -1443,36 +1457,40 @@ def _approved_arka(attempt):
     return None
 
 
-def _require_approved_arka(attempt):
-    """Return the fully approved current Arka, or raise ValueError with the message the
-    designer needs to see.
+def _require_current_arka(attempt):
+    """Return the CURRENT Arka whatever verdict it carries, or raise ValueError with the
+    message the designer needs to see.
 
-    Single chokepoint for settled decision 1. Every artifact write path calls this; none
-    of them re-derives the rule, so the call sites cannot drift.
+    REPLACES `_require_approved_arka()`, AND THE REPLACEMENT IS THE WHOLE POINT. The old
+    helper refused every artifact write until BOTH gates had passed the current Arka.
+    That rule is gone: a designer who has the CAD in hand at the moment they submit the
+    Arka may upload it in the same sitting rather than holding the file on their desk
+    until two reviewers get round to the layout. The waiting was never producing a better
+    drawing — it was producing a queue.
 
-    The messages name WHICH gate is outstanding, because "waiting for approval" is not
-    actionable when there are two approvers — the designer needs to know whether to chase
-    Design QC or the Design Head.
+    WHAT REMAINS IS THE PAIRING, NOT THE APPROVAL. `DesignFile.derived_from_arka` is still
+    NOT NULL, so an Arka version must EXIST for a CAD to record itself against, and this
+    helper is what guarantees one does. The recorded version is the current one at upload
+    time, exactly as before — only the verdict requirement is dropped.
+
+    WHAT THIS OPENS, said plainly rather than buried: a CAD may now be paired to an Arka
+    that is later rejected. Within one attempt a rejection is answered by a NEW ARKA
+    VERSION, not a new attempt, and nothing stands the already-uploaded CAD down when
+    that happens — so the designer, not the system, is now responsible for re-uploading a
+    drawing whose layout moved under it. `REDO_ARKA => REDO_CAD` in _posted_redo_scope()
+    does NOT cover this: that rule governs the QC rework loop, and an in-attempt Arka
+    rejection never reaches it. See the session report.
+
+    BOQ COMPLETION NO LONGER CALLS THIS AT ALL. It has no FK to an Arka version and never
+    did — see design_boq_complete().
     """
     if attempt is None:
         raise ValueError('no design attempt has been opened yet — submit an Arka first')
     arka = _current_arka(attempt)
     if arka is None:
-        raise ValueError('no Arka has been submitted yet. CAD and BOQ can only be '
-                         'uploaded against an approved Arka')
-    if arka.verdict == ARKA_PENDING:
-        raise ValueError(f'Arka v{arka.version} is still awaiting the Design QC review. '
-                         f'CAD and BOQ cannot be uploaded until it is approved')
-    if arka.verdict == ARKA_REJECTED:
-        raise ValueError(f'Arka v{arka.version} was rejected at Design QC. Submit a new '
-                         f'Arka version and have it approved before uploading CAD or BOQ')
-    if arka.head_verdict == ARKA_PENDING:
-        raise ValueError(f'Arka v{arka.version} passed Design QC but is still awaiting '
-                         f'the Design Head\'s approval. CAD and BOQ cannot be uploaded '
-                         f'until the Head has approved it')
-    if arka.head_verdict == ARKA_REJECTED:
-        raise ValueError(f'Arka v{arka.version} was rejected by the Design Head. Submit a '
-                         f'new Arka version and have it approved before uploading CAD or BOQ')
+        raise ValueError('no Arka has been submitted yet. A CAD records the Arka version '
+                         'it was drawn against, so the Arka has to be submitted first — '
+                         'it does not have to be approved')
     return arka
 
 
@@ -1965,9 +1983,11 @@ def _head_verdict_target(request, project):
 def design_arka_approve(request, project_id):
     """GATE 1 — DESIGN QC approves the current Arka version.
 
-    Moves the site to `awaiting_head_arka`. It does NOT unlock CAD and BOQ upload: that
-    now needs head_verdict='approved' (see _approved_arka), which is the Part 9 change to
-    the Part 3 gate.
+    Moves the site to `awaiting_head_arka`. It unlocks nothing, and neither does gate 2
+    any more — CAD travels with the Arka submission and the BOQ is not gated on the Arka
+    at all. What `head_verdict='approved'` still decides is whether the PACKAGE may
+    complete (see _approved_arka, still consulted by
+    _maybe_advance_to_artifacts_uploaded).
     """
     project = _opex_site(project_id)
     assignment_pre = getattr(project, 'design_assignment', None)
@@ -2007,9 +2027,13 @@ def design_arka_approve(request, project_id):
                      entity_type='ArkaSubmission', entity_id=arka.pk,
                      action_code='design_arka_qc_approved')
 
+    # NAMES WHO HOLDS THE ARKA, AND NOTHING ELSE. It used to end "...before the designer
+    # can upload CAD or enter the BOQ", which is no longer true of either: CAD travels
+    # with the Arka submission and the BOQ is not gated on the Arka at all. What the
+    # Head's approval still decides is whether the PACKAGE can complete.
     messages.success(request, f'{project.project_id}: Arka v{arka.version} passed Design '
                               f'QC — it now needs the Design Head\'s approval before the '
-                              f'designer can upload CAD or enter the BOQ.')
+                              f'design package can be completed.')
     return redirect('design_head_review', project_id=project.project_id)
 
 
@@ -2084,10 +2108,14 @@ def design_arka_reject(request, project_id):
 def design_arka_head_approve(request, project_id):
     """GATE 2 — the DESIGN HEAD approves an Arka that Design QC has already passed.
 
-    THIS is the approval that unlocks CAD and BOQ upload. Status returns to
-    `arka_submitted`, which carries head_verdict='approved' and therefore classifies as
-    "Arka approved, artifacts incomplete" — see the Part 9 note at the top of this module
-    for why no new status is invented for that state.
+    THIS IS NO LONGER THE APPROVAL THAT UNLOCKS UPLOAD — nothing is locked behind it any
+    more. It is the approval the PACKAGE waits on: _maybe_advance_to_artifacts_uploaded()
+    is evaluated at the end of this view precisely because the CAD and the BOQ may already
+    have arrived, in which case this verdict is the event that completes the package.
+
+    Status returns to `arka_submitted`, which carries head_verdict='approved' and therefore
+    classifies as "Arka approved, artifacts incomplete" — see the Part 9 note at the top of
+    this module for why no new status is invented for that state.
     """
     project = _opex_site(project_id)
     assignment_pre = getattr(project, 'design_assignment', None)
@@ -2131,8 +2159,12 @@ def design_arka_head_approve(request, project_id):
         _maybe_advance_to_artifacts_uploaded(
             assignment, _current_attempt(assignment), profile)
 
+    # As on gate 1: this no longer "unlocks" anything the designer was waiting on. It
+    # completes the layout, and it is what lets the package advance once the artifacts
+    # are in — which they may already be.
     messages.success(request, f'{project.project_id}: Arka v{arka.version} approved — '
-                              f'the designer can now upload CAD and enter the BOQ.')
+                              f'the design package can complete once the CAD and BOQ '
+                              f'are in.')
     return redirect('design_head_review', project_id=project.project_id)
 
 
@@ -2216,13 +2248,15 @@ def design_arka_head_reject(request, project_id):
 def design_artifact_upload(request, project_id):
     """The allocated DESIGNER uploads a CAD (pdf/dwg) or optional BOQ (xlsx/pdf) file.
 
-    REFUSED unless the current Arka is approved — settled decision 1, enforced here and
-    not by the template. A direct POST to this URL with an unapproved Arka gets the same
-    refusal a hidden button would have prevented.
+    REFUSED only when no Arka has been submitted yet — the approval requirement is gone,
+    the existence requirement is not. A direct POST to this URL against an attempt with
+    no Arka gets the same refusal a hidden button would have prevented; a POST against a
+    PENDING or even a REJECTED Arka is now accepted, which is the change.
 
-    PAIRING: derived_from_arka is set to the value _require_approved_arka() returns,
-    which is the CURRENT approved version. It is never read off an older submission and
-    never inferred from timestamps.
+    PAIRING: derived_from_arka is set to the value _require_current_arka() returns, which
+    is the CURRENT version whatever its verdict. It is never read off an older submission
+    and never inferred from timestamps. Nothing re-points it if that version is later
+    superseded — see the warning on the helper.
 
     VERSIONING is per (attempt, kind). Re-uploading a kind creates version N+1, flips
     the previous row to is_current=False and sets its superseded_by to the new row —
@@ -2254,7 +2288,7 @@ def design_artifact_upload(request, project_id):
 
     attempt = _current_attempt(assignment)
     try:
-        arka = _require_approved_arka(attempt)
+        arka = _require_current_arka(attempt)
     except ValueError as exc:
         return _back(f'{project.project_id}: {exc}.')
 
@@ -2353,8 +2387,30 @@ def design_boq_complete(request, project_id):
     All that happens here is that the ATTEMPT records boq_submitted_at /
     boq_submitted_by — the design workflow's own note that this step is done.
 
-    REFUSED unless the current Arka is approved, for the same reason CAD is: a BOQ
-    priced off an unapproved layout is rework.
+    NOT GATED ON THE ARKA IN ANY WAY, WHICH IS THE CHANGE. This used to refuse unless the
+    current Arka was approved at both gates, "for the same reason CAD is". The reason did
+    not actually transfer, and that is why the gate is gone rather than relaxed:
+
+        CAD DERIVES FROM A LAYOUT VERSION. DesignFile.derived_from_arka is a real NOT NULL
+        FK, so a CAD is meaningfully "the drawing for Arka v3" and a superseded v3 makes it
+        stale. THE BOQ IS NOT. It is assembled from the shared BOQItemMaster catalogue
+        against BOQ / BOQItem rows that are project-scoped and carry no Arka reference at
+        all — there is no version for it to be paired to and never was. What this view
+        writes is a per-attempt COMPLETION STAMP, not a derivation.
+
+        So the old rule was refusing a BOQ that could not go stale, on the grounds that a
+        CAD can. A designer who knows the bill of quantities can now record it while the
+        layout is still with the reviewers.
+
+    NO ATTEMPT IS REQUIRED EITHER. The stamp lives on DesignAttempt, and before the first
+    Arka submission there is no attempt to stamp — so this view opens attempt 1 lazily,
+    the same way design_arka_submit() does and through the same helper. It opens it only
+    AFTER every refusal below has passed, so a rejected completion never leaves a stray
+    attempt row behind on a site that has not started design.
+
+    WHAT THIS DOES NOT CHANGE, deliberately: _maybe_advance_to_artifacts_uploaded() still
+    demands an APPROVED Arka before the package is complete. BOQ may now outrun the Arka;
+    it cannot carry the site past the gate on its own.
 
     The "at least one quantity" guard reads the existing BOQ and mirrors the check
     `boq_detail`'s own submit branch applies (views.py — `boq_quantity__gt=0`), so this
@@ -2373,13 +2429,11 @@ def design_boq_complete(request, project_id):
         (messages.success if ok else messages.error)(request, msg)
         return redirect('design_site_workspace', project_id=project.project_id)
 
+    # No Arka gate. `attempt` may legitimately be None here — see the docstring — so
+    # every test below has to tolerate that rather than assume a row exists.
     attempt = _current_attempt(assignment)
-    try:
-        _require_approved_arka(attempt)
-    except ValueError as exc:
-        return _back(f'{project.project_id}: {exc}.')
 
-    if attempt.boq_submitted_at is not None:
+    if attempt is not None and attempt.boq_submitted_at is not None:
         return _back(f'{project.project_id}: the BOQ for attempt '
                      f'{attempt.attempt_number} is already marked complete.')
 
@@ -2417,6 +2471,10 @@ def design_boq_complete(request, project_id):
 
     profile = request.user.profile
     with transaction.atomic():
+        # LAST, not first: every refusal above has already returned, so this only ever
+        # runs on a completion that is actually going to be recorded.
+        if attempt is None:
+            attempt = _open_first_attempt(assignment)
         attempt.boq_submitted_at = timezone.now()
         attempt.boq_submitted_by = profile
         attempt.boq_remarks      = boq_remarks
