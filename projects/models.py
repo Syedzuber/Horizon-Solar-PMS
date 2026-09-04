@@ -1666,8 +1666,12 @@ ACTOR_ROLE_SYSTEM = 'system'
 # database constraint in this session: prompt 0.3 retrofits six existing paths
 # that do not collect a remark today and never have, so a NOT NULL column would
 # 500 every task status change on the first deploy. Enforcement therefore lives
-# in record_transition(), driven by this set. Phase 2 adds SUBJECT_TASK when
-# two-step completion ships and the UI actually collects the text.
+# in record_transition(), driven by this set. SUBJECT_TASK IS STILL PENDING, AND
+# TWO-STEP COMPLETION DID NOT UNBLOCK IT. Prompt 2.1 shipped the collection of
+# remarks for OPEX only; the residential path still moves tasks with no remark at
+# all, as do OPEX blocks, unblocks and the milestone sync. Adding SUBJECT_TASK now
+# would 500 every one of those. It goes in when the RESIDENTIAL path collects a
+# remark too — not when any path does.
 REMARK_REQUIRED_SUBJECT_TYPES = frozenset()
 
 

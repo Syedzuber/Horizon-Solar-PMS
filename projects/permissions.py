@@ -1006,11 +1006,14 @@ def project_managers(project):
 # make the PM's dual membership invisible and would make widening one side silently
 # widen the other.
 #
-# THE PM IS IN BOTH SETS, ON PURPOSE. On a small site the PM is often the only
-# person present, and a submission nobody can approve is a task nobody can finish.
-# The audit trail is what keeps this honest rather than a predicate: submitted_by
-# and approved_by are stored separately, so a PM who signed off their own work
-# shows as the same name twice and is visible to anyone reading the row.
+# THE PM IS IN BOTH SETS, BUT NOT FOR THE SAME TASK. A PM may submit a task and a
+# PM may approve one; the same PM may not do both to the same task. That refusal
+# is NOT here — it lives in `task_approve`, because it is a fact about one task's
+# current submission (which changes as the task is rejected and resubmitted by
+# different people) rather than about who holds authority on the project. See the
+# note at the check itself for why keeping the two apart matters: this predicate
+# is also what the screen asks to decide whether to offer a verdict at all, and it
+# is shared with REJECT, where withdrawing your own submission is legitimate.
 #
 # SCOPE IS NOT DECIDED HERE. Both helpers answer "does this person hold the
 # authority", not "is this an OPEX task" — the OPEX restriction is a property of
@@ -1057,9 +1060,9 @@ def user_can_approve_task(user, project):
     it replaces the visibility term HERE and nowhere else.
 
     No `task` argument: approval authority is a property of the project and the
-    person, identical for every task on it. The per-task question — is this thing
-    actually submitted and awaiting a verdict — is state, not permission, and is
-    asked by the view.
+    person, identical for every task on it. The per-task questions — is this thing
+    actually submitted, and is the person asking the one who submitted it — are
+    state, not permission, and are asked by `task_approve`.
     """
     profile = getattr(user, 'profile', None)
     if profile is None:

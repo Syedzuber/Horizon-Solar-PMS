@@ -4770,6 +4770,38 @@ def task_approve(request, project_id, task_id):
         messages.warning(request, f"'{task.task_name}' has already been approved.")
         return _approval_response(request, project, task)
 
+    # NOBODY APPROVES THEIR OWN SUBMISSION. This is the rule the whole feature
+    # exists for: a completion signed by one person is the one-step completion 2.1
+    # replaced, wearing two columns. Holding PM or QA/QC authority does not exempt
+    # anyone — on a small site the PM is frequently both the person who did the
+    # work and the only manager present, which is exactly the case where a
+    # self-signature would be silent and routine.
+    #
+    # WHY HERE AND NOT IN `user_can_approve_task()`. That predicate answers "does
+    # this person hold approval authority on this project", which is a property of
+    # the person and the project and is identical for every task on it — it is also
+    # what the screen asks to decide whether the panel offers a verdict at all.
+    # This is a property of ONE TASK's current submission, and it changes as the
+    # task is submitted, rejected and resubmitted by different people. Folding it
+    # into the predicate would give the predicate a task argument it does not
+    # otherwise need, and would silently apply the rule to REJECT as well.
+    #
+    # REJECT IS DELIBERATELY NOT COVERED. Rejecting your own submission is
+    # withdrawing it — it takes the work back rather than passing it — and the
+    # two-signature rule has nothing to say about that.
+    #
+    # `submitted_by` is nullable (SET_NULL on a departed user), and a null compares
+    # False here: if the submitter's account is gone there is nobody for the
+    # approver to be, and the task should not become unapprovable as a side effect.
+    if task.submitted_by is not None and task.submitted_by == profile:
+        messages.error(
+            request,
+            f"You submitted '{task.task_name}' yourself — an OPEX task must be "
+            f"approved by someone other than the person who submitted it. Ask "
+            f"another project manager or a QA/QC reviewer to sign it off."
+        )
+        return _approval_response(request, project, task)
+
     remarks = request.POST.get('approval_remarks', '').strip()
     if not remarks:
         messages.error(

@@ -429,21 +429,34 @@ class SubmitTests(TwoStepFixture):
 # ---------------------------------------------------------------------------
 
 class ApproveTests(TwoStepFixture):
+    """THE PM SUBMITS AND THE QA/QC HOLDER APPROVES, throughout this class.
+
+    That split is not fixture taste — a task submitted by the PM CANNOT be
+    approved by the PM (`test_the_submitter_may_not_approve_their_own_task`), so
+    an approval driven by `self.pm` here would be testing the self-approval
+    refusal by accident and would tell us nothing about approval itself.
+    """
 
     def _submitted(self):
         task = self._in_progress()
         self._post('task_submit_for_approval', {'submission_remarks': 'work done'})
         task.refresh_from_db()
         self.assertIsNotNone(task.submitted_at)
+        self.assertEqual(task.submitted_by, self.pm)
         return task
+
+    def _approve(self, remarks='ok', profile=None):
+        """Approve as somebody other than the submitter, by default."""
+        return self._post('task_approve', {'approval_remarks': remarks},
+                          profile=profile or self.qaqc)
 
     def test_approval_completes_the_task_through_the_status_function(self):
         task = self._submitted()
-        self._post('task_approve', {'approval_remarks': 'Inspected on site.'})
+        self._approve('Inspected on site.')
         task.refresh_from_db()
         self.assertEqual(task.status, Task.DONE)
         self.assertIsNotNone(task.completed_at)
-        self.assertEqual(task.approved_by, self.pm)
+        self.assertEqual(task.approved_by, self.qaqc)
         self.assertIsNotNone(task.approved_at)
         self.assertEqual(task.approval_remarks, 'Inspected on site.')
 
@@ -452,7 +465,7 @@ class ApproveTests(TwoStepFixture):
         the status itself, so the Done transition is written by the same code that
         writes every other one — once, with the actor and the from-status."""
         task = self._submitted()
-        self._post('task_approve', {'approval_remarks': 'ok'})
+        self._approve()
         rows = [r for r in self._ledger(task) if r.to_status == Task.DONE]
         self.assertEqual(len(rows), 1, 'the Done transition was not written exactly once')
         self.assertEqual(rows[0].from_status, Task.IN_PROGRESS)
@@ -461,7 +474,7 @@ class ApproveTests(TwoStepFixture):
 
     def test_an_unsubmitted_task_cannot_be_approved(self):
         task = self._in_progress()
-        response = self._post('task_approve', {'approval_remarks': 'ok'})
+        response = self._approve()
         task.refresh_from_db()
         self.assertIsNone(task.approved_at)
         self.assertEqual(task.status, Task.IN_PROGRESS)
@@ -469,7 +482,7 @@ class ApproveTests(TwoStepFixture):
 
     def test_approval_remarks_are_required_and_nothing_is_written_without_them(self):
         task = self._submitted()
-        response = self._post('task_approve', {'approval_remarks': ''})
+        response = self._approve(remarks='')
         task.refresh_from_db()
         self.assertIsNone(task.approved_at)
         self.assertEqual(task.status, Task.IN_PROGRESS)
@@ -509,15 +522,56 @@ class ApproveTests(TwoStepFixture):
 
     def test_an_approved_task_is_not_approved_twice(self):
         task = self._submitted()
-        self._post('task_approve', {'approval_remarks': 'first'})
+        self._approve('first')
         task.refresh_from_db()
         first_at = task.approved_at
 
-        self._post('task_approve', {'approval_remarks': 'second'}, profile=self.qaqc)
+        self._approve('second')
         task.refresh_from_db()
         self.assertEqual(task.approved_at, first_at)
-        self.assertEqual(task.approved_by, self.pm)
+        self.assertEqual(task.approved_by, self.qaqc)
         self.assertEqual(task.approval_remarks, 'first')
+
+    def test_the_submitter_may_not_approve_their_own_task(self):
+        """A task submitted by the PM is refused approval BY THAT PM, even though
+        the PM holds approval authority on the project and `user_can_approve_task()`
+        returns True for them.
+
+        This is the rule the feature exists for: one person signing both halves is
+        the one-step completion 2.1 replaced, wearing two columns. The assertion
+        that the SAME person may approve a DIFFERENT person's submission
+        (`test_a_qaqc_holder_who_can_see_the_project_may_approve`, and the
+        `self._approve()` in every test above) is what makes this a self-approval
+        refusal rather than an authority refusal.
+        """
+        task = self._submitted()
+        self.assertEqual(task.submitted_by, self.pm)
+        self.assertTrue(user_can_approve_task(self.pm.user, self.site),
+                        'the PM must hold approval authority, or this test proves '
+                        'nothing about SELF-approval')
+
+        response = self._post('task_approve',
+                              {'approval_remarks': 'Looks fine to me.'},
+                              profile=self.pm)
+
+        task.refresh_from_db()
+        self.assertIsNone(task.approved_at, 'a submitter approved their own task')
+        self.assertIsNone(task.approved_by)
+        self.assertEqual(task.status, Task.IN_PROGRESS)
+        self.assertEqual(task.approval_remarks, '',
+                         'a refused self-approval wrote its remarks anyway')
+        # The submission survives — it is refused, not withdrawn.
+        self.assertIsNotNone(task.submitted_at)
+
+        joined = ' '.join(self._messages(response)).lower()
+        self.assertIn('submitted', joined)
+        self.assertIn('yourself', joined)
+
+        # And somebody else can still sign it off.
+        self._approve('Checked.')
+        task.refresh_from_db()
+        self.assertEqual(task.status, Task.DONE)
+        self.assertEqual(task.approved_by, self.qaqc)
 
     def test_an_approved_task_may_then_go_to_done_from_the_ordinary_screen(self):
         """The gate is `approved_at`, not "came through task_approve". Once a task
@@ -589,7 +643,9 @@ class RejectTests(TwoStepFixture):
         # The rejection's text does not survive into the new round.
         self.assertEqual(task.approval_remarks, '')
 
-        self._post('task_approve', {'approval_remarks': 'Verified.'})
+        # Approved by someone other than the submitter — see ApproveTests.
+        self._post('task_approve', {'approval_remarks': 'Verified.'},
+                   profile=self.qaqc)
         task.refresh_from_db()
         self.assertEqual(task.status, Task.DONE)
 
@@ -609,7 +665,7 @@ class RejectTests(TwoStepFixture):
 
     def test_an_approved_task_cannot_be_rejected(self):
         task = self._submitted()
-        self._post('task_approve', {'approval_remarks': 'ok'})
+        self._post('task_approve', {'approval_remarks': 'ok'}, profile=self.qaqc)
         response = self._post('task_reject', {'approval_remarks': 'changed my mind'})
         task.refresh_from_db()
         self.assertEqual(task.status, Task.DONE)
