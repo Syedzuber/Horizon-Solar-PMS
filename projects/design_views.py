@@ -387,6 +387,15 @@ def design_my_sites(request):
                                           and assignment.status != DESIGN_RELEASED),
             'awaiting':    pending is not None,
             'is_blocked':  assignment.status == DESIGN_SURVEY_RETURNED,
+            # Read ONLY by the Design Hold control in my_sites.html, which needs
+            # "finished" as well as "already on hold" — `is_blocked` is the latter
+            # and a released row is neither. Deliberately not the dashboard's
+            # `can_mark_blocked`: that flag also folds in the designer identity and
+            # two pre-allocation statuses, and this screen's rows are the designer's
+            # own allocated sites, so importing it here would carry conditions this
+            # list has already answered. The duplication between the two screens is
+            # a known finding for the consolidation session.
+            'is_released': assignment.status == DESIGN_RELEASED,
             'revisions':   assignment.due_date_commitments.count() - 1,
         })
 
@@ -1304,6 +1313,32 @@ def design_mark_blocked(request, project_id):
 
     if assignment.status == DESIGN_SURVEY_RETURNED:
         return _deny(request, f'{project.project_id} is already on Design Hold.',
+                     'design_my_sites')
+
+    # A RELEASED DESIGN IS NOT RETURNABLE TO HOLD THROUGH THIS ENDPOINT.
+    #
+    # Design Hold means "the survey I was given is inadequate, so my clock stops".
+    # After release that sentence is not true of anything: the design is finished,
+    # the site is downstream in procurement (`ProcurementBatch` forms from released
+    # sites), and there is no clock left to stop. What this endpoint would do to a
+    # released row is not a hold — it is an undo of the release, wearing a hold's
+    # name, with none of a release-reversal's consequences handled.
+    #
+    # THE TEMPLATES WERE THE ONLY THING PREVENTING THIS, AND ONE OF THEM DID NOT.
+    # `_dashboard_design_actions.html` gates on `can_mark_blocked`, which excludes
+    # DESIGN_RELEASED; `my_sites.html` gated on `not row.is_blocked`, which is only
+    # "not currently on hold" and is TRUE of a released row — so the button rendered
+    # and the post succeeded. A rule enforced only by which button a screen draws is
+    # not enforced; this is the rule, and the template fix beside it is now the
+    # second line of defence rather than the first.
+    #
+    # NOT A GENERAL RELEASE LOCK. This closes one route on one endpoint. Whether a
+    # released design may be reopened AT ALL, and by whom and with what unwinding of
+    # the downstream, is a separate question this does not answer or foreclose.
+    if assignment.status == DESIGN_RELEASED:
+        return _deny(request,
+                     f'{project.project_id} has already been released and cannot be '
+                     f'placed on Design Hold through this action.',
                      'design_my_sites')
 
     reason = (request.POST.get('reason') or '').strip()

@@ -100,7 +100,22 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
         </button>
       {% endif %}
 
-      {% if not row.is_blocked %}
+      {% comment %}
+      `not row.is_blocked` ALONE WAS NOT ENOUGH. `is_blocked` means "currently on
+      hold" and nothing else, so a RELEASED row satisfied it and drew this button —
+      and `design_mark_blocked` accepted the post, turning a finished design back
+      into a hold. The view now refuses that outright; this second test stops the
+      screen offering the control in the first place.
+
+      The dashboard partial asks one flag, `can_mark_blocked`, built in
+      design_views.py and excluding four statuses. THIS SCREEN DOES NOT SHARE IT:
+      its rows come from `design_my_sites`, which builds a different dict, so
+      reading that flag here means adding it to that builder too. Left as two
+      per-template tests deliberately — recorded as a finding for the consolidation
+      session already scheduled ahead of the Design derivation hook, rather than
+      widened into this fix.
+      {% endcomment %}
+      {% if not row.is_blocked and not row.is_released %}
         <button class="btn btn-sm btn-outline-danger" type="button"
                 data-bs-toggle="collapse" data-bs-target="#blk{{ row.site.pk }}">
           Place on Design Hold
@@ -132,7 +147,8 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
     </div>
     {% endif %}
 
-    {% if not row.is_blocked %}
+    {# Same pair of tests as the button above — see the note there. #}
+    {% if not row.is_blocked and not row.is_released %}
     <div class="collapse mt-2" id="blk{{ row.site.pk }}">
       <form method="post" action="{% url 'design_mark_blocked' project_id=row.site.project_id %}"
             class="d-flex flex-wrap align-items-center gap-2">

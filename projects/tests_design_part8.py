@@ -19,9 +19,11 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
+from django.contrib.messages import get_messages
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import Client, TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from .design_metrics import (
@@ -36,10 +38,11 @@ from .design_views import (
     _maybe_advance_to_artifacts_uploaded,
 )
 from .models import (
+    ActivityLog,
     Program, Project, UserProfile, DesignAssignment, DueDateCommitment, DesignAttempt,
     ArkaSubmission, DesignFile,
     DESIGN_AWAITING_ALLOCATION, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
-    DESIGN_ARTIFACTS_UPLOADED, DESIGN_RELEASED,
+    DESIGN_ARTIFACTS_UPLOADED, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
     DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     ARKA_APPROVED,
 )
@@ -513,3 +516,93 @@ class ProgressionRuleTests(Part8Base):
 
     def test_progression_kinds_excludes_legacy(self):
         self.assertEqual(tuple(PROGRESSION_CAD_KINDS), (DESIGN_FILE_CAD_ZIP,))
+
+
+class ReleasedDesignCannotBeHeldTests(Part8Base):
+    """`design_mark_blocked` refuses a RELEASED assignment.
+
+    Design Hold means "the survey I was given is inadequate, so my clock stops".
+    After release there is no clock to stop and the site is already downstream in
+    procurement — what the endpoint would do to a released row is an undo of the
+    release wearing a hold's name, with none of a reversal's consequences handled.
+
+    UNTIL THIS FIX THE ONLY THING STOPPING IT WAS A TEMPLATE, and one of the two
+    templates that draw the control got it wrong: `my_sites.html` gated on
+    `not row.is_blocked`, which is "not CURRENTLY on hold" and is true of a released
+    row, so the button rendered and the post went through. The refusal now lives in
+    the view, which is the only place it can actually hold.
+
+    This is the first test in the suite to drive `design_mark_blocked` over HTTP at
+    all — the endpoint had no coverage, which is how the gap survived.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.site, self.assignment = self._site('P8-REL')
+        self.assignment.assigned_to = self.designer
+        self.assignment.status = DESIGN_RELEASED
+        self.assignment.save()
+
+        self.client = Client()
+        self.client.force_login(self.designer.user)
+        self.url = reverse('design_mark_blocked',
+                           kwargs={'project_id': self.site.project_id})
+
+    def _logs(self):
+        return ActivityLog.objects.filter(
+            entity_type='DesignAssignment', entity_id=self.assignment.pk)
+
+    def test_a_released_assignment_is_refused_the_hold(self):
+        before = self._logs().count()
+
+        response = self.client.post(self.url, {'reason': 'survey was wrong all along'})
+
+        # Refused, and said so — _deny redirects with a message rather than 403,
+        # which is this module's shape for "you may act here, but not on this row".
+        self.assertEqual(response.status_code, 302)
+        joined = ' '.join(
+            str(m) for m in get_messages(response.wsgi_request)).lower()
+        self.assertIn('already been released', joined)
+        self.assertIn('design hold', joined)
+
+        # The status did not move.
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.status, DESIGN_RELEASED,
+                         'a released design was returned to Design Hold')
+        self.assertNotEqual(self.assignment.status, DESIGN_SURVEY_RETURNED)
+
+        # Nothing was written for this attempt — not the hold columns, and not the
+        # feed. A refused act is not an event.
+        self.assertIsNone(self.assignment.survey_returned_at)
+        self.assertIsNone(self.assignment.survey_returned_by)
+        self.assertEqual(self.assignment.survey_return_reason, '')
+        self.assertEqual(self._logs().count(), before,
+                         'a refused hold wrote an ActivityLog row')
+        self.assertFalse(
+            self._logs().filter(action_code='design_blocked').exists(),
+            'a refused hold logged itself as a hold')
+
+    def test_the_same_designer_may_still_hold_a_live_site(self):
+        """The refusal is about the STATUS, not about the person or the endpoint.
+
+        Without this, "released is refused" and "this designer cannot hold anything"
+        look identical from the outside — the same shape tests_mirror_readonly.py's
+        control test exists for.
+        """
+        live_site, live = self._site('P8-LIVE')
+        live.assigned_to = self.designer
+        live.status = DESIGN_IN_DESIGN
+        live.save()
+
+        response = self.client.post(
+            reverse('design_mark_blocked', kwargs={'project_id': live_site.project_id}),
+            {'reason': 'no roof dimensions in the survey'})
+        self.assertEqual(response.status_code, 302)
+
+        live.refresh_from_db()
+        self.assertEqual(live.status, DESIGN_SURVEY_RETURNED)
+        self.assertEqual(live.survey_return_reason, 'no roof dimensions in the survey')
+        self.assertTrue(
+            ActivityLog.objects.filter(
+                entity_type='DesignAssignment', entity_id=live.pk,
+                action_code='design_blocked').exists())
