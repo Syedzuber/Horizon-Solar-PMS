@@ -994,3 +994,77 @@ def project_managers(project):
             seen.add(coord.pk)
             managers.append(coord)
     return managers
+
+
+# ---------------------------------------------------------------------------
+# Two-step task completion (2.1) — OPEX only
+#
+# TWO AUTHORITIES, TWO PREDICATES, AND THEY MUST NOT COLLAPSE INTO ONE. The whole
+# point of a two-step completion is that the hand that does the work is not the
+# hand that signs it off, so "may submit" and "may approve" are separate questions
+# with deliberately different answers. A single `user_can_act_on_approval()` would
+# make the PM's dual membership invisible and would make widening one side silently
+# widen the other.
+#
+# THE PM IS IN BOTH SETS, ON PURPOSE. On a small site the PM is often the only
+# person present, and a submission nobody can approve is a task nobody can finish.
+# The audit trail is what keeps this honest rather than a predicate: submitted_by
+# and approved_by are stored separately, so a PM who signed off their own work
+# shows as the same name twice and is visible to anyone reading the row.
+#
+# SCOPE IS NOT DECIDED HERE. Both helpers answer "does this person hold the
+# authority", not "is this an OPEX task" — the OPEX restriction is a property of
+# the RULE, lives with the rung in `_apply_task_status_change()` and with the view
+# gates, and is checked before either of these is called. Mixing it in would give
+# two places to read the scope from.
+# ---------------------------------------------------------------------------
+
+def user_can_submit_task_for_approval(user, task, project):
+    """
+    Return True if `user` may submit `task` on `project` for approval.
+
+    The assigned engineer OR PM-level authority on the project. `task.assigned_to`
+    and not the ROLE, because submitting is a claim about work this specific person
+    did — a second site engineer holding the same role did not do it and has nothing
+    to attest to. That is the same user-level rule `task_detail_status_update`
+    already applies to the status control on the very same screen.
+
+    PM authority comes through user_can_manage_project(), so a Project Coordinator
+    is admitted alongside the assigned PM exactly as everywhere else in this module.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if task.assigned_to is not None and task.assigned_to == profile:
+        return True
+    return user_can_manage_project(user, project)
+
+
+def user_can_approve_task(user, project):
+    """
+    Return True if `user` may approve or reject a submitted task on `project`.
+
+    PM-level authority on the project, OR the QA/QC capability flag plus visibility
+    of the project.
+
+    WHY `is_qaqc` IS PAIRED WITH VISIBILITY AND NOT USED ALONE. UserProfile.is_qaqc
+    is a PORTFOLIO-WIDE boolean — there is no per-project QA/QC assignment anywhere
+    in the schema today. Read on its own it would let one QA/QC holder sign off work
+    on every site in the company, including sites they cannot open. Anding it with
+    user_can_view_project() scopes the capability to the projects the person already
+    reaches by their role, which is the closest thing to "QA/QC on that project" the
+    data model can currently express. When a per-project QA/QC assignment arrives,
+    it replaces the visibility term HERE and nowhere else.
+
+    No `task` argument: approval authority is a property of the project and the
+    person, identical for every task on it. The per-task question — is this thing
+    actually submitted and awaiting a verdict — is state, not permission, and is
+    asked by the view.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if user_can_manage_project(user, project):
+        return True
+    return bool(profile.is_qaqc) and user_can_view_project(user, project)
+

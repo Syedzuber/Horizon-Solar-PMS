@@ -443,6 +443,52 @@ class Task(models.Model):
         on_delete=models.SET_NULL,
         related_name='tasks',
     )
+
+    # TWO-STEP COMPLETION, OPEX ONLY (2.1). Six columns, one for each half of a
+    # two-party handshake: the person who did the work SUBMITS it, and a second
+    # person APPROVES it. Only the approval half unlocks Done, and only for an
+    # OPEX, non-mirror task — see the rung in `_apply_task_status_change()`.
+    #
+    # WHY ON TASK AND NOT A SIDE TABLE. A task is submitted at most once at a time
+    # and approved at most once, ever: reject CLEARS the submission rather than
+    # appending to it, so there is no history to hold. The history that does matter
+    # is already kept — every submit, approve and reject writes a StatusTransition
+    # and an ActivityLog row, which is where "who rejected this three times" is
+    # answered. A side table would be a second, thinner copy of that ledger.
+    #
+    # ALL SIX ARE NULLABLE AT THE DB LEVEL, DELIBERATELY. "Remarks are required
+    # once submitted" is a rule about the ACTION, not about the row: every task in
+    # the database predates this feature and has neither, and the OPEX template
+    # seeds 23 more per site the same way. A CHECK constraint expressing
+    # `submitted_at IS NULL OR submission_remarks <> ''` would be true of every
+    # existing row and would still buy nothing, because the only writer is the
+    # submit view — which refuses an empty remark before it writes anything. The
+    # requirement is enforced in the view, and that is the whole of it.
+    #
+    # RESIDENTIAL NEVER TOUCHES THESE. They stay null for the life of a residential
+    # task and no residential surface reads them; the completion path there is
+    # unchanged (2.1 §6).
+    submitted_by         = models.ForeignKey(
+        'UserProfile',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,  # Same reasoning as assigned_to: a departure must not delete work
+        related_name='submitted_tasks',
+    )
+    submitted_at         = models.DateTimeField(null=True, blank=True)
+    # Blank until submitted; required BY THE SUBMIT VIEW at the moment of submission.
+    submission_remarks   = models.TextField(blank=True, default='')
+    approved_by          = models.ForeignKey(
+        'UserProfile',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,
+        related_name='approved_tasks',
+    )
+    approved_at          = models.DateTimeField(null=True, blank=True)
+    # Carries BOTH verdicts' text: an approval note when approved_at is set, and the
+    # rejection reason when it is not. One column because a task holds one open
+    # verdict at a time, and the ActivityLog line beside it names which it was.
+    approval_remarks     = models.TextField(blank=True, default='')
+
     created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -450,6 +496,18 @@ class Task(models.Model):
 
     def __str__(self):
         return self.task_name
+
+    @property
+    def is_awaiting_approval(self):
+        """True while a submission is outstanding: submitted and not yet approved.
+
+        Read by the task-detail screen to decide which of the three buttons to
+        offer. It is NOT an authority check and NOT the Done gate — the gate is
+        `approved_at`, asked directly in `_apply_task_status_change()`, because a
+        derived property in the refusal ladder would be one more place the rule
+        could be read from and therefore one more place it could drift.
+        """
+        return self.submitted_at is not None and self.approved_at is None
 
     @property
     def active_attachment_count(self):

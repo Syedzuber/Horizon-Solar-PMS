@@ -180,6 +180,12 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),              # PM only
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',        views.task_status_update,        name='task_status_update'),        # Assigned role or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/detail-status/', views.task_detail_status_update, name='task_detail_status_update'), # Assigned user only
+    # Two-step completion (2.1) — OPEX only, POST only. The scope is enforced in the
+    # views (and, for the completion itself, in _apply_task_status_change); these are
+    # ordinary task URLs and a residential task_id reaching one is refused there.
+    path('projects/<str:project_id>/tasks/<int:task_id>/submit-approval/', views.task_submit_for_approval, name='task_submit_for_approval'), # Assigned user or PM
+    path('projects/<str:project_id>/tasks/<int:task_id>/approve/',         views.task_approve,             name='task_approve'),             # PM or is_qaqc
+    path('projects/<str:project_id>/tasks/<int:task_id>/reject/',          views.task_reject,              name='task_reject'),              # PM or is_qaqc
     path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),        # PM only
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only

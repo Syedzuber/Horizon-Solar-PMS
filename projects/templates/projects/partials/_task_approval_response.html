@@ -1,0 +1,15 @@
+{% comment %}
+HTMX response for the three 2.1 approval actions. Swaps the panel into
+#taskApprovalBlock, refreshes the status control out of band, and surfaces the
+view's flash inline.
+
+THE STATUS CONTROL IS RE-RENDERED HERE FOR ONE REASON: approving moves the task
+to Done. Without the out-of-band swap the select beside the panel would still
+read 'In Progress' until the next full page load, which is the one place on this
+screen where two elements can contradict each other about the same row.
+{% endcomment %}
+{% include 'projects/partials/_task_approval.html' %}
+<div id="taskStatusBlock" hx-swap-oob="true">
+  {% include 'projects/partials/_task_detail_status.html' %}
+</div>
+{% include 'projects/partials/_hx_messages.html' %}

@@ -341,21 +341,36 @@ class MirrorReadOnlyContract:
 
         Without this, "mirrors are refused" and "this OPEX site is frozen" look
         identical from the outside.
+
+        THE CONTROL MOVE IS NOT-STARTED -> IN PROGRESS, AND WAS DONE UNTIL 2.1.
+        Two-step completion added a SECOND rung below the mirror one: an OPEX
+        non-mirror task now needs an approval before it may reach Done
+        (`_apply_task_status_change()` rung 1, tests_two_step_completion.py). So
+        Done stopped being a move that distinguishes a mirror from a non-mirror on
+        an OPEX site — both are refused, for different reasons — and a control
+        that cannot tell the two apart is not a control.
+
+        WHAT THIS TEST IS FOR IS UNCHANGED and so is its strength: the claim is
+        "the mirror refusal is scoped to the FLAG, not to the project", and any
+        move the non-mirror task is allowed to make proves it. In Progress is that
+        move, it is one the mirror is equally refused (asserted directly by
+        `test_every_transition_the_table_allows_is_refused_on_a_mirror`, which
+        includes this pair), and it is untouched by 2.1.
         """
         task = self._control_task()
-        self._post(task, {'status': Task.DONE})
+        self._post(task, {'status': Task.IN_PROGRESS, 'due_date': '2026-12-31'})
         task.refresh_from_db()
-        self.assertEqual(task.status, Task.DONE,
+        self.assertEqual(task.status, Task.IN_PROGRESS,
                          'the refusal leaked onto a non-mirror task')
-        self.assertIsNotNone(task.completed_at)
 
     def test_a_non_mirror_task_still_writes_its_ledger_row(self):
+        """Same control move, and the same 2.1 note as above applies."""
         task = self._control_task()
-        self._post(task, {'status': Task.DONE})
+        self._post(task, {'status': Task.IN_PROGRESS, 'due_date': '2026-12-31'})
         rows = self._ledger(task)
         self.assertEqual(len(rows), 1,
                          'the ordinary path stopped writing its ledger row')
-        self.assertEqual(rows[0].to_status, Task.DONE)
+        self.assertEqual(rows[0].to_status, Task.IN_PROGRESS)
 
     # -- 6. above the table, not inside it -----------------------------------
 

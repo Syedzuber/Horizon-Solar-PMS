@@ -1,0 +1,137 @@
+{% comment %}
+Two-step completion panel (2.1) — OPEX only. Swapped into #taskApprovalBlock by
+HTMX; also included on the initial full-page render of task_detail.
+
+Expected context, all of it built by _task_approval_context() in views.py:
+  show_approval_panel, can_submit_task, can_approve_task, task, project
+
+THE PANEL DECIDES NOTHING. Every question it asks has already been answered by
+the view — `show_approval_panel` carries the OPEX-and-not-a-mirror scope,
+`can_submit_task` / `can_approve_task` carry the two authorities. What is left
+here is which STATE the task is in, which is a fact about the row and readable
+straight off it. A template that re-derived any of the above would be a second
+copy of a rule the server also enforces, and the two would drift.
+
+Three states, and they are mutually exclusive:
+  approved                 -> a completed task; show who signed it off
+  submitted, not approved  -> the approver sees Approve/Reject; everyone else
+                              sees that it is waiting and on whom
+  neither                  -> the assignee (or PM) sees the submit form
+{% endcomment %}
+{% if show_approval_panel %}
+  <div class="card shadow-sm mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>Approval</strong>
+      {% if task.approved_at %}
+        <span class="badge bg-success">Approved</span>
+      {% elif task.submitted_at %}
+        <span class="badge bg-warning text-dark">Awaiting approval</span>
+      {% else %}
+        <span class="badge bg-secondary">Not submitted</span>
+      {% endif %}
+    </div>
+    <div class="card-body">
+
+      {% if task.approved_at %}
+        {# ── Signed off. Read-only from here; reopening a Done task is not in 2.1. ── #}
+        <div class="row g-3">
+          <div class="col-md-6">
+            <small class="text-muted d-block">Submitted by</small>
+            <span>{% if task.submitted_by %}{{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% else %}—{% endif %}</span>
+            <div class="text-muted small">{{ task.submitted_at|default:"—" }}</div>
+            {% if task.submission_remarks %}
+              <div class="mt-1">{{ task.submission_remarks|linebreaksbr }}</div>
+            {% endif %}
+          </div>
+          <div class="col-md-6">
+            <small class="text-muted d-block">Approved by</small>
+            <span>{% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}</span>
+            <div class="text-muted small">{{ task.approved_at }}</div>
+            {% if task.approval_remarks %}
+              <div class="mt-1">{{ task.approval_remarks|linebreaksbr }}</div>
+            {% endif %}
+          </div>
+        </div>
+
+      {% elif task.submitted_at %}
+        {# ── Submitted, awaiting a verdict. ── #}
+        <div class="mb-3">
+          <small class="text-muted d-block">Submitted by</small>
+          <span>{% if task.submitted_by %}{{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% else %}—{% endif %}</span>
+          <div class="text-muted small">{{ task.submitted_at }}</div>
+          {% if task.submission_remarks %}
+            <div class="mt-1">{{ task.submission_remarks|linebreaksbr }}</div>
+          {% endif %}
+        </div>
+
+        {% if can_approve_task %}
+          {% comment %}
+          One textarea, two buttons: `approval_remarks` is required by BOTH the
+          approve and the reject view, and asking for it twice on one screen would
+          only invite the two boxes to disagree. `formaction` sends it to whichever
+          endpoint was pressed.
+          {% endcomment %}
+          <form method="post"
+                action="{% url 'task_approve' project.project_id task.pk %}"
+                hx-post="{% url 'task_approve' project.project_id task.pk %}"
+                hx-target="#taskApprovalBlock" hx-swap="innerHTML">
+            {% csrf_token %}
+            <div class="mb-2">
+              <label class="form-label small text-muted" for="approvalRemarks">Remarks (required)</label>
+              <textarea class="form-control form-control-sm" id="approvalRemarks"
+                        name="approval_remarks" rows="2"
+                        placeholder="What you checked, or what needs redoing"></textarea>
+            </div>
+            <div class="d-flex gap-2">
+              <button type="submit" class="btn btn-brand btn-sm">Approve &amp; complete</button>
+              <button type="submit" class="btn btn-outline-danger btn-sm"
+                      formaction="{% url 'task_reject' project.project_id task.pk %}"
+                      hx-post="{% url 'task_reject' project.project_id task.pk %}"
+                      hx-target="#taskApprovalBlock" hx-swap="innerHTML">Reject</button>
+            </div>
+          </form>
+        {% else %}
+          <p class="text-muted small mb-0">
+            Waiting on the project manager or QA/QC to approve this work.
+          </p>
+        {% endif %}
+
+      {% else %}
+        {# ── Not yet submitted. ── #}
+        {% if can_submit_task %}
+          {% if task.status == 'In Progress' %}
+            {% if task.approval_remarks %}
+              {# Survives a rejection: the submission was cleared, the reason was not. #}
+              <div class="alert alert-warning py-2 small">
+                <strong>Sent back:</strong> {{ task.approval_remarks|linebreaksbr }}
+              </div>
+            {% endif %}
+            <form method="post"
+                  action="{% url 'task_submit_for_approval' project.project_id task.pk %}"
+                  hx-post="{% url 'task_submit_for_approval' project.project_id task.pk %}"
+                  hx-target="#taskApprovalBlock" hx-swap="innerHTML">
+              {% csrf_token %}
+              <div class="mb-2">
+                <label class="form-label small text-muted" for="submissionRemarks">What was done (required)</label>
+                <textarea class="form-control form-control-sm" id="submissionRemarks"
+                          name="submission_remarks" rows="2"
+                          placeholder="Describe the completed work"></textarea>
+              </div>
+              <button type="submit" class="btn btn-brand btn-sm">Submit for approval</button>
+            </form>
+          {% else %}
+            <p class="text-muted small mb-0">
+              This task must be In Progress before it can be submitted for approval.
+            </p>
+          {% endif %}
+        {% else %}
+          <p class="text-muted small mb-0">
+            This task is completed in two steps: the assignee submits it, then the
+            project manager or QA/QC approves it.
+          </p>
+        {% endif %}
+      {% endif %}
+
+    </div>
+  </div>
+{% endif %}

@@ -51,6 +51,11 @@
   </div>
 </div>
 
+{# ── Two-step approval (2.1) — renders only for an OPEX, non-mirror task ── #}
+<div id="taskApprovalBlock">
+  {% include 'projects/partials/_task_approval.html' %}
+</div>
+
 {# ── Attachments section ──────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

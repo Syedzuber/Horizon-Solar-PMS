@@ -57,6 +57,9 @@ from .permissions import (
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
+    # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
+    # section header in permissions.py.
+    user_can_submit_task_for_approval, user_can_approve_task,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -3902,6 +3905,51 @@ def _render_task_status_hx(request, project, task):
     })
 
 
+def _task_approval_context(request, project, task):
+    """The context the two-step approval panel needs, on the full page render and on
+    the HTMX swap alike.
+
+    ONE BUILDER, TWO CALLERS - the same reason `_checklist_context()` exists. When
+    the panel is rendered by `task_detail` and re-rendered by the three approval
+    views, a divergence between the two would show a person a button they are not
+    allowed to press (or hide one they are) depending only on how they got there.
+
+    `show_approval_panel` carries the OPEX-and-not-a-mirror scope so the template
+    never asks it: a template that tests `project.project_type == 'OPEX'` inline is
+    a third place the scope of this feature is written down.
+    """
+    profile = getattr(request.user, 'profile', None)
+    eligible = project.project_type == 'OPEX' and not task.is_mirror
+    return {
+        'show_approval_panel': eligible,
+        # Both are False for an ineligible task, so a stray include renders nothing
+        # actionable rather than an unguarded form.
+        'can_submit_task':  eligible and profile is not None
+                            and user_can_submit_task_for_approval(request.user, task, project),
+        'can_approve_task': eligible and profile is not None
+                            and user_can_approve_task(request.user, project),
+    }
+
+
+def _render_task_approval_hx(request, project, task):
+    """Render the HTMX response for the three approval actions (2.1).
+
+    Swaps the approval panel AND, out of band, the task-detail status control: an
+    approval moves the task to Done, and a status select still reading 'In Progress'
+    beside a panel saying the task is approved would be two answers to one question
+    on the same screen.
+    """
+    ctx = {
+        'project':             project,
+        'task':                task,
+        'is_assignee':         task.assigned_to is not None
+                               and task.assigned_to == getattr(request.user, 'profile', None),
+        'task_status_choices': Task.STATUS_CHOICES,
+    }
+    ctx.update(_task_approval_context(request, project, task))
+    return render(request, 'projects/partials/_task_approval_response.html', ctx)
+
+
 def _render_attachments_hx(request, project, task):
     """Render the HTMX attachment-list response (#7 upload / #8 delete). Uses the
     same is_deleted=False filter the task-detail page uses so the swapped list is
@@ -4059,6 +4107,13 @@ _TASK_STATUS_REFUSED            = 'refused'
 _TASK_STATUS_NEEDS_BLOCK_REASON = 'needs_block_reason'
 
 
+class _ApprovalRolledBack(Exception):
+    """Internal control flow for `task_approve`: raised to abort its transaction when
+    `_apply_task_status_change()` refuses the completion, so the approval columns are
+    not left written against a task that never reached Done. Never escapes that view
+    and is never raised anywhere else."""
+
+
 def _apply_task_status_change(task, new_status, profile, request, project):
     """
     Apply a user-initiated change to a Task's status: validation, the field writes,
@@ -4132,6 +4187,45 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     valid_statuses = {s[0] for s in Task.STATUS_CHOICES}
     if new_status not in valid_statuses:
         messages.error(request, 'Invalid status value.')
+        return _TASK_STATUS_REFUSED
+
+    # AN OPEX TASK IS FINISHED BY TWO PEOPLE, NOT ONE. Rung 1 of the refusal ladder
+    # (2.1). A direct request to move an OPEX, non-mirror task to Done is refused
+    # unless somebody has already approved it — `approved_at` is the gate and the
+    # only gate. The submit -> approve -> Done path reaches Done through this same
+    # function, having set `approved_at` first, so it passes this rung rather than
+    # going around it.
+    #
+    # WHY BELOW THE MIRROR RUNG AND NOT MERGED WITH IT. They refuse different things
+    # for different reasons and must stay separable. Rung 0 says "no human writes
+    # this task's status, ever, whatever the status" — a statement about the ROW.
+    # This rung says "this particular move needs a second signature first" — a
+    # statement about the TRANSITION, and one a person can satisfy by going and
+    # getting the signature. A mirror never reaches here and its refusal message is
+    # unchanged; an OPEX mirror is refused as a mirror, which is the more specific
+    # and more useful thing to tell someone.
+    #
+    # WHY NOT IN THE TRANSITION TABLE. The table is keyed on (from_status, to_status)
+    # and knows nothing about the project or the row's approval state. Encoding this
+    # there would mean a second table for OPEX, and then two tables to keep in step.
+    #
+    # RESIDENTIAL IS UNTOUCHED, BY THE FIRST CLAUSE. A residential task still goes
+    # to Done in one move by the person holding it, exactly as it did before this
+    # rung existed (2.1 §6). CAPEX likewise: the rule was scoped to OPEX and reads
+    # the project type rather than "not Residential", so a CAPEX site keeps today's
+    # behaviour until someone decides otherwise on purpose.
+    #
+    # NOTHING IS WRITTEN ON REFUSAL, same as rung 0 — this sits above the inline
+    # due_date update below, so a refused completion leaves the row alone.
+    if (new_status == Task.DONE
+            and project.project_type == 'OPEX'
+            and task.approved_at is None):
+        messages.error(
+            request,
+            f"'{task.task_name}' cannot be marked Done directly — an OPEX task must "
+            f"be submitted for approval and approved by the project manager or QA/QC "
+            f"before it can be completed."
+        )
         return _TASK_STATUS_REFUSED
 
     # State machine: defines allowed next states for each current state.
@@ -4454,6 +4548,359 @@ def task_detail_status_update(request, project_id, task_id):
         return _render_task_status_hx(request, project, task)
 
     return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+
+# ---------------------------------------------------------------------------
+# Two-step task completion (2.1) - OPEX only
+#
+# Three views for three acts: submit, approve, reject. They share the preconditions
+# below through `_approval_preconditions()` and share NOTHING with the residential
+# completion path, which is unchanged and does not reach any of this.
+#
+# THE COMPLETION ITSELF STILL GOES THROUGH `_apply_task_status_change()`.
+# `task_approve` writes approved_by/approved_at and then ASKS for Done like any
+# other caller; it does not set the status itself. That is what keeps the rung
+# honest - the approval is the key, not a bypass, so the transition table, the
+# ledger row, the ActivityLog line and the downstream milestone sync all still run
+# exactly once and in the one place they have always run (R-18).
+#
+# WHY NOT ONE VIEW WITH AN `action` PARAMETER. The three differ in who may call
+# them (submit: the engineer or the PM; approve/reject: the PM or QA/QC), in what
+# they require (submission_remarks vs approval_remarks) and in what they write. A
+# single view would branch on all three of those in sequence and its permission
+# check would have to re-derive which act it was mid-body - which is exactly the
+# shape that lets a widened branch leak authority to a neighbouring one.
+# ---------------------------------------------------------------------------
+
+def _approval_preconditions(request, task, project):
+    """Refuse anything about `task` that is not eligible for the approval workflow
+    AT ALL, before any per-act state question is asked.
+
+    Returns True when the task is eligible; otherwise emits the user-facing message
+    and returns False. Shared by all three approval views so the two refusals are
+    worded once.
+
+    TWO REFUSALS, IN THIS ORDER, MIRRORING THE STATUS LADDER:
+
+      mirror   - a mirror's status is written by the object it follows, so there is
+                 nothing for a person to submit or sign off. This is the same rule
+                 rung 0 of `_apply_task_status_change()` states, said here because
+                 submit and reject never reach that function (neither changes the
+                 status) and would otherwise be an unguarded way to write approval
+                 columns onto a row no human may touch.
+
+      not OPEX - the whole feature is scoped to OPEX (2.1 6). A residential or
+                 CAPEX task has no approval step, so these endpoints are not merely
+                 useless there, they are wrong: writing submitted_at onto a
+                 residential task would put a row into a state nothing reads and
+                 nothing can clear.
+    """
+    if task.is_mirror:
+        messages.error(
+            request,
+            f"'{task.task_name}' is a mirror task - its status is derived from the "
+            f"workspace that owns the work, so there is nothing to submit or approve."
+        )
+        return False
+    if project.project_type != 'OPEX':
+        messages.error(
+            request,
+            'Two-step approval applies to OPEX sites only. This task is completed '
+            'directly by the person it is assigned to.'
+        )
+        return False
+    return True
+
+
+def _approval_response(request, project, task):
+    """The shared tail of all three approval views: the HTMX partial or a redirect.
+
+    The task is refreshed first because every write above went through
+    `filter().update()`, which leaves the in-memory copy stale - the same reason
+    the two status views refresh before rendering their rows.
+    """
+    task.refresh_from_db()
+    if _is_hx(request):
+        return _render_task_approval_hx(request, project, task)
+    return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+
+@login_required
+def task_submit_for_approval(request, project_id, task_id):
+    """
+    Submit an OPEX task for approval. Records who submitted it, when, and what they
+    said about it; the task's STATUS DOES NOT MOVE and stays In Progress (2.1 3).
+
+    WHY THE STATUS DOES NOT MOVE. "Submitted" is not a fifth status and adding one
+    would have been the larger change by far: Task.STATUS_CHOICES is read by the
+    transition table, by both status screens, by the CEO daily report's four
+    partitioning columns and by a dozen dashboard aggregates, none of which would
+    know where to put it. Submission is a FACT ABOUT the task recorded beside its
+    status, which is why it lives in columns and not in the status vocabulary - and
+    why `not_started + in_progress + completed + blocked == tasks_assigned` still
+    holds on the daily report for a task sitting submitted-not-approved.
+
+    Access: the assigned engineer, or PM-level authority on the project
+    (user_can_submit_task_for_approval). POST only.
+    """
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    if not user_can_submit_task_for_approval(request.user, task, project):
+        return HttpResponseForbidden()
+
+    if not _approval_preconditions(request, task, project):
+        return _approval_response(request, project, task)
+
+    # Already signed off - there is nothing left to submit, and re-submitting would
+    # overwrite the submission the approval was granted against.
+    if task.approved_at is not None:
+        messages.error(request, f"'{task.task_name}' has already been approved.")
+        return _approval_response(request, project, task)
+
+    # Idempotence, stated rather than assumed: a second submit while one is
+    # outstanding is refused, so submitted_at keeps naming the moment the work was
+    # first offered and a double-click cannot quietly reset the clock on it.
+    if task.submitted_at is not None:
+        messages.warning(request, f"'{task.task_name}' is already awaiting approval.")
+        return _approval_response(request, project, task)
+
+    # The task must be underway. Submitting work that has not started is a claim
+    # about nothing, and a Blocked task's outstanding issue has to be resolved
+    # before the work it blocks can be offered for sign-off.
+    if task.status != Task.IN_PROGRESS:
+        messages.error(
+            request,
+            f"Only a task that is In Progress can be submitted for approval - "
+            f"'{task.task_name}' is {task.status}."
+        )
+        return _approval_response(request, project, task)
+
+    # REQUIRED ONCE SUBMITTED, ENFORCED HERE AND NOT BY THE DATABASE (see the field
+    # comment on Task.submission_remarks). Refused BEFORE any write, so a submission
+    # with no remark leaves no trace at all.
+    remarks = request.POST.get('submission_remarks', '').strip()
+    if not remarks:
+        messages.error(
+            request,
+            'Please describe the work being submitted before submitting it for approval.'
+        )
+        return _approval_response(request, project, task)
+
+    Task.objects.filter(pk=task.pk).update(
+        submitted_by=profile,
+        submitted_at=timezone.now(),
+        submission_remarks=remarks,
+        # A resubmission after a rejection must not inherit the rejection's text.
+        approval_remarks='',
+    )
+    # ActivityLog and NOT a StatusTransition, deliberately. The ledger records
+    # STATUS CHANGES (R-2) and the status did not change; a row reading
+    # 'In Progress -> In Progress' would be a transition that never happened, and
+    # would mislead every reader that pairs from- and to-status. The feed is the
+    # right home for "something happened to this task".
+    log_activity(
+        project, profile,
+        f"Submitted for approval: {task.task_name}",
+        entity_type='Task', entity_id=task.pk,
+        action_code='task_submitted_for_approval',
+    )
+    messages.success(request, f"'{task.task_name}' submitted for approval.")
+    return _approval_response(request, project, task)
+
+
+@login_required
+def task_approve(request, project_id, task_id):
+    """
+    Approve a submitted OPEX task and complete it. Writes approved_by/approved_at
+    and THEN asks `_apply_task_status_change()` for Done (2.1 4) - the approval is
+    what satisfies rung 1, and the completion still happens in the one place task
+    completions happen.
+
+    THE PAIR IS ATOMIC. The approval columns and the status change commit together
+    or not at all: if the status function refuses for any reason the transition
+    table still refuses for - a Blocked task, say - the approval is rolled back with
+    it. Otherwise a refused completion would leave the task approved and therefore
+    completable later by anyone, which is the two-step rule defeated by its own
+    implementation.
+
+    Access: PM-level authority on the project, or the QA/QC capability with sight of
+    it (user_can_approve_task). POST only.
+    """
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    if not user_can_approve_task(request.user, project):
+        return HttpResponseForbidden()
+
+    if not _approval_preconditions(request, task, project):
+        return _approval_response(request, project, task)
+
+    # NOTHING IS APPROVED THAT WAS NOT SUBMITTED. This is the half of the handshake
+    # that makes it one: without it an approver could sign off work nobody has
+    # claimed to have done, and `submitted_by` would be null on a completed task.
+    if task.submitted_at is None:
+        messages.error(
+            request,
+            f"'{task.task_name}' has not been submitted for approval yet."
+        )
+        return _approval_response(request, project, task)
+
+    if task.approved_at is not None:
+        messages.warning(request, f"'{task.task_name}' has already been approved.")
+        return _approval_response(request, project, task)
+
+    remarks = request.POST.get('approval_remarks', '').strip()
+    if not remarks:
+        messages.error(
+            request,
+            'Please record your approval remarks before approving this task.'
+        )
+        return _approval_response(request, project, task)
+
+    # The status function reads `task.approved_at` off the instance it is handed, so
+    # the in-memory copy is updated alongside the row - a refresh_from_db() here
+    # would cost a query to learn what we just wrote.
+    approved_at = timezone.now()
+    try:
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(
+                approved_by=profile,
+                approved_at=approved_at,
+                approval_remarks=remarks,
+            )
+            task.approved_by = profile
+            task.approved_at = approved_at
+            task.approval_remarks = remarks
+
+            outcome = _apply_task_status_change(
+                task, Task.DONE, profile, request, project,
+            )
+            if outcome != _TASK_STATUS_APPLIED:
+                # The helper has already told the user why. Undo the approval by
+                # unwinding the transaction; its message survives, because
+                # `messages` is not part of it.
+                raise _ApprovalRolledBack
+    except _ApprovalRolledBack:
+        return _approval_response(request, project, task)
+
+    log_activity(
+        project, profile,
+        f"Approved and completed: {task.task_name}",
+        entity_type='Task', entity_id=task.pk, action_code='task_approved',
+    )
+    messages.success(request, f"'{task.task_name}' approved and marked Done.")
+    return _approval_response(request, project, task)
+
+
+@login_required
+def task_reject(request, project_id, task_id):
+    """
+    Reject a submitted OPEX task. Clears the submission so the engineer can act on
+    the remarks and submit again; the task returns to (in practice, remains) In
+    Progress (2.1 5).
+
+    "RETURNS TO IN PROGRESS" IS A NO-OP TODAY AND THE CODE SAYS SO ANYWAY. A task
+    can only be rejected while it is submitted-and-unapproved, and submission
+    requires In Progress and does not move it - so a rejected task is already In
+    Progress every time. The branch below is kept because the invariant it protects
+    is the one the rule states, not the one the current call graph happens to
+    produce, and if a later phase lets a submitted task be blocked and then rejected
+    it will move it back rather than silently leaving it Blocked.
+
+    The rejection reason is written to `approval_remarks` and the approval columns
+    are left null - a rejected task has no approver, which is what keeps
+    `approved_at` usable as the Done gate.
+
+    Access: PM-level authority on the project, or QA/QC with sight of it - the same
+    people who may approve. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    if not user_can_approve_task(request.user, project):
+        return HttpResponseForbidden()
+
+    if not _approval_preconditions(request, task, project):
+        return _approval_response(request, project, task)
+
+    if task.submitted_at is None:
+        messages.error(
+            request,
+            f"'{task.task_name}' has not been submitted for approval, so there is "
+            f"nothing to reject."
+        )
+        return _approval_response(request, project, task)
+
+    # An approved task is done. Reopening it is a different act with different
+    # consequences (a completed task feeds progress bars and payment triggers) and
+    # is not in this prompt's remit.
+    if task.approved_at is not None:
+        messages.error(
+            request,
+            f"'{task.task_name}' has already been approved and cannot be rejected."
+        )
+        return _approval_response(request, project, task)
+
+    remarks = request.POST.get('approval_remarks', '').strip()
+    if not remarks:
+        messages.error(request, 'Please state why the work is being rejected.')
+        return _approval_response(request, project, task)
+
+    Task.objects.filter(pk=task.pk).update(
+        submitted_by=None,
+        submitted_at=None,
+        # The engineer's own account of the work goes with the submission it
+        # belonged to; leaving it would attach last round's description to next
+        # round's submission.
+        submission_remarks='',
+        approval_remarks=remarks,
+    )
+    task.refresh_from_db()
+
+    # Almost always already true - see the docstring. Routed through the chokepoint
+    # rather than written directly, so that if it ever does fire it is a status
+    # change with a ledger row like every other (R-18).
+    if task.status != Task.IN_PROGRESS:
+        _apply_task_status_change(task, Task.IN_PROGRESS, profile, request, project)
+
+    log_activity(
+        project, profile,
+        f"Rejected submission: {task.task_name} - {remarks}",
+        entity_type='Task', entity_id=task.pk, action_code='task_rejected',
+    )
+    messages.warning(request, f"'{task.task_name}' sent back to the assignee.")
+    return _approval_response(request, project, task)
 
 
 def _log_task_assignment(project, actor, task, prev_assignee, new_assignee):
@@ -8090,6 +8537,9 @@ def task_detail(request, project_id, task_id):
         'is_assignee':        is_assignee,
         'task_status_choices': Task.STATUS_CHOICES,
     }
+    # Two-step approval panel (2.1). Built by the same helper the HTMX swap uses, so
+    # the buttons offered on this render and on the next one cannot disagree.
+    context.update(_task_approval_context(request, project, task))
     # Checklist — items come from the Checklist linked to this (task_name, project_type);
     # completion is per-(item, task). Shared with the HTMX swap via _checklist_context().
     context.update(_checklist_context(request, project, task))
