@@ -70,10 +70,29 @@ Three states, and they are mutually exclusive:
           approve and the reject view, and asking for it twice on one screen would
           only invite the two boxes to disagree. `formaction` sends it to whichever
           endpoint was pressed.
+
+          THE SUBMITTER DOES NOT GET AN APPROVE BUTTON. `task_approve` refuses a
+          self-approval outright, so offering the button to the person who
+          submitted the work is offering a refusal — the one case where this panel
+          shows a control that cannot succeed. The test is a comparison and not a
+          third context flag on purpose: `can_approve_task` is the AUTHORITY, which
+          the submitter genuinely still holds, and folding "but not this task"
+          into it would make the panel and the view disagree about what that flag
+          means.
+
+          REJECT STAYS. Rejecting your own submission is withdrawing it, which the
+          view allows deliberately — so the form's own action and hx-post follow
+          the same conditional, and the endpoint a bare Enter in the textarea would
+          hit is always one the viewer may actually use.
           {% endcomment %}
+          {% if task.submitted_by == request.user.profile %}
+            {% url 'task_reject' project.project_id task.pk as approval_form_action %}
+          {% else %}
+            {% url 'task_approve' project.project_id task.pk as approval_form_action %}
+          {% endif %}
           <form method="post"
-                action="{% url 'task_approve' project.project_id task.pk %}"
-                hx-post="{% url 'task_approve' project.project_id task.pk %}"
+                action="{{ approval_form_action }}"
+                hx-post="{{ approval_form_action }}"
                 hx-target="#taskApprovalBlock" hx-swap="innerHTML">
             {% csrf_token %}
             <div class="mb-2">
@@ -82,12 +101,19 @@ Three states, and they are mutually exclusive:
                         name="approval_remarks" rows="2"
                         placeholder="What you checked, or what needs redoing"></textarea>
             </div>
-            <div class="d-flex gap-2">
-              <button type="submit" class="btn btn-brand btn-sm">Approve &amp; complete</button>
+            <div class="d-flex gap-2 align-items-center">
+              {% if task.submitted_by != request.user.profile %}
+                <button type="submit" class="btn btn-brand btn-sm">Approve &amp; complete</button>
+              {% endif %}
               <button type="submit" class="btn btn-outline-danger btn-sm"
                       formaction="{% url 'task_reject' project.project_id task.pk %}"
                       hx-post="{% url 'task_reject' project.project_id task.pk %}"
                       hx-target="#taskApprovalBlock" hx-swap="innerHTML">Reject</button>
+              {% if task.submitted_by == request.user.profile %}
+                <span class="text-muted small">
+                  You submitted this — someone else must approve it.
+                </span>
+              {% endif %}
             </div>
           </form>
         {% else %}
