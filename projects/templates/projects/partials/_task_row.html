@@ -13,6 +13,8 @@ Expected context:
   is_milestone_gate_candidate  — True only for the first task of the first phase
                                   (replaces the old forloop.first check; the BD
                                   milestone gate still only fires for BD users)
+  two_step_completion          — from _phase_list_two_step(); drives BOTH the Done
+                                  option below and the compact approval block
   oob                          — when True, mark the <tr> for out-of-band swap
 {% endcomment %}
 <tr id="task-row-{{ task.pk }}"{% if oob %} hx-swap-oob="true"{% endif %}
@@ -93,8 +95,29 @@ Expected context:
                   {% elif task.status == 'In Progress' %}border-primary text-primary{% endif %}
                   {% if not task.assigned_to %}opacity-50 cursor-not-allowed{% endif %}"
                 style="font-size:.78rem;">
+          {% comment %}DONE IS NOT OFFERED ON AN OPEX ROW, because it cannot succeed
+             there. Rung 1 of `_apply_task_status_change()` refuses a direct Done on an
+             OPEX task with no `approved_at`, so every one of these options was a dead
+             choice: the site engineer picked it, the row swapped back unchanged, and a
+             red flash explained a rule the control had just invited them to break. The
+             `Submit for approval` button below the select is the live path.
+
+             THE OPTION SURVIVES ON A ROW THAT IS ALREADY DONE. Dropping it there would
+             leave the select with no matching option and it would silently display
+             `Not Started` — a control lying about the row it sits on, which is worse
+             than an option nobody can pick. An approved task reached Done through this
+             same function having satisfied the rung, so showing where it is costs
+             nothing.
+
+             THIS IS NOT THE GATE and removes no protection: `two_step_completion` comes
+             from `_phase_list_two_step()`, is presentation only, and the rung refuses a
+             hand-made POST exactly as before.{% endcomment %}
           {% for val, label in task_status_choices %}
-            <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
+            {% if two_step_completion and val == 'Done' and task.status != 'Done' %}
+              {# the dead option, deliberately not emitted — see above #}
+            {% else %}
+              <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
+            {% endif %}
           {% endfor %}
         </select>
         {% if not task.assigned_to %}
@@ -113,6 +136,11 @@ Expected context:
       {% elif task.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
       {% else %}<span class="badge bg-secondary">Not Started</span>{% endif %}
     {% endif %}
+    {% comment %}OUTSIDE the editable/read-only branch on purpose: the approval STATE is
+       a fact about the row, not a control, and someone who may only look at this task
+       still needs to know it is waiting on an approver. The include decides for itself
+       whether the person gets a Submit button — see the partial.{% endcomment %}
+    {% include 'projects/partials/_task_row_approval.html' %}
   </td>
   <td>
     {% if is_assigned_pm %}

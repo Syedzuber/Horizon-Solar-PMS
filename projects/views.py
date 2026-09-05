@@ -3881,6 +3881,29 @@ def _gate_task_pk(project):
     return first_task.pk if first_task else None
 
 
+def _phase_list_two_step(project):
+    """Is the two-step completion rule (2.1) in force for this project's task rows?
+
+    ONE BUILDER, TWO CALLERS -- the same reason `_task_approval_context()` exists.
+    The phase list renders a row twice: once by `project_overview` on the full page
+    and once by `_render_task_row_hx()` after every status / assign / due-date swap.
+    A row that offered Done on one path and withheld it on the other would be the
+    same control disagreeing with itself depending only on how it was drawn.
+
+    THE SCOPE IS WRITTEN HERE AND NOT IN THE TEMPLATE, for the reason
+    `_task_approval_context()` gives about `show_approval_panel`: a template that
+    tests `project.project_type == 'OPEX'` inline is one more place the scope of
+    this feature is recorded, and the places would drift.
+
+    THIS DECIDES NOTHING AND GUARDS NOTHING. The rule is rung 1 of
+    `_apply_task_status_change()`, which refuses a direct Done on an unapproved OPEX
+    task whatever the markup offered. This flag only stops the row offering a choice
+    that rung would refuse -- delete it and the refusal is unchanged, the user simply
+    meets it after clicking instead of before.
+    """
+    return {'two_step_completion': project.project_type == 'OPEX'}
+
+
 def _render_task_row_hx(request, project, task, oob_tasks=None):
     """Render the HTMX task-row response for project_overview (#1/#3/#5):
     the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
@@ -3900,6 +3923,7 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
         'user_task_role':      user_task_role,
         'role':                role,
         'task_status_choices': Task.STATUS_CHOICES,
+        **_phase_list_two_step(project),
     })
 
 
@@ -8606,6 +8630,7 @@ def project_overview(request, project_id):
         'gantt_can_view_client':       gantt_can_view_client,
         'gantt_internal':              gantt_internal,
         'gantt_client':                gantt_client,
+        **_phase_list_two_step(project),
     })
 
 

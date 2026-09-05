@@ -1,0 +1,80 @@
+{% comment %}
+Two-step completion (2.1), COMPACT — the phase-list row's version of the panel
+that lives full-size on task_detail as `_task_approval.html`.
+
+WHY A SECOND, SMALLER PARTIAL AND NOT AN INCLUDE OF THE BIG ONE. Two reasons,
+both measured before this file was written:
+
+  QUERIES. `_task_approval.html` is fed by `_task_approval_context()`, which calls
+  `user_can_submit_task_for_approval()` and `user_can_approve_task()` — and both
+  route through `user_can_manage_project()`, whose coordinator arm is a
+  `.filter().exists()`. That is one query per call, i.e. two per row, on a list of
+  23 rows for a stock OPEX site and unbounded in general. The project-level half of
+  that answer is IDENTICAL for every row and the page already holds it in
+  `is_assigned_pm`; the only genuinely per-row half is "is this task mine", which
+  is a comparison against an object the row has already loaded. So the authority is
+  reassembled here from what the page has, and costs nothing.
+
+  WIDTH. The panel is a `card` with a two-column body, a textarea and two buttons.
+  Dropped into a ~12rem status cell it is the horizontal-scroll problem, not a fix
+  for it. What a row needs is a badge and one small button.
+
+THE AUTHORITY IS THE SAME AUTHORITY, restated and not re-decided.
+`user_can_submit_task_for_approval()` is `task.assigned_to == profile OR
+user_can_manage_project()`, and `is_assigned_pm` on this page IS
+`user_can_manage_project(request.user, project)` — the same call, made once in the
+view. The test below is that OR with the expensive half substituted by the value
+already computed. If the two ever diverge the endpoint still refuses: this markup
+opens no door, it only avoids offering one that is locked.
+
+APPROVING IS NOT OFFERED HERE, deliberately. Approval moves the task to Done, so a
+row that approved in place would leave the status select beside it reading
+In Progress until the next page load — the one contradiction `_task_approval_
+response.html` exists to prevent on task_detail. Submission does NOT move the
+status (2.1 §3), so the badge is the only thing on the row that changes and the
+swap below can keep it honest. The approver's controls stay on task_detail, and
+this row tells them the task is waiting.
+
+Expected context:
+  task, project, is_assigned_pm, two_step_completion
+{% endcomment %}
+{% if two_step_completion and not task.is_mirror %}
+  {% comment %}The id is the hx-target of the submit form in project_overview.html's
+     modal, which uses hx-select to pull the state badge out of the approval panel
+     the endpoint returns. Everything inside this element is therefore replaced by
+     that badge on a submit — including the Submit button, which is why the button
+     lives in here and not beside it: after the swap there is nothing left to press
+     twice, and the state shown is the server's own answer rather than a guess made
+     in JavaScript about whether the POST worked.{% endcomment %}
+  <div id="task-approval-{{ task.pk }}" class="mt-1 small">
+    {% if task.approved_at %}
+      <span class="badge bg-success"
+            title="Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}">Approved</span>
+    {% elif task.submitted_at %}
+      {% comment %}THE POINT OF THE WHOLE PARTIAL. Before this, a submitted task sat
+         in the list reading "In Progress" and nothing else — indistinguishable from
+         one nobody had touched, so the site engineer who had already sent it up
+         re-opened it to check and the PM never learned it was waiting.{% endcomment %}
+      <span class="badge bg-warning text-dark"
+            title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on the project manager or QA/QC.">Awaiting approval</span>
+    {% elif is_assigned_pm or task.assigned_to and task.assigned_to == request.user.profile %}
+      {% if task.status == 'In Progress' %}
+        <button type="button"
+                class="btn btn-brand btn-sm py-0 px-2"
+                style="font-size:.7rem;"
+                onclick="openSubmitApprovalModal(this)"
+                data-task-name="{{ task.task_name }}"
+                data-target-id="#task-approval-{{ task.pk }}"
+                data-submit-url="{% url 'task_submit_for_approval' project.project_id task.pk %}"
+                title="Submit this work for approval — an OPEX task is completed by its approver, not here.">
+          Submit for approval
+        </button>
+      {% else %}
+        {% comment %}`task_submit_for_approval` refuses anything that is not In Progress,
+           so the button is not drawn and the reason is given instead — the row never
+           shows a control that would turn the person pressing it away.{% endcomment %}
+        <span class="text-muted" style="font-size:.7rem;">Submit once In Progress</span>
+      {% endif %}
+    {% endif %}
+  </div>
+{% endif %}

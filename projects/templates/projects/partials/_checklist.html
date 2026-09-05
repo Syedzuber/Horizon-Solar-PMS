@@ -58,7 +58,20 @@ item's current label. Never render row.item.label here; that is the defect 0.5 f
                   hx-target="#checklistSection" hx-swap="innerHTML"
                   class="d-flex flex-column gap-1">
               {% csrf_token %}
-              <input type="file" name="photo" accept=".jpg,.jpeg,.png" required
+              {% comment %}`capture="environment"` opens the REAR camera straight away on a
+                 phone instead of the file picker. This input is the one place in the site
+                 engineer's path that asks for a photograph and nothing else — the item is
+                 being ticked because the engineer is standing in front of the thing — so
+                 there is no file on the device worth browsing to, and two taps through a
+                 gallery they never wanted was the whole friction.
+
+                 THE ATTACHMENT PICKERS DELIBERATELY DO NOT GET THIS. `task_detail.html`'s
+                 attachment input, and the two document inputs on project_overview, are
+                 `multiple` and accept PDFs and spreadsheets alongside images. `capture` on
+                 those would force the camera and make uploading a signed PDF impossible —
+                 a fix in one place and a regression in three. Desktop browsers ignore the
+                 attribute entirely, so nothing changes there.{% endcomment %}
+              <input type="file" name="photo" accept=".jpg,.jpeg,.png" capture="environment" required
                      class="form-control form-control-sm">
               <button type="submit" class="btn btn-success btn-sm">Check + Upload Photo</button>
             </form>

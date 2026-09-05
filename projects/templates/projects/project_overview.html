@@ -1302,6 +1302,78 @@ button lives in the header stats strip, gated on is_assigned_pm + non-Draft.
   <input type="hidden" id="quickAttachNext" name="next" value="{% url 'project_overview' project.project_id %}">
   <input type="file" id="quickAttachInput" name="files" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
 </form>
+{% comment %}
+Submit-for-approval modal (2.1 two-step completion) — the phase list's path to
+completion on an OPEX site, replacing the Done option the row no longer offers.
+
+WHY A MODAL AND NOT AN EXPANDING ROW. The submit endpoint requires a remarks
+textarea, and the only place to put one inside this table is a second <tr>. But
+`_task_row.html` is swapped by `_task_row_response.html` with hx-swap="outerHTML"
+on `#task-row-<pk>`, which replaces ONE element — a partial emitting two rows
+would leave the old second row behind after every status, assign or due-date
+change. A shared modal keeps the row partial exactly one <tr>, and it is the
+idiom this page already uses for assignment (`openAssignModal` below).
+
+WHY hx-select. `task_submit_for_approval` answers an HTMX request with
+`_task_approval_response.html`, which is task_detail's full approval card. This
+page wants one thing out of it: the state badge in the card header, which is the
+SERVER's account of what the submission did. Selecting it and swapping it into the
+row's `#task-approval-<pk>` means a refusal (an empty remark, a task somebody else
+already submitted, a race) puts back the badge that is actually true, instead of
+JavaScript guessing "the request returned 200, so it must have worked".
+
+The selector is safe against the rest of the response, whichever order htmx
+processes it in: `_task_detail_status.html` also renders a `.badge`, but always as a
+direct child of the `#taskStatusBlock` div and never inside a `.card-header`, and the
+approval card is the only card in the fragment.
+
+The response also carries `_hx_messages.html`, which is a genuine out-of-band swap
+into base.html's `#hxMessages` — so the view's own success or error wording appears
+at the top of this page unmodified, exactly as it does on task_detail.
+{% endcomment %}
+<div class="modal fade" id="submitApprovalModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title mb-0">Submit for approval</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form id="submitApprovalForm" method="post"
+            hx-swap="innerHTML"
+            hx-select=".card-header .badge"
+            hx-on::after-request="window.closeSubmitApprovalModal()">
+        {% csrf_token %}
+        <div class="modal-body">
+          <p class="small text-muted mb-2">
+            <strong id="submitApprovalTaskName"></strong>
+          </p>
+          <label class="form-label small text-muted" for="submitApprovalRemarks">What was done (required)</label>
+          {% comment %}`required` is a courtesy, not the rule: the view refuses an empty
+             remark before it writes anything, and this only saves the round trip.{% endcomment %}
+          <textarea class="form-control form-control-sm" id="submitApprovalRemarks"
+                    name="submission_remarks" rows="3" required
+                    placeholder="Describe the completed work"></textarea>
+          <p class="text-muted mb-0 mt-2" style="font-size:.72rem;">
+            The task stays In Progress until the project manager or QA/QC approves it.
+          </p>
+          {% comment %}A SINK FOR AN OOB SWAP THAT BELONGS TO ANOTHER SCREEN.
+             `_task_approval_response.html` also swaps `#taskStatusBlock`, which is
+             task_detail's status control and has no equivalent here. Without a target
+             htmx removes the fragment and logs an oobErrorNoTarget every time somebody
+             submits; with this hidden div the swap lands somewhere harmless and the
+             console stays readable. Nothing reads it and it is overwritten on each
+             submit.{% endcomment %}
+          <div id="taskStatusBlock" class="d-none" aria-hidden="true"></div>
+        </div>
+        <div class="modal-footer py-2">
+          <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-brand btn-sm">Submit for approval</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
 <div class="modal fade" id="noAttachmentModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -1453,6 +1525,38 @@ button lives in the header stats strip, gated on is_assigned_pm + non-Draft.
     var inst = bootstrap.Modal.getInstance(el);
     if (inst) inst.hide();
   });
+
+  /* ── Submit-for-approval modal (2.1) ──────────────────────────────────── */
+  /* Imperative, for the same reason openAssignModal below is: the trigger carries
+     the per-row URL and target, and rebuilding hx-post/hx-target on open (then
+     htmx.process) is the pattern already proven on this page. Without htmx the
+     form still POSTs natively and the endpoint redirects to task_detail — the
+     pre-2.1 path, degraded but not broken. */
+  window.openSubmitApprovalModal = function (btn) {
+    var modalEl = document.getElementById('submitApprovalModal');
+    if (!modalEl) return;
+
+    var form = document.getElementById('submitApprovalForm');
+    form.action = btn.dataset.submitUrl;
+    form.setAttribute('hx-post',   btn.dataset.submitUrl);
+    form.setAttribute('hx-target', btn.dataset.targetId);
+    if (window.htmx) window.htmx.process(form);
+
+    document.getElementById('submitApprovalTaskName').textContent = btn.dataset.taskName || '';
+    document.getElementById('submitApprovalRemarks').value = '';
+
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+  };
+
+  /* Closed on ANY completed request, refusal included: the row badge has already
+     been replaced with the server's own verdict and the flash at the top of the
+     page says what happened, so leaving the dialog open would hide both behind it. */
+  window.closeSubmitApprovalModal = function () {
+    var modalEl = document.getElementById('submitApprovalModal');
+    if (!modalEl) return;
+    var inst = bootstrap.Modal.getInstance(modalEl);
+    if (inst) inst.hide();
+  };
 
   /* ── Assign modal (imperative — avoids relatedTarget mobile issues) ──── */
   window.openAssignModal = function (btn) {
