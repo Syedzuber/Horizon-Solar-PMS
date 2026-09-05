@@ -160,6 +160,99 @@ completion action re-renders only this block, leaving #attachmentList / #taskSta
 </div>
 {% endif %}
 
+{# ── Punch points (2.3a) ──────────────────────────────────── #}
+{% comment %}
+A defect register, not the Issues register below: these rows come from
+PunchPoint, are raised only by a task rejection, and are closed only by a PM
+waiver. The Issues panel further down reads `task_issues` and is untouched —
+nothing here can change its contents or its count. The whole card is hidden
+when there are none, so a task that has never been rejected looks exactly as
+it did before.
+{% endcomment %}
+{% if task_punch_points %}
+<div class="card shadow-sm mb-4" id="punchPointsSection">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      Punch Points
+      <span class="badge bg-secondary ms-1">{{ task_punch_points|length }}</span>
+    </span>
+    <span class="small text-muted">Raised when submitted work is rejected</span>
+  </div>
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-sm mb-0 align-middle">
+        <thead class="table-light">
+          <tr>
+            <th style="width:7rem;">Status</th>
+            <th>Reason</th>
+            <th style="width:12rem;">Raised By</th>
+            <th style="width:8rem;">Raised</th>
+            <th style="width:20rem;">Waiver</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for pp in task_punch_points %}
+          <tr>
+            <td>
+              {% if pp.status == 'Open' %}
+                <span class="badge bg-danger">Open</span>
+              {% else %}
+                <span class="badge bg-warning text-dark">Waived</span>
+              {% endif %}
+            </td>
+            <td class="small">{{ pp.reason }}</td>
+            <td class="small text-muted">
+              {% if pp.raised_by %}
+                {{ pp.raised_by.user.get_full_name|default:pp.raised_by.user.username }}
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td class="small text-muted">{{ pp.created_at|date:"d M Y" }}</td>
+            <td class="small">
+              {% if pp.status == 'Open' %}
+                {% if can_waive_punch_point %}
+                  {% comment %}
+                  Inline form rather than a modal: one per row, no shared state
+                  to capture and no JS at all, so there is nothing here that can
+                  waive the wrong punch point.
+                  {% endcomment %}
+                  <form method="post"
+                        action="{% url 'punch_point_waive' project.project_id pp.pk %}">
+                    {% csrf_token %}
+                    <textarea name="waiver_reason" rows="2" required
+                              class="form-control form-control-sm mb-1"
+                              placeholder="Why is this defect being accepted?"></textarea>
+                    <button type="submit" class="btn btn-outline-warning btn-sm">
+                      Waive
+                    </button>
+                  </form>
+                {% else %}
+                  <span class="text-muted">Open — only the project's PM may waive it.</span>
+                {% endif %}
+              {% else %}
+                <div class="text-muted">{{ pp.waiver_reason }}</div>
+                <div class="text-muted">
+                  Waived by
+                  {% if pp.waived_by %}
+                    {{ pp.waived_by.user.get_full_name|default:pp.waived_by.user.username }}
+                  {% else %}
+                    an account since removed
+                  {% endif %}
+                  on {{ pp.waived_at|date:"d M Y" }}
+                </div>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+
 {# ── Issues section ───────────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

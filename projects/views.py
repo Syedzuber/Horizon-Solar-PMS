@@ -34,6 +34,9 @@ from .models import (
     split_opex_boq_rows, group_boq_rows_by_category,
     PaymentMilestone, ProjectDocument, TaskAttachment,
     Issue, ActivityLog, Comment, log_activity,
+    # 2.3a - the durable record of what a rejection was about. Separate from Issue
+    # by design; see models.PunchPoint.
+    PunchPoint,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
@@ -69,6 +72,9 @@ from .permissions import (
     # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
     # section header in permissions.py.
     user_can_submit_task_for_approval, user_can_approve_task,
+    # 2.3a - waiving a punch point is PM-only and NARROWER than approving a task;
+    # the docstring on the predicate says why is_qaqc is not enough.
+    user_can_waive_punch_point,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -5006,6 +5012,15 @@ def task_reject(request, project_id, task_id):
     )
     task.refresh_from_db()
 
+    # 2.3a - the same reason, kept a second time as a row that nothing overwrites.
+    # `approval_remarks` above is UNCHANGED and still written: the approval panel and
+    # anything else reading "the latest word on this task" keeps working exactly as
+    # before. What is new is that the reason is no longer ONLY there. A second
+    # rejection overwrites that column but creates a second PunchPoint beside the
+    # first, so the account of what was wrong each round survives - which is the
+    # whole reason this model exists (models.PunchPoint).
+    PunchPoint.objects.create(task=task, reason=remarks, raised_by=profile)
+
     # Almost always already true - see the docstring. Routed through the chokepoint
     # rather than written directly, so that if it ever does fire it is a status
     # change with a ledger row like every other (R-18).
@@ -5019,6 +5034,87 @@ def task_reject(request, project_id, task_id):
     )
     messages.warning(request, f"'{task.task_name}' sent back to the assignee.")
     return _approval_response(request, project, task)
+
+
+@login_required
+def punch_point_waive(request, project_id, punch_point_id):
+    """
+    Waive an open punch point: accept the recorded defect and let the site proceed
+    with it, against a named person and a stated reason (2.3a, B-12).
+
+    WHY THIS IS ITS OWN VIEW AND NOT A BRANCH OF THE APPROVAL VIEWS. Waiving is not
+    a verdict on a submission - there need not be one outstanding, and the task's
+    status, submission columns and approval columns are all left exactly as they
+    are. It writes three columns on ONE PunchPoint row and nothing else. Routing it
+    through `_apply_task_status_change` or the approval helpers would tie a decision
+    about a defect to the state of a submission that may not exist.
+
+    WHY THE AUTHORITY IS NOT `user_can_approve_task`. That predicate admits the
+    QA/QC flag holder, who is the person a rejection makes the RAISER of the punch
+    point. B-12 puts the waiver with the PM alone; see
+    `user_can_waive_punch_point`. A user holding only `is_qaqc` gets 403 here even
+    on a project whose tasks they may reject.
+
+    Already-waived points are refused rather than re-waived, so `waived_by` and
+    `waived_at` keep naming the person and moment the decision was actually taken.
+
+    Access: PM-level authority on the project. POST only.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
+    # Scoped through the task's phase to the project in the URL, so a punch point id
+    # from another site cannot be waived by someone who manages this one.
+    punch_point = get_object_or_404(
+        PunchPoint, pk=punch_point_id, task__phase__project=project,
+    )
+    task = punch_point.task
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    if not user_can_waive_punch_point(request.user, project):
+        return HttpResponseForbidden()
+
+    back = redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    if punch_point.status != PunchPoint.OPEN:
+        messages.error(request, 'That punch point has already been waived.')
+        return back
+
+    reason = request.POST.get('waiver_reason', '').strip()
+    if not reason:
+        messages.error(
+            request,
+            'Please state why this punch point is being waived. A waiver with no '
+            'reason records that the defect was accepted without recording why.'
+        )
+        return back
+
+    waived_at = timezone.now()
+    PunchPoint.objects.filter(pk=punch_point.pk).update(
+        status=PunchPoint.WAIVED,
+        waived_by=profile,
+        waived_at=waived_at,
+        waiver_reason=reason,
+    )
+
+    log_activity(
+        project, profile,
+        # ActivityLog.action is a 255-char column and log_activity swallows the
+        # error it would raise, so a long waiver reason would cost the audit line
+        # silently. The full text is on the PunchPoint row either way.
+        f"Waived punch point on {task.task_name}: {reason}"[:255],
+        entity_type='Task', entity_id=task.pk, action_code='punch_point_waived',
+    )
+    messages.success(request, f"Punch point on '{task.task_name}' waived.")
+    return back
 
 
 def _log_task_assignment(project, actor, task, prev_assignee, new_assignee):
@@ -8922,12 +9018,25 @@ def task_detail(request, project_id, task_id):
 
     is_assignee = task.assigned_to is not None and task.assigned_to == profile
 
+    # 2.3a - punch points. A SEPARATE query on a SEPARATE model: `task_issues` above
+    # is untouched, so the Issues panel shows exactly what it showed before and its
+    # count cannot move when a rejection raises a punch point.
+    task_punch_points = (
+        PunchPoint.objects.filter(task=task)
+        .select_related('raised_by__user', 'waived_by__user')
+    )
+
     context = {
         'project':            project,
         'task':               task,
         'attachments':        attachments,
         'user_profile':       profile,
         'task_issues':        task_issues,
+        'task_punch_points':  task_punch_points,
+        # The waive control renders only for the project's PM-level authority — the
+        # same predicate the endpoint enforces, so the button offered and the button
+        # accepted cannot disagree.
+        'can_waive_punch_point': user_can_waive_punch_point(request.user, project),
         'all_profiles':       all_profiles,
         'task_comments':      task_comments,
         'is_assignee':        is_assignee,
@@ -11247,6 +11356,11 @@ def admin_user_edit(request, user_id):
             profile.phone_number    = cd['phone_number']
             profile.is_design_head  = cd['is_design_head']
             profile.is_design_qc    = cd['is_design_qc']
+            # 2.3a. Read the same way as the two above, which is why the edit form
+            # MUST render the checkbox: an unchecked box posts nothing, so a missing
+            # field is indistinguishable from "off" and would clear the flag on
+            # every save that did not render it.
+            profile.is_qaqc         = cd['is_qaqc']
             profile.save()
 
             log_activity(
@@ -11278,6 +11392,7 @@ def admin_user_edit(request, user_id):
                 'role':         profile.role,
                 'is_design_head': profile.is_design_head,
                 'is_design_qc':   profile.is_design_qc,
+                'is_qaqc':        profile.is_qaqc,
             },
             instance_user=target_user,
         )

@@ -186,6 +186,9 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/<int:task_id>/submit-approval/', views.task_submit_for_approval, name='task_submit_for_approval'), # Assigned user or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/approve/',         views.task_approve,             name='task_approve'),             # PM or is_qaqc
     path('projects/<str:project_id>/tasks/<int:task_id>/reject/',          views.task_reject,              name='task_reject'),              # PM or is_qaqc
+    # Punch points (2.3a) — raised by a rejection, waived by the PM alone. The id is
+    # a PunchPoint pk, scoped to the project in the URL by the view.
+    path('projects/<str:project_id>/punch-points/<int:punch_point_id>/waive/', views.punch_point_waive, name='punch_point_waive'), # PM only, NOT is_qaqc
     path('projects/<str:project_id>/tasks/<int:task_id>/assign/',   views.task_assign,        name='task_assign'),        # PM only
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only

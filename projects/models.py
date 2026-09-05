@@ -4378,3 +4378,95 @@ class StockLocation(models.Model):
 
     def __str__(self):
         return f"{self.code} — {self.name}"
+
+
+# ---------------------------------------------------------------------------
+# Punch points (2.3a)
+#
+# A punch point is a NAMED DEFECT against a specific task's work: the thing a
+# rejection was actually about, kept as a row of its own instead of a sentence
+# that the next rejection overwrites.
+# ---------------------------------------------------------------------------
+
+
+class PunchPoint(models.Model):
+    """A defect raised against one task's submitted work, durable across rejections.
+
+    WHY THIS IS NOT AN `Issue`, AND WHY THAT IS THE WHOLE POINT (Option D). `Issue`
+    is the project's general blocker register: it is read by the issue dashboards,
+    the per-project counts, the task-detail Issues panel and the CEO report, and its
+    status vocabulary (Open / In Progress / Resolved / Closed) is written to by an
+    assignment-and-resolution workflow those screens assume. A punch point is a
+    different object with a different life: it is raised only by a rejection, it is
+    never assigned to anyone, and it is closed by exactly one act (a PM waiver) that
+    has no analogue in the issue workflow. Putting punch points into `Issue` would
+    have meant every one of those existing readers deciding, at every call site,
+    whether the row in front of it was a blocker or a punch point - which is a
+    discriminator on a shared table, i.e. the option this model was chosen over. A
+    separate model costs those readers ZERO reads: none of them names this table, so
+    none of them can see these rows, and no issue count, panel or dashboard moves
+    when a punch point is raised. That claim is asserted by
+    tests_punch_point.PunchPointIsolationTests, not just by this paragraph.
+
+    WHY THE REASON LIVES HERE AND NOT IN `Task.approval_remarks`. `task_reject`
+    writes the rejection reason to `approval_remarks`, which is a SINGLE COLUMN on
+    the task: the second rejection overwrites the first, so the record of what was
+    wrong the first time is gone by the time anyone asks whether it was fixed.
+    `approval_remarks` is still written - other code and the approval panel read it
+    as "the most recent word on this task" - but the durable account of each defect
+    is a row here. Three rejections mean three rows, in order, each with its own
+    reason. That is why `task` is a plain FK with no uniqueness on it.
+
+    WHY THE STATUS ENUM IS ITS OWN AND ONLY HAS TWO VALUES. There is no "resolved"
+    state and that is deliberate: a punch point is not closed by someone declaring
+    the work fixed, it is closed by the work being re-submitted and approved, which
+    is a fact about the TASK. The only thing a person may do to a punch point
+    directly is WAIVE it - accept the defect and let the site proceed with it - and
+    B-12 puts that in the PM's hands alone. `Issue.status` is untouched by this
+    model; the two enums do not share a value or a code path.
+    """
+
+    OPEN   = 'Open'
+    WAIVED = 'Waived'
+    STATUS_CHOICES = [
+        (OPEN,   'Open'),
+        (WAIVED, 'Waived'),
+    ]
+
+    # CASCADE, not SET_NULL: a punch point is a statement ABOUT one task's work and
+    # is meaningless detached from it. Tasks are not deleted in normal operation
+    # (projects soft-delete), so this fires only when the row it describes is really
+    # gone.
+    task        = models.ForeignKey(
+        Task, on_delete=models.CASCADE, related_name='punch_points',
+    )
+    # Required, and required at the view too: a punch point whose reason is blank
+    # records that something was wrong without saying what, which is the exact
+    # failure this model exists to stop.
+    reason      = models.TextField()
+    raised_by   = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='raised_punch_points',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    status      = models.CharField(max_length=10, choices=STATUS_CHOICES, default=OPEN)
+
+    # The three waiver columns move together and are all null on an open point.
+    waived_by   = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='waived_punch_points',
+    )
+    waived_at   = models.DateTimeField(null=True, blank=True)
+    waiver_reason = models.TextField(blank=True, default='')
+
+    class Meta:
+        # Oldest first: a task's punch points read as the history they are, in the
+        # order the defects were found.
+        ordering = ['created_at', 'pk']
+
+    def __str__(self):
+        return f"{self.task.task_name} — {self.get_status_display()}: {self.reason[:60]}"
+
+    @property
+    def is_open(self):
+        return self.status == self.OPEN

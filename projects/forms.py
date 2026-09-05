@@ -163,6 +163,15 @@ class AdminUserEditForm(forms.Form):
                    'can never record both verdicts on the same site.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
+    is_qaqc = forms.BooleanField(
+        required=False,
+        label='QA/QC',
+        help_text=('May approve or reject a submitted OPEX task on any site they can '
+                   'already see, and raises a punch point when they reject one. '
+                   'Independent of role, and does NOT confer the PM-only power to '
+                   'waive a punch point.'),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
     new_password = forms.CharField(
         min_length=8,
         required=False,

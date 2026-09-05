@@ -1180,3 +1180,33 @@ def user_can_approve_task(user, project):
         return True
     return bool(profile.is_qaqc) and user_can_view_project(user, project)
 
+
+
+def user_can_waive_punch_point(user, project):
+    """
+    Return True if `user` may waive a punch point on `project` — accept a recorded
+    defect and let the site proceed with it.
+
+    PM-LEVEL AUTHORITY ONLY. This is deliberately NARROWER than
+    `user_can_approve_task()` above, and the difference is the entire point of
+    B-12: the QA/QC holder is the person who RAISES the defect (a rejection creates
+    the punch point), so letting the same capability wave it away would make the
+    record self-cancelling — the one signature that is supposed to cost something
+    would be available to the person who wrote the finding. A user holding
+    `is_qaqc` and nothing else is refused here even though the same user may reject
+    the very task the punch point hangs off.
+
+    B-12 also settles what is NOT here: no severity threshold above which a waiver
+    needs more authority, and no second signature. One PM, one reason, recorded.
+    When a threshold arrives it belongs in this function and nowhere else.
+
+    Routed through `user_can_manage_project()` like every other PM-ownership check
+    in this module, so the assigned PM and a Project Coordinator on the project are
+    both admitted — coordinator authority is additive PM authority everywhere else
+    in the portal and inventing a second, narrower notion of "PM" here would be the
+    only place it means something different.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return user_can_manage_project(user, project)
