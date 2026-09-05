@@ -413,6 +413,10 @@ _SUBJECT_PROJECT_RESOLVERS = {
     'DeliveryChallan':  lambda s: s.project,
     'Issue':            lambda s: s.project,
     'PaymentMilestone': lambda s: s.project,
+    # OneToOne to the OPEX *site* Project, not to the tender Program — the site is
+    # what every other subject type here denormalises to, so a design transition
+    # lands on the same project timeline as that site's tasks and BOQ.
+    'DesignAssignment': lambda s: s.project,
 }
 
 
@@ -422,8 +426,10 @@ def _subject_type_registry():
     if _SUBJECT_TYPE_REGISTRY is None:
         from .models import (
             Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
+            DesignAssignment,
             SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
             SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
+            SUBJECT_DESIGN_ASSIGNMENT,
         )
         _SUBJECT_TYPE_REGISTRY = {
             Project:          SUBJECT_PROJECT,
@@ -432,6 +438,7 @@ def _subject_type_registry():
             DeliveryChallan:  SUBJECT_DELIVERY_CHALLAN,
             Issue:            SUBJECT_ISSUE,
             PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
+            DesignAssignment: SUBJECT_DESIGN_ASSIGNMENT,
         }
     return _SUBJECT_TYPE_REGISTRY
 

@@ -40,7 +40,7 @@ from .design_analytics import (
 from .design_metrics import (
     STAGE_LABELS, effective_commitment, pending_extension, tender_metrics,
 )
-from .utils import design_due_date
+from .utils import design_due_date, record_transition
 from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
     validate_cad_zip,
@@ -332,26 +332,49 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
                  entity_id=assignment.pk if entity_id is None else entity_id,
                  action_code=action_code)
 
-    # ── MIRROR HOOK ATTACHMENT POINT — INTENTIONALLY EMPTY (Session D) ──────────
+    # ── MIRROR HOOK ATTACHMENT POINT — STILL EMPTY. THE STATE LEDGER IS NOT IT. ──
     #
-    # The OPEX Design mirror Task is derived from this field, and this is the one line
-    # in the product where that derivation can be written once. Everything the hook
-    # needs is in scope right here:
+    # Session C left one marker here and Session D attached ONE OF THE TWO THINGS it
+    # anticipated. Keeping them apart matters, because they are not the same derivation:
+    #
+    #   * THE STATE LEDGER (attached below, Session D). A `StatusTransition` row about
+    #     the assignment ITSELF. It answers "who moved this site, from what, and when".
+    #   * THE OPEX DESIGN MIRROR (still not built). A mirror `Task` whose state is
+    #     DERIVED from this field. It writes a DIFFERENT subject through
+    #     `record_transition()` and MUST NOT enter `_apply_task_status_change()`, which
+    #     exists to refuse humans (rung 0, R-18/R-20).
+    #
+    # Everything either one needs is in scope right here:
     #
     #     assignment    the subject, and `assignment.project` through it
     #     from_status   the status the row was on before this write
     #     new_status    the status it is on now (None when no transition happened)
     #     actor         the UserProfile that caused it
     #
-    # The hook writes the mirror Task through record_transition() and MUST NOT enter
-    # _apply_task_status_change(), which exists to refuse humans (rung 0, R-18/R-20).
-    # It fires per WRITE, so a caller that writes twice would notify twice — the one
-    # place that used to do that (`qc_failed`) no longer does; see design_qc_fail().
-    # A no-transition call (new_status is None, or equal to from_status) is a
-    # companion-field write and has nothing for the mirror to follow.
+    # The mirror fires per WRITE, so a caller that writes twice would notify twice — the
+    # one place that used to do that (`qc_failed`) no longer does; see design_qc_fail().
     #
-    # No behaviour here yet. Session D adds it, and nothing else has to change.
+    # A NO-TRANSITION CALL IS NOT A TRANSITION, and the guard below says so once for
+    # both. `new_status=None` is the companion-field write documented above, and
+    # `new_status == from_status` re-states the value the row already carries — neither
+    # moved anything, and a row claiming `x -> x` is a history of something that did not
+    # happen (R-3). It is a statement about what a transition IS, not error handling.
+    #
+    # DELIBERATELY NOT WRAPPED IN try/except, AND DO NOT ADD ONE. `record_transition()`
+    # raises rather than swallowing, on purpose, and the caller owns the atomic block
+    # this runs inside — so a ledger failure rolls the status change back with it. That
+    # is the intended outcome: a design status that moved with no record of who moved it
+    # is worse than an action that visibly failed and can be retried. Wrapping this in a
+    # bare `except` would give you the first while looking like defensive coding.
+    #
+    # The `log_activity()` call above is a SEPARATE ledger and is unchanged. The feed and
+    # the ledger are different things and are allowed to fail differently — that one
+    # catches, this one does not (R-3).
     # ───────────────────────────────────────────────────────────────────────────
+    if new_status is not None and new_status != from_status:
+        record_transition(
+            assignment, new_status, from_status=from_status, actor=actor,
+        )
 
     return from_status
 

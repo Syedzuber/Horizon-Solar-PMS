@@ -1711,6 +1711,11 @@ SUBJECT_BOQ               = 'boq'
 SUBJECT_DELIVERY_CHALLAN  = 'delivery_challan'
 SUBJECT_ISSUE             = 'issue'
 SUBJECT_PAYMENT_MILESTONE = 'payment_milestone'
+# The seventh, added by Session D. 0.3 left DesignAssignment out on purpose — §13 called
+# it "a session of its own" — because instrumenting it meant editing design_views.py,
+# which had eighteen status writes across sixteen functions at the time. Session C
+# consolidated those into apply_design_status(), which is why one call site is now enough.
+SUBJECT_DESIGN_ASSIGNMENT = 'design_assignment'
 
 SUBJECT_TYPE_CHOICES = [
     (SUBJECT_PROJECT,           'Project'),
@@ -1719,6 +1724,7 @@ SUBJECT_TYPE_CHOICES = [
     (SUBJECT_DELIVERY_CHALLAN,  'Delivery Challan'),
     (SUBJECT_ISSUE,             'Issue'),
     (SUBJECT_PAYMENT_MILESTONE, 'Payment Milestone'),
+    (SUBJECT_DESIGN_ASSIGNMENT, 'Design Assignment'),
 ]
 
 # Reason vocabulary — module-level constants per R-10, NOT a lookup table and
