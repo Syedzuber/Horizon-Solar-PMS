@@ -2677,6 +2677,23 @@ class Checklist(models.Model):
     version_no     = models.PositiveIntegerField(default=1)
     status         = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
     effective_from = models.DateField(null=True, blank=True)   # Stamped by activate()
+    # PER-CHECKLIST, NEVER A GLOBAL SWITCH. Until now every checklist item on every task
+    # demanded a photograph, because the first checklist built happened to be one where a
+    # photograph was the evidence. Most are not: a commissioning sheet asking "insulation
+    # resistance recorded?" is answered by a reading written in remarks, and forcing a
+    # snapshot of a multimeter to record it was friction that produced junk photographs,
+    # not evidence. Default True so every checklist that exists today — and every one
+    # authored without thinking about it — keeps the stricter rule it already had.
+    #
+    # It is deliberately a property of the CHECKLIST and not of the item or the site: the
+    # person who authors the questions is the person who knows whether answering them
+    # means photographing something, and one answer per checklist is a decision they can
+    # actually make. A per-item flag would be a decision nobody makes and everybody
+    # inherits from whatever the previous line said.
+    requires_photo = models.BooleanField(
+        default=True,
+        help_text='When on, an item on this checklist cannot be answered without a photo.',
+    )
     created_by     = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='created_checklists',
@@ -2723,6 +2740,22 @@ class Checklist(models.Model):
     def is_editable(self):
         """Content may be changed only while the version is a draft (R-7)."""
         return self.status == self.DRAFT
+
+    @property
+    def sections(self):
+        """The section headings this checklist's items carry, in item order, de-duplicated.
+
+        PRESENTATION ONLY — see ChecklistItem.section. An item with no section contributes
+        '', which is the ungrouped bucket and is rendered without a heading. Read straight
+        off the items so there is no second stored list of sections to fall out of step
+        with the items that name them.
+        """
+        seen, out = set(), []
+        for section in self.items.values_list('section', flat=True):
+            if section not in seen:
+                seen.add(section)
+                out.append(section)
+        return out
 
     def save(self, *args, **kwargs):
         # A checklist created through the admin screen carries only a name; derive the
@@ -2777,6 +2810,25 @@ class ChecklistItem(models.Model):
     checklist = models.ForeignKey(Checklist, on_delete=models.CASCADE, related_name='items')
     label     = models.TextField()
     order     = models.PositiveIntegerField(default=0)  # Ascending within checklist; swapped by move up/down
+    # PURELY PRESENTATIONAL, AND EXPLICITLY NOT PART OF R-8's SNAPSHOT.
+    #
+    # A real commissioning checklist is forty lines under six headings — "Earthing",
+    # "AC side", "DC side" — and reading it as one undifferentiated list of forty is the
+    # thing the paper version never asked anyone to do. This is that heading, and nothing
+    # more: it groups rows on screen, and blank means the item is ungrouped.
+    #
+    # R-8 snapshots the LABEL, because the label is the question that was answered and a
+    # recorded "Yes" must keep pointing at the wording it answered. A section heading is
+    # not part of any question. Nothing reads it to decide what a completion means, no
+    # completion stores a copy of it, and renaming one therefore RE-GROUPS HISTORY: a
+    # completion recorded under "AC side" will display under "AC/DC" the moment a new
+    # draft version renames the heading. That is stated rather than defended — regrouping
+    # a display is not rewriting an answer, which is the only thing R-8 exists to stop.
+    #
+    # It is content of a checklist version all the same, so ChecklistItem.save()'s R-7
+    # draft guard covers it exactly as it covers the label: a live checklist's headings
+    # are as frozen as its questions, and changing them means a new version.
+    section   = models.CharField(max_length=120, blank=True, default='')
 
     class Meta:
         ordering = ['order', 'pk']  # pk tiebreak keeps ordering stable when two items share an order
@@ -2883,10 +2935,25 @@ class ChecklistTaskLink(models.Model):
 class ChecklistItemCompletion(models.Model):
     """
     Per-task completion state for one ChecklistItem. Keyed by (item, task) so the same
-    checklist item, shown on two different tasks, is completed independently. Completing
-    an item requires BOTH a tick and a photo: is_checked is only ever set True together
-    with the three photo_* fields in the same save, so a checked item can never lack a
-    photo. Reuses the same three-field Supabase convention as the rest of the app.
+    checklist item, shown on two different tasks, is completed independently. Reuses the
+    same three-field Supabase convention as the rest of the app.
+
+    THE PHOTO RULE IS NOW THE CHECKLIST'S TO SET, NOT THIS MODEL'S TO ASSUME. It used to
+    read: a completion requires BOTH a tick and a photo, is_checked only ever set True
+    together with the three photo_* fields. That held while every checklist wanted a
+    photograph. It is now `Checklist.requires_photo`: on a checklist that requires one,
+    the old sentence is still exactly true and the pinned tests still assert it; on one
+    that does not, a completion may carry no photo at all. The enforcement lives in the
+    completion view, which is the only writer — the same honest half-measure as R-7's.
+
+    IS_CHECKED MEANS "ANSWERED", AND HAS ALWAYS MEANT THAT. It was named for a checkbox
+    when Yes was the only possible answer, so ticking it and answering Yes were the same
+    keystroke. `answer` splits the two apart: is_checked=True now says a response was
+    recorded, and `answer` says which of the three it was. Every row that existed before
+    this split was a tick, a tick meant Yes, and migration 0081 writes exactly that —
+    no existing completion changes meaning and none is dropped. Everything that counts
+    completions (the badge, the "already answered" idempotent return, the R-8 read path)
+    goes on reading is_checked and is unaffected by which answer was given.
 
     R-8 — IT STORES THE TEXT IT WAS ANSWERING. `item_text_snapshot` is written from the
     item's label at the instant the item is checked, and every read path renders the
@@ -2900,12 +2967,61 @@ class ChecklistItemCompletion(models.Model):
     an answer to a question that no longer exists, and it is still evidence.
     """
 
+    YES = 'yes'
+    NO  = 'no'
+    NA  = 'na'
+
+    ANSWER_CHOICES = [
+        (YES, 'Yes'),
+        (NO,  'No'),
+        (NA,  'Not Applicable'),
+    ]
+
     item       = models.ForeignKey(
         ChecklistItem, null=True, blank=True, on_delete=models.SET_NULL,
         related_name='completions',
     )
     task       = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='checklist_completions')
     is_checked = models.BooleanField(default=False)
+
+    # WHICH of the three answers was recorded. Blank ('') on a row that has not been
+    # answered yet — a get_or_create that has not reached its save, or a row created
+    # directly in a test — which is why this is a blank-able CharField and not a
+    # three-valued enum with no null state. is_checked stays the "was it answered at all"
+    # flag; this is the answer itself.
+    #
+    # NO IS NOT A FAILURE TO ANSWER. The old model could only record agreement: an
+    # engineer standing in front of a thing that was not right had no way to say so
+    # except by leaving the line blank, which is indistinguishable from not having
+    # reached it. That silence is what this field ends.
+    answer  = models.CharField(max_length=3, choices=ANSWER_CHOICES, blank=True, default='')
+
+    # Free text beside the answer. MANDATORY WHEN THE ANSWER IS NO, and the constraint
+    # below is what says so — a "No" with no reason recorded is the same dead end as the
+    # blank line it replaced, one step further along. Optional for Yes and Not
+    # Applicable, where it carries readings, serial numbers and caveats.
+    remarks = models.TextField(blank=True, default='')
+
+    # WITNESS CAPTURE, AND WHAT IT IS NOT.
+    #
+    # Commissioning is witnessed: the client's representative, the DISCOM inspector, the
+    # EPC's own QA stand at the panel while the line is answered. checked_by/checked_at
+    # record ONE authenticated person — the logged-in completer — and there is exactly
+    # one of them, so until now the other people in the room left no trace at all.
+    #
+    # This field is where their names go, and it is AN ASSERTION BY THE COMPLETER, NOT A
+    # SIGNATURE. Nobody named here logged in, typed anything, or was asked to confirm any
+    # of it; the completer typed their names, and the system has verified nothing beyond
+    # who was logged in. It is worth recording — a name to ask "were you there?" is
+    # better than no name — and it is worth never mistaking for the countersigned
+    # document a real witnessed test certificate is. The completion template says this in
+    # those words, to the person typing the names, because a comment here is read by the
+    # wrong audience: the risk is not that a developer misreads the column, it is that
+    # somebody downstream treats its contents as a signature it never was.
+    witness_names = models.TextField(
+        blank=True, default='',
+        help_text='Names asserted by the completer. Not verified signatures.',
+    )
 
     # The item's label as it stood when this item was checked (R-8). Blank only on a row
     # that has never been checked, and on pre-0069 rows the backfill could not reach.
@@ -2940,10 +3056,23 @@ class ChecklistItemCompletion(models.Model):
                 condition=models.Q(item__isnull=False),
                 name='uniq_checklist_completion_item_task',
             ),
+            # A "No" MUST carry its reason, and the database is what says so rather than
+            # the view alone. Every other rule on this model that mattered — one live
+            # completion per (item, task) — is a constraint, and the reason is the same
+            # one: the view is one writer today, and a shell, a data migration or a
+            # future second screen is a writer nobody remembers to teach. Stated as
+            # "not (answer=no and remarks blank)" so it says nothing at all about Yes,
+            # Not Applicable, or the unanswered '' state, all three of which are free to
+            # carry a remark or not.
+            models.CheckConstraint(
+                condition=~models.Q(answer='no', remarks=''),   # literal: Meta cannot see the class body's NO
+                name='checklist_completion_no_requires_remarks',
+            ),
         ]
 
     def __str__(self):
-        state = 'checked' if self.is_checked else 'pending'
+        state = self.get_answer_display() if self.answer else (
+            'checked' if self.is_checked else 'pending')
         return f"Task {self.task_id} / item {self.item_id} — {state}"
 
 

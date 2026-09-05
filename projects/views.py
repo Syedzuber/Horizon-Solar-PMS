@@ -4104,7 +4104,10 @@ def _checklist_context(request, project, task):
     render, the HTMX response partial, and any view that swaps #checklistSection. Items come
     from the Checklist linked to this (task_name, project_type); per-item completion state is
     looked up per (item, task) so each task instance completes independently. Keeps the
-    permission flag computed in exactly one place."""
+    permission flag computed in exactly one place.
+
+    Returns the item list TWICE, on purpose: `checklist_rows` flat and unchanged, and
+    `checklist_sections` the same rows grouped under their headings for display."""
     profile = getattr(request.user, 'profile', None)
     checklist = _checklist_for_task(task, project)
     items = list(checklist.items.all()) if checklist else []
@@ -4121,18 +4124,43 @@ def _checklist_context(request, project, task):
     # being asked now. Computed here rather than in the template so there is exactly
     # one place that decides which of the two a reader sees.
     rows = []
-    for it in items:
+    for n, it in enumerate(items, start=1):
         completion = completions.get(it.id)
         if completion is not None and completion.is_checked and completion.item_text_snapshot:
             label = completion.item_text_snapshot
         else:
             label = it.label
-        rows.append({'item': it, 'completion': completion, 'label': label})
+        # `number` is the position in the WHOLE checklist, computed here rather than from
+        # a template forloop counter, because the grouped view below restarts its loop at
+        # every section and item 14 must stay item 14 under whichever heading it sits.
+        rows.append({'item': it, 'completion': completion, 'label': label, 'number': n})
+
+    # SECTIONS ARE A SECOND VIEW OF `rows`, NOT A REPLACEMENT FOR IT. Same row dicts, same
+    # order, grouped by ChecklistItem.section into [{'name': ..., 'rows': [...]}, ...].
+    # Additive on purpose: `checklist_rows` keeps the exact shape and contents it had, so
+    # neither caller of this function — _render_checklist_hx() and task_detail(), which
+    # both splat this dict into a template context and read nothing from it themselves —
+    # needs to change, and any reader still iterating the flat list gets what it always
+    # got.
+    #
+    # Grouping is CONSECUTIVE, not a bucket-by-name gather: items are ordered by
+    # ChecklistItem.Meta ['order', 'pk'], and a section that appears twice in that order
+    # renders twice, in place. Reordering items to collect a scattered heading is the
+    # author's decision to make in the draft, not one to make silently at render time by
+    # moving rows out from under the numbering above.
+    sections = []
+    for row in rows:
+        name = row['item'].section
+        if not sections or sections[-1]['name'] != name:
+            sections.append({'name': name, 'rows': []})
+        sections[-1]['rows'].append(row)
+
     return {
         'project':            project,
         'task':               task,
         'checklist':          checklist,
         'checklist_rows':     rows,
+        'checklist_sections': sections,
         'checklist_items':    items,   # truthiness + count badge
         'user_profile':       profile,
         'can_complete_items': _user_can_complete_checklist_item(request.user, task, project),
@@ -9348,7 +9376,8 @@ def delete_task_attachment(request, project_id, task_id, attach_pk):
 #
 # The checklist itself (name + items) is authored in portal-admin and assigned to a
 # task via ChecklistTaskLink; item CRUD lives there, NOT here. On task detail the only
-# action is COMPLETION: tick an item + upload its required photo, writing a
+# action is COMPLETION: answer an item yes/no/not-applicable, with a mandatory remark on
+# a No, optional witness names, and a photo iff the checklist requires one — writing a
 # ChecklistItemCompletion row keyed by (item, task). Completion is gated by
 # _user_can_complete_checklist_item (role-match OR PM/coordinator) and swaps
 # #checklistSection via _render_checklist_hx. The task-closing gate is intentionally
@@ -9366,11 +9395,31 @@ def _checklist_error(request, project, task, msg):
 
 @login_required
 def checklist_item_complete(request, project_id, task_id, item_id):
-    """Tick one checklist item on this task AND upload its required photo as one atomic
-    action, writing a ChecklistItemCompletion row keyed by (item, task). is_checked is set
-    True only together with the three photo_* fields in the same save — a checked item can
-    never lack a photo. The item must belong to the Checklist assigned to this task.
-    Access: role-match OR PM/coordinator (_user_can_complete_checklist_item). POST only."""
+    """Answer one checklist item on this task as one atomic action, writing a
+    ChecklistItemCompletion row keyed by (item, task). The item must belong to the
+    Checklist assigned to this task. Access: role-match OR PM/coordinator
+    (_user_can_complete_checklist_item). POST only.
+
+    THREE RULES, AND THE ORDER THEY ARE APPLIED IN:
+
+      * `answer` is one of yes / no / na, and DEFAULTS TO YES WHEN THE POST OMITS IT.
+        That default is not politeness, it is the migration: this endpoint's only answer
+        used to be a tick, a tick meant Yes, and every caller written against the old
+        form — including the pinned tests that post nothing but a photo — must keep
+        meaning what it meant.
+      * A `no` REQUIRES a remark. Refused here with a message the completer can act on,
+        and refused again by the database constraint for every writer that is not this
+        view.
+      * The photo is required IF AND ONLY IF `checklist.requires_photo`. On a checklist
+        that requires one, is_checked still becomes True only together with the three
+        photo_* fields in the same save, exactly as before. On one that does not, the
+        three stay blank and the answer stands on its own.
+
+    The photo rule is read from the checklist and NOT from the answer: a `no` and a `not
+    applicable` demand a photograph on a photo checklist just as a `yes` does. Deciding
+    otherwise — "you cannot photograph something that is not applicable" — is a real
+    argument and a decision for whoever authors the content, which is why it is expressed
+    as one flag they set rather than three rules they cannot see."""
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
@@ -9408,60 +9457,88 @@ def checklist_item_complete(request, project_id, task_id, item_id):
             return _render_checklist_hx(request, project, task)
         return redirect('task_detail', project_id=project_id, task_id=task_id)
 
+    # The answer. An absent or empty field is YES — see the docstring; every caller that
+    # predates this field posted a tick, and a tick was a Yes.
+    answer = (request.POST.get('answer') or ChecklistItemCompletion.YES).strip().lower()
+    valid_answers = {choice for choice, _label in ChecklistItemCompletion.ANSWER_CHOICES}
+    if answer not in valid_answers:
+        return _checklist_error(request, project, task,
+                                'Choose Yes, No or Not Applicable.')
+
+    remarks       = (request.POST.get('remarks') or '').strip()
+    witness_names = (request.POST.get('witness_names') or '').strip()
+
+    # A No without its reason is the blank line it was meant to replace. Checked before
+    # the upload so a refused answer never leaves an orphan file in the bucket.
+    if answer == ChecklistItemCompletion.NO and not remarks:
+        return _checklist_error(request, project, task,
+                                'Answering "No" requires a remark saying why.')
+
     photo = request.FILES.get('photo')
-    if not photo:
+    if not photo and checklist.requires_photo:
         return _checklist_error(request, project, task,
                                 'A photo is required to check this item.')
 
-    try:
-        from .supabase_storage import get_supabase_client
-        client = get_supabase_client()
-    except (ValueError, ImportError) as exc:
-        return _checklist_error(request, project, task,
-                                f"Upload service unavailable. Contact Admin. ({exc})")
+    # Blank unless a photo is actually uploaded below. A completion on a checklist that
+    # does not require one carries three empty photo_* fields, which is the honest record
+    # of there being no photograph — not a missing one.
+    file_url      = ''
+    supabase_path = ''
+    if photo:
+        try:
+            from .supabase_storage import get_supabase_client
+            client = get_supabase_client()
+        except (ValueError, ImportError) as exc:
+            return _checklist_error(request, project, task,
+                                    f"Upload service unavailable. Contact Admin. ({exc})")
 
-    bucket = settings.SUPABASE_BUCKET
-    supabase_path = (
-        f"checklist-photos/{project.project_id}/{task.pk}/{item.pk}/"
-        f"{_uuid.uuid4()}_{photo.name}"
-    )
-    try:
-        # Photo-only allow-list — reuses the shared helper (audit Point 2)
-        _validate_and_upload(photo, client, bucket, supabase_path,
-                             allowed_extensions=ALLOWED_PHOTO_EXTENSIONS)
-    except ValueError as exc:
-        return _checklist_error(request, project, task, f"Photo rejected: {exc}")
-    except Exception as exc:
-        logger.error('Supabase checklist photo upload failed for %s: %s', photo.name, exc)
-        return _checklist_error(request, project, task, 'Photo upload failed. Please try again.')
+        bucket = settings.SUPABASE_BUCKET
+        supabase_path = (
+            f"checklist-photos/{project.project_id}/{task.pk}/{item.pk}/"
+            f"{_uuid.uuid4()}_{photo.name}"
+        )
+        try:
+            # Photo-only allow-list — reuses the shared helper (audit Point 2)
+            _validate_and_upload(photo, client, bucket, supabase_path,
+                                 allowed_extensions=ALLOWED_PHOTO_EXTENSIONS)
+        except ValueError as exc:
+            return _checklist_error(request, project, task, f"Photo rejected: {exc}")
+        except Exception as exc:
+            logger.error('Supabase checklist photo upload failed for %s: %s', photo.name, exc)
+            return _checklist_error(request, project, task, 'Photo upload failed. Please try again.')
 
-    file_url = (
-        f"{settings.SUPABASE_URL}/storage/v1/object/public/"
-        f"{settings.SUPABASE_BUCKET}/{supabase_path}"
-    )
+        file_url = (
+            f"{settings.SUPABASE_URL}/storage/v1/object/public/"
+            f"{settings.SUPABASE_BUCKET}/{supabase_path}"
+        )
 
-    # Atomic completion: tick + all three photo fields + the text snapshot written
-    # together on the (item, task) row. item_text_snapshot joins that same save
-    # deliberately (R-8) — a checked item can no more lack the question it answered than
-    # it can lack its photo.
+    # Atomic completion: the answer + its remark + the witnesses + all three photo fields
+    # + the text snapshot written together on the (item, task) row. item_text_snapshot
+    # joins that same save deliberately (R-8) — an answered item can no more lack the
+    # question it answered than a photo checklist's item can lack its photo.
     answered_text = item.label
     completion, _created = ChecklistItemCompletion.objects.get_or_create(item=item, task=task)
-    completion.photo_file_name     = photo.name
+    completion.photo_file_name     = photo.name if photo else ''
     completion.photo_url           = file_url
     completion.photo_supabase_path = supabase_path
     completion.is_checked          = True
+    completion.answer              = answer
+    completion.remarks             = remarks
+    completion.witness_names       = witness_names
     completion.item_text_snapshot  = answered_text
     completion.checked_by          = request.user
     completion.checked_at          = timezone.now()
     completion.save(update_fields=[
         'photo_file_name', 'photo_url', 'photo_supabase_path',
-        'is_checked', 'item_text_snapshot', 'checked_by', 'checked_at',
+        'is_checked', 'answer', 'remarks', 'witness_names',
+        'item_text_snapshot', 'checked_by', 'checked_at',
     ])
 
     log_activity(project, profile,
-                 f"Completed checklist item '{answered_text}' on task: {task.task_name}",
+                 f"Answered '{completion.get_answer_display()}' on checklist item "
+                 f"'{answered_text}' on task: {task.task_name}",
                  entity_type='ChecklistItemCompletion', entity_id=completion.pk)
-    messages.success(request, 'Checklist item checked.')
+    messages.success(request, 'Checklist item recorded.')
 
     if _is_hx(request):
         return _render_checklist_hx(request, project, task)

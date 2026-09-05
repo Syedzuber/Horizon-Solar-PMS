@@ -6,11 +6,21 @@ by _checklist_response.html. Items come from the Checklist linked to this task
 authoring/assignment is done in portal-admin, NOT here — this surface is completion-only.
 
 Expected context:
-  checklist_rows [{item, completion, label}], checklist, project, task, can_complete_items
+  checklist_sections [{name, rows}], checklist_rows [{item, completion, label, number}],
+  checklist, project, task, can_complete_items
+
+ITERATES checklist_sections, NOT checklist_rows. The two hold the same row dicts in the
+same order; the grouped one lets a forty-line commissioning sheet carry its headings. A
+checklist whose items name no section produces exactly one group with an empty name, which
+renders with no header row and is byte-for-byte the old output. `row.number` is the
+position in the whole checklist and is computed in _checklist_context, because a forloop
+counter here would restart at every heading.
 
 row.label is the R-8 read path: for a CHECKED row it is completion.item_text_snapshot —
 the wording as it stood when the item was answered — and for an unchecked row it is the
 item's current label. Never render row.item.label here; that is the defect 0.5 fixed.
+The SECTION HEADING is deliberately not part of that snapshot: it is read live off the
+item, so renaming a heading re-groups history. See ChecklistItem.section.
 {% endcomment %}
 {% if checklist_rows %}
 <div class="table-responsive">
@@ -19,67 +29,129 @@ item's current label. Never render row.item.label here; that is the defect 0.5 f
       <tr>
         <th style="width:3rem;">#</th>
         <th>Item</th>
-        <th style="width:11rem;">Photo</th>
-        <th style="width:13rem;">Status</th>
+        {% if checklist.requires_photo %}<th style="width:11rem;">Photo</th>{% endif %}
+        <th style="width:22rem;">Answer</th>
       </tr>
     </thead>
     <tbody>
-      {% for row in checklist_rows %}
-      <tr>
-        <td class="text-muted small">{{ forloop.counter }}</td>
-        <td>{{ row.label }}</td>
-        <td>
-          {% if row.completion.photo_url %}
-            <a href="{{ row.completion.photo_url }}" target="_blank" rel="noopener">
-              <img src="{{ row.completion.photo_url }}" alt="{{ row.completion.photo_file_name }}"
-                   class="rounded" style="max-height:56px;max-width:80px;object-fit:cover;">
-            </a>
-          {% else %}
-            <span class="text-muted small">—</span>
+      {% for section in checklist_sections %}
+        {% if section.name %}
+        <tr class="table-light">
+          {% comment %}colspan tracks the Photo column, which is hidden on a checklist
+             that does not require photographs.{% endcomment %}
+          <th colspan="{% if checklist.requires_photo %}4{% else %}3{% endif %}"
+              class="small text-uppercase text-muted fw-semibold">
+            {{ section.name }}
+          </th>
+        </tr>
+        {% endif %}
+        {% for row in section.rows %}
+        <tr>
+          <td class="text-muted small">{{ row.number }}</td>
+          <td>{{ row.label }}</td>
+          {% if checklist.requires_photo %}
+          <td>
+            {% if row.completion.photo_url %}
+              <a href="{{ row.completion.photo_url }}" target="_blank" rel="noopener">
+                <img src="{{ row.completion.photo_url }}" alt="{{ row.completion.photo_file_name }}"
+                     class="rounded" style="max-height:56px;max-width:80px;object-fit:cover;">
+              </a>
+            {% else %}
+              <span class="text-muted small">—</span>
+            {% endif %}
+          </td>
           {% endif %}
-        </td>
-        <td>
-          {% if row.completion.is_checked %}
-            <span class="badge bg-success">✓ Checked</span>
-            <div class="text-muted small mt-1">
-              {% if row.completion.checked_by %}{{ row.completion.checked_by.get_full_name|default:row.completion.checked_by.username }}{% endif %}
-              {% if row.completion.checked_at %} · {{ row.completion.checked_at|date:"d M Y H:i" }}{% endif %}
-            </div>
-          {% elif can_complete_items %}
-            {% comment %}
-            Check + photo are one atomic action — the file input is REQUIRED, so an item
-            can never be ticked without a photo. hx-encoding drives the multipart upload;
-            the native action/method fallback degrades without HTMX.
-            {% endcomment %}
-            <form method="post" enctype="multipart/form-data"
-                  action="{% url 'checklist_item_complete' project.project_id task.pk row.item.pk %}"
-                  hx-post="{% url 'checklist_item_complete' project.project_id task.pk row.item.pk %}"
-                  hx-encoding="multipart/form-data"
-                  hx-target="#checklistSection" hx-swap="innerHTML"
-                  class="d-flex flex-column gap-1">
-              {% csrf_token %}
-              {% comment %}`capture="environment"` opens the REAR camera straight away on a
-                 phone instead of the file picker. This input is the one place in the site
-                 engineer's path that asks for a photograph and nothing else — the item is
-                 being ticked because the engineer is standing in front of the thing — so
-                 there is no file on the device worth browsing to, and two taps through a
-                 gallery they never wanted was the whole friction.
+          <td>
+            {% if row.completion.is_checked %}
+              {% if row.completion.answer == 'no' %}
+                <span class="badge bg-danger">✗ No</span>
+              {% elif row.completion.answer == 'na' %}
+                <span class="badge bg-secondary">Not Applicable</span>
+              {% else %}
+                <span class="badge bg-success">✓ Yes</span>
+              {% endif %}
+              {% if row.completion.remarks %}
+                <div class="small mt-1">{{ row.completion.remarks|linebreaksbr }}</div>
+              {% endif %}
+              {% if row.completion.witness_names %}
+                {% comment %}The same sentence the completer was shown when they typed
+                   these names, repeated to whoever reads them afterwards. A name recorded
+                   here is worth having and is not a signature; saying so once, at the
+                   point of entry, and never again at the point of reading is how it turns
+                   into one.{% endcomment %}
+                <div class="small mt-1">
+                  <span class="text-muted">Witnessed by (stated):</span>
+                  {{ row.completion.witness_names|linebreaksbr }}
+                  <div class="text-muted fst-italic">
+                    Recorded by the completer, not verified signatures.
+                  </div>
+                </div>
+              {% endif %}
+              <div class="text-muted small mt-1">
+                {% if row.completion.checked_by %}{{ row.completion.checked_by.get_full_name|default:row.completion.checked_by.username }}{% endif %}
+                {% if row.completion.checked_at %} · {{ row.completion.checked_at|date:"d M Y H:i" }}{% endif %}
+              </div>
+            {% elif can_complete_items %}
+              {% comment %}
+              Answer + remark + witnesses + photo are one atomic action. hx-encoding drives
+              the multipart upload; the native action/method fallback degrades without HTMX.
+              The file input is REQUIRED only when the checklist requires a photo — that is
+              the whole of Checklist.requires_photo on this surface, and the server applies
+              the same rule so a hand-rolled POST cannot get past a hidden input.
 
-                 THE ATTACHMENT PICKERS DELIBERATELY DO NOT GET THIS. `task_detail.html`'s
-                 attachment input, and the two document inputs on project_overview, are
-                 `multiple` and accept PDFs and spreadsheets alongside images. `capture` on
-                 those would force the camera and make uploading a signed PDF impossible —
-                 a fix in one place and a regression in three. Desktop browsers ignore the
-                 attribute entirely, so nothing changes there.{% endcomment %}
-              <input type="file" name="photo" accept=".jpg,.jpeg,.png" capture="environment" required
-                     class="form-control form-control-sm">
-              <button type="submit" class="btn btn-success btn-sm">Check + Upload Photo</button>
-            </form>
-          {% else %}
-            <span class="badge bg-secondary">Pending</span>
-          {% endif %}
-        </td>
-      </tr>
+              A remark is mandatory on "No" and the server refuses one without it. The
+              field is not marked `required` in HTML, because it is conditional on another
+              control's value and a plain `required` would block Yes as well; the note
+              under the box says so, and the refusal names the rule.
+              {% endcomment %}
+              <form method="post" enctype="multipart/form-data"
+                    action="{% url 'checklist_item_complete' project.project_id task.pk row.item.pk %}"
+                    hx-post="{% url 'checklist_item_complete' project.project_id task.pk row.item.pk %}"
+                    hx-encoding="multipart/form-data"
+                    hx-target="#checklistSection" hx-swap="innerHTML"
+                    class="d-flex flex-column gap-1">
+                {% csrf_token %}
+                <select name="answer" class="form-select form-select-sm" required>
+                  <option value="yes" selected>Yes</option>
+                  <option value="no">No</option>
+                  <option value="na">Not Applicable</option>
+                </select>
+                <textarea name="remarks" rows="2" class="form-control form-control-sm"
+                          placeholder="Remarks (required if the answer is No)"></textarea>
+                <input type="text" name="witness_names" class="form-control form-control-sm"
+                       placeholder="Witness names (optional)">
+                <div class="form-text small">
+                  Witness names are recorded as <strong>your statement</strong> that these
+                  people were present. They are not verified signatures — nobody named
+                  here is asked to confirm it.
+                </div>
+                {% if checklist.requires_photo %}
+                {% comment %}`capture="environment"` opens the REAR camera straight away on a
+                   phone instead of the file picker. This input is the one place in the site
+                   engineer's path that asks for a photograph and nothing else — the item is
+                   being answered because the engineer is standing in front of the thing — so
+                   there is no file on the device worth browsing to, and two taps through a
+                   gallery they never wanted was the whole friction.
+
+                   THE ATTACHMENT PICKERS DELIBERATELY DO NOT GET THIS. `task_detail.html`'s
+                   attachment input, and the two document inputs on project_overview, are
+                   `multiple` and accept PDFs and spreadsheets alongside images. `capture` on
+                   those would force the camera and make uploading a signed PDF impossible —
+                   a fix in one place and a regression in three. Desktop browsers ignore the
+                   attribute entirely, so nothing changes there.{% endcomment %}
+                <input type="file" name="photo" accept=".jpg,.jpeg,.png" capture="environment" required
+                       class="form-control form-control-sm">
+                {% endif %}
+                <button type="submit" class="btn btn-success btn-sm">
+                  {% if checklist.requires_photo %}Record + Upload Photo{% else %}Record Answer{% endif %}
+                </button>
+              </form>
+            {% else %}
+              <span class="badge bg-secondary">Pending</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
       {% endfor %}
     </tbody>
   </table>
