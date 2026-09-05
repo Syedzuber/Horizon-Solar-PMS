@@ -268,6 +268,94 @@ def _deny(request, message, redirect_to):
     return redirect(redirect_to)
 
 
+def apply_design_status(assignment, new_status, actor, detail, action_code,
+                        extra_fields=None, entity_type='DesignAssignment',
+                        entity_id=None):
+    """THE ONE PLACE `DesignAssignment.status` IS WRITTEN. Session C (audit A-2.2 §5.1).
+
+    Before this existed the field was written in eighteen places across sixteen
+    functions, each setting the attribute and saving in its own way. Six of them saved
+    the WHOLE ROW; the rest named `update_fields`. That spread is what made a Design
+    mirror hook impossible to add without eighteen copies of it, and it is what this
+    function exists to end.
+
+    WHAT IT IS NOT. It is not a state machine and deliberately carries no transition
+    table. Whether a move is legal from the current state remains each caller's own job,
+    exactly as before — `_qc_guard()`, `_verdict_target()`, `_head_verdict_target()`,
+    `REALLOCATABLE_STATUSES`, `ARKA_SUBMITTABLE_STATUSES` and the per-view status tests
+    are the guards, and they are per-gate for good reason. Two shapes in this module
+    cannot be expressed as edges between status names at all: `design_arka_head_approve`
+    moves `awaiting_head_arka -> arka_submitted`, which reads backwards and is forwards
+    (the Arka now carries head_verdict='approved'), and `_status_after_unblock()` returns
+    one of three computed values rather than a literal. It is also not a permission
+    check: those need `request`, which this never takes.
+
+    filter().update(), NOT save(). The reason is written out at design_qc_assign() and
+    applies identically here: two people acting on one site would otherwise each write a
+    whole row from their own stale copy, and the loser's view of every other column would
+    silently win. `update()` names its columns, so a concurrent write to any column not
+    listed survives. `updated_at` is passed explicitly because `auto_now` does not fire on
+    a queryset update.
+
+    `extra_fields` is for the companion columns that must land in the SAME write as the
+    status: `released_at`/`released_by`, the `survey_returned_*` triple, the survey file
+    or link stamps, the allocation stamps, `current_attempt_number`. Splitting them into
+    a second save would reintroduce the very torn write this function removes.
+
+    `new_status=None` means "no transition — write the companion fields and log, and
+    leave `status` alone". Two branches need it (a survey file or folder link REPLACED on
+    a site whose status is already correct); passing the current status instead would
+    write a value read from a stale in-memory row for no reason.
+
+    The caller owns the transaction, matching `record_transition()` and
+    `_open_next_attempt()`. `DesignAttempt` open/close is likewise NOT folded in: see
+    `_open_next_attempt()`, which is its own chokepoint and calls this one.
+
+    Returns the status the row was on before the write, so callers can message on it.
+    """
+    from_status = assignment.status
+
+    fields = dict(extra_fields or {})
+    if new_status is not None:
+        fields['status'] = new_status
+    fields['updated_at'] = timezone.now()
+
+    DesignAssignment.objects.filter(pk=assignment.pk).update(**fields)
+    # Keep the in-memory row in step with the row on disk. Callers read `assignment`
+    # afterwards for their success messages and for the next step in the same
+    # transaction, and a queryset update leaves the instance untouched.
+    for name, value in fields.items():
+        setattr(assignment, name, value)
+
+    log_activity(assignment.project, actor, detail,
+                 entity_type=entity_type,
+                 entity_id=assignment.pk if entity_id is None else entity_id,
+                 action_code=action_code)
+
+    # ── MIRROR HOOK ATTACHMENT POINT — INTENTIONALLY EMPTY (Session D) ──────────
+    #
+    # The OPEX Design mirror Task is derived from this field, and this is the one line
+    # in the product where that derivation can be written once. Everything the hook
+    # needs is in scope right here:
+    #
+    #     assignment    the subject, and `assignment.project` through it
+    #     from_status   the status the row was on before this write
+    #     new_status    the status it is on now (None when no transition happened)
+    #     actor         the UserProfile that caused it
+    #
+    # The hook writes the mirror Task through record_transition() and MUST NOT enter
+    # _apply_task_status_change(), which exists to refuse humans (rung 0, R-18/R-20).
+    # It fires per WRITE, so a caller that writes twice would notify twice — the one
+    # place that used to do that (`qc_failed`) no longer does; see design_qc_fail().
+    # A no-transition call (new_status is None, or equal to from_status) is a
+    # companion-field write and has nothing for the mirror to follow.
+    #
+    # No behaviour here yet. Session D adds it, and nothing else has to change.
+    # ───────────────────────────────────────────────────────────────────────────
+
+    return from_status
+
+
 # ---------------------------------------------------------------------------
 # Screens
 # ---------------------------------------------------------------------------
@@ -457,31 +545,39 @@ def design_survey_upload(request, project_id):
         assignment = _get_or_create_assignment(project)
         replacing = bool(assignment.survey_file_path)
 
-        assignment.survey_file_bucket = bucket
-        assignment.survey_file_path   = stored_path
-        assignment.survey_uploaded_by = profile
-        assignment.survey_uploaded_at = timezone.now()
+        # The file stamps ride WITH the status write, in one update() — see
+        # apply_design_status(). They used to ride with a bare save() of the whole row.
+        survey_fields = {
+            'survey_file_bucket': bucket,
+            'survey_file_path':   stored_path,
+            'survey_uploaded_by': profile,
+            'survey_uploaded_at': timezone.now(),
+        }
 
         if was_blocked:
             # Clearing the block. survey_returned_at / _by / _reason are deliberately
             # LEFT IN PLACE: together with survey_uploaded_at they are the record of how
             # long the clock was stopped, without adding a schema field this session.
-            assignment.status = _status_after_unblock(assignment)
-            action = (f'Design Hold cleared by replacement survey; status restored to '
-                      f'{assignment.status}')
-            code = 'design_survey_unblocked'
+            restored = _status_after_unblock(assignment)
+            apply_design_status(
+                assignment, restored, profile,
+                f'Design Hold cleared by replacement survey; status restored to '
+                f'{restored}',
+                'design_survey_unblocked', extra_fields=survey_fields)
         elif assignment.status == DESIGN_AWAITING_SURVEY:
-            assignment.status = DESIGN_AWAITING_ALLOCATION
-            action = 'Survey uploaded; site ready for allocation'
-            code = 'design_survey_uploaded'
+            apply_design_status(
+                assignment, DESIGN_AWAITING_ALLOCATION, profile,
+                'Survey uploaded; site ready for allocation',
+                'design_survey_uploaded', extra_fields=survey_fields)
         else:
-            action = 'Survey file replaced'
-            code = 'design_survey_replaced'
-
-        assignment.save()
-        log_activity(project, profile, action,
-                     entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code=code)
+            # NO TRANSITION on this branch and there never was one — replacing a survey
+            # on an already-correct site moves nothing. `None` says exactly that; passing
+            # the current status would write a value read from this in-memory row for no
+            # reason, and lose a concurrent move.
+            apply_design_status(
+                assignment, None, profile,
+                'Survey file replaced',
+                'design_survey_replaced', extra_fields=survey_fields)
 
     if was_blocked:
         messages.success(request, f'{project.project_id}: replacement survey uploaded, '
@@ -578,30 +674,35 @@ def design_survey_link_set(request, project_id):
         assignment = _get_or_create_assignment(project)
         replacing = bool(assignment.survey_folder_url)
 
-        assignment.survey_folder_url    = url
-        assignment.survey_link_added_by = profile
-        assignment.survey_link_added_at = timezone.now()
+        # As on the upload path: the link stamps ride WITH the status write in one
+        # update(), not in a bare save() of the whole row.
+        link_fields = {
+            'survey_folder_url':    url,
+            'survey_link_added_by': profile,
+            'survey_link_added_at': timezone.now(),
+        }
 
         if was_blocked:
             # Clearing the block. survey_returned_at / _by / _reason are deliberately
             # LEFT IN PLACE, exactly as the upload path leaves them: together with
             # survey_link_added_at they are the record of how long the clock was stopped.
-            assignment.status = _status_after_unblock(assignment)
-            action = (f'Design Hold cleared by survey folder link; status restored to '
-                      f'{assignment.status}')
-            code = 'design_survey_unblocked'
+            restored = _status_after_unblock(assignment)
+            apply_design_status(
+                assignment, restored, profile,
+                f'Design Hold cleared by survey folder link; status restored to '
+                f'{restored}',
+                'design_survey_unblocked', extra_fields=link_fields)
         elif assignment.status == DESIGN_AWAITING_SURVEY:
-            assignment.status = DESIGN_AWAITING_ALLOCATION
-            action = 'Survey folder link added; site ready for allocation'
-            code = 'design_survey_link_added'
+            apply_design_status(
+                assignment, DESIGN_AWAITING_ALLOCATION, profile,
+                'Survey folder link added; site ready for allocation',
+                'design_survey_link_added', extra_fields=link_fields)
         else:
-            action = 'Survey folder link updated'
-            code = 'design_survey_link_updated'
-
-        assignment.save()
-        log_activity(project, profile, action,
-                     entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code=code)
+            # No transition — see the matching branch in design_survey_upload().
+            apply_design_status(
+                assignment, None, profile,
+                'Survey folder link updated',
+                'design_survey_link_updated', extra_fields=link_fields)
 
     if was_blocked:
         messages.success(request, f'{project.project_id}: survey folder link saved, '
@@ -720,11 +821,21 @@ def _allocate_one(assignment, designer, actor, allocated_on=None):
     due = design_due_date(allocated_on)
 
     previous = assignment.assigned_to
-    assignment.assigned_to = designer
-    assignment.assigned_by = actor
-    assignment.assigned_at = now
-    assignment.status = DESIGN_IN_DESIGN
-    assignment.save()
+    if previous and previous.pk != designer.pk:
+        detail = (f'Site reallocated from {previous.user.get_full_name() or previous.user.username} '
+                  f'to {designer.user.get_full_name() or designer.user.username}')
+        code = 'design_reallocated'
+    else:
+        detail = f'Site allocated to {designer.user.get_full_name() or designer.user.username}'
+        code = 'design_allocated'
+
+    # The three allocation stamps ride WITH the status in one update(). This used to be a
+    # bare save() of the whole row, and it is the sharpest case of the six: the bulk path
+    # can reach here with an in-memory row read some time earlier, and a Design Hold
+    # placed on the same site meanwhile would have been wiped along with everything else.
+    apply_design_status(
+        assignment, DESIGN_IN_DESIGN, actor, f'{detail}; due {due}', code,
+        extra_fields={'assigned_to': designer, 'assigned_by': actor, 'assigned_at': now})
 
     # The auto-approved commitment. Any earlier row is stood down first — reallocation
     # of an already-allocated site re-runs this, and the partial unique constraint
@@ -742,15 +853,6 @@ def _allocate_one(assignment, designer, actor, allocated_on=None):
         project.assigned_design = designer
         project.save(update_fields=['assigned_design'])
 
-    if previous and previous.pk != designer.pk:
-        detail = (f'Site reallocated from {previous.user.get_full_name() or previous.user.username} '
-                  f'to {designer.user.get_full_name() or designer.user.username}')
-        code = 'design_reallocated'
-    else:
-        detail = f'Site allocated to {designer.user.get_full_name() or designer.user.username}'
-        code = 'design_allocated'
-    log_activity(assignment.project, actor, f'{detail}; due {due}',
-                 entity_type='DesignAssignment', entity_id=assignment.pk, action_code=code)
     return due
 
 
@@ -1351,14 +1453,17 @@ def design_mark_blocked(request, project_id):
 
     profile = request.user.profile
     with transaction.atomic():
-        assignment.survey_returned_at    = timezone.now()
-        assignment.survey_returned_by    = profile
-        assignment.survey_return_reason  = reason
-        assignment.status = DESIGN_SURVEY_RETURNED
-        assignment.save()
-        log_activity(project, profile, f'Site placed on Design Hold — survey inadequate: {reason}',
-                     entity_type='DesignAssignment', entity_id=assignment.pk,
-                     action_code='design_blocked')
+        # The hold triple rides WITH the status in one update(); a hold recorded without
+        # its reason, or a reason recorded without the hold, is not a state this row may
+        # ever be in. There is deliberately no clearing path for the three — see
+        # design_survey_upload().
+        apply_design_status(
+            assignment, DESIGN_SURVEY_RETURNED, profile,
+            f'Site placed on Design Hold — survey inadequate: {reason}',
+            'design_blocked',
+            extra_fields={'survey_returned_at':   timezone.now(),
+                          'survey_returned_by':   profile,
+                          'survey_return_reason': reason})
 
     messages.success(request, f'{project.project_id} placed on Design Hold. The Design Head '
                               f'can see the reason and your clock is stopped.')
@@ -1625,13 +1730,12 @@ def _maybe_advance_to_artifacts_uploaded(assignment, attempt, actor):
     if attempt.boq_submitted_at is None:
         return False
 
-    assignment.status = DESIGN_ARTIFACTS_UPLOADED
-    assignment.save(update_fields=['status', 'updated_at'])
-    log_activity(assignment.project, actor,
-                 f'Design package complete on attempt {attempt.attempt_number} — '
-                 f'approved Arka, CAD and BOQ all present',
-                 entity_type='DesignAttempt', entity_id=attempt.pk,
-                 action_code='design_artifacts_uploaded')
+    apply_design_status(
+        assignment, DESIGN_ARTIFACTS_UPLOADED, actor,
+        f'Design package complete on attempt {attempt.attempt_number} — '
+        f'approved Arka, CAD and BOQ all present',
+        'design_artifacts_uploaded',
+        entity_type='DesignAttempt', entity_id=attempt.pk)
     return True
 
 
@@ -1960,12 +2064,11 @@ def design_arka_submit(request, project_id):
             submitted_by=profile, remarks=remarks,
             verdict=ARKA_PENDING, is_current=True,
         )
-        assignment.status = DESIGN_ARKA_SUBMITTED
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Arka v{arka.version} submitted ({capacity} kW) for approval',
-                     entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_submitted')
+        apply_design_status(
+            assignment, DESIGN_ARKA_SUBMITTED, profile,
+            f'Arka v{arka.version} submitted ({capacity} kW) for approval',
+            'design_arka_submitted',
+            entity_type='ArkaSubmission', entity_id=arka.pk)
 
     return _back(f'{project.project_id}: Arka v{next_version} submitted — awaiting '
                  f'Design Head approval.', ok=True)
@@ -2070,13 +2173,12 @@ def design_arka_approve(request, project_id):
         arka.reviewed_by = profile
         arka.reviewed_at = timezone.now()
         arka.save(update_fields=['verdict', 'reviewed_by', 'reviewed_at'])
-        assignment.status = DESIGN_AWAITING_HEAD_ARKA
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Arka v{arka.version} passed Design QC ({arka.capacity_kw} kW) — '
-                     f'awaiting Design Head approval',
-                     entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_qc_approved')
+        apply_design_status(
+            assignment, DESIGN_AWAITING_HEAD_ARKA, profile,
+            f'Arka v{arka.version} passed Design QC ({arka.capacity_kw} kW) — '
+            f'awaiting Design Head approval',
+            'design_arka_qc_approved',
+            entity_type='ArkaSubmission', entity_id=arka.pk)
 
     # NAMES WHO HOLDS THE ARKA, AND NOTHING ELSE. It used to end "...before the designer
     # can upload CAD or enter the BOQ", which is no longer true of either: CAD travels
@@ -2141,13 +2243,12 @@ def design_arka_reject(request, project_id):
         arka.reviewed_at         = timezone.now()
         arka.save(update_fields=['verdict', 'rejection_reason', 'qc_failure_category',
                                  'reviewed_by', 'reviewed_at'])
-        assignment.status = DESIGN_ARKA_REJECTED
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Arka v{arka.version} rejected at Design QC '
-                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
-                     entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_qc_rejected')
+        apply_design_status(
+            assignment, DESIGN_ARKA_REJECTED, profile,
+            f'Arka v{arka.version} rejected at Design QC '
+            f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
+            'design_arka_qc_rejected',
+            entity_type='ArkaSubmission', entity_id=arka.pk)
 
     messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected at '
                               f'Design QC — the designer has been asked to submit a new '
@@ -2198,13 +2299,14 @@ def design_arka_head_approve(request, project_id):
         arka.head_overturned_qc = False
         arka.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
                                  'head_overturned_qc'])
-        assignment.status = DESIGN_ARKA_SUBMITTED
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Arka v{arka.version} approved by the Design Head '
-                     f'({arka.capacity_kw} kW)',
-                     entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_head_approved')
+        # Backwards by status name, forwards by meaning — see the docstring. This is one
+        # of the two shapes that make a transition table the wrong abstraction here.
+        apply_design_status(
+            assignment, DESIGN_ARKA_SUBMITTED, profile,
+            f'Arka v{arka.version} approved by the Design Head '
+            f'({arka.capacity_kw} kW)',
+            'design_arka_head_approved',
+            entity_type='ArkaSubmission', entity_id=arka.pk)
         # A re-approval on an attempt that already carries CAD and a submitted BOQ would
         # otherwise leave the status behind; evaluating here costs one query.
         _maybe_advance_to_artifacts_uploaded(
@@ -2276,14 +2378,13 @@ def design_arka_head_reject(request, project_id):
         arka.save(update_fields=['head_verdict', 'head_rejection_reason',
                                  'head_failure_category', 'head_reviewed_by',
                                  'head_reviewed_at', 'head_overturned_qc'])
-        assignment.status = DESIGN_ARKA_REJECTED
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Arka v{arka.version} rejected by the Design Head, overturning '
-                     f'Design QC '
-                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
-                     entity_type='ArkaSubmission', entity_id=arka.pk,
-                     action_code='design_arka_head_rejected')
+        apply_design_status(
+            assignment, DESIGN_ARKA_REJECTED, profile,
+            f'Arka v{arka.version} rejected by the Design Head, overturning '
+            f'Design QC '
+            f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}]: {reason}',
+            'design_arka_head_rejected',
+            entity_type='ArkaSubmission', entity_id=arka.pk)
 
     messages.success(request, f'{project.project_id}: Arka v{arka.version} rejected — the '
                               f'designer has been asked to submit a new version, and the '
@@ -2716,16 +2817,22 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None):
                           and carried_arka.head_verdict == ARKA_APPROVED)
                       else DESIGN_IN_DESIGN)
 
-    assignment.current_attempt_number = next_number
-    assignment.status = opening_status
-    assignment.save(update_fields=['current_attempt_number', 'status', 'updated_at'])
-
     detail_suffix = f' — carried forward: {", ".join(carried)}' if carried else ''
-    log_activity(assignment.project, actor,
-                 f'Attempt {next_number} opened ({new_attempt.get_opened_reason_display()}): '
-                 f'{detail}{detail_suffix}',
-                 entity_type='DesignAttempt', entity_id=new_attempt.pk,
-                 action_code=f'design_attempt_opened_{reason}')
+
+    # NESTED, NOT MERGED (audit A-2.2 §5.2). This function stays the only place an
+    # attempt is closed and the next opened; apply_design_status() stays the only place
+    # the status is written. The coupling is not one-to-one in either direction —
+    # design_head_qc_pass() closes an attempt without opening one, design_qc_pass()
+    # closes nothing — so folding them together would give the merged function two
+    # reasons to change. `current_attempt_number` rides with the status because the two
+    # must never be observable apart.
+    apply_design_status(
+        assignment, opening_status, actor,
+        f'Attempt {next_number} opened ({new_attempt.get_opened_reason_display()}): '
+        f'{detail}{detail_suffix}',
+        f'design_attempt_opened_{reason}',
+        extra_fields={'current_attempt_number': next_number},
+        entity_type='DesignAttempt', entity_id=new_attempt.pk)
 
     # Everything may have carried forward — a failure whose fix was entirely inside the
     # BOQ line items, for instance. Evaluate the progression rule so the new attempt does
@@ -2860,12 +2967,11 @@ def design_qc_start(request, project_id):
     with transaction.atomic():
         attempt.qc_started_at = timezone.now()
         attempt.save(update_fields=['qc_started_at'])
-        assignment.status = DESIGN_IN_QC
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'QC started on attempt {attempt.attempt_number}',
-                     entity_type='DesignAttempt', entity_id=attempt.pk,
-                     action_code='design_qc_started')
+        apply_design_status(
+            assignment, DESIGN_IN_QC, profile,
+            f'QC started on attempt {attempt.attempt_number}',
+            'design_qc_started',
+            entity_type='DesignAttempt', entity_id=attempt.pk)
 
     messages.success(request, f'{project.project_id}: QC started on attempt '
                               f'{attempt.attempt_number}. The PM can now raise a change '
@@ -2931,13 +3037,12 @@ def design_qc_pass(request, project_id):
         attempt.head_started_at = now
         attempt.save(update_fields=['qc_verdict', 'qc_reviewed_by', 'qc_reviewed_at',
                                     'head_started_at'])
-        assignment.status = DESIGN_AWAITING_HEAD_QC
-        assignment.save(update_fields=['status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Design QC passed attempt {attempt.attempt_number} — awaiting '
-                     f'Design Head review',
-                     entity_type='DesignAttempt', entity_id=attempt.pk,
-                     action_code='design_qc_passed')
+        apply_design_status(
+            assignment, DESIGN_AWAITING_HEAD_QC, profile,
+            f'Design QC passed attempt {attempt.attempt_number} — awaiting '
+            f'Design Head review',
+            'design_qc_passed',
+            entity_type='DesignAttempt', entity_id=attempt.pk)
 
     messages.success(request, f'{project.project_id}: Design QC passed on attempt '
                               f'{attempt.attempt_number} — the package now needs the '
@@ -3010,11 +3115,17 @@ def design_qc_fail(request, project_id):
         attempt.redo_required       = sorted(redo)
         attempt.save(update_fields=['qc_verdict', 'qc_remarks', 'qc_failure_category',
                                     'qc_reviewed_by', 'qc_reviewed_at', 'redo_required'])
-        # Status passes THROUGH qc_failed on its way to the new attempt. Recorded as its
-        # own log line so the failure is visible in the trail even though the stored
-        # status moves straight on.
-        assignment.status = DESIGN_QC_FAILED
-        assignment.save(update_fields=['status', 'updated_at'])
+        # THE FAILURE IS A LOG LINE, NOT A STATUS. It used to be both: `qc_failed` was
+        # written here and overwritten by _open_next_attempt() two statements later,
+        # inside this same atomic block, so no query anywhere could ever observe it. The
+        # log line was always the thing that made the failure visible in the trail — the
+        # old comment here said so — and it is untouched. Session C dropped the write
+        # itself: a status nothing can read is not a state the site was in, and a mirror
+        # hook firing on it would announce a transition that never happened.
+        #
+        # `qc_failed` remains a legal DESIGN_ASSIGNMENT_STATUS_CHOICES value and both its
+        # readers (design_metrics.stage_of, views.TENDER_DESIGN_SUBMITTED_STATUSES) are
+        # left alone — they read committed rows, and no committed row ever carried it.
         log_activity(project, profile,
                      f'Design QC failed attempt {attempt.attempt_number} '
                      f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}] '
@@ -3078,14 +3189,17 @@ def design_head_qc_pass(request, project_id):
         attempt.head_overturned_qc = False
         attempt.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
                                     'closed_at', 'head_overturned_qc'])
-        assignment.released_at = now
-        assignment.released_by = profile
-        assignment.status      = DESIGN_RELEASED
-        assignment.save(update_fields=['released_at', 'released_by', 'status', 'updated_at'])
-        log_activity(project, profile,
-                     f'Design Head passed attempt {attempt.attempt_number} — design released',
-                     entity_type='DesignAttempt', entity_id=attempt.pk,
-                     action_code='design_head_qc_passed')
+        # THE RELEASE STAMP AND THE STATUS ARE ONE WRITE. This is the only path that
+        # stamps released_at / released_by, and a row that said `released` without them
+        # (or carried them without saying `released`) is a state the product cannot
+        # produce — which is exactly why the admin form may no longer set any of the
+        # three. See DesignAssignmentAdmin.
+        apply_design_status(
+            assignment, DESIGN_RELEASED, profile,
+            f'Design Head passed attempt {attempt.attempt_number} — design released',
+            'design_head_qc_passed',
+            extra_fields={'released_at': now, 'released_by': profile},
+            entity_type='DesignAttempt', entity_id=attempt.pk)
 
     messages.success(request, f'{project.project_id}: both review gates passed — design '
                               f'released on attempt {attempt.attempt_number}.')
@@ -3159,8 +3273,9 @@ def design_head_qc_fail(request, project_id):
         attempt.save(update_fields=['head_verdict', 'head_remarks', 'head_failure_category',
                                     'head_reviewed_by', 'head_reviewed_at',
                                     'head_overturned_qc', 'redo_required'])
-        assignment.status = DESIGN_QC_FAILED
-        assignment.save(update_fields=['status', 'updated_at'])
+        # No status write here either — see the matching note in design_qc_fail(). The
+        # gate-2 failure passed through `qc_failed` on its way to the new attempt for
+        # exactly as long as gate 1's did, which is to say never observably.
         log_activity(project, profile,
                      f'Design Head failed attempt {attempt.attempt_number}, overturning '
                      f'Design QC '

@@ -404,7 +404,15 @@ class SystemSettingsAdmin(admin.ModelAdmin):
 # screens. Audit-trail models (attempts, Arka versions, files, change requests)
 # are append-only records of what happened, so their historical fields are
 # read-only here — the admin must not be a side door that rewrites design
-# history. Nothing below performs a status transition.
+# history.
+#
+# CORRECTED 05 Sep 2026 (Session C, audit A-2.2 §1.4). This comment used to end
+# "Nothing below performs a status transition", which was false of the very next
+# class: DesignAssignmentAdmin left `status`, `released_at` and `released_by`
+# editable, so a superuser could move a site from awaiting_survey to released in
+# one form submit. It was a true statement about design_views.py presented as a
+# statement about the product — the same mistake B10 found in ProjectAdmin. It is
+# now true, because those three fields are read-only.
 # ---------------------------------------------------------------------------
 
 @admin.register(DesignAssignment)
@@ -415,7 +423,31 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     search_fields = ['project__project_id', 'project__customer_name',
                      'assigned_to__user__username']
     raw_id_fields = ['project']
-    readonly_fields = ['current_attempt_number', 'survey_link_added_at',
+    # DO NOT REMOVE `status`, `released_at` or `released_by` — Session C. An
+    # unhelpfully read-only field is exactly what a future maintainer will want to
+    # delete, so the reason is written down here.
+    #
+    # CLOSED, NOT INSTRUMENTED, matching how B10 closed ProjectAdmin. Every status
+    # write in the product now goes through design_views.apply_design_status(),
+    # which logs the transition and carries the mirror-derivation hook. A
+    # ModelAdmin saves the form field straight to the column, so an admin edit
+    # would move the site with no ActivityLog row and, once Session D lands, no
+    # mirror update.
+    #
+    # The design-specific reason is stronger than the general one, and it is why
+    # routing the admin through apply_design_status() would not have been enough
+    # either. `design_head_qc_pass()` is the ONLY path that stamps the release AND
+    # closes the attempt. A form that set status='released' correctly would still
+    # leave a released site with an open DesignAttempt and a downstream
+    # ProcurementBatch query that disagrees with every screen. THE ADMIN IS NOT A
+    # RELEASE ROUTE, and an admin who cannot set these three cannot pretend to be
+    # one — that is the correct outcome, not a lost capability.
+    #
+    # Reading them is still fine: `status` stays in list_display and list_filter and
+    # `released_at` in list_display, which are read paths. None of the three may
+    # ever appear in list_editable, which writes past this.
+    readonly_fields = ['status', 'released_at', 'released_by',
+                       'current_attempt_number', 'survey_link_added_at',
                        'created_at', 'updated_at']
 
 
