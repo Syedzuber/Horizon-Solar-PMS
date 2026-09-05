@@ -1747,6 +1747,15 @@ REASON_ZOHO_WEBHOOK       = 'zoho_webhook'
 # is pinned byte-for-byte by 92 characterisation tests and a new value in a column it
 # has never written is a behaviour change, however small.
 REASON_EXECUTION_STARTED  = 'execution_started'  # Draft -> Active, template attached
+# Session E. A MIRROR Task's status, DERIVED from the object that owns the work rather
+# than typed by anyone — today only the OPEX Design mirror, following
+# DesignAssignment.status. It is its own reason and not one of the eight above because
+# none of those is true of it: nobody blocked or unblocked anything, no GRN was
+# confirmed, and REASON_MILESTONE_SYNC is the task<->PaymentMilestone sync, a different
+# derivation with a different source. A ledger reader filtering on this one gets exactly
+# the rows no human could have written, which is the question worth asking of a mirror.
+# Costs no migration for the reason stated above: reason_code carries no choices=.
+REASON_MIRROR_DERIVED     = 'mirror_derived'
 
 # Written into actor_role_code when no human performed the change. The Zoho
 # webhook creates projects with created_by=None and no request user at all;

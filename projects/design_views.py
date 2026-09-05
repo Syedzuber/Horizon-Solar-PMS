@@ -49,6 +49,10 @@ from .design_storage import (
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
 from .forms import BOQItemMasterForm
 from .models import (
+    # Session E — the Design mirror derivation. `Task` is read and written ONLY by
+    # apply_mirror_status() below, never by a view in this module: the design workspace
+    # has no business touching execution rows and this import is not a licence to start.
+    Task, REASON_MIRROR_DERIVED,
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
     SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
@@ -268,6 +272,372 @@ def _deny(request, message, redirect_to):
     return redirect(redirect_to)
 
 
+# ---------------------------------------------------------------------------
+# The OPEX Design mirror — Session E (audit A-2.3)
+#
+# THREE FUNCTIONS, ONE PER QUESTION, and they are separate on purpose:
+#
+#   derive_design_mirror_state()  WHAT should the mirror read, given a design status
+#   _design_mirror_task()         WHICH Task row is the Design mirror on this site
+#   apply_mirror_status()         HOW a mirror's status is written at all
+#   sync_design_mirror()          the composition, and the only thing callers touch
+#
+# The split is what lets the SAME mapping serve two callers that have nothing else in
+# common — the hook at the end of apply_design_status(), and the reconcile inside
+# utils.attach_opex_template(). The audit's §3.4 finding is why there are two: design
+# work runs entirely BEFORE activation and nothing sequences them, so on today's data
+# the hook alone would fire for zero sites and the first activation would mint a Design
+# mirror reading Not Started against a source that had already moved on. A mirror that
+# disagrees with its source is the single failure the whole mirror design exists to
+# prevent, so the reconcile is not a nicety.
+#
+# THAT IS ALSO WHY THE MAPPING IS A FUNCTION OF THE STATUS AND NOT OF THE TRANSITION.
+# The reconcile has no transition to read — it has a stored value and nothing else.
+# ---------------------------------------------------------------------------
+
+# The Design mirror's stable identity. `template_task.code`, not `task_name` and not
+# `assigned_role`:
+#
+#   * `task_name` resolves uniquely TODAY and would work TODAY. It is the pre-2.4
+#     pattern this codebase has already migrated away from once (see
+#     ChecklistTaskLink's docstring): rewording a template label silently detaches a
+#     name-keyed lookup, and a mirror hook that stops finding its row does not raise —
+#     it just quietly stops updating. `code` survives the rewording by construction.
+#   * `assigned_role` is NOT a discriminator. Two OPEX mirrors carry role=Design —
+#     this one and As-Built Drawings — and As-Built does NOT follow DesignAssignment
+#     (it is post-commissioning, and nothing in the design workspace records it).
+#     Reaching for the role because it is one join shorter gets the wrong row half the
+#     time.
+DESIGN_MIRROR_CODE = 'DESIGN'
+
+
+# The mapping. A pure function of the STORED design status — see the block comment
+# above for why it cannot be a function of the transition.
+#
+# Coarse on purpose: three mirror states carry eleven design statuses between them.
+# That is OPEX spec §2 rule 7 working as intended — "portfolio metrics read the source
+# object, never the mirror". The mirror answers one question, "has the PM's site got
+# its design", and the fourteen-status detail belongs to the design dashboard, which
+# already has design_metrics._classify() for it.
+#
+# EVERY status in the vocabulary is listed, including the three that nothing writes any
+# more (`allocated`, `due_date_proposed`, `qc_failed`). They remain legal `choices`
+# values and rows carrying them are legal rows, so a mapping that is a pure function of
+# a stored value has to answer for them. Omitting them and letting the fallback catch
+# them would silently map a real state to Not Started.
+DESIGN_MIRROR_STATE_MAP = {
+    # ── Nothing is under way. ──────────────────────────────────────────────
+    # No survey yet, or the Head holds the survey and has not handed the site to a
+    # designer. `awaiting_allocation` is the load-bearing one: 82 of the 87 assignments
+    # that exist sit here, so this row is what the Design mirror reads on essentially
+    # the entire tender. It is Not Started because that is TRUE — nobody is doing design
+    # work — and because In Progress on 82 idle sites destroys the mirror's only job,
+    # which is to tell a PM whether their site's design is moving.
+    #
+    # The discomfort this leaves (a PM sees Phase 1 at Not Started with no action
+    # available to them) is real and is NOT this mapping's to fix: it is spec §2 rule 6,
+    # mirror ageing — "Design — In Progress, 41 days" — which is not built. No choice
+    # here substitutes for it, and R-21 already softens it by excluding mirrors from
+    # current_phase().
+    DESIGN_AWAITING_SURVEY:     Task.NOT_STARTED,
+    DESIGN_AWAITING_ALLOCATION: Task.NOT_STARTED,
+
+    # ── Somebody owns the work. ────────────────────────────────────────────
+    # Allocation is the line: from the moment a site has a designer, design is moving,
+    # whoever is currently holding it. Which of the nine it is says WHO owes the next
+    # move — the designer, the Arka reviewer, the QC reviewer, the Head — and that is a
+    # design-dashboard question, not a mirror question.
+    DESIGN_ALLOCATED:           Task.IN_PROGRESS,
+    DESIGN_DUE_DATE_PROPOSED:   Task.IN_PROGRESS,
+    DESIGN_IN_DESIGN:           Task.IN_PROGRESS,
+    DESIGN_ARKA_SUBMITTED:      Task.IN_PROGRESS,
+    DESIGN_AWAITING_HEAD_ARKA:  Task.IN_PROGRESS,
+    DESIGN_ARKA_REJECTED:       Task.IN_PROGRESS,
+    DESIGN_ARTIFACTS_UPLOADED:  Task.IN_PROGRESS,
+    DESIGN_IN_QC:               Task.IN_PROGRESS,
+    DESIGN_AWAITING_HEAD_QC:    Task.IN_PROGRESS,
+    DESIGN_QC_FAILED:           Task.IN_PROGRESS,
+
+    # ── Held. ──────────────────────────────────────────────────────────────
+    # `survey_returned` is the DESIGN HOLD flag (Part 8 renamed the label, never the
+    # stored value): the assigned designer has stopped over an inadequate survey, which
+    # halts their clock and surfaces to the Head. Blocked is the honest reading of that,
+    # and _status_after_unblock() restores the pre-hold status cleanly, so the mirror
+    # comes back to In Progress by itself with no special case here.
+    #
+    # THIS IS THE FIRST BLOCKED TASK IN THE SYSTEM WITH NO `Issue` BEHIND IT, and that
+    # was checked before it was written rather than after. The human Blocked path
+    # auto-creates an Issue (views.py:4367); a derived Blocked writes only the status
+    # (see apply_mirror_status). Every consumer of "blocked" was read: not one joins
+    # Task.status=Blocked to Issue, or reaches an Issue through a blocked task. The
+    # Issue queries are independent — they filter on project or delivery_challan, and
+    # Issue.task is nullable with a SET_NULL, so an issue-less blocked row is a shape
+    # the schema already permits and project-level issues already produce the converse.
+    # task_detail.html guards with `{% if task_issues %}`. What DOES change is recorded
+    # at the two read sites that do not exclude mirrors — see the note in
+    # sync_design_mirror().
+    DESIGN_SURVEY_RETURNED:     Task.BLOCKED,
+
+    # ── Delivered. ─────────────────────────────────────────────────────────
+    # NOT terminal, and that is what makes spec rule 3 — "mirrors follow their source in
+    # both directions" — achievable here. One reopen route exists (a PM change request
+    # accepted by the Head, design_change_request_accept -> _open_next_attempt), which
+    # moves released -> in_design and therefore Done -> In Progress with no special case.
+    DESIGN_RELEASED:            Task.DONE,
+}
+
+
+def derive_design_mirror_state(design_status):
+    """The Design mirror's status, derived from `DesignAssignment.status`.
+
+    A PURE FUNCTION and deliberately nothing more — no query, no write, no clock. Both
+    callers (the hook and the reconcile) need the same answer from the same input, and
+    a caller that could not test this in isolation would test it through a view.
+
+    An unknown value raises rather than defaulting. A status this does not know is
+    either a fourteenth choice somebody added without reading here, or a corrupt row;
+    both are defects, and Not Started is a plausible-looking wrong answer that would
+    hide either one for months. DESIGN_MIRROR_STATE_MAP lists all fourteen, so the only
+    way to reach this line is to have added a fifteenth.
+    """
+    try:
+        return DESIGN_MIRROR_STATE_MAP[design_status]
+    except KeyError:
+        raise ValueError(
+            f"derive_design_mirror_state(): no mirror state defined for design status "
+            f"{design_status!r}. Add it to DESIGN_MIRROR_STATE_MAP — a design status "
+            f"the mirror cannot read is a mirror that silently stops following its "
+            f"source."
+        )
+
+
+def _design_mirror_task(project):
+    """The Design mirror `Task` on one site, or None.
+
+    THE LOOKUP IS THE PROJECT-TYPE GUARD, and it does the job better than an explicit
+    `if project.project_type != 'OPEX'` would. `code` is unique within a TEMPLATE, not
+    globally, and the Residential template has a task whose code is also 'DESIGN'
+    (`(phase, code)` is the uniqueness constraint, so this is legal and expected):
+
+        RESIDENTIAL  phase=DESIGN  code=DESIGN  label='Design'  is_mirror=False
+        OPEX         phase=DESIGN  code=DESIGN  label='Design'  is_mirror=True
+
+    TWO INDEPENDENT CLAUSES ALREADY EXCLUDE THE RESIDENTIAL ROW, and both are stated
+    because either one alone would be an accident:
+
+      * `phase__project=project` cannot cross templates at all — one project's tasks
+        come from one template. This is the scoping the collision actually needs.
+      * `is_mirror=True` excludes it a second time, on the property that MATTERS: the
+        Residential Design task is a human's task and must never be written by a
+        derivation. The Residential template has no mirrors at all, so this clause
+        makes a Residential project return None here without the function ever asking
+        what type it is.
+
+    A `project_type` join on `template_task__phase__template` — the third guard
+    `_checklist_task_link_for()` carries — is deliberately NOT added. That lookup is
+    genuinely portfolio-wide (a ChecklistTaskLink has no project to scope by) and needs
+    it; this one is handed a project and cannot be portfolio-wide by construction.
+    Adding a redundant join and a comment saying it is redundant is worse than saying
+    why it is not there. If this lookup is ever lifted out of a per-project context, the
+    join comes with it.
+
+    Returns None rather than raising: "no mirror" is the CORRECT and COMMON case today —
+    every OPEX site with design under way is still in Draft with no tasks at all (96
+    sites, 0 phases). The caller decides what to make of it.
+    """
+    return (Task.objects
+            .filter(phase__project=project,
+                    is_mirror=True,
+                    template_task__code=DESIGN_MIRROR_CODE)
+            .first())
+
+
+def apply_mirror_status(task, new_status, actor, reason_code):
+    """THE ONE PLACE A MIRROR `Task`'s STATUS IS WRITTEN. Caller owns the atomic block.
+
+    THE EXACT INVERSE OF RUNG 0. `_apply_task_status_change()` opens by refusing every
+    `is_mirror` task to every human (views.py:4240); this function opens by refusing
+    every NON-mirror task to every derivation. Between them the two statements are
+    total: every `Task` row in the database is writable by exactly one of them, and
+    neither needs to know anything about the other's callers.
+
+    THIS SESSION WEAKENS RUNG 0 IN NO WAY. It was considered and refused: the audit's
+    task 1 re-read the refusal at current state and confirmed it is unconditional —
+    the predicate is `task.is_mirror` and nothing else, and none of the five parameters
+    could carry "this call is a derivation, not a person" without inventing it. A bypass
+    flag would turn "read one line" into "audit every caller, forever". So the refusal
+    stays absolute and the derivation gets its own door. `_apply_task_status_change()`
+    is not called from here, not imported here, and is unmodified by this session.
+
+    WHAT IT DELIBERATELY DOES NOT DO, each because the human path does it and a
+    derivation must not:
+
+      * NO `Issue`. The human Blocked branch auto-creates one; a derived Blocked writes
+        only the status. Conflating a Design Hold with the project issue log is exactly
+        what OPEX_task_template_spec.md:197 dropped the Punch Points mirror to avoid.
+      * NO `due_date`, ever, in either direction. Mirrors seed with due_date NULL,
+        calculate_due_dates() is deliberately not called for OPEX (B18), and R-20 keeps
+        mirrors out of every overdue count. The human path's "In Progress requires a due
+        date" guard is a rule about PEOPLE, not about rows, and carrying it across would
+        make an undated mirror unable to follow its source.
+      * NO notification. The payment-milestone notification is keyed on
+        `is_payment_milestone`, which no mirror carries. Notifying on a derived state is
+        a separate product decision.
+      * NO TRANSITION TABLE. `VALID_TRANSITIONS` forbids humans Done -> In Progress to
+        stop somebody un-completing their own work; a mirror has no such actor, and
+        reopen (released -> in_design after an accepted change request) is a REAL and
+        supported move that has to reverse the mirror out of Done. Spec rule 3 requires
+        it: mirrors follow their source in BOTH directions. This is a genuine divergence
+        between the two writers and it is correct — stated here rather than left for
+        whoever notices the tables differ.
+
+    IDEMPOTENT, AND THAT IS LOAD-BEARING RATHER THAN TIDY. Many consecutive design
+    transitions map to the same mirror state — in_design -> arka_submitted ->
+    awaiting_head_arka -> artifacts_uploaded -> in_qc is five design events that are all
+    "In Progress". Writing unconditionally would produce four StatusTransition rows
+    reading `In Progress -> In Progress`, and a row claiming `x -> x` is a history of
+    something that did not happen (R-3). Note this guard is NOT implied by the one at
+    the end of apply_design_status(): that one says the DESIGN row moved, this one says
+    the DERIVED state differs. Both are needed and they answer different questions.
+
+    `filter(pk=...).update()` rather than `save()`, for the reason apply_design_status()
+    gives for itself: named columns survive a concurrent write to any column not listed.
+
+    `record_transition()` raises where log_activity() swallows, and is called WITHOUT
+    exception handling on purpose — see apply_design_status(). A mirror that moved with
+    no record of why is worse than a design action that visibly failed.
+
+    Returns True if the row was written, False if it already read `new_status`.
+    """
+    if not task.is_mirror:
+        raise ValueError(
+            f"apply_mirror_status(): task {task.pk} ({task.task_name!r}) is not a "
+            f"mirror. This function is the derivation door and writes ONLY derived "
+            f"rows; a human's task goes through _apply_task_status_change(), which "
+            f"applies the permission checks, the transition table and the due-date "
+            f"guard that a derivation deliberately skips."
+        )
+
+    if task.status == new_status:
+        return False
+
+    fields = {'status': new_status}
+    # Parity with _apply_task_status_change()'s update_kwargs (views.py:4325-4332). A
+    # mirror reaching Done with a NULL completed_at is invisible to every completion
+    # metric in the app.
+    if new_status == Task.DONE:
+        fields['completed_at'] = timezone.now()
+    elif task.status == Task.DONE:
+        # ONE DELIBERATE DIVERGENCE FROM THE HUMAN PATH, which does not clear this. It
+        # never had to: Done is near-terminal for a human, and VALID_TRANSITIONS lets
+        # them leave it only for Blocked. A MIRROR reverses out of Done as normal
+        # business — that is the reopen route above — and a `completed_at` left standing
+        # on a row that is no longer done is a false date in a column people group by.
+        fields['completed_at'] = None
+    # Same two rules the human path applies: stamp on entering Blocked so the CEO aged
+    # KPI can measure the wait, clear on leaving so a re-block ages from zero rather
+    # than from the first one. (Mirrors are excluded from that KPI today —
+    # human_owned_tasks_q() sits on the base queryset at views.py:2153 — so this column
+    # is currently written and not read. It is written anyway: the day rule 6's mirror
+    # ageing is built, it needs a truthful date to have been kept all along.)
+    if new_status == Task.BLOCKED and task.status != Task.BLOCKED:
+        fields['blocked_since'] = timezone.now()
+    elif new_status != Task.BLOCKED and task.status == Task.BLOCKED:
+        fields['blocked_since'] = None
+
+    from_status = task.status
+    Task.objects.filter(pk=task.pk).update(**fields)
+    # Keep the in-memory row in step with the row on disk, exactly as
+    # apply_design_status() does and for the same reason: a queryset update leaves the
+    # instance untouched, and callers read it afterwards.
+    for name, value in fields.items():
+        setattr(task, name, value)
+
+    record_transition(
+        task, to_status=new_status, from_status=from_status,
+        actor=actor, reason_code=reason_code,
+    )
+    return True
+
+
+def sync_design_mirror(project, design_status, actor):
+    """Bring one OPEX site's Design mirror into line with its `DesignAssignment.status`.
+
+    THE COMPOSITION, and the only one of these four functions anything outside this
+    block calls. Two callers, and they are the whole feature:
+
+        apply_design_status()          the HOOK — a design status just moved
+        utils.attach_opex_template()   the RECONCILE — a site just got its tasks, and
+                                       its design had a head start of up to months
+
+    `actor` is the SOURCE EVENT's actor, per OPEX spec §2.8: the Design Head who
+    released, the designer who submitted. The ledger then reads truthfully instead of
+    attributing every mirror move to a system user. The reconcile passes None, which
+    record_transition() spells ACTOR_ROLE_SYSTEM — correct and not a shortcut: nobody
+    moved design at activation time, the mirror is catching up to a status somebody else
+    set earlier, and naming the activating PM there would be a lie in the one column
+    that exists to answer "who".
+
+    Caller owns the atomic block, matching record_transition() and apply_design_status().
+
+    WHAT A PM SEES WHEN THIS WRITES Blocked, recorded because a derived Blocked has no
+    `Issue` behind it and two read sites do not exclude mirrors:
+
+      * views.py:1945 `blocked_subq` -> the CEO project card's red "Blocked" badge, and
+        the `proj_blocked` count above it. A site on Design Hold gets that badge with no
+        issue in its issue list. That is arguably right — the site IS held — but it is a
+        behaviour change and it is not silent.
+      * views.py:833 `blocked_tasks_list` is a DEAD context key: no template reads it
+        (searched all of projects/templates/). It counts nothing and renders nothing.
+
+      Everything else that counts or lists blocked work already excludes mirrors through
+      human_owned_tasks_q() on its base queryset — the PM dashboard's blocked_tasks and
+      per-project blocked_count and its five-row evidence list, the SE dashboard's
+      blocked_count, the CEO blocked_open / blocked_aged_7d pair, and the daily user
+      report's blocked column. The task rows themselves (_task_row.html,
+      _task_detail_status.html, project_detail.html) render a red "Blocked" badge and,
+      because the row is a mirror, the READ-ONLY badge instead of the status control —
+      so the one thing a PM cannot do with it is exactly the thing rung 0 refuses.
+
+    Returns True if the mirror was written, False if it was already correct or absent.
+    """
+    task = _design_mirror_task(project)
+    if task is None:
+        # NOT SILENT, AND NOT ALL ONE THING. Two very different situations reach here
+        # and lumping them into one log line would bury the defect under the routine
+        # case, which is precisely the trap _checklist_task_link_for() logs its own
+        # fallback to avoid.
+        if not Task.objects.filter(phase__project=project).exists():
+            # ROUTINE AND, TODAY, UNIVERSAL. Design runs entirely before activation and
+            # nothing sequences the two: 87 sites hold a DesignAssignment and 0 hold a
+            # task. A design status moving on a site that has not been activated has
+            # nowhere to write and nothing is wrong. This is why the reconcile exists —
+            # attach_opex_template() calls this function the moment the rows appear.
+            logger.debug(
+                'Design mirror sync skipped: %s has no tasks yet (not activated).',
+                project.project_id,
+            )
+        else:
+            # A REAL DEFECT. The site HAS tasks, so the template was attached, and the
+            # Design mirror still cannot be found by its code. Either the template was
+            # re-versioned with the code changed, or the row was deleted. The mirror has
+            # silently stopped following its source and nothing else would say so.
+            logger.warning(
+                'Design mirror NOT FOUND on %s, which has tasks: no Task with '
+                'is_mirror=True and template_task__code=%r. The Design mirror has '
+                'stopped following its DesignAssignment on this site.',
+                project.project_id, DESIGN_MIRROR_CODE,
+            )
+        return False
+
+    return apply_mirror_status(
+        task,
+        derive_design_mirror_state(design_status),
+        actor,
+        REASON_MIRROR_DERIVED,
+    )
+
+
 def apply_design_status(assignment, new_status, actor, detail, action_code,
                         extra_fields=None, entity_type='DesignAssignment',
                         entity_id=None):
@@ -332,17 +702,19 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
                  entity_id=assignment.pk if entity_id is None else entity_id,
                  action_code=action_code)
 
-    # ── MIRROR HOOK ATTACHMENT POINT — STILL EMPTY. THE STATE LEDGER IS NOT IT. ──
+    # ── MIRROR HOOK ATTACHMENT POINT — BOTH DERIVATIONS NOW ATTACHED. ──────────
     #
-    # Session C left one marker here and Session D attached ONE OF THE TWO THINGS it
-    # anticipated. Keeping them apart matters, because they are not the same derivation:
+    # Session C left one marker here; Session D attached the first of the two things it
+    # anticipated and Session E attached the second. Keeping them apart still matters,
+    # because they are not the same derivation and they fail differently:
     #
     #   * THE STATE LEDGER (attached below, Session D). A `StatusTransition` row about
     #     the assignment ITSELF. It answers "who moved this site, from what, and when".
-    #   * THE OPEX DESIGN MIRROR (still not built). A mirror `Task` whose state is
-    #     DERIVED from this field. It writes a DIFFERENT subject through
-    #     `record_transition()` and MUST NOT enter `_apply_task_status_change()`, which
-    #     exists to refuse humans (rung 0, R-18/R-20).
+    #   * THE OPEX DESIGN MIRROR (attached below, Session E). A mirror `Task` whose
+    #     state is DERIVED from this field. It writes a DIFFERENT subject through
+    #     `record_transition()` and does NOT enter `_apply_task_status_change()`, which
+    #     exists to refuse humans (rung 0, R-18/R-20) and is untouched by Session E.
+    #     `sync_design_mirror()` is its door; see the block above that function.
     #
     # Everything either one needs is in scope right here:
     #
@@ -375,6 +747,23 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
         record_transition(
             assignment, new_status, from_status=from_status, actor=actor,
         )
+        # THE MIRROR, under the SAME guard and after the ledger. Same guard because the
+        # question is the same one — did this design row actually move — and a mirror
+        # write on a call that moved nothing would announce a transition that never
+        # happened. After the ledger so that the two rows a single design move produces
+        # land in the order they happened: the source first, then what follows from it.
+        #
+        # `assignment.status` rather than `new_status`, and they are equal here: the
+        # loop above has already written the new value onto the instance, and reading
+        # the FIELD makes it plain that the mirror derives from a STATE, not from this
+        # transition. That is what lets attach_opex_template() call the same function
+        # with nothing but a stored value in hand.
+        #
+        # UNGUARDED, like the ledger call above it, and for the same reason: this runs
+        # inside the caller's atomic block, so a mirror that cannot be written rolls the
+        # design status change back with it rather than leaving a site whose mirror
+        # silently disagrees with it. Do not add a try/except here either.
+        sync_design_mirror(assignment.project, assignment.status, actor)
 
     return from_status
 

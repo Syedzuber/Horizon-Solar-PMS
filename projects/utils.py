@@ -1615,6 +1615,39 @@ def attach_opex_template(project):
             project.assigned_pm,
         )
 
+        # THE DESIGN MIRROR RECONCILE — Session E, audit A-2.3 §3.4.
+        #
+        # WHY THIS EXISTS AT ALL. Design work and activation are completely unsequenced,
+        # and design runs FIRST. Nothing in design_views.py reads project.status, and
+        # opex_site_activate() has no design precondition. So by the time a site gets
+        # its tasks, its design may have been running for months: 87 of the 96 OPEX
+        # sites hold a DesignAssignment and 0 hold a task, five of them already past
+        # allocation. Without this the row _attach_task_template() just created reads
+        # Not Started while its source says in_qc — a mirror disagreeing with its
+        # source, which is the one failure the whole mirror design exists to prevent.
+        # The hook in apply_design_status() cannot cover it: it fires on a MOVE, and
+        # these moves already happened, before there was anything to write them to.
+        #
+        # A SECOND WRITE, NOT A DIFFERENT SEED. _attach_task_template() is the shared
+        # core Residential uses too, and threading a per-project status into its
+        # bulk_create() to save one UPDATE would put an OPEX-only concern inside the one
+        # attach. The mirror really was created at the template default and really was
+        # corrected, and the StatusTransition row saying so is accurate history.
+        #
+        # NO ACTOR, DELIBERATELY. record_transition() spells that ACTOR_ROLE_SYSTEM.
+        # Nobody moved design here — the mirror is catching up to a status somebody else
+        # set earlier — and stamping the activating PM on it would be a lie in the one
+        # column that exists to answer "who".
+        #
+        # Deferred import: design_views imports from this module at module level, so the
+        # reverse cannot be a top-level import. Same pattern as every model import here.
+        # Inside the atomic block above, which is what sync_design_mirror() requires:
+        # a mirror that cannot be written takes the whole activation back with it.
+        from .design_views import sync_design_mirror
+        assignment = getattr(project, 'design_assignment', None)
+        if assignment is not None:
+            sync_design_mirror(project, assignment.status, None)
+
 
 def attach_residential_template(project):
     """
