@@ -38,6 +38,9 @@ from .models import (
     # by design; see models.PunchPoint.
     PunchPoint,
     DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
+    # Labelled "Warehouse" on every screen; StockLocation is the model's name because
+    # it is one physical place, not two concepts. See models.StockLocation.
+    StockLocation,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     # 2.4 - the checklist picker resolves its POST back to a concrete template row.
@@ -10601,13 +10604,28 @@ def create_delivery_challan(request, project_id):
     project = _active_project(project_id)
     profile = request.user.profile
     vendors = Vendor.objects.filter(is_active=True).order_by('name')
+    # Labelled "Warehouse" on the form. No filtering by site and no smart default:
+    # nothing on Project or Program carries a location, and material lands at shared
+    # drop points, so any location may legitimately serve any site. Ordered by code —
+    # the same ordering StockLocation.Meta uses and the same short identifier that
+    # appears on the paperwork.
+    warehouses = StockLocation.objects.filter(is_active=True).order_by('code')
 
-    if request.method != 'POST':
-        return render(request, 'projects/delivery_challan_create.html', {
+    # ONE SOURCE FOR THE FORM'S CONTEXT, because there are five render() calls below —
+    # the GET plus four validation-failure re-renders — and a field added to some of
+    # them is a field that silently vanishes when a submission fails validation. That
+    # is how a re-rendered form loses a dropdown, and the only fix that stays fixed is
+    # for there to be no second copy to forget.
+    def _form_context():
+        return {
             'project':          project,
             'vendors':          vendors,
+            'warehouses':       warehouses,
             'category_choices': DCLineItem.CATEGORY_CHOICES,
-        })
+        }
+
+    if request.method != 'POST':
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     # Parse DC header fields
     vendor_id              = request.POST.get('vendor_id', '').strip()
@@ -10619,19 +10637,13 @@ def create_delivery_challan(request, project_id):
 
     if not dc_number or not dc_date_s:
         messages.error(request, 'DC Number and DC Date are required.')
-        return render(request, 'projects/delivery_challan_create.html', {
-            'project': project, 'vendors': vendors,
-            'category_choices': DCLineItem.CATEGORY_CHOICES,
-        })
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     try:
         dc_date = date.fromisoformat(dc_date_s)
     except ValueError:
         messages.error(request, 'Invalid DC Date format.')
-        return render(request, 'projects/delivery_challan_create.html', {
-            'project': project, 'vendors': vendors,
-            'category_choices': DCLineItem.CATEGORY_CHOICES,
-        })
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     expected_delivery_date = None
     if expected_delivery_s:
@@ -10645,6 +10657,18 @@ def create_delivery_challan(request, project_id):
         try:
             vendor = Vendor.objects.get(pk=vendor_id, is_active=True)
         except Vendor.DoesNotExist:
+            pass
+
+    # OPTIONAL FOR THE PILOT — an empty selection is a valid submission, not an error,
+    # so an unrecognised or blank id leaves this None and the challan saves without it.
+    # Resolved through the same is_active filter the dropdown was built from, so a
+    # location deactivated between the GET and the POST cannot be attached.
+    warehouse = None
+    if request.POST.get('issued_from_warehouse', '').strip():
+        try:
+            warehouse = StockLocation.objects.get(
+                pk=request.POST['issued_from_warehouse'].strip(), is_active=True)
+        except (StockLocation.DoesNotExist, ValueError):
             pass
 
     # Parse dynamically indexed line item fields from POST
@@ -10669,15 +10693,13 @@ def create_delivery_challan(request, project_id):
     # Minimum 1 line item — DC with zero items rejected
     if not line_items_data:
         messages.error(request, 'At least one line item is required.')
-        return render(request, 'projects/delivery_challan_create.html', {
-            'project': project, 'vendors': vendors,
-            'category_choices': DCLineItem.CATEGORY_CHOICES,
-        })
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     with transaction.atomic():
         challan = DeliveryChallan.objects.create(
             project=project,
             vendor=vendor,
+            issued_from_warehouse=warehouse,
             po_number=po_number,
             dc_number=dc_number,
             dc_date=dc_date,

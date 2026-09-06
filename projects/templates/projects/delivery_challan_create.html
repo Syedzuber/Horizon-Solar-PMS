@@ -47,6 +47,24 @@
                  placeholder="External PO reference (Excel / Zoho Inventory)" maxlength="100">
         </div>
 
+        {% comment %}
+        "Warehouse" is the label; the model behind it is StockLocation. Deliberately
+        unfiltered by site — material lands at shared drop points, so any warehouse
+        may serve any project — and deliberately without a pre-selected default.
+        {% endcomment %}
+        <div class="col-md-6">
+          <label class="form-label fw-semibold">Warehouse <span class="text-muted">(optional)</span></label>
+          <select name="issued_from_warehouse" class="form-select">
+            <option value="">— Select Warehouse —</option>
+            {% for w in warehouses %}
+            <option value="{{ w.pk }}">{{ w }}</option>
+            {% endfor %}
+          </select>
+          {% if not warehouses %}
+          <div class="form-text text-muted">No warehouses have been set up yet.</div>
+          {% endif %}
+        </div>
+
         <div class="col-md-4">
           <label class="form-label fw-semibold">
             DC Number <span class="text-danger">*</span>

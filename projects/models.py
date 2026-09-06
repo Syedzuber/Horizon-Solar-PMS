@@ -1444,6 +1444,23 @@ class DeliveryChallan(models.Model):
     # po_number is a free-text reference to external PO (Excel/Zoho Inventory)
     # PO creation inside SolarPMS is Phase 2 scope — do NOT add PO model today
 
+    # WHICH WAREHOUSE THIS MATERIAL LEFT. 'Warehouse' is the label every user sees; the
+    # model is `StockLocation` because it is the same physical place stock is received
+    # into and held at, not a second concept (see its section note).
+    #
+    # PROTECT, NOT CASCADE OR SET_NULL. Deleting a location must never take delivery
+    # records with it, and must not quietly erase which building the material came from
+    # either — a refused delete is a state an admin can see and resolve, and retirement
+    # already has a spelling here: `is_active=False`, which leaves history readable.
+    #
+    # NULLABLE because every challan that already exists predates this column and has no
+    # honest value for it. Optional on submit for the pilot; making it required is a
+    # question for the session that has a warehouse entry screen to point people at.
+    issued_from_warehouse = models.ForeignKey(
+        'StockLocation', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='delivery_challans',
+    )
+
     dc_number = models.CharField(max_length=100)
     # dc_number: challan number printed on vendor's delivery document
 
@@ -4481,6 +4498,16 @@ class StockLocation(models.Model):
     #: Short human identifier used on documents and in pickers — 'HYD-1', 'MUM-CENTRAL'.
     code    = models.CharField(max_length=20, unique=True)
     address = models.TextField(blank=True, default='')
+    city    = models.CharField(max_length=100, blank=True, default='')
+    state   = models.CharField(max_length=100, blank=True, default='')
+
+    # A BOOLEAN, NOT A `warehouse_type` CHOICE FIELD, and that is the whole decision.
+    # The Delhi location serves as BOTH the central store and its own regional one, so a
+    # single-choice field could not represent it: whichever of 'central'/'regional' was
+    # picked would be a lie about half of what the building does. A flag says "this one is
+    # also central" and leaves every location regional by default, which is the only
+    # spelling that describes Delhi correctly.
+    is_central = models.BooleanField(default=False)
 
     # THE KEEPER'S AUTHORITY FOLLOWS THIS WAREHOUSE, NOT A TENDER. Whoever is named here
     # acts on everything inside this location — whatever programme, tender or project it
