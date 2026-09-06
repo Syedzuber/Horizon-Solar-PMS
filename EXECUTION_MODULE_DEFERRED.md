@@ -118,3 +118,82 @@ context. No template reads it — grep finds zero references. Dead context, harm
 in place because removing it is not this session's business. Worth deleting alongside the
 T4 work, which is the only thing that will otherwise make someone wonder whether it feeds
 a category list somewhere.
+
+---
+
+## 6. The local `.env` points at PRODUCTION Supabase, and storage has no master switch
+
+Found while seeding the SCM pilot (`seed_scm_pilot`, 6 Sep 2026), on a local database that
+is a restored production dump.
+
+`SUPABASE_URL` in the local `.env` is `https://wqpxtjelsfgwhhyyafus.supabase.co` — the
+same project that hosts all 18 stored `file_url` values in the dump. It is not a staging
+bucket that resembles production; it **is** production storage, reachable from a developer
+laptop with a live `SUPABASE_KEY`.
+
+**Why this is not the same as the notification hazard, and is worse.** Notifications have a
+master switch: `SystemSettings.whatsapp_enabled` and `email_enabled` are both `False` on
+this restore, so the live Interakt and ZeptoMail keys sitting in the same file cannot
+actually deliver anything. There is **no equivalent flag for storage**. `upload_design_file`
+and `supabase_storage` consult nothing before writing; any local action that uploads —
+`design_artifact_upload`, `design_survey_upload`, task file attachments — puts a real
+object into the real bucket, silently and immediately.
+
+The concrete consequence, already paid: the SCM pilot's design walk had to be cut short.
+Reaching `released` requires a CAD upload, so the walkthrough site is walked only to the
+Arka gate pair and the rest is fixtured — recorded as `PARTIAL` in the pilot manifest
+rather than `WALKED`. That is a real loss of coverage caused by a configuration, not by
+the product.
+
+**What a session picking this up has to do**, in order of how much it buys:
+
+1. Give local development its own Supabase project, or at minimum its own bucket, and put
+   that in the developer `.env`. This is the actual fix and everything else is mitigation.
+2. Failing that, add a settings-level storage kill switch that `design_storage` and
+   `supabase_storage` both consult — one that raises rather than silently no-ops, so a
+   developer learns immediately instead of wondering why a file vanished.
+3. Either way, a check equivalent to `_demo_support.require_local_database()` but for
+   storage: refuse a write when the database is local and the bucket is not.
+
+Note that `DEBUG=True` is also set locally, so a stray production connection would be
+serving tracebacks. `.env` is correctly gitignored and untracked; the exposure is the
+credential's reach, not its disclosure.
+
+---
+
+## 7. `TESTTENDER26` is test data living in the production database
+
+`Program` id 1 — `short_tender_code='TESTTENDER26'`, name `HRP-Test`, client
+`Test-HRP-Client`, created 28 Jul 2026 by user id 10 — carries 11 OPEX sites
+(`TESTTENDER26-MB001` .. `MB011`), one of them soft-deleted. All of it is present in
+`railway_backup.dump`, which means it was created **on production, through the browser**,
+not locally by an audit.
+
+Left alone deliberately. It is out of scope for the pilot, and deleting a Program on
+production is not a thing to do as a side effect of seeding a local rehearsal.
+
+What a session picking it up needs to know: `Project.program` is `on_delete=PROTECT`, so
+the sites must go first, and `short_tender_code` uniqueness is checked **soft-delete-aware**
+against the unfiltered manager — a soft-deleted `TESTTENDER26` keeps reserving its code
+and keeps its sites' `project_id` values reserved with it. Decide hard vs soft deletion
+before starting, not halfway through.
+
+Related but distinct: the 12 `MS0xx` sites under `MPUVL` looked like test data to a
+pattern match and are **not** — they are ordinary MPUVNL tender sites alongside the `MB0xx`
+ones. Do not sweep on the prefix.
+
+---
+
+## 8. One account has `UserProfile.is_active=True` and `auth.User.is_active=False`
+
+`pradeep` (Site Engineer, email `pushkar@horizonrenewablepower.com`). The account **cannot
+log in**, while every screen that reads the profile shows it as active. It is the only such
+row in the database; the inverse case (profile inactive, user active) is zero rows.
+
+Not touched — it is a dump-originated row and correcting it is a production data decision,
+not a seeding one. Whoever owns it needs to decide which of the two columns is the truth
+and set the other to match.
+
+`seed_scm_pilot._assert_loginable()` exists because of this row: every pilot user has both
+flags asserted `True` at creation and printed per user, so the pilot cannot inherit the
+same failure and discover it mid-rehearsal.
