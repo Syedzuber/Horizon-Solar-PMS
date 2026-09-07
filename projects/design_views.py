@@ -53,6 +53,13 @@ from .models import (
     # apply_mirror_status() below, never by a view in this module: the design workspace
     # has no business touching execution rows and this import is not a licence to start.
     Task, REASON_MIRROR_DERIVED,
+    # The delivery mirror derivation. `DCLineItem` is READ here and never written —
+    # sync_delivery_mirrors() derives task state FROM delivery, never the reverse, and
+    # no DC or GRN behaviour is reachable from this module. `_dc_item_severity` is
+    # imported rather than re-spelled so that "a line arrived in full and undamaged"
+    # has exactly one definition in the codebase; see that function and the docstring
+    # of sync_delivery_mirrors().
+    DCLineItem, DC_CATEGORY_TO_MIRROR_CODE, _dc_item_severity,
     Program, Project, UserProfile, BOQ, BOQItem, DesignAssignment, DueDateCommitment,
     DesignAttempt, ArkaSubmission, DesignFile, DesignChangeRequest, log_activity,
     SiteGroup, SiteGroupMembership, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
@@ -636,6 +643,190 @@ def sync_design_mirror(project, design_status, actor):
         actor,
         REASON_MIRROR_DERIVED,
     )
+
+
+# ---------------------------------------------------------------------------
+# The delivery mirrors — the SECOND derivation, and the second caller of the writer
+# ---------------------------------------------------------------------------
+#
+# WHY THIS LIVES IN THE DESIGN MODULE, which is otherwise nothing to do with delivery.
+# It is here because `apply_mirror_status()` is here, and that function is THE door
+# through which a mirror `Task` is written — the exact inverse of rung 0. A second door
+# opened next to the delivery views would be a second thing to audit forever. The file
+# boundary is therefore the wrong one to reason about: what matters is that every
+# mirror write goes through one writer, and every caller of that writer is named.
+#
+# Nothing else about the design module is involved. This function reads DCLineItem and
+# writes a Task; it touches no DesignAssignment, no attempt, no Arka submission.
+
+# The four mirror codes, derived from the mapping rather than restated beside it —
+# a second literal list is a second thing to keep in step when T4 extends the dict.
+DELIVERY_MIRROR_CODES = frozenset(DC_CATEGORY_TO_MIRROR_CODE.values())
+
+
+def _delivery_mirror_tasks(project):
+    """The delivery mirror `Task` rows on one site, keyed by template code.
+
+    THE LOOKUP IS THE PROJECT-TYPE GUARD, exactly as `_design_mirror_task()` explains at
+    length for its own case, and here it is stronger still: the Residential template has
+    no task carrying any of these four codes AND has no mirrors at all, so a Residential
+    project returns `{}` here without the function ever asking what type it is. That
+    covers both halves of the fail-safe requirement — "not OPEX" and "no delivery
+    mirrors" are one condition to this lookup, not two, and neither raises.
+
+    `code__in` and not `assigned_role='SCM'`: role is not a discriminator (several OPEX
+    tasks carry SCM), and `code` survives a template relabel where `label` would not.
+
+    Returns a dict so the caller can ask for one bucket without a second query, and so a
+    site missing one of the four is simply a bucket the caller skips rather than a
+    KeyError. Partially-seeded sites are a real state — see the count logged below.
+    """
+    return {
+        task.template_task.code: task
+        for task in (Task.objects
+                     .filter(phase__project=project,
+                             is_mirror=True,
+                             template_task__code__in=DELIVERY_MIRROR_CODES)
+                     .select_related('template_task'))
+    }
+
+
+def sync_delivery_mirrors(project):
+    """Derive the four OPEX delivery mirror task statuses from delivery challan lines.
+    Read-derived: reflects DC/GRN state, never the reverse.
+
+    THE SECOND DERIVATION, built to the shape `sync_design_mirror()` set: resolve the
+    row, compute the state, hand both to `apply_mirror_status()`. It writes no status
+    itself and knows nothing about `completed_at`, transitions or actors — that is all
+    the writer's, and there is deliberately no second copy of it here.
+
+    WHAT EACH BUCKET MEANS, across ALL challans on the site:
+
+        no DC lines in the category            Not Started
+        lines exist, any not yet GRN-confirmed In Progress
+        all confirmed, every line green        Done
+        all confirmed, any short or damaged    In Progress
+
+    THE LAST ROW IS DELIBERATE AND IS THE POINT OF THE FUNCTION. A bucket reading Done
+    while material is missing is worse than one reading In Progress: Done is what a PM
+    scans for to stop worrying about a category. The shortfall itself is carried by the
+    delivery issue (`create_delivery_issue`), not by this status — this status only
+    declines to say the delivery finished, because it did not.
+
+    `_dc_item_severity()` (models.py) IS THE PREDICATE, reused rather than restated.
+    Its 'green' is precisely "received in full, no damage" and its 'amber'/'red' are
+    precisely "short, or damaged, or both" — the same rule `recalculate_dc_status()`
+    rolls up into the DC's own status. A second spelling of that rule here would be two
+    definitions of a full delivery, and they would drift the first time either moved.
+    The dependency is named in this sentence so it is visible from this end too.
+
+    NO CHALLAN STATUS FILTER, AND THAT IS NOT AN OVERSIGHT. `DeliveryChallan` has no
+    cancelled state: its four statuses are Expected / Partially Received / Received /
+    Rejected, and `Rejected` is REPURPOSED (see recalculate_dc_status) to mean severe
+    delivery failure — shortfall AND damage, or nothing received at all. Filtering it
+    out would make the worst deliveries in the portfolio read as though nothing had
+    been ordered, which inverts the meaning of the status. So a Rejected challan HOLDS
+    its buckets at In Progress, and that is correct: material was ordered and did not
+    properly arrive. If a real cancellation is ever added, it is excluded HERE.
+
+    IDEMPOTENT, and it needs no guard of its own to be so. `apply_mirror_status()`
+    returns False without writing when the row already reads the derived status, so a
+    second call in a row produces no `StatusTransition`; and that function calls no
+    `log_activity()` at all, so it produces no `ActivityLog` row either, first call or
+    tenth. Both deltas are structurally zero rather than tested-to-be-zero.
+
+    IT MOVES BACKWARDS OUT OF Done, AND MAY SAFELY DO SO. The state is recomputed from
+    the live line set every time rather than accumulated, so a bucket leaves Done only
+    when the lines genuinely stop supporting it — a new challan line in that category
+    is unconfirmed, which is "some confirmed, some not". `apply_mirror_status()` clears
+    `completed_at` on the way out for exactly this case. No forward-only clamp is
+    needed and none is applied.
+
+    ACTOR IS ALWAYS None, i.e. ACTOR_ROLE_SYSTEM, and this is where it diverges from
+    `sync_design_mirror()` — which takes the source event's actor because one design
+    status moved and one person moved it. A bucket here aggregates every line on every
+    challan on the site: confirming a GRN on one challan can move a bucket whose other
+    lines were confirmed by a different SE weeks earlier. Naming whoever happened to
+    trigger the recalculation would be a lie in the one column that exists to answer
+    "who". The `ActivityLog` entries at the GRN and DC endpoints already record the
+    person, and that is the right place for it.
+
+    Caller owns the atomic block, matching `apply_mirror_status()` and
+    `record_transition()`.
+
+    Returns the number of mirror rows actually written — 0 when nothing moved, when the
+    project is not OPEX, and when it has no delivery mirrors. Never raises.
+    """
+    tasks = _delivery_mirror_tasks(project)
+    if not tasks:
+        # Silent for the two routine cases and loud for the one that is not, the same
+        # three-way `sync_design_mirror()` makes. Lumping them together would bury a
+        # broken template under the ordinary Residential call.
+        # The literal, because there is no `Project.OPEX` constant — `PROJECT_TYPE_CHOICES`
+        # is bare strings and every other site in this codebase spells it this way.
+        if project.project_type != 'OPEX':
+            # THE COMMON CASE BY FAR. Every Residential project reaches here on every
+            # DC it raises — 96 of them — and nothing is wrong. Not logged at all: a
+            # debug line per Residential GRN is noise that would hide the case below.
+            pass
+        elif not Task.objects.filter(phase__project=project).exists():
+            # An OPEX site still in Draft. Delivery before activation is unusual but
+            # not impossible, and there is nowhere to write.
+            logger.debug(
+                'Delivery mirror sync skipped: %s has no tasks yet (not activated).',
+                project.project_id,
+            )
+        else:
+            # A REAL DEFECT, and the only way to hear about it. The site HAS tasks, so
+            # the template was attached, and not one of the four delivery mirrors can
+            # be found by its code. Either the template was re-versioned with the codes
+            # changed or the rows were deleted; either way the buckets have silently
+            # stopped following the material.
+            logger.warning(
+                'Delivery mirrors NOT FOUND on %s, which has tasks: no Task with '
+                'is_mirror=True and template_task__code in %r. The delivery mirrors '
+                'have stopped following the delivery challans on this site.',
+                project.project_id, sorted(DELIVERY_MIRROR_CODES),
+            )
+        return 0
+
+    # ONE QUERY FOR THE WHOLE SITE, across every challan (H7: a project may carry
+    # several, and one category may span them). `values_list` rather than model
+    # instances because the only thing wanted is four numbers per row, and a site with
+    # a long delivery history should not build a DCLineItem for each.
+    lines = (DCLineItem.objects
+             .filter(challan__project=project)
+             .values_list('boq_category', 'received_quantity',
+                          'ordered_quantity', 'damaged_quantity'))
+
+    # Bucket by MIRROR CODE, not by category — this is what lets T4's sixteen OPEX
+    # categories fan into the same four buckets with no change to the logic below.
+    buckets = {code: [] for code in tasks}
+    for category, received, ordered, damaged in lines:
+        code = DC_CATEGORY_TO_MIRROR_CODE.get(category)
+        # An unmapped category is skipped rather than raised on. During T4 the form may
+        # legitimately offer a category this dict has not been extended to cover yet,
+        # and a delivery that cannot be classified must not take the GRN down with it.
+        if code in buckets:
+            buckets[code].append(
+                _dc_item_severity(received, ordered, damaged))
+
+    written = 0
+    for code, severities in buckets.items():
+        if not severities:
+            state = Task.NOT_STARTED
+        elif all(sev == 'green' for sev in severities):
+            # `_dc_item_severity()` returns None for an unconfirmed line, so this is
+            # "every line confirmed AND every one of them received in full undamaged"
+            # in a single test — an unconfirmed line is not green and cannot pass here.
+            state = Task.DONE
+        else:
+            state = Task.IN_PROGRESS
+
+        if apply_mirror_status(tasks[code], state, None, REASON_MIRROR_DERIVED):
+            written += 1
+
+    return written
 
 
 def apply_design_status(assignment, new_status, actor, detail, action_code,

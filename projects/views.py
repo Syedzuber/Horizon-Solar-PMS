@@ -119,6 +119,12 @@ from .gantt_constants import GANTT_PHASE_DISPLAY_NAME_MAP, GANTT_TASK_DISPLAY_NA
 from .design_views import (
     design_head_dashboard_counts, design_qc_dashboard_counts, designer_dashboard_context,
     pm_change_request_targets, scm_opex_tender_rows,
+    # The OPEX delivery mirror derivation. It lives in design_views because the single
+    # writer every mirror Task status goes through lives there; it has nothing to do
+    # with the design workspace otherwise. This module calls the DERIVATION and never
+    # that writer, which is what keeps the door single — and is why neither the writer
+    # nor the Design derivation is named anywhere in this file, by test, on purpose.
+    sync_delivery_mirrors,
 )
 
 logger = logging.getLogger(__name__)
@@ -10720,6 +10726,23 @@ def create_delivery_challan(request, project_id):
         # here because all new items have no received_quantity → status stays Expected
         for item_data in line_items_data:
             DCLineItem.objects.create(challan=challan, **item_data)
+
+        # ── THE OPEX DELIVERY MIRRORS. One added call; nothing above it changed. ────
+        #
+        # THE SECOND AND LAST CALL SITE, and it exists precisely BECAUSE of the comment
+        # four lines up: recalculate_dc_status() is deliberately not called here, so
+        # the hook attached inside it cannot fire on this path. Without this call the
+        # Not Started -> In Progress move — a challan raised, material on its way,
+        # nothing yet received — would never happen at all, and a bucket would sit at
+        # Not Started until its first GRN.
+        #
+        # Inside the atomic block and after the line items, because it reads them: run
+        # before the loop it would see a challan with no lines and derive Not Started.
+        # Unguarded, for the reason recalculate_dc_status() gives at its own call.
+        # Returns without writing for every Residential challan, which is all but one
+        # of the projects that reach this view today.
+        # ───────────────────────────────────────────────────────────────────────────
+        sync_delivery_mirrors(project)
 
     vendor_name = vendor.name if vendor else 'Unknown Vendor'
     log_activity(

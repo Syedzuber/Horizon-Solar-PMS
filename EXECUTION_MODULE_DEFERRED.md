@@ -197,3 +197,57 @@ and set the other to match.
 `seed_scm_pilot._assert_loginable()` exists because of this row: every pilot user has both
 flags asserted `True` at creation and printed per user, so the pilot cannot inherit the
 same failure and discover it mid-rehearsal.
+
+---
+
+## 9. The delivery mirrors have a hook but no RECONCILE
+
+Found while wiring `sync_delivery_mirrors()`. Not a defect in that function — a gap
+beside it, and the same gap the Design mirror already solved.
+
+The Design mirror has **two** entry points and needs both:
+
+    apply_design_status()          the HOOK      — a source status just moved
+    utils.attach_opex_template()   the RECONCILE — the task rows just appeared, and the
+                                                   source had a head start
+
+The delivery mirrors have only hooks — `recalculate_dc_status()` and
+`create_delivery_challan()`. Both fire on a delivery EVENT. Neither fires when the task
+rows themselves appear.
+
+**The consequence is visible on the pilot data right now.** `SCMPILOT01` carries two
+challans with Solar Modules, Inverter and Structure lines all confirmed in full, and its
+four mirror rows are all still `Not Started`. Running the derivation by hand moves three
+of them to `Done` immediately:
+
+    SCMPILOT01   DELIVERY_SOLAR_PANELS    Not Started -> Done
+    SCMPILOT01   DELIVERY_INVERTERS       Not Started -> Done
+    SCMPILOT01   DELIVERY_MMS             Not Started -> Done
+
+(`DELIVERY_BOS_KIT` correctly stays `Not Started` — those challans carry no BOS line.)
+
+Nothing will move them until somebody raises another challan on that site or re-saves a
+GRN. Any OPEX site activated AFTER its material was delivered lands in the same state,
+which is the exact shape of the problem audit A-2.3 §3.4 measured for design: the source
+event happens before the rows exist, so a hook alone is correct for no site that already
+has history.
+
+**Left unfixed deliberately.** The approved call-site set for this session was the
+minimum that covers every path *forward*, and it does. A reconcile is a third call site
+in `utils.attach_opex_template()`, which was outside the session's MODE, and it is a
+different decision from the hook: it needs someone to choose whether newly activated
+sites should silently inherit `Done` buckets from material delivered months earlier, or
+whether that should be a visible backfill somebody runs and reads.
+
+**What a session picking it up needs to know.** The function is already safe to call
+this way — it derives from the live line set rather than from an event, takes only a
+project, is idempotent, and returns without writing or raising for a non-OPEX project or
+one with no mirrors. So the fix is one call plus the decision above, and
+`sync_delivery_mirrors()` needs no change to support it. Adding that call means adding
+`attach_opex_template` to the closed caller list in
+`tests_design_mirror_derivation.test_01b`, which is the intended way to make it a
+deliberate act rather than a silent one.
+
+A one-off backfill for the six seeded sites is the same call in a loop, and is worth
+running before the pilot rehearsal so `SCMPILOT01` demonstrates the feature rather than
+demonstrating this gap.

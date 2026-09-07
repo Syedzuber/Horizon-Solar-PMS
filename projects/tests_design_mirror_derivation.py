@@ -63,7 +63,7 @@ from . import design_views
 from .design_views import (
     DESIGN_MIRROR_CODE, DESIGN_MIRROR_STATE_MAP, _design_mirror_task,
     apply_design_status, apply_mirror_status, derive_design_mirror_state,
-    sync_design_mirror,
+    sync_design_mirror, sync_delivery_mirrors,
 )
 from .models import (
     ACTOR_ROLE_SYSTEM, DesignAssignment, Issue, Program, Project, StatusTransition,
@@ -948,48 +948,131 @@ class CallerDisciplineTests(TestCase):
             return []
         return names
 
+    def _imported_names(self, source):
+        """{(lineno, name)} for every name BOUND BY AN IMPORT in `source`.
+
+        PARSED, BECAUSE THE LINE-PREFIX TEST BELOW CANNOT SEE A PARENTHESISED IMPORT.
+        `from .design_views import (\\n    sync_delivery_mirrors,\\n)` puts the name on
+        a line of its own that starts with neither `import` nor `from`, so the prefix
+        check waves it through and the sweep reports an IMPORT as a CALL. That is not
+        hypothetical — views.py imports the delivery derivation exactly that way, and
+        this method exists because it did.
+
+        The consequence ran in the safe direction here (a false caller fails loudly)
+        but it runs the other way just as easily: the whole point of these tests is to
+        count the writer's callers exactly, and a counter that miscounts parenthesised
+        imports is a counter that can be quietly satisfied by reformatting an import.
+
+        A SyntaxError yields the empty set rather than raising: `_code_names()` already
+        returns [] for a file that will not tokenise, and a file that will not parse is
+        somebody else's test's problem, not this sweep's.
+        """
+        import ast
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return set()
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    bound.add((alias.lineno, alias.asname or alias.name.split('.')[0]))
+        return bound
+
     def _call_sites(self, function_name, *, exclude_files=()):
         """Files and lines where `function_name` appears as EXECUTED code.
 
-        Its own `def` and every `import`/`from` line are excluded — a definition is not
-        a call and neither is an import, and both functions are imported by this module
-        precisely so they can be tested.
+        Its own `def` and every name bound by an `import` are excluded — a definition
+        is not a call and neither is an import, and these functions are imported by
+        this module precisely so they can be tested.
         """
         found = []
         for relpath, source in self._sources():
             if relpath in exclude_files:
                 continue
             lines = source.splitlines()
+            imported = self._imported_names(source)
             for lineno, name in self._code_names(source):
                 if name != function_name:
                     continue
+                # Single-line `def`/`import`/`from`, then the parenthesised-import case
+                # the prefix test structurally cannot reach. Both kept: the prefix test
+                # still covers a file that parses badly enough for ast to give up.
                 stripped = lines[lineno - 1].strip()
                 if stripped.startswith(('def ', 'import ', 'from ')):
+                    continue
+                if (lineno, name) in imported:
                     continue
                 found.append(f'{relpath}:{lineno}: {stripped}')
         return found
 
-    def test_01_apply_mirror_status_has_exactly_one_production_caller(self):
-        """`sync_design_mirror()` and nothing else.
+    # The closed list of compositions permitted to write a mirror. ADDING A NAME HERE
+    # IS THE WHOLE DECISION — it is meant to be a deliberate, reviewed act, which is
+    # why the list is a literal and not computed from anything.
+    MIRROR_WRITER_CALLERS = ('sync_design_mirror', 'sync_delivery_mirrors')
+
+    def test_01_apply_mirror_status_is_called_only_by_named_compositions(self):
+        """The two named derivations and nothing else.
 
         The writer is the door; the composition decides WHICH row and WHAT state. A
-        second production caller means somebody has a Task in hand and a status in mind,
-        which is the shape rung 0 exists to refuse.
+        caller that is not on this list means somebody has a Task in hand and a status
+        in mind, which is the shape rung 0 exists to refuse.
+
+        THE INVARIANT IS THE CLOSED LIST, NOT THE COUNT. Session E's version of this
+        test asserted "exactly one caller" because at the time there was exactly one;
+        Session F added the delivery derivation and the assertion became a list of two.
+        What must NEVER happen is this relaxing into "any caller inside
+        design_views.py" or a bare count — either would let a third composition appear
+        with nobody deciding it should. The three assertions below are closed together:
+        the count fixes how many call sites exist, the file check fixes where, and the
+        per-function check fixes which functions they are inside. Two callers, both in
+        design_views.py, one provably inside each named function, leaves no room for an
+        unnamed third.
         """
         callers = self._call_sites(
             'apply_mirror_status',
             exclude_files=('tests_design_mirror_derivation.py',))
         self.assertEqual(
-            len(callers), 1,
-            'apply_mirror_status() has %d callers, expected exactly one '
-            '(sync_design_mirror):\n%s' % (len(callers), '\n'.join(callers)))
-        self.assertTrue(
-            callers[0].startswith('design_views.py:'),
-            f'the writer is called from outside design_views.py: {callers[0]}')
+            len(callers), len(self.MIRROR_WRITER_CALLERS),
+            'apply_mirror_status() has %d call sites, expected exactly %d (%s). A new '
+            'one is a new composition and must be added to MIRROR_WRITER_CALLERS '
+            'deliberately:\n%s' % (len(callers), len(self.MIRROR_WRITER_CALLERS),
+                                   ', '.join(self.MIRROR_WRITER_CALLERS),
+                                   '\n'.join(callers)))
+        for caller in callers:
+            self.assertTrue(
+                caller.startswith('design_views.py:'),
+                f'the writer is called from outside design_views.py: {caller}')
 
-        # And that one call site is inside sync_design_mirror(), not merely in the
-        # same file — the file-level check above would pass for a second view.
-        self.assertIn('apply_mirror_status(', inspect.getsource(sync_design_mirror))
+        # And each call site is inside one of the NAMED compositions, not merely in the
+        # same file — the file-level check above would pass for a second view. With the
+        # count pinned above, one call proven inside each name accounts for all of them.
+        for name in self.MIRROR_WRITER_CALLERS:
+            self.assertIn(
+                'apply_mirror_status(',
+                inspect.getsource(globals()[name]),
+                f'{name}() is named as a mirror-writing composition but does not '
+                f'call the writer')
+
+    def test_01b_sync_delivery_mirrors_is_called_only_by_the_delivery_paths(self):
+        """The DC create and the DC status recalculation. Both are named.
+
+        The delivery analogue of test_02, and it exists for the same reason: a
+        derivation nobody can reach from an unexpected place is what makes "read-derived"
+        true. `recalculate_dc_status` (models.py) covers both GRN endpoints because they
+        both funnel through it; `create_delivery_challan` (views.py) is separate only
+        because that view deliberately does not call it.
+        """
+        callers = self._call_sites(
+            'sync_delivery_mirrors',
+            exclude_files=('tests_design_mirror_derivation.py',))
+        files = sorted({c.split(':')[0] for c in callers})
+        self.assertEqual(files, ['models.py', 'views.py'],
+                         'sync_delivery_mirrors() gained a caller:\n'
+                         + '\n'.join(callers))
+        self.assertEqual(len(callers), 2,
+                         'sync_delivery_mirrors() is called more than twice:\n'
+                         + '\n'.join(callers))
 
     def test_02_sync_design_mirror_has_exactly_two_production_callers(self):
         """The hook and the reconcile. Both are named, so a third fails here."""

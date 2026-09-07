@@ -1538,6 +1538,40 @@ class DCLineItem(models.Model):
         return f"{self.challan.dc_number} — {self.boq_category}: {self.item_description[:40]}"
 
 
+# ---------------------------------------------------------------------------
+# The delivery-mirror join
+# ---------------------------------------------------------------------------
+#
+# THE SINGLE PLACE A DC CATEGORY IS TIED TO AN OPEX MIRROR TASK. Read by
+# design_views.sync_delivery_mirrors() and by nothing else; it lives HERE, beside
+# DCLineItem, because it is a statement about that model's `boq_category` column and
+# because design_views already imports from this module (the reverse import would be a
+# cycle).
+#
+# WHY `Structure` MAPS TO MMS. They are the same physical item under two vocabularies:
+# `DCLineItem.CATEGORY_CHOICES` is Residential's, where the mounting steelwork is called
+# "Structure"; the OPEX template calls the same steelwork "MMS" (module mounting
+# structure). Nothing is being reinterpreted here — the two names denote one thing, and
+# this row is where that fact is written down rather than assumed.
+#
+# THIS DICT IS THE EXTENSION POINT, and it is a dict rather than a chain of `if`s for
+# exactly that reason. When T4 widens the DC form from these four Residential categories
+# to the sixteen OPEX ones, the new categories are ADDED here — several may point at the
+# same mirror code, which the derivation already handles because it groups by mirror
+# code, not by category. Nothing else needs to change, and no call site needs revisiting.
+#
+# The four codes are `TaskTemplateTask.code` values on the OPEX template's
+# PROCUREMENT_DELIVERY phase, all `is_mirror=True`. `code` and not `label`: rewording a
+# template label must not silently detach the mapping (the same reasoning
+# DESIGN_MIRROR_CODE gives for itself).
+DC_CATEGORY_TO_MIRROR_CODE = {
+    DCLineItem.SOLAR_MODULES: 'DELIVERY_SOLAR_PANELS',
+    DCLineItem.INVERTER:      'DELIVERY_INVERTERS',
+    DCLineItem.BOS:           'DELIVERY_BOS_KIT',
+    DCLineItem.STRUCTURE:     'DELIVERY_MMS',
+}
+
+
 def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
     """
     Compute per-line-item severity for the DC status rollup.
@@ -1576,6 +1610,11 @@ def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
     one would put dwell times of zero all through the delivery history.
     """
     from .utils import record_transition
+    # Imported INSIDE the function, like record_transition above and for the same
+    # reason: design_views imports this module at import time, so a module-level import
+    # here would be a cycle. utils.attach_opex_template() reaches sync_design_mirror()
+    # exactly this way.
+    from .design_views import sync_delivery_mirrors
 
     previous = challan.status
 
@@ -1612,6 +1651,32 @@ def recalculate_dc_status(challan, actor=None, reason_code='', remark=''):
                 challan, to_status=challan.status, from_status=previous,
                 actor=actor, reason_code=reason_code, remark=remark,
             )
+        # ── THE OPEX DELIVERY MIRRORS. One added call; nothing above it changed. ────
+        #
+        # HERE RATHER THAN AT THE TWO GRN ENDPOINTS, and that is the whole reason this
+        # is one call site instead of two. This function is the ONE place
+        # DeliveryChallan.status is recomputed and the only thing confirm_grn() and
+        # override_grn() both funnel through after writing line items, so a hook here
+        # covers both — and covers a third GRN endpoint the day anyone writes one,
+        # which two copies at the views would not.
+        #
+        # DELIBERATELY OUTSIDE THE `if` ABOVE. The ledger row is conditional on the
+        # CHALLAN's status having moved; a mirror bucket is not. Confirming a second
+        # category short on a challan already sitting at Partially Received moves that
+        # bucket from Not Started to In Progress while the challan's own status does
+        # not move at all — under the guard, that bucket would never update. The two
+        # subjects change on different events and only one of them is the challan.
+        #
+        # PER PROJECT, NOT PER CHALLAN. sync_delivery_mirrors() re-reads every line on
+        # every challan the site has; it is not incrementally applying this one.
+        #
+        # INSIDE the atomic block and UNGUARDED, matching the Design mirror's
+        # attachment point exactly: a mirror that cannot be written rolls the GRN back
+        # with it rather than leaving a site whose buckets silently disagree with its
+        # material. Do not add a try/except. Returns without writing, and without
+        # raising, for every Residential challan.
+        # ───────────────────────────────────────────────────────────────────────────
+        sync_delivery_mirrors(challan.project)
 
 
 def get_material_status(project):
