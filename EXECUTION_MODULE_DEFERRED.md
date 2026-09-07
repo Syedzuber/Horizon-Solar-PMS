@@ -251,3 +251,135 @@ deliberate act rather than a silent one.
 A one-off backfill for the six seeded sites is the same call in a loop, and is worth
 running before the pilot rehearsal so `SCMPILOT01` demonstrates the feature rather than
 demonstrating this gap.
+
+---
+
+## 10. Nothing is the authority on whether a design package is complete
+
+**Five signals, no reconciliation.** "Is this site's BOQ finished" and "is this design
+package finished" are each answered by several rows that were written independently, and
+no code compares them. The disagreement is not hypothetical — it is on screen right now on
+the pilot data, and it is visible to two different roles at the same moment.
+
+**Reproduce it, as the Design Head and as SCM:**
+
+    /design/SCMPILOT03/qc/         green badge: "BOQ: Complete"
+                                   "BOQ marked complete 20 Aug 2026 22:26"
+    /projects/SCMPILOT03/boq/      "BOQ not yet created by the Design team."
+
+Both screens read real data and neither is wrong about what it reads. The design module
+reads `DesignAttempt.boq_submitted_at`; the BOQ page reads the `BOQ` row, which did not
+exist. Since `fixture_scmpilot_boq` ran, the second screen renders a sheet — the fixture
+changed the DATA, not the mechanism. The two signals are still unconnected, and the next
+site to reach this state will disagree the same way.
+
+**The five signals, and what each actually means:**
+
+| # | signal | written by | means |
+|---|---|---|---|
+| 1 | `BOQ.status` | Residential submit/acknowledge workflow | where a *Residential* BOQ is in its approval loop. Permanently `Draft` on OPEX — the picker never touches it |
+| 2 | `DesignAttempt.boq_submitted_at` | `design_boq_complete()` | the designer ticked "BOQ complete" on THIS attempt |
+| 3 | group lock (`project_boq_is_group_locked()`) | `site_group_lock()` | SCM committed these quantities to a purchase |
+| 4 | `DesignAssignment.status == released` | `design_head_qc_pass()` | both review gates passed |
+| 5 | a `BOQ` row with items | the OPEX picker / upload | somebody actually entered quantities |
+
+The first three were named as unreconciled by the 23 Aug audit. This session found the
+fourth and fifth by walking the pilot data.
+
+**The fourth signal deserves naming on its own.** That same QC screen reads
+**"CAD: Pending"** on a site the Design Head has already RELEASED. Release is supposed to
+be unreachable without a current `cad_zip` — `_package_is_complete()` requires one — yet
+all six SCMPILOT sites carry zero `DesignFile` rows and five of them are `released`.
+Either the release is not real or the requirement is not enforced on every route into
+`released`; the seed reached it by writing the status directly, which is a sixth way to
+produce the state and the one nothing guards. A screen that says a released package is
+missing its drawings is telling the truth about a state the product should not be able to
+hold.
+
+**And the group lock itself freezes nothing when there is nothing to freeze.**
+`site_group_lock()` refuses exactly two things — an empty group, and a member with a
+pending change request. It does NOT check that any member has a BOQ. A group of sites with
+no `BOQItem` rows locks successfully, reports success, and freezes nothing:
+
+    group 40 "demo rehearse group"  status=locked  members=[SCMPILOT01, SCMPILOT02]
+    aggregate: {lines: 0, unlinked: 0, item_count: 0, site_count: 2}
+
+Note the last two keys. **`site_count` comes from `len(member_ids)`; `item_count` comes
+from the data.** They are derived from different sources and nothing reconciles them
+either, so the screen states "2 sites" over an empty table with equal confidence. That
+lock is irreversible by design — there is no unlock — so group 40 is now permanently
+locked over two sites whose quantities were never entered, and the only recorded trace is
+an ActivityLog line per site saying "BOQ locked".
+
+**Why this is one finding and not five.** Each row above is individually defensible; the
+problem is that there is no single predicate anybody can call to ask "is this package
+finished", so every screen answers it from whichever row is nearest to hand. Fixing any
+one signal in isolation makes the set MORE inconsistent, not less. A session picking this
+up should start by deciding which signal is authoritative and making the other four derive
+from it — or state plainly that they measure something narrower — not by adding a sixth.
+
+**Not fixed here, deliberately.** This session's MODE was a data fixture; changing what
+any of these screens reads is a product decision with a blast radius across the design
+module, the BOQ pages and the SCM handoff.
+
+---
+
+## 11. A released OPEX site CAN be reopened — through a draft procurement group
+
+**Undocumented, reachable, and nobody wrote it down.** The design module reads as though
+`released` is terminal: there is no revise button, no reopen control, and
+`design_change_request()` refuses a released site outright. That refusal has an exception,
+and the exception is easy to reach by accident.
+
+**The route, measured end to end rather than reasoned about:**
+
+    SCM    POST /programs/<tender>/site-groups/create/    (adds the released site)
+    PM     POST /design/<site>/change-request/raise/      (accepted — see below)
+    HEAD   POST /design/change-request/<pk>/accept/       (opens attempt N+1)
+    DESIGN POST /projects/<site>/boq/entry/               (the BOQ is editable again)
+
+**Why it works.** `design_change_request()` widens its own status gate for a site sitting
+in a DRAFT procurement group:
+
+    allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
+                        if in_draft_group else CHANGE_REQUEST_STATUSES)
+
+This is Part 6 §4 as specified and the function's docstring explains it — a draft-group
+member is `released` by construction, so admitting the branch at all means admitting a
+released site. What the docstring does not say is the second half: acceptance calls
+`_open_next_attempt(assignment, ..., redo=None)`, and `redo=None` means
+`_carry_forward_artifacts()` is **never called**. So attempt N+1 starts with
+`boq_submitted_at` unset, `project_boq_is_design_locked()` goes false, and the BOQ picker
+opens. The reopen is a side effect of the carry-forward scoping rule, not a decision
+anybody made about reopening.
+
+**The state it leaves behind** is the part worth knowing before somebody triggers it on
+real tender data:
+
+* the site LEAVES the group on RAISE, before the Head has ruled (deliberate — SCM must not
+  aggregate a site under dispute)
+* `DesignAssignment.status` goes `released` -> `in_design`, and `released_at` /
+  `released_by` are **not cleared** — so the row now says "in design" while still carrying
+  the stamps of a release that has been undone. The post-QC pool ages sites off
+  `released_at`, so a reopened site returns to the pool wearing its original age.
+* attempt N is closed with both verdicts left `pending` forever (deliberate — the PM
+  caused the rework, not the designer)
+* the Arka does not carry forward, so the designer resubmits one and BOTH gates re-approve
+  an Arka nobody disputed
+
+**It is one-way on the pilot data, and that is an accident of the seed.** Getting back to
+`released` needs `_package_is_complete()`, which needs a current `cad_zip` — and
+`seed_scm_pilot` created no `DesignFile` rows at all (see §10). So on SCMPILOT03/04/05 this
+route can UNDO a release and cannot redo one without a fabricated CAD archive in the live
+production Supabase bucket (§6). That is the specific reason `fixture_scmpilot_boq` exists
+instead of a walkthrough: the route is real, it was tested in a rolled-back transaction,
+and it was rejected for what it costs rather than assumed to be closed.
+
+**What a session picking this up has to decide.** Not whether to close the route — it is
+specified behaviour and settled decision 6 depends on it. The open questions are narrower:
+whether `released_at` / `released_by` should be cleared when a release is undone, whether
+the reopen should be visible as such anywhere (today it is inferable only from
+`DesignAttempt.opened_reason == pm_change_request`), and whether SCM adding a released site
+to a draft group should say out loud that it has just made that site change-requestable.
+The last one is the surprise: SCM's action, taken for procurement reasons, is what unlocks
+a PM's ability to reopen someone else's finished design.
