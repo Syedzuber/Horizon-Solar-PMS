@@ -148,7 +148,7 @@ authority and both locks on the POST regardless of what this template chose to r
           {% endcomment %}
           <div class="border-top mt-2 pt-2">
             <div class="small fw-semibold px-1 mb-1">
-              Not in the OPEX catalogue
+              Not in the RESCO catalogue
               <span class="boq-muted fw-normal">— {{ added_off_count }} row{{ added_off_count|pluralize }}
                 carried over from before this catalogue existed</span>
             </div>
@@ -388,7 +388,7 @@ authority and both locks on the POST regardless of what this template chose to r
                 // not the sheet is editable, because a reviewer needs to see it too.
                 (item.mand
                   ? '<span class="boq-chip" title="Mandatory — the catalogue puts this on ' +
-                    'every OPEX BOQ, so it cannot be removed">Req</span>'
+                    'every RESCO BOQ, so it cannot be removed">Req</span>'
                   : CAN_EDIT
                     ? '<button type="button" class="btn btn-sm btn-link text-danger p-0" ' +
                       'data-del="' + item.id + '" title="Remove">&times;</button>'

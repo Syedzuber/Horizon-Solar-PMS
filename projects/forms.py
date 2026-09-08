@@ -158,7 +158,7 @@ class AdminUserEditForm(forms.Form):
     is_design_qc = forms.BooleanField(
         required=False,
         label='Design QC',
-        help_text=('Reviews OPEX designs at the FIRST gate, before the Design Head. '
+        help_text=('Reviews RESCO designs at the FIRST gate, before the Design Head. '
                    'Independent of role. Holding both flags is allowed, but one person '
                    'can never record both verdicts on the same site.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
@@ -166,7 +166,7 @@ class AdminUserEditForm(forms.Form):
     is_qaqc = forms.BooleanField(
         required=False,
         label='QA/QC',
-        help_text=('May approve or reject a submitted OPEX task on any site they can '
+        help_text=('May approve or reject a submitted RESCO task on any site they can '
                    'already see, and raises a punch point when they reject one. '
                    'Independent of role, and does NOT confer the PM-only power to '
                    'waive a punch point.'),
@@ -302,7 +302,7 @@ class ProjectCreateForm(forms.ModelForm):
         value = self.cleaned_data.get('project_type')
         if value == 'OPEX':
             raise forms.ValidationError(
-                'OPEX projects must be created under a Program, not from this form.'
+                'RESCO projects must be created under a Program, not from this form.'
             )
         return value
 
@@ -508,16 +508,16 @@ class BOQItemMasterForm(forms.ModelForm):
         # on the Residential template by default, whatever they meant.
         self.fields['project_type'].help_text = (
             'Which template this item belongs to. Residential items are pre-populated onto '
-            'every new Residential BOQ; OPEX items are offered in the OPEX BOQ picker.'
+            'every new Residential BOQ; RESCO items are offered in the RESCO BOQ picker.'
         )
         self.fields['category'].help_text = (
-            'Residential: display grouping only. OPEX: groups the picker and the saved '
-            'sheet, so it should match an existing OPEX category exactly.'
+            'Residential: display grouping only. RESCO: groups the picker and the saved '
+            'sheet, so it should match an existing RESCO category exactly.'
         )
         self.fields['unit'].help_text     = 'e.g. Nos, Mtr, Kg, Set, Lot. Required — quantities cannot be summed across sites without it.'
         self.fields['sort_order'].help_text = 'Position in the standard BOQ template; also becomes the line item serial number.'
         self.fields['is_mandatory'].help_text = (
-            'OPEX only. A mandatory item is added to every new OPEX BOQ and cannot be '
+            'RESCO only. A mandatory item is added to every new RESCO BOQ and cannot be '
             'removed by the designer. Not used for Residential — every active Residential '
             'item is already pre-populated onto every new Residential BOQ.'
         )
@@ -566,7 +566,7 @@ class BOQItemMasterForm(forms.ModelForm):
             return cleaned
         if cleaned.get('project_type') != 'OPEX':
             raise forms.ValidationError({
-                'is_mandatory': 'Only OPEX items can be marked mandatory. Every active '
+                'is_mandatory': 'Only RESCO items can be marked mandatory. Every active '
                                 'Residential item is already added to every new '
                                 'Residential BOQ, so the flag would do nothing there.',
             })
@@ -655,7 +655,7 @@ class ProgramForm(forms.ModelForm):
         }
         labels = {
             'total_capacity':      'Total planned capacity (MW)',
-            'short_tender_code':   'Short tender code (OPEX)',
+            'short_tender_code':   'Short tender code (RESCO)',
             'planned_site_count':  'Planned site count',
         }
 
@@ -670,7 +670,7 @@ class ProgramForm(forms.ModelForm):
         if program_type == 'OPEX':
             if not code:
                 self.add_error('short_tender_code',
-                               'Short tender code is required for an OPEX tender.')
+                               'Short tender code is required for a RESCO tender.')
             else:
                 if code in _RESERVED_TENDER_CODES:
                     self.add_error('short_tender_code',

@@ -15,8 +15,8 @@
     <p class="text-sm text-gray-500 mt-1">
       {# Part 11: two independent templates live in one table, and they behave differently. #}
       <strong>Residential</strong> items, in sort order, are pre-populated onto every new
-      Residential BOQ. <strong>OPEX</strong> items are not pre-populated at all — they are
-      offered in the OPEX BOQ picker, where the designer searches and adds what a site uses.
+      Residential BOQ. <strong>RESCO</strong> items are not pre-populated at all — they are
+      offered in the RESCO BOQ picker, where the designer searches and adds what a site uses.
     </p>
     <p class="text-sm text-gray-500 mt-1">
       {{ active_count }} active of {{ total_count }} total —
@@ -75,7 +75,7 @@
         <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
           {% if item.project_type == 'OPEX' %}bg-blue-100 text-blue-700
           {% elif item.project_type == 'CAPEX' %}bg-amber-100 text-amber-700
-          {% else %}bg-gray-100 text-gray-600{% endif %}">{{ item.project_type }}</span>
+          {% else %}bg-gray-100 text-gray-600{% endif %}">{{ item.get_project_type_display }}</span>
       </td>
       <td class="px-4 py-3 text-gray-800">
         <a href="{% url 'admin_boq_item_edit' item.pk %}" class="text-green-700 hover:underline">{{ item.description }}</a>

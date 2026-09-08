@@ -237,7 +237,7 @@ def _opex_site(project_id):
     through every view in this module."""
     project = get_object_or_404(Project, project_id=project_id, is_deleted=False)
     if project.project_type != 'OPEX':
-        raise Http404('Design workflow applies to OPEX sites only.')
+        raise Http404('Design workflow applies to RESCO sites only.')
     return project
 
 
@@ -5834,7 +5834,7 @@ def design_analytics_reset(request):
 #: Where an unauthorised caller is told to go. ONE string, so all four endpoints refuse
 #: identically — a probe must not be able to tell them apart, and must not be able to tell
 #: "refused" from "no such row" by the wording either.
-_CATALOGUE_FORBIDDEN = 'The OPEX BOQ catalogue is for the Design Head only.'
+_CATALOGUE_FORBIDDEN = 'The RESCO BOQ catalogue is for the Design Head only.'
 
 
 def _opex_catalogue_qs():
@@ -5915,7 +5915,7 @@ def design_boq_catalogue_create(request):
             item.project_type = 'OPEX'
             item.save()
             log_activity(None, request.user.profile,
-                         f"Created OPEX BOQ catalogue item "
+                         f"Created RESCO BOQ catalogue item "
                          f"'{item.code} — {item.description}'",
                          entity_type='BOQItemMaster', entity_id=item.pk,
                          action_code='design_boq_item_created')
@@ -5933,7 +5933,7 @@ def design_boq_catalogue_create(request):
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
         'form':  form,
-        'title': 'Add OPEX Catalogue Item',
+        'title': 'Add RESCO Catalogue Item',
         'item':  None,
     })
 
@@ -5968,7 +5968,7 @@ def design_boq_catalogue_edit(request, item_id):
         if form.is_valid():
             form.save()
             log_activity(None, request.user.profile,
-                         f"Updated OPEX BOQ catalogue item '{item.code}' "
+                         f"Updated RESCO BOQ catalogue item '{item.code}' "
                          f"(active={item.is_active})",
                          entity_type='BOQItemMaster', entity_id=item.pk,
                          action_code='design_boq_item_updated')
@@ -5981,7 +5981,7 @@ def design_boq_catalogue_edit(request, item_id):
 
     return render(request, 'projects/design/boq_catalogue_form.html', {
         'form':         form,
-        'title':        f'Edit OPEX Catalogue Item — {item.code}',
+        'title':        f'Edit RESCO Catalogue Item — {item.code}',
         'item':         item,
         'linked_count': item.boq_items.count(),
     })
@@ -6024,7 +6024,7 @@ def design_boq_catalogue_toggle(request, item_id):
 
     state = 'activated' if item.is_active else 'deactivated'
     log_activity(None, request.user.profile,
-                 f"{state.capitalize()} OPEX BOQ catalogue item '{item.code}'",
+                 f"{state.capitalize()} RESCO BOQ catalogue item '{item.code}'",
                  entity_type='BOQItemMaster', entity_id=item.pk,
                  action_code=f'design_boq_item_{state}')
     messages.success(request, f'Catalogue item "{item.code}" {state}.')

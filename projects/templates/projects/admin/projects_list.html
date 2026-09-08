@@ -44,7 +44,7 @@
         </td>
 
         <td class="px-4 py-3 text-gray-700">{{ project.customer_name }}</td>
-        <td class="px-4 py-3 text-gray-500">{{ project.project_type }}</td>
+        <td class="px-4 py-3 text-gray-500">{{ project.get_project_type_display }}</td>
 
         <td class="px-4 py-3">
           {% if project.status == 'Draft' %}

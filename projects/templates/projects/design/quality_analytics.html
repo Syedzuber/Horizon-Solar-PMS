@@ -56,7 +56,7 @@ NO AUTO-REFRESH. The only way this page updates is the Refresh link.
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h5 class="mb-0">
-      Design quality{% if program %} — {{ program.name }}{% else %} — all OPEX tenders{% endif %}
+      Design quality{% if program %} — {{ program.name }}{% else %} — all RESCO tenders{% endif %}
     </h5>
     <div class="text-muted small">
       {% if program %}
@@ -84,7 +84,7 @@ NO AUTO-REFRESH. The only way this page updates is the Refresh link.
     <span class="qa-group-h me-1">Scope</span>
     <a href="{% url 'design_quality_analytics' %}"
        class="btn btn-sm {% if all_tenders %}text-white{% else %}btn-outline-secondary{% endif %}"
-       {% if all_tenders %}style="background-color:#1a7a4a;"{% endif %}>All OPEX tenders</a>
+       {% if all_tenders %}style="background-color:#1a7a4a;"{% endif %}>All RESCO tenders</a>
     {% for t in tender_choices %}
       <a href="{% url 'design_quality_analytics_tender' pk=t.pk %}"
          class="btn btn-sm {% if program and program.pk == t.pk %}text-white{% else %}btn-outline-secondary{% endif %}"

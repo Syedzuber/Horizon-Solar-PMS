@@ -31,7 +31,7 @@
         <tr style="cursor:pointer;" onclick="window.location='{% url 'project_overview' project.project_id %}'">
           <td><a href="{% url 'project_overview' project.project_id %}" class="fw-semibold text-decoration-none">{{ project.project_id }}</a></td>
           <td>{{ project.customer_name }}</td>
-          <td>{{ project.project_type }}</td>
+          <td>{{ project.get_project_type_display }}</td>
           <td>
             {% if project.status == 'Draft' %}
               <span class="badge bg-secondary">Draft</span>

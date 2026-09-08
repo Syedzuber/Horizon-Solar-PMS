@@ -51,7 +51,7 @@
       <td class="px-4 py-3">
         {% for link in cl.task_links.all %}
           <span class="inline-flex items-center px-2 py-0.5 mr-1 mb-1 rounded text-xs font-medium bg-gray-100 text-gray-700">
-            {{ link.task_name }} <span class="text-gray-400 ml-1">· {{ link.project_type }}</span>
+            {{ link.task_name }} <span class="text-gray-400 ml-1">· {{ link.get_project_type_display }}</span>
           </span>
         {% empty %}
           <span class="text-gray-400 text-xs">Not assigned</span>

@@ -383,3 +383,64 @@ the reopen should be visible as such anywhere (today it is inferable only from
 to a draft group should say out loud that it has just made that site change-requestable.
 The last one is the surprise: SCM's action, taken for procurement reasons, is what unlocks
 a PM's ability to reopen someone else's finished design.
+
+---
+
+## 12. `OPEX` is the stored value; "RESCO" is the label
+
+**Deliberate, not a half-finished rename.** `OPEX` remains the stored string in
+`Project.project_type`, `Program.program_type` and 207 `BOQItemMaster` rows. Every
+user-facing surface says **RESCO**. Django choices are `(value, label)` pairs, so the
+change was one label per tuple in `Project.PROJECT_TYPE_CHOICES` and
+`Program.PROGRAM_TYPE_CHOICES`, plus the prose that spelled the word out by hand.
+
+**Why the value did not move.** `'OPEX'` is not decoration, it is a key:
+
+* `TaskDurationTemplate` / `TaskTemplate` are keyed by `(project_type, phase_name,
+  task_name)` — `attach_opex_template()` finds the 23-task, 8-mirror template by it
+* `ChecklistTaskLink.unique_together` is `('task_name', 'project_type')`
+* `get_opex_boq_catalogue()` and `get_opex_mandatory_items()` filter
+  `BOQItemMaster.project_type='OPEX'` — 207 rows and codes `OPX-001` / `OPX-027`
+* `sync_delivery_mirrors()` and every `design_views` entry point guard on
+  `project.project_type != 'OPEX'`
+* eleven migrations already contain the literal, and production carries real MPUVNL data
+  typed `OPEX`
+
+Renaming the value is a data migration across five fields plus a rewrite of every
+comparison, filter and dictionary key. This change deliberately avoids that: the migration
+it generates (`0083`) is five `AlterField` operations, state-only, and changes no row.
+
+**Where the split is visible, and why each side is correct.**
+
+Users see RESCO in: every `project_type` / `program_type` dropdown (`<option value="OPEX">
+RESCO</option>`), the project detail, project list, program list and program detail badges,
+the BOQ catalogue screens, the EOD digest and CEO report footnotes, form help text,
+validation errors and `Http404` messages, and the Django admin's tender fieldset.
+
+The word OPEX survives, correctly, in:
+
+* every `== 'OPEX'` comparison, queryset filter and dictionary key, including the four in
+  templates (`boq_items.html`, `program_detail.html`) and the one in JS
+  (`program_form.html`, which reads the `<option value>`)
+* every code comment and `{% comment %}` block — 48 of them describe the stored value
+* every function, module, template filename, URL name and test — `attach_opex_template`,
+  `opex_boq_entry.html`, `_opex_site`, `tests_opex_template.py`
+* the `opex_sites_<code>.xlsx` export filename
+* management command stdout and the seed scripts, which are developer-facing.
+  `seed_scm_handoff_data.py:319` writes `Created OPEX Program:` into an `ActivityLog` row —
+  demo data only, but it is the one place a seed script's wording reaches a user's screen
+* `TaskDurationTemplate.PROJECT_TYPE_CHOICES`, a separate lowercase list
+  (`[('residential', 'Residential')]`) with no OPEX member at all
+
+**ActivityLog rows written before this change still read OPEX.** Nothing rewrites history,
+so the audit log reads `Created OPEX site …` for everything up to now and `Created RESCO
+site …` after. That is a consequence of leaving the data alone, not an oversight.
+
+**What a session picking up the full rename has to do.** Not decide whether RESCO is the
+right word — that is settled. The work is: a `RunPython` data migration over
+`Project.project_type`, `Program.program_type`, `BOQItemMaster.project_type`,
+`TaskTemplate.project_type` and `ChecklistTaskLink.project_type`; a sweep of every
+comparison and filter listed above; the eleven historical migrations, which must keep
+`OPEX` because they describe the state at the time they ran; and a decision about whether
+existing `ActivityLog` prose is rewritten or left as the record of what the system called
+it then. Until that happens, the rule is one line: **users see RESCO, the code says OPEX.**

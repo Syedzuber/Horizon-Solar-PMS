@@ -32,7 +32,7 @@
               <div class="text-muted small">{{ p.reference_display }}</div>
             {% endif %}
           </td>
-          <td><span class="badge bg-secondary">{{ p.program_type }}</span></td>
+          <td><span class="badge bg-secondary">{{ p.get_program_type_display }}</span></td>
           <td>{{ p.client_name }}</td>
           <td>{{ p.status }}</td>
           <td class="text-center">

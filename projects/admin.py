@@ -72,7 +72,7 @@ class ProgramAdmin(admin.ModelAdmin):
                        'short_tender_code', 'total_capacity',
                        'expected_completion_date', 'planned_site_count')
         }),
-        ('OPEX Tender', {
+        ('RESCO Tender', {
             'fields': ('tender_reference_number', 'bid_value', 'award_date',
                        'ppa_reference', 'ppa_signed_date', 'ppa_per_unit_rate',
                        'ppa_escalation_percentage', 'ppa_escalation_frequency'),

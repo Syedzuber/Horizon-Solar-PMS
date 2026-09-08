@@ -17,20 +17,20 @@ The Deactivate control carries a confirm; Activate does not. Deactivating is the
 removal this product has, and it changes what every future sheet is offered.
 {% endcomment %}
 
-{% block title %}OPEX BOQ Catalogue — SolarPMS{% endblock %}
+{% block title %}RESCO BOQ Catalogue — SolarPMS{% endblock %}
 
 {% block content %}
 
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
-    <h5 class="mb-0">OPEX BOQ Catalogue</h5>
+    <h5 class="mb-0">RESCO BOQ Catalogue</h5>
     <div class="text-muted small">
-      Every item the OPEX BOQ picker offers. Editing an entry never changes a BOQ that has
+      Every item the RESCO BOQ picker offers. Editing an entry never changes a BOQ that has
       already been created — those keep the description they were created with.
     </div>
     <div class="text-muted small mt-1">
       <span class="fw-semibold">{{ active_count }}</span> active of
-      <span class="fw-semibold">{{ total_count }}</span> OPEX items.
+      <span class="fw-semibold">{{ total_count }}</span> RESCO items.
       Residential items are managed separately and are not shown here.
     </div>
   </div>
@@ -121,7 +121,7 @@ removal this product has, and it changes what every future sheet is offered.
               {% endcomment %}
               {% if item.is_active %}
                 <button type="submit" class="btn btn-sm btn-outline-secondary"
-                        onclick="return confirm('Deactivate {{ item.code|escapejs }}?\n\nIt stops being offered in the OPEX BOQ picker. Sheets that already carry it keep their quantities and are not changed.');">
+                        onclick="return confirm('Deactivate {{ item.code|escapejs }}?\n\nIt stops being offered in the RESCO BOQ picker. Sheets that already carry it keep their quantities and are not changed.');">
                   <i class="bi bi-eye-slash"></i> Deactivate
                 </button>
               {% else %}

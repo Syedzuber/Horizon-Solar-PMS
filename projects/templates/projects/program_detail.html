@@ -7,7 +7,7 @@
     <a href="{% url 'program_list' %}" class="text-decoration-none small">← Programs</a>
     <h4 class="mb-0 mt-1">{{ program.name }}</h4>
     <div class="text-muted small">
-      <span class="badge bg-secondary">{{ program.program_type }}</span>
+      <span class="badge bg-secondary">{{ program.get_program_type_display }}</span>
       {{ program.client_name }}
       {% if program.reference_display and program.reference_display != program.name %}
         · {{ program.reference_display }}

@@ -92,7 +92,7 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
           spreadsheet has no effect — remove items on the
           <a href="{% url 'opex_boq_entry' project.project_id %}">BOQ screen</a> instead.</li>
       <li>A blank quantity leaves the existing value alone. Enter <code>0</code> to set zero.</li>
-      <li>An item code that is not in the OPEX catalogue rejects the whole file.</li>
+      <li>An item code that is not in the RESCO catalogue rejects the whole file.</li>
     </ul>
   </div>
 {% endif %}
@@ -152,7 +152,7 @@ STAGES, all driven off `stage`, the same shape opex_site_bulk_upload.html uses:
       {% for m in plan_readded %}
         <div><code>{{ m.code }}</code> {{ m.description }}</div>
       {% endfor %}
-      Marked mandatory in the catalogue, so every OPEX BOQ carries them. They will be added
+      Marked mandatory in the catalogue, so every RESCO BOQ carries them. They will be added
       with a blank quantity.
     </div>
   {% endif %}

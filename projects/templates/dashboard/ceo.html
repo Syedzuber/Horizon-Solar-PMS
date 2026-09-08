@@ -792,7 +792,7 @@
           {# Info row: city · type · capacity #}
           <p class="text-muted mb-2" style="font-size:.8rem;">
             {{ p.city }}
-            &nbsp;·&nbsp;{{ p.project_type }}
+            &nbsp;·&nbsp;{{ p.get_project_type_display }}
             {% if p.capacity_kw %}&nbsp;·&nbsp;{{ p.capacity_kw }} kW{% endif %}
           </p>
 

@@ -3475,7 +3475,7 @@ def create_opex_site(program, data, creator, profile=None):
         )
     log_activity(
         site, profile,
-        f"Created OPEX site {site.project_id} under program {program.name}",
+        f"Created RESCO site {site.project_id} under program {program.name}",
         entity_type='Project', entity_id=site.pk, action_code='opex_site_created',
     )
     return site, form
@@ -4351,7 +4351,7 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             and task.approved_at is None):
         messages.error(
             request,
-            f"'{task.task_name}' cannot be marked Done directly — an OPEX task must "
+            f"'{task.task_name}' cannot be marked Done directly — a RESCO task must "
             f"be submitted for approval and approved by the project manager or QA/QC "
             f"before it can be completed."
         )
@@ -4925,7 +4925,7 @@ def task_approve(request, project_id, task_id):
     if task.submitted_by is not None and task.submitted_by == profile:
         messages.error(
             request,
-            f"You submitted '{task.task_name}' yourself — an OPEX task must be "
+            f"You submitted '{task.task_name}' yourself — a RESCO task must be "
             f"approved by someone other than the person who submitted it. Ask "
             f"another project manager or a QA/QC reviewer to sign it off."
         )
@@ -6166,7 +6166,7 @@ def opex_boq_entry(request, project_id):
     project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
-        raise Http404('The BOQ picker is for OPEX sites. Residential BOQs are entered on '
+        raise Http404('The BOQ picker is for RESCO sites. Residential BOQs are entered on '
                       'the standard BOQ screen.')
 
     # Read gate first and separately from the write gate, exactly as boq_detail does: they
@@ -6530,7 +6530,7 @@ def opex_boq_download(request, project_id):
     # OPEX only, the same refusal the picker makes and for the same reason: a
     # Residential BOQ is a different sheet with a different catalogue behind it.
     if project.project_type != 'OPEX':
-        raise Http404('The BOQ download is for OPEX sites. Residential BOQs are read on '
+        raise Http404('The BOQ download is for RESCO sites. Residential BOQs are read on '
                       'the standard BOQ screen.')
 
     if not user_can_view_project_boq(request.user, project):
@@ -6816,7 +6816,7 @@ def _parse_boq_workbook(uploaded_file):
     cap = _boq_upload_row_cap()
     if len(numbered) > cap:
         return None, (f'This file has {len(numbered)} rows — the limit is {cap}. That is '
-                      f'more rows than there are items in the OPEX catalogue, so this is '
+                      f'more rows than there are items in the RESCO catalogue, so this is '
                       f'unlikely to be a BOQ downloaded from this site.')
 
     rows = []
@@ -6860,7 +6860,7 @@ def _validate_boq_rows(rows, catalogue_by_code):
         # validates its posted pks against.
         master = catalogue_by_code.get(code)
         if master is None:
-            errors.append(f'Row {index}: item code "{code}" is not in the OPEX catalogue.')
+            errors.append(f'Row {index}: item code "{code}" is not in the RESCO catalogue.')
             continue
 
         if code in seen:
@@ -6906,7 +6906,7 @@ def opex_boq_upload(request, project_id):
     project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
-        raise Http404('The BOQ upload is for OPEX sites. Residential BOQs are entered on '
+        raise Http404('The BOQ upload is for RESCO sites. Residential BOQs are entered on '
                       'the standard BOQ screen.')
 
     if not user_can_edit_project_boq(request.user, project):
@@ -7238,7 +7238,7 @@ def boq_correct(request, project_id):
     project = _active_project(project_id)
 
     if project.project_type != 'OPEX':
-        raise Http404('BOQ correction is an OPEX design-review action. A Residential '
+        raise Http404('BOQ correction is a RESCO design-review action. A Residential '
                       'project has no design assignment and no reviewer to correct it.')
 
     # Read gate first and separately from the correction gate, exactly as boq_detail and

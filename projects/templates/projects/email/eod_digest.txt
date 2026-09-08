@@ -25,7 +25,7 @@ Per-user status ({{ date_str }}):
 
 Blocked and Done-Today counts are on the full report.{% if user_status_url %} Open it: {{ user_status_url }}{% endif %}
 Overdue counts tasks whose due date has passed and which are not completed. An overdue task is also counted under Not Started or In Progress, so the row will not sum to Tasks.
-Task counts cover projects that use the task template. OPEX and CAPEX design work is tracked separately.
+Task counts cover projects that use the task template. RESCO and CAPEX design work is tracked separately.
 Projects counts every project that is still Active; the system has no project-closure step yet.
 {% else %}No users have tasks or projects assigned for this date.
 {% endif %}{% endif %}

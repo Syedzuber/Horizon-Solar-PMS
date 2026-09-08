@@ -11,7 +11,7 @@ class Project(models.Model):
 
     PROJECT_TYPE_CHOICES = [
         ('Residential', 'Residential'),
-        ('OPEX',        'OPEX'),
+        ('OPEX',        'RESCO'),
         ('CAPEX',       'CAPEX'),
     ]
 
@@ -195,7 +195,7 @@ class Program(models.Model):
     # same values (Residential never has a Program). This is what the type-match check
     # in Project._validate_program_link compares against directly.
     PROGRAM_TYPE_CHOICES = [
-        ('OPEX',  'OPEX'),
+        ('OPEX',  'RESCO'),
         ('CAPEX', 'CAPEX'),
     ]
     # Match Project.STATUS_CHOICES exactly (same title-case, same semantic role).

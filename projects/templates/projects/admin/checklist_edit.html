@@ -159,7 +159,7 @@ editable only while it is a draft (R-7).
     {% for link in links %}
     <div class="flex items-center justify-between gap-2 py-2 border-b border-gray-100">
       <span class="text-sm text-gray-800">{{ link.task_name }}
-        <span class="text-xs text-gray-400 ml-1">· {{ link.project_type }}</span>
+        <span class="text-xs text-gray-400 ml-1">· {{ link.get_project_type_display }}</span>
         {% comment %} A link with no template task is one the 2.4 backfill could not
            resolve. It still works — through the name fallback — and saying so is
            better than letting it look identical to a keyed link. {% endcomment %}

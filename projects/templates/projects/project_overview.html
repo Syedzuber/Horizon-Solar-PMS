@@ -119,7 +119,7 @@
 
     {# Compact stats strip #}
     <div class="d-flex flex-wrap gap-3 border-top pt-2 small text-muted">
-      <span class="info-pill"><i class="bi bi-lightning-charge-fill"></i>{{ project.project_type }}</span>
+      <span class="info-pill"><i class="bi bi-lightning-charge-fill"></i>{{ project.get_project_type_display }}</span>
       {# Post-activation-editable business fields — swap target for the field-edit modal #}
       {% include 'projects/partials/_project_editable_fields.html' with oob=False %}
       {% if is_assigned_pm and project.status != 'Draft' %}

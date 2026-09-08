@@ -85,7 +85,7 @@
             </select>
             {% for e in form.project_type.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
           {% else %}
-            <input type="text" class="form-control" value="{{ project.project_type }}" disabled>
+            <input type="text" class="form-control" value="{{ project.get_project_type_display }}" disabled>
           {% endif %}
         </div>
 
