@@ -69,6 +69,17 @@
           Users
         </a>
 
+        {# Daily Report — CEO / Admin / System Admin only, the same three roles as   #}
+        {# permissions.USER_STATUS_REPORT_ROLES, which the view itself enforces.     #}
+        {# The report lives in the Bootstrap shell, so it never marks a nav_ block   #}
+        {# active here; this is a way in, not a section of this shell.               #}
+        {% if user.profile.role == 'CEO' or user.profile.role == 'Admin' or user.profile.role == 'System Admin' %}
+          <a href="{% url 'ceo_daily_report' %}" class="nav-item">
+            <i data-lucide="clipboard-list" class="w-4 h-4 shrink-0"></i>
+            Daily Report
+          </a>
+        {% endif %}
+
       </nav>
     </aside>
 

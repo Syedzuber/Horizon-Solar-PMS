@@ -63,13 +63,14 @@ def ceo_daily_report(request):
     """Per-user task and login status for one day.
     Access: CEO, Admin, System Admin.
     """
-    # Two gates on purpose, and they are NOT redundant — they catch different users.
-    # @role_required is the decorator pattern every gated view in views.py uses and
-    # produces the standard message-and-redirect bounce for a wrong-role user; but it
-    # falls back to treating a user with NO UserProfile as 'Admin' (decorators.py:106-109),
-    # so a bare `createsuperuser` account would walk straight through it. The predicate
-    # below refuses that case, and it is also the one that OWNS the rule per R-13: if this
-    # report's audience ever changes, permissions.py is the single place it changes.
+    # Two gates on purpose. They agree on the answer; they differ in who OWNS it.
+    # permissions.can_view_user_status_report is authoritative per R-13: this report's
+    # audience is USER_STATUS_REPORT_ROLES and permissions.py is the single place it
+    # changes. @role_required is the decorator every gated view in views.py uses, and it
+    # enforces that same audience at the request boundary — before the view body runs —
+    # so a wrong-role user is turned away by the app's standard mechanism rather than by
+    # a one-off check buried in this function. Keep the decorator's role list in step
+    # with the frozenset; the predicate below is the one that decides.
     if not can_view_user_status_report(request.user):
         return HttpResponseForbidden('CEO, Admin or System Admin only.')
 
