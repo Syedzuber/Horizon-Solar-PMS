@@ -23,6 +23,18 @@ The SECTION HEADING is deliberately not part of that snapshot: it is read live o
 item, so renaming a heading re-groups history. See ChecklistItem.section.
 {% endcomment %}
 {% if checklist_rows %}
+{% if can_complete_items %}
+{% comment %}The witness caveat is stated ONCE here rather than under every row's input.
+   It is the same sentence it always was; a forty-item commissioning sheet repeated it
+   forty times, which is how a notice stops being read. The reading-side twin on a
+   recorded answer ("Recorded by the completer, not verified signatures") stays per-row:
+   that one travels with the names it qualifies.{% endcomment %}
+<div class="alert alert-light border small text-muted py-2 px-3 mb-3" role="note">
+  <i class="bi bi-info-circle me-1"></i>
+  Witness names are recorded as <strong>your statement</strong> that these people were
+  present. They are not verified signatures — nobody named here is asked to confirm it.
+</div>
+{% endif %}
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle mb-0">
     <thead class="table-light">
@@ -120,11 +132,6 @@ item, so renaming a heading re-groups history. See ChecklistItem.section.
                           placeholder="Remarks (required if the answer is No)"></textarea>
                 <input type="text" name="witness_names" class="form-control form-control-sm"
                        placeholder="Witness names (optional)">
-                <div class="form-text small">
-                  Witness names are recorded as <strong>your statement</strong> that these
-                  people were present. They are not verified signatures — nobody named
-                  here is asked to confirm it.
-                </div>
                 {% if checklist.requires_photo %}
                 {% comment %}`capture="environment"` opens the REAR camera straight away on a
                    phone instead of the file picker. This input is the one place in the site
