@@ -46,7 +46,7 @@ from .models import (
     ARKA_APPROVED, ARKA_PENDING, ARKA_REJECTED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
-    DESIGN_IN_DESIGN, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    DESIGN_IN_DESIGN, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES,
     ERR_BOQ_QUANTITY, ERR_ELECTRICAL_DESIGN, ERR_LAYOUT,
     ERR_REQUIREMENT_CHANGED, ERR_SURVEY_INADEQUATE,
     QC_FAILED, QC_PASSED, QC_PENDING,
@@ -441,12 +441,54 @@ class MetricArithmeticTests(Part10Base):
 
         # ABSENT from the rework numerator. A6's attempt 2 exists because the survey was
         # wrong; alpha must not be charged for it.
+        #
+        # B-06 (attempt-accounting prompt, T4): this was `numerator + excluded == every one
+        # of alpha's attempts`. B-06 takes the initial attempt out of the numerator, and
+        # every attempt on an unfinished site out of the whole figure, so those two sets no
+        # longer cover everything. It stays an EXHAUSTIVENESS check, restated as a PARTITION
+        # into three sets built here from the raw fields, independently of the code under
+        # test. Each set's size is pinned exactly, so the check cannot pass on an empty set.
         rework = self._row(self._panel(result, 'rework_multiplier'), 'alpha10')
-        self.assertGreaterEqual(rework['excluded'], 1)
-        total_attempts = DesignAttempt.objects.filter(
-            assignment__assigned_to=self.alpha).count()
-        self.assertEqual(rework['figure']['numerator'] + rework['excluded'],
-                         total_attempts)
+        counted, excluded, dropped = set(), set(), set()
+        every = list(DesignAttempt.objects.filter(assignment__assigned_to=self.alpha)
+                     .select_related('assignment'))
+        by_key = {(t.assignment_id, t.attempt_number): t for t in every}
+        for t in every:
+            finished = t.assignment.status in DESIGN_WORK_FINISHED_STATUSES
+            if not finished or t.opened_reason == ATTEMPT_REASON_INITIAL:
+                dropped.add(t.pk)
+            elif t.opened_reason == ATTEMPT_REASON_PM_CHANGE_REQUEST:
+                excluded.add(t.pk)
+            else:
+                failed = by_key[(t.assignment_id, t.attempt_number - 1)]
+                group = error_category_group(failed.head_failure_category
+                                             or failed.qc_failure_category)
+                (excluded if group in ('B', 'C') else counted).add(t.pk)
+
+        # (a) dropped = exactly the initial attempts, plus every attempt on an unfinished
+        #     site: A1-A6's six initials, plus A7's two and A8's two.
+        self.assertEqual(dropped,
+                         {t.pk for t in every
+                          if t.opened_reason == ATTEMPT_REASON_INITIAL
+                          or t.assignment.status not in DESIGN_WORK_FINISHED_STATUSES})
+        self.assertEqual(len(dropped), 10)
+        # (b) the three sets are disjoint...
+        self.assertFalse(counted & excluded)
+        self.assertFalse(counted & dropped)
+        self.assertFalse(excluded & dropped)
+        # (c) ...and together they cover every one of alpha's attempts.
+        self.assertEqual(counted | excluded | dropped, {t.pk for t in every})
+        self.assertEqual(len(every), 12)
+
+        # The metric agrees with the partition, set by set. counted = A5's Group A
+        # attempt; excluded = A6's Group B attempt.
+        self.assertEqual(len(counted), 1)
+        self.assertEqual(len(excluded), 1)
+        self.assertEqual(rework['figure']['numerator'], len(counted))
+        self.assertEqual(rework['excluded'], len(excluded))
+        self.assertEqual(rework['dropped'], len(dropped))
+        a6_second = by_key[(DesignAssignment.objects.get(project=self.site_group_b).pk, 2)]
+        self.assertIn(a6_second.pk, excluded)
 
     def test_group_c_failure_and_accepted_cr_land_on_the_pm_not_the_designer(self):
         """VERIFICATION 8 — brief changes are charged to the PM who moved the brief."""
@@ -476,7 +518,10 @@ class MetricArithmeticTests(Part10Base):
 
         # And the attempt the accepted request opened is out of alpha's rework numerator.
         rework = self._row(self._panel(result, 'rework_multiplier'), 'alpha10')
-        self.assertGreaterEqual(rework['excluded'], 2)  # one Group B, one PM change
+        # B-06 (attempt-accounting prompt, T5): was `>= 2` (A6's Group B attempt and A7's
+        # PM-change attempt). The PM-change attempt is on A7, which is UNFINISHED, so B1c's
+        # scope drops it from the figure altogether. Only A6's Group B attempt is excluded.
+        self.assertEqual(rework['excluded'], 1)
 
     def test_overturn_rate_matches_a_manual_count(self):
         """VERIFICATION 9 — overturns counted by hand against the computed rate."""

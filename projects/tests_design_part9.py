@@ -552,7 +552,7 @@ class ReworkMultiplierTests(Part9Base):
     def test_group_b_failure_does_not_increment_the_designer_multiplier(self):
         """VERIFICATION 12 — all three figures printed and asserted."""
         # Site 1: two attempts, the second caused by a GROUP A failure  -> designer rework
-        self._released_site_with_causes(
+        _site_a, a_site, a_attempts = self._released_site_with_causes(
             'P9-RW-A', [(ERR_LAYOUT, ATTEMPT_REASON_QC_FAILED)])
         # Site 2: two attempts, the second caused by a GROUP B failure  -> input quality
         self._released_site_with_causes(
@@ -582,13 +582,36 @@ class ReworkMultiplierTests(Part9Base):
         self.assertEqual(row['input_problem_attempts'], 1)
         self.assertEqual(row['pm_change_request'], 1)
 
-        # The Group B attempt is EXCLUDED from the numerator: 6 - 1 = 5, over 3 released.
-        self.assertEqual(row['rework'], round(5 / 3, 1))
+        # B-06 (attempt-accounting prompt, T1): was round(5 / 3, 1) = 1.7, which counted the
+        # three initial attempts and the PM-change attempt as rework. Rework is now the
+        # designer-caused bucket only: site 1's Group A attempt, 1, over 3 finished sites.
+        self.assertEqual(row['rework'], round(1 / 3, 1))
         # ...and counted here instead.
         self.assertEqual(row['input_quality'], round(1 / 3, 1))
         self.assertEqual(row['pm_change_multiplier'], round(1 / 3, 1))
-        # The three are distinct numbers, never summed into one.
-        self.assertNotEqual(row['rework'], row['input_quality'])
+
+        # B-06 (T1b): this was assertNotEqual(rework, input_quality). It pinned a
+        # coincidence, and B-06 made the two equal at 0.3 by coincidence. The property it
+        # stood for is a DIFFERENTIAL: another Group B failure on a finished site raises
+        # input and leaves rework where it was. Site 1 fails QC again, over the survey,
+        # and stays released, so the denominator does not move.
+        rework_before, input_before = row['rework'], row['input_quality']
+        last = a_attempts[-1]
+        last.qc_verdict = QC_FAILED
+        last.qc_remarks = 'survey wrong'
+        last.qc_failure_category = ERR_SURVEY_INADEQUATE
+        last.closed_at = timezone.now()
+        last.save()
+        DesignAttempt.objects.create(assignment=a_site,
+                                     attempt_number=last.attempt_number + 1,
+                                     opened_reason=ATTEMPT_REASON_QC_FAILED)
+        a_site.current_attempt_number = last.attempt_number + 1
+        a_site.save()
+        after = [w for w in tender_metrics(self.program)['workload']
+                 if w['designer'].pk == self.designer.pk][0]
+        self.assertEqual(after['input_quality'], round(2 / 3, 1))
+        self.assertGreater(after['input_quality'], input_before)
+        self.assertEqual(after['rework'], rework_before)
 
     def test_group_c_is_also_excluded_from_designer_rework(self):
         self._released_site_with_causes(
@@ -597,8 +620,9 @@ class ReworkMultiplierTests(Part9Base):
         row = [w for w in m['workload'] if w['designer'].pk == self.designer.pk][0]
         self.assertEqual(row['input_problem_attempts'], 1)
         self.assertEqual(row['designer_error_attempts'], 0)
-        # 2 attempts - 1 input-caused = 1, over 1 released site.
-        self.assertEqual(row['rework'], 1.0)
+        # B-06 (attempt-accounting prompt, T2): was 1.0, which counted the initial attempt.
+        # The only other attempt is input-caused, so no designer rework: 0 over 1 site.
+        self.assertEqual(row['rework'], 0.0)
 
     def test_a_pre_part_9_failure_with_no_category_is_counted_and_surfaced(self):
         """Historical rows must not silently shrink the multiplier."""
@@ -608,8 +632,10 @@ class ReworkMultiplierTests(Part9Base):
         row = [w for w in m['workload'] if w['designer'].pk == self.designer.pk][0]
         self.assertEqual(row['uncategorised_attempts'], 1)
         self.assertEqual(row['input_problem_attempts'], 0)
-        # Still in the designer numerator — 2 attempts, nothing excluded.
-        self.assertEqual(row['rework'], 2.0)
+        # B-06 (attempt-accounting prompt, T3): was 2.0, which counted the initial attempt.
+        # The uncategorised attempt is STILL designer rework (product owner, B-06 Stop 1
+        # Q2), so the figure is 1 over 1 site, not 0.
+        self.assertEqual(row['rework'], 1.0)
 
     def test_classify_attempt_causes_reads_the_previous_attempts_category(self):
         _site, _a, attempts = self._released_site_with_causes(

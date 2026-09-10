@@ -1581,7 +1581,24 @@ _No entries yet._
 
 ## D. Phase 3 — design handover and as-built (prompts 3.1 – 3.4)
 
-### D1 — a site awaiting PM approval will count as its designer's current load and sit in the rework denominator, so 3.1-ACC must land BEFORE 3.1b
+### ~~D1 — a site awaiting PM approval will count as its designer's current load and sit in the rework denominator, so 3.1-ACC must land BEFORE 3.1b~~ — **CLOSED by prompt 3.1-ACC**
+
+#### CLOSED 11 Sep 2026 BY PROMPT 3.1-ACC (B-06 attempt accounting)
+
+Each site now carries a `finished` flag, `status in DESIGN_WORK_FINISHED_STATUSES`, beside
+the strict `released` one. It is built in `tender_metrics()` and in `analytics_dataset()`.
+A site in `awaiting_pm_approval`:
+
+- is **not** current load (sites and kW) in `designer_workload`;
+- is **not** counted as released: the "N released" line, `released_count`, capacity
+  throughput, on-time delivery and cycle time all still read `released`;
+- **stays in** the finished-site denominator of rework, input, PM change, first-pass, the
+  rework multiplier and the change-request rate, so no ratio inflates;
+- is **not** in `no_due_date`.
+
+Every one of those is exercised only by a fixture (`tests_design_attempt_accounting`
+section d, through `PmGateBase._park_in_pm_gate`). Nothing can produce the status until
+3.1b. The original entry follows.
 
 Recorded by prompt 3.1a, 10 Sep 2026, which dropped this item (B7) from its own scope
 on instruction.
@@ -1647,6 +1664,47 @@ approval gets the grey fall-through chip. It still shows the correct label ("Awa
 approval"), through `get_status_display` / `status_label`.
 
 It is a presentation decision for prompt 3.1b or 3.1c, and nothing is reachable today.
+
+### D5 — the tender dashboard renders a Rework or Input of 0.0 as "—", with a tooltip that says there are no released sites
+
+Recorded by prompt 3.1-ACC, 11 Sep 2026. `tender_dashboard.html` was outside its MODE.
+
+**Visible today.** The workload table tests `{% if w.rework %}` and `{% if w.input_quality %}`.
+Python's 0.0 is falsy, so a genuine zero renders as the "no data" dash, and its `title` says
+*"No released sites yet — nothing to divide by"* (or *"…or no input-caused rework"*). The Input
+column has done this since Part 9. B-06 made 0.0 the correct Rework for a clean record, so on
+the SCMPILOT tender demo.design's Rework moved from **"1.2×" to "—"**, with a false tooltip.
+The fix is `{% if w.rework is not None %}` in both cells, plus the matching `data-v` sort
+keys. The figure itself is None only when the designer has no finished site.
+
+**Same template, stale text.** The workload card footer says *"Rework = attempts caused by a
+designer error (Group A) ÷ released sites"*. Since B-06 the numerator also counts
+uncategorised pre-Part-9 QC failures (product owner, B-06 Stop 1 Q2), and the denominator is
+finished sites: released, or awaiting PM approval. The two denominators agree until 3.1b.
+
+### D6 — the change-request-rate panel still labels its divisor "released" after it became "finished"
+
+Recorded by prompt 3.1-ACC, 11 Sep 2026. Only one `quality_analytics.html` header was in its
+MODE.
+
+`m_change_request_rate` now divides by finished sites (B-06, B4). Each row carries both the
+strict `released` count and a `finished` count, which is the divisor. The panel's headers
+*"Accepted per released site"* and *"Released sites"* are true until prompt 3.1b makes
+`awaiting_pm_approval` reachable. After that, the figure's `n=` and the "Released sites"
+column can disagree. **Fix with, or before, 3.1b:** relabel the first header and show
+`r.finished` beside or instead of `r.released`.
+
+### D7 — `pm_change_multiplier` is computed and nothing reads it
+
+Recorded by prompt 3.1-ACC, 11 Sep 2026.
+
+`designer_workload()` returns `pm_change_multiplier` (PM-change attempts on finished sites ÷
+finished sites). No template, view or report reads it. The tender dashboard shows only the raw
+chip count, *"N PM change"*. B-06 kept it consistent with rework and input: same
+implementation (`rework_contribution()`), same denominator, pinned by
+`tests_design_attempt_accounting` section c. On the pilot it read 0.0 before and after.
+**Either display it as the third figure the workload card's footer already describes, or
+delete it.** Until then it is dead weight that has to be kept correct for no reader.
 
 ---
 

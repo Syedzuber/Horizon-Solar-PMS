@@ -81,14 +81,15 @@ from .models import (
     DesignChangeRequest, DueDateCommitment,
     ARKA_APPROVED, ARKA_PENDING,
     CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_REJECTED,
-    DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES,
+    ATTEMPT_REASON_QC_FAILED,
     ERROR_GROUP_A, ERROR_GROUP_B, ERROR_GROUP_C,
     DESIGN_ERROR_CATEGORY_LABELS, error_category_group,
     QC_FAILED, QC_PENDING,
 )
 from .design_metrics import (
     CAUSE_PM_CHANGE, CAUSE_UNCATEGORISED, classify_attempt_causes,
-    effective_commitment,
+    effective_commitment, rework_contribution,
 )
 from .utils import is_working_day
 
@@ -207,18 +208,22 @@ class Metric:
 METRIC_CATALOGUE = [
     # ── A — designer execution ───────────────────────────────────────────────
     Metric('first_pass_rate', GROUP_A, 'First-pass rate',
-           'Released sites that were released on their first attempt, per designer and '
-           'team-wide.',
+           'Finished sites (released, or awaiting PM approval) that no QC failure sent '
+           'round again, per designer and team-wide. A reopen for a PM change request '
+           'does not cost first-pass.',
            core=True,
            why='Locked: it is the one designer metric that measures work getting through '
                'cleanly rather than counting failures, so the page cannot be read as a '
                'failure tally alone.'),
     Metric('rework_multiplier', GROUP_A, 'Rework multiplier',
-           'Attempts per released site, counting only attempts a Group A failure caused. '
-           'Group B, Group C and PM-change attempts are excluded from the numerator.',
-           caveat='Stricter than the rework column on the tender dashboard, which also '
-                  'counts attempts opened by a PM change request. The two figures will '
-                  'differ and both are correct for what they name.'),
+           'Designer-caused attempts per finished site (released, or awaiting PM '
+           'approval): attempts a Group A failure opened, plus uncategorised pre-Part-9 '
+           'QC failures. The initial attempt, and Group B, Group C and PM-change '
+           'attempts, are not counted, so a clean record reads 0.',
+           caveat='The same figure as the Rework column on the tender dashboard, computed '
+                  'by the same code, so over the same sites the two agree. The dashboard '
+                  'rounds to one decimal and shows any sample size; this panel rounds to '
+                  'two and withholds the figure below 5 finished sites.'),
     Metric('arka_iterations', GROUP_A, 'Arka iterations',
            'Average Arka versions per attempt, per designer. Versions carried forward '
            'from an earlier attempt are excluded — nobody iterated on those.'),
@@ -257,7 +262,8 @@ METRIC_CATALOGUE = [
 
     # ── C — brief stability ──────────────────────────────────────────────────
     Metric('change_request_rate', GROUP_C, 'Change request rate',
-           'Accepted change requests over released sites, per REQUESTING PM.',
+           'Accepted change requests over finished sites (released, or awaiting PM '
+           'approval), per REQUESTING PM.',
            core=True,
            why='Locked: an accepted change request is rework the designer did not cause. '
                'Counting it against the PM who raised it is what stops it being counted '
@@ -350,6 +356,11 @@ def analytics_dataset(programs, need_hold_events=False):
     ARKA VERSIONS ARE LOADED IN FULL, not filtered to `is_current` as design_metrics does.
     The iteration count is the number of versions, so filtering to the live one would make
     every attempt look like a single-version attempt.
+
+    Each site carries `released` (status == released, and nothing else) AND `finished`
+    (DESIGN_WORK_FINISHED_STATUSES: released, or awaiting PM approval). First-pass, the
+    rework multiplier and the change-request rate divide by `finished` (§D1, B-06). Every
+    other released-only figure, `released_count` included, still reads `released`.
     """
     program_ids = [p.pk for p in programs]
 
@@ -437,6 +448,10 @@ def analytics_dataset(programs, need_hold_events=False):
             'capacity_kw': approved_arka.capacity_kw if approved_arka else None,
             'commitments': commitments_by_assignment.get(a.pk, []),
             'released':    a.status == DESIGN_RELEASED,
+            # The same flag, from the same set, as design_metrics.tender_metrics() builds —
+            # DESIGN_WORK_FINISHED_STATUSES is the one definition (§D1). Not "released": a
+            # site awaiting PM approval is counted as released nowhere.
+            'finished':    a.status in DESIGN_WORK_FINISHED_STATUSES,
             'ever_held':   a.survey_returned_at is not None,
             'allocated':   a.assigned_at is not None,
         })
@@ -582,73 +597,89 @@ def _failure_rows(data):
 # ---------------------------------------------------------------------------
 
 def m_first_pass_rate(data):
-    """Released sites released on attempt 1, per designer and team-wide.
+    """Finished sites that no QC failure ever sent round again, per designer and team-wide.
 
-    The denominator is RELEASED sites, not allocated ones: a site still in design has not
-    yet had a chance to be first-pass, and counting it would drag every rate down by
-    however much work happens to be in flight on the day the page is opened.
+    FIRST-PASS COUNTS LOOPS, NOT FAULT (B-06, B2). A site loses first-pass when a QC failure
+    opened an attempt on it, at either gate and whatever the failure's category. A Group B
+    survey failure still costs first-pass, because the package failed review and went round
+    again. Whose fault that was is answered separately, by the rework and input figures,
+    which are never summed.
+
+    A REOPEN FOR A PM CHANGE REQUEST DOES NOT COST FIRST-PASS (B-06, answered by the product
+    owner; DESIGN_APPROVAL_AUDIT.md finding 3). A site that passed QC cleanly stays
+    first-pass however many times the brief moves afterwards. This used to read
+    `current_attempt_number == 1`, which dropped such a site for good once it was
+    re-released.
+
+    The denominator is FINISHED sites (released, or awaiting PM approval — §D1), not
+    allocated ones. A site still in design has not had its chance to be first-pass yet, and
+    counting it would drag every rate down by however much work is in flight on the day.
+    A site waiting on the PM HAS had that chance, so it stays in.
     """
     per = {}
     team_num = team_den = 0
     for s in data['sites']:
-        if not s['released']:
+        if not s['finished']:
             continue
-        row = _bucket(per, s['designer'], {'first': 0, 'released': 0})
-        row['released'] += 1
+        row = _bucket(per, s['designer'], {'first': 0, 'finished': 0})
+        row['finished'] += 1
         team_den += 1
-        if s['assignment'].current_attempt_number == 1:
+        if not any(t.opened_reason == ATTEMPT_REASON_QC_FAILED for t in s['attempts']):
             row['first'] += 1
             team_num += 1
     return {
         'team': rate(team_num, team_den),
         'rows': _person_rows(per, lambda r: {
             'label': r['label'], 'profile': r['profile'],
-            'figure': rate(r['first'], r['released']),
+            'figure': rate(r['first'], r['finished']),
         }),
     }
 
 
 def m_rework_multiplier(data):
-    """Attempts per released site, GROUP A CAUSES ONLY.
+    """Designer-caused attempts per finished site. THE SAME FIGURE as the tender
+    dashboard's Rework column.
 
-    THE NUMERATOR IS NOT "every attempt". classify_attempt_causes() says what opened each
-    attempt, and everything that is not the designer's own error comes out:
+    ONE METRIC, ONE IMPLEMENTATION (B-06, Stop 1, Option A). Both the numerator and the
+    denominator come from design_metrics.rework_contribution(), which designer_workload()
+    also calls. This function only groups the result by designer. Before B-06 it kept the
+    initial attempt in the numerator, which contradicted its own catalogue description
+    ("counting only attempts a Group A failure caused"). The tender column kept PM-change
+    attempts in, so the two screens gave different answers to one question.
 
-        kept      the initial attempt, and every attempt a Group A failure opened
-        kept      uncategorised attempts — pre-Part-9 QC failures, which had no other
-                  meaning at the time. Counted, and reported separately so the mixture is
-                  visible rather than implied (the reasoning is design_metrics'; it is
-                  not re-litigated here).
-        REMOVED   attempts opened by a Group B or Group C failure
-        REMOVED   attempts opened by a PM change request
+    Each attempt in scope lands in exactly one place:
 
-    That last exclusion is where this diverges from the tender dashboard's rework column,
-    which keeps PM-change attempts in. Both are defensible for what they name; this one is
-    the figure a hard rule of Part 10 requires, and the divergence is printed on screen so
-    two different numbers under similar labels do not read as a bug.
+        numerator  designer-caused attempts on finished sites: Group A, plus uncategorised
+                   pre-Part-9 QC failures. Uncategorised ones are also shown in their own
+                   column, so the mixture is visible rather than implied.
+        excluded   Group B, Group C and PM-change attempts on finished sites
+        dropped    every attempt on an unfinished site, and the initial attempt on a
+                   finished one (B1c: the top and the bottom span the same sites)
+
+    The denominator is finished sites: released, or awaiting PM approval (§D1). Over the
+    same sites the two screens agree. This panel rounds to two places and refuses below
+    MIN_DENOMINATOR; the dashboard rounds to one.
     """
     per = {}
     for s in data['sites']:
         row = _bucket(per, s['designer'],
-                      {'released': 0, 'designer_attempts': 0, 'uncategorised': 0,
-                       'excluded': 0})
-        if s['released']:
-            row['released'] += 1
-        causes = classify_attempt_causes(s['attempts'])
-        for t in s['attempts']:
-            cause = causes.get(t.attempt_number)
-            if cause in (ERROR_GROUP_B, ERROR_GROUP_C, CAUSE_PM_CHANGE):
-                row['excluded'] += 1
-                continue
-            row['designer_attempts'] += 1
-            if cause == CAUSE_UNCATEGORISED:
-                row['uncategorised'] += 1
+                      {'finished': 0, 'designer_attempts': 0, 'uncategorised': 0,
+                       'excluded': 0, 'dropped': 0})
+        contribution = rework_contribution(s)
+        row['finished']          += contribution['finished']
+        row['designer_attempts'] += contribution['designer']
+        row['uncategorised']     += contribution['uncategorised']
+        # A COUNT of what the numerator left out, for the "Excluded" column. It is not a
+        # figure, and it is never divided or compared with rework.
+        row['excluded']          += contribution['input'] + contribution['pm_change']
+        row['dropped']           += contribution['dropped']
     return {
         'rows': _person_rows(per, lambda r: {
             'label': r['label'], 'profile': r['profile'],
-            'figure': ratio(r['designer_attempts'], r['released'], places=2),
+            'figure': ratio(r['designer_attempts'], r['finished'], places=2),
             'uncategorised': r['uncategorised'],
             'excluded': r['excluded'],
+            'dropped': r['dropped'],
         }),
     }
 
@@ -871,33 +902,42 @@ def m_hold_duration(data):
 # ---------------------------------------------------------------------------
 
 def m_change_request_rate(data):
-    """Accepted change requests over released sites, PER REQUESTING PM.
+    """Accepted change requests over finished sites, PER REQUESTING PM.
 
     THE PM IS THE UNIT, not the designer, and that is the whole point of the metric. The
-    denominator for one PM is the released sites THEY are the assigned PM of — dividing
-    every PM's accepted requests by the tender's total released count would make a PM
-    holding two sites look identical to one holding forty.
+    denominator for one PM is the finished sites THEY are the assigned PM of — dividing
+    every PM's accepted requests by the tender's total would make a PM holding two sites
+    look identical to one holding forty.
+
+    FINISHED, NOT RELEASED (B-06, B4; §D1). A site awaiting PM approval stays in the
+    denominator, the same as in the rework multiplier and the tender dashboard. Otherwise
+    the day prompt 3.1b ships, every site with the PM would fall out of the bottom of this
+    ratio while its accepted request stayed on top. Each row also carries the strict
+    `released` count for the table's "Released sites" column; `finished` is the divisor.
     """
     per = {}
     for s in data['sites']:
-        row = _bucket(per, s['pm'], {'released': 0, 'accepted': 0})
+        row = _bucket(per, s['pm'], {'finished': 0, 'released': 0, 'accepted': 0})
+        if s['finished']:
+            row['finished'] += 1
         if s['released']:
             row['released'] += 1
     for cr in data['change_requests']:
         if cr.verdict != CHANGE_REQUEST_ACCEPTED:
             continue
-        row = _bucket(per, cr.requested_by, {'released': 0, 'accepted': 0})
+        row = _bucket(per, cr.requested_by, {'finished': 0, 'released': 0, 'accepted': 0})
         row['accepted'] += 1
 
     team_accepted = sum(1 for cr in data['change_requests']
                         if cr.verdict == CHANGE_REQUEST_ACCEPTED)
-    team_released = sum(1 for s in data['sites'] if s['released'])
+    team_finished = sum(1 for s in data['sites'] if s['finished'])
     return {
-        'team': ratio(team_accepted, team_released, places=2),
+        'team': ratio(team_accepted, team_finished, places=2),
         'rows': _person_rows(per, lambda r: {
             'label': r['label'], 'profile': r['profile'],
-            'figure': ratio(r['accepted'], r['released'], places=2),
+            'figure': ratio(r['accepted'], r['finished'], places=2),
             'accepted': r['accepted'], 'released': r['released'],
+            'finished': r['finished'],
         }),
     }
 

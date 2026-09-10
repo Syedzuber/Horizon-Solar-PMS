@@ -253,6 +253,12 @@ def tender_metrics(program, today=None):
     Returns a dict; see the panel builders below for each key's shape. Safe on a tender
     with no design work at all — every panel degrades to zeros and empty lists rather
     than raising, because a freshly created tender is a normal state, not an error.
+
+    Each site carries TWO completion flags, and they answer different questions:
+    `released` is `status == released` and nothing else — it is what the page may call
+    released. `finished` is "the designer's work is done": released, or awaiting PM
+    approval (DESIGN_WORK_FINISHED_STATUSES). Current load, `no_due_date` and the three
+    attempt figures read `finished`; only the "N released" count reads `released`.
     """
     today = today or timezone.localdate()
 
@@ -352,6 +358,12 @@ def tender_metrics(program, today=None):
             'revisions':     max(len(commitments_by_assignment.get(a.pk, [])) - 1, 0),
             'attempts':      attempts_by_assignment.get(a.pk, []),
             'released':      a.status == DESIGN_RELEASED,
+            # "FINISHED" IS DESIGN_WORK_FINISHED_STATUSES, and that set is the one
+            # definition — no second name. Authority: EXECUTION_MODULE_DEFERRED.md §D1. A
+            # site awaiting PM approval is not the designer's load and is not released;
+            # it IS finished, so it stays in every attempt-figure denominator rather than
+            # dropping out of one while its attempts stay in the numerator.
+            'finished':      a.status in DESIGN_WORK_FINISHED_STATUSES,
             # PART 4.6 — the oldest untriaged PM change request on this site, or None.
             # A list is carried rather than a bool because the queue panel needs the row
             # itself and the attention band needs its age.
@@ -384,7 +396,8 @@ def tender_metrics(program, today=None):
         'qc_queue':      qc_review_queue_age(sites, today),
         'qc_attention':  attention_list(sites, today, own_stages=QC_ACTION_STAGES,
                                         own_only=True),
-        'no_due_date':   sum(1 for s in sites if not s['has_approved_due'] and not s['released']),
+        # `finished`, not `released` (§D1): a site with the PM owes no date either.
+        'no_due_date':   sum(1 for s in sites if not s['has_approved_due'] and not s['finished']),
     }
 
 
@@ -466,34 +479,120 @@ def classify_attempt_causes(attempts):
     return causes
 
 
+def attempt_cause_split(attempts):
+    """One site's attempts, bucketed by what opened them. THE ONLY BUCKETING.
+
+    Every attempt lands in exactly one bucket:
+
+        initial        the first attempt — not rework; it is the work
+        group_a        opened by a Group A failure — the design was wrong
+        uncategorised  opened by a QC failure that recorded no category (pre-Part-9)
+        input          opened by a Group B or C failure — bad survey, or moved brief
+        pm_change      opened by an accepted PM change request
+
+    `designer` = group_a + uncategorised. UNCATEGORISED COUNTS AGAINST THE DESIGNER, for
+    two reasons decided with the product owner on the B-06 prompt: an uncategorised QC
+    failure is a loop that DID happen, and leaving it out would make the figure look better
+    by forgetting; and classify_attempt_causes() settled it deliberately in Part 9, which a
+    prompt scoped to a different question has no remit to reverse.
+
+    The tender dashboard's Split chip is these buckets summed over EVERY site. The attempt
+    figures are the same buckets restricted to finished sites — see rework_contribution().
+    """
+    causes = classify_attempt_causes(attempts)
+    split = {'initial': 0, 'group_a': 0, 'uncategorised': 0, 'input': 0, 'pm_change': 0}
+    for t in attempts:
+        cause = causes.get(t.attempt_number)
+        if cause is None:
+            split['initial'] += 1
+        elif cause == ERROR_GROUP_A:
+            split['group_a'] += 1
+        elif cause == CAUSE_UNCATEGORISED:
+            split['uncategorised'] += 1
+        elif cause == CAUSE_PM_CHANGE:
+            split['pm_change'] += 1
+        else:
+            # ERROR_GROUP_B or ERROR_GROUP_C — classify_attempt_causes() returns nothing
+            # else for a QC-failure attempt.
+            split['input'] += 1
+    split['designer'] = split['group_a'] + split['uncategorised']
+    return split
+
+
+def rework_contribution(site, split=None):
+    """What one site adds to the three attempt figures — rework, input and PM change.
+
+    THE ONE IMPLEMENTATION of their numerators and of their shared denominator. It is
+    imported by designer_workload() (the tender dashboard's Rework and Input columns) and
+    by design_analytics.m_rework_multiplier() (the quality-analytics rework panel). The
+    B-06 prompt chose one metric under one definition (Stop 1, Option A), and computing it
+    twice would let the two screens drift apart again.
+
+    WHAT COUNTS
+      * rework numerator = the `designer` bucket only. The initial attempt is not rework
+        (B-06, B1b), and an attempt opened by a PM change request is not the designer's
+        (B-06, answered by the product owner; DESIGN_APPROVAL_AUDIT.md finding 3). A PM
+        change request is the only way an SCM-originated change can arrive, so the same
+        exclusion covers it.
+      * input numerator = the Group B / C bucket; PM-change numerator = its own bucket.
+        THREE FIGURES, NEVER SUMMED — they point at coaching, survey quality and customer
+        discipline respectively.
+
+    ONLY A FINISHED SITE CONTRIBUTES, to the top AND the bottom (B-06, B1c). The top used
+    to count attempts on every site and the bottom only released ones, so a designer's
+    in-flight work inflated their multiplier — the pilot's demo.design read 1.2 on five
+    clean releases for exactly that reason. Numerator and denominator now span the same
+    sites. "Finished" is the caller's `site['finished']` flag, which is
+    DESIGN_WORK_FINISHED_STATUSES (§D1).
+
+    `dropped` counts the attempts in none of the three: every attempt on an unfinished
+    site, plus the initial attempt on a finished one. Returned so that
+    designer + input + pm_change + dropped == len(attempts) can be checked.
+
+    `split` may be passed by a caller that already holds attempt_cause_split() for the site.
+    """
+    if split is None:
+        split = attempt_cause_split(site['attempts'])
+    if not site['finished']:
+        return {'finished': 0, 'designer': 0, 'uncategorised': 0, 'input': 0,
+                'pm_change': 0, 'dropped': len(site['attempts'])}
+    return {'finished': 1, 'designer': split['designer'],
+            'uncategorised': split['uncategorised'], 'input': split['input'],
+            'pm_change': split['pm_change'], 'dropped': split['initial']}
+
+
 def designer_workload(sites, today=None):
     """One row per designer holding at least one assignment on this tender.
 
     SITES AND kW SIT SIDE BY SIDE ON PURPOSE. Sites are not equal units of work;
     allocating by count alone hands one designer six ground mounts and another six
-    rooftops and calls them balanced.
+    rooftops and calls them balanced. Both are CURRENT LOAD: sites whose design work is
+    not finished. A site awaiting PM approval has left the designer and is not load.
 
-    REWORK IS SPLIT AND NEVER MERGED. Part 5 split it two ways; PART 9 SPLITS IT THREE,
-    and the three are reported as separate figures that must not be added together:
+    THREE ATTEMPT FIGURES, NEVER ADDED TOGETHER (B-06):
 
-        rework           attempts caused by a GROUP A failure — the design was wrong.
-                         This is the designer's number, and the only one that should
-                         ever drive coaching.
-        input_quality    attempts caused by a GROUP B or C failure — the survey was
-                         wrong, or the brief moved after work started. NOT the
-                         designer's error (settled decision 8). A team with a high
-                         figure here needs better surveys or a pinned-down customer;
-                         coaching the designer would be useless and unfair.
-        pm_change_request  attempts opened by a formal PM change request, exactly as in
-                         Part 5 and deliberately unchanged.
+        rework                designer-caused attempts (Group A, plus uncategorised
+                              pre-Part-9 QC failures) ÷ finished sites. The initial
+                              attempt is not rework, so a clean record reads 0.0, and one
+                              extra loop across five finished sites reads 0.2. This is the
+                              designer's number, and the only one that should drive
+                              coaching.
+        input_quality         attempts opened by a Group B or C failure ÷ finished sites —
+                              a bad survey or a moved brief. NOT the designer's error
+                              (settled decision 8).
+        pm_change_multiplier  attempts opened by an accepted PM change request ÷ finished
+                              sites. Not the designer's error either (B-06; audit
+                              finding 3).
 
-    Both multipliers are ÷ released sites — undefined with no released sites, and reported
-    as None (rendered '—') rather than 0, which would read as "no rework" when it means
-    "no data".
+    All three come from rework_contribution(), the implementation this function shares with
+    design_analytics.m_rework_multiplier(). Only finished sites count, at the top and the
+    bottom alike. Each is None (rendered '—') when the designer has no finished site —
+    "no data", not "no rework".
 
-    THE DENOMINATOR IS THE SAME FOR BOTH so the two are comparable at a glance. Only the
-    numerator differs, and Group B and C attempts are excluded from `rework` — that
-    exclusion is the whole point of the change.
+    The Split chip counts (`designer_error_attempts`, `input_problem_attempts`,
+    `pm_change_request`, `uncategorised_attempts`) are the same buckets over EVERY site,
+    finished or not, and are unchanged by B-06. `released` is the strict released count,
+    for the "N released" line; it is not a denominator.
     """
     by_designer = {}
     for s in sites:
@@ -505,16 +604,22 @@ def designer_workload(sites, today=None):
             'sites_no_capacity': 0,
             'overdue': 0, 'blocked': 0, 'released': 0,
             'attempts': 0, 'qc_failed': 0, 'pm_change_request': 0,
-            # Part 9 — the three-way split of what those attempts were caused BY.
+            # Part 9 — the three-way split of what those attempts were caused BY. These
+            # feed the Split chip and span every site.
             'designer_error_attempts': 0,
             'input_problem_attempts':  0,
             'uncategorised_attempts':  0,
+            # B-06 — the attempt figures' numerators and shared denominator, finished
+            # sites only. Filled from rework_contribution().
+            'finished': 0,
+            'rework_attempts': 0, 'input_attempts': 0, 'pm_change_attempts': 0,
         })
         if s['released']:
             row['released'] += 1
-        else:
-            # "Sites" and "kW" describe CURRENT LOAD, so released work is excluded from
-            # both — a designer is not still carrying a site they have finished.
+        if not s['finished']:
+            # "Sites" and "kW" describe CURRENT LOAD, so finished work is excluded from
+            # both — a designer is not still carrying a site they have finished, and a
+            # site waiting on the PM is waiting on someone else (§D1).
             row['sites'] += 1
             if s['capacity_kw'] is not None:
                 row['capacity_kw'] += s['capacity_kw']
@@ -527,37 +632,37 @@ def designer_workload(sites, today=None):
             row['overdue'] += 1
         if s['blocked']:
             row['blocked'] += 1
-        # Rework counts every attempt the designer has worked, released or not.
+        # The Split chip — every attempt on every site, finished or not. Unchanged by B-06.
         row['attempts'] += len(s['attempts'])
-        causes = classify_attempt_causes(s['attempts'])
         for t in s['attempts']:
             if t.opened_reason == ATTEMPT_REASON_QC_FAILED:
                 row['qc_failed'] += 1
             elif t.opened_reason == ATTEMPT_REASON_PM_CHANGE_REQUEST:
                 row['pm_change_request'] += 1
+        split = attempt_cause_split(s['attempts'])
+        row['designer_error_attempts'] += split['group_a']
+        row['input_problem_attempts']  += split['input']
+        row['uncategorised_attempts']  += split['uncategorised']
 
-            cause = causes.get(t.attempt_number)
-            if cause == ERROR_GROUP_A:
-                row['designer_error_attempts'] += 1
-            elif cause in ('B', 'C'):
-                row['input_problem_attempts'] += 1
-            elif cause == CAUSE_UNCATEGORISED:
-                row['uncategorised_attempts'] += 1
+        # The attempt figures — the same buckets, finished sites only (B-06 B1c).
+        contribution = rework_contribution(s, split)
+        row['finished']           += contribution['finished']
+        row['rework_attempts']    += contribution['designer']
+        row['input_attempts']     += contribution['input']
+        row['pm_change_attempts'] += contribution['pm_change']
 
     rows = []
     for row in by_designer.values():
-        released = row['released']
-        # THE PART 9 EXCLUSION, and the only change to how this number is computed:
-        # attempts opened by a Group B or C failure come out of the numerator entirely.
-        # Everything else Part 5 counted is still counted.
-        designer_attempts = row['attempts'] - row['input_problem_attempts']
-        row['rework'] = (round(designer_attempts / released, 1) if released else None)
-        row['input_quality'] = (round(row['input_problem_attempts'] / released, 1)
-                                if released else None)
-        # Reported as its own figure rather than folded into either multiplier — a PM
-        # change request is neither a design error nor an input problem.
-        row['pm_change_multiplier'] = (round(row['pm_change_request'] / released, 1)
-                                       if released else None)
+        finished = row['finished']
+        # THREE INDEPENDENT QUOTIENTS over one denominator. Each numerator is its own
+        # bucket, and none is derived from another by subtraction. Subtracting was how
+        # PM-change attempts used to stay in `rework` (B-06; audit finding 3).
+        row['rework'] = (round(row['rework_attempts'] / finished, 1)
+                         if finished else None)
+        row['input_quality'] = (round(row['input_attempts'] / finished, 1)
+                                if finished else None)
+        row['pm_change_multiplier'] = (round(row['pm_change_attempts'] / finished, 1)
+                                       if finished else None)
         rows.append(row)
     # Default order is kW descending — the load that matters, not the row count.
     rows.sort(key=lambda r: (r['capacity_kw'], r['sites']), reverse=True)
