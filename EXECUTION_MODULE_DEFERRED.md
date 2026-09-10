@@ -557,3 +557,140 @@ compose project_id" — a scheme dropped when `site_code` became the whole proje
 Neither is executable and neither was touched, because the session's MODE fenced off the
 design module. Both are worth a one-line fix in any session that legitimately opens those
 files.
+
+---
+
+## 16. An unknown design status fails three different ways, and only one is tested
+
+Found 10 Sep 2026 by the design approval audit (`docs/DESIGN_APPROVAL_AUDIT.md` §1.3, §7.2).
+
+Three readers take `DesignAssignment.status` and have to cope with a value they do not know.
+Each does something different:
+
+- `design_views.derive_design_mirror_state()` **raises** `ValueError`. It runs inside the
+  caller's atomic block and is unguarded by design, so on an activated site the whole write
+  rolls back.
+- `design_metrics._classify()` **silently** returns `'in_design'` — its last line is
+  `return 'in_design'` — so the site is reported as "In design, awaiting Arka" on both
+  tender dashboards.
+- `designer_dashboard_context()` calls `_DESIGNER_ACTIONS.get(assignment.status, ('none', '', ''))`,
+  which silently offers the designer nothing.
+
+Only the first is guarded by a test: `tests_design_mirror_derivation.test_01` compares the
+mirror map to `DESIGN_ASSIGNMENT_STATUS_CHOICES`. `STAGE_ORDER` and `_DESIGNER_ACTIONS`
+have no such check.
+
+A fourth reader depends on position rather than on the value. `tender_dashboard.html`
+takes the released tile as `{% with released=m.stages|last %}`, which is right only while
+`'released'` is the last entry of `STAGE_ORDER`.
+
+**Not fixed** — audit session, `.py` and templates fenced off. **Risk if left:** the next
+status added to the choices shows up correctly on the mirror and wrongly on the dashboards,
+with nothing failing.
+
+## 17. The tender dashboard's `rework` counts PM change requests against the designer
+
+Found 10 Sep 2026 by the design approval audit (§4.4).
+
+`design_metrics.designer_workload()` computes:
+
+    designer_attempts = row['attempts'] - row['input_problem_attempts']
+    row['rework'] = (round(designer_attempts / released, 1) if released else None)
+
+`row['attempts']` counts every attempt, and only Group B/C attempts are subtracted. An
+attempt opened by an accepted PM change request is therefore in the designer's `rework`
+figure. The function's own docstring says the opposite: *"rework — attempts caused by a
+GROUP A failure — the design was wrong. This is the designer's number"*.
+
+`design_analytics.m_rework_multiplier()` excludes `CAUSE_PM_CHANGE` and says on screen that
+the two figures differ. `design_analytics.m_first_pass_rate()` tests
+`current_attempt_number == 1`, so a site reopened by a change request stops counting as
+first-pass for its designer however clean the design was.
+
+This is dormant on live data, which has zero `DesignChangeRequest` rows and ten `initial`
+attempts. It starts to matter the moment any rework loop other than a QC failure goes
+through `_open_next_attempt()`.
+
+**Not fixed** — audit session. **Risk if left:** the Head coaches a designer over rework
+the PM caused, which is exactly what the separate `opened_reason` values exist to prevent.
+
+## 18. The PM dashboard never offers the change request a released draft-group site accepts
+
+Found 10 Sep 2026 by the design approval audit (§0 P4, §1.3 row 11).
+
+`design_change_request()` and `design_change_request_form()` both widen the change window to
+`released` for a site in a draft procurement group (see `docs/EXECUTION_MODULE_DEFERRED.md`
+B1). A third gate, `design_views.pm_change_request_targets()`, decides whether the PM
+dashboard shows the button at all, and it has no widening:
+
+    if assignment is None or assignment.status == DESIGN_RELEASED:
+        continue
+
+So §11's reopen route is reachable only by typing the form's URL. Nothing on any dashboard
+leads to it.
+
+**Not fixed** — audit session. **Risk if left:** there are now three spellings of one
+window, and the only one a PM ever sees is the one that disagrees. B1's "one shared helper"
+fix needs to cover this function too, or it will leave the dashboard behind.
+
+## 19. The Design mirror hook and the design ledger are built; five documents say they are not
+
+Found 10 Sep 2026 by the design approval audit (§2.2, §6.1, §7.1).
+
+`apply_design_status()` calls both `record_transition()` and `sync_design_mirror()`.
+`DesignAssignment` has been a registered ledger subject since migration
+`0079_design_assignment_subject_type`. The local dump holds 5 `design_assignment` ledger
+rows, and 6 activated sites carry a Design mirror that the hook writes.
+
+These still describe the design mirror or the design ledger as unbuilt:
+
+- `docs/execution-model.md` — §5 ("The derivation hooks that will *write* mirror statuses do
+  not exist"), R-21, and §13's "NOT instrumented" row for `DesignAssignment`
+- `docs/PHASE_0_COMPLETION.md` — "The design module's transitions"
+- `docs/EXECUTION_PROMPT_LOG.md` — the "derivation hooks" paragraph and row B21
+- `docs/OPEX_task_template_spec.md` — §2 rules 3–4, §4 and §6 ("NOT BUILT for any of the 8,
+  Design included")
+- `docs/EXECUTION_MODULE_DEFERRED.md` — B27 ("none of their six mirrors can move")
+
+Separately, `docs/PHASE_2_PREFLIGHT_AUDIT.md` §6.1 says `design_mark_blocked` has no
+`released` guard. It has one now.
+
+**Not fixed** — the session could edit only its own audit file and this one (R-12). **Risk
+if left:** the next prompt author reads §13, plans a session to instrument the design
+ledger, and discovers mid-build that it already exists.
+
+## 20. The change-request screen and its view disagree about "review in progress"
+
+Found 10 Sep 2026 by the design approval audit (§1.4, §7.2).
+
+`design_change_request()` sets
+`was_in_qc = assignment.status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)` and warns the PM,
+on raise, that either gate's review is suspended. The form template warns only for
+`{% if assignment.status == 'in_qc' %}`. A PM raising against a package at
+`awaiting_head_qc` is not told, before submitting, that they are about to stop the Design
+Head's review.
+
+`design_change_request_accept()` has a related gap. It checks only that the request is still
+pending, never the site's status, and relies entirely on the status gate applied when the
+request was raised.
+
+**Not fixed** — audit session. **Risk if left:** low; the success message after the raise
+does say it. It becomes relevant as soon as anything else can move a site while a request is
+pending.
+
+## 21. The Designer User Manual is not in the repository
+
+Found 10 Sep 2026 by the design approval audit (§1.5).
+
+The audit prompt said the manual documents thirteen stages against the model's fourteen and
+asked which one is missing. The repo and its parent directory contain no manual: there is no
+file named like one and no text matching "user manual", "designer manual" or "13 stages".
+The question could not be answered.
+
+The code does show that three values are never committed by any current writer —
+`due_date_proposed` (no writer anywhere), `qc_failed` (write removed in Session C) and
+`awaiting_survey` (the default, moved on inside the same transaction) — and that `allocated`
+is reachable only for legacy rows.
+
+**Not fixed** — nothing to fix in code. **Risk if left:** user-facing documentation lives
+somewhere no code audit can check it against, and it will drift.
