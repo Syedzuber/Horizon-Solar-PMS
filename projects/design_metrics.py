@@ -41,6 +41,7 @@ from .models import (
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
+    DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
     ARKA_APPROVED, ARKA_PENDING,
     ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     ERROR_GROUP_A, error_category_group,
@@ -120,7 +121,7 @@ def is_overdue(assignment, current_commitment, today=None):
 
         overdue  =  an APPROVED due-date commitment exists
                     AND its date is strictly before today
-                    AND the assignment is not released
+                    AND the designer's work is not finished (released, or with the PM)
 
     THREE THINGS THIS DELIBERATELY DOES NOT DO:
 
@@ -145,7 +146,11 @@ def is_overdue(assignment, current_commitment, today=None):
     the row do not re-query per site — this function is called once per assignment in a
     loop over hundreds of them.
     """
-    if assignment.status == DESIGN_RELEASED:
+    # PROMPT 3.1a — FINISHED, NOT MERELY RELEASED. A site awaiting PM approval has left the
+    # designer: both gates have passed and the ball is with the PM. The designer's clock
+    # stops when the work leaves them, so this tests the shared "work finished" set rather
+    # than `== DESIGN_RELEASED`. Identical for every status reachable today.
+    if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
         return False
     if current_commitment is None or current_commitment.approved_at is None:
         return False
@@ -188,6 +193,9 @@ STAGE_ORDER = [
     # renaming it would break every link and bookmark already pointing at that filter for
     # no gain — nobody sees the key.
     ('blocked',             'Design Hold'),
+    # PROMPT 3.1a — both gates passed, with the PM. Immediately before 'released' and never
+    # after it: tender_dashboard.html reads the release tile as `m.stages|last`.
+    ('awaiting_pm_approval', 'Awaiting PM approval'),
     ('released',            'Released'),
 ]
 STAGE_LABELS = dict(STAGE_ORDER)
@@ -211,6 +219,11 @@ def _classify(assignment, current_arka):
     status = assignment.status
     if status == DESIGN_SURVEY_RETURNED:
         return 'blocked'
+    if status == DESIGN_AWAITING_PM_APPROVAL:
+        # PROMPT 3.1a — EXPLICIT, NEVER THE FALL-THROUGH. The last line of this function
+        # files an unknown status under 'in_design', which for this one would report a
+        # design both gates have passed as "In design, awaiting Arka".
+        return 'awaiting_pm_approval'
     if status == DESIGN_ARKA_SUBMITTED:
         # PART 9: the test is head_verdict, not verdict. `arka_submitted` carrying a
         # head-approved Arka means BOTH gates are done and the designer owes artifacts;
@@ -757,7 +770,13 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
             reason = (s['assignment'].survey_return_reason or '').strip() or 'no reason recorded'
             _add(s, _SEV_BLOCKED, days, f'Design Hold {days} day(s) — {reason}', 'warning')
 
-        for s in sorted((x for x in sites if x['revisions'] >= 3 and not x['released']),
+        # PROMPT 3.1a — the same "finished" test is_overdue() applies, and for the same
+        # reason: a site awaiting PM approval has left the designer, so its revision count
+        # is history rather than a live problem. The old `not x['released']` would have
+        # listed it. `s['released']` is `status == DESIGN_RELEASED`, so this is identical
+        # for every status reachable today.
+        for s in sorted((x for x in sites if x['revisions'] >= 3
+                         and x['assignment'].status not in DESIGN_WORK_FINISHED_STATUSES),
                         key=lambda x: x['revisions'], reverse=True):
             _add(s, _SEV_REVISED, s['revisions'],
                  f'Due date revised {s["revisions"]} times', 'warning')

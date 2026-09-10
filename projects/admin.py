@@ -449,7 +449,16 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     # Reading them is still fine: `status` stays in list_display and list_filter and
     # `released_at` in list_display, which are read paths. None of the three may
     # ever appear in list_editable, which writes past this.
+    #
+    # PROMPT 3.1a ADDS `pm_approved_at` AND `pm_approved_by` UNDER THE SAME RULE, AND
+    # THEY MAY NOT BE REMOVED EITHER. An approval stamp typed into a form is an approval
+    # nobody made. It would also falsify the property that session rests on: nothing in
+    # the product writes these two fields until prompt 3.1b does, and
+    # tests_design_pm_gate_inert.py proves that by grep, which an editable admin field
+    # would quietly make untrue. Same mechanism as B9, B10 and B26 — closed, not
+    # instrumented.
     readonly_fields = ['status', 'released_at', 'released_by',
+                       'pm_approved_at', 'pm_approved_by',
                        'current_attempt_number', 'survey_link_added_at',
                        'created_at', 'updated_at']
 

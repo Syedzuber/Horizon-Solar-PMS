@@ -1581,7 +1581,72 @@ _No entries yet._
 
 ## D. Phase 3 — design handover and as-built (prompts 3.1 – 3.4)
 
-_No entries yet._
+### D1 — a site awaiting PM approval will count as its designer's current load and sit in the rework denominator, so 3.1-ACC must land BEFORE 3.1b
+
+Recorded by prompt 3.1a, 10 Sep 2026, which dropped this item (B7) from its own scope
+on instruction.
+
+`awaiting_pm_approval` exists and is unreachable. Two families of figures read
+`released`-or-not and will mis-file it the moment prompt 3.1b makes it reachable:
+
+- **`design_metrics.designer_workload()`.** `if s['released']: row['released'] += 1` /
+  `else: row['sites'] += 1` and `capacity_kw`. A site with the PM is counted as the
+  designer's **current load** (sites and kW), although the designer has nothing left to
+  do. It is also missing from the `released` denominator of `rework`, `input_quality` and
+  `pm_change_multiplier` until the PM approves.
+- **`design_analytics.analytics_dataset()`'s `released` flag.** Every released-only figure
+  (`m_first_pass_rate`, `m_rework_multiplier`, `m_capacity_throughput`,
+  `m_change_request_rate`, `m_on_time_delivery`, `m_cycle_time`, `released_count`) leaves
+  it out until the PM approves.
+
+3.1a touched none of these. `tender_metrics`, `designer_workload`, `analytics_dataset` and
+every rework and first-pass figure are prompt 3.1-ACC's.
+
+**Ordering constraint:** 3.1-ACC must land **before 3.1b**, not merely before go-live.
+From the first commit that writes the status, every Head-passed site shows up as live
+designer load and drops out of the denominators.
+
+### D2 — `qc_review.html` would tell a reviewer "Nothing to review yet" about a design with the PM
+
+Recorded by prompt 3.1a, where `qc_review.html` was out of scope.
+
+The actions block's `if/elif` chain in `qc_review.html` reads `blocked_by_own_qc_verdict`,
+`open_crs`, `awaiting_head` (`status == awaiting_head_qc`) and `released`
+(`status == released`), then falls to `{% else %}`: *"Nothing to review yet. Design QC starts
+once the package is complete"*. A site at `awaiting_pm_approval` matches none of the
+branches, so a Head-passed package would be described as incomplete. The `released` banner
+at the top of the page doesn't render for it either. `design_qc_review` builds the flags.
+
+**Not reachable today.** It must be fixed with, or before, prompt 3.1b.
+
+### D3 — two stale sentences that 3.1a's MODE did not reach
+
+- **`design_views.derive_design_mirror_state()`'s docstring** still says
+  *"DESIGN_MIRROR_STATE_MAP lists all fourteen, so the only way to reach this line is to
+  have added a fifteenth"*. There are fifteen statuses now, and the map lists all of them.
+  The function wasn't in 3.1a's MODE.
+- **`design_views.design_my_sites`'s comment on `is_released`** still says it is *"Read ONLY
+  by the Design Hold control in my_sites.html"*. 3.1a moved that control to the new
+  `design_work_finished` flag, as instructed, and left `is_released` in place and truthful.
+  It now has no reader on that screen. The MODE admitted only the new flag in that
+  function, so the old comment was left as it was.
+
+**Risk if left:** the next reader is misled about a count and about who reads a flag.
+There is no behaviour at stake.
+
+### D4 — the two design chip partials show a site awaiting PM approval as a grey chip
+
+Recorded by prompt 3.1a. The MODE allowed flag substitution only in these two templates.
+
+`_dashboard_design_chips.html` and `_design_status_chips.html` pick a chip colour with an
+`if/elif` chain over literal status values. Neither reads a flag that 3.1a changed, so
+nothing needed substituting. Colouring the new status (for example, the navy "in review"
+chip that `awaiting_head_qc` gets) would mean adding a literal comparison, which is new
+logic rather than a substitution. Until someone decides the colour, a site awaiting PM
+approval gets the grey fall-through chip. It still shows the correct label ("Awaiting PM
+approval"), through `get_status_display` / `status_label`.
+
+It is a presentation decision for prompt 3.1b or 3.1c, and nothing is reachable today.
 
 ---
 

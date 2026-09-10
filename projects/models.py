@@ -3237,6 +3237,13 @@ DESIGN_RELEASED            = 'released'
 DESIGN_AWAITING_HEAD_ARKA  = 'awaiting_head_arka'
 DESIGN_AWAITING_HEAD_QC    = 'awaiting_head_qc'
 
+# PROMPT 3.1a — THE PM APPROVAL WAITING ROOM, AND NOTHING CAN REACH IT YET. Both review
+# gates have passed and the design has left the designer; it waits on the site's PM.
+# It is in the choices, and every list that reads the ladder handles it, BEFORE any code
+# path writes it — the transition that does is prompt 3.1b. Until then no row can carry
+# it, and tests_design_pm_gate_inert.py proves that by grep rather than by argument.
+DESIGN_AWAITING_PM_APPROVAL = 'awaiting_pm_approval'
+
 # Order below is the LINEAR workflow order, corrected in Part 2. The Design Head
 # receives the survey when a tender starts, uploads it, and only then allocates the
 # site — so allocation follows survey upload rather than preceding it:
@@ -3272,9 +3279,24 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_IN_QC,               'In QC'),
     (DESIGN_AWAITING_HEAD_QC,    'QC passed — awaiting Design Head'),
     (DESIGN_QC_FAILED,           'QC failed'),
+    # PROMPT 3.1a — immediately before `released`. Unreachable; see the constant.
+    (DESIGN_AWAITING_PM_APPROVAL, 'Awaiting PM approval'),
     (DESIGN_RELEASED,            'Released'),
     (DESIGN_SURVEY_RETURNED,     'Design Hold — survey inadequate'),
 ]
+
+# "The designer's work on this attempt is done" — the Head has passed it, whether or not
+# it has been released yet.
+#
+# WHY A SET AND NOT `== DESIGN_RELEASED`. Five guards — design_due_date_propose,
+# design_due_date_change, design_mark_blocked, and the can_request_extension and
+# can_mark_blocked flags — were equality tests against `released`, which is right only
+# while `released` is the sole status after the last review. With the PM gate in front of
+# it, an equality test lets a designer put a Head-passed design on Design Hold, and the
+# Head's replacement survey then clears it through _status_after_unblock() straight back
+# to `in_design` with no attempt and no change request. That is the reopen route closed in
+# PHASE_2_PREFLIGHT_AUDIT §6.1, returning by a second door. Test membership here instead.
+DESIGN_WORK_FINISHED_STATUSES = frozenset({DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
 
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
 # deliberately not collapsed into one field: a QC failure is the design failing
@@ -3681,6 +3703,16 @@ class DesignAssignment(models.Model):
     released_by = models.ForeignKey(
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='released_design_assignments',
+    )
+
+    # ── PM approval (prompt 3.1a — written by NOTHING yet) ──────────────────
+    # Nothing in the product writes either field; prompt 3.1b owns the write. Read-only in
+    # the admin for the reason DesignAssignmentAdmin gives: an approval stamp typed into a
+    # form is an approval nobody made.
+    pm_approved_at = models.DateTimeField(null=True, blank=True)
+    pm_approved_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='pm_approved_design_assignments',
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
