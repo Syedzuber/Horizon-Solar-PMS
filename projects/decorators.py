@@ -1,6 +1,6 @@
 import logging
 from functools import wraps
-from django.shortcuts import redirect
+from django.shortcuts import redirect, render
 from django.contrib import messages
 from django.http import HttpResponseForbidden
 
@@ -105,6 +105,30 @@ def login_required(view_func):
     return wrapper
 
 
+def _forbidden(request):
+    """
+    A 403 with a readable body.
+
+    role_required() returns HttpResponseForbidden directly, which never reaches
+    Django's permission_denied handler, so handler403/403.html would not be
+    consulted — the template is rendered here explicitly.
+
+    THE STATUS STAYS 403 (28 Aug, prompt 0.2): one authorisation failure, one
+    response, so a probe cannot distinguish "wrong role" from "not yours". Only
+    the empty body changes. 403.html discloses neither the requested URL, nor the
+    role that would have been required, nor whether any object exists — the sole
+    user-specific value passed to it is the caller's own dashboard URL, which
+    they already know.
+    """
+    return HttpResponseForbidden(
+        render(
+            request,
+            '403.html',
+            {'dashboard_url': get_user_dashboard(request.user)},
+        ).content
+    )
+
+
 def role_required(allowed_roles):
     """
     Restrict a view to users whose UserProfile.role is in allowed_roles.
@@ -147,9 +171,9 @@ def role_required(allowed_roles):
                     "No UserProfile for user %s in role_required check — denying",
                     request.user.username,
                 )
-                return HttpResponseForbidden()
+                return _forbidden(request)
             if role not in allowed_roles:
-                return HttpResponseForbidden()
+                return _forbidden(request)
             return view_func(request, *args, **kwargs)
         return wrapper
     return decorator

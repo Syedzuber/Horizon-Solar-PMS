@@ -1,0 +1,90 @@
+{% comment %}
+403 — access denied.
+
+STANDALONE BY DESIGN: no {% extends %}. This page is rendered by role_required()
+in decorators.py for EVERY role, and the two shells in this codebase are different
+design systems (base.html vs subadmin/subadmin_base.html). Extending either one
+would render wrong for the roles that live in the other, and picking a shell by
+role would mean the denial page reads the profile it is denying. All CSS is inline
+and there are no {% static %} lookups or CDN assets, so this page cannot itself
+fail to render.
+
+DISCLOSES NOTHING: no requested path, no required role, no hint about whether the
+object exists. That is the 0.2 lockdown contract (28 Aug, prompt 0.2) — one
+authorisation failure, one response, so a probe cannot tell "wrong role" from
+"not yours". The status stays 403; only the body is no longer empty.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Access denied — Horizon Solar PMS</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: #f4f6f9;
+      color: #1f2933;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                   "Helvetica Neue", Arial, sans-serif;
+      line-height: 1.55;
+    }
+    .card {
+      width: 100%;
+      max-width: 460px;
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, .10);
+      overflow: hidden;
+    }
+    .card-bar {
+      height: 4px;
+      background: linear-gradient(135deg, #1a7a4a 0%, #155f3a 100%);
+      border-bottom: 2px solid #f0a829;
+    }
+    .card-body { padding: 32px 32px 28px; text-align: center; }
+    .wordmark {
+      font-size: .75rem;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+      color: #1a7a4a;
+      margin: 0 0 20px;
+    }
+    .code { font-size: 2.5rem; font-weight: 700; margin: 0; color: #155f3a; }
+    h1 { font-size: 1.15rem; font-weight: 600; margin: 6px 0 12px; }
+    p { margin: 0 0 24px; font-size: .95rem; color: #52606d; }
+    .btn {
+      display: inline-block;
+      padding: 10px 22px;
+      border-radius: 6px;
+      background: #1a7a4a;
+      color: #fff;
+      font-size: .9rem;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .btn:hover { background: #155f3a; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="card-bar"></div>
+    <div class="card-body">
+      <p class="wordmark">Horizon Solar &mdash; PMS</p>
+      <p class="code">403</p>
+      <h1>Access denied</h1>
+      <p>
+        You don&rsquo;t have permission to view this page. If you believe you should,
+        contact your project administrator.
+      </p>
+      <a class="btn" href="{{ dashboard_url }}">Return to your dashboard</a>
+    </div>
+  </div>
+</body>
+</html>
