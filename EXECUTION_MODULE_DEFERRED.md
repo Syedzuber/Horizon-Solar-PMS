@@ -445,6 +445,64 @@ comparison and filter listed above; the eleven historical migrations, which must
 existing `ActivityLog` prose is rewritten or left as the record of what the system called
 it then. Until that happens, the rule is one line: **users see RESCO, the code says OPEX.**
 
+---
+
+## 13. A System Admin is granted the daily report but has no way to navigate to it
+
+Found 9 Sep 2026 while verifying that `'System Admin'` had reached all three places the
+CEO daily report gates on. It had — `USER_STATUS_REPORT_ROLES`
+(`permissions.py:1039`), the `@role_required` list (`report_views.py:61`) and the
+`base.html` nav condition (`base.html:64`) all read `'CEO', 'Admin', 'System Admin'`, and
+the page returns 200 for that role. **Nothing was changed.** The grant is real.
+
+**But the link is in a shell that role never sees.** `ROLE_DASHBOARD['System Admin']` is
+`/sub-admin/projects/` (`decorators.py:24`), and every sub-admin screen extends
+`projects/subadmin/subadmin_base.html` — a Tailwind shell whose nav offers exactly three
+links: Projects, Task Durations, Departments. The Daily Report link lives in `base.html`,
+the Bootstrap shell, which a System Admin only ever renders **by arriving at the report
+itself**. Verified: `GET /sub-admin/projects/` as a System Admin contains neither
+`/reports/user-status/` nor the string `Daily Report`.
+
+So a System Admin can reach the report only by typing the URL, and once there sees the
+link they could not previously find. R-11 says a screen ships with its navigation entry;
+for two of the three admitted roles it did, for the third it did not.
+
+**Not fixed here** because the prompt granting the role explicitly fenced off changes to
+any other nav entry, and `subadmin_base.html` is a different design system (Tailwind +
+Alpine + Lucide) from the one the link is currently written in. Doing it properly means a
+Lucide-icon link in that shell's sidebar, not a copy-paste of the Bootstrap markup.
+
+**Risk if left:** the role has access nobody told it about. The likely outcome is not a
+security problem but a silent one — a System Admin never opens the report, and the grant
+reads as done because all three code sites say so.
+
+## 14. `role_required` denies with a completely empty 403 body
+
+The 403 status is deliberate and decision-logged (28 Aug, prompt 0.2 — one authorisation
+failure, one response, so a probe cannot tell "wrong role" from "not yours"). **That part
+is settled and should not be reverted.** This entry is about the body, not the status.
+
+`role_required()` returns bare `HttpResponseForbidden()` at `decorators.py:150` and `:152`
+— no content, no template. There is no `handler403` anywhere in `solarpms/` or
+`projects/urls.py` and no `403.html` template in the repo, and a `HttpResponseForbidden`
+*returned* from a view does not pass through Django's `permission_denied` handler anyway
+(only a raised `PermissionDenied` does). Measured 9 Sep: a Finance user and an SCM user
+hitting `/reports/user-status/` each receive **HTTP 403 with a 0-byte body** — a blank
+white page, no explanation, no way back.
+
+This is repo-wide behaviour affecting **every** `@role_required` view, not a property of
+the report. It replaced the previous redirect-with-flash-message, which was chatty but
+told the user what had happened.
+
+**Not fixed** (R-12 — a report-access verification is the wrong session to change the
+denial surface of every gated view in the product). **The fix is small and belongs in its
+own prompt:** a `403.html` extending `base.html` plus `handler403`, and switching the
+decorator to `raise PermissionDenied` so the handler fires. Worth pairing with the same
+treatment for 404.
+
+**Risk if left:** a user denied a page sees nothing at all and reports it as "the site is
+broken". Support cost, not a security one — the denial itself is correct.
+
 ## 15. Programme and site fields reshaped for phase 1 — hidden, not removed
 
 Two decisions from the same session, recorded together because they share one rationale.
