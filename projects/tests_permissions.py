@@ -59,7 +59,7 @@ def _make_project(customer_name='Acme', assigned_pm=None, assigned_design=None):
         site_address='1 Sun Rd',
         city='Lucknow',
         project_type='Residential',
-        capacity_kw=Decimal('3.00'),
+        dc_capacity_kw=Decimal('3.00'),
         status='Active',
         assigned_pm=assigned_pm,
         assigned_design=assigned_design,

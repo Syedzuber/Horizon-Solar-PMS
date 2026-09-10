@@ -90,11 +90,19 @@
         </div>
 
         <div class="col-md-4">
-          <label class="form-label">Capacity (kW) <span class="text-danger">*</span></label>
-          <input type="number" step="0.01" name="capacity_kw"
-                 class="form-control{% if form.capacity_kw.errors %} is-invalid{% endif %}"
-                 value="{{ form.capacity_kw.value|default:'' }}">
-          {% for e in form.capacity_kw.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+          <label class="form-label">DC Capacity (kWp)</label>
+          <input type="number" step="0.01" name="dc_capacity_kw"
+                 class="form-control{% if form.dc_capacity_kw.errors %} is-invalid{% endif %}"
+                 value="{{ form.dc_capacity_kw.value|default:'' }}">
+          {% for e in form.dc_capacity_kw.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+        </div>
+
+        <div class="col-md-4">
+          <label class="form-label">AC Capacity (kWp)</label>
+          <input type="number" step="0.01" name="ac_capacity_kw"
+                 class="form-control{% if form.ac_capacity_kw.errors %} is-invalid{% endif %}"
+                 value="{{ form.ac_capacity_kw.value|default:'' }}">
+          {% for e in form.ac_capacity_kw.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
         </div>
 
         <div class="col-md-4">

@@ -33,6 +33,12 @@
           <div class="form-text">Alphanumeric, matching the tender's site list (e.g. MB0003, RJJP001). This becomes the project ID.</div>
           {% for e in form.site_code.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
+        <div class="col-md-8">
+          <label class="form-label">Site Name</label>
+          {{ form.site_name }}
+          <div class="form-text">Display only — a readable name for the site. Does not affect the project ID.</div>
+          {% for e in form.site_name.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
       </div>
 
       <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Site In-Charge & Location</h6>
@@ -77,9 +83,32 @@
       <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">Technical</h6>
       <div class="row g-3 mb-4">
         <div class="col-md-3">
-          <label class="form-label">Capacity (kW)</label>
-          {{ form.capacity_kw }}
-          {% for e in form.capacity_kw.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+          <label class="form-label">DC Capacity (kWp)</label>
+          {{ form.dc_capacity_kw }}
+          {% for e in form.dc_capacity_kw.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">AC Capacity (kWp)</label>
+          {{ form.ac_capacity_kw }}
+          {% for e in form.ac_capacity_kw.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6">
+          <label class="form-label">IVRS No.</label>
+          {{ form.ivrs_no }}
+          {% for e in form.ivrs_no.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Latitude</label>
+          {{ form.latitude }}
+          {% for e in form.latitude.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Longitude</label>
+          {{ form.longitude }}
+          {% for e in form.longitude.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
+        </div>
+        <div class="col-md-6 d-flex align-items-end">
+          <div class="form-text">Decimal degrees, up to 6 decimal places — e.g. 23.259933, 77.412615.</div>
         </div>
       </div>
 

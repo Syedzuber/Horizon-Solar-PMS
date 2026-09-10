@@ -104,7 +104,7 @@ class PhaseListFixture(TestCase):
         site = Project.objects.create(
             customer_name='Phase-list Tender Site', customer_phone='9876543210',
             site_address='2 Approval Road', city='Lucknow', project_type='OPEX',
-            capacity_kw=Decimal('100.00'), status='Draft', assigned_pm=self.pm,
+            dc_capacity_kw=Decimal('100.00'), status='Draft', assigned_pm=self.pm,
         )
         response = _client_for(self.pm).post(
             reverse('opex_site_activate', args=[site.project_id]))
@@ -117,7 +117,7 @@ class PhaseListFixture(TestCase):
         project = Project.objects.create(
             customer_name='Phase-list House', customer_phone='9876543211',
             site_address='3 Approval Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
+            dc_capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
         )
         response = _client_for(self.pm).post(
             reverse('project_activate', args=[project.project_id]),

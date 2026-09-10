@@ -34,7 +34,7 @@
         <div class="col-md-4" id="field-short_tender_code">
           <label class="form-label">{{ form.short_tender_code.label }} <span class="text-danger opex-req">*</span></label>
           {{ form.short_tender_code }}
-          <div class="form-text">Uppercase letters/digits only, e.g. IPGCL26. Used to build site IDs.</div>
+          <div class="form-text">Letters, digits and hyphens — e.g. IPGCL26 or HRP-2026. Saved in uppercase whatever you type.</div>
           {% for e in form.short_tender_code.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
         <div class="col-md-6">
@@ -47,78 +47,37 @@
           {{ form.client_name }}
           {% for e in form.client_name.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
-        <div class="col-md-4">
+        <div class="col-md-6">
           <label class="form-label">{{ form.total_capacity.label }}</label>
           {{ form.total_capacity }}
+          <div class="form-text">Optional.</div>
           {% for e in form.total_capacity.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
-        <div class="col-md-4">
-          <label class="form-label">Expected Completion Date</label>
-          {{ form.expected_completion_date }}
-          {% for e in form.expected_completion_date.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
-        </div>
-        <div class="col-md-4">
+        <div class="col-md-6">
           <label class="form-label">{{ form.planned_site_count.label }}</label>
           {{ form.planned_site_count }}
-          <div class="form-text">Target only — never enforced as a limit.</div>
+          <div class="form-text">Optional. Target only — never enforced as a limit.</div>
           {% for e in form.planned_site_count.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
         </div>
       </div>
 
-      <div id="opex-fields">
-        <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">RESCO Tender Details</h6>
-        <div class="row g-3 mb-4">
-          <div class="col-md-4">
-            <label class="form-label">Tender Reference Number</label>
-            {{ form.tender_reference_number }}
-            {% for e in form.tender_reference_number.errors %}<div class="text-danger small mt-1">{{ e }}</div>{% endfor %}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">Bid Value (₹)</label>
-            {{ form.bid_value }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">Award Date</label>
-            {{ form.award_date }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">PPA Reference</label>
-            {{ form.ppa_reference }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">PPA Signed Date</label>
-            {{ form.ppa_signed_date }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">PPA Per-Unit Rate (₹)</label>
-            {{ form.ppa_per_unit_rate }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">PPA Escalation (%)</label>
-            {{ form.ppa_escalation_percentage }}
-          </div>
-          <div class="col-md-4">
-            <label class="form-label">PPA Escalation Frequency</label>
-            {{ form.ppa_escalation_frequency }}
-          </div>
-        </div>
-        <p class="text-muted small">PPA fields are stored for record-keeping only — no escalation is calculated here.</p>
-      </div>
+      {% comment %}
+      HIDDEN IN PHASE 1, NOT REMOVED. Two field groups used to sit here:
 
-      <div id="capex-fields">
-        <h6 class="text-muted text-uppercase fw-semibold mb-3" style="font-size:.75rem;letter-spacing:.08em;">CAPEX Financing (placeholders)</h6>
-        <div class="row g-3 mb-4">
-          <div class="col-md-6">
-            <label class="form-label">Financing Partner Name</label>
-            {{ form.financing_partner_name }}
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Financing Assistance Type</label>
-            {{ form.financing_assistance_type }}
-          </div>
-        </div>
-        <p class="text-muted small">Financing fields are storage-only placeholders — no loan logic runs yet.</p>
-      </div>
+        RESCO Tender Details — tender reference number, bid value, award date,
+          PPA reference, PPA signed date, PPA per-unit rate, PPA escalation %,
+          PPA escalation frequency
+        CAPEX Financing      — financing partner name, financing assistance type
+
+      Every one of those is still a column on Program, is empty on every row today,
+      and is still reachable through the Django admin. They came off THIS form and
+      off ProgramForm.Meta.fields together — markup alone would not have been enough,
+      because a ModelForm field absent from the POST body cleans to None/'' and gets
+      written back, which would have wiped the columns on every save.
+
+      To bring one back: add its name to ProgramForm.Meta.fields, its widget to
+      Meta.widgets, and a cell here. See EXECUTION_MODULE_DEFERRED.md.
+      {% endcomment %}
 
       <div class="d-flex gap-2">
         <button type="submit" class="btn btn-primary">
@@ -131,20 +90,18 @@
 </div>
 
 <script>
-  // Show only the type-relevant field groups. Pure display convenience — the server
+  // Show the tender-code field only for RESCO. Pure display convenience — the server
   // still validates by program_type regardless of what the browser shows/hides.
+  //
+  // The #opex-fields and #capex-fields groups this used to toggle were hidden in
+  // phase 1; their lookups are gone with them rather than left to return null and
+  // throw on the first .style access.
   (function () {
     const typeSel = document.querySelector('[name="program_type"]');
-    const opex = document.getElementById('opex-fields');
-    const capex = document.getElementById('capex-fields');
     const tenderCodeGroup = document.getElementById('field-short_tender_code');
     function sync() {
-      const v = typeSel ? typeSel.value : '';
-      const isOpex = v === 'OPEX';
-      const isCapex = v === 'CAPEX';
-      opex.style.display = isOpex ? '' : 'none';
-      capex.style.display = isCapex ? '' : 'none';
-      tenderCodeGroup.style.display = isOpex ? '' : 'none';
+      const isOpex = (typeSel ? typeSel.value : '') === 'OPEX';
+      if (tenderCodeGroup) tenderCodeGroup.style.display = isOpex ? '' : 'none';
     }
     if (typeSel) { typeSel.addEventListener('change', sync); sync(); }
   })();

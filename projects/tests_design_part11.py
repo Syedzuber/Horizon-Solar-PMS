@@ -128,7 +128,7 @@ class Part11Base(TestCase):
             project_id=code, customer_name='P11Client', customer_phone='9876543210',
             site_address='1 Sun Rd', city='Delhi', project_type='OPEX',
             program=self.program, site_code=code,
-            capacity_kw=Decimal('100.00'), status='Draft',
+            dc_capacity_kw=Decimal('100.00'), status='Draft',
             assigned_design=designer or self.designer, assigned_pm=self.pm)
         site.save()
         assignment = DesignAssignment.objects.create(
@@ -141,7 +141,7 @@ class Part11Base(TestCase):
         site = Project(
             project_id=code, customer_name='House', customer_phone='9876543211',
             site_address='2 Sun Rd', city='Delhi', project_type='Residential',
-            capacity_kw=Decimal('10.00'), status='Draft',
+            dc_capacity_kw=Decimal('10.00'), status='Draft',
             assigned_design=self.designer, assigned_pm=self.pm)
         site.save()
         return site

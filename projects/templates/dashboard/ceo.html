@@ -793,7 +793,7 @@
           <p class="text-muted mb-2" style="font-size:.8rem;">
             {{ p.city }}
             &nbsp;·&nbsp;{{ p.get_project_type_display }}
-            {% if p.capacity_kw %}&nbsp;·&nbsp;{{ p.capacity_kw }} kW{% endif %}
+            {% if p.dc_capacity_kw %}&nbsp;·&nbsp;{{ p.dc_capacity_kw }} kWp{% endif %}
           </p>
 
           {% comment %}

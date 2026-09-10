@@ -114,7 +114,7 @@ class LedgerFixture(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             contract_value=Decimal('300000.00'),
             status='Draft',
             assigned_pm=self.pm,
@@ -504,7 +504,7 @@ class InstrumentedSubjectTypeTests(LedgerFixture):
             'city': 'Lucknow',
             'state': 'Uttar Pradesh',
             'project_type': 'Residential',
-            'capacity_kw': '5.00',
+            'dc_capacity_kw': '5.00',
             'contract_value': '300000.00',
             'target_commissioning_date': (date.today() + timedelta(days=90)).isoformat(),
         })
@@ -866,7 +866,7 @@ class AdminCannotWriteTaskStatusTests(TestCase):
         project = Project.objects.create(
             customer_name='Admin Sidedoor', customer_phone='9000000001',
             site_address='2 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft',
+            dc_capacity_kw=Decimal('5.00'), status='Draft',
         )
         phase = ProjectPhase.objects.create(
             project=project, phase_order=1, phase_name='Phase 1')
@@ -1001,7 +1001,7 @@ class AdminCannotWriteTaskMirrorFlagTests(TestCase):
         project = Project.objects.create(
             customer_name='Admin Mirror Sidedoor', customer_phone='9000000002',
             site_address='3 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft',
+            dc_capacity_kw=Decimal('5.00'), status='Draft',
         )
         phase = ProjectPhase.objects.create(
             project=project, phase_order=1, phase_name='Phase 1')
@@ -1151,7 +1151,7 @@ class AdminCannotWriteProjectStatusTests(TestCase):
         self.project = Project.objects.create(
             customer_name='Admin Sidedoor Project', customer_phone='9000000002',
             site_address='3 Sun Road', city='Lucknow', state='Uttar Pradesh',
-            project_type='Residential', capacity_kw=Decimal('5.00'),
+            project_type='Residential', dc_capacity_kw=Decimal('5.00'),
         )
 
     def _request(self):

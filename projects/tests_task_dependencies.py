@@ -106,7 +106,7 @@ class DependencyBase(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Active',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),
@@ -620,7 +620,7 @@ class RealResidentialActivationTests(TestCase):
         project = Project.objects.create(
             customer_name='Real House', customer_phone='9876543210',
             site_address='2 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
+            dc_capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),
         )
         client = Client()
@@ -645,7 +645,7 @@ class RealResidentialActivationTests(TestCase):
         project = Project.objects.create(
             customer_name='Quiet House', customer_phone='9876543210',
             site_address='3 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
+            dc_capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),
         )
         client = Client()

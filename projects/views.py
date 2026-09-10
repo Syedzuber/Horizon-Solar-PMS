@@ -3530,9 +3530,30 @@ _BULK_COLUMNS = [
     ('Site Address',         'site_address',             True),
     ('City',                 'city',                     True),
     ('State',                'state',                    False),
-    ('Capacity (kW)',        'capacity_kw',              False),
+    # The phase-1 site fields, in the order the spec lists them. 'Capacity (kW)' became
+    # 'DC Capacity (kWp)' in place — see _BULK_LEGACY_HEADERS for why the old spelling
+    # still works.
+    ('DC Capacity (kWp)',    'dc_capacity_kw',           False),
+    ('AC Capacity (kWp)',    'ac_capacity_kw',           False),
+    ('IVRS No.',             'ivrs_no',                  False),
+    ('Site Name',            'site_name',                False),
+    ('Latitude',             'latitude',                 False),
+    ('Longitude',            'longitude',                False),
 ]
+
+# Header spellings retired from the template that MUST still parse, because sheets
+# carrying them are already in circulation and the parser matches on header text.
+#
+# WITHOUT THIS the old 'Capacity (kW)' column would not be rejected — it would be
+# swept into `extra_headers` and merely WARNED ABOUT, so a half-filled sheet someone
+# started last month would import cleanly with every capacity silently dropped. A
+# quiet wrong import is worse than a loud refusal. Retiring a header is therefore
+# additive here, never a replacement: map the old spelling, don't delete it.
+_BULK_LEGACY_HEADERS = {
+    'capacity (kw)': 'dc_capacity_kw',
+}
 _BULK_HEADER_TO_KEY = {h.strip().lower(): key for h, key, _req in _BULK_COLUMNS}
+_BULK_HEADER_TO_KEY.update(_BULK_LEGACY_HEADERS)
 _BULK_REQUIRED_HEADERS = [h for h, _key, req in _BULK_COLUMNS if req]
 _BULK_MAX_ROWS = 500   # soft guard against a runaway file timing out the request
 
@@ -3850,14 +3871,21 @@ def opex_site_bulk_template(request, pk):
         'site_address': 'Full site address.',
         'city': 'City.',
         'state': 'Optional — defaults to "Uttar Pradesh" if left blank.',
-        'capacity_kw': 'Optional. Number, e.g. 150.00.',
+        'dc_capacity_kw': 'Optional. DC capacity in kWp. Number, e.g. 150.00.',
+        'ac_capacity_kw': 'Optional. AC capacity in kWp. Number, e.g. 125.00.',
+        'ivrs_no': 'Optional. The discom IVRS / consumer reference, entered as it appears.',
+        'site_name': 'Optional. A display name for the site — NOT the Site Code, and not used to build the project ID.',
+        'latitude': 'Optional. Decimal degrees, up to 6 decimal places, e.g. 23.259933.',
+        'longitude': 'Optional. Decimal degrees, up to 6 decimal places, e.g. 77.412615.',
     }
     for header, key, req in _BULK_COLUMNS:
         info.append([header, 'Yes' if req else 'No', _notes.get(key, '')])
     info.append([])
     info.append(['Example (do NOT copy this onto the Sites sheet as-is):'])
     info.append([h for h, _key, _req in _BULK_COLUMNS])
-    info.append(['MB0003', '', '', '', '12 Grid Lane, Sector 5', 'Bhopal', 'MP', '45.00'])
+    info.append(['MB0003', '', '', '', '12 Grid Lane, Sector 5', 'Bhopal', 'MP',
+                 '45.00', '37.50', 'IVRS0099123', 'Bhopal Grid Substation',
+                 '23.259933', '77.412615'])
 
     resp = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -8881,7 +8909,10 @@ def zoho_deal_closed_webhook(request):
                 city=(deal.get('City', '') or '').strip(),
                 state=(deal.get('State', '') or '').strip() or 'Uttar Pradesh',
                 project_type='Residential',
-                capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
+                # Zoho sends ONE capacity figure and has no AC/DC distinction, so it
+                # lands on DC — the same reading every pre-rename value now gets.
+                # ac_capacity_kw stays null on a webhook-created project.
+                dc_capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
                 contract_value=_safe_decimal(deal.get('Amount')),
                 assigned_pm=assigned_pm,
                 target_commissioning_date=target_commissioning_date,

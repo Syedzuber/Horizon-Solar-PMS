@@ -139,7 +139,7 @@ class SoftDeleteBase(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             contract_value=Decimal('300000.00'),
             status='Draft',
             assigned_pm=self.pm,

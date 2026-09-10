@@ -4,8 +4,19 @@ hx-get, and re-rendered here with inline field errors on a failed hx-post so the
 stays open. On success the server returns _project_field_edit_success.html instead
 (which closes the modal via the fieldEditDone HX-Trigger and OOB-swaps the pills).
 
-Only capacity / contract value / target commissioning date are exposed here — never
-the customer/scope fields. Expects: project, form.
+Only the site capacity / identity / coordinate fields and the target commissioning
+date are exposed here — never the customer/scope fields.
+
+CONTRACT VALUE IS NOT ON THIS FORM. It was removed in phase 1 (commercial, out of
+scope) and PostActivationFieldEditForm no longer lists it, so it is absent from the
+POST body and cannot be written from here. The column is untouched and still editable
+while a project is Draft, through project_form.html. Do not re-add the markup without
+also re-adding the field AND its milestone guard to the form — see the form docstring.
+
+Target commissioning date deliberately STAYS: it is operational, not commercial, and
+it feeds is_delayed on five dashboards.
+
+Expects: project, form.
 {% endcomment %}
 <div class="modal-header">
   <h5 class="modal-title">Edit Project Fields — {{ project.project_id }}</h5>
@@ -19,15 +30,43 @@ the customer/scope fields. Expects: project, form.
     {% if form.non_field_errors %}
       <div class="alert alert-danger py-2 small mb-2">{{ form.non_field_errors|striptags }}</div>
     {% endif %}
-    <div class="mb-2">
-      <label class="form-label small mb-1">Capacity (kWp)</label>
-      {{ form.capacity_kw }}
-      {% if form.capacity_kw.errors %}<div class="text-danger small mt-1">{{ form.capacity_kw.errors|striptags }}</div>{% endif %}
+    <div class="row g-2">
+      <div class="col-6 mb-2">
+        <label class="form-label small mb-1">DC Capacity (kWp)</label>
+        {{ form.dc_capacity_kw }}
+        {% if form.dc_capacity_kw.errors %}<div class="text-danger small mt-1">{{ form.dc_capacity_kw.errors|striptags }}</div>{% endif %}
+      </div>
+      <div class="col-6 mb-2">
+        <label class="form-label small mb-1">AC Capacity (kWp)</label>
+        {{ form.ac_capacity_kw }}
+        {% if form.ac_capacity_kw.errors %}<div class="text-danger small mt-1">{{ form.ac_capacity_kw.errors|striptags }}</div>{% endif %}
+      </div>
     </div>
     <div class="mb-2">
-      <label class="form-label small mb-1">Contract Value (₹)</label>
-      {{ form.contract_value }}
-      {% if form.contract_value.errors %}<div class="text-danger small mt-1">{{ form.contract_value.errors|striptags }}</div>{% endif %}
+      <label class="form-label small mb-1">Site Name</label>
+      {{ form.site_name }}
+      {% if form.site_name.errors %}<div class="text-danger small mt-1">{{ form.site_name.errors|striptags }}</div>{% endif %}
+      <div class="form-text small">Display only — the project ID is unchanged by this.</div>
+    </div>
+    <div class="mb-2">
+      <label class="form-label small mb-1">IVRS No.</label>
+      {{ form.ivrs_no }}
+      {% if form.ivrs_no.errors %}<div class="text-danger small mt-1">{{ form.ivrs_no.errors|striptags }}</div>{% endif %}
+    </div>
+    <div class="row g-2">
+      <div class="col-6 mb-2">
+        <label class="form-label small mb-1">Latitude</label>
+        {{ form.latitude }}
+        {% if form.latitude.errors %}<div class="text-danger small mt-1">{{ form.latitude.errors|striptags }}</div>{% endif %}
+      </div>
+      <div class="col-6 mb-2">
+        <label class="form-label small mb-1">Longitude</label>
+        {{ form.longitude }}
+        {% if form.longitude.errors %}<div class="text-danger small mt-1">{{ form.longitude.errors|striptags }}</div>{% endif %}
+      </div>
+      <div class="col-12 mb-2">
+        <div class="form-text small">Decimal degrees, up to 6 decimal places — e.g. 23.259933, 77.412615.</div>
+      </div>
     </div>
     <div class="mb-2">
       <label class="form-label small mb-1">Target Commissioning Date</label>

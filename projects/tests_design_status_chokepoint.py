@@ -119,7 +119,7 @@ class ChokepointBase(TestCase):
             project_id=code, customer_name='SCClient', customer_phone='9876543210',
             site_address='1 Sun Rd', city='Delhi', project_type='OPEX',
             program=self.program, site_code=code,
-            capacity_kw=Decimal('100.00'), status='Draft')
+            dc_capacity_kw=Decimal('100.00'), status='Draft')
         site.save()
         assignment = DesignAssignment.objects.create(
             project=site, status=status, assigned_to=designer,

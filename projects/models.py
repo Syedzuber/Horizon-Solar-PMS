@@ -60,7 +60,28 @@ class Project(models.Model):
     # OPEX-under-Program only: user-entered, matches the tender's official site list.
     # NOT auto-generated. Combined with Program.short_tender_code to compose project_id.
     site_code                 = models.CharField(max_length=30, null=True, blank=True)
-    capacity_kw               = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    # Display-only site label, distinct from site_code (which IS the project_id for OPEX).
+    # Nullable and blank everywhere on existing rows — nothing derives from it.
+    site_name                 = models.CharField(max_length=200, null=True, blank=True)
+    # RENAMED from `capacity_kw` (migration 0084, RenameField — no value was lost). Every
+    # pre-rename figure is carried forward here and is now READ AS DC. The screens label it
+    # kWp, which they already did before the split.
+    dc_capacity_kw            = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    # The AC half of the split. Blank on every pre-existing site — there was only ever one
+    # capacity figure before, and it became the DC one. Needs backfilling by the team; no
+    # migration guesses at it (see EXECUTION_MODULE_DEFERRED.md).
+    ac_capacity_kw            = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+    # Discom IVRS / consumer reference. DELIBERATELY UNVALIDATED: nothing in this codebase
+    # referenced IVRS, a consumer number or any discom reference before this field, so there
+    # was no format to follow and none was invented. No unique constraint either — whether
+    # it is unique across sites is unknown. Add both only once the discom's real format is
+    # confirmed, and add them together.
+    ivrs_no                   = models.CharField(max_length=50, null=True, blank=True)
+    # Six decimal places ≈ 0.11 m at the equator — enough to place a site, and the precision
+    # the team records coordinates in. max_digits=9 leaves 3 integer digits, which covers
+    # longitude's -180..180 range.
+    latitude                  = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude                 = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     contract_value            = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     assigned_pm               = models.ForeignKey(
         'UserProfile',
@@ -605,13 +626,22 @@ class ProjectFieldEditLog(models.Model):
     auto_now_add timestamp, newest-first ordering.
     """
 
-    CAPACITY_KW               = 'capacity_kw'
+    # RENAMED with the model field (migration 0084). These strings are NOT labels — the
+    # view getattr()s Project by them, so 'capacity_kw' here after the rename would raise
+    # AttributeError on every edit. The value moves with the field, always.
+    #
+    # Rows written before the rename keep field_name='capacity_kw'. That value is no longer
+    # in FIELD_CHOICES, so get_field_name_display() returns it raw — harmless, because
+    # nothing renders this log to any screen (it is read by the writer and by tests only).
+    # No RunPython rewrites those rows: they record what the field was called when the edit
+    # happened, which is what an audit trail is for.
+    DC_CAPACITY_KW            = 'dc_capacity_kw'
     CONTRACT_VALUE            = 'contract_value'
     TARGET_COMMISSIONING_DATE = 'target_commissioning_date'
     # Field names deliberately match Project field names so the view can getattr()
     # old/new values by iterating these choices.
     FIELD_CHOICES = [
-        (CAPACITY_KW,               'Capacity (kW)'),
+        (DC_CAPACITY_KW,            'DC Capacity (kWp)'),
         (CONTRACT_VALUE,            'Contract Value'),
         (TARGET_COMMISSIONING_DATE, 'Target Commissioning Date'),
     ]

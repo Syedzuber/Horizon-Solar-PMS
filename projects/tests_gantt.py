@@ -42,7 +42,7 @@ def _make_user(username, role):
 def _make_project(pm, project_type='Residential', activated=ACTIVATED, status='Active'):
     project = Project.objects.create(
         customer_name='Acme', customer_phone='9876543210', site_address='1 Sun Rd',
-        city='Lucknow', project_type=project_type, capacity_kw=Decimal('3.00'),
+        city='Lucknow', project_type=project_type, dc_capacity_kw=Decimal('3.00'),
         contract_value=Decimal('100000.00'),
         target_commissioning_date=datetime.date(2026, 12, 1),
         status=status, assigned_pm=pm,

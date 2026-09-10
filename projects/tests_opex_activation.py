@@ -153,7 +153,7 @@ class OpexActivationBase(TestCase):
             site_address='1 Tender Road',
             city='Lucknow',
             project_type='OPEX',
-            capacity_kw=Decimal('100.00'),
+            dc_capacity_kw=Decimal('100.00'),
             status='Draft',
             assigned_pm=pm or self.pm,
         )
@@ -172,7 +172,7 @@ class OpexActivationBase(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Draft',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),

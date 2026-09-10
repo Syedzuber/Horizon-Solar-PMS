@@ -59,7 +59,7 @@ class PostQCPoolTests(TestCase):
             project_id=f'POOLT-{code}', customer_name='PoolClient',
             customer_phone='9876543210', site_address='1 Sun Rd', city='Delhi',
             project_type='OPEX', program=self.program, site_code=code,
-            capacity_kw=Decimal('100.00'), status='Draft',
+            dc_capacity_kw=Decimal('100.00'), status='Draft',
         )
         site.save()
         DesignAssignment.objects.create(
@@ -223,7 +223,7 @@ class CompletenessAndMembershipTests(TestCase):
         site = Project(project_id=f'COMPT-{code}', customer_name='C',
                        customer_phone='9876543210', site_address='1 Sun Rd', city='Delhi',
                        project_type='OPEX', program=self.program, site_code=code,
-                       capacity_kw=Decimal('100.00'), status='Draft')
+                       dc_capacity_kw=Decimal('100.00'), status='Draft')
         site.save()
         DesignAssignment.objects.create(project=site, assigned_to=self.designer,
                                         status=status, released_at=self.now)

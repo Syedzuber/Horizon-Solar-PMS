@@ -199,7 +199,7 @@ class ResidentialBaselineBase(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             contract_value=contract_value,
             status='Draft',
             assigned_pm=pm,
@@ -343,7 +343,7 @@ class ActivationInvariantTests(ResidentialBaselineBase):
         draft = Project.objects.create(
             customer_name='Charlie Residence', customer_phone='9876543210',
             site_address='3 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('4.00'), status='Draft', assigned_pm=self.pm_a,
+            dc_capacity_kw=Decimal('4.00'), status='Draft', assigned_pm=self.pm_a,
         )
         with self.assertRaises(UserProfile.DoesNotExist):
             _client_for(self.pm_a).post(
@@ -364,7 +364,7 @@ class ActivationInvariantTests(ResidentialBaselineBase):
         draft = Project.objects.create(
             customer_name='Delta Residence', customer_phone='9876543210',
             site_address='4 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('4.00'), status='Draft', assigned_pm=self.pm_a,
+            dc_capacity_kw=Decimal('4.00'), status='Draft', assigned_pm=self.pm_a,
         )
         _client_for(self.pm_a).post(
             reverse('project_activate', args=[draft.project_id]), {},
@@ -1318,7 +1318,7 @@ class ExistingIsolationTests(ResidentialBaselineBase):
         draft = Project.objects.create(
             customer_name='Echo Residence', customer_phone='9876543210',
             site_address='5 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('3.00'), status='Draft', assigned_pm=self.pm_a,
+            dc_capacity_kw=Decimal('3.00'), status='Draft', assigned_pm=self.pm_a,
         )
         response = _client_for(self.pm_b).post(
             reverse('project_activate', args=[draft.project_id]),
@@ -1403,7 +1403,7 @@ class ExistingIsolationTests(ResidentialBaselineBase):
         deleted = Project.objects.create(
             customer_name='Gone Site', customer_phone='9876543210',
             site_address='9 Sun Road', city='Lucknow', project_type='OPEX',
-            capacity_kw=Decimal('50.00'), status='Active', is_deleted=True,
+            dc_capacity_kw=Decimal('50.00'), status='Active', is_deleted=True,
         )
         with self.assertRaises(Http404):
             _opex_site(deleted.project_id)
@@ -1412,7 +1412,7 @@ class ExistingIsolationTests(ResidentialBaselineBase):
         live = Project.objects.create(
             customer_name='Live Site', customer_phone='9876543210',
             site_address='10 Sun Road', city='Lucknow', project_type='OPEX',
-            capacity_kw=Decimal('50.00'), status='Active',
+            dc_capacity_kw=Decimal('50.00'), status='Active',
         )
         self.assertEqual(_opex_site(live.project_id).pk, live.pk)
 
@@ -1600,7 +1600,7 @@ class NotificationTests(ResidentialBaselineBase):
         draft = Project.objects.create(
             customer_name='Foxtrot Residence', customer_phone='9876543210',
             site_address='6 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('3.00'), status='Draft', assigned_pm=self.pm_a,
+            dc_capacity_kw=Decimal('3.00'), status='Draft', assigned_pm=self.pm_a,
         )
         with patch('projects.views.send_notification') as sender:
             _client_for(self.pm_a).post(

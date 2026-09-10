@@ -264,14 +264,16 @@ class ProjectCreateForm(forms.ModelForm):
             'city',
             'state',
             'project_type',
-            'capacity_kw',
+            'dc_capacity_kw',
+            'ac_capacity_kw',
             'contract_value',
             'survey_date',
             'target_commissioning_date',
             'zoho_crm_id',
         ]
         labels = {
-            'capacity_kw': 'Capacity (kW)',
+            'dc_capacity_kw': 'DC Capacity (kWp)',
+            'ac_capacity_kw': 'AC Capacity (kWp)',
         }
         widgets = {
             'site_address':              forms.Textarea(attrs={'rows': 3}),
@@ -306,10 +308,16 @@ class ProjectCreateForm(forms.ModelForm):
             )
         return value
 
-    def clean_capacity_kw(self):
-        value = self.cleaned_data.get('capacity_kw')
+    def clean_dc_capacity_kw(self):
+        value = self.cleaned_data.get('dc_capacity_kw')
         if value is not None and value <= 0:
-            raise forms.ValidationError('Capacity must be greater than zero.')
+            raise forms.ValidationError('DC capacity must be greater than zero.')
+        return value
+
+    def clean_ac_capacity_kw(self):
+        value = self.cleaned_data.get('ac_capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('AC capacity must be greater than zero.')
         return value
 
     def clean_contract_value(self):
@@ -331,14 +339,16 @@ class ProjectEditForm(forms.ModelForm):
             'site_address',
             'city',
             'state',
-            'capacity_kw',
+            'dc_capacity_kw',
+            'ac_capacity_kw',
             'contract_value',
             'survey_date',
             'target_commissioning_date',
             'zoho_crm_id',
         ]
         labels = {
-            'capacity_kw': 'Capacity (kW)',
+            'dc_capacity_kw': 'DC Capacity (kWp)',
+            'ac_capacity_kw': 'AC Capacity (kWp)',
         }
         widgets = {
             'site_address':              forms.Textarea(attrs={'rows': 3}),
@@ -351,10 +361,16 @@ class ProjectEditForm(forms.ModelForm):
         _validate_phone(value)
         return value
 
-    def clean_capacity_kw(self):
-        value = self.cleaned_data.get('capacity_kw')
+    def clean_dc_capacity_kw(self):
+        value = self.cleaned_data.get('dc_capacity_kw')
         if value is not None and value <= 0:
-            raise forms.ValidationError('Capacity must be greater than zero.')
+            raise forms.ValidationError('DC capacity must be greater than zero.')
+        return value
+
+    def clean_ac_capacity_kw(self):
+        value = self.cleaned_data.get('ac_capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('AC capacity must be greater than zero.')
         return value
 
     def clean_contract_value(self):
@@ -365,15 +381,26 @@ class ProjectEditForm(forms.ModelForm):
 
 
 class PostActivationFieldEditForm(forms.ModelForm):
-    """Narrow edit form for the three business fields a PM/Coordinator may change
-    AFTER a project leaves Draft (see views.project_field_edit). Deliberately
-    exposes ONLY capacity / contract value / target commissioning date plus an
+    """Narrow edit form for the site fields a PM/Coordinator may change AFTER a
+    project leaves Draft (see views.project_field_edit). Deliberately exposes ONLY
+    the capacity/identity/coordinate fields plus target commissioning date and an
     optional free-text reason — never the customer/scope fields on ProjectEditForm.
 
-    Positive-value validation mirrors ProjectEditForm. clean_contract_value also
-    blocks a *change* to contract_value once payment-milestone amounts exist,
-    because set_milestone_amounts validated M1+M2+M3 == contract_value and nothing
-    reconciles them here (accepted design gap — the block keeps the invariant safe).
+    CONTRACT VALUE WAS REMOVED FROM THIS FORM — commercial, out of phase 1. The
+    COLUMN IS UNTOUCHED and still carries every rupee it did: Project.contract_value
+    stays on the model, keeps feeding the Finance and CEO dashboard totals and the
+    payment-milestone amounts, and is still editable while a project is Draft via
+    ProjectEditForm. It is only no longer editable AFTER activation, and no longer
+    shown on the overview header.
+
+    That removal also retired `clean_contract_value`, which refused a change once
+    payment-milestone amounts existed (set_milestone_amounts validates
+    M1+M2+M3 == contract_value and nothing reconciles them here). The invariant it
+    protected is now protected more simply — this form does not offer the field, so
+    there is no post-activation change to guard against. IF contract_value EVER
+    COMES BACK TO THIS FORM, THAT CHECK MUST COME BACK WITH IT.
+
+    Positive-value validation mirrors ProjectEditForm.
     """
 
     reason = forms.CharField(
@@ -384,18 +411,38 @@ class PostActivationFieldEditForm(forms.ModelForm):
 
     class Meta:
         model = Project
-        fields = ['capacity_kw', 'contract_value', 'target_commissioning_date']
-        labels = {'capacity_kw': 'Capacity (kW)'}
+        # Order matches the modal's layout and the upload template's column order.
+        fields = [
+            'dc_capacity_kw', 'ac_capacity_kw', 'ivrs_no', 'site_name',
+            'latitude', 'longitude', 'target_commissioning_date',
+        ]
+        labels = {
+            'dc_capacity_kw': 'DC Capacity (kWp)',
+            'ac_capacity_kw': 'AC Capacity (kWp)',
+            'ivrs_no':        'IVRS No.',
+            'site_name':      'Site Name',
+        }
         widgets = {
-            'capacity_kw':               forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
-            'contract_value':            forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
+            'dc_capacity_kw':            forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
+            'ac_capacity_kw':            forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': '0.01'}),
+            'ivrs_no':                   forms.TextInput(attrs={'class': 'form-control form-control-sm'}),
+            'site_name':                 forms.TextInput(attrs={'class': 'form-control form-control-sm'}),
+            # step=any so the browser never rounds a six-decimal coordinate on submit.
+            'latitude':                  forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': 'any'}),
+            'longitude':                 forms.NumberInput(attrs={'class': 'form-control form-control-sm', 'step': 'any'}),
             'target_commissioning_date': forms.DateInput(attrs={'type': 'date', 'class': 'form-control form-control-sm'}),
         }
 
-    def clean_capacity_kw(self):
-        value = self.cleaned_data.get('capacity_kw')
+    def clean_dc_capacity_kw(self):
+        value = self.cleaned_data.get('dc_capacity_kw')
         if value is not None and value <= 0:
-            raise forms.ValidationError('Capacity must be greater than zero.')
+            raise forms.ValidationError('DC capacity must be greater than zero.')
+        return value
+
+    def clean_ac_capacity_kw(self):
+        value = self.cleaned_data.get('ac_capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('AC capacity must be greater than zero.')
         return value
 
     def clean_contract_value(self):
@@ -600,13 +647,62 @@ _CODE_STRIP_RE = re.compile(r'[^A-Z0-9]')
 # HRP-prefixed format. Rejected case-insensitively (spec: reserved-code guard).
 _RESERVED_TENDER_CODES = {'HRP'}
 
+# Tender codes accept a hyphen; site codes do not. See normalize_tender_code below for
+# why these are two rules and not one.
+_TENDER_CODE_RE = re.compile(r'\A[A-Z0-9-]+\Z')
+
 
 def normalize_program_code(value):
-    """Uppercase + strip to [A-Z0-9] (drops spaces/hyphens/punctuation). Shared by
-    short_tender_code here and by the OPEX site_code in the Program-scoped creation
-    path, so both halves of a composed project_id normalize identically. A hyphen
-    inside a token would blur the single `{code}-{site}` delimiter — hence stripped."""
+    """Uppercase + strip to [A-Z0-9] (drops spaces/hyphens/punctuation). THE SITE-CODE
+    RULE — `OpexSiteForm.clean_site_code` and the bulk-upload duplicate detector.
+
+    THIS MUST STAY STRICTER THAN THE TENDER-CODE RULE, and the reason is not cosmetic.
+    A site_code IS the project_id verbatim (OpexSiteForm.clean: `project_id = code`),
+    and project_id is what `utils.generate_project_id` slices to recover the running
+    serial out of the auto-generated `HRP-{PREFIX}-{YEAR}-{NNN}` namespace:
+
+        suffix = existing_id[len(id_prefix):]
+
+    Stripping the hyphen is what makes it STRUCTURALLY IMPOSSIBLE for a hand-entered
+    or bulk-uploaded site code to land inside that namespace and skew the next serial.
+    The reserved-code guard on 'HRP' is the second line of defence; this is the first.
+    Do not relax it to match the tender-code rule "for consistency" — they are
+    deliberately different, and only one of them ends up in a URL and a serial parser.
+    """
     return _CODE_STRIP_RE.sub('', (value or '').upper())
+
+
+def normalize_tender_code(value):
+    """Uppercase + trim, then REJECT anything outside [A-Z0-9-]. THE TENDER-CODE RULE —
+    `ProgramForm.clean_short_tender_code` only. Returns '' for an empty input; the
+    OPEX-required check lives in ProgramForm.clean().
+
+    TWO DIFFERENCES FROM normalize_program_code, both intended:
+
+    1. THE HYPHEN IS KEPT. `short_tender_code` no longer composes a project_id — that
+       stopped when the `{short_tender_code}-{site_code}` scheme was dropped and
+       site_code became the whole ID. Every remaining reader is a display badge, a
+       uniqueness filter, an admin search, or the bulk-template filename, so a hyphen
+       reaches nothing that splits, slices or routes on it. `HRP-2026` is now a legal
+       tender code; `HRP 2026` and `HRP/2026` are not, because a space or a slash in
+       anything code-shaped is how a URL segment gets broken later.
+
+    2. IT REJECTS RATHER THAN STRIPS. The old shared normalizer silently swallowed
+       every illegal character — 'HRP 2026' saved quietly as 'HRP2026' and the user was
+       never told their code had changed. Bad input now says so.
+
+    Lowercase is still accepted and uppercased here, not rejected: case is a typing
+    convenience, not a mistake worth an error message.
+    """
+    code = (value or '').strip().upper()
+    if not code:
+        return ''
+    if not _TENDER_CODE_RE.match(code):
+        raise forms.ValidationError(
+            'Tender code may contain only letters, digits and hyphens — '
+            'no spaces, slashes or other punctuation.'
+        )
+    return code
 
 
 class ProgramForm(forms.ModelForm):
@@ -614,44 +710,56 @@ class ProgramForm(forms.ModelForm):
 
     OPEX-only rules (spec §2 / §4): short_tender_code is required, normalized,
     reserved-code-guarded, and globally unique across ALL Programs INCLUDING
-    soft-deleted ones (it is a building block of a globally-unique site project_id,
-    so a soft-deleted collision would still produce colliding IDs). tender_reference_number,
-    when supplied, is likewise unique soft-delete-aware. All uniqueness checks are
-    explicit .filter().exists() queries returning a clear message — never a raw DB error.
+    soft-deleted ones. tender_reference_number, when supplied, is likewise unique
+    soft-delete-aware. All uniqueness checks are explicit .filter().exists() queries
+    returning a clear message — never a raw DB error.
+
+    THAT UNIQUENESS RULE USED TO BE JUSTIFIED as "short_tender_code is a building block
+    of a globally-unique site project_id, so a soft-deleted collision would still
+    produce colliding IDs". THAT IS NO LONGER TRUE and the sentence has been removed:
+    the `{short_tender_code}-{site_code}` composition was dropped and `site_code` is now
+    the whole project_id (see OpexSiteForm.clean). The tender code composes nothing.
+
+    THE RULE ITSELF STAYS, on its own merits — the code identifies a tender across every
+    screen that shows one, and two live tenders sharing a code is a reporting problem
+    whether or not it is an ID problem. Keeping the check while correcting its stated
+    reason is deliberate: the next person to read this should not "simplify" it away on
+    the strength of a rationale that no longer holds.
+
+    See normalize_tender_code above for why this field accepts a hyphen and site_code
+    does not.
     """
 
     class Meta:
         model = Program
+        # PHASE 1 — SEVEN FIELDS. Eleven others were REMOVED FROM THIS LIST, not from
+        # the model and not from the database:
+        #
+        #     expected_completion_date, tender_reference_number, bid_value, award_date,
+        #     ppa_reference, ppa_signed_date, ppa_per_unit_rate,
+        #     ppa_escalation_percentage, ppa_escalation_frequency,
+        #     financing_partner_name, financing_assistance_type
+        #
+        # Every one is still a column on Program, is empty on every row today, and can
+        # be brought back by adding its name here and its markup to program_form.html.
+        # See EXECUTION_MODULE_DEFERRED.md for why hidden rather than dropped.
+        #
+        # REMOVING THEM FROM Meta.fields IS THE WHOLE POINT — hiding them in the
+        # template alone would leave them ON the form, and a ModelForm field absent
+        # from the POST body cleans to None/'' and construct_instance writes THAT back.
+        # Template-only hiding would silently wipe these columns on every save.
         fields = [
             'program_type', 'name', 'client_name', 'status',
-            'short_tender_code', 'total_capacity', 'expected_completion_date',
-            'planned_site_count',
-            # OPEX-specific
-            'tender_reference_number', 'bid_value', 'award_date',
-            'ppa_reference', 'ppa_signed_date', 'ppa_per_unit_rate',
-            'ppa_escalation_percentage', 'ppa_escalation_frequency',
-            # CAPEX-specific placeholders
-            'financing_partner_name', 'financing_assistance_type',
+            'short_tender_code', 'total_capacity', 'planned_site_count',
         ]
         widgets = {
             'program_type':              forms.Select(attrs={'class': 'form-select'}),
             'status':                    forms.Select(attrs={'class': 'form-select'}),
             'name':                      forms.TextInput(attrs=_bs),
             'client_name':               forms.TextInput(attrs=_bs),
-            'short_tender_code':         forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. IPGCL26'}),
+            'short_tender_code':         forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. IPGCL26 or HRP-2026'}),
             'total_capacity':            forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
-            'expected_completion_date':  forms.DateInput(attrs={**_bs, 'type': 'date'}),
             'planned_site_count':        forms.NumberInput(attrs={**_bs, 'min': '0'}),
-            'tender_reference_number':   forms.TextInput(attrs=_bs),
-            'bid_value':                 forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
-            'award_date':                forms.DateInput(attrs={**_bs, 'type': 'date'}),
-            'ppa_reference':             forms.TextInput(attrs=_bs),
-            'ppa_signed_date':           forms.DateInput(attrs={**_bs, 'type': 'date'}),
-            'ppa_per_unit_rate':         forms.NumberInput(attrs={**_bs, 'step': '0.0001'}),
-            'ppa_escalation_percentage': forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
-            'ppa_escalation_frequency':  forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. Annual'}),
-            'financing_partner_name':    forms.TextInput(attrs=_bs),
-            'financing_assistance_type': forms.TextInput(attrs=_bs),
         }
         labels = {
             'total_capacity':      'Total planned capacity (MW)',
@@ -660,7 +768,10 @@ class ProgramForm(forms.ModelForm):
         }
 
     def clean_short_tender_code(self):
-        return normalize_program_code(self.cleaned_data.get('short_tender_code'))
+        # normalize_TENDER_code, not normalize_program_code — the tender-code rule keeps
+        # hyphens and rejects everything else, where the site-code rule strips. See both
+        # docstrings; the difference is load-bearing.
+        return normalize_tender_code(self.cleaned_data.get('short_tender_code'))
 
     def clean(self):
         cleaned = super().clean()
@@ -668,7 +779,14 @@ class ProgramForm(forms.ModelForm):
         code = cleaned.get('short_tender_code', '')
 
         if program_type == 'OPEX':
-            if not code:
+            # If clean_short_tender_code already rejected the FORMAT, the key is missing
+            # from cleaned_data and `code` is ''. Saying "required" on top of "may contain
+            # only letters, digits and hyphens" reads as two separate faults when the user
+            # made one — they DID enter a code, it just had a space in it. Report the
+            # specific error alone.
+            if 'short_tender_code' in self.errors:
+                pass
+            elif not code:
                 self.add_error('short_tender_code',
                                'Short tender code is required for a RESCO tender.')
             else:
@@ -687,6 +805,13 @@ class ProgramForm(forms.ModelForm):
                                        f"Tender code '{code}' is already used by another Program.")
 
             # tender_reference_number uniqueness (when provided), soft-delete-aware.
+            #
+            # DORMANT IN PHASE 1 AND DELIBERATELY LEFT STANDING. The field is no longer
+            # on Meta.fields, so cleaned.get() returns None, `ref` is '' and the whole
+            # block short-circuits — it costs one dict lookup per submit. It stays
+            # because it is the ONLY uniqueness rule for that column, and the day the
+            # field returns to the form it must return already guarded, not silently
+            # unguarded. Do not "clean it up" without putting it back with the field.
             ref = (cleaned.get('tender_reference_number') or '').strip()
             if ref:
                 ref_dupes = Program.objects.filter(tender_reference_number=ref)
@@ -732,12 +857,20 @@ class OpexSiteForm(forms.ModelForm):
         # null and every reader guards for that). customer_contact_person is reused as the
         # Site In-Charge Name; customer_phone / customer_email are reinterpreted as the
         # Site In-Charge phone/email (see the dual-meaning notes on the model fields).
+        # The five phase-1 site fields are here as well as on the post-activation modal
+        # ON PURPOSE. The bulk upload can set all five, and a form that cannot enter or
+        # correct what the upload can set is the asymmetry that becomes a support
+        # question. contract_value is NOT here and never was — Residential-only.
         fields = [
-            'site_code', 'customer_contact_person', 'customer_phone', 'customer_email',
-            'site_address', 'city', 'state', 'capacity_kw',
+            'site_code', 'site_name', 'customer_contact_person', 'customer_phone',
+            'customer_email', 'site_address', 'city', 'state',
+            'dc_capacity_kw', 'ac_capacity_kw', 'ivrs_no', 'latitude', 'longitude',
         ]
         labels = {
-            'capacity_kw': 'Capacity (kW)',
+            'dc_capacity_kw': 'DC Capacity (kWp)',
+            'ac_capacity_kw': 'AC Capacity (kWp)',
+            'ivrs_no': 'IVRS No.',
+            'site_name': 'Site Name',
             'site_code': 'Site Code',
             'customer_contact_person': 'Site In-Charge Name',
             'customer_phone': 'Site In-Charge Phone',
@@ -745,13 +878,19 @@ class OpexSiteForm(forms.ModelForm):
         }
         widgets = {
             'site_code':                 forms.TextInput(attrs={**_bs, 'placeholder': 'e.g. S045'}),
+            'site_name':                 forms.TextInput(attrs=_bs),
             'customer_contact_person':   forms.TextInput(attrs=_bs),
             'customer_phone':            forms.TextInput(attrs={**_bs, 'maxlength': '10'}),
             'customer_email':            forms.EmailInput(attrs=_bs),
             'site_address':              forms.Textarea(attrs={**_bs, 'rows': 3}),
             'city':                      forms.TextInput(attrs=_bs),
             'state':                     forms.TextInput(attrs=_bs),
-            'capacity_kw':               forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'dc_capacity_kw':            forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'ac_capacity_kw':            forms.NumberInput(attrs={**_bs, 'step': '0.01'}),
+            'ivrs_no':                   forms.TextInput(attrs=_bs),
+            # step=any so the browser never rounds a six-decimal coordinate on submit.
+            'latitude':                  forms.NumberInput(attrs={**_bs, 'step': 'any'}),
+            'longitude':                 forms.NumberInput(attrs={**_bs, 'step': 'any'}),
         }
 
     def __init__(self, *args, program=None, **kwargs):
@@ -774,10 +913,16 @@ class OpexSiteForm(forms.ModelForm):
         _validate_phone(value)
         return value
 
-    def clean_capacity_kw(self):
-        value = self.cleaned_data.get('capacity_kw')
+    def clean_dc_capacity_kw(self):
+        value = self.cleaned_data.get('dc_capacity_kw')
         if value is not None and value <= 0:
-            raise forms.ValidationError('Capacity must be greater than zero.')
+            raise forms.ValidationError('DC capacity must be greater than zero.')
+        return value
+
+    def clean_ac_capacity_kw(self):
+        value = self.cleaned_data.get('ac_capacity_kw')
+        if value is not None and value <= 0:
+            raise forms.ValidationError('AC capacity must be greater than zero.')
         return value
 
     def clean_site_code(self):

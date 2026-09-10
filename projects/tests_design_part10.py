@@ -115,7 +115,7 @@ class Part10Base(TestCase):
             project_id=code, customer_name='C', customer_phone='9876543210',
             site_address='1 Sun Rd', city='Delhi', project_type='OPEX',
             program=program, site_code=code, assigned_pm=pm,
-            capacity_kw=Decimal('100.00'), status='Draft')
+            dc_capacity_kw=Decimal('100.00'), status='Draft')
         site.save()
         assignment = DesignAssignment.objects.create(
             project=site,

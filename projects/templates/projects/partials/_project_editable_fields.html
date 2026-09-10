@@ -1,20 +1,35 @@
 {% comment %}
-The three post-activation-editable project pills (capacity, contract value, target
-commissioning date), grouped so #project-editable-fields can be swapped on its own by
-the field-edit HTMX response — nothing else in the header DOM is touched.
+The post-activation-editable project pills, grouped so #project-editable-fields can be
+swapped on its own by the field-edit HTMX response — nothing else in the header DOM is
+touched.
 
 Included in the overview stats strip (oob=False) and re-rendered out-of-band on a
 successful edit (oob=True). Each pill stays {% if %}-guarded so a field edited from
 blank -> value appears, and value -> blank disappears, after the swap.
 
+CONTRACT VALUE IS NO LONGER SHOWN HERE. Phase 1 took it off the edit modal as
+commercial, and a pill on the overview header is MORE visible than a field inside a
+modal, not less — leaving it would have been a louder version of the thing being
+hidden. The column is untouched and still feeds the Finance and CEO dashboard totals
+and the payment milestones.
+
 Expects: project, oob (bool).
 {% endcomment %}
 <span id="project-editable-fields" class="d-flex flex-wrap gap-3"{% if oob %} hx-swap-oob="true"{% endif %}>
-  {% if project.capacity_kw %}
-    <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.capacity_kw }} kWp</span>
+  {% if project.dc_capacity_kw %}
+    <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.dc_capacity_kw }} kWp DC</span>
   {% endif %}
-  {% if project.contract_value %}
-    <span class="info-pill"><i class="bi bi-currency-rupee"></i>{{ project.contract_value }}</span>
+  {% if project.ac_capacity_kw %}
+    <span class="info-pill"><i class="bi bi-broadcast"></i>{{ project.ac_capacity_kw }} kWp AC</span>
+  {% endif %}
+  {% if project.site_name %}
+    <span class="info-pill"><i class="bi bi-signpost"></i>{{ project.site_name }}</span>
+  {% endif %}
+  {% if project.ivrs_no %}
+    <span class="info-pill"><i class="bi bi-hash"></i>IVRS {{ project.ivrs_no }}</span>
+  {% endif %}
+  {% if project.latitude and project.longitude %}
+    <span class="info-pill"><i class="bi bi-geo-alt"></i>{{ project.latitude }}, {{ project.longitude }}</span>
   {% endif %}
   {% if project.target_commissioning_date %}
     <span class="info-pill"><i class="bi bi-calendar-check"></i>{{ project.target_commissioning_date|date:"d M Y" }}</span>

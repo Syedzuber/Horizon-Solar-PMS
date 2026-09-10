@@ -76,7 +76,7 @@ class GroupTypeTestCase(TestCase):
             project_id='GTT-S01', customer_name='GTClient',
             customer_phone='9876543210', site_address='1 Sun Rd', city='Delhi',
             project_type='OPEX', program=self.program, site_code='S01',
-            capacity_kw=Decimal('100.00'), status='Draft',
+            dc_capacity_kw=Decimal('100.00'), status='Draft',
         )
         self.procurement_group = self._group('SCM batch', GROUP_TYPE_PROCUREMENT)
         self.execution_group = self._group('PM crew batch', GROUP_TYPE_EXECUTION)
@@ -244,7 +244,7 @@ class ExistingFixturesAreAllProcurementTests(TestCase):
             project_id='LEGT-S01', customer_name='LegacyClient',
             customer_phone='9876543210', site_address='2 Sun Rd', city='Delhi',
             project_type='OPEX', program=program, site_code='S01',
-            capacity_kw=Decimal('100.00'), status='Draft',
+            dc_capacity_kw=Decimal('100.00'), status='Draft',
         )
         # No group_type anywhere — the exact call shape every pre-existing fixture and
         # `design_views._add_sites()` use.

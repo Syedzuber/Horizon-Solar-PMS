@@ -130,7 +130,7 @@ class AccessIsolationBase(TestCase):
         project = Project.objects.create(
             customer_name=customer_name, customer_phone='9876543210',
             site_address='1 Sun Road', city='Lucknow', project_type='Residential',
-            capacity_kw=Decimal('5.00'), contract_value=Decimal('300000.00'),
+            dc_capacity_kw=Decimal('5.00'), contract_value=Decimal('300000.00'),
             status='Draft', assigned_pm=pm,
             target_commissioning_date=date.today() + timedelta(days=90),
         )

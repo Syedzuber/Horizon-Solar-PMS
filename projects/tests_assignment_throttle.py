@@ -49,7 +49,7 @@ def _make_user(username, role, email=''):
 def _make_project(pm, name='Acme'):
     return Project.objects.create(
         customer_name=name, customer_phone='9876543210', site_address='1 Sun Rd',
-        city='Lucknow', project_type='Residential', capacity_kw=Decimal('3.00'),
+        city='Lucknow', project_type='Residential', dc_capacity_kw=Decimal('3.00'),
         contract_value=Decimal('100000.00'),
         target_commissioning_date=datetime.date(2026, 12, 1),
         status='Active', assigned_pm=pm,

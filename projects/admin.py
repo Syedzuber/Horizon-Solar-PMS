@@ -92,7 +92,7 @@ class ProgramAdmin(admin.ModelAdmin):
 @admin.register(Project)
 class ProjectAdmin(admin.ModelAdmin):
     list_display    = ['project_id', 'customer_name', 'project_type', 'status',
-                       'city', 'capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
+                       'city', 'dc_capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
     list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
     # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
@@ -131,7 +131,10 @@ class ProjectAdmin(admin.ModelAdmin):
                        'site_address', 'city', 'state')
         }),
         ('Technical & Financial', {
-            'fields': ('capacity_kw', 'contract_value')
+            'fields': ('dc_capacity_kw', 'ac_capacity_kw', 'contract_value')
+        }),
+        ('Site Identity & Location', {
+            'fields': ('site_name', 'ivrs_no', 'latitude', 'longitude')
         }),
         ('Dates', {
             'fields': ('survey_date', 'target_commissioning_date', 'activated_at', 'created_at')

@@ -100,7 +100,7 @@ class CapabilityFlagsGrantNothingTests(TestCase):
             project_id='CFT-S01', customer_name='CFClient',
             customer_phone='9876543210', site_address='1 Sun Rd', city='Delhi',
             project_type='OPEX', program=self.program, site_code='S01',
-            capacity_kw=Decimal('100.00'), status='Draft',
+            dc_capacity_kw=Decimal('100.00'), status='Draft',
             assigned_pm=self.owner,
         )
 

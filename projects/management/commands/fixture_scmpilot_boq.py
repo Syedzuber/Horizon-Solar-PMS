@@ -324,7 +324,7 @@ class Command(BaseCommand):
             self.stdout.write('')
             for idx, code in enumerate(FIXTURE_SITES):
                 planned = [r[0] for r in ITEM_SET if r[idx + 1] is not None]
-                self.stdout.write(f'  {code} ({sites[code].capacity_kw} kW): '
+                self.stdout.write(f'  {code} ({sites[code].dc_capacity_kw} kWp DC): '
                                   f'{len(planned)} BOQItem rows')
             self.stdout.write('')
             self.stdout.write('  WOULD NOT TOUCH: ' + ', '.join(UNTOUCHABLE_SITES))
@@ -427,7 +427,7 @@ class Command(BaseCommand):
         self.site_rows[project.project_id] = {
             'boq_pk':          boq.pk,
             'boq_created':     created,
-            'capacity_kw':     str(project.capacity_kw),
+            'dc_capacity_kw':  str(project.dc_capacity_kw),
             'item_rows':       item_count,
             'item_rows_made':  created_items,
             'status':          boq.status,
@@ -520,7 +520,7 @@ class Command(BaseCommand):
 
         for code, facts in self.site_rows.items():
             verb = 'created' if facts['boq_created'] else 'already present'
-            w(f'  {code}  ({facts["capacity_kw"]} kW)')
+            w(f'  {code}  ({facts["dc_capacity_kw"]} kWp DC)')
             w(f'      BOQ pk={facts["boq_pk"]}  status={facts["status"]}  '
               f'submitted_by={facts["submitted_by"]}   [{verb}]   FIXTURED')
             w(f'      BOQItem rows: {facts["item_rows"]} on the sheet, '

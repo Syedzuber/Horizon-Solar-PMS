@@ -94,7 +94,7 @@ class TaskTemplateBase(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Draft',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),

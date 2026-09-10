@@ -94,7 +94,7 @@ TENDER_CODE    = 'DEMOTEND'
 
 RESIDENTIAL_PROJECT_ID = f'{DEMO_PREFIX}-RES-01'
 
-#: (site_code, city, capacity_kw). site_code IS the project_id — no tender prefix.
+#: (site_code, city, dc_capacity_kw). site_code IS the project_id — no tender prefix.
 #: No hyphens: OpexSiteForm strips everything outside [A-Z0-9]. See _demo_support.
 OPEX_SITES = [
     ('DEMOOPEX01', 'Delhi',     Decimal('120.00')),   # activated
@@ -369,7 +369,7 @@ class Command(BaseCommand):
                     'customer_email': f'site{index:02d}@{DEMO_EMAIL_DOMAIN}',
                     'site_address': f'{site_code}, demo address (local only)',
                     'city': city, 'state': 'Demo State',
-                    'capacity_kw': str(capacity),
+                    'dc_capacity_kw': str(capacity),
                 },
                 creator=pm.user, profile=pm,
             )
@@ -451,7 +451,7 @@ class Command(BaseCommand):
             'site_address': 'Demo residential address (local only)',
             'city': 'Pune', 'state': 'Demo State',
             'project_type': 'Residential',
-            'capacity_kw': '8.50', 'contract_value': '450000.00',
+            'dc_capacity_kw': '8.50', 'contract_value': '450000.00',
             'survey_date': (timezone.localdate() - timedelta(days=30)).isoformat(),
             'target_commissioning_date': (
                 timezone.localdate() + timedelta(days=60)).isoformat(),
@@ -551,7 +551,7 @@ class Command(BaseCommand):
         # teardown attempt a Supabase delete for an object that never existed.
         manifest.add(ArkaSubmission.objects.create(
             attempt=rel_attempt, version=1,
-            capacity_kw=sites[RELEASED_SITE_CODE].capacity_kw,
+            capacity_kw=sites[RELEASED_SITE_CODE].dc_capacity_kw,
             arka_link='https://example.invalid/arka/demo-seed',
             submitted_by=designer, verdict=ARKA_APPROVED, reviewed_by=designer,
             reviewed_at=released_at - timedelta(days=5), is_current=True,

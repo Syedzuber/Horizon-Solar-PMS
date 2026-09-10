@@ -347,7 +347,7 @@ class WaiverAuthorityTests(PunchPointFixture):
             site_address='9 Elsewhere Road',
             city='Lucknow',
             project_type='OPEX',
-            capacity_kw=Decimal('50.00'),
+            dc_capacity_kw=Decimal('50.00'),
             status='Draft',
             assigned_pm=other_pm,
         )
@@ -515,7 +515,7 @@ class ResidentialRaisesNoPunchPointsTests(TestCase):
             site_address='3 Baseline Lane',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Draft',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),

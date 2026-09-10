@@ -335,7 +335,7 @@ class Command(BaseCommand):
                         'customer_email': f'handoff{n:02d}@{DEMO_EMAIL_DOMAIN}',
                         'site_address': f'{site_code}, demo address (local only)',
                         'city': 'Gurugram', 'state': 'Demo State',
-                        'capacity_kw': str(200 + n),
+                        'dc_capacity_kw': str(200 + n),
                     },
                     creator=pm.user, profile=pm,
                 )

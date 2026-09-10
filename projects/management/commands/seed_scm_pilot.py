@@ -123,7 +123,7 @@ PROGRAM_CLIENT = 'SCMPILOT Client (Local Only)'
 PILOT_EMAIL_DOMAIN = 'scmpilot.invalid'   # RFC 6761 — permanently undeliverable
 PILOT_PASSWORD     = 'ScmPilot!2026'      # >=8 chars, satisfies UserCreateForm
 
-#: (site_code, city, state, capacity_kw). The site_code IS the project_id — no tender
+#: (site_code, city, state, dc_capacity_kw). The site_code IS the project_id — no tender
 #: prefix (settled 5 Aug 2026). No hyphens: OpexSiteForm strips everything outside
 #: [A-Z0-9], so a hyphen here would silently produce a different project_id.
 PILOT_SITES = [
@@ -499,7 +499,7 @@ class Command(BaseCommand):
                     'customer_email': f'site{index:02d}@{PILOT_EMAIL_DOMAIN}',
                     'site_address': f'{site_code}, pilot address (local only)',
                     'city': city, 'state': state,
-                    'capacity_kw': str(capacity),
+                    'dc_capacity_kw': str(capacity),
                 },
                 creator=pm.user, profile=pm,
             )
@@ -759,7 +759,7 @@ class Command(BaseCommand):
             # path would point at a production Supabase object that does not exist, and
             # the first download click would fail in a way that looks like a bug.
             arka = ArkaSubmission.objects.create(
-                attempt=attempt, version=1, capacity_kw=site.capacity_kw,
+                attempt=attempt, version=1, capacity_kw=site.dc_capacity_kw,
                 arka_link='https://example.invalid/arka/scmpilot-seed',
                 submitted_by=designer,
                 verdict=ARKA_APPROVED, reviewed_by=qc,

@@ -61,7 +61,7 @@
       </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Capacity</small>
-        <span>{{ project.capacity_kw }} kW</span>
+        <span>{{ project.dc_capacity_kw }} kWp DC{% if project.ac_capacity_kw %} / {{ project.ac_capacity_kw }} kWp AC{% endif %}</span>
       </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">Contract Value</small>

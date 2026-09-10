@@ -154,7 +154,7 @@ class TwoStepFixture(TestCase):
             site_address='1 Approval Road',
             city='Lucknow',
             project_type='OPEX',
-            capacity_kw=Decimal('100.00'),
+            dc_capacity_kw=Decimal('100.00'),
             status='Draft',
             assigned_pm=self.pm,
         )
@@ -715,7 +715,7 @@ class ResidentialIsUntouchedTests(TestCase):
             site_address='2 Baseline Lane',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Draft',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),

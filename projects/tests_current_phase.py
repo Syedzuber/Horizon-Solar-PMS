@@ -224,7 +224,7 @@ class CurrentPhaseFixture(TestCase):
             site_address='1 Tender Road',
             city='Lucknow',
             project_type='OPEX',
-            capacity_kw=Decimal('100.00'),
+            dc_capacity_kw=Decimal('100.00'),
             status='Draft',
             assigned_pm=self.pm,
         )
@@ -248,7 +248,7 @@ class CurrentPhaseFixture(TestCase):
             site_address='1 Sun Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Draft',
             assigned_pm=self.pm,
             target_commissioning_date=date.today() + timedelta(days=90),
@@ -603,7 +603,7 @@ class NoPhasesTests(CurrentPhaseFixture):
             site_address='1 Empty Road',
             city='Lucknow',
             project_type='Residential',
-            capacity_kw=Decimal('5.00'),
+            dc_capacity_kw=Decimal('5.00'),
             status='Active',          # so the PM and BD dashboards list it
             assigned_pm=self.pm,
         )

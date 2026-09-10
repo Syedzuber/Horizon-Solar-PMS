@@ -62,7 +62,7 @@
         <div class="small text-muted">
           {{ dp.project_id }}
           {% if dp.city %} · {{ dp.city }}{% endif %}
-          {% if dp.capacity_kw %} · {{ dp.capacity_kw }} kW{% endif %}
+          {% if dp.dc_capacity_kw %} · {{ dp.dc_capacity_kw }} kWp{% endif %}
           · Created {{ dp.created_at|date:"d M Y" }}
         </div>
       </div>

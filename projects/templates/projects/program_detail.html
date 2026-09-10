@@ -9,9 +9,14 @@
     <div class="text-muted small">
       <span class="badge bg-secondary">{{ program.get_program_type_display }}</span>
       {{ program.client_name }}
-      {% if program.reference_display and program.reference_display != program.name %}
-        · {{ program.reference_display }}
+      {% if program.short_tender_code %}
+        · {{ program.short_tender_code }}
       {% endif %}
+      {% comment %}
+      Was program.reference_display, which resolves to tender_reference_number for a
+      RESCO tender — hidden in phase 1. The short tender code is a kept field and
+      identifies the programme just as well.
+      {% endcomment %}
     </div>
   </div>
   <div class="d-flex gap-2">
@@ -30,7 +35,7 @@
 
 <!-- Aggregate rollup vs. planned targets -->
 <div class="row g-3 mb-4">
-  <div class="col-md-3">
+  <div class="col-md-4">
     <div class="card shadow-sm h-100"><div class="card-body">
       <div class="text-muted small text-uppercase">Active sites (live)</div>
       <div class="fs-3 fw-semibold">
@@ -38,19 +43,18 @@
       </div>
     </div></div>
   </div>
-  <div class="col-md-3">
+  <div class="col-md-4">
     <div class="card shadow-sm h-100"><div class="card-body">
       <div class="text-muted small text-uppercase">Total planned capacity</div>
       <div class="fs-3 fw-semibold">{{ program.total_capacity|default:"—" }}{% if program.total_capacity %} MW{% endif %}</div>
     </div></div>
   </div>
-  <div class="col-md-3">
-    <div class="card shadow-sm h-100"><div class="card-body">
-      <div class="text-muted small text-uppercase">Expected completion</div>
-      <div class="fs-5 fw-semibold">{{ program.expected_completion_date|default:"—" }}</div>
-    </div></div>
-  </div>
-  <div class="col-md-3">
+  {% comment %}
+  The "Expected completion" card stood here and was dropped with
+  expected_completion_date in phase 1. The column remains and is empty on every
+  row; re-add the card when the field returns to the form.
+  {% endcomment %}
+  <div class="col-md-4">
     <div class="card shadow-sm h-100"><div class="card-body">
       <div class="text-muted small text-uppercase">Status</div>
       <div class="fs-5 fw-semibold">{{ program.status }}</div>

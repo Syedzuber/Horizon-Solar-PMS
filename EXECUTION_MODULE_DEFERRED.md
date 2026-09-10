@@ -444,3 +444,116 @@ comparison and filter listed above; the eleven historical migrations, which must
 `OPEX` because they describe the state at the time they ran; and a decision about whether
 existing `ActivityLog` prose is rewritten or left as the record of what the system called
 it then. Until that happens, the rule is one line: **users see RESCO, the code says OPEX.**
+
+## 15. Programme and site fields reshaped for phase 1 — hidden, not removed
+
+Two decisions from the same session, recorded together because they share one rationale.
+
+### 15a. Eleven programme fields and `contract_value` were HIDDEN, not dropped
+
+**Hidden from the programme create and edit forms** (`ProgramForm.Meta.fields` and
+`program_form.html` together — see below for why both):
+
+| Field | Group it sat in |
+|---|---|
+| `expected_completion_date` | Program Details |
+| `tender_reference_number` | RESCO Tender Details |
+| `bid_value` | RESCO Tender Details |
+| `award_date` | RESCO Tender Details |
+| `ppa_reference` | RESCO Tender Details |
+| `ppa_signed_date` | RESCO Tender Details |
+| `ppa_per_unit_rate` | RESCO Tender Details |
+| `ppa_escalation_percentage` | RESCO Tender Details |
+| `ppa_escalation_frequency` | RESCO Tender Details |
+| `financing_partner_name` | CAPEX Financing |
+| `financing_assistance_type` | CAPEX Financing |
+
+The last two were not on the original hide list by name; they were included as the
+"anything below the fold" the brief allowed for, and confirmed. The seven that remain are
+program type, status, short tender code, name, client name, total planned capacity
+(`total_capacity`, in MW) and planned site count.
+
+Two renders also went, because they displayed hidden fields: the **"Expected completion"
+stat card** on `program_detail.html`, and that page's `reference_display` suffix, which
+resolves to `tender_reference_number` for a RESCO tender — replaced with
+`short_tender_code`, which is a kept field and identifies the programme just as well.
+
+**Also hidden: `Project.contract_value`**, on the post-activation edit modal
+(`PostActivationFieldEditForm`) *and* on the overview header pill
+(`_project_editable_fields.html`). Commercial, out of phase 1. A pill on the header is
+more visible than a field inside a modal, so hiding one without the other would have been
+a louder version of the thing being hidden.
+
+**EVERY COLUMN REMAINS.** Migration 0084 contains no `RemoveField` and no `RunPython`.
+All eleven programme fields are empty on every row on both databases today, so nothing was
+stranded; `contract_value` is NOT empty and is untouched — it still feeds the Finance and
+CEO dashboard totals, still gates the M1/M2/M3 payment-milestone amounts, and is still
+editable while a project is Draft through `ProjectEditForm` / `project_form.html`.
+
+**Why hidden rather than removed.** Dropping a column means finding every read, owning a
+rollback story, and writing a data migration for values that may arrive later. Hiding costs
+one line per field in a `Meta.fields` list. Removal stays available at any time and is a
+separate, deliberate decision — this entry is what makes it an informed one.
+
+**THE MECHANISM MATTERS — DO NOT "TIDY" IT INTO A TEMPLATE-ONLY HIDE.** Each field came
+off `Meta.fields` *and* out of the template. Removing only the markup would leave the field
+ON the form, and a `ModelForm` field absent from the POST body cleans to `None`/`''` and is
+written back by `construct_instance` — so a template-only hide would silently wipe these
+columns on every save. Harmless today because they are empty; not harmless the day someone
+backfills them.
+
+**Two pieces of dormant code were left standing on purpose:**
+
+- `ProgramForm.clean()` still holds the soft-delete-aware uniqueness check for
+  `tender_reference_number`. `cleaned.get()` now returns `None`, so it short-circuits at a
+  cost of one dict lookup. It is the ONLY uniqueness rule for that column and must return
+  *with* the field, not after it.
+- `PostActivationFieldEditForm.clean_contract_value` was the opposite call and was
+  **removed**, because its body was a guard against a change the form can no longer make.
+  Its rule — contract value may not change once payment-milestone amounts exist, because
+  `set_milestone_amounts` validated M1+M2+M3 == contract_value and nothing reconciles them
+  — is recorded in that form's docstring and in `projects/tests.py`. **If `contract_value`
+  ever returns to that form, the check returns with it.**
+
+**To restore any hidden field:** add its name back to the form's `Meta.fields`, its widget
+to `Meta.widgets`, and a cell to the template. Nothing else is required — no migration, no
+backfill.
+
+**Risk if left:** none to data. The risk is institutional — in six months someone finds
+eleven empty columns with no form behind them and cannot tell whether that is deliberate.
+This entry is the answer: it is.
+
+### 15b. `ac_capacity_kw` is blank on every site and needs backfilling
+
+`Project.capacity_kw` was renamed to `dc_capacity_kw` by `RenameField` in migration 0084.
+`RenameField` is an `ALTER TABLE ... RENAME COLUMN` — the column and its contents survive
+intact — so **every stored capacity was preserved and is now READ AS DC**. Verified on the
+local database: 139 non-null values before, the same 139 after, identical row by row.
+
+**`ac_capacity_kw` is null on all 148 projects and no migration guessed at it.** There was
+only ever one capacity figure, and inferring AC from DC needs an inverter-loading ratio
+this system does not hold. **The team must backfill it.** Until they do:
+
+- the overview header shows a DC pill and no AC pill (each is `{% if %}`-guarded);
+- the bulk-upload template carries an `AC Capacity (kWp)` column for new sites;
+- `OpexSiteForm` and the post-activation modal both accept it, so existing sites can be
+  corrected one at a time without an upload.
+
+The Zoho webhook writes its single capacity figure to `dc_capacity_kw` for the same reason
+— Zoho has no AC/DC distinction — so webhook-created projects also land with AC null.
+
+**One column ordering note for whoever does the backfill:** the upload parser matches on
+header text, and `Capacity (kW)` was renamed to `DC Capacity (kWp)` in the template. The
+old spelling is still mapped, via `_BULK_LEGACY_HEADERS` in `views.py`, so half-filled
+sheets already in circulation still import their capacity into DC rather than having it
+silently dropped into the ignored-extra-headers warning. **Retiring a header is additive
+here — map the old spelling, never just replace it.**
+
+### 15c. Two stale comments in the design module were left alone
+
+`design_metrics.py:26` still reads `Project.capacity_kw is KILOWATTS`, and
+`models.py:61` still says `site_code` is "Combined with `Program.short_tender_code` to
+compose project_id" — a scheme dropped when `site_code` became the whole project ID.
+Neither is executable and neither was touched, because the session's MODE fenced off the
+design module. Both are worth a one-line fix in any session that legitimately opens those
+files.

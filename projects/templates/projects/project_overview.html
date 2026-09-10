@@ -123,9 +123,9 @@
       {# Post-activation-editable business fields — swap target for the field-edit modal #}
       {% include 'projects/partials/_project_editable_fields.html' with oob=False %}
       {% if is_assigned_pm and project.status != 'Draft' %}
-        {# Separate, smaller entry point from the Draft-only "Edit" button — opens a 3-field modal #}
+        {# Separate, smaller entry point from the Draft-only "Edit" button — opens the site-field modal #}
         <button type="button" class="btn btn-link btn-sm p-0 align-baseline text-muted"
-                title="Edit capacity / contract value / target commissioning date"
+                title="Edit site capacity, name, IVRS, coordinates and target commissioning date"
                 hx-get="{% url 'project_field_edit' project.project_id %}"
                 hx-target="#fieldEditModalContent" hx-swap="innerHTML"
                 hx-on::after-request="if (event.detail.successful) window.showFieldEditModal();">

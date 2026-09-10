@@ -160,7 +160,7 @@ class MirrorDerivationBase(TestCase):
             project_id=code, customer_name='SEClient', customer_phone='9876543210',
             site_address='1 Sun Rd', city='Delhi', project_type='OPEX',
             program=self.program, site_code=code, assigned_pm=self.pm,
-            capacity_kw=Decimal('100.00'), status='Draft')
+            dc_capacity_kw=Decimal('100.00'), status='Draft')
         assignment = None
         if design_status is not None:
             assignment = DesignAssignment.objects.create(
@@ -358,7 +358,7 @@ class TheLookupTests(MirrorDerivationBase):
         house = Project.objects.create(
             project_id='SE-RES1', customer_name='House', customer_phone='9876543210',
             site_address='2 Sun Rd', city='Delhi', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm)
+            dc_capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm)
         attach_residential_template(house)
 
         self.assertTrue(
@@ -792,7 +792,7 @@ class ReconcileAtActivationTests(MirrorDerivationBase):
         house = Project.objects.create(
             project_id='SE-RC7', customer_name='House', customer_phone='9876543210',
             site_address='3 Sun Rd', city='Delhi', project_type='Residential',
-            capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm)
+            dc_capacity_kw=Decimal('5.00'), status='Draft', assigned_pm=self.pm)
         attach_residential_template(house)
 
         self.assertFalse(Task.objects.filter(phase__project=house,

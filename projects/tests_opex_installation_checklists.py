@@ -232,7 +232,7 @@ class _ActivatedSiteFixture(TestCase):
             site_address='1 Checklist Road',
             city='Lucknow',
             project_type='OPEX',
-            capacity_kw=Decimal('100.00'),
+            dc_capacity_kw=Decimal('100.00'),
             status='Draft',
             assigned_pm=self.pm,
         )
