@@ -167,7 +167,7 @@ way around it; the one-line `why` is the whole argument for each of the five.
 <div class="card shadow-sm border-0 mb-3">
   <div class="card-body py-2 small text-muted">
     <span class="fw-semibold text-dark">Every rate shows its denominator.</span>
-    Under 5 released sites or reviews, no figure is shown at all —
+    Under 5 sites or reviews in the denominator, no figure is shown at all —
     <span class="qa-none">Insufficient data (n=N)</span>.
     Between 5 and 14 the figure carries <span class="qa-low">low confidence</span>.
     One failure in two sites is not a 50% failure rate, it is noise, and a number like that
@@ -360,9 +360,9 @@ A group with nothing selected produces no heading at all.
         <table class="table table-sm qa-table mb-0">
           <thead><tr>
             <th class="small text-muted">Requesting PM</th>
-            <th class="small text-muted">Accepted per released site</th>
+            <th class="small text-muted">Accepted per finished site</th>
             <th class="small text-muted text-end">Accepted</th>
-            <th class="small text-muted text-end">Released sites</th>
+            <th class="small text-muted text-end">Finished sites</th>
           </tr></thead>
           <tbody>
           {% for r in panel.data.rows %}
@@ -370,7 +370,8 @@ A group with nothing selected produces no heading at all.
               <td>{{ r.label }}</td>
               <td>{% include "projects/design/_qa_figure.html" with f=r.figure %}</td>
               <td class="text-end small">{{ r.accepted }}</td>
-              <td class="text-end small">{{ r.released }}</td>
+              {# The figure's divisor (released, or awaiting PM approval) — so it matches n= beside it. #}
+              <td class="text-end small">{{ r.finished }}</td>
             </tr>
           {% empty %}
             <tr><td colspan="4" class="text-muted small">No sites in this scope.</td></tr>

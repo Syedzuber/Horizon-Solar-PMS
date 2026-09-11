@@ -1665,7 +1665,23 @@ approval"), through `get_status_display` / `status_label`.
 
 It is a presentation decision for prompt 3.1b or 3.1c, and nothing is reachable today.
 
-### D5 — the tender dashboard renders a Rework or Input of 0.0 as "—", with a tooltip that says there are no released sites
+### ~~D5 — the tender dashboard renders a Rework or Input of 0.0 as "—", with a tooltip that says there are no released sites~~ — **CLOSED by the zero-display prompt**
+
+#### CLOSED 11 Sep 2026 BY THE ZERO-DISPLAY PROMPT
+
+- **Cells.** The Rework and Input cells now test `is not None`, in both the display and
+  the `data-v` sort key. A zero renders as `0.0×`, and the dash is kept for None only
+  (the designer has no finished site). The tooltip on that dash now reads *"No finished
+  sites yet — nothing to divide by"*.
+- **Footer.** It now describes designer-caused attempts (Group A, plus uncategorised) ÷
+  finished sites.
+- **Two other captions.** The workload header ("exclude finished work") and the attention
+  footer ("unfinished site") were corrected in the same session.
+- **Left as they were,** because they cannot legitimately be zero: the drill-down kW and
+  capacity-panel kW truthiness guards (`design_arka_submit` refuses a capacity ≤ 0).
+- **Tests.** Both directions are pinned by `tests_design_zero_display`.
+
+The original entry follows.
 
 Recorded by prompt 3.1-ACC, 11 Sep 2026. `tender_dashboard.html` was outside its MODE.
 
@@ -1682,7 +1698,19 @@ designer error (Group A) ÷ released sites"*. Since B-06 the numerator also coun
 uncategorised pre-Part-9 QC failures (product owner, B-06 Stop 1 Q2), and the denominator is
 finished sites: released, or awaiting PM approval. The two denominators agree until 3.1b.
 
-### D6 — the change-request-rate panel still labels its divisor "released" after it became "finished"
+### ~~D6 — the change-request-rate panel still labels its divisor "released" after it became "finished"~~ — **CLOSED by the zero-display prompt**
+
+#### CLOSED 11 Sep 2026 BY THE ZERO-DISPLAY PROMPT
+
+- **Headers.** They now read *"Accepted per finished site"* and *"Finished sites"*.
+- **Column.** It renders `r.finished`, the figure's own divisor, so it always agrees with
+  the `n=` beside it. `r.released` stays in the row and is no longer displayed here.
+- **Legend.** The sample-size legend no longer names a single denominator (*"Under 5 sites
+  or reviews in the denominator"*).
+- **Tests.** Pinned by `tests_design_zero_display`, with a site parked in the PM gate so
+  that finished and released differ.
+
+The original entry follows.
 
 Recorded by prompt 3.1-ACC, 11 Sep 2026. Only one `quality_analytics.html` header was in its
 MODE.

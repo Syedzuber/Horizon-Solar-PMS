@@ -244,7 +244,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
   <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
     <span class="fw-semibold small">Designer workload</span>
     <span class="text-muted" style="font-size:.7rem;">
-      Sorted by kW. Sites and kW exclude released work.
+      Sorted by kW. Sites and kW are current load: they exclude finished work (released, or awaiting PM approval).
     </span>
   </div>
   <div class="table-responsive">
@@ -304,23 +304,25 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             {% if w.blocked %}<span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>{{ w.blocked }}</span>
             {% else %}<span class="text-muted">0</span>{% endif %}
           </td>
-          <td class="text-end" data-v="{% if w.rework %}{{ w.rework }}{% else %}-1{% endif %}">
+          <td class="text-end" data-v="{% if w.rework is not None %}{{ w.rework }}{% else %}-1{% endif %}">
             {% comment %}
-            '—' not '0' when there are no released sites: 0 would read as "no rework"
-            when it actually means "no data to divide by" (settled decision 5).
+            '—' ONLY FOR None: the designer has no finished site, so there is nothing to
+            divide by (settled decision 5). A real 0.0 is a clean record and renders as the
+            number. Since 3.1-ACC the first attempt is not rework, so zero is the ordinary
+            reading — a truthiness test here showed every clean designer as "no data".
             {% endcomment %}
-            {% if w.rework %}<strong>{{ w.rework }}&times;</strong>
-            {% else %}<span class="text-muted" title="No released sites yet — nothing to divide by">&mdash;</span>{% endif %}
+            {% if w.rework is not None %}<strong>{{ w.rework }}&times;</strong>
+            {% else %}<span class="text-muted" title="No finished sites yet — nothing to divide by">&mdash;</span>{% endif %}
           </td>
-          <td class="text-end" data-v="{% if w.input_quality %}{{ w.input_quality }}{% else %}-1{% endif %}">
+          <td class="text-end" data-v="{% if w.input_quality is not None %}{{ w.input_quality }}{% else %}-1{% endif %}">
             {% comment %}
             Input quality — attempts caused by a Group B or C failure. Deliberately shown
             beside the designer's figure rather than buried: a team whose Input column is
             high has a survey or requirements problem, and coaching the designer for it
             would be both useless and unfair.
             {% endcomment %}
-            {% if w.input_quality %}<strong class="text-warning">{{ w.input_quality }}&times;</strong>
-            {% else %}<span class="text-muted" title="No released sites yet, or no input-caused rework">&mdash;</span>{% endif %}
+            {% if w.input_quality is not None %}<strong class="text-warning">{{ w.input_quality }}&times;</strong>
+            {% else %}<span class="text-muted" title="No finished sites yet — nothing to divide by">&mdash;</span>{% endif %}
           </td>
           <td style="font-size:.75rem;">
             <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>
@@ -350,12 +352,14 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
     </table>
   </div>
   <div class="card-footer bg-white small text-muted py-2">
-    <strong>Rework</strong> = attempts caused by a designer error (Group A) &divide;
-    released sites. <strong>Input</strong> = attempts caused by a bad survey or a changed
-    brief (Groups B and C) &divide; released sites — <em>not</em> the designer's error, and
-    excluded from Rework. <strong>PM change</strong> is counted separately again. The three
-    are never added together: they call for coaching, better surveys, and a pinned-down
-    customer respectively.
+    <strong>Rework</strong> = designer-caused attempts (attempts a Group A failure opened,
+    plus uncategorised pre-Part-9 QC failures) &divide; finished sites (released, or awaiting
+    PM approval). The first attempt is not rework, so a clean record reads 0.0&times;.
+    <strong>Input</strong> = attempts opened by a bad survey or a changed brief (Groups B and
+    C) &divide; finished sites — <em>not</em> the designer's error, and excluded from Rework.
+    <strong>PM change</strong> is counted separately again. The three are never added
+    together: they call for coaching, better surveys, and a pinned-down customer
+    respectively. A dash means the designer has no finished site yet.
   </div>
 </div>
 
@@ -493,8 +497,8 @@ rather than to the site's QC screen, because he is working a queue, not one site
   {% endif %}
   {% if m.no_due_date %}
   <div class="card-footer bg-white small text-muted py-2">
-    {{ m.no_due_date }} unreleased site{{ m.no_due_date|pluralize }} ha{{ m.no_due_date|pluralize:"s,ve" }}
-    no approved due date and therefore cannot be overdue — they are counted under their
+    {{ m.no_due_date }} unfinished site{{ m.no_due_date|pluralize }} (not yet released or
+    awaiting PM approval) ha{{ m.no_due_date|pluralize:"s,ve" }} no approved due date and therefore cannot be overdue — they are counted under their
     stage above.
   </div>
   {% endif %}
