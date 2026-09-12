@@ -1868,6 +1868,14 @@ REASON_EXECUTION_STARTED  = 'execution_started'  # Draft -> Active, template att
 # the rows no human could have written, which is the question worth asking of a mirror.
 # Costs no migration for the reason stated above: reason_code carries no choices=.
 REASON_MIRROR_DERIVED     = 'mirror_derived'
+# Prompt 3.1b-1. The PM's verdict on a design package before release — the first design
+# transitions to name their own reason (every other design row writes ''). Two values,
+# never one with a flag: a ledger reader must be able to count rejections alone. Neither
+# is a change request, and neither may ever be reused for one — a PM rejection is "the PM
+# never accepted this"; a change request is "accepted, then changed". No migration, for
+# the reason stated above: reason_code carries no choices=.
+REASON_DESIGN_PM_APPROVED = 'pm_approved'         # awaiting_pm_approval -> released
+REASON_DESIGN_PM_REJECTED = 'pm_rejected'         # awaiting_pm_approval -> awaiting_head_qc
 
 # Written into actor_role_code when no human performed the change. The Zoho
 # webhook creates projects with created_by=None and no request user at all;

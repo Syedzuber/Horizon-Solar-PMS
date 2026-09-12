@@ -799,6 +799,30 @@ def user_can_request_design_change(user, project):
     return user_can_manage_project(user, project)
 
 
+def can_approve_design_release(user, project):
+    """Who may approve or reject a design package before release.
+
+    Routed straight through user_can_manage_project(): the site's assigned PM or any of
+    its Project Coordinators, by identity, and nobody else. THE SAME PREDICATE AS THE
+    CHANGE-REQUEST PATH (user_can_request_design_change above), on purpose — a PM's
+    authority over a design means one thing and not two. If it ever needs to differ, that
+    is a product decision to take in the open, not a drift between two helpers.
+
+    Its queryset form, for the PM's queue, is manageable_projects_q(); the invariant on
+    that function keeps the two in step.
+
+    NO DEPUTY. design_head_qc_pass() admits the Design Head's named deputy, and this
+    deliberately does not. The Head's deputy exists so that REVIEW capacity is not one
+    person; this gate is the CUSTOMER SIDE accepting the package, and a Design deputy
+    accepting on the PM's behalf would be Design approving its own work — the one thing a
+    second gate exists to prevent. Cover for an absent PM is a Project Coordinator on the
+    site, which this already honours, not a design flag.
+    """
+    if project is None:
+        return False
+    return user_can_manage_project(user, project)
+
+
 def user_is_assigned_designer(user, assignment):
     """Return True if `user` is the designer this assignment is allocated to.
 

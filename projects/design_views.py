@@ -75,6 +75,8 @@ from .models import (
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     # Prompt 3.1a — the unreachable PM-approval status and the "work finished" set.
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
+    # Prompt 3.1b-1 — the ledger reasons for the PM's two verdicts.
+    REASON_DESIGN_PM_APPROVED, REASON_DESIGN_PM_REJECTED,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
@@ -106,6 +108,9 @@ from .permissions import (
     # Session B - reviewer BOQ correction. Read here only to decide whether the QC review
     # screen renders the link; the authority itself is enforced in views.boq_correct().
     user_can_correct_boq,
+    # Prompt 3.1b-1 — the PM's release approval: the per-site authority, and its
+    # queryset form for the queue.
+    can_approve_design_release, manageable_projects_q,
 )
 
 logger = logging.getLogger(__name__)
@@ -838,7 +843,7 @@ def sync_delivery_mirrors(project):
 
 def apply_design_status(assignment, new_status, actor, detail, action_code,
                         extra_fields=None, entity_type='DesignAssignment',
-                        entity_id=None):
+                        entity_id=None, reason_code='', remark=''):
     """THE ONE PLACE `DesignAssignment.status` IS WRITTEN. Session C (audit A-2.2 §5.1).
 
     Before this existed the field was written in eighteen places across sixteen
@@ -944,6 +949,7 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
     if new_status is not None and new_status != from_status:
         record_transition(
             assignment, new_status, from_status=from_status, actor=actor,
+            reason_code=reason_code, remark=remark,
         )
         # THE MIRROR, under the SAME guard and after the ledger. Same guard because the
         # question is the same one — did this design row actually move — and a mirror
@@ -2534,7 +2540,15 @@ def design_site_workspace(request, project_id):
         raise Http404('No design assignment for this site.')
 
     is_designer = user_is_assigned_designer(request.user, assignment)
-    if not (is_designer or user_has_design_head_authority(request.user)):
+    # PROMPT 3.1b-1 — the site's PM (or a Coordinator) reads this screen to approve or
+    # reject the package: the Arka, the CAD archive listing and the BOQ are all here
+    # already, so there is no second, cut-down approval view (D-3). ONE OR TERM, AT THIS
+    # GATE ONLY — the two helpers above are shared by the Head's and the designer's
+    # endpoints and neither is widened. Conditioned on the status, so it opens exactly
+    # while the PM owes a verdict, and is inert until prompt 3.1b-2 makes that reachable.
+    pm_reviewing = (assignment.status == DESIGN_AWAITING_PM_APPROVAL
+                    and can_approve_design_release(request.user, project))
+    if not (is_designer or user_has_design_head_authority(request.user) or pm_reviewing):
         return HttpResponseForbidden('Only the allocated designer or the Design Head '
                                      'may open this site\'s design workspace.')
 
@@ -3930,6 +3944,205 @@ def design_head_qc_fail(request, project_id):
                               f'{new_attempt.attempt_number} opened and the site is back '
                               f'with the designer to redo {_redo_phrase(redo)}.')
     return redirect('design_qc_review', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# 12b. PM release approval — gate 3 (prompt 3.1b-1)
+#
+# INERT UNTIL PROMPT 3.1b-2. Everything in this section acts on `awaiting_pm_approval`,
+# and no code path writes that status yet: design_head_qc_pass() still releases directly.
+# So the queue renders its empty state and both POST views refuse every site. 3.1b-2
+# flips the Head's pass and makes all of it live. The surface is built FIRST so that the
+# moment a site can park here, somebody can see it and act on it.
+#
+# AUTHORITY: permissions.can_approve_design_release() — the site's PM or one of its
+# Project Coordinators, and no deputy. ORDER, exactly as _qc_guard(): authority first (a
+# 403 that reveals nothing about the site's state), then the method, then the status
+# (a message and a redirect — never a 500, never a blank page).
+# ---------------------------------------------------------------------------
+
+#: The 403 text for both PM verdict endpoints.
+_PM_GATE_FORBIDDEN = ('Design release approval is for the site\'s Project Manager or one of '
+                      'its Project Coordinators.')
+
+
+def _pm_gate_guard(request, project):
+    """Shared entry checks for the two PM verdict endpoints.
+
+    Returns (assignment, error), where `error` is:
+        None  -> refuse with 403. The user may not approve this site's design.
+        ''    -> proceed.
+        str   -> refuse with this message and a redirect. Authorised, wrong state.
+    """
+    if not can_approve_design_release(request.user, project):
+        return None, None
+    assignment = getattr(project, 'design_assignment', None)
+    if assignment is None:
+        return None, f'{project.project_id}: this site has no design to approve.'
+    if assignment.status != DESIGN_AWAITING_PM_APPROVAL:
+        return assignment, (f'{project.project_id}: this design is not awaiting your '
+                            f'approval (status "{assignment.get_status_display()}").')
+    return assignment, ''
+
+
+def _lock_parked(assignment):
+    """Re-read the row under a row lock and return it if it is STILL with the PM, else None.
+
+    A site has a PM and possibly several Coordinators, all with the same authority. Two of
+    them clicking at once would otherwise both pass _pm_gate_guard() on a stale copy and
+    write two ledger rows for one transition. The caller owns the atomic block.
+    """
+    locked = DesignAssignment.objects.select_for_update().get(pk=assignment.pk)
+    if locked.status != DESIGN_AWAITING_PM_APPROVAL:
+        return None
+    return locked
+
+
+@login_required
+def design_pm_approval_queue(request):
+    """The PM's worklist: designs both review gates have passed, waiting for the site's PM
+    or a Coordinator to accept them before release.
+
+    Same shape as design_qc_queue(): a DesignAssignment filter on status, scoped to the
+    user, one row dict per site. NO ROLE GATE, like design_my_sites(): the queryset IS the
+    scope, so anybody else gets the empty state rather than a 403 — the nav link is shown
+    to PMs and Coordinators only, and the verdict endpoints re-check authority per site.
+
+    SCOPED BY manageable_projects_q(), the queryset form of can_approve_design_release()
+    (both are user_can_manage_project()). `.distinct()` IS REQUIRED, not tidy: that Q
+    traverses the coordinators M2M, so a site with two Coordinators would otherwise appear
+    twice to its PM. No OPEX site has a Coordinator today, which is exactly why a missing
+    distinct() would pass every check on current data.
+    """
+    profile = getattr(request.user, 'profile', None)
+    if profile is None:
+        return HttpResponseForbidden('No profile.')
+
+    assignments = (DesignAssignment.objects
+                   .filter(status=DESIGN_AWAITING_PM_APPROVAL)
+                   .filter(manageable_projects_q(profile, 'project__'),
+                           project__is_deleted=False, project__project_type='OPEX')
+                   .select_related('project', 'project__program', 'assigned_to__user')
+                   .distinct()
+                   .order_by('project__program__name', 'project__project_id'))
+
+    rows = []
+    for assignment in assignments:
+        attempt = _current_attempt(assignment)
+        rows.append({
+            'assignment': assignment,
+            'site':       assignment.project,
+            'attempt':    attempt,
+            'arka':       _current_arka(attempt),
+        })
+
+    return render(request, 'projects/design/pm_approval_queue.html', {'rows': rows})
+
+
+@login_required
+def design_pm_approve(request, project_id):
+    """GATE 3 — the site's PM accepts the package. RELEASE.
+
+    `awaiting_pm_approval` -> `released`, stamping the release and the PM's approval in
+    ONE write through apply_design_status(), with its StatusTransition row in the same
+    transaction (R-2) carrying REASON_DESIGN_PM_APPROVED. A remark is optional here.
+
+    THIS IS THE ONLY NEW WRITER OF `released`. It reaches nothing today: the precondition
+    is a status no code path produces until prompt 3.1b-2.
+    """
+    project = _opex_site(project_id)
+    assignment, error = _pm_gate_guard(request, project)
+    if error is None:
+        return HttpResponseForbidden(_PM_GATE_FORBIDDEN)
+    if request.method != 'POST':
+        return redirect('design_pm_approval_queue')
+    if error:
+        messages.error(request, error)
+        return redirect('design_pm_approval_queue')
+
+    profile = request.user.profile
+    remark = (request.POST.get('remark') or '').strip()
+    now = timezone.now()
+    with transaction.atomic():
+        locked = _lock_parked(assignment)
+        if locked is None:
+            messages.error(request, f'{project.project_id}: this design is no longer '
+                                    f'awaiting your approval.')
+            return redirect('design_pm_approval_queue')
+        # released_at IS STAMPED HERE, AT THE PM'S APPROVAL, AND NOT AT THE HEAD'S PASS.
+        # It is the SCM pool's age clock (post_qc_pool orders by it, _age_days reads it)
+        # and the end point of every cycle-time figure, so it has to mean RELEASED TO SCM.
+        # Left stamped at the Head's pass, a site would age in SCM's queue while it was
+        # still with the PM and invisible to SCM. `released_by` therefore becomes the
+        # approving PM, where the five rows released before this gate existed hold the
+        # Design Head. That discontinuity is recorded (EXECUTION_MODULE_DEFERRED.md D11),
+        # not migrated: those rows are true about who released them at the time.
+        apply_design_status(
+            locked, DESIGN_RELEASED, profile,
+            'PM approved the design for release' + (f': {remark}' if remark else ''),
+            'design_pm_approved',
+            extra_fields={'released_at': now, 'released_by': profile,
+                          'pm_approved_at': now, 'pm_approved_by': profile},
+            reason_code=REASON_DESIGN_PM_APPROVED, remark=remark)
+
+    messages.success(request, f'{project.project_id}: design approved and released to SCM.')
+    return redirect('design_pm_approval_queue')
+
+
+@login_required
+def design_pm_reject(request, project_id):
+    """GATE 3 — the site's PM rejects the package before release. Back to the Design Head.
+
+    `awaiting_pm_approval` -> `awaiting_head_qc`, with a StatusTransition row carrying
+    REASON_DESIGN_PM_REJECTED and a MANDATORY remark. Nothing else is written.
+
+    THE REMARK IS ENFORCED HERE, IN THE VIEW, because R-9 is not enforced centrally for
+    design rows: REMARK_REQUIRED_SUBJECT_TYPES is empty (EXECUTION_MODULE_DEFERRED.md D12).
+    A blank or whitespace-only remark is refused before the transaction opens, so it
+    writes nothing at all.
+
+    NO ATTEMPT, NO REASON VALUE, NO APPROVAL STAMP, NO released_at CHANGE. Whether this
+    rejection warrants a designer attempt is the DESIGN HEAD'S call, made with the
+    existing design_head_qc_fail() once the site is back in front of him — a PM does not
+    get to charge a designer a rework directly.
+
+    AND IT IS NOT A CHANGE REQUEST, AND MUST NEVER BE MERGED WITH ONE. A PM rejection is
+    "the PM never accepted this". A post-release change request (design_change_request
+    and its family, prompt 3.1c) is "the PM accepted it and later changed their mind".
+    They share no status, no path and no row, so that both questions stay answerable.
+    """
+    project = _opex_site(project_id)
+    assignment, error = _pm_gate_guard(request, project)
+    if error is None:
+        return HttpResponseForbidden(_PM_GATE_FORBIDDEN)
+    if request.method != 'POST':
+        return redirect('design_pm_approval_queue')
+    if error:
+        messages.error(request, error)
+        return redirect('design_pm_approval_queue')
+
+    remark = (request.POST.get('remark') or '').strip()
+    if not remark:
+        messages.error(request, f'{project.project_id}: a remark is required to reject a '
+                                f'design — the Design Head cannot act on "rejected" alone.')
+        return redirect('design_pm_approval_queue')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        locked = _lock_parked(assignment)
+        if locked is None:
+            messages.error(request, f'{project.project_id}: this design is no longer '
+                                    f'awaiting your approval.')
+            return redirect('design_pm_approval_queue')
+        apply_design_status(
+            locked, DESIGN_AWAITING_HEAD_QC, profile,
+            f'PM rejected the design before release: {remark}',
+            'design_pm_rejected',
+            reason_code=REASON_DESIGN_PM_REJECTED, remark=remark)
+
+    messages.success(request, f'{project.project_id}: design rejected and returned to the '
+                              f'Design Head with your remark.')
+    return redirect('design_pm_approval_queue')
 
 
 # ---------------------------------------------------------------------------

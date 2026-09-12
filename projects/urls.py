@@ -142,6 +142,12 @@ urlpatterns = [
     # Gate 2 — the Design Head. Release now happens here, not at qc/pass/.
     path('design/<str:project_id>/qc/head/pass/',   design_views.design_head_qc_pass,    name='design_head_qc_pass'),
     path('design/<str:project_id>/qc/head/fail/',   design_views.design_head_qc_fail,    name='design_head_qc_fail'),
+    # Prompt 3.1b-1 — the PM's release approval (gate 3). The queue, and one POST per
+    # verdict. Authority is permissions.can_approve_design_release(); nothing reaches
+    # awaiting_pm_approval until prompt 3.1b-2, so all three are inert until then.
+    path('design/pm-approval/',                     design_views.design_pm_approval_queue, name='design_pm_approval_queue'),
+    path('design/<str:project_id>/pm/approve/',     design_views.design_pm_approve,      name='design_pm_approve'),
+    path('design/<str:project_id>/pm/reject/',      design_views.design_pm_reject,       name='design_pm_reject'),
     path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),
     path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
 

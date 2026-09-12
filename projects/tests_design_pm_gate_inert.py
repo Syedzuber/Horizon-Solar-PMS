@@ -94,6 +94,10 @@ _WRITE_CALL = re.compile(r'\.(?:update|create|get_or_create|update_or_create|bul
 #: Assembled from pieces for the same reason as the names above.
 _ALLOWED = {
     ('tests_design_pm_gate_inert.py', '.update(status=' + _NAME + ')'),
+    # PROMPT 3.1b-1 IS THE AUTHORITY FOR THIS ONE. design_pm_approve() writes the two
+    # stamp fields in the same write as the release. Stamps only: the STATUS is still
+    # written by the fixture above and nothing else. Assembled from pieces like the rest.
+    ('design_views.py', "'" + 'pm_approved' + "_at': now, '" + 'pm_approved' + "_by': profile}"),
 }
 
 
@@ -151,8 +155,10 @@ class InertnessTests(TestCase):
         """The walk is not vacuous: it finds the one write it is supposed to find, and
         nothing else anywhere."""
         hits = find_pm_gate_writes()
-        self.assertEqual(len(hits), 1, hits)
-        rel, pid, line = hits[0]
+        # PROMPT 3.1b-1: two hits — design_pm_approve()'s stamp write (design_views.py,
+        # which the walk reaches first) and this fixture, which is therefore the last.
+        self.assertEqual(len(hits), 2, hits)
+        rel, pid, line = hits[-1]
         self.assertEqual((rel, pid), ('tests_design_pm_gate_inert.py', 'W1'))
         self.assertIn('.update(status=' + _NAME + ')', line)
 

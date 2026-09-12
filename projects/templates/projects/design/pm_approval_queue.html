@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% comment %}
+PM / Project Coordinator — designs waiting for the site's PM to accept them before
+release (prompt 3.1b-1). Same shape as qc_queue.html: one card per site, the site's
+facts on the left, its stage on the right, the actions underneath.
+
+The rows are already scoped by design_pm_approval_queue() to sites this user manages.
+The verdict forms are _pm_approval_controls.html, and each POST is re-checked server-side
+by permissions.can_approve_design_release() — nothing on this page enforces anything.
+
+INERT UNTIL PROMPT 3.1b-2: nothing writes awaiting_pm_approval yet, so today this page
+always renders its empty state.
+{% endcomment %}
+
+{% block title %}Design approvals — SolarPMS{% endblock %}
+
+{% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start mb-3">
+  <div>
+    <h5 class="mb-0">Design approvals</h5>
+    <div class="text-muted small">
+      Designs that have passed Design QC and the Design Head and are waiting for you to
+      accept them. Nothing is released to SCM until you approve it.
+    </div>
+  </div>
+</div>
+
+{% if not rows %}
+  <div class="card shadow-sm">
+    <div class="card-body text-center text-muted small py-4">
+      No designs are waiting for your approval.
+    </div>
+  </div>
+{% endif %}
+
+{% for row in rows %}
+<div class="card shadow-sm mb-2">
+  <div class="card-body py-3">
+
+    <div class="d-flex flex-wrap justify-content-between align-items-start gap-2">
+      <div>
+        <div class="fw-semibold">{{ row.site.project_id }}</div>
+        <div class="text-muted small">
+          {{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}
+          {% if row.assignment.assigned_to %}
+            · designer {{ row.assignment.assigned_to.user.get_full_name|default:row.assignment.assigned_to.user.username }}
+          {% endif %}
+        </div>
+        {% if row.arka %}
+          <div class="small mt-2">
+            <span class="ver-tag">Arka v{{ row.arka.version }}</span>
+            · {{ row.arka.capacity_kw }} kW designed
+            <a href="{{ row.arka.arka_link }}" target="_blank" rel="noopener" class="ms-1">open the Arka</a>
+          </div>
+        {% endif %}
+      </div>
+      <div class="text-end">
+        <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+          Awaiting your approval</span>
+        {% if row.attempt %}
+          <div class="text-muted" style="font-size:.7rem;">
+            attempt {{ row.attempt.attempt_number }}
+            {% if row.attempt.head_reviewed_at %}
+              · Design Head passed {{ row.attempt.head_reviewed_at|date:"d M Y H:i" }}
+            {% endif %}
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      <a href="{% url 'design_site_workspace' project_id=row.site.project_id %}"
+         class="btn btn-sm btn-outline-secondary">
+        Open the design — Arka, CAD and BOQ
+      </a>
+    </div>
+
+    {% include "projects/design/_pm_approval_controls.html" with site=row.site %}
+
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}

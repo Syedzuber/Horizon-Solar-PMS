@@ -1734,6 +1734,79 @@ implementation (`rework_contribution()`), same denominator, pinned by
 **Either display it as the third figure the workload card's footer already describes, or
 delete it.** Until then it is dead weight that has to be kept correct for no reader.
 
+### D8 — one PM holds 86 of 93 design sites, with no coordinator and no deputy
+
+Recorded by prompt 3.1b-1 (its D-a), 12 Sep 2026, from the local dump.
+
+- **The numbers.** 86 of the 93 OPEX sites with a design assignment have `nirankar` as PM
+  (all of MPUVNL). `nitesh` has 10 OPEX sites and `demo.pm` has the six SCMPILOT sites.
+- **No coverage.** No OPEX site has a Project Coordinator. `can_approve_design_release()`
+  deliberately allows no deputy.
+- **The risk.** Once prompt 3.1b-2 makes `awaiting_pm_approval` reachable, one person's
+  absence strands a whole tender at the PM gate.
+- **The remedy is data, not code.** Populate `Project.coordinators`. That is identity-based
+  authority, and `user_can_manage_project()` already honours it.
+- **Owner and timing.** A data task for the product owner, BEFORE 3.1b-2. Re-run the
+  counts on Railway first: these are local figures.
+
+### D9 — BLOCKS 3.1b-2, ANSWER FIRST: a PM rejection may land on a closed attempt
+
+Recorded by prompt 3.1b-1 (its D-b).
+
+- **What happens.** `design_pm_reject` returns the site to `awaiting_head_qc`. But the Head's
+  pass may already have closed that attempt, with `head_verdict=passed` and `closed_at` set.
+  It does both today. From there, `design_head_qc_fail` would call `_open_next_attempt`
+  from a closed attempt, and `design_head_qc_pass` would rewrite the verdict.
+- **What 3.1b-2's pre-flight must establish.** Can the Head act on a closed attempt WITHOUT
+  rewriting its verdict?
+- **If not,** the rejection needs a status of its own. That is a migration and a fresh
+  R-1 approval.
+- **Nothing in 3.1b-1 depends on the answer.** Its reject view writes only the status and
+  the ledger row.
+
+### D10 — BLOCKS 3.1b-2: the design workspace tells a PM they are the Design Head
+
+Recorded by prompt 3.1b-1 (its D-c). `site_workspace.html` was outside its MODE.
+
+- **What it says.** 3.1b-1 opened `design_site_workspace` to the site's PM (or a
+  Coordinator) while the site is at `awaiting_pm_approval`. The screen's
+  `{% if not is_designer %}` banner then tells them *"You are viewing this as Design
+  Head"*.
+- **Where it links.** It points them at `design_head_review` for the Arka verdict. That
+  view 403s for a PM.
+- **Two smaller dead ends.** The "My sites" back link goes to `design_my_sites`, which is
+  always empty for a PM. The workspace also carries none of the PM's verdict controls:
+  those live on the approval queue only.
+- **When it matters.** Unreachable today. It is wrong the moment 3.1b-2 makes the status
+  reachable.
+
+### D11 — `released_by` changes meaning at the PM gate
+
+Recorded by prompt 3.1b-1 (its D-d).
+
+- **The five existing released rows** (SCMPILOT01–05) hold the Design Head in `released_by`
+  and the Head's pass time in `released_at`.
+- **Every row released by `design_pm_approve`** holds the approving PM and the approval
+  time. That is by decision: `released_at` is the SCM pool's age clock and the end of every
+  cycle-time figure, so it means RELEASED TO SCM.
+- **Recorded, not migrated.** The old rows were true when they were written.
+- **Reading across the boundary.** Anything that reads `released_by` as "who signed off
+  the design technically" must read `attempt.head_reviewed_by` instead.
+
+### D12 — R-9 is enforced per view, not centrally, for design transitions
+
+Recorded by prompt 3.1b-1 (its D-e).
+
+- **The gap.** `REMARK_REQUIRED_SUBJECT_TYPES` is `frozenset()`, so `record_transition()`
+  demands a remark for no subject.
+- **How 3.1b-1 handles it.** `design_pm_reject` enforces its mandatory remark in the view,
+  and refuses a blank or whitespace-only remark before writing anything.
+- **Why not add `design_assignment` to the set now.** It would change the contract of
+  every existing design transition. Most of those write through `apply_design_status()`
+  with no remark, so they would start raising.
+- **Open decision.** Whether it should join the set belongs to a later session, after
+  every design writer collects a remark.
+
 ---
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
