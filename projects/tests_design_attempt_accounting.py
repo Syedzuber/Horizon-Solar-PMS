@@ -45,7 +45,7 @@ from .models import (
     QC_FAILED,
 )
 # The ONE fixture writer of the PM-approval status, reused rather than duplicated.
-from .tests_design_pm_gate_inert import PmGateBase
+from .tests_design_pm_gate_fixtured import PmGateBase
 
 
 def _profile(username, role, first_name='', last_name=''):

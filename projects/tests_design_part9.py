@@ -38,6 +38,7 @@ from .models import (
     NotificationLog,
     DESIGN_AWAITING_ALLOCATION, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_RELEASED,
+    DESIGN_AWAITING_PM_APPROVAL,
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
@@ -406,6 +407,7 @@ class PackageGateTests(Part9Base):
         self.assertIsNone(self.a.released_at)
 
     def test_head_pass_releases(self):
+        """Prompt 3.1b-2c: the Head's pass hands the package to the PM; release is the PM's."""
         self._login(self.qc)
         self._post('design_qc_pass', self.site)
         self._login(self.head)
@@ -417,8 +419,9 @@ class PackageGateTests(Part9Base):
         self.assertEqual(self.attempt.head_reviewed_by_id, self.head.pk)
         self.assertIsNotNone(self.attempt.closed_at)
         self.assertFalse(self.attempt.head_overturned_qc)
-        self.assertEqual(self.a.status, DESIGN_RELEASED)
-        self.assertEqual(self.a.released_by_id, self.head.pk)
+        self.assertEqual(self.a.status, DESIGN_AWAITING_PM_APPROVAL)
+        self.assertIsNone(self.a.released_at)
+        self.assertIsNone(self.a.released_by_id)
 
     def test_10_and_11_head_failure_opens_n_plus_1_and_sets_the_overturn_signal(self):
         """VERIFICATION 10 and 11."""

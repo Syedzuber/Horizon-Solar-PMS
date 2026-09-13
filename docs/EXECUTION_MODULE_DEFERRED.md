@@ -1581,6 +1581,23 @@ _No entries yet._
 
 ## D. Phase 3 — design handover and as-built (prompts 3.1 – 3.4)
 
+> ### ⛔ DEPLOY GATE — PROMPT 3.1b-2c MUST NOT REACH RAILWAY BEFORE PROMPT 3.1b-3 (NOTIFICATIONS) EXISTS
+>
+> Recorded 13 Sep 2026 by prompt 3.1b-2c, the commit that makes the PM gate live.
+>
+> - **What 3.1b-2c changed.** The Design Head's QC pass no longer releases a site. It parks
+>   the package at `awaiting_pm_approval` until the site's PM approves it. A PM rejection
+>   parks it at `pm_rejected` until the Design Head answers.
+> - **What is missing.** Nobody is TOLD. No email, no WhatsApp and no in-app notice goes to
+>   the PM when a package lands in their queue, or to the Head when the PM rejects one. The
+>   queue is reachable only from the nav link (`design_pm_approval_queue`).
+> - **What happens if it ships alone.** Every design the Head passes stops at the PM and
+>   nobody knows. SCM's pool stops receiving sites. The first person to notice is the CEO,
+>   asking why nothing reached SCM. On today's data that PM is `nirankar`, who holds 86 of
+>   the 93 design sites with no coordinator and no deputy (§D8).
+> - **The rule.** Push 3.1b-2c to Railway ONLY together with, or after, 3.1b-3. Until then
+>   it stays local and unpushed. Anyone deploying `main` must check this line first.
+
 ### ~~D1 — a site awaiting PM approval will count as its designer's current load and sit in the rework denominator, so 3.1-ACC must land BEFORE 3.1b~~ — **CLOSED by prompt 3.1-ACC**
 
 #### CLOSED 11 Sep 2026 BY PROMPT 3.1-ACC (B-06 attempt accounting)
@@ -1660,7 +1677,23 @@ at the top of the page doesn't render for it either. `design_qc_review` builds t
 **Risk if left:** the next reader is misled about a count and about who reads a flag.
 There is no behaviour at stake.
 
-### D4 — the two design chip partials show a site awaiting PM approval as a grey chip
+### ~~D4 — the two design chip partials show a site awaiting PM approval as a grey chip~~ — **CLOSED by prompt 3.1b-2c**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2c
+
+`awaiting_pm_approval` is **amber** in both partials. Amber is the colour the PM's own queue
+already gives this state, so the PM and the design screens show it the same way. It is
+distinct from `released` (green on the dashboard, grey on the workspace) and from
+`pm_rejected` (navy).
+
+- **`_dashboard_design_chips.html`.** One `or` was added to the existing amber branch, with
+  no new markup. Amber there also means `arka_rejected`. That was accepted: the label tells
+  them apart, and both mean "waiting on someone else".
+- **`_design_status_chips.html`.** It had no amber branch, so one two-line `elif` was added.
+  Joining the navy branch instead would have made `awaiting_pm_approval` and `pm_rejected`
+  identical, which is the defect this entry exists to close.
+
+The original entry follows.
 
 Recorded by prompt 3.1a. The MODE allowed flag substitution only in these two templates.
 
@@ -2092,7 +2125,24 @@ tender renders.
   ledger read adds zero queries, at 5 and at 86 rows. It deliberately does not pin the
   per-row growth, so the fix will not break it.
 
-### D22 — HARD REQUIREMENT OF 3.1b-2c: the Design Head's return-to-PM remark is stored and read by nothing
+### ~~D22 — HARD REQUIREMENT OF 3.1b-2c: the Design Head's return-to-PM remark is stored and read by nothing~~ — **CLOSED by prompt 3.1b-2c**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2c
+
+`design_pm_approval_queue` annotates its existing query with the **latest transition INTO
+`awaiting_pm_approval`**: its reason code, remark and time. The remark shows on the row only
+when that arrival was the Head's return (`REASON_DESIGN_HEAD_RETURNED_TO_PM`).
+
+- **Why not filter on the reason, as this entry proposed.** A package can be returned by the
+  Head, rejected again, sent back to the designer and brought to the PM by a second Head
+  pass. The old return row is still on the ledger, so a reason-keyed read would show that
+  stale remark on a fresh package. `tests_design_pm_gate_live` e3 drives exactly that cycle
+  and asserts the remark is gone.
+- **Cost:** zero added queries. Three correlated subqueries ride on the one SELECT the queue
+  already ran: 7 queries at 1 row, 11 at 3 rows, before and after. The queue's own per-row
+  cost predates this and is §D29.
+
+The original entry follows.
 
 Recorded by prompt 3.1b-2b (its D-l), 13 Sep 2026. **This is not a deferral.** It is D14's
 kind of requirement, owed by the session that makes the path reachable.
@@ -2126,7 +2176,38 @@ deliberately not special-cased.**
   written another way (a fixture, a backfill) can hit this. Pinned by
   `tests_design_head_rejection_inert` c3.
 
-### D24 — both PM-gate inertness modules RETIRE after 3.1b-2c; do not amend them a fourth time
+### ~~D24 — both PM-gate inertness modules RETIRE after 3.1b-2c; do not amend them a fourth time~~ — **CLOSED by prompt 3.1b-2c**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2c — split, not deleted
+
+The prompt first said to delete the three modules. They held 76 tests: 15 absence proofs and
+61 behaviour tests. Deleting them would have discarded the 61 this entry said to keep, and
+broken three importing modules. So they were **split**.
+
+- **The 15 absence proofs were dropped:** each module's `InertnessTests` (5 + 5 + 5),
+  together with `tests_design_head_rejection_inert` a1 and a2, which pinned the same chain.
+- **The 61 behaviour tests moved verbatim** to `tests_design_pm_gate_fixtured.py`, with the
+  two fixture bases. An AST comparison shows 61 in and 61 out, and exactly five changed
+  units, each approved in advance:
+  - three class renames (the modules shared `DeclarationTests`, `MirrorDerivationTests` and
+    `LadderAnswerTests`; merged as they were, 9 tests would have silently vanished);
+  - `RejectTests` test_01 and test_02, whose status moved to `pm_rejected` (3 asserts);
+  - three fixture docstrings that cited the dropped allow-lists.
+- **Repointed.** `tests_design_head_rejection_inert`, `tests_design_attempt_accounting` and
+  `tests_design_zero_display` changed their import lines only.
+- **The successor, as specified.** `tests_design_pm_gate_live` (a) parses every non-test
+  `.py` under `projects/`, rather than grepping it, and asserts per-status set equality:
+  - `awaiting_pm_approval` = {`design_head_qc_pass`, `design_head_return_to_pm`};
+  - `pm_rejected` = {`design_pm_reject`};
+  - `released` = {`design_pm_approve`}, plus the three seed commands, which write fixture
+    rows and are named one by one.
+
+  The three status writes computed at run time (`design_survey_upload` and
+  `design_survey_link_set`'s `restored`, and `_open_next_attempt`'s `opening_status`) are
+  enumerated and resolved, and none of them can produce a gate status. The parse found no
+  fifth writer.
+
+The original entry follows.
 
 Recorded by prompt 3.1b-2b (its D-n), 13 Sep 2026.
 
@@ -2159,7 +2240,23 @@ Recorded by prompt 3.1b-2b (its D-n), 13 Sep 2026.
   the three retiring modules did. Without that assertion, retiring them removes the only
   thing that has caught these writes.
 
-### D25 — the Head decides on a PM rejection without the PM's words on the screen where he decides
+### ~~D25 — the Head decides on a PM rejection without the PM's words on the screen where he decides~~ — **CLOSED by prompt 3.1b-2c**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2c
+
+`design_qc_review` now fetches its `DesignAssignment` with one annotated query. The query
+carries the PM's latest rejection remark and time, and it **replaces** the
+`project.design_assignment` read the view used to make. The row is then seated back in the
+reverse-relation cache, so the BOQ predicates do not re-query.
+
+- **Why the reason filter is exact here.** At `pm_rejected` it cannot be stale:
+  `design_pm_reject` is the only writer of that status.
+- **What the Head sees.** The remark is on the Head's two-action card, beside the actions
+  that answer it. The link-out to the sites screen is gone.
+- **Cost, measured:** 28 queries at `pm_rejected` before and after, 28 at `in_qc`, and 26
+  on a released site.
+
+The original entry follows.
 
 Recorded by prompt 3.1b-2b, 13 Sep 2026, from its own build.
 
@@ -2198,6 +2295,89 @@ Recorded by prompt 3.1b-2b, 13 Sep 2026.
   reason code there, and has since Session D. If ledger readers come to need reasons on
   attempt-opening rows, give `_open_next_attempt()` optional reason and remark
   parameters, for all its callers at once.
+
+### D27 — five comments still cite the three grep proofs 3.1b-2c retired
+
+Recorded by prompt 3.1b-2c, 13 Sep 2026. **Recorded, not fixed.** Each sits in a file or
+at a name outside that prompt's MODE.
+
+- **`models.py:3264` and `:3273`.** They say `tests_design_pm_gate_inert.py` and
+  `tests_design_pm_rejected_inert.py` prove "by grep" that nothing writes
+  `awaiting_pm_approval` or `pm_rejected`. Both modules are gone, and both statuses have
+  product writers.
+- **`admin.py:457`.** It gives the same grep proof as the reason the admin fields are
+  read-only. The reason still holds: `tests_design_pm_gate_live` (a) would see an admin
+  writer only if it wrote through the product. The citation is stale.
+- **`tests_design_attempt_accounting.py:20` and `tests_design_zero_display.py:24`.** Both
+  docstrings name `tests_design_pm_gate_inert.PmGateBase._park_in_pm_gate` as the only
+  writer of the status. The fixture now lives in `tests_design_pm_gate_fixtured`, and the
+  status has product writers. 3.1b-2c's MODE allowed import lines only in those modules.
+
+**Fix:** repoint each comment at `tests_design_pm_gate_live` (a), and drop "by grep".
+
+### D28 — `design_views` still describes the gate before it went live, in eight places
+
+Recorded by prompt 3.1b-2c, 13 Sep 2026. Comment-only; no behaviour. None of these names
+was in that prompt's MODE, and every statement below has been false since that commit: six
+say the PM gate is unreachable, and two say where release happens or who reads the ledger.
+
+- **`:4079-4080`, the §12b section header:** "INERT UNTIL PROMPT 3.1b-2 … no code path
+  writes that status yet: design_head_qc_pass() still releases directly".
+- **`:4194`, `design_pm_approve`'s docstring:** "It reaches nothing today".
+- **`:4297`, the §12c section header:** "INERT UNTIL PROMPT 3.1b-2c … nothing writes that
+  status".
+- **`:4394`, `design_head_return_to_pm`'s docstring:** "Nothing shows it to the PM yet".
+  Since 3.1b-2c the PM's queue shows it.
+- **`:2661`, `design_site_workspace`:** "inert until prompt 3.1b-2 makes that reachable".
+- **`:5210`, the `_DESIGNER_ACTIONS` comment on `DESIGN_PM_REJECTED`:** "Unreachable until
+  prompt 3.1b-2b".
+
+Also stale: **`design_qc_pass`'s docstring (`:3772`)** says "release happens at
+design_head_qc_pass() or not at all". Release is now `design_pm_approve`'s, and
+`design_qc_pass` was MAY-NOT in 3.1b-2c. The same claim, shown to users, was FIXED in
+`qc_review.html` in that commit under its B6: the Head's button read "Pass & release" and now
+reads "Pass & send to the PM", and the gate-1 help text and two template comments were
+corrected with it.
+
+Also stale: **`latest_design_transition()`'s docstring (`:1004`)** says "TWO CONSUMERS".
+There are now four. `design_head_sites` and `design_qc_review` read the PM's rejection,
+`design_pm_approval_queue` reads the latest arrival at the PM, and §D18 remains unbuilt.
+
+### D29 — the PM approval queue costs two queries per row
+
+Recorded by prompt 3.1b-2c, 13 Sep 2026. **Predates that prompt.** It came with the queue
+in 3.1b-1, and 3.1b-2c's remark read added nothing to it.
+
+- **Measured** on the local dump as nirankar, with rows parked in a rolled-back
+  transaction: 5 queries empty, 7 at 1 row, 11 at 3 rows. The cause is
+  `_current_attempt(assignment)` and `_current_arka(attempt)` per row.
+- **Why it matters now.** 3.1b-2c makes the queue live, and nirankar holds 86 sites. A
+  tender passed in bulk would put about 177 queries on one screen, the same shape as §D21.
+- **The fix pattern.** Prefetch `attempts` and `attempts__arka_submissions`, and pick the
+  current ones in Python, as `design_head_sites` does for its gate-1 flag.
+
+### D30 — three recorded costs went live with 3.1b-2c
+
+Recorded by prompt 3.1b-2c, 13 Sep 2026. Nothing new here: these are reminders that
+entries written as "inert until 3.1b-2c" now describe production behaviour.
+
+- **§D16.** `_attempt_history.html` still has no branch for an attempt opened with reason
+  `pm_rejected`. From 3.1b-2c every send-back produces one, so it renders with no reason
+  border or label. `m_first_pass_rate` still does not count a PM-rejection send-back
+  against first-pass; that product decision is still open.
+- **§D17.** A `pm_rejected` site is the designer's current load again while the Head holds
+  it.
+- **§D23.** Each send-back that moves the date adds a due-date revision.
+
+### D31 — `tests_design_part9.test_head_pass_releases` is named for what the pass no longer does
+
+Recorded by prompt 3.1b-2c, 13 Sep 2026.
+
+- **What changed.** Its expectation was rewritten to `awaiting_pm_approval` with both
+  release stamps null. The prompt admitted expectation-only changes to existing tests, so
+  the name was kept, and a one-line docstring says what it now pins.
+- **The fix.** Rename it (for example `test_head_pass_hands_to_the_pm`) the next time the
+  module is open.
 
 ---
 

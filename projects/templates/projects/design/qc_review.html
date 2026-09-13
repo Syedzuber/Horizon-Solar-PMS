@@ -266,10 +266,11 @@ status `in_qc`, gate 2's need `awaiting_head_qc`. `can_qc` covers the gate-1 aud
 `can_head_verdict` / `blocked_by_own_qc_verdict` the gate-2 one, so the card renders for
 whichever reviewer is looking at it.
 
-RELEASE MOVED. In Part 4 "Pass" released the site; it now hands the package to the Design
-Head, and release happens at design_head_qc_pass. The button labels say so, because a
-reviewer who thinks they have released a site and has not is the one mistake this screen
-must not allow.
+RELEASE MOVED, TWICE. In Part 4 "Pass" released the site; Part 9 moved release to the Design
+Head's pass; prompt 3.1b-2c moved it again, to the site's PM approving the package
+(design_pm_approve). Neither gate on this screen releases anything now. The button labels say
+so, because a reviewer who thinks they have released a site and has not is the one mistake
+this screen must not allow.
 {% endcomment %}
 {% if can_qc or can_head_verdict or blocked_by_own_qc_verdict or can_resolve_pm_rejection %}
 <div class="card shadow-sm mb-3">
@@ -300,7 +301,7 @@ must not allow.
             <button class="btn btn-sm btn-success">Pass QC</button>
             <div class="text-muted mt-1" style="font-size:.7rem;">
               Sends the package to the Design Head. The site is <strong>not</strong>
-              released until he passes it too.
+              released until he passes it and the site's PM approves it.
             </div>
           </form>
         </div>
@@ -338,7 +339,7 @@ must not allow.
       </div>
 
     {% elif can_head_verdict %}
-      {# ── GATE 2 — the Design Head. THIS is where release happens. ── #}
+      {# ── GATE 2 — the Design Head. A pass hands the package to the site's PM (3.1b-2c). ── #}
       <div class="small mb-3">
         Passed Design QC
         {% if attempt.qc_reviewed_by %}by {{ attempt.qc_reviewed_by.user.get_full_name|default:attempt.qc_reviewed_by.user.username }}{% endif %}
@@ -348,9 +349,10 @@ must not allow.
         <div class="col-md-4">
           <form method="post" action="{% url 'design_head_qc_pass' project_id=project.project_id %}">
             {% csrf_token %}
-            <button class="btn btn-sm btn-success">Pass &amp; release</button>
+            <button class="btn btn-sm btn-success">Pass &amp; send to the PM</button>
             <div class="text-muted mt-1" style="font-size:.7rem;">
-              Closes the attempt and marks the site design-complete.
+              Closes the attempt and sends the package to the site's PM for approval. Nothing
+              is released to SCM until the PM approves it.
             </div>
           </form>
         </div>
@@ -388,15 +390,19 @@ must not allow.
       with the Design Head. Two answers and only two. He disagrees: it returns to the PM
       unchanged, and nothing on the attempt moves. He agrees: it goes back to the designer
       with his classification of whose fault it was, recorded on this attempt beside — never
-      over — his own pass. The PM's remark is on the tender's sites screen (§D25): this
-      screen's view carries one flag for this card and nothing else.
+      over — his own pass. PROMPT 3.1b-2c (§D25): the PM's remark is shown here, where he
+      decides, read off the ledger by design_qc_review() in the query it already made.
       {% endcomment %}
       <div class="small mb-3">
         The site's PM rejected attempt {{ attempt.attempt_number }} after both review gates had
         passed it. The Design QC and Design Head verdicts on it stand whichever you choose.
-        {% if project.program %}The PM's remark is on the
-        <a href="{% url 'design_head_sites' pk=project.program_id %}">tender's sites screen</a>.{% endif %}
       </div>
+      {% if pm_rejection_remark %}
+        <div class="alert alert-warning small py-2 mb-3">
+          <strong>The PM's reason{% if pm_rejected_at %} ({{ pm_rejected_at|date:"d M Y H:i" }}){% endif %}:</strong>
+          {{ pm_rejection_remark }}
+        </div>
+      {% endif %}
       <div class="row g-3">
         <div class="col-md-4">
           <form method="post" action="{% url 'design_head_return_to_pm' project_id=project.project_id %}">

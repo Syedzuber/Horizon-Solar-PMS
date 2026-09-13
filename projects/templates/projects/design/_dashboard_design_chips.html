@@ -42,7 +42,7 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     {% elif p.design.status == 'arka_submitted' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: Arka awaiting Design QC</span>
-    {% elif p.design.status == 'arka_rejected' %}
+    {% elif p.design.status == 'arka_rejected' or p.design.status == 'awaiting_pm_approval' %}
       <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
         Design: {{ p.design.status_label }}</span>
     {% else %}

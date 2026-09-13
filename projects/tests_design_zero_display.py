@@ -36,7 +36,7 @@ from .models import (
     ATTEMPT_REASON_INITIAL, DESIGN_IN_DESIGN, DESIGN_RELEASED,
 )
 # The ONE fixture writer of the PM-approval status, reused rather than duplicated.
-from .tests_design_pm_gate_inert import PmGateBase
+from .tests_design_pm_gate_fixtured import PmGateBase
 
 
 def _profile(username, role, is_design_head=False):

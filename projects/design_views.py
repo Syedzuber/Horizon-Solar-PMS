@@ -86,6 +86,8 @@ from .models import (
     # returning it to the PM, the attempt reason for sending it back to the designer, and
     # the ledger itself, read back by latest_design_transition().
     REASON_DESIGN_HEAD_RETURNED_TO_PM, ATTEMPT_REASON_PM_REJECTED,
+    # Prompt 3.1b-2c — the Head's QC pass, now a handover to the PM rather than a release.
+    REASON_DESIGN_HEAD_PASSED,
     StatusTransition, SUBJECT_DESIGN_ASSIGNMENT,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
@@ -3911,15 +3913,18 @@ def design_qc_fail(request, project_id):
 
 @login_required
 def design_head_qc_pass(request, project_id):
-    """GATE 2 — the DESIGN HEAD passes a package Design QC has already passed. RELEASE.
+    """GATE 2 — the DESIGN HEAD passes a package Design QC has already passed. A HANDOVER
+    TO THE SITE'S PM, NOT A RELEASE.
 
-    Release sets `released_at` / `released_by` on the assignment and moves it to
-    `released`. THAT IS ALL IT DOES (Part 4 settled decision 9). It does not lock, group
-    or hand over the BOQ — those are Part 6, and reading anything into `released` beyond
-    "design is finished" would pre-empt decisions that have not been made.
+    PROMPT 3.1b-2c CHANGED WHAT THIS DOES. It released the site until then; it now moves
+    it to `awaiting_pm_approval`, with REASON_DESIGN_HEAD_PASSED on the ledger row, and the
+    site is released at design_pm_approve() or not at all. `released_at` / `released_by`
+    are NOT stamped here any more — the PM's approval stamps them, because released_at is
+    SCM's age clock and must mean released to SCM (EXECUTION_MODULE_DEFERRED.md §D11).
 
-    This is where the attempt finally closes, and where Part 4's release behaviour now
-    lives unchanged apart from which gate triggers it.
+    This is still where the attempt closes: both review gates have ruled on it. If the PM
+    rejects the package, the Head answers from `pm_rejected` without reopening this attempt
+    (design_head_return_to_pm / design_head_send_back).
     """
     project = _opex_site(project_id)
     assignment, attempt, error = _qc_guard(request, project, (DESIGN_AWAITING_HEAD_QC,),
@@ -3955,20 +3960,27 @@ def design_head_qc_pass(request, project_id):
         attempt.head_overturned_qc = False
         attempt.save(update_fields=['head_verdict', 'head_reviewed_by', 'head_reviewed_at',
                                     'closed_at', 'head_overturned_qc'])
-        # THE RELEASE STAMP AND THE STATUS ARE ONE WRITE. This is the only path that
-        # stamps released_at / released_by, and a row that said `released` without them
-        # (or carried them without saying `released`) is a state the product cannot
-        # produce — which is exactly why the admin form may no longer set any of the
-        # three. See DesignAssignmentAdmin.
+        # THE HANDOVER, NOT THE RELEASE (prompt 3.1b-2c). No released_at / released_by here:
+        # design_pm_approve() stamps both in the same write as `released`, so the rule that
+        # a row says `released` exactly when it carries them still holds.
+        #
+        # THE DEPUTY ASYMMETRY IS DELIBERATE. `_qc_guard(..., gate='head')` above admits the
+        # Design Head OR his named deputy to pass QC — a technical review, and a deputy is
+        # who covers it. The PM gate this hands to has NO deputy
+        # (permissions.can_approve_design_release: the site's PM or its Coordinators only,
+        # prompt 3.1b-1): accepting a design for the site is the site owner's act, not the
+        # design department's. This commit puts the two acts side by side for the first
+        # time; the difference is the design, not an oversight.
         apply_design_status(
-            assignment, DESIGN_RELEASED, profile,
-            f'Design Head passed attempt {attempt.attempt_number} — design released',
+            assignment, DESIGN_AWAITING_PM_APPROVAL, profile,
+            f'Design Head passed attempt {attempt.attempt_number} — with the PM for approval',
             'design_head_qc_passed',
-            extra_fields={'released_at': now, 'released_by': profile},
-            entity_type='DesignAttempt', entity_id=attempt.pk)
+            entity_type='DesignAttempt', entity_id=attempt.pk,
+            reason_code=REASON_DESIGN_HEAD_PASSED)
 
-    messages.success(request, f'{project.project_id}: both review gates passed — design '
-                              f'released on attempt {attempt.attempt_number}.')
+    messages.success(request, f'{project.project_id}: both review gates passed on attempt '
+                              f'{attempt.attempt_number} — the design is now with the site\'s '
+                              f'PM for approval before release.')
     return redirect('design_qc_review', project_id=project.project_id)
 
 
@@ -4138,17 +4150,34 @@ def design_pm_approval_queue(request):
                    .filter(manageable_projects_q(profile, 'project__'),
                            project__is_deleted=False, project__project_type='OPEX')
                    .select_related('project', 'project__program', 'assigned_to__user')
+                   # PROMPT 3.1b-2c (§D22) — HOW THE PACKAGE CAME TO BE HERE, read off the
+                   # ledger in this same query: the LATEST transition INTO this status. Keyed
+                   # on the arrival, not on the Head's reason code: a package the Head
+                   # returned, that the PM then rejected again, that went back to the designer
+                   # and came here through a second Head pass, still has the old return row —
+                   # filtering on the reason would show that stale remark on a fresh package.
+                   .annotate(
+                       arrived_reason=latest_design_transition(
+                           'reason_code', to_status=DESIGN_AWAITING_PM_APPROVAL),
+                       arrived_remark=latest_design_transition(
+                           'remark', to_status=DESIGN_AWAITING_PM_APPROVAL),
+                       arrived_at=latest_design_transition(
+                           'occurred_at', to_status=DESIGN_AWAITING_PM_APPROVAL))
                    .distinct()
                    .order_by('project__program__name', 'project__project_id'))
 
     rows = []
     for assignment in assignments:
         attempt = _current_attempt(assignment)
+        returned = assignment.arrived_reason == REASON_DESIGN_HEAD_RETURNED_TO_PM
         rows.append({
             'assignment': assignment,
             'site':       assignment.project,
             'attempt':    attempt,
             'arka':       _current_arka(attempt),
+            # The Design Head overruled this PM's rejection: his reason, and when.
+            'head_return_remark': assignment.arrived_remark if returned else '',
+            'head_returned_at':   assignment.arrived_at if returned else None,
         })
 
     return render(request, 'projects/design/pm_approval_queue.html', {'rows': rows})
@@ -4208,18 +4237,20 @@ def design_pm_approve(request, project_id):
 def design_pm_reject(request, project_id):
     """GATE 3 — the site's PM rejects the package before release. Back to the Design Head.
 
-    `awaiting_pm_approval` -> `awaiting_head_qc`, with a StatusTransition row carrying
+    `awaiting_pm_approval` -> `pm_rejected`, with a StatusTransition row carrying
     REASON_DESIGN_PM_REJECTED and a MANDATORY remark. Nothing else is written.
 
     THE REMARK IS ENFORCED HERE, IN THE VIEW, because R-9 is not enforced centrally for
     design rows: REMARK_REQUIRED_SUBJECT_TYPES is empty (EXECUTION_MODULE_DEFERRED.md D12).
     A blank or whitespace-only remark is refused before the transaction opens, so it
-    writes nothing at all.
+    writes nothing at all. The Head reads it where he decides — design_qc_review — and on
+    his sites screen, both through latest_design_transition().
 
     NO ATTEMPT, NO REASON VALUE, NO APPROVAL STAMP, NO released_at CHANGE. Whether this
-    rejection warrants a designer attempt is the DESIGN HEAD'S call, made with the
-    existing design_head_qc_fail() once the site is back in front of him — a PM does not
-    get to charge a designer a rework directly.
+    rejection warrants a designer attempt is the DESIGN HEAD'S call, made from `pm_rejected`
+    with design_head_return_to_pm() (he disagrees) or design_head_send_back() (he agrees,
+    and classifies whose fault it was) — a PM does not get to charge a designer a rework
+    directly. The attempt the Head passed stays closed with its verdict intact.
 
     AND IT IS NOT A CHANGE REQUEST, AND MUST NEVER BE MERGED WITH ONE. A PM rejection is
     "the PM never accepted this". A post-release change request (design_change_request
@@ -4250,7 +4281,7 @@ def design_pm_reject(request, project_id):
                                     f'awaiting your approval.')
             return redirect('design_pm_approval_queue')
         apply_design_status(
-            locked, DESIGN_AWAITING_HEAD_QC, profile,
+            locked, DESIGN_PM_REJECTED, profile,
             f'PM rejected the design before release: {remark}',
             'design_pm_rejected',
             reason_code=REASON_DESIGN_PM_REJECTED, remark=remark)
@@ -5034,9 +5065,25 @@ def design_qc_review(request, project_id):
     """Head / deputy: the full package for one site — Arka link and capacity, CAD and
     BOQ files by signed URL, BOQ link, attempt history — with the QC actions."""
     project = _opex_site(project_id)
-    assignment = getattr(project, 'design_assignment', None)
+    # PROMPT 3.1b-2c (§D25) — the PM's rejection remark, read HERE, where the Head decides
+    # what to do about it. This query REPLACES the `project.design_assignment` read that used
+    # to fetch the row, so the remark costs no query: two correlated subqueries on the one
+    # SELECT that was already being issued. Filtering on the reason alone is exact at
+    # `pm_rejected`, because design_pm_reject() is the only writer of that status — the
+    # latest PM-rejection row is the one that put the package here.
+    assignment = (DesignAssignment.objects.filter(project=project)
+                  .annotate(
+                      pm_rejection_remark=latest_design_transition(
+                          'remark', reason_code=REASON_DESIGN_PM_REJECTED),
+                      pm_rejected_at=latest_design_transition(
+                          'occurred_at', reason_code=REASON_DESIGN_PM_REJECTED))
+                  .first())
     if assignment is None:
         raise Http404('No design assignment for this site.')
+    # Seat the row in the reverse-relation cache, so the helpers below that reach it through
+    # `project.design_assignment` (the BOQ-lock and correction predicates) read this instance
+    # instead of issuing the query this one replaced.
+    project.design_assignment = assignment
     # Session B.1 — PER SITE, and that is the whole difference from the queue's gate. A
     # plain designer reaches this screen for the one site they were named on and no other;
     # an unassigned site refuses them exactly as it did before B.1.
@@ -5079,6 +5126,13 @@ def design_qc_review(request, project_id):
         # designer is refused even when they hold Head authority; both endpoints re-check it
         # through _qc_guard(). Set here, never derived in the template (R-13).
         'can_resolve_pm_rejection': can_head_gate and assignment.status == DESIGN_PM_REJECTED,
+        # PROMPT 3.1b-2c (§D25) — the PM's words beside the two actions that answer them.
+        # Shown only at `pm_rejected`: an earlier rejection the Head has already answered is
+        # history (the ledger), not the question in front of him.
+        'pm_rejection_remark': (assignment.pm_rejection_remark
+                                if assignment.status == DESIGN_PM_REJECTED else ''),
+        'pm_rejected_at': (assignment.pm_rejected_at
+                           if assignment.status == DESIGN_PM_REJECTED else None),
         'awaiting_head': awaiting_head,
         'is_self_qc':    user_is_assigned_designer(request.user, assignment),
         # Part 4.6 — drives the triage buttons on the pending-change-request banner.

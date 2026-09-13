@@ -39,6 +39,9 @@ designer's screen and the Head's screen can never disagree about the state.
   {% elif status == 'awaiting_head_arka' or status == 'awaiting_head_qc' or status == 'pm_rejected' %}
     <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
       Design: {{ assignment.get_status_display }}</span>
+  {% elif status == 'awaiting_pm_approval' %}
+    <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+      Design: {{ assignment.get_status_display }}</span>
   {% else %}
     <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
       Design: {{ assignment.get_status_display }}</span>

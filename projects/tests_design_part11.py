@@ -37,7 +37,7 @@ from .models import (
     DesignAssignment, DesignAttempt, ArkaSubmission, SiteGroup, SiteGroupMembership,
     SITE_GROUP_DRAFT, SITE_GROUP_LOCKED,
     DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
-    DESIGN_AWAITING_HEAD_QC, DESIGN_RELEASED,
+    DESIGN_AWAITING_HEAD_QC, DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL,
     ARKA_PENDING, ARKA_APPROVED,
     QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
@@ -628,7 +628,9 @@ class DesignLockTests(Part11Base):
         self.assignment.refresh_from_db()
         self.attempt.refresh_from_db()
         self.assertEqual(self.attempt.head_verdict, QC_PASSED)
-        self.assertEqual(self.assignment.status, DESIGN_RELEASED)
+        # Prompt 3.1b-2c: the Head's pass hands the package to the PM rather than releasing
+        # it. The lock is the BOQ stamp surviving the pass, so it holds either way.
+        self.assertEqual(self.assignment.status, DESIGN_AWAITING_PM_APPROVAL)
         self.assertTrue(project_boq_is_design_locked(self.site))
 
         self.client.logout()

@@ -1,16 +1,19 @@
-"""The Design Head's two answers to a PM rejection exist — and NOTHING CAN REACH THEM.
+"""The Design Head's two answers to a PM rejection, and the screens that show them.
 
 WHY THIS FILE EXISTS
 --------------------
 The fourth session of this shape, after 3.1a (the PM-approval status), 3.1b-1 (the PM's
 approval surface) and the pm_rejected schema prompt. A PM who rejects a package sends it
 back to the Design Head, who either OVERRULES the PM (return to the PM, unchanged) or
-AGREES (send back to the designer, classified). Both are built here, with every screen
-that shows them, while nothing can write `pm_rejected`. Prompt 3.1b-2c flips the PM's
-reject onto that status and everything below becomes reachable in one commit.
+AGREES (send back to the designer, classified). Both were built by prompt 3.1b-2b while
+nothing could write `pm_rejected`; prompt 3.1b-2c retargeted the PM's reject onto that
+status, and everything below is now reachable. The tests still park a package by fixture —
+what is asserted here is what the two actions DO. The product route there, and the exact
+set of writers of each gate status, are tests_design_pm_gate_live's.
 
-  (a) THE INERTNESS CHAIN, both halves: nothing writes pm_rejected (the grep), and the only
-      writer of awaiting_pm_approval refuses every other status (a POST per status)
+  (a) return to PM refuses every other status (a POST per status). Its two grep-based
+      absence proofs (a1, a2 — "nothing writes pm_rejected", "return to PM is the only
+      writer of awaiting_pm_approval") were deleted by 3.1b-2c, which made both false.
   (b) return to PM: the status, one ledger row, and nothing on the attempt
   (c) send back: the Head's classification on attempt N, attempt N+1, the due date moved
       out by the review time — at BOTH opening statuses — and the head_* fields untouched;
@@ -27,7 +30,6 @@ THE FIXTURES REUSE THE TWO INERT MODULES' OWN WRITERS (RejectedBase._park_reject
 PmGateBase._park_in_pm_gate), so this file adds no write shape to either walk. Field names
 the walks search for are assembled from pieces for the same reason.
 """
-import inspect
 from datetime import timedelta
 from decimal import Decimal
 from unittest import mock
@@ -42,7 +44,7 @@ from django.utils import timezone
 from . import design_views
 from .design_metrics import is_overdue
 from .design_views import (
-    design_head_dashboard_counts, design_head_return_to_pm, latest_design_transition,
+    design_head_dashboard_counts, latest_design_transition,
 )
 from .models import (
     ArkaSubmission, DesignAssignment, DesignAttempt, DesignFile, DueDateCommitment, Project,
@@ -54,10 +56,7 @@ from .models import (
     ERR_SURVEY_INADEQUATE, QC_PASSED, REASON_DESIGN_HEAD_RETURNED_TO_PM,
     REASON_DESIGN_PM_REJECTED, SUBJECT_DESIGN_ASSIGNMENT,
 )
-from .tests_design_pm_gate_inert import PmGateBase, find_pm_gate_writes
-from .tests_design_pm_rejected_inert import (
-    RejectedBase, _profile, find_pm_rejected_writes,
-)
+from .tests_design_pm_gate_fixtured import PmGateBase, RejectedBase, _profile
 from .utils import record_transition
 
 #: The send-back form's remarks field. Assembled so no line here is a dict-key write of it.
@@ -133,31 +132,11 @@ class HeadRejectionBase(RejectedBase):
 
 
 # ===========================================================================
-# (a) THE INERTNESS CHAIN — both halves, each asserted
+# (a) Return to PM refuses every other status. a1 and a2 (the grep-based absence proofs)
+#     were deleted by prompt 3.1b-2c: tests_design_pm_gate_live asserts the writer sets.
 # ===========================================================================
 
 class InertnessChainTests(HeadRejectionBase):
-
-    def test_a1_step_one_nothing_writes_pm_rejected(self):
-        """STEP ONE, BY GREP: the status is written by the fixture in the pm_rejected module
-        and nowhere else. This session added writers of the two fields and the reason, and
-        NONE of the status."""
-        status_hits = [(rel, pid, line) for rel, pid, line in find_pm_rejected_writes()
-                       if pid.startswith('S')]
-        self.assertEqual([(rel, pid) for rel, pid, _ in status_hits],
-                         [('tests_design_pm_rejected_inert.py', 'S1')], status_hits)
-        self.assertFalse(DesignAssignment.objects.filter(status=DESIGN_PM_REJECTED).exists())
-
-    def test_a2_the_only_product_writer_of_awaiting_pm_approval_is_return_to_pm(self):
-        """The grep's half of step two: one product write of awaiting_pm_approval, and it is
-        in design_head_return_to_pm(), behind a pm_rejected-only guard."""
-        product = [(rel, pid, line) for rel, pid, line in find_pm_gate_writes()
-                   if not rel.startswith('tests_') and pid.startswith('W')]
-        self.assertEqual([(rel, pid) for rel, pid, _ in product],
-                         [('design_views.py', 'W3')], product)
-        source = inspect.getsource(design_head_return_to_pm)
-        self.assertIn('_qc_guard(request, project, (DESIGN_PM_REJECTED,)', source)
-        self.assertIn('locked = _lock_pm_rejected(assignment)', source)
 
     def test_a3_step_two_return_to_pm_refuses_every_other_status(self):
         """STEP TWO, BY BEHAVIOUR — not left as reasoning in a comment. Every status in the

@@ -1875,13 +1875,19 @@ REASON_MIRROR_DERIVED     = 'mirror_derived'
 # never accepted this"; a change request is "accepted, then changed". No migration, for
 # the reason stated above: reason_code carries no choices=.
 REASON_DESIGN_PM_APPROVED = 'pm_approved'         # awaiting_pm_approval -> released
-REASON_DESIGN_PM_REJECTED = 'pm_rejected'         # awaiting_pm_approval -> awaiting_head_qc
+REASON_DESIGN_PM_REJECTED = 'pm_rejected'         # awaiting_pm_approval -> pm_rejected
 # Prompt 3.1b-2b. The Design Head OVERRULES a PM rejection and returns the package to the PM
 # unchanged. Its own value, never REASON_DESIGN_PM_APPROVED or a reused one: a ledger reader
 # must be able to count the Head disagreeing with the PM. The send-back to the designer has
 # no reason of its own here — it opens an attempt, and _open_next_attempt() writes that row.
 # No migration, for the reason stated above: reason_code carries no choices=.
 REASON_DESIGN_HEAD_RETURNED_TO_PM = 'head_returned_to_pm'   # pm_rejected -> awaiting_pm_approval
+# Prompt 3.1b-2c. The Design Head's QC pass is a HANDOVER to the site's PM, not a release,
+# and this row is the only place that distinction is recorded: the pass once wrote '' on its
+# way to `released`. Its own value, never REASON_DESIGN_HEAD_RETURNED_TO_PM — both land on
+# awaiting_pm_approval, and a ledger reader must be able to tell a first handover from the
+# Head overruling a rejection. No migration, for the reason stated above.
+REASON_DESIGN_HEAD_PASSED = 'head_passed'          # awaiting_head_qc -> awaiting_pm_approval
 
 # Written into actor_role_code when no human performed the change. The Zoho
 # webhook creates projects with created_by=None and no request user at all;
