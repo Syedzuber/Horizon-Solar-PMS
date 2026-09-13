@@ -48,7 +48,7 @@ from .models import (
     Program, program_rollup_annotations, get_program_rollup,
     DesignAssignment,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
-    DESIGN_QC_FAILED, DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL,
+    DESIGN_QC_FAILED, DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL, DESIGN_PM_REJECTED,
     # Prompt 0.3 — reason vocabulary for the state ledger (R-10: constants, not a table).
     REASON_CREATED, REASON_BLOCKED, REASON_UNBLOCKED, REASON_MILESTONE_SYNC,
     REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
@@ -1794,6 +1794,10 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
     # before this, and leaving it out would flip the pill Done -> Not Done between the
     # Head's pass and release: the failure the `qc_failed` note above exists to prevent.
     DESIGN_AWAITING_PM_APPROVAL,
+    # The PM rejected it and it is back with the Design Head. Submitted and bounced — the
+    # `qc_failed` note above, word for word; leaving it out would flip the pill backwards
+    # on a rejection. Unreachable until prompt 3.1b-2b.
+    DESIGN_PM_REJECTED,
     DESIGN_RELEASED,
 )
 

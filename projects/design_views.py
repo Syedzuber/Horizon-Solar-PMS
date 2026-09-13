@@ -75,6 +75,8 @@ from .models import (
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
     # Prompt 3.1a — the unreachable PM-approval status and the "work finished" set.
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
+    # The unreachable PM-rejected status, and the guards' "designer does not hold it" set.
+    DESIGN_PM_REJECTED, DESIGN_NOT_WITH_DESIGNER_STATUSES,
     # Prompt 3.1b-1 — the ledger reasons for the PM's two verdicts.
     REASON_DESIGN_PM_APPROVED, REASON_DESIGN_PM_REJECTED,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
@@ -376,6 +378,10 @@ DESIGN_MIRROR_STATE_MAP = {
     # the PM's site got its design" — not yet. Nothing writes this status until prompt
     # 3.1b; it is listed now so derive_design_mirror_state() can never raise on it.
     DESIGN_AWAITING_PM_APPROVAL: Task.IN_PROGRESS,
+    # The PM rejected it and it is back with the Design Head. In Progress for the same
+    # reason: not released, so the PM's site has not got its design. Nothing writes this
+    # status until prompt 3.1b-2b; listed now so derive_design_mirror_state() cannot raise.
+    DESIGN_PM_REJECTED:          Task.IN_PROGRESS,
 
     # ── Held. ──────────────────────────────────────────────────────────────
     # `survey_returned` is the DESIGN HOLD flag (Part 8 renamed the label, never the
@@ -1038,8 +1044,13 @@ def design_head_sites(request, pk):
             # PROMPT 3.1a — drives the Head's "Change date" control, which head_sites.html
             # used to gate on the literal 'released'. design_due_date_change() refuses the
             # same set, so the screen and the view cannot disagree.
+            #
+            # The pm_rejected prompt moved BOTH to DESIGN_NOT_WITH_DESIGNER_STATUSES,
+            # together, for exactly that reason. The key keeps its old name because the
+            # template reads it; it now means "the date is not open to change", which
+            # includes a PM-rejected package that is not finished.
             'design_work_finished': bool(
-                assignment and assignment.status in DESIGN_WORK_FINISHED_STATUSES),
+                assignment and assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES),
             'allocatable':   bool(assignment and assignment.survey_ready
                                   and assignment.status in REALLOCATABLE_STATUSES),
             # Session B — the SECOND visibility condition for the allocation block, and
@@ -1095,11 +1106,12 @@ def design_my_sites(request):
             # PART 8: the designer asks for an EXTENSION, and only once there is an
             # agreed date to extend, no request already in flight, and the site is
             # still live.
-            # Prompt 3.1a: membership, not `!= DESIGN_RELEASED` — see
-            # DESIGN_WORK_FINISHED_STATUSES. Identical for every status reachable today.
+            # Prompt 3.1a: membership, not `!= DESIGN_RELEASED`. The pm_rejected prompt moved
+            # it to DESIGN_NOT_WITH_DESIGNER_STATUSES in step with design_due_date_propose(),
+            # which it mirrors. Identical for every status reachable today.
             'can_request_extension': bool(
                 current is not None and pending is None
-                and assignment.status not in DESIGN_WORK_FINISHED_STATUSES),
+                and assignment.status not in DESIGN_NOT_WITH_DESIGNER_STATUSES),
             'awaiting':    pending is not None,
             'is_blocked':  assignment.status == DESIGN_SURVEY_RETURNED,
             # Read ONLY by the Design Hold control in my_sites.html, which needs
@@ -1115,7 +1127,11 @@ def design_my_sites(request):
             # `is_released`: "the designer's work is finished", which also covers a design
             # with the PM. `is_released` is left exactly as it was and stays truthful; this
             # screen no longer reads it.
-            'design_work_finished': assignment.status in DESIGN_WORK_FINISHED_STATUSES,
+            #
+            # The pm_rejected prompt moved it to DESIGN_NOT_WITH_DESIGNER_STATUSES in step
+            # with design_mark_blocked(), which it mirrors — a button the endpoint refuses is
+            # worse than no button. The key keeps its name because the template reads it.
+            'design_work_finished': assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES,
             'revisions':   assignment.due_date_commitments.count() - 1,
         })
 
@@ -1804,11 +1820,14 @@ def design_due_date_propose(request, project_id):
     if _pending_extension(assignment) is not None:
         return _deny(request, f'{project.project_id}: an extension request is already '
                               f'awaiting the Design Head.', 'design_my_sites')
-    # Prompt 3.1a: membership, not equality — see DESIGN_WORK_FINISHED_STATUSES. The
-    # refusal text for `released` is unchanged, word for word.
-    if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
+    # Prompt 3.1a: membership, not equality. The pm_rejected prompt moved the test from
+    # DESIGN_WORK_FINISHED_STATUSES to DESIGN_NOT_WITH_DESIGNER_STATUSES: the question is
+    # whether the designer holds the site, not whether the work counts as finished. The
+    # refusal texts for `released` and for the PM gate are unchanged, word for word.
+    if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
         where = ('released' if assignment.status == DESIGN_RELEASED
-                 else 'with the PM for approval')
+                 else 'with the PM for approval' if assignment.status == DESIGN_AWAITING_PM_APPROVAL
+                 else 'back with the Design Head after the PM rejected it')
         return _deny(request, f'{project.project_id}: this site is {where} — its due date '
                               f'can no longer be changed.', 'design_my_sites')
 
@@ -1993,11 +2012,15 @@ def design_due_date_change(request, project_id):
         (messages.success if ok else messages.error)(request, msg)
         return redirect('design_head_sites', pk=project.program_id)
 
-    # Prompt 3.1a: membership, not equality — see DESIGN_WORK_FINISHED_STATUSES. The
-    # refusal text for `released` is unchanged, word for word.
-    if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
+    # Prompt 3.1a: membership, not equality. The pm_rejected prompt moved the test to
+    # DESIGN_NOT_WITH_DESIGNER_STATUSES, with the screen flag in design_head_sites() that
+    # mirrors it. A PM-rejected package's date is settled when the Head sends it back
+    # (EXECUTION_MODULE_DEFERRED.md §D15), not before. The refusal texts for `released` and
+    # for the PM gate are unchanged, word for word.
+    if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
         where = ('released' if assignment.status == DESIGN_RELEASED
-                 else 'with the PM for approval')
+                 else 'with the PM for approval' if assignment.status == DESIGN_AWAITING_PM_APPROVAL
+                 else 'back with the Design Head after the PM rejected it')
         return _back(f'{project.project_id}: this site is {where} — its due date can no '
                      f'longer be changed.')
     if _effective_commitment(assignment) is None:
@@ -2081,9 +2104,18 @@ def design_mark_blocked(request, project_id):
     # PROMPT 3.1a — MEMBERSHIP, NOT EQUALITY. A design with the PM is as finished as a
     # released one, and a hold on it would be the same undo by the same second door; see
     # DESIGN_WORK_FINISHED_STATUSES. The refusal text for `released` is unchanged.
-    if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
+    #
+    # The pm_rejected prompt moved the test to DESIGN_NOT_WITH_DESIGNER_STATUSES: a
+    # PM-rejected package is not finished, but the designer does not hold it either, and a
+    # hold on it would clear straight back to `in_design`. That set does NOT yet contain the
+    # review statuses where the same door is open TODAY — EXECUTION_MODULE_DEFERRED.md §D13,
+    # whose fix is adding them to that set. The refusal texts for `released` and for the PM
+    # gate are unchanged, word for word.
+    if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
         where = ('has already been released' if assignment.status == DESIGN_RELEASED
-                 else 'has passed both review gates and is with the PM for approval')
+                 else 'has passed both review gates and is with the PM for approval'
+                 if assignment.status == DESIGN_AWAITING_PM_APPROVAL
+                 else 'was rejected by the PM and is back with the Design Head')
         return _deny(request,
                      f'{project.project_id} {where} and cannot be '
                      f'placed on Design Hold through this action.',
@@ -4777,6 +4809,10 @@ _DESIGNER_ACTIONS = {
     # this table exists to prevent.
     DESIGN_AWAITING_PM_APPROVAL: ('none', '', 'Design passed both review gates — with the '
                                               'PM for approval.'),
+    # Unreachable until prompt 3.1b-2b. No action: the designer does not hold the site —
+    # the Design Head decides whether it goes back to the PM or comes back to them.
+    DESIGN_PM_REJECTED:          ('none', '', 'Returned by the PM — the Design Head is '
+                                              'reviewing the rejection.'),
 }
 
 
@@ -4897,13 +4933,15 @@ def designer_dashboard_context(profile, projects):
             'action_kind':    kind if is_designer else 'none',
             'action_label':   label if is_designer else '',
             'waiting':        waiting,
-            # Prompt 3.1a: `released` is excluded ONCE, through the "work finished" set,
-            # rather than by name in the tuple as well — see DESIGN_WORK_FINISHED_STATUSES.
+            # Prompt 3.1a: `released` is excluded ONCE, through a set rather than by name in
+            # the tuple as well. The pm_rejected prompt moved that set to
+            # DESIGN_NOT_WITH_DESIGNER_STATUSES in step with design_mark_blocked(), which
+            # this flag mirrors (§D13 is why it is still incomplete).
             'can_mark_blocked': (is_designer
                                  and assignment.status not in (
                                      DESIGN_SURVEY_RETURNED, DESIGN_AWAITING_SURVEY,
                                      DESIGN_AWAITING_ALLOCATION)
-                                 and assignment.status not in DESIGN_WORK_FINISHED_STATUSES),
+                                 and assignment.status not in DESIGN_NOT_WITH_DESIGNER_STATUSES),
         }
     return out
 

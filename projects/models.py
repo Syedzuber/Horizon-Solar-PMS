@@ -3252,6 +3252,19 @@ DESIGN_AWAITING_HEAD_QC    = 'awaiting_head_qc'
 # it, and tests_design_pm_gate_inert.py proves that by grep rather than by argument.
 DESIGN_AWAITING_PM_APPROVAL = 'awaiting_pm_approval'
 
+# THE PM REJECTED THE PACKAGE, AND NOTHING CAN REACH THIS YET. Both review gates passed,
+# the PM refused it, and it is back with the Design Head, who decides whether it returns to
+# the PM or to the designer. A status of its own rather than `awaiting_head_qc`, because the
+# current attempt already carries head_verdict='passed' and design_head_qc_fail() would
+# overwrite that verdict — destroying the record the second gate exists to keep. The
+# transitions into and out of it are prompt 3.1b-2b; until then no row can carry it, and
+# tests_design_pm_rejected_inert.py proves that by grep.
+#
+# THE SPELLING IS SHARED BY THREE COLUMNS — this status, DesignAttempt.opened_reason
+# (ATTEMPT_REASON_PM_REJECTED) and StatusTransition.reason_code (REASON_DESIGN_PM_REJECTED).
+# They are different facts about one event. Search by CONSTANT NAME, never by the literal.
+DESIGN_PM_REJECTED = 'pm_rejected'
+
 # Order below is the LINEAR workflow order, corrected in Part 2. The Design Head
 # receives the survey when a tender starts, uploads it, and only then allocates the
 # site — so allocation follows survey upload rather than preceding it:
@@ -3287,6 +3300,10 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_IN_QC,               'In QC'),
     (DESIGN_AWAITING_HEAD_QC,    'QC passed — awaiting Design Head'),
     (DESIGN_QC_FAILED,           'QC failed'),
+    # Unreachable; see the constant. BEFORE `awaiting_pm_approval`, not after it, although
+    # it follows it in time: `awaiting_pm_approval` must stay immediately before `released`
+    # (3.1a's ordering test pins that).
+    (DESIGN_PM_REJECTED,         'PM rejected — awaiting Design Head'),
     # PROMPT 3.1a — immediately before `released`. Unreachable; see the constant.
     (DESIGN_AWAITING_PM_APPROVAL, 'Awaiting PM approval'),
     (DESIGN_RELEASED,            'Released'),
@@ -3306,6 +3323,26 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
 # PHASE_2_PREFLIGHT_AUDIT §6.1, returning by a second door. Test membership here instead.
 DESIGN_WORK_FINISHED_STATUSES = frozenset({DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
 
+# "DOES THE DESIGNER HOLD THIS SITE?" — the statuses where the answer is NO, for the GUARDS.
+#
+# A DIFFERENT QUESTION FROM THE SET ABOVE (R-5), so a different name even where the members
+# agree. DESIGN_WORK_FINISHED_STATUSES answers a METRICS question — which sites count in a
+# denominator — and a PM-rejected package is not finished. This answers the guards' question:
+# may the designer put this site on Design Hold, ask for an extension, or have its date
+# changed? Read by design_mark_blocked, can_mark_blocked, design_due_date_propose and
+# design_due_date_change, and by the three screen flags that show those controls.
+#
+# It is the finished set plus `pm_rejected`: the Head passed the attempt, the PM refused it,
+# and it is the Head's to decide — not the designer's to hold.
+#
+# THIS SET IS INCOMPLETE ON PURPOSE, AND THE OMISSION IS NOT THE ANSWER. The designer does not
+# hold `artifacts_uploaded`, `in_qc` or `awaiting_head_qc` either, and a Design Hold placed
+# there today is cleared back to `in_design` on the same attempt — the live reopen route in
+# EXECUTION_MODULE_DEFERRED.md §D13. THE FIX FOR D13 IS ADDING THOSE THREE MEMBERS TO THIS SET,
+# in the prompt that follows this one. They are left out here only so that this commit
+# changes no guard's answer for any status a row can actually be in.
+DESIGN_NOT_WITH_DESIGNER_STATUSES = frozenset(DESIGN_WORK_FINISHED_STATUSES | {DESIGN_PM_REJECTED})
+
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
 # deliberately not collapsed into one field: a QC failure is the design failing
 # review, a PM change request is the requirement changing underneath it. Rework
@@ -3313,11 +3350,18 @@ DESIGN_WORK_FINISHED_STATUSES = frozenset({DESIGN_AWAITING_PM_APPROVAL, DESIGN_R
 ATTEMPT_REASON_INITIAL           = 'initial'
 ATTEMPT_REASON_QC_FAILED         = 'qc_failed'
 ATTEMPT_REASON_PM_CHANGE_REQUEST = 'pm_change_request'
+# The third loop, and UNREACHABLE until prompt 3.1b-2b: the Design Head sends a PM-rejected
+# package back to the designer. Whose fault it was is the Head's classification, stored on
+# the attempt that was rejected (pm_rejection_category) — the same one-row-earlier rule the
+# QC-failure loop follows. NOT a change request: a rejection is "the PM never accepted this",
+# a change request is "accepted, then changed".
+ATTEMPT_REASON_PM_REJECTED       = 'pm_rejected'
 
 DESIGN_ATTEMPT_REASON_CHOICES = [
     (ATTEMPT_REASON_INITIAL,           'Initial'),
     (ATTEMPT_REASON_QC_FAILED,         'QC failed'),
     (ATTEMPT_REASON_PM_CHANGE_REQUEST, 'PM change request'),
+    (ATTEMPT_REASON_PM_REJECTED,       'PM rejected'),
 ]
 
 QC_PENDING = 'pending'
@@ -3885,6 +3929,24 @@ class DesignAttempt(models.Model):
     #   ...filter(assignment__project__program=tender, head_overturned_qc=True).count()
     head_overturned_qc = models.BooleanField(default=False)
 
+    # ── The Design Head's classification of a PM rejection ──────────────────
+    # NOTHING WRITES EITHER FIELD YET — prompt 3.1b-2b does, on the send-back-to-designer
+    # path. Written on the attempt the PM rejected, which already carries head_verdict=
+    # 'passed' and keeps it: that is why these are separate columns and not
+    # head_failure_category / head_remarks. design_analytics._failure_rows() reads the head
+    # field without looking at the verdict, so a PM-caught error stored there would be
+    # reported as one the Head caught.
+    #
+    # The category decides whose rework the next attempt is, exactly as a QC-failure
+    # category does (classify_attempt_causes): Group A charges the designer, B and C do not.
+    # The PM's own remark is on the StatusTransition row; these are the Head's words to the
+    # designer. Same choices and width as head_failure_category.
+    pm_rejection_category = models.CharField(
+        max_length=30, choices=DESIGN_ERROR_CATEGORY_CHOICES, blank=True, default='',
+    )
+    # Required when a category is recorded — CHECK constraint below.
+    pm_rejection_remarks = models.TextField(blank=True, default='')
+
     # ── BOQ ─────────────────────────────────────────────────────────────────
     # The design workflow RECORDS that a BOQ was submitted; it does not duplicate BOQ
     # data (settled decision 7). The BOQ / BOQItem / BOQItemMaster models are used
@@ -3942,6 +4004,18 @@ class DesignAttempt(models.Model):
             models.CheckConstraint(
                 condition=~models.Q(head_verdict=QC_FAILED) | ~models.Q(head_remarks=''),
                 name='head_remarks_required_when_head_failed',
+            ),
+            # The same rule for the Head's classification of a PM rejection: a category
+            # with no words is not a send-back the designer can act on. AN IMPLICATION,
+            # "a category requires remarks", in the shape of the constraint above — there
+            # the trigger is `head_verdict=failed`, here it is "a category is set", whose
+            # negation is `pm_rejection_category=''`. Every row with no category passes on
+            # the first term, which is every row that exists (R-1 pre-flight: 0 of 10).
+            # The first draft wrote ~Q(category='') here, which rejects BOTH-BLANK rows and
+            # would have failed the migration on every existing attempt.
+            models.CheckConstraint(
+                condition=models.Q(pm_rejection_category='') | ~models.Q(pm_rejection_remarks=''),
+                name='pm_rejection_remarks_required_with_category',
             ),
         ]
 

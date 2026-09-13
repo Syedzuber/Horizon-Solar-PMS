@@ -28,7 +28,7 @@ Head viewing somebody else's site gets `is_designer` False and sees state withou
     has nothing to do — so they take the same navy chip. The label itself names which
     reviewer, which is the part that actually differs.
     {% endcomment %}
-    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'awaiting_head_arka' %}
+    {% elif p.design.status == 'in_qc' or p.design.status == 'artifacts_uploaded' or p.design.status == 'awaiting_head_qc' or p.design.status == 'awaiting_head_arka' or p.design.status == 'pm_rejected' %}
       <span class="chip chip-navy"><span class="chip-dot chip-dot-navy"></span>
         Design: {{ p.design.status_label }}</span>
     {% comment %}

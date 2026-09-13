@@ -1807,6 +1807,117 @@ Recorded by prompt 3.1b-1 (its D-e).
 - **Open decision.** Whether it should join the set belongs to a later session, after
   every design writer collects a remark.
 
+### D13 — LIVE: a designer can put a handed-in package on Design Hold, and clearing the hold rewinds it to `in_design` with no attempt and no change request
+
+Recorded by the pm_rejected schema prompt's pre-flight (its A2), 13 Sep 2026. **Reported,
+not fixed** — on instruction, because it is a live defect with its own blast radius and
+does not belong in a schema commit.
+
+- **The guard.** `design_mark_blocked` refuses only `survey_returned` and
+  `DESIGN_WORK_FINISHED_STATUSES` (`awaiting_pm_approval`, `released`). Nothing else. The
+  dashboard's `can_mark_blocked` and `my_sites.html`'s Hold control use the same test, so
+  the **button renders** too. A crafted POST is not needed.
+- **The clear.** The Head clears a hold by replacing the survey file
+  (`design_survey_upload`) or the folder link (`design_survey_link_set`). Both call
+  `_status_after_unblock()`, which returns `in_design` for any allocated site with an
+  approved date. It never returns the pre-hold status.
+- **What it does to a handed-in package.** A hold at `artifacts_uploaded`, `in_qc` or
+  `awaiting_head_qc` comes back at `in_design`, on the **same** attempt:
+  - no `_open_next_attempt`, no new attempt, no change request;
+  - `qc_started_at`, `boq_submitted_at` and any gate verdict stay on the attempt, so the
+    BOQ stays design-locked while the status says design is under way;
+  - the package drops out of `design_qc_queue`;
+  - `ARKA_SUBMITTABLE_STATUSES` includes `in_design`, so the designer may submit a new
+    Arka version onto the reviewed attempt.
+
+  That is the §6.1 reopen route (PHASE_2_PREFLIGHT_AUDIT), live on reachable statuses.
+- **Blast radius on the local dump** (computed read-only from `_status_after_unblock` on
+  the real rows; nothing was written):
+
+  | Site | Status | Current attempt | Clear restores |
+  |---|---|---|---|
+  | MB0141 | `in_qc` | 1, QC started, BOQ complete | `in_design` |
+  | MB0164 | `artifacts_uploaded` | 1, BOQ complete | `in_design` |
+  | MB0191 | `artifacts_uploaded` | 1, BOQ complete | `in_design` |
+
+  None sit at `awaiting_head_qc` today; that status is reachable from every Design QC pass.
+- **Adjacent, same mechanism.** A hold at `arka_submitted` or `awaiting_head_arka` also
+  clears to `in_design`. That drops a pending Arka out of the Arka queue and reopens Arka
+  submission. MB0005 and SCMPILOT06 sit at `arka_submitted`.
+- **The open question for its own prompt.** Either the hold refuses post-hand-in statuses,
+  or the clear restores the pre-hold status instead of deriving `in_design`. This is not
+  obviously the first: a survey defect can surface during review. Re-run the counts on
+  Railway first — these are local figures.
+- **What the schema prompt did about it.** Nothing, deliberately. Its new "designer does
+  not hold this site" set does NOT include `awaiting_head_qc`, `in_qc` or
+  `artifacts_uploaded`, so no guard's answer changes for a reachable status.
+- **The fix, located.** Add those three statuses to `models.DESIGN_NOT_WITH_DESIGNER_STATUSES`,
+  which the four guards and the three screen flags already read. The set's own comment
+  says so, so nobody takes the omission for the answer. `is_overdue()` and
+  `attention_list()` deliberately name `pm_rejected` rather than reading that set, so that
+  fix cannot move the overdue rule.
+
+### D14 — HARD REQUIREMENT OF 3.1b-2b: the Head's counts and the QC queue must gain `pm_rejected` rows TOGETHER WITH their actions
+
+Recorded by the pm_rejected schema prompt (its B9, D-f), 13 Sep 2026. **This is not a
+deferral.**
+
+- **Today.** `design_head_dashboard_counts` and `design_qc_queue` are unchanged, so a
+  `pm_rejected` site is in neither. The status is unreachable, so nothing is wrong yet.
+- **The trap.** `design_qc_queue` scopes by `_qc_scope()`, and a `pm_rejected` row sits
+  inside that scope. If 3.1b-2b widens the queue's status tuple without also teaching its
+  row flags, `can_qc = can_qc_gate and not awaiting_head` is True for a QC reviewer. That
+  reviewer is shown gate-1 buttons on a package that is not theirs. The Head would get a
+  Review link to a screen with no action for this status.
+- **The requirement.** The Head's count, the queue rows, the row flags and the Head's two
+  actions (return to PM, send back to designer) ship in ONE commit, or none of them do.
+
+### D15 — BLOCKS 3.1b-2b's send-back: attempt N+1 reopens against the OLD due date and is overdue on arrival
+
+Recorded by the pm_rejected schema prompt (its B9, D-g), 13 Sep 2026.
+
+- **While the site is `pm_rejected`,** `is_overdue()` returns False: the Head passed the
+  attempt, so the designer delivered.
+- **The moment the Head sends it back,** `_open_next_attempt` moves the site to `in_design`
+  or `arka_submitted`. It keeps every `DueDateCommitment`, by design (settled decision 2).
+  So the old approved date is live again, and usually already past: the site is overdue on
+  arrival for a delay the designer did not cause.
+- **Decide BEFORE the transition is built.** Options: the send-back sets a new date, or
+  requires the Head to set one, or rework runs without a date. `design_due_date_change`
+  refuses `pm_rejected` today, so the date can only move after the send-back.
+
+### D16 — readers of `opened_reason` outside the schema prompt's MODE assume three values
+
+Recorded by the pm_rejected schema prompt (its B9, D-h), 13 Sep 2026. Each is inert until
+3.1b-2b opens an attempt with `opened_reason='pm_rejected'`.
+
+- **`design_metrics.designer_workload`'s raw counters.** They count `qc_failed` and
+  `pm_change_request` and nothing else, so a PM-rejection attempt is in `attempts` and in
+  neither counter. The Split chip (from `attempt_cause_split`) is correct:
+  `classify_attempt_causes` gained its branch.
+- **`design_analytics.m_first_pass_rate`.** It counts `qc_failed` only, so a
+  PM-rejection send-back does not cost first-pass. **Open PRODUCT decision:** does a PM
+  rejection the Head sends back to the designer cost first-pass?
+- **`_attempt_history.html`.** Its reason border and label have branches for `qc_failed`
+  and `pm_change_request` only, so a PM-rejection attempt renders with neither.
+- **`METRIC_CATALOGUE` text** (visible on the quality analytics page). Two descriptions are
+  true today and incomplete once the loop is reachable. `rework_multiplier` should add "or
+  a PM rejection the Head classified Group A". `error_distribution` should name PM
+  rejections as a source. They were left unchanged here so that no existing screen's text
+  moved.
+
+### D17 — `designer_workload` puts a `pm_rejected` site back into the designer's current load
+
+Recorded by the pm_rejected schema prompt (its B9, D-i), 13 Sep 2026. **Stated, not
+changed**, because `designer_workload` is outside that MODE.
+
+- `pm_rejected` is not finished (product decision D2), so the site counts as the
+  designer's current load in sites and kW, although the Head holds it. That matches how
+  `awaiting_head_qc` is treated today.
+- So a site moves from load (review), to not load (with the PM), and back to load
+  (rejected). Whether current load should mean "the designer holds it" is the same
+  question as D13's, and should be answered with it.
+
 ---
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)

@@ -41,9 +41,9 @@ from .models import (
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
-    DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
+    DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES, DESIGN_PM_REJECTED,
     ARKA_APPROVED, ARKA_PENDING,
-    ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
+    ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST, ATTEMPT_REASON_PM_REJECTED,
     ERROR_GROUP_A, error_category_group,
 )
 
@@ -152,6 +152,17 @@ def is_overdue(assignment, current_commitment, today=None):
     # than `== DESIGN_RELEASED`. Identical for every status reachable today.
     if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
         return False
+    # A PM REJECTION IS NOT THE DESIGNER BEING LATE. The Head passed the attempt, so the
+    # designer delivered, and the commitment was met or missed at that moment; the PM
+    # refusing the package afterwards is not a missed date.
+    #
+    # NOT "the designer does not hold it" — they do not hold `in_qc` or `awaiting_head_qc`
+    # either, and both ARE counted overdue. That is also why this names the status rather
+    # than reading DESIGN_NOT_WITH_DESIGNER_STATUSES: that set is due to gain the review
+    # statuses when §D13 is fixed, and the overdue rule must not move with it. Unreachable
+    # until prompt 3.1b-2b; what the date becomes on send-back is §D15.
+    if assignment.status == DESIGN_PM_REJECTED:
+        return False
     if current_commitment is None or current_commitment.approved_at is None:
         return False
     return current_commitment.proposed_date < (today or timezone.localdate())
@@ -224,6 +235,15 @@ def _classify(assignment, current_arka):
         # files an unknown status under 'in_design', which for this one would report a
         # design both gates have passed as "In design, awaiting Arka".
         return 'awaiting_pm_approval'
+    if status == DESIGN_PM_REJECTED:
+        # EXPLICIT, NEVER THE FALL-THROUGH — which would file a package both gates passed as
+        # "In design, awaiting Arka". Deliberately NOT a stage of its own: it IS a package
+        # awaiting the Design Head, and review_queue_age() takes exactly ONE package stage
+        # for the Head's queue, so a separate stage would drop PM-rejected packages out of
+        # that panel (and add a zero tile to every tender dashboard). HEAD_ACTION_STAGES
+        # follows from this for free. The Head's sites screen is where a PM-rejected package
+        # is told apart from a fresh one (prompt 3.1b-2b). Unreachable until then.
+        return 'awaiting_head_qc'
     if status == DESIGN_ARKA_SUBMITTED:
         # PART 9: the test is head_verdict, not verdict. `arka_submitted` carrying a
         # head-approved Arka means BOTH gates are done and the designer owes artifacts;
@@ -459,6 +479,12 @@ def classify_attempt_causes(attempts):
     The category is read from the Head's field first, then Design QC's. Exactly one of the
     two is ever populated on a given attempt: if Design QC failed it the Head never saw
     it, and if the Head failed it Design QC had already passed it.
+
+    A PM-REJECTION LOOP (the ATTEMPT_REASON_PM_REJECTED reason, unreachable until 3.1b-2b) is
+    one more branch of the same shape — one attempt back, no walk. It reads ONLY
+    `pm_rejection_category`, the Head's classification of the PM's rejection, and never the
+    two fields above: the rejected attempt carries head_verdict='passed', and its gate
+    fields describe gates it passed. Group A charges the designer; B and C are input.
     """
     ordered   = sorted(attempts, key=lambda t: t.attempt_number)
     by_number = {t.attempt_number: t for t in ordered}
@@ -472,6 +498,19 @@ def classify_attempt_causes(attempts):
             if previous is not None:
                 category = (previous.head_failure_category
                             or previous.qc_failure_category)
+            causes[t.attempt_number] = (error_category_group(category)
+                                        or CAUSE_UNCATEGORISED)
+        elif t.opened_reason == ATTEMPT_REASON_PM_REJECTED:
+            # Without this branch the attempt falls to the `else` below and is counted as
+            # an INITIAL attempt — neither rework nor anybody's.
+            #
+            # A BLANK CATEGORY READS AS UNCATEGORISED, AND UNCATEGORISED CHARGES THE
+            # DESIGNER (attempt_cause_split's `designer` bucket). Charging a designer because
+            # the Head did not classify is the opposite of what B-06 fixed, so the
+            # send-back-to-designer path in prompt 3.1b-2b MUST require the category; the
+            # CHECK constraint only ties remarks to a category, it cannot demand one.
+            previous = by_number.get(t.attempt_number - 1)
+            category = previous.pm_rejection_category if previous is not None else ''
             causes[t.attempt_number] = (error_category_group(category)
                                         or CAUSE_UNCATEGORISED)
         else:
@@ -880,8 +919,13 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
         # is history rather than a live problem. The old `not x['released']` would have
         # listed it. `s['released']` is `status == DESIGN_RELEASED`, so this is identical
         # for every status reachable today.
+        #
+        # A PM-rejected package is excluded on is_overdue()'s reasoning: the Head passed it,
+        # so the designer delivered and the revisions are history. Named, not read through
+        # DESIGN_NOT_WITH_DESIGNER_STATUSES, for the same reason as there (§D13).
         for s in sorted((x for x in sites if x['revisions'] >= 3
-                         and x['assignment'].status not in DESIGN_WORK_FINISHED_STATUSES),
+                         and x['assignment'].status not in DESIGN_WORK_FINISHED_STATUSES
+                         and x['assignment'].status != DESIGN_PM_REJECTED),
                         key=lambda x: x['revisions'], reverse=True):
             _add(s, _SEV_REVISED, s['revisions'],
                  f'Due date revised {s["revisions"]} times', 'warning')

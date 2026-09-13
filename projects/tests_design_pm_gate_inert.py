@@ -152,15 +152,23 @@ class InertnessTests(TestCase):
             + '\n'.join(f'  {rel} [{pid}] {line}' for rel, pid, line in offenders))
 
     def test_02_the_fixture_is_actually_found(self):
-        """The walk is not vacuous: it finds the one write it is supposed to find, and
-        nothing else anywhere."""
+        """The walk is not vacuous: it finds exactly the writes _ALLOWED names — the status
+        fixture below and design_pm_approve()'s stamp write — each once, and nothing else.
+
+        Asserted as a SET of (file, pattern, allowed-fragment) triples, never by position:
+        which hit the walk reaches first depends on os.walk and file-name order, and a proof
+        that leans on walk order is encoding an accident rather than the property."""
         hits = find_pm_gate_writes()
-        # PROMPT 3.1b-1: two hits — design_pm_approve()'s stamp write (design_views.py,
-        # which the walk reaches first) and this fixture, which is therefore the last.
-        self.assertEqual(len(hits), 2, hits)
-        rel, pid, line = hits[-1]
-        self.assertEqual((rel, pid), ('tests_design_pm_gate_inert.py', 'W1'))
-        self.assertIn('.update(status=' + _NAME + ')', line)
+        found = {(rel, pid, allowed)
+                 for rel, pid, line in hits
+                 for f, allowed in _ALLOWED if rel == f and allowed in line}
+        self.assertEqual(found, {
+            ('tests_design_pm_gate_inert.py', 'W1', '.update(status=' + _NAME + ')'),
+            ('design_views.py', 'F2',
+             "'" + 'pm_approved' + "_at': now, '" + 'pm_approved' + "_by': profile}"),
+        }, hits)
+        # And nothing beyond them: one hit per allowed write, no extras hiding in the list.
+        self.assertEqual(len(hits), len(found), hits)
 
     def test_03_the_patterns_catch_every_write_shape(self):
         """Each pattern fires on a synthetic write of the shape it names. The samples are

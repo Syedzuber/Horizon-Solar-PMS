@@ -550,10 +550,16 @@ def _spread(values):
 def _failure_rows(data):
     """Every recorded failure category in scope, as (group, category, designer, source).
 
-    ONE PLACE THE FOUR CATEGORY FIELDS ARE READ. There are four: the QC and Head fields on
-    DesignAttempt (a failed package) and the same pair on ArkaSubmission (a rejected Arka
-    version). Any metric that counts failures reads this list, so a metric cannot
-    accidentally count packages and forget Arkas, or vice versa.
+    ONE PLACE THE FIVE CATEGORY FIELDS ARE READ. The QC and Head fields on DesignAttempt (a
+    failed package) and the same pair on ArkaSubmission (a rejected Arka version), plus
+    DesignAttempt.pm_rejection_category — the Head's classification of a package the PM
+    rejected after both gates passed. Any metric that counts failures reads this list, so a
+    metric cannot accidentally count packages and forget Arkas, or vice versa.
+
+    THE PM SOURCE IS A THIRD TUPLE AND CHANGES NOTHING THE FIRST TWO REPORT: same loop, same
+    order, same condition, and the field is blank on every row until prompt 3.1b-2b writes
+    it. It is labelled 'PM' rather than reusing 'Design Head' because the Head did not catch
+    that error — the PM did — and head_failure_category cannot hold it for the same reason.
 
     The group comes from error_category_group() on every row without exception.
     """
@@ -561,7 +567,8 @@ def _failure_rows(data):
     for t in data['attempts']:
         designer = data['assignment_by_id'][t.assignment_id].assigned_to
         for category, gate in ((t.qc_failure_category, 'Design QC'),
-                               (t.head_failure_category, 'Design Head')):
+                               (t.head_failure_category, 'Design Head'),
+                               (t.pm_rejection_category, 'PM')):
             if not category:
                 continue
             rows.append({
