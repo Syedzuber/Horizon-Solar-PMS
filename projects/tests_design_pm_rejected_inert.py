@@ -115,6 +115,14 @@ _ALLOWED = {
     (_THIS_FILE, 'S1', '.update(status=' + _STATUS + ')'),
     (_THIS_FILE, 'F1', 'pm_rejection' + '_category=category, ' + 'pm_rejection' + '_remarks=remarks'),
     (_THIS_FILE, 'R3', 'reason=' + _REASON + ','),
+    # PROMPT 3.1b-2b IS THE AUTHORITY FOR THESE THREE: design_head_send_back() writes the
+    # Head's classification onto attempt N and opens attempt N+1 with the reason. Behind a
+    # pm_rejected guard, so they reach nothing while the STATUS proof above holds — and the
+    # status is still written by the fixture alone: the S patterns gained nothing here.
+    # This module retires after 3.1b-2c (§D24) rather than being amended a fourth time.
+    ('design_views.py', 'F1', 'attempt.' + 'pm_rejection' + '_category = category'),
+    ('design_views.py', 'F1', 'attempt.' + 'pm_rejection' + '_remarks = remarks'),
+    ('design_views.py', 'R2', '_open_next_attempt( locked, ' + _REASON),
 }
 
 

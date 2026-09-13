@@ -123,7 +123,11 @@ class InertnessTests(TestCase):
     def test_01_the_status_is_still_written_by_the_fixture_alone(self):
         status_hits = [h for h in find_pm_gate_writes() if h[1].startswith('W')]
         self.assertEqual([(rel, pid) for rel, pid, _ in status_hits],
-                         [('tests_design_pm_gate_inert.py', 'W1')], status_hits)
+                         [# PROMPT 3.1b-2b — design_head_return_to_pm(), which requires
+                          # pm_rejected, and nothing writes that (both halves asserted in
+                          # tests_design_head_rejection_inert). Walk order: sorted names.
+                          ('design_views.py', 'W3'),
+                          ('tests_design_pm_gate_inert.py', 'W1')], status_hits)
 
     def test_02_the_stamps_are_written_by_the_approve_view_alone(self):
         stamp_hits = [h for h in find_pm_gate_writes() if h[1].startswith('F')]
@@ -137,7 +141,10 @@ class InertnessTests(TestCase):
         """Every pre-existing caller of the chokepoint is unchanged: none passes
         reason_code or remark, so each still writes '' and '' exactly as before."""
         self.assertEqual(_apply_design_status_callers_passing(('reason_code', 'remark')),
-                         {'design_pm_approve': 1, 'design_pm_reject': 1})
+                         {'design_pm_approve': 1, 'design_pm_reject': 1,
+                          # PROMPT 3.1b-2b — the Head's return to the PM names its own
+                          # reason (REASON_DESIGN_HEAD_RETURNED_TO_PM) and a mandatory remark.
+                          'design_head_return_to_pm': 1})
 
     def test_04_the_new_arguments_default_to_what_was_written_before(self):
         params = inspect.signature(design_views.apply_design_status).parameters

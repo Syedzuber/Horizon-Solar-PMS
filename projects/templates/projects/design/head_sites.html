@@ -109,7 +109,20 @@ page, and any markup named inside it becomes real elements.
                     placed by {{ row.assignment.survey_returned_by.user.get_full_name }}
                   </div>
                 </div>
-              {% endif %}
+              {% endif %}{% if row.pm_rejected %}
+                {% comment %}
+                PROMPT 3.1b-2b (§D14). The PM's own words, from the ledger row their rejection
+                wrote — read by latest_design_transition() in the view's one query. Opened
+                inline on the closing tag above so that a screen with no rejected row renders
+                byte-for-byte as it did before.
+                {% endcomment %}
+                <div class="small text-dark mt-1">
+                  <i class="bi bi-arrow-return-left me-1"></i>{{ row.pm_rejection_remark|default:"No remark recorded." }}
+                  <div class="text-muted" style="font-size:.7rem;">
+                    rejected by the PM{% if row.pm_rejected_at %} on {{ row.pm_rejected_at|date:"d M Y H:i" }}{% endif %}
+                    — return it to the PM, or send it back to the designer
+                  </div>
+                </div>{% endif %}
             </td>
             <td class="small">
               {% if row.assignment.assigned_to %}
@@ -212,7 +225,10 @@ page, and any markup named inside it becomes real elements.
               {% if row.current_due and not row.clock_stopped %}
                 <button class="btn btn-sm btn-outline-warning" type="button"
                         data-bs-toggle="collapse" data-bs-target="#ch{{ row.site.pk }}">Change date</button>
-              {% endif %}
+              {% endif %}{% if row.pm_rejected %}
+                {# PROMPT 3.1b-2b — the Head's two answers to a PM rejection are on the package screen. #}
+                <a href="{% url 'design_qc_review' project_id=row.site.project_id %}"
+                   class="btn btn-sm btn-warning">Review PM rejection</a>{% endif %}
             </td>
           </tr>
 

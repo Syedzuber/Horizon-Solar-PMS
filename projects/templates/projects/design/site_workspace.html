@@ -28,21 +28,35 @@ Arka is approved is a convenience; design_artifact_upload() refuses the POST reg
       ({{ project.program.short_tender_code }}){% endif %}
     </div>
   </div>
-  <a href="{% url 'design_my_sites' %}" class="btn btn-sm btn-outline-secondary">
+  {% if pm_reviewing %}<a href="{% url 'design_pm_approval_queue' %}" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>Design approvals
+  </a>{% else %}<a href="{% url 'design_my_sites' %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>My sites
-  </a>
+  </a>{% endif %}
 </div>
 
 {% include "projects/design/_design_status_chips.html" %}
 
-{% if not is_designer %}
+{% if not is_designer %}{% if pm_reviewing %}
+  {% comment %}
+  PROMPT 3.1b-2b (§D10). The site's PM, reading the design to approve or reject it. Their
+  verdict is on their own queue and deliberately not repeated here; the Design Head's text
+  below is unchanged, byte for byte.
+  {% endcomment %}
+  <div class="alert alert-secondary py-2 small">
+    You are reviewing this design as the site's Project Manager. The actions below belong to
+    the allocated designer{% if assignment.assigned_to %}
+    ({{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}){% endif %};
+    approve or reject the design on your
+    <a href="{% url 'design_pm_approval_queue' %}">Design approvals</a> screen.
+  </div>{% else %}
   <div class="alert alert-secondary py-2 small">
     You are viewing this as Design Head. The actions below belong to the allocated
     designer{% if assignment.assigned_to %}
     ({{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}){% endif %};
     approve or reject the Arka on the
     <a href="{% url 'design_head_review' project_id=project.project_id %}">review screen</a>.
-  </div>
+  </div>{% endif %}
 {% endif %}
 
 {% comment %}

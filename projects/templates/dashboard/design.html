@@ -203,7 +203,19 @@ how much of it is his.
         <div class="design-stat-num {% if head_counts.awaiting_head_qc %}text-warning{% else %}text-muted{% endif %}">
           {{ head_counts.awaiting_head_qc }}</div>
         <div class="small text-muted">Packages awaiting <strong>you</strong></div>
-      </div>
+      </div>{% if head_counts.pm_rejected %}
+      {% comment %}
+      PROMPT 3.1b-2b (§D14) — packages the PM rejected, back with the Head. Separate from
+      "Packages awaiting you" above, which counts awaiting_head_qc alone, so no package is in
+      both tiles. Shown only when there is one: an exception state, not a stage, and opened
+      inline on the closing tag above so that the strip with none is byte-for-byte unchanged.
+      Acted on from the tender's site list, not from the review queue.
+      {% endcomment %}
+      <div class="col-6 col-lg-2">
+        <div class="design-stat-num text-danger">
+          {{ head_counts.pm_rejected }}</div>
+        <div class="small text-muted">Rejected by the <strong>PM</strong> — on the tender's site list</div>
+      </div>{% endif %}
     </div>
     {% comment %}
     Tenders linked directly rather than through the Programs nav entry: program_list is

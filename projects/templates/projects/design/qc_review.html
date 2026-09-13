@@ -271,12 +271,13 @@ Head, and release happens at design_head_qc_pass. The button labels say so, beca
 reviewer who thinks they have released a site and has not is the one mistake this screen
 must not allow.
 {% endcomment %}
-{% if can_qc or can_head_verdict or blocked_by_own_qc_verdict %}
+{% if can_qc or can_head_verdict or blocked_by_own_qc_verdict or can_resolve_pm_rejection %}
 <div class="card shadow-sm mb-3">
   <div class="card-header bg-white py-2 fw-semibold small d-flex justify-content-between">
     <span>Review decision</span>
     {% if can_verdict or can_start_qc %}<span class="badge bg-primary-subtle text-primary-emphasis">Gate 1 · Design QC</span>
     {% elif can_head_verdict %}<span class="badge bg-info-subtle text-info-emphasis">Gate 2 · Design Head</span>
+    {% elif can_resolve_pm_rejection %}<span class="badge bg-warning-subtle text-warning-emphasis">PM rejection · Design Head</span>
     {% endif %}
   </div>
   <div class="card-body py-3">
@@ -381,6 +382,69 @@ must not allow.
         </div>
       </div>
 
+    {% elif can_resolve_pm_rejection %}
+      {% comment %}
+      PROMPT 3.1b-2b — the PM rejected a package both review gates had passed, and it is back
+      with the Design Head. Two answers and only two. He disagrees: it returns to the PM
+      unchanged, and nothing on the attempt moves. He agrees: it goes back to the designer
+      with his classification of whose fault it was, recorded on this attempt beside — never
+      over — his own pass. The PM's remark is on the tender's sites screen (§D25): this
+      screen's view carries one flag for this card and nothing else.
+      {% endcomment %}
+      <div class="small mb-3">
+        The site's PM rejected attempt {{ attempt.attempt_number }} after both review gates had
+        passed it. The Design QC and Design Head verdicts on it stand whichever you choose.
+        {% if project.program %}The PM's remark is on the
+        <a href="{% url 'design_head_sites' pk=project.program_id %}">tender's sites screen</a>.{% endif %}
+      </div>
+      <div class="row g-3">
+        <div class="col-md-4">
+          <form method="post" action="{% url 'design_head_return_to_pm' project_id=project.project_id %}">
+            {% csrf_token %}
+            <label for="pmr_return_remark" class="form-label small mb-1">
+              Why the package stands <span class="text-danger">*</span>
+            </label>
+            <textarea name="remark" id="pmr_return_remark" rows="2" required
+                      class="form-control form-control-sm"
+                      placeholder="Why you disagree with the PM"></textarea>
+            <button class="btn btn-sm btn-outline-primary mt-2">Return to the PM unchanged</button>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              Nothing on the attempt changes and the designer is not charged. The PM decides again.
+            </div>
+          </form>
+        </div>
+
+        <div class="col-md-8">
+          <form method="post" action="{% url 'design_head_send_back' project_id=project.project_id %}">
+            {% csrf_token %}
+            <div class="row g-2">
+              <div class="col-md-6">
+                {% include "projects/design/_error_category_select.html" with cat_id="pmr_cat" %}
+              </div>
+              <div class="col-md-6">
+                <label for="pmr_remarks" class="form-label small mb-1">
+                  Remarks to the designer <span class="text-danger">*</span>
+                </label>
+                <textarea name="pm_rejection_remarks" id="pmr_remarks" rows="2" required
+                          class="form-control form-control-sm"
+                          placeholder="What has to change, and why"></textarea>
+                <div class="text-muted mt-1" style="font-size:.7rem;">
+                  The designer sees this. Your Design Head pass on this attempt is not changed.
+                </div>
+              </div>
+              <div class="col-12">
+                {% include "projects/design/_redo_scope.html" with scope_id="pmr_redo" %}
+              </div>
+            </div>
+            <button class="btn btn-sm btn-outline-danger mt-2">Send back to the designer</button>
+            <div class="text-muted mt-1" style="font-size:.7rem;">
+              Opens a new attempt. The agreed due date moves out by the days since you passed
+              the package, so the designer is not overdue for the time it spent with the PM.
+            </div>
+          </form>
+        </div>
+      </div>
+
     {% elif blocked_by_own_qc_verdict %}
       <div class="alert alert-warning small mb-0 py-2">
         <strong>You passed attempt {{ attempt.attempt_number }} through Design QC yourself.</strong>
@@ -409,6 +473,16 @@ must not allow.
       </div>
     {% elif released %}
       <div class="small text-muted">This site is released — both gates are complete.</div>
+    {% elif status == 'awaiting_pm_approval' %}
+      <div class="small text-muted">
+        Both review gates passed this package. It is with the site's PM for approval before
+        release — there is nothing for Design QC or the Design Head to do here.
+      </div>
+    {% elif status == 'pm_rejected' %}
+      <div class="small text-muted">
+        The site's PM rejected this package after both review gates passed it. It is back with
+        the Design Head, who returns it to the PM or sends it back to the designer.
+      </div>
     {% else %}
       <div class="small text-muted">
         Nothing to review yet. Design QC starts once the package is complete
@@ -428,7 +502,7 @@ must not allow.
   <a href="{% url 'design_site_workspace' project_id=project.project_id %}">design workspace</a>.
 </div>
 
-{% if can_verdict or can_head_verdict %}
+{% if can_verdict or can_head_verdict or can_resolve_pm_rejection %}
 {{ redo_defaults_json|json_script:"redoDefaults" }}
 <script>
 /*

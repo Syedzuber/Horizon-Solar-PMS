@@ -18,6 +18,7 @@ from here.
 """
 import json
 import logging
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from urllib.parse import urlparse
 
@@ -25,7 +26,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Max, Q, Sum
+from django.db.models import Count, Max, OuterRef, Q, Subquery, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -81,6 +82,11 @@ from .models import (
     DESIGN_CLOCK_STOPPED_STATUSES,
     # Prompt 3.1b-1 — the ledger reasons for the PM's two verdicts.
     REASON_DESIGN_PM_APPROVED, REASON_DESIGN_PM_REJECTED,
+    # Prompt 3.1b-2b — the Head's answers to a PM rejection: the ledger reason for
+    # returning it to the PM, the attempt reason for sending it back to the designer, and
+    # the ledger itself, read back by latest_design_transition().
+    REASON_DESIGN_HEAD_RETURNED_TO_PM, ATTEMPT_REASON_PM_REJECTED,
+    StatusTransition, SUBJECT_DESIGN_ASSIGNMENT,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
     QC_PENDING, QC_PASSED, QC_FAILED,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
@@ -980,6 +986,33 @@ def apply_design_status(assignment, new_status, actor, detail, action_code,
     return from_status
 
 
+def latest_design_transition(field, outer_ref='pk', **match):
+    """A Subquery: `field` of the most recent StatusTransition on a DesignAssignment that
+    matches `**match`, correlated to the outer query's `outer_ref`.
+
+    THE LEDGER, READ BACK — and read the only way a list screen may: as an annotation on
+    the query it already runs, so a screen of 86 rows is still ONE query, never 87. Do not
+    call this per row. `outer_ref` is the ORM path from the outer model to the
+    DesignAssignment's pk: 'pk' when annotating DesignAssignment itself,
+    'design_assignment__pk' when annotating Project.
+
+    Served by sttrans_subject_idx (subject_type, subject_id, occurred_at). `-pk` breaks a
+    tie between two rows written in the same instant.
+
+    TWO CONSUMERS:
+      1. design_head_sites — the PM's rejection remark and time (prompt 3.1b-2b).
+      2. §D18, not built — the status a Design Hold was taken FROM (field='from_status',
+         to_status=DESIGN_SURVEY_RETURNED), so that clearing a hold can restore it instead
+         of deriving `in_design`. Reuse this for that; do not write a second reader.
+    """
+    return Subquery(
+        StatusTransition.objects
+        .filter(subject_type=SUBJECT_DESIGN_ASSIGNMENT, subject_id=OuterRef(outer_ref),
+                **match)
+        .order_by('-occurred_at', '-pk')
+        .values(field)[:1])
+
+
 # ---------------------------------------------------------------------------
 # Screens
 # ---------------------------------------------------------------------------
@@ -999,6 +1032,15 @@ def design_head_sites(request, pk):
              # reviewer. Prefetched rather than reached through _current_attempt() in the
              # loop, which runs its own query per site.
              .prefetch_related('design_assignment__attempts')
+             # PROMPT 3.1b-2b — the PM's latest rejection, read off the ledger IN THIS
+             # QUERY: two correlated subqueries on the same SELECT, no query per row.
+             .annotate(
+                 pm_rejection_remark=latest_design_transition(
+                     'remark', 'design_assignment__pk',
+                     reason_code=REASON_DESIGN_PM_REJECTED),
+                 pm_rejected_at=latest_design_transition(
+                     'occurred_at', 'design_assignment__pk',
+                     reason_code=REASON_DESIGN_PM_REJECTED))
              .order_by('project_id'))
 
     # ONE query for the whole screen, evaluated once with list(). The per-row designer
@@ -1054,6 +1096,14 @@ def design_head_sites(request, pk):
             # `design_work_finished` to what it means.
             'clock_stopped': bool(
                 assignment and assignment.status in DESIGN_CLOCK_STOPPED_STATUSES),
+            # PROMPT 3.1b-2b (§D14) — the row's flag, the PM's words and the Review link
+            # they drive ship together; the Head's two actions are behind that link, on
+            # design_qc_review. The two annotations are the LATEST PM rejection on the
+            # ledger and are shown only while the row is still pm_rejected — an earlier
+            # rejection the Head has already answered is history, not the question.
+            'pm_rejected':   bool(assignment and assignment.status == DESIGN_PM_REJECTED),
+            'pm_rejection_remark': site.pm_rejection_remark,
+            'pm_rejected_at': site.pm_rejected_at,
             'allocatable':   bool(assignment and assignment.survey_ready
                                   and assignment.status in REALLOCATABLE_STATUSES),
             # Session B — the SECOND visibility condition for the allocation block, and
@@ -2618,6 +2668,10 @@ def design_site_workspace(request, project_id):
     ctx = _workspace_context(project, assignment)
     ctx.update({
         'is_designer':  is_designer,
+        # PROMPT 3.1b-2b (§D10) — the banner and the back link tell the site's PM the truth.
+        # Passed, not re-derived: a status test alone would show the PM's text to the Design
+        # Head at the same status, since he opens this screen too.
+        'pm_reviewing': pm_reviewing,
         # Part 4: the designer reads the QC verdict, the QC remarks and any PM change
         # request off the shared attempt-history partial, so they see the same record of
         # what happened as the Head does on the QC screen.
@@ -4207,6 +4261,257 @@ def design_pm_reject(request, project_id):
 
 
 # ---------------------------------------------------------------------------
+# 12c. The Design Head's answer to a PM rejection (prompt 3.1b-2b)
+#
+# INERT UNTIL PROMPT 3.1b-2c. Both views require `pm_rejected`, and nothing writes that
+# status until 2c retargets design_pm_reject(). tests_design_head_rejection_inert.py proves
+# the chain in both halves: nothing writes pm_rejected, and the one writer of
+# awaiting_pm_approval below refuses every other status.
+#
+# AUTHORITY, ORDER AND REFUSALS are _qc_guard()'s at the head gate: the Design Head or his
+# deputy, never the site's own designer; a 403 that reveals nothing first, then the method,
+# then the status as a message and a redirect — never a 500, never a blank page. The two
+# forms are on design_qc_review, and every refusal lands back there.
+# ---------------------------------------------------------------------------
+
+def _lock_pm_rejected(assignment):
+    """Re-read the row under a row lock and return it if it is STILL pm_rejected, else None.
+
+    The Head and his deputy hold the same authority here. Two clicks at once would
+    otherwise both pass _qc_guard() on a stale copy and act twice. The caller owns the
+    atomic block — the same shape as _lock_parked() at the PM's gate.
+    """
+    locked = DesignAssignment.objects.select_for_update().get(pk=assignment.pk)
+    if locked.status != DESIGN_PM_REJECTED:
+        return None
+    return locked
+
+
+def _extend_due_date_for_pm_review(assignment, attempt, actor):
+    """§D15, decision (c): move the agreed date out by the WHOLE DAYS since attempt N's
+    head_reviewed_at, so a reopened attempt is not overdue for the PM's timing.
+
+    WHY THAT SPAN. is_overdue() stops the designer's clock at the Head's pass —
+    `awaiting_pm_approval` and `pm_rejected` are both clock-stopped — and the send-back
+    starts it again. The span between is exactly the time the package spent with the PM and
+    back with the Head. Moving the date by it gives the designer back the margin they had
+    when the Head passed the package, no more and no less: a designer who was already late
+    at that moment is still late by the same amount.
+
+    THE SAME WRITE design_due_date_change() MAKES: the current row stood down, a new row
+    approved on creation, with a change_reason that says why. Never an in-place edit. The
+    caller has already refused an open extension request, so the row stood down here is
+    the approved one.
+
+    TWO KNOWN COSTS, recorded and deliberately not special-cased
+    (EXECUTION_MODULE_DEFERRED.md §D23):
+      * The new row IS a revision. `revisions` (rows - 1) goes up by one, on the Head's
+        sites screen and in attention_list()'s "revised >= 3 times" band, so a site the PM
+        has rejected more than once reads as a designer who keeps needing more time.
+      * A null head_reviewed_at adds nothing — see that branch below.
+
+    Returns (old_date, new_date, days), or None when nothing was written.
+    """
+    agreed = _effective_commitment(assignment)
+    if agreed is None:
+        # No agreed date was ever set: nothing to move, and nothing to be overdue against.
+        return None
+    if attempt.head_reviewed_at is None:
+        # KNOWN COST, NOT A BUG. With no Head-pass time there is no span to measure, so
+        # nothing is added and the reopened attempt may be overdue on arrival. A package
+        # reaches the PM only through the Head's pass, which stamps head_reviewed_at, so
+        # this is a row written some other way (a fixture, a backfill). Inventing a span
+        # would be a date nobody agreed to.
+        return None
+    days = (timezone.localdate() - timezone.localtime(attempt.head_reviewed_at).date()).days
+    if days <= 0:
+        # Sent back the same day the Head passed it: no time was lost, and a revision row
+        # moving the date by nothing would still count as a revision.
+        return None
+
+    new_date = agreed.proposed_date + timedelta(days=days)
+    # Stand the current row down BEFORE inserting — the partial unique constraint permits
+    # one is_current row per assignment. It keeps its approved_at, so the history of what
+    # was agreed and when stays intact.
+    assignment.due_date_commitments.filter(is_current=True).update(is_current=False)
+    DueDateCommitment.objects.create(
+        assignment=assignment, proposed_date=new_date, proposed_by=actor,
+        approved_by=actor, approved_at=timezone.now(), is_current=True,
+        change_reason=(f'Moved out {days} day(s): the time the package spent with the PM '
+                       f'and the Design Head after attempt {attempt.attempt_number} passed '
+                       f'review, before the PM rejection was sent back to the designer.'))
+    log_activity(assignment.project, actor,
+                 f'Agreed due date moved from {agreed.proposed_date} to {new_date} — '
+                 f'{days} day(s) with the PM and the Design Head',
+                 entity_type='DesignAssignment', entity_id=assignment.pk,
+                 action_code='design_due_date_extended_pm_review')
+    return agreed.proposed_date, new_date, days
+
+
+@login_required
+def design_head_return_to_pm(request, project_id):
+    """The Design Head OVERRULES the PM: `pm_rejected` -> `awaiting_pm_approval`.
+
+    THIS IS THE HEAD DISAGREEING WITH THE PM, AND THE PACKAGE RETURNS UNCHANGED. It writes
+    NOTHING to the attempt — no category, no remarks, no redo, no head_* field, no new
+    attempt. On the Head's reading the designer did nothing wrong, so nothing is charged and
+    nothing reopens; the same package goes back in front of the same PM.
+
+    The Head's reason therefore has one home: this transition's ledger row, carrying
+    REASON_DESIGN_HEAD_RETURNED_TO_PM. The remark is MANDATORY and enforced here, since R-9
+    is not enforced centrally for design rows (§D12); a blank one is refused before the
+    transaction opens. Nothing shows it to the PM yet — the PM's queue is prompt 3.1b-2c's,
+    which must read it back with latest_design_transition() (§D22).
+
+    released_at and the PM approval stamps are untouched: the PM has approved nothing.
+    """
+    project = _opex_site(project_id)
+    assignment, _attempt, error = _qc_guard(request, project, (DESIGN_PM_REJECTED,),
+                                            gate='head')
+    if error is None:
+        return HttpResponseForbidden(_GATE_FORBIDDEN['head'])
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    remark = (request.POST.get('remark') or '').strip()
+    if not remark:
+        messages.error(request, f'{project.project_id}: a remark is required to return a '
+                                f'design to the PM — the PM rejected it, and needs to read '
+                                f'why you disagree.')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    profile = request.user.profile
+    with transaction.atomic():
+        locked = _lock_pm_rejected(assignment)
+        if locked is None:
+            messages.error(request, f'{project.project_id}: this design is no longer '
+                                    f'waiting for your answer to a PM rejection.')
+            return redirect('design_qc_review', project_id=project.project_id)
+        apply_design_status(
+            locked, DESIGN_AWAITING_PM_APPROVAL, profile,
+            f'Design Head returned the design to the PM unchanged: {remark}',
+            'design_head_returned_to_pm',
+            reason_code=REASON_DESIGN_HEAD_RETURNED_TO_PM, remark=remark)
+
+    messages.success(request, f'{project.project_id}: design returned to the PM unchanged, '
+                              f'with your remark.')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+@login_required
+def design_head_send_back(request, project_id):
+    """The Design Head AGREES with the PM: the package goes back to the designer.
+
+    `pm_rejected` -> a new attempt, opened by _open_next_attempt() — at `in_design` when
+    the redo scope includes the Arka, at `arka_submitted` when the Arka is carried forward
+    (it is approved at both gates, so it carries with its verdicts).
+
+    THE HEAD CLASSIFIES WHOSE FAULT IT WAS, ON ATTEMPT N — pm_rejection_category,
+    pm_rejection_remarks and redo_required — exactly as a gate failure is recorded on the
+    attempt that failed. The category decides whose rework attempt N+1 is
+    (classify_attempt_causes): Group A charges the designer, Groups B and C do not.
+
+    IT NEVER TOUCHES head_verdict, head_failure_category OR head_remarks. Attempt N carries
+    head_verdict='passed' and keeps it: the Head did pass this package and the PM caught
+    something he did not. design_analytics._failure_rows() reads the head fields as errors
+    the HEAD caught, which is why migration 0086 added separate columns.
+
+    CATEGORY AND REMARKS ARE BOTH MANDATORY, BOTH REFUSED HERE BEFORE ANY WRITE. A blank
+    category would read as uncategorised and charge the designer — the opposite of what
+    B-06 fixed. A category with blank remarks is refused by the database
+    (pm_rejection_remarks_required_with_category); refusing it here first means that
+    constraint never reaches the Head as an IntegrityError.
+
+    AN OPEN EXTENSION REQUEST REFUSES THE SEND-BACK (product decision, 13 Sep 2026). The
+    designer can ask for more time while the package is in review, and nothing since has
+    ruled on it. The send-back writes a new agreed date, which would overrule that request
+    without a verdict — so the Head rules on it first, from the Extension button on the
+    tender's sites screen, and then sends back.
+
+    THE DUE DATE MOVES OUT by the time the package spent with the PM and the Head — see
+    _extend_due_date_for_pm_review() for why that span, and its two costs.
+
+    The ledger row for the move is written inside _open_next_attempt(), with no reason_code
+    and no remark: that function takes neither and is shared with three live paths, so it
+    is called here and not edited. Its from_status (`pm_rejected`) identifies the row; the
+    Head's words are on attempt N.
+    """
+    project = _opex_site(project_id)
+    assignment, attempt, error = _qc_guard(request, project, (DESIGN_PM_REJECTED,),
+                                           gate='head')
+    if error is None:
+        return HttpResponseForbidden(_GATE_FORBIDDEN['head'])
+    if request.method != 'POST':
+        return redirect('design_qc_review', project_id=project.project_id)
+    if error:
+        messages.error(request, error)
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    def _back(msg):
+        messages.error(request, f'{project.project_id}: {msg}')
+        return redirect('design_qc_review', project_id=project.project_id)
+
+    if attempt is None:
+        return _back('this site has no design attempt to send back.')
+
+    remarks = (request.POST.get('pm_rejection_remarks') or '').strip()
+    if not remarks:
+        return _back('remarks are required to send a design back — the designer cannot act '
+                     'on "the PM rejected it" alone.')
+
+    category, cat_error = _posted_error_category(request)
+    if cat_error:
+        return _back(f'{cat_error}.')
+
+    redo, redo_error = _posted_redo_scope(request, attempt)
+    if redo_error:
+        return _back(f'{redo_error}.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        locked = _lock_pm_rejected(assignment)
+        if locked is None:
+            return _back('this design is no longer waiting for your answer to a PM rejection.')
+        # UNDER THE LOCK, so the answer cannot change between this check and the date write.
+        pending = _pending_extension(locked)
+        if pending is not None:
+            return _back(f'the designer\'s extension request to {pending.proposed_date} is '
+                         f'still open. Approve or reject it from the Extension button on the '
+                         f'tender\'s sites screen first — sending the design back moves the '
+                         f'due date, and would overrule that request without a verdict.')
+
+        attempt.pm_rejection_category = category
+        attempt.pm_rejection_remarks = remarks
+        attempt.redo_required = sorted(redo)
+        attempt.save(update_fields=['pm_rejection_category', 'pm_rejection_remarks',
+                                    'redo_required'])
+        log_activity(project, profile,
+                     f'Design Head sent the PM rejection of attempt {attempt.attempt_number} '
+                     f'back to the designer '
+                     f'[{DESIGN_ERROR_CATEGORY_LABELS.get(category, category)}] '
+                     f'— redo: {", ".join(sorted(redo))}: {remarks}',
+                     entity_type='DesignAttempt', entity_id=attempt.pk,
+                     action_code='design_head_sent_back_to_designer')
+
+        moved = _extend_due_date_for_pm_review(locked, attempt, profile)
+
+        new_attempt = _open_next_attempt(
+            locked, ATTEMPT_REASON_PM_REJECTED, profile,
+            f'Design Head sent the PM rejection of attempt {attempt.attempt_number} back '
+            f'to the designer', redo=redo)
+
+    date_note = (f' The due date moved from {moved[0]:%d %b %Y} to {moved[1]:%d %b %Y}.'
+                 if moved else '')
+    messages.success(request, f'{project.project_id}: sent back to the designer — attempt '
+                              f'{new_attempt.attempt_number} opened to redo '
+                              f'{_redo_phrase(redo)}.{date_note}')
+    return redirect('design_qc_review', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
 # 13. PM change requests
 # ---------------------------------------------------------------------------
 
@@ -4675,6 +4980,11 @@ def design_qc_queue(request):
         })
 
     # ── Packages: awaiting gate 1, in gate 1, or awaiting gate 2 ──────────────
+    # `pm_rejected` IS DELIBERATELY NOT IN THIS TUPLE (prompt 3.1b-2b, §D14). It is not a
+    # review: both gates have passed, and the Head's answer — return to the PM, or send back
+    # to the designer — lives on design_qc_review, reached from design_head_sites. Added
+    # here, it would make `can_qc` below True for a QC reviewer on a package that is not
+    # theirs to judge.
     assignments = (DesignAssignment.objects
                    .filter(scope,
                            status__in=(DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC,
@@ -4764,6 +5074,11 @@ def design_qc_review(request, project_id):
         # Why the gate-2 form is absent, when it is absent for this reason and not
         # because of the status. An empty screen explains nothing.
         'blocked_by_own_qc_verdict': can_head_gate and awaiting_head and own_qc_verdict,
+        # PROMPT 3.1b-2b — the Design Head's two answers to a PM rejection: return it to the
+        # PM unchanged, or send it back to the designer. Gate-2 authority, so the assigned
+        # designer is refused even when they hold Head authority; both endpoints re-check it
+        # through _qc_guard(). Set here, never derived in the template (R-13).
+        'can_resolve_pm_rejection': can_head_gate and assignment.status == DESIGN_PM_REJECTED,
         'awaiting_head': awaiting_head,
         'is_self_qc':    user_is_assigned_designer(request.user, assignment),
         # Part 4.6 — drives the triage buttons on the pending-change-request banner.
@@ -5010,6 +5325,11 @@ def design_head_dashboard_counts(user):
         'awaiting_head_qc':    base.filter(status=DESIGN_AWAITING_HEAD_QC).count(),
         'awaiting_qc':         base.filter(status=DESIGN_ARTIFACTS_UPLOADED).count(),
         'in_qc':               base.filter(status=DESIGN_IN_QC).count(),
+        # PROMPT 3.1b-2b (§D14) — packages the PM rejected, back with the Head. A number of
+        # its own, NOT folded into awaiting_head_qc: that tile's worklist is the review
+        # queue, which deliberately does not carry these, so a folded count would promise
+        # rows the queue cannot show. The Head acts on them from design_head_sites.
+        'pm_rejected':         base.filter(status=DESIGN_PM_REJECTED).count(),
         'programs':            list(Program.objects.filter(is_deleted=False,
                                                            program_type='OPEX')
                                     .order_by('name')),

@@ -1876,6 +1876,12 @@ REASON_MIRROR_DERIVED     = 'mirror_derived'
 # the reason stated above: reason_code carries no choices=.
 REASON_DESIGN_PM_APPROVED = 'pm_approved'         # awaiting_pm_approval -> released
 REASON_DESIGN_PM_REJECTED = 'pm_rejected'         # awaiting_pm_approval -> awaiting_head_qc
+# Prompt 3.1b-2b. The Design Head OVERRULES a PM rejection and returns the package to the PM
+# unchanged. Its own value, never REASON_DESIGN_PM_APPROVED or a reused one: a ledger reader
+# must be able to count the Head disagreeing with the PM. The send-back to the designer has
+# no reason of its own here — it opens an attempt, and _open_next_attempt() writes that row.
+# No migration, for the reason stated above: reason_code carries no choices=.
+REASON_DESIGN_HEAD_RETURNED_TO_PM = 'head_returned_to_pm'   # pm_rejected -> awaiting_pm_approval
 
 # Written into actor_role_code when no human performed the change. The Zoho
 # webhook creates projects with created_by=None and no request user at all;

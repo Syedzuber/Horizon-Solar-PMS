@@ -99,6 +99,12 @@ _ALLOWED = {
     # stamp fields in the same write as the release. Stamps only: the STATUS is still
     # written by the fixture above and nothing else. Assembled from pieces like the rest.
     ('design_views.py', "'" + 'pm_approved' + "_at': now, '" + 'pm_approved' + "_by': profile}"),
+    # PROMPT 3.1b-2b IS THE AUTHORITY FOR THIS ONE — the third amendment, and the proof is
+    # now a CHAIN. design_head_return_to_pm() writes the status, and requires pm_rejected
+    # first; nothing writes pm_rejected (tests_design_pm_rejected_inert). Both halves are
+    # asserted in tests_design_head_rejection_inert. This module retires after 3.1b-2c
+    # (EXECUTION_MODULE_DEFERRED.md §D24) rather than being amended a fourth time.
+    ('design_views.py', 'apply_design_status( locked, ' + _NAME),
 }
 
 
@@ -167,6 +173,8 @@ class InertnessTests(TestCase):
             ('tests_design_pm_gate_inert.py', 'W1', '.update(status=' + _NAME + ')'),
             ('design_views.py', 'F2',
              "'" + 'pm_approved' + "_at': now, '" + 'pm_approved' + "_by': profile}"),
+            # Prompt 3.1b-2b — design_head_return_to_pm(), behind a pm_rejected guard.
+            ('design_views.py', 'W3', 'apply_design_status( locked, ' + _NAME),
         }, hits)
         # And nothing beyond them: one hit per allowed write, no extras hiding in the list.
         self.assertEqual(len(hits), len(found), hits)

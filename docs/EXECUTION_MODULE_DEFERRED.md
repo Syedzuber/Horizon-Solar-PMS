@@ -1623,7 +1623,16 @@ every rework and first-pass figure are prompt 3.1-ACC's.
 From the first commit that writes the status, every Head-passed site shows up as live
 designer load and drops out of the denominators.
 
-### D2 — `qc_review.html` would tell a reviewer "Nothing to review yet" about a design with the PM
+### ~~D2 — `qc_review.html` would tell a reviewer "Nothing to review yet" about a design with the PM~~ — **CLOSED by prompt 3.1b-2b**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2b
+
+The actions card's chain gained two branches ahead of its fall-through, read off the
+`status` the shared workspace context already carries. At `awaiting_pm_approval` it says
+both gates passed and the package is with the site's PM. At `pm_rejected` it says the PM
+rejected it and it is back with the Design Head. The Head's own card at `pm_rejected` is
+the two actions (§D14). Pinned by `tests_design_head_rejection_inert` `ScreenTests`. The
+original entry follows.
 
 Recorded by prompt 3.1a, where `qc_review.html` was out of scope.
 
@@ -1764,7 +1773,16 @@ Recorded by prompt 3.1b-1 (its D-b).
 - **Nothing in 3.1b-1 depends on the answer.** Its reject view writes only the status and
   the ledger row.
 
-### D10 — BLOCKS 3.1b-2: the design workspace tells a PM they are the Design Head
+### ~~D10 — BLOCKS 3.1b-2: the design workspace tells a PM they are the Design Head~~ — **CLOSED by prompt 3.1b-2b**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2b
+
+`design_site_workspace` now passes the `pm_reviewing` flag it already computed. A status
+test alone would have shown the PM's text to the Design Head at the same status. The PM
+gets a banner naming them as the site's Project Manager, pointing to their Design approvals
+queue, and a back link to that queue instead of the always-empty "My sites". The Head's
+banner and link are byte-identical. The PM's verdict controls stay on the queue only, as
+3.1b-1 decided. The original entry follows.
 
 Recorded by prompt 3.1b-1 (its D-c). `site_workspace.html` was outside its MODE.
 
@@ -1884,7 +1902,29 @@ does not belong in a schema commit.
   - **Not answered here:** §D17's "does current load mean the designer holds it" question,
     which named D13 as its moment. `designer_workload` was outside the prompt's MODE.
 
-### D14 — HARD REQUIREMENT OF 3.1b-2b: the Head's counts and the QC queue must gain `pm_rejected` rows TOGETHER WITH their actions
+### ~~D14 — HARD REQUIREMENT OF 3.1b-2b: the Head's counts and the QC queue must gain `pm_rejected` rows TOGETHER WITH their actions~~ — **CLOSED by prompt 3.1b-2b**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2b — one commit, rows and actions together
+
+- **The two actions.** `design_head_return_to_pm` and `design_head_send_back` both require
+  `pm_rejected` and gate-2 authority, through `_qc_guard(..., gate='head')`. They sit on
+  `design_qc_review` behind one view flag, `can_resolve_pm_rejection`.
+- **The Head's sites screen.** A `pm_rejected` row shows the PM's latest remark and its
+  time, read from the ledger by `latest_design_transition()` in the screen's one query. It
+  also carries a *Review PM rejection* link to the package screen.
+- **The count.** `design_head_dashboard_counts()['pm_rejected']` is its own tile, shown only
+  when it is non-zero, so no existing strip moves. It is NOT folded into `awaiting_head_qc`,
+  so no package is counted in two tiles and no tile sums them. The tender dashboard's
+  stage count still files `pm_rejected` under `awaiting_head_qc` via `_classify()`; that
+  was the schema prompt's decision and is unchanged.
+- **The QC queue EXCLUDES it.** It is excluded by `design_qc_queue`'s own status tuple,
+  which no other screen reads, so no shared predicate was edited. The trap this entry
+  named (`can_qc` True for a QC reviewer) cannot be reached. The queue carries a comment
+  saying so.
+- **Still open, and visible from 2c:** §D16's `_attempt_history.html` has no branch for a
+  `pm_rejected` attempt. Its readers were outside this MODE.
+
+The original entry follows.
 
 Recorded by the pm_rejected schema prompt (its B9, D-f), 13 Sep 2026. **This is not a
 deferral.**
@@ -1899,7 +1939,27 @@ deferral.**
 - **The requirement.** The Head's count, the queue rows, the row flags and the Head's two
   actions (return to PM, send back to designer) ship in ONE commit, or none of them do.
 
-### D15 — BLOCKS 3.1b-2b's send-back: attempt N+1 reopens against the OLD due date and is overdue on arrival
+### ~~D15 — BLOCKS 3.1b-2b's send-back: attempt N+1 reopens against the OLD due date and is overdue on arrival~~ — **CLOSED by prompt 3.1b-2b, decision (c)**
+
+#### CLOSED 13 Sep 2026 BY PROMPT 3.1b-2b
+
+**The decision (product owner): (c).** The send-back moves the agreed date out by the
+whole days since attempt N's `head_reviewed_at`, as one new approved commitment. This is
+`_extend_due_date_for_pm_review()`, the same write `design_due_date_change` makes. It is
+exactly the span the overdue rule's clock was stopped (`awaiting_pm_approval`, then
+`pm_rejected`), so the designer gets back the margin they had at the Head's pass.
+
+**The candidates that lost:**
+- **(a) clear the date.** No field means "cleared", and `design_due_date_change` refuses a
+  site with no approved date, so nothing could ever date the site again.
+- **(b) keep it.** The designer is charged whenever the Head forgets to move it.
+
+**An open extension request REFUSES the send-back** (product decision, 13 Sep 2026). Such a
+request can be raised at `in_qc` and survives into the PM gate, because nothing stands one
+down. The Head rules on it first from the sites screen's Extension button. Superseding it
+would drop it with no verdict; rejecting it would record a verdict the Head never gave.
+
+**Costs:** see §D23. The original entry follows.
 
 Recorded by the pm_rejected schema prompt (its B9, D-g), 13 Sep 2026.
 
@@ -1998,6 +2058,146 @@ Recorded by the D13 prompt, 13 Sep 2026. Comment-only; no behaviour.
 - They were left untouched because the D13 prompt required both views to stay
   byte-identical apart from the constant. The next session that touches either view
   should update the comment to name the clock-stopped question.
+- **Still true after prompt 3.1b-2b,** whose MODE forbade both views as well.
+
+### D20 — LIVE: the Arka review screen says "waiting on the designer's CAD and BOQ" about a package that is finished
+
+Recorded by prompt 3.1b-2b (its D-j), 13 Sep 2026. `head_review.html`'s verdict card was
+outside its MODE for this.
+
+- **What it says.** For any current Arka with `head_verdict='approved'`, the card's
+  fall-through branch renders *"Nothing to review — waiting on the designer's CAD and
+  BOQ."*
+- **Where it is false.** It is true only at `arka_submitted`, the "artifacts outstanding"
+  state. On a `released` site it is false today, and that status is reachable. From 2c it
+  is also false at `awaiting_pm_approval` and `pm_rejected`.
+- **The fix.** Test the status before the Arka's verdict: at a package-stage status, say
+  where the package is and link to `design_qc_review`.
+
+### D21 — `design_head_sites` makes three queries per row: 26 at 6 rows, 266 at 86
+
+Recorded by prompt 3.1b-2b (its D-k), 13 Sep 2026. Measured on the local dump as praveen:
+SCMPILOT (6 sites) 26 queries; MPUVNL (86 sites) **266**. MPUVNL is the screen nirankar's
+tender renders.
+
+- **The cause.** Three reads per row, each its own query:
+  `_effective_commitment(assignment)`, `_pending_extension(assignment)` and
+  `assignment.due_date_commitments.count()`.
+- **The fix pattern already exists.** It is the one this prompt's ledger read uses: work
+  on the query the screen already runs. Prefetch `due_date_commitments` once and use
+  `design_metrics.effective_commitment(rows)`, `pending_extension(rows)` and `len(rows)`,
+  which are pure functions built for exactly this. Or annotate them as subqueries, the way
+  `latest_design_transition()` does.
+- **Not fixed here (R-12).** `tests_design_head_rejection_inert` (g) pins only that the
+  ledger read adds zero queries, at 5 and at 86 rows. It deliberately does not pin the
+  per-row growth, so the fix will not break it.
+
+### D22 — HARD REQUIREMENT OF 3.1b-2c: the Design Head's return-to-PM remark is stored and read by nothing
+
+Recorded by prompt 3.1b-2b (its D-l), 13 Sep 2026. **This is not a deferral.** It is D14's
+kind of requirement, owed by the session that makes the path reachable.
+
+- **What exists.** `design_head_return_to_pm` requires a remark and writes it, and only it,
+  on the transition's ledger row (`reason_code=REASON_DESIGN_HEAD_RETURNED_TO_PM`). It is
+  the Head's reason for overruling the PM, and it has no other home: the action writes
+  nothing to the attempt.
+- **What reads it.** Nothing. The PM's queue was MAY-NOT in 3.1b-2b.
+- **The requirement.** 2c is already opening `design_pm_approval_queue`. It must annotate
+  the queue with `latest_design_transition('remark', reason_code=
+  REASON_DESIGN_HEAD_RETURNED_TO_PM)` and show it on a row that came back from the Head.
+  The helper is one query for the whole queue. A mandatory remark nobody reads is a form
+  field, not a record.
+
+### D23 — a PM-rejected send-back counts as a due-date revision, and a missing Head-pass time moves nothing
+
+Recorded by prompt 3.1b-2b (its D-m), 13 Sep 2026. These are the two costs of §D15's
+decision (c), stated at the code in `_extend_due_date_for_pm_review()`. **Known, and
+deliberately not special-cased.**
+
+- **The revision.** The moved date is a new commitment row. `revisions` (rows − 1) goes up
+  by one, both on the Head's sites screen and in `attention_list()`'s "Due date revised ≥3
+  times" band. So a site the PM has rejected more than once reads as a designer who keeps
+  needing more time, when the PM caused the returns. A fix would tell the automatic row
+  apart from a requested one, for example by reading its `change_reason` or its
+  `proposed_by`, and that is a decision about what a revision means.
+- **The null branch.** If attempt N has no `head_reviewed_at`, there is no span to measure,
+  so nothing is added and a past date stays past: the site is overdue on arrival. A package
+  reaches the PM only through the Head's pass, which stamps that field, so only a row
+  written another way (a fixture, a backfill) can hit this. Pinned by
+  `tests_design_head_rejection_inert` c3.
+
+### D24 — both PM-gate inertness modules RETIRE after 3.1b-2c; do not amend them a fourth time
+
+Recorded by prompt 3.1b-2b (its D-n), 13 Sep 2026.
+
+- **How far they have been bent.** `tests_design_pm_gate_inert` and
+  `tests_design_pm_rejected_inert` were written to prove "nothing writes this". Each has
+  now been amended three times to admit a writer that is real but unreachable.
+- **What they prove now.** A chain. `pm_rejected` has no product writer. The one product
+  writer of `awaiting_pm_approval` (`design_head_return_to_pm`) refuses every other status.
+  Both halves are asserted in `tests_design_head_rejection_inert` (a): the first by grep,
+  the second by a POST per status in the choices.
+- **A third module pins the same property:** `tests_design_pm_approval` `InertnessTests`
+  (3.1b-1). It needed the same amendment in 3.1b-2b, for the same write.
+- **The three modules are not duplicates, and they earned their keep.** Each amendment was
+  a real new writer, appearing where the previous session had said none could, and each
+  was caught by a failing test rather than by a reader.
+- **After 2c,** the first link breaks by design, and the chain proves nothing. Retire all
+  three modules' absence proofs in 2c in favour of 2c's live-path module. Keep only what
+  still pins a behaviour, not what pins an absence: the declaration tables, the
+  CHECK-constraint tests and the guard-parity tests.
+- **THE SUCCESSOR IS SPECIFIED, NOT PROMISED.** 2c's live-path module inherits the job the
+  retiring ones were doing. It MUST assert that the set of product writers of each gate
+  status is EXACTLY the set of views intended to write it, as a set equality over enclosing
+  function names, parsed (as `_apply_design_status_callers_passing` does), not grepped:
+  - `awaiting_pm_approval` — `design_head_qc_pass` (after 2c's flip) and
+    `design_head_return_to_pm`;
+  - `pm_rejected` — `design_pm_reject` (after 2c's retarget);
+  - `released` — `design_pm_approve` alone.
+
+  A writer added later then fails a test in the session that adds it, which is exactly what
+  the three retiring modules did. Without that assertion, retiring them removes the only
+  thing that has caught these writes.
+
+### D25 — the Head decides on a PM rejection without the PM's words on the screen where he decides
+
+Recorded by prompt 3.1b-2b, 13 Sep 2026, from its own build.
+
+- **Where the remark is.** The PM's rejection remark is on `design_head_sites`' row, read
+  by `latest_design_transition()`. The two actions are on `design_qc_review`, whose view
+  was admitted for ONE flag and nothing else.
+- **What the Head sees there.** The action card says the remark is on the tender's sites
+  screen and links to it. So the Head reads the PM's reason on one screen and answers it
+  on another.
+- **The fix.** One more key on `design_qc_review`: the same helper, annotated on a
+  one-row `DesignAssignment` query.
+
+### D26 — the send-back's own ledger row carries no reason code and no remark
+
+Recorded by prompt 3.1b-2b, 13 Sep 2026.
+
+- **Where the row comes from.** The `pm_rejected` → `in_design` / `arka_submitted` row is
+  written by `_open_next_attempt()` through `apply_design_status()`. That function takes
+  neither a reason code nor a remark, and it is shared with three live paths, so it was
+  called and not edited.
+- **Why it will bite.** The machine record of the most consequential transition in this
+  workflow says only `pm_rejected` → `in_design` (or `arka_submitted`). Nothing on the row
+  says why.
+- **WHERE THE REASON ACTUALLY LIVES — THE REASON WAS CAPTURED, just not on this row.** It
+  is on the DesignAttempt the Head sent back: the one with `assignment` = this row's
+  `subject_id` and `attempt_number` = (the new `current_attempt_number` − 1). Read
+  `pm_rejection_category` (whose rework it is, by group), `pm_rejection_remarks` (the
+  Head's words to the designer) and `redo_required` there. The PM's own words are the
+  EARLIER ledger row on the same subject with `reason_code=REASON_DESIGN_PM_REJECTED`
+  (`latest_design_transition()` reads it). A session reading only the ledger must look
+  there before concluding the reason was never captured.
+- **How to identify the row.** `from_status='pm_rejected'`: it is the only exit from that
+  status to a working status. The ActivityLog carries `design_attempt_opened_pm_rejected`
+  and `design_head_sent_back_to_designer`.
+- **The same gap on the QC-failure loop.** The same function writes the same empty
+  reason code there, and has since Session D. If ledger readers come to need reasons on
+  attempt-opening rows, give `_open_next_attempt()` optional reason and remark
+  parameters, for all its callers at once.
 
 ---
 

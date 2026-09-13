@@ -148,6 +148,10 @@ urlpatterns = [
     path('design/pm-approval/',                     design_views.design_pm_approval_queue, name='design_pm_approval_queue'),
     path('design/<str:project_id>/pm/approve/',     design_views.design_pm_approve,      name='design_pm_approve'),
     path('design/<str:project_id>/pm/reject/',      design_views.design_pm_reject,       name='design_pm_reject'),
+    # Prompt 3.1b-2b — the Design Head's two answers to a PM rejection. Both require
+    # pm_rejected, which nothing writes until prompt 3.1b-2c, so both are inert until then.
+    path('design/<str:project_id>/pm-rejection/return/',    design_views.design_head_return_to_pm, name='design_head_return_to_pm'),
+    path('design/<str:project_id>/pm-rejection/send-back/', design_views.design_head_send_back,     name='design_head_send_back'),
     path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),
     path('design/<str:project_id>/change-request/raise/', design_views.design_change_request, name='design_change_request'),
 
