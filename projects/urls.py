@@ -139,17 +139,18 @@ urlpatterns = [
     # Design QC verdict, so they keep their URLs and change who may POST to them.
     path('design/<str:project_id>/qc/pass/',        design_views.design_qc_pass,         name='design_qc_pass'),
     path('design/<str:project_id>/qc/fail/',        design_views.design_qc_fail,         name='design_qc_fail'),
-    # Gate 2 — the Design Head. Release now happens here, not at qc/pass/.
+    # Gate 2 — the Design Head. His pass hands the package to the PM (prompt 3.1b-2c);
+    # release is gate 3's, below.
     path('design/<str:project_id>/qc/head/pass/',   design_views.design_head_qc_pass,    name='design_head_qc_pass'),
     path('design/<str:project_id>/qc/head/fail/',   design_views.design_head_qc_fail,    name='design_head_qc_fail'),
     # Prompt 3.1b-1 — the PM's release approval (gate 3). The queue, and one POST per
-    # verdict. Authority is permissions.can_approve_design_release(); nothing reaches
-    # awaiting_pm_approval until prompt 3.1b-2, so all three are inert until then.
+    # verdict. Authority is permissions.can_approve_design_release(). Live since prompt
+    # 3.1b-2c, 13 Sep 2026: the approve POST is where a design is released.
     path('design/pm-approval/',                     design_views.design_pm_approval_queue, name='design_pm_approval_queue'),
     path('design/<str:project_id>/pm/approve/',     design_views.design_pm_approve,      name='design_pm_approve'),
     path('design/<str:project_id>/pm/reject/',      design_views.design_pm_reject,       name='design_pm_reject'),
     # Prompt 3.1b-2b — the Design Head's two answers to a PM rejection. Both require
-    # pm_rejected, which nothing writes until prompt 3.1b-2c, so both are inert until then.
+    # pm_rejected, which design_pm_reject() writes since prompt 3.1b-2c.
     path('design/<str:project_id>/pm-rejection/return/',    design_views.design_head_return_to_pm, name='design_head_return_to_pm'),
     path('design/<str:project_id>/pm-rejection/send-back/', design_views.design_head_send_back,     name='design_head_send_back'),
     path('design/<str:project_id>/change-request/', design_views.design_change_request_form, name='design_change_request_form'),

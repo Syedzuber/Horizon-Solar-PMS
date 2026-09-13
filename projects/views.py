@@ -1796,7 +1796,7 @@ TENDER_DESIGN_SUBMITTED_STATUSES = (
     DESIGN_AWAITING_PM_APPROVAL,
     # The PM rejected it and it is back with the Design Head. Submitted and bounced — the
     # `qc_failed` note above, word for word; leaving it out would flip the pill backwards
-    # on a rejection. Unreachable until prompt 3.1b-2b.
+    # on a rejection.
     DESIGN_PM_REJECTED,
     DESIGN_RELEASED,
 )

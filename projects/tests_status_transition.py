@@ -27,7 +27,7 @@ per instrumented subject type — plus the dwell-time query that was the point.
 
 WHAT IS NOT COVERED HERE, AND WHY
 ---------------------------------
-`DesignAssignment` / `DesignAttempt` (fourteen statuses) and `PaymentRequest` are
+`DesignAssignment` / `DesignAttempt` and `PaymentRequest` are
 NOT instrumented — see docs/execution-model.md §13. Their absence from this file is
 deliberate and documented, not an oversight.
 

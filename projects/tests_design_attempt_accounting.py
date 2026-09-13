@@ -14,11 +14,9 @@ The design attempt figures now say what their docstrings claim:
       stays in every finished-site denominator so no ratio inflates;
   (e) the named-site case, on a RECONSTRUCTION of the SCMPILOT pilot's shape.
 
-(d) IS EXERCISED ONLY BY A FIXTURE. Nothing in product code can put a site in
-`awaiting_pm_approval` yet — prompt 3.1b builds that transition. This file does not write
-the status itself: it borrows the one reviewed fixture writer,
-`tests_design_pm_gate_inert.PmGateBase._park_in_pm_gate`, so that module's
-inertness proof still finds exactly one writer in projects/.
+(d) IS EXERCISED BY A FIXTURE. This file does not write the status itself: it borrows the
+one reviewed fixture writer, `tests_design_pm_gate_fixtured.PmGateBase._park_in_pm_gate`.
+The product route to `awaiting_pm_approval` is tests_design_pm_gate_live's.
 
 (e) IS A RECONSTRUCTION, NOT THE PILOT. The suite runs on an empty SQLite database, so the
 five released SCMPILOT sites and the pilot's one in-flight site are rebuilt here in the
@@ -266,7 +264,7 @@ class NeverSummedTests(AccountingBase):
 
 
 # ===========================================================================
-# (d) A site awaiting PM approval — FIXTURE ONLY; nothing can produce the status yet
+# (d) A site awaiting PM approval — PARKED BY FIXTURE
 # ===========================================================================
 
 class AwaitingPmApprovalTests(AccountingBase):

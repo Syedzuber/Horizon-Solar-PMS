@@ -26,9 +26,8 @@ set of writers of each gate status, are tests_design_pm_gate_live's.
   plus the screens: the QC queue excludes the status, the review screen's two branches,
   the PM's workspace banner, and the Head's count tile
 
-THE FIXTURES REUSE THE TWO INERT MODULES' OWN WRITERS (RejectedBase._park_rejected and
-PmGateBase._park_in_pm_gate), so this file adds no write shape to either walk. Field names
-the walks search for are assembled from pieces for the same reason.
+THE FIXTURES REUSE THE FIXTURE WRITERS IN tests_design_pm_gate_fixtured
+(RejectedBase._park_rejected and PmGateBase._park_in_pm_gate).
 """
 from datetime import timedelta
 from decimal import Decimal

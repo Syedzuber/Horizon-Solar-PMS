@@ -1662,7 +1662,12 @@ at the top of the page doesn't render for it either. `design_qc_review` builds t
 
 **Not reachable today.** It must be fixed with, or before, prompt 3.1b.
 
-### D3 — two stale sentences that 3.1a's MODE did not reach
+### D3 — PARTLY CLOSED (one of two, 13 Sep 2026): two stale sentences that 3.1a's MODE did not reach
+
+**The first bullet was fixed by the comment-correction prompt.** The docstring now says the
+map lists every choice, with no count to go stale. The second bullet stands on purpose: it is
+false on its own, but the paragraph directly below it says the screen no longer reads the
+flag (§D34).
 
 - **`design_views.derive_design_mirror_state()`'s docstring** still says
   *"DESIGN_MIRROR_STATE_MAP lists all fourteen, so the only way to reach this line is to
@@ -1784,16 +1789,28 @@ Recorded by prompt 3.1b-1 (its D-a), 12 Sep 2026, from the local dump.
   (all of MPUVNL). `nitesh` has 10 OPEX sites and `demo.pm` has the six SCMPILOT sites.
 - **No coverage.** No OPEX site has a Project Coordinator. `can_approve_design_release()`
   deliberately allows no deputy.
-- **The risk.** Once prompt 3.1b-2 makes `awaiting_pm_approval` reachable, one person's
-  absence strands a whole tender at the PM gate.
+- **The risk — LIVE since 3.1b-2c, 13 Sep 2026** (on local `main`; not on Railway, per the
+  DEPLOY GATE). `awaiting_pm_approval` is reachable, so one person's absence strands a whole
+  tender at the PM gate.
 - **The remedy is data, not code.** Populate `Project.coordinators`. That is identity-based
   authority, and `user_can_manage_project()` already honours it.
-- **Owner and timing.** A data task for the product owner, BEFORE 3.1b-2. Re-run the
-  counts on Railway first: these are local figures.
+- **Owner and timing.** A data task for the product owner, BEFORE 3.1b-2c reaches Railway.
+  Re-run the counts on Railway first: these are local figures.
 
-### D9 — BLOCKS 3.1b-2, ANSWER FIRST: a PM rejection may land on a closed attempt
+### D9 — ANSWERED, NOT CLOSED: a PM rejection may land on a closed attempt
 
 Recorded by prompt 3.1b-1 (its D-b).
+
+**ANSWERED by the pm_rejected schema prompt, 13 Sep 2026: the rejection got a status of its
+own,** `pm_rejected`, added by migration 0086 (`0086_design_pm_rejected`). The Head could not
+act from `awaiting_head_qc` without rewriting the closed attempt's verdict:
+`design_head_qc_fail()` would overwrite `head_verdict='passed'` (the reason `models.py` gives
+beside `DESIGN_PM_REJECTED`). Prompt 3.1b-2c then retargeted `design_pm_reject` onto the new
+status, so the attempt the Head passed stays closed with its verdict intact.
+
+**Left open on purpose.** This entry is the record of WHY `pm_rejected` exists. Closing it
+would hide the reasoning behind a schema decision behind a strikethrough. The original entry
+follows.
 
 - **What happens.** `design_pm_reject` returns the site to `awaiting_head_qc`. But the Head's
   pass may already have closed that attempt, with `head_verdict=passed` and `closed_at` set.
@@ -2006,10 +2023,11 @@ Recorded by the pm_rejected schema prompt (its B9, D-g), 13 Sep 2026.
   requires the Head to set one, or rework runs without a date. `design_due_date_change`
   refuses `pm_rejected` today, so the date can only move after the send-back.
 
-### D16 — readers of `opened_reason` outside the schema prompt's MODE assume three values
+### D16 — LIVE: readers of `opened_reason` outside the schema prompt's MODE assume three values
 
-Recorded by the pm_rejected schema prompt (its B9, D-h), 13 Sep 2026. Each is inert until
-3.1b-2b opens an attempt with `opened_reason='pm_rejected'`.
+Recorded by the pm_rejected schema prompt (its B9, D-h), 13 Sep 2026. **LIVE since 3.1b-2c,
+13 Sep 2026:** every send-back opens an attempt with `opened_reason='pm_rejected'`, so each
+bullet below describes what the code on `main` does now, not what it will do.
 
 - **`design_metrics.designer_workload`'s raw counters.** They count `qc_failed` and
   `pm_change_request` and nothing else, so a PM-rejection attempt is in `attempts` and in
@@ -2019,14 +2037,11 @@ Recorded by the pm_rejected schema prompt (its B9, D-h), 13 Sep 2026. Each is in
   PM-rejection send-back does not cost first-pass. **Open PRODUCT decision:** does a PM
   rejection the Head sends back to the designer cost first-pass?
 - **`_attempt_history.html`.** Its reason border and label have branches for `qc_failed`
-  and `pm_change_request` only, so a PM-rejection attempt renders with neither.
-- **`METRIC_CATALOGUE` text** (visible on the quality analytics page). Two descriptions are
-  true today and incomplete once the loop is reachable. `rework_multiplier` should add "or
-  a PM rejection the Head classified Group A". `error_distribution` should name PM
-  rejections as a source. They were left unchanged here so that no existing screen's text
-  moved.
+  and `pm_change_request` only, so every send-back's attempt renders with neither.
+- **`METRIC_CATALOGUE` text** — moved to its own entry, **§D32**, because it is user-visible
+  text describing a metric, not a reader of the value, and it is now incomplete on live data.
 
-### D17 — `designer_workload` puts a `pm_rejected` site back into the designer's current load
+### D17 — LIVE: `designer_workload` puts a `pm_rejected` site back into the designer's current load
 
 Recorded by the pm_rejected schema prompt (its B9, D-i), 13 Sep 2026. **Stated, not
 changed**, because `designer_workload` is outside that MODE.
@@ -2039,6 +2054,8 @@ changed**, because `designer_workload` is outside that MODE.
   question as D13's, and should be answered with it.
 - **Still open after the D13 prompt (13 Sep 2026).** D13's fix answered the question for
   the hold guards only; `designer_workload` was outside that MODE.
+- **LIVE since 3.1b-2c, 13 Sep 2026.** `design_pm_reject` writes `pm_rejected`, so this now
+  happens on every PM rejection.
 
 ### D18 — LIVE: a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
 
@@ -2079,7 +2096,16 @@ two of D13's five doors that a refusal cannot close.
     to restoration: restoring is safe for them too, but the refusal is what names the
     honest attempt-opening route.
 
-### D19 — two date-guard comments name the wrong set after the D13 split
+### ~~D19 — two date-guard comments name the wrong set after the D13 split~~ — **CLOSED by the comment-correction prompt**
+
+#### CLOSED 13 Sep 2026 BY THE COMMENT-CORRECTION PROMPT
+
+Both comments, in `design_due_date_propose` and `design_due_date_change`, now name
+`DESIGN_CLOCK_STOPPED_STATUSES` and the clock-stopped question, and keep the history of both
+moves. A third statement of the same kind was fixed with them. `DESIGN_WORK_FINISHED_STATUSES`'
+own comment told readers the five guards "test membership here". It now says they read the two
+sets below it, both derived from it, and that the set read directly is the metrics' question.
+The original entry follows.
 
 Recorded by the D13 prompt, 13 Sep 2026. Comment-only; no behaviour.
 
@@ -2158,11 +2184,12 @@ kind of requirement, owed by the session that makes the path reachable.
   The helper is one query for the whole queue. A mandatory remark nobody reads is a form
   field, not a record.
 
-### D23 — a PM-rejected send-back counts as a due-date revision, and a missing Head-pass time moves nothing
+### D23 — LIVE: a PM-rejected send-back counts as a due-date revision, and a missing Head-pass time moves nothing
 
 Recorded by prompt 3.1b-2b (its D-m), 13 Sep 2026. These are the two costs of §D15's
 decision (c), stated at the code in `_extend_due_date_for_pm_review()`. **Known, and
-deliberately not special-cased.**
+deliberately not special-cased.** **LIVE since 3.1b-2c, 13 Sep 2026:** the send-back is
+reachable, so both costs are current behaviour.
 
 - **The revision.** The moved date is a new commitment row. `revisions` (rows − 1) goes up
   by one, both on the Head's sites screen and in `attention_list()`'s "Due date revised ≥3
@@ -2296,7 +2323,19 @@ Recorded by prompt 3.1b-2b, 13 Sep 2026.
   attempt-opening rows, give `_open_next_attempt()` optional reason and remark
   parameters, for all its callers at once.
 
-### D27 — five comments still cite the three grep proofs 3.1b-2c retired
+### ~~D27 — five comments still cite the three grep proofs 3.1b-2c retired~~ — **CLOSED by the comment-correction prompt**
+
+#### CLOSED 13 Sep 2026 BY THE COMMENT-CORRECTION PROMPT
+
+None of the five says "by grep" any more.
+- The two `models.py` comments name each status's product writers and cite
+  `tests_design_pm_gate_live` (a).
+- The admin comment names `design_pm_approve()` as the two fields' one product writer.
+- The two test docstrings name the fixture where it now lives:
+  `tests_design_pm_gate_fixtured.PmGateBase._park_in_pm_gate`.
+
+A sixth was found and fixed with them: `tests_design_head_rejection_inert`'s module docstring
+cited the "two inert modules" and their "walks". The original entry follows.
 
 Recorded by prompt 3.1b-2c, 13 Sep 2026. **Recorded, not fixed.** Each sits in a file or
 at a name outside that prompt's MODE.
@@ -2315,7 +2354,21 @@ at a name outside that prompt's MODE.
 
 **Fix:** repoint each comment at `tests_design_pm_gate_live` (a), and drop "by grep".
 
-### D28 — `design_views` still describes the gate before it went live, in eight places
+### ~~D28 — `design_views` still describes the gate before it went live, in eight places~~ — **CLOSED by the comment-correction prompt**
+
+#### CLOSED 13 Sep 2026 BY THE COMMENT-CORRECTION PROMPT
+
+All eight were corrected:
+- The two section headers read "LIVE SINCE PROMPT 3.1b-2c, 13 Sep 2026".
+- `design_qc_pass` names `design_pm_approve()` as where release happens.
+- `latest_design_transition()` lists three live consumers, with §D18 as the one planned.
+
+Most were one pattern: a claim, dated against a prompt number, that a gate status or field is
+unreachable. The same sweep corrected 36 FALSE statements in all, in `design_views`, `models`,
+`admin`, `design_metrics`, `design_analytics` and three test modules. It also
+corrected four more in `urls.py` (three) and `views.py` (one), whose MODE was widened for
+exactly those lines. Every edit was proven comment-only by an AST comparison against 1f2a137.
+The original entry follows.
 
 Recorded by prompt 3.1b-2c, 13 Sep 2026. Comment-only; no behaviour. None of these names
 was in that prompt's MODE, and every statement below has been false since that commit: six
@@ -2356,7 +2409,13 @@ in 3.1b-1, and 3.1b-2c's remark read added nothing to it.
 - **The fix pattern.** Prefetch `attempts` and `attempts__arka_submissions`, and pick the
   current ones in Python, as `design_head_sites` does for its gate-1 flag.
 
-### D30 — three recorded costs went live with 3.1b-2c
+### ~~D30 — three recorded costs went live with 3.1b-2c~~ — **CLOSED by the comment-correction prompt**
+
+#### CLOSED 13 Sep 2026 BY THE COMMENT-CORRECTION PROMPT
+
+§D16, §D17 and §D23 now carry LIVE in their headings and say so in their bodies. §D8's risk
+and timing were reworded the same way. D30's reminder has nothing left to remind. The
+original entry follows.
 
 Recorded by prompt 3.1b-2c, 13 Sep 2026. Nothing new here: these are reminders that
 entries written as "inert until 3.1b-2c" now describe production behaviour.
@@ -2369,7 +2428,13 @@ entries written as "inert until 3.1b-2c" now describe production behaviour.
   it.
 - **§D23.** Each send-back that moves the date adds a due-date revision.
 
-### D31 — `tests_design_part9.test_head_pass_releases` is named for what the pass no longer does
+### ~~D31 — `tests_design_part9.test_head_pass_releases` is named for what the pass no longer does~~ — **CLOSED by the comment-correction prompt**
+
+#### CLOSED 13 Sep 2026 BY THE COMMENT-CORRECTION PROMPT
+
+Renamed to `PackageGateTests.test_head_pass_hands_to_the_pm`. The only other reference to the
+old name anywhere in the repository was this entry's heading. The method's one-line docstring
+was already true and is unchanged. The original entry follows.
 
 Recorded by prompt 3.1b-2c, 13 Sep 2026.
 
@@ -2378,6 +2443,80 @@ Recorded by prompt 3.1b-2c, 13 Sep 2026.
   the name was kept, and a one-line docstring says what it now pins.
 - **The fix.** Rename it (for example `test_head_pass_hands_to_the_pm`) the next time the
   module is open.
+
+### D32 — `METRIC_CATALOGUE`: user-visible text describing a metric omits a source that went live with 3.1b-2c
+
+Recorded by the comment-correction prompt, 13 Sep 2026. It was §D16's fourth bullet, and it
+now has its own entry because of its class.
+
+- **THIS IS USER-VISIBLE TEXT DESCRIBING A METRIC, NOT A COMMENT.** The descriptions in
+  `design_analytics.METRIC_CATALOGUE` render on the quality analytics page. praveen reads them
+  and checks figures against them. That kept them out of a session whose safety property was
+  "nothing visible changed".
+- **Where it belongs.** Prompt 3.1b-3, or a session of its own. **Fix it BEFORE the deploy:**
+  before 3.1b-2c reaches Railway.
+- **What changed underneath it.** Since 3.1b-2c, a PM rejection that the Design Head classifies
+  Group A IS charged as designer rework. `classify_attempt_causes()`' `ATTEMPT_REASON_PM_REJECTED`
+  branch reads `pm_rejection_category`. `_failure_rows()` also emits a third source, labelled
+  `'PM'`. That is correct behaviour; the descriptions predate it, so the on-screen text now
+  omits a live source of the number.
+- **The sentences, verbatim:**
+  - `rework_multiplier`: *"Designer-caused attempts per finished site (released, or awaiting PM
+    approval): attempts a Group A failure opened, plus uncategorised pre-Part-9 QC failures. The
+    initial attempt, and Group B, Group C and PM-change attempts, are not counted, so a clean
+    record reads 0."* It omits the Group A PM rejection, which is counted. A reader takes
+    "failure" to mean a gate failure.
+  - `error_distribution`: *"Count by Group A category, team-wide and per designer, across both
+    package failures and Arka rejections."* There are three sources now. "Both" is the nearest
+    the catalogue comes to being false.
+  - `first_pass_rate`: *"Finished sites (released, or awaiting PM approval) that no QC failure
+    sent round again, per designer and team-wide. A reopen for a PM change request does not
+    cost first-pass."* This matches the code, which counts `qc_failed` only. It is silent on
+    PM rejections, which is §D16's open product decision. Settle that first.
+
+### D33 — the authority document says `DesignAssignment` is not instrumented, and it has been since the transition-ledger session
+
+Recorded by the comment-correction prompt, 13 Sep 2026. **Older than the PM-gate run.**
+
+- **What it says.** `docs/execution-model.md` §13's "NOT instrumented" table lists
+  `DesignAssignment` with "14 (`DESIGN_ASSIGNMENT_STATUS_CHOICES`)" and "It is a session of its
+  own." `tests_status_transition`'s module docstring says the same.
+- **Why that is false.** Every design status write goes through `apply_design_status()`, which
+  calls `record_transition()` in the same transaction. `tests_design_transition_ledger` pins
+  that, and `latest_design_transition()` reads the ledger back on three screens. There are 16
+  statuses, not 14.
+- **What was changed.** The comment-correction prompt deleted only the count, "(fourteen
+  statuses)", from the test docstring, because that was the part the PM-gate run had made
+  false. The rest of that sentence, and §13 itself, need `docs/execution-model.md` open, which
+  was outside its MODE.
+- **The same document, the same kind.** §5's design-workflow table row says "a PM approval gate
+  does not exist ✔". The gate has existed since 3.1b-1 and has been live since 3.1b-2c.
+- **Why it matters.** This is the authority document on the ledger. A reader deciding whether
+  design transitions can be queried for dwell time is told they cannot.
+
+### D34 — true-but-stale statements left standing on purpose, which a reader may still trip on
+
+Recorded by the comment-correction prompt, 13 Sep 2026. Each was classified STALE-BUT-TRUE and
+left byte-identical. They are recorded so the next reader knows they were seen.
+
+- **`permissions.py`.** "his released sites" (the site-groups section header) and "the sites he
+  released" (`user_can_view_site_groups`). Since 3.1b-2c the Head passes and the PM releases.
+  The rationale for the Head's read access is unchanged.
+- **`tests_design_head_rejection_inert`.** The module name and the class `InertnessChainTests`
+  still say "inert"; the class now holds only a3, a behaviour test. Two fixture docstrings are
+  in the future tense ("as 3.1b-2c will leave one", "as the PM's reject will from 3.1b-2c").
+  Renaming a module or a class was outside that MODE.
+- **`design_views.design_my_sites`.** The `is_released` comment, "Read ONLY by the Design Hold
+  control", is §D3's second bullet. It is false on its own and corrected by the paragraph
+  directly below it.
+- **`design_metrics.classify_attempt_causes`.** "The send-back-to-designer path in prompt
+  3.1b-2b MUST require the category" is a requirement that is now met:
+  `design_head_send_back` refuses a blank category.
+- **`design_views`, the comment above `DESIGN_MIRROR_STATE_MAP`'s In Progress block.** "Which
+  of the nine it is": the block has twelve entries. It was already false before the PM-gate run
+  began (ten entries before prompt 3.1a), so it was outside that sweep.
+- **Migrations 0085 and 0086.** Their "NOTHING WRITES…" docstrings describe each migration as
+  it was written, which is the correct tense for a migration.
 
 ---
 

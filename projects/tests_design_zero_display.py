@@ -21,8 +21,7 @@ number by design. So the inverse assertion there is "no number", in that page's 
 
 The parked site is what makes the change-request-rate column's switch from `r.released` to
 `r.finished` observable: without it the two counts are equal. It is parked through the one
-admitted fixture writer, tests_design_pm_gate_inert.PmGateBase._park_in_pm_gate, and is
-exercised only by fixture — nothing in product code can produce that status yet.
+admitted fixture writer, tests_design_pm_gate_fixtured.PmGateBase._park_in_pm_gate.
 """
 from decimal import Decimal
 

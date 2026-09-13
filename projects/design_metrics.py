@@ -149,7 +149,7 @@ def is_overdue(assignment, current_commitment, today=None):
     # PROMPT 3.1a — FINISHED, NOT MERELY RELEASED. A site awaiting PM approval has left the
     # designer: both gates have passed and the ball is with the PM. The designer's clock
     # stops when the work leaves them, so this tests the shared "work finished" set rather
-    # than `== DESIGN_RELEASED`. Identical for every status reachable today.
+    # than `== DESIGN_RELEASED`.
     if assignment.status in DESIGN_WORK_FINISHED_STATUSES:
         return False
     # A PM REJECTION IS NOT THE DESIGNER BEING LATE. The Head passed the attempt, so the
@@ -158,9 +158,9 @@ def is_overdue(assignment, current_commitment, today=None):
     #
     # NOT "the designer does not hold it" — they do not hold `in_qc` or `awaiting_head_qc`
     # either, and both ARE counted overdue. That is also why this names the status rather
-    # than reading DESIGN_NOT_WITH_DESIGNER_STATUSES: that set is due to gain the review
-    # statuses when §D13 is fixed, and the overdue rule must not move with it. Unreachable
-    # until prompt 3.1b-2b; what the date becomes on send-back is §D15.
+    # than reading DESIGN_NOT_WITH_DESIGNER_STATUSES: that set gained the review statuses
+    # with the §D13 fix, and the overdue rule must not move with it. What the date becomes
+    # on send-back is §D15.
     if assignment.status == DESIGN_PM_REJECTED:
         return False
     if current_commitment is None or current_commitment.approved_at is None:
@@ -242,7 +242,7 @@ def _classify(assignment, current_arka):
         # for the Head's queue, so a separate stage would drop PM-rejected packages out of
         # that panel (and add a zero tile to every tender dashboard). HEAD_ACTION_STAGES
         # follows from this for free. The Head's sites screen is where a PM-rejected package
-        # is told apart from a fresh one (prompt 3.1b-2b). Unreachable until then.
+        # is told apart from a fresh one (prompt 3.1b-2b).
         return 'awaiting_head_qc'
     if status == DESIGN_ARKA_SUBMITTED:
         # PART 9: the test is head_verdict, not verdict. `arka_submitted` carrying a
@@ -480,7 +480,7 @@ def classify_attempt_causes(attempts):
     two is ever populated on a given attempt: if Design QC failed it the Head never saw
     it, and if the Head failed it Design QC had already passed it.
 
-    A PM-REJECTION LOOP (the ATTEMPT_REASON_PM_REJECTED reason, unreachable until 3.1b-2b) is
+    A PM-REJECTION LOOP (the ATTEMPT_REASON_PM_REJECTED reason) is
     one more branch of the same shape — one attempt back, no walk. It reads ONLY
     `pm_rejection_category`, the Head's classification of the PM's rejection, and never the
     two fields above: the rejected attempt carries head_verdict='passed', and its gate
@@ -917,8 +917,7 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
         # PROMPT 3.1a — the same "finished" test is_overdue() applies, and for the same
         # reason: a site awaiting PM approval has left the designer, so its revision count
         # is history rather than a live problem. The old `not x['released']` would have
-        # listed it. `s['released']` is `status == DESIGN_RELEASED`, so this is identical
-        # for every status reachable today.
+        # listed it.
         #
         # A PM-rejected package is excluded on is_overdue()'s reasoning: the Head passed it,
         # so the designer delivered and the revisions are history. Named, not read through

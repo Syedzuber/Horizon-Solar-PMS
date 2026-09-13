@@ -557,8 +557,7 @@ def _failure_rows(data):
     metric cannot accidentally count packages and forget Arkas, or vice versa.
 
     THE PM SOURCE IS A THIRD TUPLE AND CHANGES NOTHING THE FIRST TWO REPORT: same loop, same
-    order, same condition, and the field is blank on every row until prompt 3.1b-2b writes
-    it. It is labelled 'PM' rather than reusing 'Design Head' because the Head did not catch
+    order, same condition. It is labelled 'PM' rather than reusing 'Design Head' because the Head did not catch
     that error — the PM did — and head_failure_category cannot hold it for the same reason.
 
     The group comes from error_category_group() on every row without exception.

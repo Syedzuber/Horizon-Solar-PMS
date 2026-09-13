@@ -406,7 +406,7 @@ class PackageGateTests(Part9Base):
         self.assertNotEqual(self.a.status, DESIGN_RELEASED)
         self.assertIsNone(self.a.released_at)
 
-    def test_head_pass_releases(self):
+    def test_head_pass_hands_to_the_pm(self):
         """Prompt 3.1b-2c: the Head's pass hands the package to the PM; release is the PM's."""
         self._login(self.qc)
         self._post('design_qc_pass', self.site)

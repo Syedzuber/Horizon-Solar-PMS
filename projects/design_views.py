@@ -74,9 +74,9 @@ from .models import (
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
     DESIGN_IN_QC, DESIGN_QC_FAILED, DESIGN_RELEASED,
     DESIGN_AWAITING_HEAD_ARKA, DESIGN_AWAITING_HEAD_QC,
-    # Prompt 3.1a — the unreachable PM-approval status and the "work finished" set.
+    # Prompt 3.1a — the PM-approval status and the "work finished" set.
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
-    # The unreachable PM-rejected status, and the guards' "designer does not hold it" set.
+    # The PM-rejected status, and the guards' "designer does not hold it" set.
     DESIGN_PM_REJECTED, DESIGN_NOT_WITH_DESIGNER_STATUSES,
     # The D13 prompt — the date guards' "the designer's clock has stopped" set.
     DESIGN_CLOCK_STOPPED_STATUSES,
@@ -340,10 +340,10 @@ DESIGN_MIRROR_CODE = 'DESIGN'
 # The mapping. A pure function of the STORED design status — see the block comment
 # above for why it cannot be a function of the transition.
 #
-# Coarse on purpose: three mirror states carry eleven design statuses between them.
+# Coarse on purpose.
 # That is OPEX spec §2 rule 7 working as intended — "portfolio metrics read the source
 # object, never the mirror". The mirror answers one question, "has the PM's site got
-# its design", and the fourteen-status detail belongs to the design dashboard, which
+# its design", and the per-status detail belongs to the design dashboard, which
 # already has design_metrics._classify() for it.
 #
 # EVERY status in the vocabulary is listed, including the three that nothing writes any
@@ -385,12 +385,12 @@ DESIGN_MIRROR_STATE_MAP = {
     DESIGN_QC_FAILED:           Task.IN_PROGRESS,
     # PROMPT 3.1a — the PM approval waiting room. In Progress, the same as
     # `awaiting_head_qc`: a design with the PM is not released, and the mirror answers "has
-    # the PM's site got its design" — not yet. Nothing writes this status until prompt
-    # 3.1b; it is listed now so derive_design_mirror_state() can never raise on it.
+    # the PM's site got its design" — not yet. It is listed so derive_design_mirror_state()
+    # can never raise on it.
     DESIGN_AWAITING_PM_APPROVAL: Task.IN_PROGRESS,
     # The PM rejected it and it is back with the Design Head. In Progress for the same
-    # reason: not released, so the PM's site has not got its design. Nothing writes this
-    # status until prompt 3.1b-2b; listed now so derive_design_mirror_state() cannot raise.
+    # reason: not released, so the PM's site has not got its design. Listed so
+    # derive_design_mirror_state() cannot raise.
     DESIGN_PM_REJECTED:          Task.IN_PROGRESS,
 
     # ── Held. ──────────────────────────────────────────────────────────────
@@ -430,10 +430,10 @@ def derive_design_mirror_state(design_status):
     a caller that could not test this in isolation would test it through a view.
 
     An unknown value raises rather than defaulting. A status this does not know is
-    either a fourteenth choice somebody added without reading here, or a corrupt row;
+    either a new choice somebody added without reading here, or a corrupt row;
     both are defects, and Not Started is a plausible-looking wrong answer that would
-    hide either one for months. DESIGN_MIRROR_STATE_MAP lists all fourteen, so the only
-    way to reach this line is to have added a fifteenth.
+    hide either one for months. DESIGN_MIRROR_STATE_MAP lists every choice, so the only
+    way to reach this line is to have added one.
     """
     try:
         return DESIGN_MIRROR_STATE_MAP[design_status]
@@ -1001,9 +1001,12 @@ def latest_design_transition(field, outer_ref='pk', **match):
     Served by sttrans_subject_idx (subject_type, subject_id, occurred_at). `-pk` breaks a
     tie between two rows written in the same instant.
 
-    TWO CONSUMERS:
+    THREE LIVE CONSUMERS, AND ONE PLANNED:
       1. design_head_sites — the PM's rejection remark and time (prompt 3.1b-2b).
-      2. §D18, not built — the status a Design Hold was taken FROM (field='from_status',
+      2. design_qc_review — the same, beside the Head's two actions (prompt 3.1b-2c, §D25).
+      3. design_pm_approval_queue — the latest arrival at the PM, and the Head's return
+         remark (prompt 3.1b-2c, §D22).
+      Planned: §D18, not built — the status a Design Hold was taken FROM (field='from_status',
          to_status=DESIGN_SURVEY_RETURNED), so that clearing a hold can restore it instead
          of deriving `in_design`. Reuse this for that; do not write a second reader.
     """
@@ -1877,8 +1880,9 @@ def design_due_date_propose(request, project_id):
         return _deny(request, f'{project.project_id}: an extension request is already '
                               f'awaiting the Design Head.', 'design_my_sites')
     # Prompt 3.1a: membership, not equality. The pm_rejected prompt moved the test from
-    # DESIGN_WORK_FINISHED_STATUSES to DESIGN_NOT_WITH_DESIGNER_STATUSES: the question is
-    # whether the designer holds the site, not whether the work counts as finished. The
+    # DESIGN_WORK_FINISHED_STATUSES to DESIGN_NOT_WITH_DESIGNER_STATUSES, and the D13 prompt
+    # moved it again to DESIGN_CLOCK_STOPPED_STATUSES: the question is whether the
+    # designer's clock has stopped, and a package under review is still on it. The
     # refusal texts for `released` and for the PM gate are unchanged, word for word.
     if assignment.status in DESIGN_CLOCK_STOPPED_STATUSES:
         where = ('released' if assignment.status == DESIGN_RELEASED
@@ -2069,8 +2073,9 @@ def design_due_date_change(request, project_id):
         return redirect('design_head_sites', pk=project.program_id)
 
     # Prompt 3.1a: membership, not equality. The pm_rejected prompt moved the test to
-    # DESIGN_NOT_WITH_DESIGNER_STATUSES, with the screen flag in design_head_sites() that
-    # mirrors it. A PM-rejected package's date is settled when the Head sends it back
+    # DESIGN_NOT_WITH_DESIGNER_STATUSES, and the D13 prompt to DESIGN_CLOCK_STOPPED_STATUSES,
+    # each time with the screen flag in design_head_sites() that mirrors it. A PM-rejected
+    # package's date is settled when the Head sends it back
     # (EXECUTION_MODULE_DEFERRED.md §D15), not before. The refusal texts for `released` and
     # for the PM gate are unchanged, word for word.
     if assignment.status in DESIGN_CLOCK_STOPPED_STATUSES:
@@ -2658,7 +2663,7 @@ def design_site_workspace(request, project_id):
     # already, so there is no second, cut-down approval view (D-3). ONE OR TERM, AT THIS
     # GATE ONLY — the two helpers above are shared by the Head's and the designer's
     # endpoints and neither is widened. Conditioned on the status, so it opens exactly
-    # while the PM owes a verdict, and is inert until prompt 3.1b-2 makes that reachable.
+    # while the PM owes a verdict.
     pm_reviewing = (assignment.status == DESIGN_AWAITING_PM_APPROVAL
                     and can_approve_design_release(request.user, project))
     if not (is_designer or user_has_design_head_authority(request.user) or pm_reviewing):
@@ -3769,7 +3774,8 @@ def design_qc_pass(request, project_id):
 
     PART 9 CHANGED WHAT THIS DOES. In Part 4 a QC pass released the site; it now hands the
     package to the Design Head. `in_qc` -> `awaiting_head_qc`, `head_started_at` is
-    stamped, and release happens at design_head_qc_pass() or not at all.
+    stamped, and release happens at design_pm_approve() or not at all —
+    design_head_qc_pass() hands the package to the PM (prompt 3.1b-2c).
 
     The attempt is deliberately NOT closed here. It is still live — the Head has not
     ruled — and closing it would make the package look finished to every surface that
@@ -4076,11 +4082,11 @@ def design_head_qc_fail(request, project_id):
 # ---------------------------------------------------------------------------
 # 12b. PM release approval — gate 3 (prompt 3.1b-1)
 #
-# INERT UNTIL PROMPT 3.1b-2. Everything in this section acts on `awaiting_pm_approval`,
-# and no code path writes that status yet: design_head_qc_pass() still releases directly.
-# So the queue renders its empty state and both POST views refuse every site. 3.1b-2
-# flips the Head's pass and makes all of it live. The surface is built FIRST so that the
-# moment a site can park here, somebody can see it and act on it.
+# LIVE SINCE PROMPT 3.1b-2c, 13 Sep 2026. Everything in this section acts on
+# `awaiting_pm_approval`, which design_head_qc_pass() writes when the Head passes a package
+# and design_head_return_to_pm() when he overrules a rejection. The surface was built
+# FIRST, in prompt 3.1b-1, so that the moment a site could park here, somebody could see
+# it and act on it.
 #
 # AUTHORITY: permissions.can_approve_design_release() — the site's PM or one of its
 # Project Coordinators, and no deputy. ORDER, exactly as _qc_guard(): authority first (a
@@ -4191,8 +4197,7 @@ def design_pm_approve(request, project_id):
     ONE write through apply_design_status(), with its StatusTransition row in the same
     transaction (R-2) carrying REASON_DESIGN_PM_APPROVED. A remark is optional here.
 
-    THIS IS THE ONLY NEW WRITER OF `released`. It reaches nothing today: the precondition
-    is a status no code path produces until prompt 3.1b-2.
+    THIS IS THE ONLY NEW WRITER OF `released`.
     """
     project = _opex_site(project_id)
     assignment, error = _pm_gate_guard(request, project)
@@ -4294,10 +4299,9 @@ def design_pm_reject(request, project_id):
 # ---------------------------------------------------------------------------
 # 12c. The Design Head's answer to a PM rejection (prompt 3.1b-2b)
 #
-# INERT UNTIL PROMPT 3.1b-2c. Both views require `pm_rejected`, and nothing writes that
-# status until 2c retargets design_pm_reject(). tests_design_head_rejection_inert.py proves
-# the chain in both halves: nothing writes pm_rejected, and the one writer of
-# awaiting_pm_approval below refuses every other status.
+# LIVE SINCE PROMPT 3.1b-2c, 13 Sep 2026. Both views require `pm_rejected`, which
+# design_pm_reject() writes. tests_design_pm_gate_live (a) pins the writer set of each gate
+# status, by parse.
 #
 # AUTHORITY, ORDER AND REFUSALS are _qc_guard()'s at the head gate: the Design Head or his
 # deputy, never the site's own designer; a 403 that reveals nothing first, then the method,
@@ -4391,8 +4395,8 @@ def design_head_return_to_pm(request, project_id):
     The Head's reason therefore has one home: this transition's ledger row, carrying
     REASON_DESIGN_HEAD_RETURNED_TO_PM. The remark is MANDATORY and enforced here, since R-9
     is not enforced centrally for design rows (§D12); a blank one is refused before the
-    transaction opens. Nothing shows it to the PM yet — the PM's queue is prompt 3.1b-2c's,
-    which must read it back with latest_design_transition() (§D22).
+    transaction opens. The PM's queue shows it on the returned row, read back with
+    latest_design_transition() (§D22).
 
     released_at and the PM approval stamps are untouched: the PM has approved nothing.
     """
@@ -5207,7 +5211,7 @@ _DESIGNER_ACTIONS = {
     # this table exists to prevent.
     DESIGN_AWAITING_PM_APPROVAL: ('none', '', 'Design passed both review gates — with the '
                                               'PM for approval.'),
-    # Unreachable until prompt 3.1b-2b. No action: the designer does not hold the site —
+    # No action: the designer does not hold the site —
     # the Design Head decides whether it goes back to the PM or comes back to them.
     DESIGN_PM_REJECTED:          ('none', '', 'Returned by the PM — the Design Head is '
                                               'reviewing the rejection.'),

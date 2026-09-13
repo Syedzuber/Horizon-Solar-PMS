@@ -3257,20 +3257,21 @@ DESIGN_RELEASED            = 'released'
 DESIGN_AWAITING_HEAD_ARKA  = 'awaiting_head_arka'
 DESIGN_AWAITING_HEAD_QC    = 'awaiting_head_qc'
 
-# PROMPT 3.1a — THE PM APPROVAL WAITING ROOM, AND NOTHING CAN REACH IT YET. Both review
+# PROMPT 3.1a — THE PM APPROVAL WAITING ROOM. Both review
 # gates have passed and the design has left the designer; it waits on the site's PM.
-# It is in the choices, and every list that reads the ladder handles it, BEFORE any code
-# path writes it — the transition that does is prompt 3.1b. Until then no row can carry
-# it, and tests_design_pm_gate_inert.py proves that by grep rather than by argument.
+# It went into the choices, with every list that reads the ladder taught to handle it,
+# BEFORE any code path wrote it. Since prompt 3.1b-2c design_head_qc_pass() and
+# design_head_return_to_pm() write it, and tests_design_pm_gate_live (a) pins that writer
+# set by parse.
 DESIGN_AWAITING_PM_APPROVAL = 'awaiting_pm_approval'
 
-# THE PM REJECTED THE PACKAGE, AND NOTHING CAN REACH THIS YET. Both review gates passed,
+# THE PM REJECTED THE PACKAGE. Both review gates passed,
 # the PM refused it, and it is back with the Design Head, who decides whether it returns to
 # the PM or to the designer. A status of its own rather than `awaiting_head_qc`, because the
 # current attempt already carries head_verdict='passed' and design_head_qc_fail() would
 # overwrite that verdict — destroying the record the second gate exists to keep. The
-# transitions into and out of it are prompt 3.1b-2b; until then no row can carry it, and
-# tests_design_pm_rejected_inert.py proves that by grep.
+# transitions out of it are prompt 3.1b-2b's; design_pm_reject() writes it since 3.1b-2c,
+# and tests_design_pm_gate_live (a) pins that writer set by parse.
 #
 # THE SPELLING IS SHARED BY THREE COLUMNS — this status, DesignAttempt.opened_reason
 # (ATTEMPT_REASON_PM_REJECTED) and StatusTransition.reason_code (REASON_DESIGN_PM_REJECTED).
@@ -3312,11 +3313,11 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_IN_QC,               'In QC'),
     (DESIGN_AWAITING_HEAD_QC,    'QC passed — awaiting Design Head'),
     (DESIGN_QC_FAILED,           'QC failed'),
-    # Unreachable; see the constant. BEFORE `awaiting_pm_approval`, not after it, although
+    # BEFORE `awaiting_pm_approval`, not after it, although
     # it follows it in time: `awaiting_pm_approval` must stay immediately before `released`
     # (3.1a's ordering test pins that).
     (DESIGN_PM_REJECTED,         'PM rejected — awaiting Design Head'),
-    # PROMPT 3.1a — immediately before `released`. Unreachable; see the constant.
+    # PROMPT 3.1a — immediately before `released`.
     (DESIGN_AWAITING_PM_APPROVAL, 'Awaiting PM approval'),
     (DESIGN_RELEASED,            'Released'),
     (DESIGN_SURVEY_RETURNED,     'Design Hold — survey inadequate'),
@@ -3332,7 +3333,10 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
 # it, an equality test lets a designer put a Head-passed design on Design Hold, and the
 # Head's replacement survey then clears it through _status_after_unblock() straight back
 # to `in_design` with no attempt and no change request. That is the reopen route closed in
-# PHASE_2_PREFLIGHT_AUDIT §6.1, returning by a second door. Test membership here instead.
+# PHASE_2_PREFLIGHT_AUDIT §6.1, returning by a second door. Test membership instead. Since
+# the D13 prompt those five read the two sets below, not this one. Both are DERIVED from it
+# (each is this set plus more), so a status added here reaches all five guards; read
+# directly, this set answers the metrics' question — which sites count as finished.
 DESIGN_WORK_FINISHED_STATUSES = frozenset({DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
 
 # "HAS THE DESIGNER'S DUE-DATE CLOCK STOPPED?" — the statuses where the answer is YES.
@@ -3384,7 +3388,7 @@ DESIGN_NOT_WITH_DESIGNER_STATUSES = frozenset(DESIGN_CLOCK_STOPPED_STATUSES | {
 ATTEMPT_REASON_INITIAL           = 'initial'
 ATTEMPT_REASON_QC_FAILED         = 'qc_failed'
 ATTEMPT_REASON_PM_CHANGE_REQUEST = 'pm_change_request'
-# The third loop, and UNREACHABLE until prompt 3.1b-2b: the Design Head sends a PM-rejected
+# The third loop, live since prompt 3.1b-2c, 13 Sep 2026: the Design Head sends a PM-rejected
 # package back to the designer. Whose fault it was is the Head's classification, stored on
 # the attempt that was rejected (pm_rejection_category) — the same one-row-earlier rule the
 # QC-failure loop follows. NOT a change request: a rejection is "the PM never accepted this",
@@ -3791,8 +3795,9 @@ class DesignAssignment(models.Model):
         related_name='released_design_assignments',
     )
 
-    # ── PM approval (prompt 3.1a — written by NOTHING yet) ──────────────────
-    # Nothing in the product writes either field; prompt 3.1b owns the write. Read-only in
+    # ── PM approval (prompt 3.1a) ───────────────────────────────────────────
+    # design_pm_approve() is the only product writer of both fields, in the same write as
+    # `released`. Read-only in
     # the admin for the reason DesignAssignmentAdmin gives: an approval stamp typed into a
     # form is an approval nobody made.
     pm_approved_at = models.DateTimeField(null=True, blank=True)
@@ -3964,7 +3969,7 @@ class DesignAttempt(models.Model):
     head_overturned_qc = models.BooleanField(default=False)
 
     # ── The Design Head's classification of a PM rejection ──────────────────
-    # NOTHING WRITES EITHER FIELD YET — prompt 3.1b-2b does, on the send-back-to-designer
+    # WRITTEN ONLY BY design_head_send_back(), on the send-back-to-designer
     # path. Written on the attempt the PM rejected, which already carries head_verdict=
     # 'passed' and keeps it: that is why these are separate columns and not
     # head_failure_category / head_remarks. design_analytics._failure_rows() reads the head

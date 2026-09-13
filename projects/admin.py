@@ -439,9 +439,12 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     #
     # The design-specific reason is stronger than the general one, and it is why
     # routing the admin through apply_design_status() would not have been enough
-    # either. `design_head_qc_pass()` is the ONLY path that stamps the release AND
-    # closes the attempt. A form that set status='released' correctly would still
-    # leave a released site with an open DesignAttempt and a downstream
+    # either. Release is the end of a chain: `design_head_qc_pass()` closes the
+    # attempt, then `design_pm_approve()` stamps the release (prompt 3.1b-2c).
+    # Neither view is reachable from the admin (admin.py imports no design view),
+    # which is why these fields are read-only here. A form that set
+    # status='released' correctly would still leave a released site with an open
+    # DesignAttempt and a downstream
     # ProcurementBatch query that disagrees with every screen. THE ADMIN IS NOT A
     # RELEASE ROUTE, and an admin who cannot set these three cannot pretend to be
     # one — that is the correct outcome, not a lost capability.
@@ -452,10 +455,10 @@ class DesignAssignmentAdmin(admin.ModelAdmin):
     #
     # PROMPT 3.1a ADDS `pm_approved_at` AND `pm_approved_by` UNDER THE SAME RULE, AND
     # THEY MAY NOT BE REMOVED EITHER. An approval stamp typed into a form is an approval
-    # nobody made. It would also falsify the property that session rests on: nothing in
-    # the product writes these two fields until prompt 3.1b does, and
-    # tests_design_pm_gate_inert.py proves that by grep, which an editable admin field
-    # would quietly make untrue. Same mechanism as B9, B10 and B26 — closed, not
+    # nobody made. It would also give them a second writer. The product has one,
+    # design_pm_approve(), in the same write as `released`; tests_design_pm_gate_live (a)
+    # pins `released`'s writer set by parse, and an admin form edit has no line of code
+    # for that parse to find. Same mechanism as B9, B10 and B26 — closed, not
     # instrumented.
     readonly_fields = ['status', 'released_at', 'released_by',
                        'pm_approved_at', 'pm_approved_by',
