@@ -45,7 +45,8 @@ from .design_views import (
 from .models import (
     DesignAssignment, DueDateCommitment, Program, Project, Task,
     DESIGN_ASSIGNMENT_STATUS_CHOICES, DESIGN_AWAITING_HEAD_QC, DESIGN_AWAITING_PM_APPROVAL,
-    DESIGN_IN_QC, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES,
+    DESIGN_IN_DESIGN, DESIGN_IN_QC, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    DESIGN_WORK_FINISHED_STATUSES,
 )
 from .views import TENDER_DESIGN_SUBMITTED_STATUSES
 
@@ -343,12 +344,13 @@ class MirrorDerivationTests(TestCase):
 # ===========================================================================
 
 class WorkFinishedGuardTests(PmGateBase):
-    """Each guard is asserted on its own, against a control site at `in_qc` that the
-    same guard ALLOWS — so the refusal is shown to come from the status and nothing else."""
+    """Each guard is asserted on its own, against a control site at `in_design` that the
+    same guard ALLOWS — so the refusal is shown to come from the status and nothing else.
+    (The control was `in_qc` until the D13 prompt closed the Design Hold there.)"""
 
     # ── 1. design_my_sites → can_request_extension ───────────────────────────────
     def test_01_can_request_extension_is_false_in_the_pm_gate(self):
-        _, control = self._site('PG-EXT-C')
+        _, control = self._site('PG-EXT-C', status=DESIGN_IN_DESIGN)
         _, parked = self._site('PG-EXT-P')
         self._park_in_pm_gate(parked)
         self._login(self.designer)
@@ -357,13 +359,13 @@ class WorkFinishedGuardTests(PmGateBase):
         self.assertTrue(rows[control.pk]['can_request_extension'])
         self.assertFalse(rows[parked.pk]['can_request_extension'])
         # The Design Hold control's flag, and `is_released` left truthful beside it.
-        self.assertTrue(rows[parked.pk]['design_work_finished'])
+        self.assertTrue(rows[parked.pk]['not_with_designer'])
         self.assertFalse(rows[parked.pk]['is_released'])
-        self.assertFalse(rows[control.pk]['design_work_finished'])
+        self.assertFalse(rows[control.pk]['not_with_designer'])
 
     # ── 2. design_due_date_propose ───────────────────────────────────────────────
     def test_02_extension_request_is_refused_in_the_pm_gate(self):
-        control_site, control = self._site('PG-PRO-C')
+        control_site, control = self._site('PG-PRO-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PG-PRO-P')
         self._park_in_pm_gate(parked)
         self._login(self.designer)
@@ -381,7 +383,7 @@ class WorkFinishedGuardTests(PmGateBase):
 
     # ── 3. design_due_date_change ────────────────────────────────────────────────
     def test_03_head_date_change_is_refused_in_the_pm_gate(self):
-        control_site, control = self._site('PG-CHG-C')
+        control_site, control = self._site('PG-CHG-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PG-CHG-P')
         self._park_in_pm_gate(parked)
         self._login(self.head)
@@ -400,7 +402,7 @@ class WorkFinishedGuardTests(PmGateBase):
     # ── 4. design_mark_blocked ───────────────────────────────────────────────────
     def test_04_design_hold_is_refused_in_the_pm_gate(self):
         """The §6.1 second door: a hold here would clear back to `in_design`."""
-        control_site, control = self._site('PG-BLK-C')
+        control_site, control = self._site('PG-BLK-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PG-BLK-P')
         self._park_in_pm_gate(parked)
         self._login(self.designer)
@@ -421,7 +423,7 @@ class WorkFinishedGuardTests(PmGateBase):
 
     # ── 5. designer_dashboard_context → can_mark_blocked ─────────────────────────
     def test_05_can_mark_blocked_is_false_in_the_pm_gate(self):
-        control_site, _ = self._site('PG-CMB-C')
+        control_site, _ = self._site('PG-CMB-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PG-CMB-P')
         self._park_in_pm_gate(parked)
         ctx = designer_dashboard_context(
@@ -432,14 +434,14 @@ class WorkFinishedGuardTests(PmGateBase):
 
     # ── and the Head's screen flag that mirrors guard 3 ──────────────────────────
     def test_06_head_sites_flag_hides_change_date_in_the_pm_gate(self):
-        control_site, _ = self._site('PG-HS-C')
+        control_site, _ = self._site('PG-HS-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PG-HS-P')
         self._park_in_pm_gate(parked)
         self._login(self.head)
         rows = {r['site'].pk: r for r in self.client.get(
             reverse('design_head_sites', kwargs={'pk': self.program.pk})).context['rows']}
-        self.assertFalse(rows[control_site.pk]['design_work_finished'])
-        self.assertTrue(rows[parked_site.pk]['design_work_finished'])
+        self.assertFalse(rows[control_site.pk]['clock_stopped'])
+        self.assertTrue(rows[parked_site.pk]['clock_stopped'])
 
 
 # ===========================================================================

@@ -115,7 +115,7 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
       session already scheduled ahead of the Design derivation hook, rather than
       widened into this fix.
       {% endcomment %}
-      {% if not row.is_blocked and not row.design_work_finished %}
+      {% if not row.is_blocked and not row.not_with_designer %}
         <button class="btn btn-sm btn-outline-danger" type="button"
                 data-bs-toggle="collapse" data-bs-target="#blk{{ row.site.pk }}">
           Place on Design Hold
@@ -148,7 +148,7 @@ head_sites.html for why not Tailwind. Functional workflow screen, not a dashboar
     {% endif %}
 
     {# Same pair of tests as the button above — see the note there. #}
-    {% if not row.is_blocked and not row.design_work_finished %}
+    {% if not row.is_blocked and not row.not_with_designer %}
     <div class="collapse mt-2" id="blk{{ row.site.pk }}">
       <form method="post" action="{% url 'design_mark_blocked' project_id=row.site.project_id %}"
             class="d-flex flex-wrap align-items-center gap-2">

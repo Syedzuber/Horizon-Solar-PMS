@@ -1807,7 +1807,7 @@ Recorded by prompt 3.1b-1 (its D-e).
 - **Open decision.** Whether it should join the set belongs to a later session, after
   every design writer collects a remark.
 
-### D13 — LIVE: a designer can put a handed-in package on Design Hold, and clearing the hold rewinds it to `in_design` with no attempt and no change request
+### D13 — PARTLY CLOSED (three of five doors, 13 Sep 2026): a designer can put a handed-in package on Design Hold, and clearing the hold rewinds it to `in_design` with no attempt and no change request
 
 Recorded by the pm_rejected schema prompt's pre-flight (its A2), 13 Sep 2026. **Reported,
 not fixed** — on instruction, because it is a live defect with its own blast radius and
@@ -1856,6 +1856,33 @@ does not belong in a schema commit.
   says so, so nobody takes the omission for the answer. `is_overdue()` and
   `attention_list()` deliberately name `pm_rejected` rather than reading that set, so that
   fix cannot move the overdue rule.
+- **What the D13 prompt did, 13 Sep 2026 — three of five doors closed, NOT all of D13.**
+  - **The set was split first (R-5), because it answered two questions.** The pre-flight
+    found that `DESIGN_NOT_WITH_DESIGNER_STATUSES` fed the date controls as well as the
+    hold: the designer's extension request and the Head's Change date. `is_overdue()`
+    keeps counting `in_qc` and `awaiting_head_qc`, so adding the review statuses there
+    would have left a site going overdue against a date nobody could move until a
+    reviewer acted.
+    - `DESIGN_CLOCK_STOPPED_STATUSES` is new and keeps the old membership:
+      `awaiting_pm_approval`, `released`, `pm_rejected`. Its readers are
+      `design_due_date_propose`, `can_request_extension`, `design_due_date_change` and
+      head_sites' `clock_stopped` flag.
+    - `DESIGN_NOT_WITH_DESIGNER_STATUSES` keeps its name and now adds `artifacts_uploaded`,
+      `in_qc` and `awaiting_head_qc`. Its readers are `design_mark_blocked`,
+      `can_mark_blocked` and my_sites' `not_with_designer` flag (renamed from
+      `design_work_finished`).
+  - **The three review statuses now refuse the hold, at the endpoint AND on the screen.**
+    The refusal names the honest route: the reviewer holding the package fails it with
+    "Survey data inadequate or incorrect". That is Group B, so attempt N+1 opens with
+    reason `qc_failed` and counts as an input problem, not as the designer's rework.
+    `tests_design_hold_refusal.py` drives that route end to end from `in_qc`, and from
+    `artifacts_uploaded` via QC start. It also pins the reopen sequence so it fails if
+    the fix is reverted.
+  - **Two doors stay open: `arka_submitted` and `awaiting_head_arka`.** A refusal is the
+    wrong instrument there, because the designer is still working (the card offers
+    Upload CAD and Enter BOQ). The residual is **§D18**.
+  - **Not answered here:** §D17's "does current load mean the designer holds it" question,
+    which named D13 as its moment. `designer_workload` was outside the prompt's MODE.
 
 ### D14 — HARD REQUIREMENT OF 3.1b-2b: the Head's counts and the QC queue must gain `pm_rejected` rows TOGETHER WITH their actions
 
@@ -1917,6 +1944,60 @@ changed**, because `designer_workload` is outside that MODE.
 - So a site moves from load (review), to not load (with the PM), and back to load
   (rejected). Whether current load should mean "the designer holds it" is the same
   question as D13's, and should be answered with it.
+- **Still open after the D13 prompt (13 Sep 2026).** D13's fix answered the question for
+  the hold guards only; `designer_workload` was outside that MODE.
+
+### D18 — LIVE: a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
+
+Recorded by the D13 prompt (its A4), 13 Sep 2026. **Reported, not fixed.** These are the
+two of D13's five doors that a refusal cannot close.
+
+- **The route.** The designer takes a hold at `arka_submitted` or `awaiting_head_arka`.
+  Both are allowed, and correctly so: the designer is still working, and the card offers
+  Upload CAD and Enter BOQ. The Head then clears the hold, and `_status_after_unblock()`
+  returns `in_design` on the SAME attempt.
+- **What it orphans.** The current Arka keeps `is_current=True` and a `pending` verdict,
+  but nobody can rule on it any more:
+  - `_verdict_target()` refuses Design QC (`status != DESIGN_ARKA_SUBMITTED`), and
+    `_head_verdict_target()` refuses the Head the same way;
+  - the site drops out of `design_qc_queue`'s Arka rows, which filter
+    `status__in=(arka_submitted, awaiting_head_arka)`;
+  - `_maybe_advance_to_artifacts_uploaded()` returns early off `arka_submitted`, so the
+    package cannot move forward.
+- **The only way out makes it worse.** The designer must resubmit, and `design_arka_submit()`
+  stands the old version down (`is_current=False`). Its verdict then stays `pending`
+  forever. If the old Arka was already approved at both gates (the "artifacts outstanding"
+  state), the resubmission also orphans the CAD paired to it through `derived_from_arka`.
+  `ARKA_SUBMITTABLE_STATUSES`' own comment excludes `arka_submitted` to prevent exactly that.
+- **Live rows on the local dump.** Re-count on Railway first.
+  - `MB0005` is at `arka_submitted` with v1 `qc=pending head=pending`. A hold and clear
+    orphans a pending verdict.
+  - `SCMPILOT06` is at `arka_submitted` with v1 approved at both gates. A hold and clear
+    reopens resubmission over an approved Arka.
+- **Proposed shape, for the session that takes it.** For these two statuses,
+  `_status_after_unblock()` should return the status the hold was taken FROM, not
+  `in_design` unconditionally.
+  - That status is recoverable without a schema change: the hold's own `StatusTransition`
+    row (`to_status='survey_returned'`) carries `from_status`. That keeps the function
+    "derived, not stored", as its docstring requires.
+  - The pending Arka then returns to its queue with its verdicts intact.
+  - This changes `_status_after_unblock()` and its two callers, which the D13 prompt's
+    MODE forbade. Decide whether the three review statuses keep the refusal or also move
+    to restoration: restoring is safe for them too, but the refusal is what names the
+    honest attempt-opening route.
+
+### D19 — two date-guard comments name the wrong set after the D13 split
+
+Recorded by the D13 prompt, 13 Sep 2026. Comment-only; no behaviour.
+
+- `design_due_date_propose` and `design_due_date_change` now test
+  `DESIGN_CLOCK_STOPPED_STATUSES`. Each still carries a comment saying the pm_rejected
+  prompt moved the test to `DESIGN_NOT_WITH_DESIGNER_STATUSES`. The propose one adds
+  "the question is whether the designer holds the site". Both statements were true when
+  written and are now superseded.
+- They were left untouched because the D13 prompt required both views to stay
+  byte-identical apart from the constant. The next session that touches either view
+  should update the comment to name the clock-stopped question.
 
 ---
 

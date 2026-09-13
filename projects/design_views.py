@@ -77,6 +77,8 @@ from .models import (
     DESIGN_AWAITING_PM_APPROVAL, DESIGN_WORK_FINISHED_STATUSES,
     # The unreachable PM-rejected status, and the guards' "designer does not hold it" set.
     DESIGN_PM_REJECTED, DESIGN_NOT_WITH_DESIGNER_STATUSES,
+    # The D13 prompt — the date guards' "the designer's clock has stopped" set.
+    DESIGN_CLOCK_STOPPED_STATUSES,
     # Prompt 3.1b-1 — the ledger reasons for the PM's two verdicts.
     REASON_DESIGN_PM_APPROVED, REASON_DESIGN_PM_REJECTED,
     ARKA_PENDING, ARKA_APPROVED, ARKA_REJECTED,
@@ -1046,11 +1048,12 @@ def design_head_sites(request, pk):
             # same set, so the screen and the view cannot disagree.
             #
             # The pm_rejected prompt moved BOTH to DESIGN_NOT_WITH_DESIGNER_STATUSES,
-            # together, for exactly that reason. The key keeps its old name because the
-            # template reads it; it now means "the date is not open to change", which
-            # includes a PM-rejected package that is not finished.
-            'design_work_finished': bool(
-                assignment and assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES),
+            # together, for exactly that reason. The D13 prompt moved both again, together, to
+            # DESIGN_CLOCK_STOPPED_STATUSES — the date controls close where the clock stops,
+            # and a package under review is still on it — and renamed the key from
+            # `design_work_finished` to what it means.
+            'clock_stopped': bool(
+                assignment and assignment.status in DESIGN_CLOCK_STOPPED_STATUSES),
             'allocatable':   bool(assignment and assignment.survey_ready
                                   and assignment.status in REALLOCATABLE_STATUSES),
             # Session B — the SECOND visibility condition for the allocation block, and
@@ -1106,12 +1109,12 @@ def design_my_sites(request):
             # PART 8: the designer asks for an EXTENSION, and only once there is an
             # agreed date to extend, no request already in flight, and the site is
             # still live.
-            # Prompt 3.1a: membership, not `!= DESIGN_RELEASED`. The pm_rejected prompt moved
-            # it to DESIGN_NOT_WITH_DESIGNER_STATUSES in step with design_due_date_propose(),
-            # which it mirrors. Identical for every status reachable today.
+            # Prompt 3.1a: membership, not `!= DESIGN_RELEASED`. The D13 prompt moved it to
+            # DESIGN_CLOCK_STOPPED_STATUSES in step with design_due_date_propose(), which it
+            # mirrors: a package under review is still on the clock, so its date stays open.
             'can_request_extension': bool(
                 current is not None and pending is None
-                and assignment.status not in DESIGN_NOT_WITH_DESIGNER_STATUSES),
+                and assignment.status not in DESIGN_CLOCK_STOPPED_STATUSES),
             'awaiting':    pending is not None,
             'is_blocked':  assignment.status == DESIGN_SURVEY_RETURNED,
             # Read ONLY by the Design Hold control in my_sites.html, which needs
@@ -1130,8 +1133,9 @@ def design_my_sites(request):
             #
             # The pm_rejected prompt moved it to DESIGN_NOT_WITH_DESIGNER_STATUSES in step
             # with design_mark_blocked(), which it mirrors — a button the endpoint refuses is
-            # worse than no button. The key keeps its name because the template reads it.
-            'design_work_finished': assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES,
+            # worse than no button. The D13 prompt renamed the key from `design_work_finished`
+            # to what it means, when that set gained the three review statuses.
+            'not_with_designer': assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES,
             'revisions':   assignment.due_date_commitments.count() - 1,
         })
 
@@ -1824,7 +1828,7 @@ def design_due_date_propose(request, project_id):
     # DESIGN_WORK_FINISHED_STATUSES to DESIGN_NOT_WITH_DESIGNER_STATUSES: the question is
     # whether the designer holds the site, not whether the work counts as finished. The
     # refusal texts for `released` and for the PM gate are unchanged, word for word.
-    if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
+    if assignment.status in DESIGN_CLOCK_STOPPED_STATUSES:
         where = ('released' if assignment.status == DESIGN_RELEASED
                  else 'with the PM for approval' if assignment.status == DESIGN_AWAITING_PM_APPROVAL
                  else 'back with the Design Head after the PM rejected it')
@@ -2017,7 +2021,7 @@ def design_due_date_change(request, project_id):
     # mirrors it. A PM-rejected package's date is settled when the Head sends it back
     # (EXECUTION_MODULE_DEFERRED.md §D15), not before. The refusal texts for `released` and
     # for the PM gate are unchanged, word for word.
-    if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
+    if assignment.status in DESIGN_CLOCK_STOPPED_STATUSES:
         where = ('released' if assignment.status == DESIGN_RELEASED
                  else 'with the PM for approval' if assignment.status == DESIGN_AWAITING_PM_APPROVAL
                  else 'back with the Design Head after the PM rejected it')
@@ -2107,11 +2111,36 @@ def design_mark_blocked(request, project_id):
     #
     # The pm_rejected prompt moved the test to DESIGN_NOT_WITH_DESIGNER_STATUSES: a
     # PM-rejected package is not finished, but the designer does not hold it either, and a
-    # hold on it would clear straight back to `in_design`. That set does NOT yet contain the
-    # review statuses where the same door is open TODAY — EXECUTION_MODULE_DEFERRED.md §D13,
-    # whose fix is adding them to that set. The refusal texts for `released` and for the PM
-    # gate are unchanged, word for word.
+    # hold on it would clear straight back to `in_design`.
+    #
+    # THE D13 PROMPT (13 Sep 2026) ADDED THE THREE REVIEW STATUSES to that set, closing the
+    # same door where it was open on live rows — EXECUTION_MODULE_DEFERRED.md §D13. Their
+    # refusal is not a permission denial, because no permission exists that would make the
+    # hold right: it says why, and names the route that does the job honestly. The reviewer
+    # holding the package fails it as "Survey data inadequate or incorrect", which opens
+    # attempt N+1 counted as an input problem, not as the designer's rework (B-06). It names
+    # the reviewer who can actually act: Design QC fails only from `in_qc` (starting review
+    # from `artifacts_uploaded` first), the Head only from `awaiting_head_qc`.
+    #
+    # The refusal texts for `released`, for the PM gate and for `pm_rejected` are unchanged,
+    # word for word.
     if assignment.status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
+        under_review = {
+            DESIGN_ARTIFACTS_UPLOADED: ('is waiting for Design QC to start review', 'Design QC'),
+            DESIGN_IN_QC:              ('is in review with Design QC', 'Design QC'),
+            DESIGN_AWAITING_HEAD_QC:   ('has passed Design QC and is with the Design Head',
+                                        'the Design Head'),
+        }
+        if assignment.status in under_review:
+            where, reviewer = under_review[assignment.status]
+            return _deny(request,
+                         f'{project.project_id} {where}, so it cannot go on Design Hold — a '
+                         f'hold pauses design work, and this package is no longer being '
+                         f'designed. If the survey is inadequate, ask {reviewer} to fail the '
+                         f'package with the category "Survey data inadequate or incorrect". '
+                         f'It comes back to you as a new attempt, recorded as a survey '
+                         f'problem, not as your rework.',
+                         'design_my_sites')
         where = ('has already been released' if assignment.status == DESIGN_RELEASED
                  else 'has passed both review gates and is with the PM for approval'
                  if assignment.status == DESIGN_AWAITING_PM_APPROVAL
@@ -4936,7 +4965,8 @@ def designer_dashboard_context(profile, projects):
             # Prompt 3.1a: `released` is excluded ONCE, through a set rather than by name in
             # the tuple as well. The pm_rejected prompt moved that set to
             # DESIGN_NOT_WITH_DESIGNER_STATUSES in step with design_mark_blocked(), which
-            # this flag mirrors (§D13 is why it is still incomplete).
+            # this flag mirrors. The D13 prompt added the three review statuses to that set,
+            # so the button is gone from a package under review as the endpoint refuses it.
             'can_mark_blocked': (is_designer
                                  and assignment.status not in (
                                      DESIGN_SURVEY_RETURNED, DESIGN_AWAITING_SURVEY,

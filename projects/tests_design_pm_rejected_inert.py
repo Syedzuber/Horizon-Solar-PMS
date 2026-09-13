@@ -54,7 +54,8 @@ from .models import (
     DesignAssignment, DesignAttempt, DueDateCommitment, Program, Project, Task,
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_PM_REJECTED, DESIGN_ATTEMPT_REASON_CHOICES,
     DESIGN_ASSIGNMENT_STATUS_CHOICES, DESIGN_AWAITING_ALLOCATION, DESIGN_AWAITING_HEAD_QC,
-    DESIGN_AWAITING_PM_APPROVAL, DESIGN_AWAITING_SURVEY, DESIGN_IN_QC,
+    DESIGN_AWAITING_PM_APPROVAL, DESIGN_AWAITING_SURVEY, DESIGN_CLOCK_STOPPED_STATUSES,
+    DESIGN_IN_DESIGN, DESIGN_IN_QC,
     DESIGN_NOT_WITH_DESIGNER_STATUSES, DESIGN_PM_REJECTED, DESIGN_RELEASED,
     DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES, DESIGN_ARTIFACTS_UPLOADED,
     ERR_LAYOUT, ERR_REQUIREMENT_CHANGED, ERR_SURVEY_INADEQUATE, ERROR_GROUP_A,
@@ -295,15 +296,20 @@ class DeclarationTests(TestCase):
         self.assertIn('awaiting_head_qc', HEAD_ACTION_STAGES)
         self.assertNotIn('awaiting_head_qc', QC_ACTION_STAGES)
 
-    def test_05_the_guard_set_is_the_finished_set_plus_one_and_D13_stays_out(self):
-        self.assertEqual(DESIGN_NOT_WITH_DESIGNER_STATUSES,
+    def test_05_the_guard_set_is_the_finished_set_plus_one_and_D13_joins_the_hold_set(self):
+        # The D13 prompt split the guard set in two (R-5). The DATE guards' set keeps the
+        # membership this test pinned before: the finished set plus one.
+        self.assertEqual(DESIGN_CLOCK_STOPPED_STATUSES,
                          DESIGN_WORK_FINISHED_STATUSES | {DESIGN_PM_REJECTED})
-        # §D13: the designer does not hold these either, and a hold there is the live
-        # reopen route. Their addition to THIS set is D13's fix, in the NEXT prompt — left
-        # out here so no guard answers differently for a reachable status. When D13 lands,
-        # this assertion is the one it deliberately changes.
-        for status in (DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC):
-            self.assertNotIn(status, DESIGN_NOT_WITH_DESIGNER_STATUSES)
+        # §D13: the designer does not hold these either, and a hold there was the live
+        # reopen route. The D13 prompt (13 Sep 2026) added them to the HOLD guards' set —
+        # this is the assertion it deliberately changed. They stay out of the clock set:
+        # is_overdue() still counts them, so their due date stays open to change.
+        review = {DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC}
+        self.assertEqual(DESIGN_NOT_WITH_DESIGNER_STATUSES,
+                         DESIGN_CLOCK_STOPPED_STATUSES | review)
+        for status in review:
+            self.assertNotIn(status, DESIGN_CLOCK_STOPPED_STATUSES)
 
 
 # ===========================================================================
@@ -425,12 +431,13 @@ class MirrorDerivationTests(TestCase):
 # ===========================================================================
 
 class GuardTests(RejectedBase):
-    """Each guard on its own, against a control site at `in_qc` that the same guard ALLOWS,
-    so the refusal is shown to come from the status and nothing else."""
+    """Each guard on its own, against a control site at `in_design` that the same guard
+    ALLOWS, so the refusal is shown to come from the status and nothing else. (The control
+    was `in_qc` until the D13 prompt closed the Design Hold there.)"""
 
     # ── 1. design_due_date_propose ───────────────────────────────────────────────
     def test_01_extension_request_is_refused(self):
-        control_site, control = self._site('PR-PRO-C')
+        control_site, control = self._site('PR-PRO-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PR-PRO-P')
         self._park_rejected(parked)
         self._login(self.designer)
@@ -447,7 +454,7 @@ class GuardTests(RejectedBase):
 
     # ── 2. design_due_date_change ────────────────────────────────────────────────
     def test_02_head_date_change_is_refused(self):
-        control_site, control = self._site('PR-CHG-C')
+        control_site, control = self._site('PR-CHG-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PR-CHG-P')
         self._park_rejected(parked)
         self._login(self.head)
@@ -465,7 +472,7 @@ class GuardTests(RejectedBase):
     # ── 3. design_mark_blocked ───────────────────────────────────────────────────
     def test_03_design_hold_is_refused(self):
         """The reopen door: a hold here would clear back to `in_design`."""
-        control_site, control = self._site('PR-BLK-C')
+        control_site, control = self._site('PR-BLK-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PR-BLK-P')
         self._park_rejected(parked)
         self._login(self.designer)
@@ -485,7 +492,7 @@ class GuardTests(RejectedBase):
 
     # ── 4. designer_dashboard_context → can_mark_blocked ─────────────────────────
     def test_04_can_mark_blocked_is_false(self):
-        control_site, _ = self._site('PR-CMB-C')
+        control_site, _ = self._site('PR-CMB-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PR-CMB-P')
         self._park_rejected(parked)
         ctx = designer_dashboard_context(
@@ -496,7 +503,7 @@ class GuardTests(RejectedBase):
 
     # ── the three screen flags that show those controls ──────────────────────────
     def test_05_my_sites_flags_hide_extension_and_hold(self):
-        _, control = self._site('PR-MS-C')
+        _, control = self._site('PR-MS-C', status=DESIGN_IN_DESIGN)
         _, parked = self._site('PR-MS-P')
         self._park_rejected(parked)
         self._login(self.designer)
@@ -504,29 +511,38 @@ class GuardTests(RejectedBase):
                 self.client.get(reverse('design_my_sites')).context['rows']}
         self.assertTrue(rows[control.pk]['can_request_extension'])
         self.assertFalse(rows[parked.pk]['can_request_extension'])
-        self.assertFalse(rows[control.pk]['design_work_finished'])
-        self.assertTrue(rows[parked.pk]['design_work_finished'])
+        self.assertFalse(rows[control.pk]['not_with_designer'])
+        self.assertTrue(rows[parked.pk]['not_with_designer'])
 
     def test_06_head_sites_flag_hides_change_date(self):
-        control_site, _ = self._site('PR-HS-C')
+        control_site, _ = self._site('PR-HS-C', status=DESIGN_IN_DESIGN)
         parked_site, parked = self._site('PR-HS-P')
         self._park_rejected(parked)
         self._login(self.head)
         rows = {r['site'].pk: r for r in self.client.get(
             reverse('design_head_sites', kwargs={'pk': self.program.pk})).context['rows']}
-        self.assertFalse(rows[control_site.pk]['design_work_finished'])
-        self.assertTrue(rows[parked_site.pk]['design_work_finished'])
+        self.assertFalse(rows[control_site.pk]['clock_stopped'])
+        self.assertTrue(rows[parked_site.pk]['clock_stopped'])
 
     # ── and every OTHER status answers exactly as it did before ──────────────────
     def test_07_every_other_status_answers_identically(self):
         """THE STOP CONDITION, as a test. The guards and flags moved from the finished set
         to the new one; for every status except the new one, membership is identical, and
         each flag is re-derived through the real code and compared with the pre-change
-        formula (which read DESIGN_WORK_FINISHED_STATUSES)."""
+        formula (which read DESIGN_WORK_FINISHED_STATUSES).
+
+        The D13 prompt split the guard set. The date guards' set still agrees with the
+        finished set for every other status. The hold guards' set also refuses the three
+        review statuses — the deliberate D13 difference, named `under_review` below and
+        nowhere else."""
         others = [v for v, _ in DESIGN_ASSIGNMENT_STATUS_CHOICES if v != DESIGN_PM_REJECTED]
+        under_review = (DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)
         for status in others:
-            self.assertEqual(status in DESIGN_NOT_WITH_DESIGNER_STATUSES,
+            self.assertEqual(status in DESIGN_CLOCK_STOPPED_STATUSES,
                              status in DESIGN_WORK_FINISHED_STATUSES, status)
+            self.assertEqual(status in DESIGN_NOT_WITH_DESIGNER_STATUSES,
+                             status in DESIGN_WORK_FINISHED_STATUSES or status in under_review,
+                             status)
 
         sites = {status: self._site(f'PR-ALL-{i:02d}', status=status)
                  for i, status in enumerate(others)}
@@ -541,14 +557,17 @@ class GuardTests(RejectedBase):
 
         for status, (site, assignment) in sites.items():
             finished = status in DESIGN_WORK_FINISHED_STATUSES
+            reviewing = status in under_review
             self.assertEqual(ctx[site.pk]['can_mark_blocked'],
                              status not in (DESIGN_SURVEY_RETURNED, DESIGN_AWAITING_SURVEY,
-                                            DESIGN_AWAITING_ALLOCATION) and not finished,
+                                            DESIGN_AWAITING_ALLOCATION)
+                             and not finished and not reviewing,
                              status)
             self.assertEqual(my_rows[assignment.pk]['can_request_extension'], not finished,
                              status)
-            self.assertEqual(my_rows[assignment.pk]['design_work_finished'], finished, status)
-            self.assertEqual(head_rows[site.pk]['design_work_finished'], finished, status)
+            self.assertEqual(my_rows[assignment.pk]['not_with_designer'],
+                             finished or reviewing, status)
+            self.assertEqual(head_rows[site.pk]['clock_stopped'], finished, status)
 
 
 # ===========================================================================

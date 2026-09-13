@@ -3323,25 +3323,47 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
 # PHASE_2_PREFLIGHT_AUDIT §6.1, returning by a second door. Test membership here instead.
 DESIGN_WORK_FINISHED_STATUSES = frozenset({DESIGN_AWAITING_PM_APPROVAL, DESIGN_RELEASED})
 
-# "DOES THE DESIGNER HOLD THIS SITE?" — the statuses where the answer is NO, for the GUARDS.
+# "HAS THE DESIGNER'S DUE-DATE CLOCK STOPPED?" — the statuses where the answer is YES.
 #
-# A DIFFERENT QUESTION FROM THE SET ABOVE (R-5), so a different name even where the members
-# agree. DESIGN_WORK_FINISHED_STATUSES answers a METRICS question — which sites count in a
-# denominator — and a PM-rejected package is not finished. This answers the guards' question:
-# may the designer put this site on Design Hold, ask for an extension, or have its date
-# changed? Read by design_mark_blocked, can_mark_blocked, design_due_date_propose and
-# design_due_date_change, and by the three screen flags that show those controls.
+# Read by the DATE controls: design_due_date_propose, design_due_date_change, and the two
+# screen flags that show them (my_sites' can_request_extension, head_sites' clock_stopped).
 #
-# It is the finished set plus `pm_rejected`: the Head passed the attempt, the PM refused it,
-# and it is the Head's to decide — not the designer's to hold.
+# THE DATE CONTROLS CLOSE EXACTLY WHERE THE CLOCK STOPS, which is why this set is narrower
+# than the one below. design_metrics.is_overdue() keeps counting `artifacts_uploaded`,
+# `in_qc` and `awaiting_head_qc` against the agreed date, so a package under review is still
+# on the clock. Closing the date controls there would leave a site going overdue against a
+# date nobody could move until a reviewer acted. tests_design_hold_refusal pins the half of
+# this that can be pinned: every member here is excluded from is_overdue().
 #
-# THIS SET IS INCOMPLETE ON PURPOSE, AND THE OMISSION IS NOT THE ANSWER. The designer does not
-# hold `artifacts_uploaded`, `in_qc` or `awaiting_head_qc` either, and a Design Hold placed
-# there today is cleared back to `in_design` on the same attempt — the live reopen route in
-# EXECUTION_MODULE_DEFERRED.md §D13. THE FIX FOR D13 IS ADDING THOSE THREE MEMBERS TO THIS SET,
-# in the prompt that follows this one. They are left out here only so that this commit
-# changes no guard's answer for any status a row can actually be in.
-DESIGN_NOT_WITH_DESIGNER_STATUSES = frozenset(DESIGN_WORK_FINISHED_STATUSES | {DESIGN_PM_REJECTED})
+# Split out of DESIGN_NOT_WITH_DESIGNER_STATUSES by the D13 prompt, 13 Sep 2026, with the
+# membership that set had then — the finished set plus `pm_rejected` (R-5: two questions,
+# two names, even where the members once agreed).
+DESIGN_CLOCK_STOPPED_STATUSES = frozenset(DESIGN_WORK_FINISHED_STATUSES | {DESIGN_PM_REJECTED})
+
+# "DOES THE DESIGNER HOLD THIS SITE?" — the statuses where the answer is NO.
+#
+# Read by the HOLD controls: design_mark_blocked, can_mark_blocked, and my_sites'
+# not_with_designer flag. A DIFFERENT QUESTION FROM DESIGN_WORK_FINISHED_STATUSES (R-5), which
+# answers a METRICS question — which sites count in a denominator.
+#
+# The clock-stopped set above, plus the three review statuses: `artifacts_uploaded`, `in_qc`,
+# `awaiting_head_qc`. The package is handed in and under review; the designer is not
+# designing it, so there is no design work for a Design Hold to pause.
+#
+# THE REVIEW STATUSES WERE ADDED BY THE D13 PROMPT, 13 Sep 2026 (EXECUTION_MODULE_DEFERRED.md
+# §D13). A hold placed at any of them was cleared by _status_after_unblock() back to
+# `in_design` on the SAME attempt — no new attempt, no change request, the package out of the
+# QC queue with its BOQ still design-locked. The hold is now refused there, and the refusal
+# names the route that does the job honestly: the reviewer fails the package with
+# "Survey data inadequate or incorrect", which opens attempt N+1 counted as an input problem.
+#
+# `arka_submitted` AND `awaiting_head_arka` ARE DELIBERATELY NOT MEMBERS. The same clear reaches
+# them and orphans a pending Arka verdict (§D18), but the designer IS still working there — the
+# card offers Upload CAD and Enter BOQ — so a hold is a real workflow and a refusal is the
+# wrong instrument. Their fix belongs on the clear side. D13 closes three of those five doors.
+DESIGN_NOT_WITH_DESIGNER_STATUSES = frozenset(DESIGN_CLOCK_STOPPED_STATUSES | {
+    DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC,
+})
 
 # DesignAttempt.opened_reason. The two rework loops are counted SEPARATELY and
 # deliberately not collapsed into one field: a QC failure is the design failing

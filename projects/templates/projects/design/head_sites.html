@@ -209,7 +209,7 @@ page, and any markup named inside it becomes real elements.
               {% endif %}
 
               {# Revise an agreed date directly — Head only, takes effect at once #}
-              {% if row.current_due and not row.design_work_finished %}
+              {% if row.current_due and not row.clock_stopped %}
                 <button class="btn btn-sm btn-outline-warning" type="button"
                         data-bs-toggle="collapse" data-bs-target="#ch{{ row.site.pk }}">Change date</button>
               {% endif %}
@@ -359,7 +359,7 @@ page, and any markup named inside it becomes real elements.
           </tr>
           {% endif %}
 
-          {% if row.current_due and not row.design_work_finished %}
+          {% if row.current_due and not row.clock_stopped %}
           <tr class="collapse" id="ch{{ row.site.pk }}">
             <td colspan="7" class="bg-light">
               <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
