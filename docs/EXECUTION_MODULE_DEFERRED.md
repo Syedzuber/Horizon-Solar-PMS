@@ -1581,7 +1581,26 @@ _No entries yet._
 
 ## D. Phase 3 — design handover and as-built (prompts 3.1 – 3.4)
 
-> ### ⛔ DEPLOY GATE — PROMPT 3.1b-2c MUST NOT REACH RAILWAY BEFORE PROMPT 3.1b-3 (NOTIFICATIONS) EXISTS
+> ### ✅ DEPLOY GATE — SATISFIED 15 Sep 2026 BY PROMPT 3.1b-3. 3.1b-2c (`1f2a137`) MAY REACH RAILWAY, BUT ONLY TOGETHER WITH OR AFTER THE 3.1b-3 COMMIT
+>
+> **What 3.1b-3 added.** The four people the gate blocks are told it is their turn, **in-app
+> only**:
+>
+> | Transition | Who is told | Where the notice links |
+> |---|---|---|
+> | Head's pass | the site's PM and active Coordinators | the PM approval queue |
+> | PM's rejection | the actor on the latest ledger transition into `awaiting_pm_approval` (the Head or deputy who passed it, or whoever returned it); else `head_reviewed_by`; else every active Design Head (that fan-out is logged) | `design_qc_review` |
+> | Head's return | the site's PM and active Coordinators | the PM approval queue |
+> | Head's send-back | the allocated designer | the design workspace |
+>
+> - **Every call site names `channels=['in_app']`.** Each send runs after the view's atomic block,
+>   inside a `try`, so a failed send cannot unwind the transition.
+> - **`tests_design_gate_notifications`** proves nothing else is transmitted, with the switches
+>   ON.
+> - **Still true after 3.1b-3:** nothing is emailed or sent on WhatsApp, there is no off switch
+>   (§D37), and SCM is told nothing on release (§D39). The original entry follows.
+>
+> #### ⛔ ORIGINAL — PROMPT 3.1b-2c MUST NOT REACH RAILWAY BEFORE PROMPT 3.1b-3 (NOTIFICATIONS) EXISTS
 >
 > Recorded 13 Sep 2026 by prompt 3.1b-2c, the commit that makes the PM gate live.
 >
@@ -2574,6 +2593,70 @@ that were approved one by one, so they were left byte-identical.
 - **`execution-model.md` §13:** *"so this table is the whole answer"*. v1.4 added the approved
   `PunchPoint` row, but `Program`, `DesignSubmission` and `NotificationLog` also carry a
   `status` field and appear in neither of §13's tables.
+
+### D37 — THE IN-APP SWITCH DOES NOTHING, so the PM gate's notifications have no off switch
+
+Recorded by prompt 3.1b-3 (its D-o), 15 Sep 2026. **Recorded, not fixed.**
+
+- **What exists.** `SystemSettings.in_app_notifications_enabled` is on the admin master-switch
+  screen (`admin_master_switches`, labelled "In-app notifications"). The screen saves it and
+  logs the change.
+- **What reads it.** Nothing. `send_notification()` reads `whatsapp_enabled` and
+  `email_enabled`, and its `in_app` branch calls `_send_in_app()` with no check. There is no
+  per-user in-app preference either. An administrator can toggle the control, see it save,
+  and change nothing. A control that lies is worse than a missing one.
+- **The consequence for 3.1b-3.** The PM gate's four notifications have no off switch. If they
+  misfire on production, the only remedy is a deploy.
+- **Why not fixed here.** The fix is one check in the chokepoint's `in_app` branch. It changes
+  the behaviour of all sixteen existing call sites, and of the assignment cooldown
+  (`utils._assign_notification_state`), which counts in-app `NotificationLog` rows *because*
+  that channel is never skipped. It belongs in its own session.
+
+### D38 — THE BELL ALREADY LINKS TO THE WRONG HOST
+
+Recorded by prompt 3.1b-3 (its D-p), 15 Sep 2026. **LIVE, user-facing, pre-existing. Recorded,
+not fixed.**
+
+- **What happens.** The existing call sites build one message for all three channels, with
+  `https://horizon-solar-pms-production.up.railway.app` appended to the text. For example, the
+  payment milestone in `_apply_task_status_change`, `_notify_boq_acknowledged`, and both
+  assignment messages in `utils._notify_assignment` (`SITE_BASE_URL`).
+- **Why it reaches the bell.** That text is stored as `Notification.message`. On production,
+  a user reading the bell at `pms.horizonrenewablepower.in` sees a Railway URL in the body, and
+  clicking it goes to `railway.app`. `Notification.link` is relative and correct; the message
+  text is not.
+- **How 3.1b-3 avoided it.** Its links are relative, from `reverse()`, and no message carries a
+  URL. `tests_design_gate_notifications` a3 pins that.
+- **The fix.** Separate the in-app text from the email text at each call site, or strip the
+  URL for in-app. A single `APP_BASE_URL` (§G2) would fix the host for email. It is its own
+  session.
+
+### D39 — SCM is told nothing when a design is released
+
+Recorded by prompt 3.1b-3 (its D-q), 15 Sep 2026. **Deliberately out of scope.**
+
+- **What happens.** `design_pm_approve` releases the site into SCM's pool, and nobody in SCM
+  hears about it. SCM finds released sites by opening `post_qc_pool`.
+- **Why it was left out.** 3.1b-3 had four firsts: the module's first notifications, first
+  recipient resolution, first channel restriction and first logged fan-out. SCM would be a new
+  audience on top of them.
+- **Open questions for its own session.** Who in SCM: every active `role='SCM'` profile (the
+  notifications spec §2.5), or an assignee? How to avoid a burst when a tender releases many
+  sites in a day? And in-app only again, or email, now that `email_enabled` is ON in
+  production?
+
+### D40 — `project_managers()` drops inactive coordinators; the permission check does not
+
+Recorded by prompt 3.1b-3 (its D-r), 15 Sep 2026. **Recorded, not fixed.**
+
+- **The difference.** `permissions.project_managers()` returns the assigned PM plus
+  `coordinators.filter(is_active=True)`. `can_approve_design_release()` is
+  `user_can_manage_project()`, which checks `coordinators.filter(pk=...)` with no `is_active`.
+  So an inactive coordinator can still approve or reject a design and is not told when one
+  arrives. The assigned PM is not filtered on `is_active` by either.
+- **Why it is immaterial today.** No OPEX site has a coordinator (0 of 102 on the local dump).
+  It will matter once MPUVNL sites get coordinators.
+- **Pinned.** `tests_design_gate_notifications` b1 asserts that a lapsed coordinator is not told.
 
 ---
 

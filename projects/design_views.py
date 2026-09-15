@@ -42,6 +42,9 @@ from .design_metrics import (
     STAGE_LABELS, effective_commitment, pending_extension, tender_metrics,
 )
 from .utils import design_due_date, record_transition
+# Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
+# design_gate_next_actors() before adding a fifth.
+from .notifications import send_notification
 from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
     validate_cad_zip,
@@ -123,6 +126,8 @@ from .permissions import (
     # Prompt 3.1b-1 — the PM's release approval: the per-site authority, and its
     # queryset form for the queue.
     can_approve_design_release, manageable_projects_q,
+    # Prompt 3.1b-3 — the same PM audience, as a list of people to notify.
+    project_managers,
 )
 
 logger = logging.getLogger(__name__)
@@ -3984,6 +3989,25 @@ def design_head_qc_pass(request, project_id):
             entity_type='DesignAttempt', entity_id=attempt.pk,
             reason_code=REASON_DESIGN_HEAD_PASSED)
 
+    # PROMPT 3.1b-3 — the PM's turn. IN-APP ONLY, named here; after the atomic block, so no
+    # send can unwind the handover. See the block above design_gate_next_actors().
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        for recipient in design_gate_next_actors(assignment, GATE_HEAD_PASSED):
+            send_notification(
+                recipient=recipient,
+                message=(f'{project.project_id}: a design is waiting for your approval. '
+                         f'{who} (Design Head) passed attempt {attempt.attempt_number} '
+                         f'through both review gates. Approve it to release it to SCM, or '
+                         f'reject it with a remark for the Design Head.'),
+                channels=['in_app'],
+                link=reverse('design_pm_approval_queue'),
+                template='design_gate_head_passed',  # a NotificationLog label, not Interakt
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_head_qc_pass: the in-app notification for %s failed; the '
+                         'handover to the PM stands.', project.project_id)
+
     messages.success(request, f'{project.project_id}: both review gates passed on attempt '
                               f'{attempt.attempt_number} — the design is now with the site\'s '
                               f'PM for approval before release.')
@@ -4097,6 +4121,109 @@ def design_head_qc_fail(request, project_id):
 #: The 403 text for both PM verdict endpoints.
 _PM_GATE_FORBIDDEN = ('Design release approval is for the site\'s Project Manager or one of '
                       'its Project Coordinators.')
+
+
+# ---------------------------------------------------------------------------
+# 12b-n. Whose turn it is — the PM gate's notifications (prompt 3.1b-3)
+#
+# THE DESIGN MODULE'S FIRST NOTIFICATIONS, AND THEY ARE IN-APP ONLY. Each of the four call
+# sites names channels=['in_app'] itself. It does not lean on send_notification()'s
+# default, and it does not lean on SystemSettings.email_enabled being off: that switch is
+# ON in production, and UserProfile.email_notifications defaults to True, so a site that
+# named 'email' would send real mail to everyone it reached. Nothing can switch these off
+# either: in_app_notifications_enabled is read by no send path
+# (EXECUTION_MODULE_DEFERRED.md §D37). tests_design_gate_notifications pins the channel
+# at every call site by parse.
+#
+# EVERY SEND RUNS AFTER ITS VIEW'S ATOMIC BLOCK, INSIDE A try/except. send_notification()
+# catches its own failures, and that is what makes it dangerous INSIDE the block: a caught
+# failed INSERT leaves the Postgres transaction aborted, and the status change is rolled
+# back at commit, silently, under a success message. After the block the transition has
+# already committed and no send can undo it; the except stops a failure from turning the
+# view's redirect into a 500. A notification outage must never become a workflow outage.
+#
+# LINKS ARE RELATIVE, from reverse(), AND NO MESSAGE CARRIES A URL. The bell renders
+# `link` as an href, so a relative path lands on whatever host the user is already on.
+# The absolute hosts elsewhere in the codebase are wrong for production (§D38).
+#
+# SCM IS NOT TOLD WHEN A DESIGN IS RELEASED. Deliberately: a new audience (§D39).
+# ---------------------------------------------------------------------------
+
+GATE_HEAD_PASSED   = 'head_passed'     # design_head_qc_pass      -> the site's PM
+GATE_PM_REJECTED   = 'pm_rejected'     # design_pm_reject         -> the Design Head
+GATE_HEAD_RETURNED = 'head_returned'   # design_head_return_to_pm -> the site's PM
+GATE_SENT_BACK     = 'sent_back'       # design_head_send_back    -> the designer
+
+
+def design_gate_next_actors(assignment, transition):
+    """Whose turn it is after `transition` on `assignment`: the UserProfiles to notify,
+    deduplicated by pk. Call it ONCE per transition, after the atomic block. Never per row.
+
+    GATE_HEAD_PASSED, GATE_HEAD_RETURNED -> project_managers(): the site's PM plus its
+        active Coordinators, PM first. That is the audience of can_approve_design_release(),
+        so everyone who can act on the queue hears about it, and only they do. Two queries.
+
+    GATE_SENT_BACK -> the allocated designer, `assigned_to`. _open_next_attempt() never
+        writes it, so it still names the designer after attempt N+1 opens. One query.
+
+    GATE_PM_REJECTED -> the ONE person whose decision the rejection answers, by a chain:
+        1. the actor on the LATEST ledger transition INTO `awaiting_pm_approval`. On a first
+           rejection that is whoever passed the package, the Head or his deputy. After a
+           Head return it is whoever RETURNED it, and head_reviewed_by would name the wrong
+           person here, because design_head_return_to_pm writes nothing to the attempt.
+        2. else attempt N's head_reviewed_by;
+        3. else every active is_design_head holder, AND THAT FALL-THROUGH IS LOGGED: a
+           fan-out to several people nobody chose should be findable later.
+        A step is skipped when its person is null or no longer active. One query on the
+        normal path, three on the full fall-through.
+    """
+    if transition in (GATE_HEAD_PASSED, GATE_HEAD_RETURNED):
+        people = project_managers(assignment.project)
+    elif transition == GATE_SENT_BACK:
+        people = [assignment.assigned_to] if assignment.assigned_to is not None else []
+        if not people:
+            logger.warning('design_gate_next_actors: %s has no allocated designer, so the '
+                           'send-back notifies nobody.', assignment.project.project_id)
+    elif transition == GATE_PM_REJECTED:
+        arrival = (StatusTransition.objects
+                   .filter(subject_type=SUBJECT_DESIGN_ASSIGNMENT, subject_id=assignment.pk,
+                           to_status=DESIGN_AWAITING_PM_APPROVAL)
+                   .select_related('actor')
+                   .order_by('-occurred_at', '-pk')
+                   .first())
+        attempt = None
+        if arrival is not None and arrival.actor is not None and arrival.actor.is_active:
+            people = [arrival.actor]
+        else:
+            attempt = (assignment.attempts.select_related('head_reviewed_by')
+                       .filter(attempt_number=assignment.current_attempt_number).first())
+            passer = attempt.head_reviewed_by if attempt is not None else None
+            if passer is not None and passer.is_active:
+                logger.warning('design_gate_next_actors: %s — nobody active on the ledger '
+                               'handed this package to the PM; notifying the Head who '
+                               'passed attempt %s (%s) instead.',
+                               assignment.project.project_id, attempt.attempt_number,
+                               passer.user.username)
+                people = [passer]
+            else:
+                people = list(UserProfile.objects
+                              .filter(is_design_head=True, is_active=True)
+                              .select_related('user').order_by('pk'))
+                log = logger.warning if people else logger.error
+                log('design_gate_next_actors: %s — no single Design Head answers this PM '
+                    'rejection (the ledger and attempt %s name nobody active); notifying '
+                    'ALL %d active Design Head flag-holders: %s.',
+                    assignment.project.project_id, assignment.current_attempt_number,
+                    len(people), ', '.join(p.user.username for p in people) or 'none')
+    else:
+        raise ValueError(f'design_gate_next_actors: unknown transition {transition!r}')
+
+    seen, unique = set(), []
+    for person in people:
+        if person.pk not in seen:
+            seen.add(person.pk)
+            unique.append(person)
+    return unique
 
 
 def _pm_gate_guard(request, project):
@@ -4291,6 +4418,27 @@ def design_pm_reject(request, project_id):
             'design_pm_rejected',
             reason_code=REASON_DESIGN_PM_REJECTED, remark=remark)
 
+    # PROMPT 3.1b-3 — the Design Head's turn: the one whose decision this answers.
+    # IN-APP ONLY, named here; after the atomic block, so no send can unwind the rejection.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        for recipient in design_gate_next_actors(locked, GATE_PM_REJECTED):
+            send_notification(
+                recipient=recipient,
+                # The PM's own words go LAST and unpunctuated: a remark ending in its own
+                # full stop must not be followed by a second one.
+                message=(f'{project.project_id}: the PM rejected the design and it is back '
+                         f'with you. Return it to the PM unchanged, or send it back to the '
+                         f'designer. {who} rejected attempt {locked.current_attempt_number} '
+                         f'before release: "{remark}"'),
+                channels=['in_app'],
+                link=reverse('design_qc_review', kwargs={'project_id': project.project_id}),
+                template='design_gate_pm_rejected',  # a NotificationLog label, not Interakt
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_pm_reject: the in-app notification for %s failed; the '
+                         'rejection stands.', project.project_id)
+
     messages.success(request, f'{project.project_id}: design rejected and returned to the '
                               f'Design Head with your remark.')
     return redirect('design_pm_approval_queue')
@@ -4431,6 +4579,25 @@ def design_head_return_to_pm(request, project_id):
             'design_head_returned_to_pm',
             reason_code=REASON_DESIGN_HEAD_RETURNED_TO_PM, remark=remark)
 
+    # PROMPT 3.1b-3 — the PM's turn again. IN-APP ONLY, named here; after the atomic block,
+    # so no send can unwind the return.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        for recipient in design_gate_next_actors(locked, GATE_HEAD_RETURNED):
+            send_notification(
+                recipient=recipient,
+                # The Head's words last, as at design_pm_reject.
+                message=(f'{project.project_id}: a design is back for your approval, '
+                         f'unchanged. Approve it to release it to SCM, or reject it again. '
+                         f'{who} (Design Head) disagrees with the rejection: "{remark}"'),
+                channels=['in_app'],
+                link=reverse('design_pm_approval_queue'),
+                template='design_gate_head_returned',  # a NotificationLog label, not Interakt
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_head_return_to_pm: the in-app notification for %s failed; '
+                         'the return to the PM stands.', project.project_id)
+
     messages.success(request, f'{project.project_id}: design returned to the PM unchanged, '
                               f'with your remark.')
     return redirect('design_qc_review', project_id=project.project_id)
@@ -4540,6 +4707,29 @@ def design_head_send_back(request, project_id):
 
     date_note = (f' The due date moved from {moved[0]:%d %b %Y} to {moved[1]:%d %b %Y}.'
                  if moved else '')
+
+    # PROMPT 3.1b-3 — the designer's turn. IN-APP ONLY, named here; after the atomic block,
+    # so no send can unwind the send-back or attempt N+1.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        for recipient in design_gate_next_actors(locked, GATE_SENT_BACK):
+            send_notification(
+                recipient=recipient,
+                # The Head's words last, as at design_pm_reject.
+                message=(f'{project.project_id}: the design is back with you, and attempt '
+                         f'{new_attempt.attempt_number} is open to redo '
+                         f'{_redo_phrase(redo)}.{date_note} The PM rejected attempt '
+                         f'{attempt.attempt_number} and {who} (Design Head) sent it back: '
+                         f'"{remarks}"'),
+                channels=['in_app'],
+                link=reverse('design_site_workspace',
+                             kwargs={'project_id': project.project_id}),
+                template='design_gate_sent_back',  # a NotificationLog label, not Interakt
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_head_send_back: the in-app notification for %s failed; the '
+                         'send-back stands.', project.project_id)
+
     messages.success(request, f'{project.project_id}: sent back to the designer — attempt '
                               f'{new_attempt.attempt_number} opened to redo '
                               f'{_redo_phrase(redo)}.{date_note}')
