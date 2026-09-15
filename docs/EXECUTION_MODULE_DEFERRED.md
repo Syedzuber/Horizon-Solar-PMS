@@ -2059,6 +2059,14 @@ bullet below describes what the code on `main` does now, not what it will do.
   and `pm_change_request` only, so every send-back's attempt renders with neither.
 - **`METRIC_CATALOGUE` text** — moved to its own entry, **§D32**, because it is user-visible
   text describing a metric, not a reader of the value, and it is now incomplete on live data.
+- **The first-pass decision, stated as the problem (D32 caption prompt, 15 Sep 2026).** A
+  Head's send-back opens an attempt with reason `pm_rejected`. `m_first_pass_rate` counts
+  only `qc_failed`, so that loop does not cost first-pass. For the same event,
+  `classify_attempt_causes` charges the designer rework when the Head classes it Group A. So
+  one event is a designer error on the rework figure and not a failed first pass on the
+  first-pass figure. **Still OPEN.** The first-pass caption matches its code and was left
+  byte-identical; `tests_design_metric_captions.test_first_pass_does_not_count_it_which_is_section_d16`
+  pins the disagreement as it stands, and is the test the deciding session changes.
 
 ### D17 — LIVE: `designer_workload` puts a `pm_rejected` site back into the designer's current load
 
@@ -2221,6 +2229,13 @@ reachable, so both costs are current behaviour.
   reaches the PM only through the Head's pass, which stamps that field, so only a row
   written another way (a fixture, a backfill) can hit this. Pinned by
   `tests_design_head_rejection_inert` c3.
+- **A second figure distorted by the same row (D32 caption prompt, 15 Sep 2026).**
+  `design_analytics.m_extension_rate` counts assignments carrying more than one commitment,
+  so the send-back's row also raises the quality page's "Due date extension rate" — a PM
+  rejection reads as a designer asking for more time. Its caption ("more than one due-date
+  commitment") is literally true and was left byte-identical: the mismatch is between the
+  metric's NAME and what a send-back does to it, and the fix is the same decision as the
+  revision bullet above.
 
 ### ~~D24 — both PM-gate inertness modules RETIRE after 3.1b-2c; do not amend them a fourth time~~ — **CLOSED by prompt 3.1b-2c**
 
@@ -2463,7 +2478,38 @@ Recorded by prompt 3.1b-2c, 13 Sep 2026.
 - **The fix.** Rename it (for example `test_head_pass_hands_to_the_pm`) the next time the
   module is open.
 
-### D32 — `METRIC_CATALOGUE`: user-visible text describing a metric omits a source that went live with 3.1b-2c
+### ~~D32 — `METRIC_CATALOGUE`: user-visible text describing a metric omits a source that went live with 3.1b-2c~~ — **CLOSED by the D32 caption prompt**
+
+#### CLOSED 15 Sep 2026 BY THE D32 CAPTION PROMPT
+
+A full sweep of every catalogue entry, group blurb, caption, header, legend and tooltip on
+the quality analytics page and the tender dashboard found 4 FALSE and 6 INCOMPLETE; the rest
+are ACCURATE. Nine were corrected; the tenth (`extension_rate`) was dropped by decision and
+moved to §D23.
+
+- **Corrected.** `rework_multiplier` and the tender dashboard's Rework footer now name the
+  Group A PM rejection. `error_distribution` names three sources, and its legend says the
+  package count includes PM rejections. `group_b_failures` and the Group B blurb say "Never
+  counted as designer rework" instead of "Counted here and nowhere else" / "Never folded into
+  any designer figure", both false since Part 10: a Group B loop costs first-pass and counts
+  in the QC and Head failure rates. The `m_change_request_rate` docstring no longer names a
+  "Released sites" column that does not exist.
+- **Deleted, not rewritten.** The Group A blurb's "Group A causes only — a bad survey or a
+  moved brief never appears here" (first-pass and both failure rates count every loop
+  whatever its category; the proposed replacement was itself false, because rework also
+  counts uncategorised pre-Part-9 failures). The Group C blurb's "counted against the PM who
+  moved it": the proposed "Change requests count against the PM who raised them" failed a
+  literal check — see §D41.
+- **The Rework footer kept its old sentence.** `tests_design_zero_display` pins it verbatim,
+  and no test expectation could change, so the PM rejection is a new sentence after it
+  rather than an insertion into it.
+- **Proof.** `ast_proof` over `design_analytics.py` against `683a0ea`: identical outside
+  caption constants, with exactly the seven intended ones changed; the rule is in the
+  session report. `manage.py design_figure_snapshot` (committed for this purpose) is
+  byte-identical before and after on the local database. `tests_design_metric_captions`
+  asserts the corrected text in the rendered HTML of both screens.
+
+The original entry follows.
 
 Recorded by the comment-correction prompt, 13 Sep 2026. It was §D16's fourth bullet, and it
 now has its own entry because of its class.
@@ -2659,6 +2705,28 @@ Recorded by prompt 3.1b-3 (its D-r), 15 Sep 2026. **Recorded, not fixed.**
 - **Pinned.** `tests_design_gate_notifications` b1 asserts that a lapsed coordinator is not told.
 
 ---
+
+### D41 — what the D32 caption sweep found outside its MODE
+
+Recorded by the D32 caption prompt, 15 Sep 2026. **Recorded, not fixed.**
+
+- **The change-request rate is keyed to two different people.** `m_change_request_rate`
+  puts each ACCEPTED request in the row of `cr.requested_by`, and divides by the finished
+  sites whose `project.assigned_pm` is that same person. `user_can_request_design_change()`
+  routes through `user_can_manage_project()`, which also admits every active Project
+  Coordinator. So a coordinator's accepted request lands in a row with no finished sites
+  ("Insufficient data (n=0)"), and the site's PM's row never shows it. The column header
+  "Requesting PM" and the catalogue's "per REQUESTING PM" read as PMs only. This is why the
+  Group C blurb's attribution clause was deleted rather than rewritten. **Decide** whether a
+  coordinator's request is charged to the site's PM.
+- **`error_distribution.by_source` has two keys, not three.** The PM-source rows from
+  `_failure_rows()` carry `source='Package'`, so they are inside the package count. The
+  legend now says so; splitting them into their own count is a code change.
+- **`m_change_request_rate` rows still carry `released`, which nothing renders.** Left in
+  place: the return shape was frozen for the caption session.
+- **`tests_design_part10` line 427 docstring,** "the Group B failure appears in B and nowhere
+  else", echoes the catalogue claim that session deleted. What the test asserts is narrower
+  and still true; the docstring was outside the MODE.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 

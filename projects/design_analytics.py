@@ -178,14 +178,12 @@ GROUP_D = 'D'
 
 METRIC_GROUPS = [
     (GROUP_A, 'Designer execution',
-     'What the design team produced. Group A causes only — a bad survey or a moved brief '
-     'never appears here.'),
+     'What the design team produced.'),
     (GROUP_B, 'Input quality',
-     'Problems that arrived with the site, not with the design. Never folded into any '
-     'designer figure.'),
+     'Problems that arrived with the site, not with the design. Never counted as '
+     'designer rework.'),
     (GROUP_C, 'Brief stability',
-     'How much the requirement moved after work started, counted against the PM who '
-     'moved it.'),
+     'How much the requirement moved after work started.'),
     (GROUP_D, 'Process and reviewer consistency',
      'Whether the workflow and the two gates are doing their job.'),
 ]
@@ -217,9 +215,9 @@ METRIC_CATALOGUE = [
                'failure tally alone.'),
     Metric('rework_multiplier', GROUP_A, 'Rework multiplier',
            'Designer-caused attempts per finished site (released, or awaiting PM '
-           'approval): attempts a Group A failure opened, plus uncategorised pre-Part-9 '
-           'QC failures. The initial attempt, and Group B, Group C and PM-change '
-           'attempts, are not counted, so a clean record reads 0.',
+           'approval): attempts a Group A QC failure or Group A PM rejection opened, '
+           'plus uncategorised pre-Part-9 QC failures. The initial attempt, and Group B, '
+           'Group C and PM-change attempts, are not counted, so a clean record reads 0.',
            caveat='The same figure as the Rework column on the tender dashboard, computed '
                   'by the same code, so over the same sites the two agree. The dashboard '
                   'rounds to one decimal and shows any sample size; this panel rounds to '
@@ -232,8 +230,8 @@ METRIC_CATALOGUE = [
     Metric('head_failure_rate', GROUP_A, 'Head failure rate',
            'Attempts failed at the Design Head gate, over attempts that reached it.'),
     Metric('error_distribution', GROUP_A, 'Error category distribution',
-           'Count by Group A category, team-wide and per designer, across both package '
-           'failures and Arka rejections.',
+           'Count by Group A category, team-wide and per designer, across package '
+           'failures, PM rejections and Arka rejections.',
            core=True,
            why='Locked: this is the training signal. It shows WHERE errors cluster, which '
                'is the only part of the page that says what to do next rather than who '
@@ -252,7 +250,7 @@ METRIC_CATALOGUE = [
                'rework figure and the page stops being able to tell the two apart.'),
     Metric('group_b_failures', GROUP_B, 'Group B failure count',
            'Failures categorised as an input problem — the survey was inadequate, or the '
-           'site differed from it. Counted here and nowhere else.'),
+           'site differed from it. Never counted as designer rework.'),
     Metric('hold_duration', GROUP_B, 'Design Hold duration',
            'Average days a site spent on Design Hold, over completed holds.',
            caveat='Reconstructed from paired activity-log events, because the assignment '
@@ -919,7 +917,8 @@ def m_change_request_rate(data):
     denominator, the same as in the rework multiplier and the tender dashboard. Otherwise
     the day prompt 3.1b ships, every site with the PM would fall out of the bottom of this
     ratio while its accepted request stayed on top. Each row also carries the strict
-    `released` count for the table's "Released sites" column; `finished` is the divisor.
+    `released` count, which no column renders; the table's "Finished sites" column is
+    `finished`, the divisor.
     """
     per = {}
     for s in data['sites']:
