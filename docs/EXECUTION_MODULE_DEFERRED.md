@@ -2474,7 +2474,19 @@ now has its own entry because of its class.
     cost first-pass."* This matches the code, which counts `qc_failed` only. It is silent on
     PM rejections, which is §D16's open product decision. Settle that first.
 
-### D33 — the authority document says `DesignAssignment` is not instrumented, and it has been since the transition-ledger session
+### ~~D33 — the authority document says `DesignAssignment` is not instrumented, and it has been since the transition-ledger session~~ — **CLOSED by the execution-model v1.4 session**
+
+#### CLOSED 15 Sep 2026 BY THE EXECUTION-MODEL v1.4 SESSION
+
+`docs/execution-model.md` is now v1.4. §13 lists `design_assignment` in its Instrumented table
+(16 statuses, migration `0079`), and the "NOT instrumented" row is gone. §5's design-workflow
+row no longer says a PM approval gate does not exist: it states the one exit from `released`
+and its writers per branch, and a new block at the end of §5's OPEX-only subsection describes
+the gate. That block is scoped in its heading to local `main` from `1f2a137`, and says the gate
+is unreachable on deployed `6cdb61e`. The same pass corrected 35 other claims and re-verified
+every ✔ by grep: 47 held and 5 were false. The false ones were corrected and re-ticked. The
+`tests_status_transition` docstring half of this entry is a `.py` file and was outside that
+MODE; it is recorded in §D36. The original entry follows.
 
 Recorded by the comment-correction prompt, 13 Sep 2026. **Older than the PM-gate run.**
 
@@ -2517,6 +2529,51 @@ left byte-identical. They are recorded so the next reader knows they were seen.
   began (ten entries before prompt 3.1a), so it was outside that sweep.
 - **Migrations 0085 and 0086.** Their "NOTHING WRITES…" docstrings describe each migration as
   it was written, which is the correct tense for a migration.
+
+### D35 — `staticfiles/` is tracked in git, so any local `collectstatic` dirties the tree
+
+Recorded by the execution-model v1.4 session, 15 Sep 2026. **Recorded, not fixed.**
+
+- **What happens.** `staticfiles/` is committed. Any local `collectstatic`, including a
+  deployment rehearsal, rewrites it. At the start of this session that showed as 130 `M`
+  entries under `staticfiles/admin/`. `git diff --shortstat -- staticfiles` was empty, with
+  and without `--ignore-cr-at-eol`, so they are stat-only phantom modifications, not content.
+- **Why it bites.** A careless `git add -A` or `git commit -a` would commit generated files.
+  It is also why this session's pre-flight had to stop at its "git status clean" check. The
+  session committed its two `.md` files by explicit path.
+- **The open decision, for its own session.** Untrack `staticfiles/` (with a `.gitignore`
+  entry) if Railway runs `collectstatic` at start, which R-22 says its start command does. Or
+  keep it tracked and document the phantom modifications. Check the deploy first: this
+  session did not.
+
+### D36 — false claims the v1.4 sweep found and its MODE could not fix
+
+Recorded by the execution-model v1.4 session, 15 Sep 2026. Each was confirmed by grep in that
+session. The first four are outside a MODE that admitted only `docs/execution-model.md` and
+this section. The last three are in `docs/execution-model.md` but outside the 37 corrections
+that were approved one by one, so they were left byte-identical.
+
+- **`projects/tests_status_transition.py`'s module docstring** still lists `DesignAssignment`
+  beside `DesignAttempt` and `PaymentRequest` as not instrumented. It is §D33's second half;
+  a `.py` file.
+- **`docs/PHASE_0_COMPLETION.md`**, "The design module's transitions": *"Not instrumented, and
+  this is the largest deliberate gap in the ledger. `DesignAssignment` has 14 statuses"*.
+  Since migration `0079` it is instrumented, and it has 16.
+- **`docs/EXECUTION_PROMPT_LOG.md`, row B21**, and **`docs/OPEX_task_template_spec.md` §2 rule
+  3** (*"NOT BUILT for any of the 8, Design included. No derivation hook exists yet"*). The
+  Design mirror has been derived since `70a6684` (5 Sep 2026), and the four delivery mirrors
+  since `0a106bb` (7 Sep 2026).
+- **§B27's premise** (section B, outside this session's mandate). Its heading says the four
+  delivery mirrors need SCM's catalogue mapping **and** B-18. `sync_delivery_mirrors()`
+  derives them from delivery challan lines through `DC_CATEGORY_TO_MIRROR_CODE`, with neither.
+- **`execution-model.md` §5, OPEX template:** *"it is why mirrors leave both halves of a
+  progress fraction (R-20)"*. Since prompt 1.6, R-20's progress half counts mirrors.
+- **`execution-model.md` §12, the 31 Aug `enable_cascade_scheduling` entry:** *"Nine of the 22
+  OPEX tasks are the Site Engineer's."* The 0075 seed gives the Site Engineer 11 of 23 today.
+  It is a dated decision-log row, and whether "nine" held on 31 Aug was not checked.
+- **`execution-model.md` §13:** *"so this table is the whole answer"*. v1.4 added the approved
+  `PunchPoint` row, but `Program`, `DesignSubmission` and `NotificationLog` also carry a
+  `status` field and appear in neither of §13's tables.
 
 ---
 

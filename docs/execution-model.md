@@ -4,12 +4,13 @@
 
 Read this file at the start of every execution-module session. It is the authority on vocabulary, structure and rules for this module. Where it conflicts with an older document, this file wins. Where it is silent, `PROJECT_CONTEXT.md` and `code commenting standard.txt` apply unchanged.
 
-**Version 1.3 — 29 Aug 2026.** Phase 0 is complete, and this revision makes the file describe the codebase as it now stands rather than as 0.1 found it: §5 gains every structure phase 0 built, §6 separates the problems that were fixed from the ones that are still live, §8 closes the questions phase 0 answered, §11 marks B-1/B-2/B-5/B-7 fixed, and R-16 and R-17 are added. Sections 13, 14 and 15 — appended by prompts 0.3, 0.4 and 0.5 — are unchanged and remain the detailed record for `StatusTransition`, task templates and checklists.
+**Version 1.4 — 15 Sep 2026.** The PM approval gate exists (prompts 3.1b-1 to 3.1b-2c, 10–13 Sep 2026), and this revision makes the file say so. §5 gains "The PM approval gate" and corrects the OPEX template counts (23 tasks, 8 mirrors), mirror derivation (the Design mirror and the four delivery mirrors are derived), checklist linking (2.4), `PunchPoint` (2.3a) and the warehouse on a delivery challan. §8 closes B-06 and B-12. §12 records the PM gate's decisions and the punch-point reversal. §13 moves `DesignAssignment` to the instrumented table (the seventh subject type, migration `0079`) and adds `PunchPoint` to the uninstrumented one. §16 and §18 correct their counts. Every line-number anchor is replaced by the name of the function, class or constant it pointed into. Recorded as `EXECUTION_MODULE_DEFERRED.md` §D33.
 
-*Version history.* v1.0 (23 Aug) → v1.1/v1.2 built by the prompt 0.1 verification session (25 claims confirmed, 11 corrected), then extended by the A-0.2 access audit and the 0.2a regression baseline. 0.3 appended §13 while deliberately holding the version string at 1.2, because later prompts hard-checked for it. Phase 0 has now closed, so the bump is safe to take. Claims marked ✔ were verified against source; claims added in v1.3 were read from the committed code, not from the prompts' own reports.
+*Version history.* v1.0 (23 Aug) → v1.1/v1.2 built by the prompt 0.1 verification session (25 claims confirmed, 11 corrected), then extended by the A-0.2 access audit and the 0.2a regression baseline. 0.3 appended §13 while deliberately holding the version string at 1.2, because later prompts hard-checked for it. v1.3 (29 Aug) closed phase 0: §5 gained every structure phase 0 built, §6 separated the fixed problems from the live ones, §8 closed the questions phase 0 answered, §11 marked B-1/B-2/B-5/B-7 fixed, and R-16 and R-17 were added. v1.3 was then edited in place through 3 Sep — R-18 to R-22 and §16 to §18 — without a bump. v1.4 (15 Sep) is the correction pass: 37 false or misleading claims corrected. Claims marked ✔ were verified against source; claims added in v1.3 were read from the committed code, not from the prompts' own reports. **Every ✔ in v1.4 was re-verified by grep against the working tree on 15 Sep 2026; five were false, and each was corrected and re-ticked on that same grep. An unticked claim is not asserted to have been checked.**
 
 > **If the copy in `docs/` says "Last updated: 23 Aug 2026" it is v1.0 and has eleven errors in it. Replace it.**
 > **If it says "Version 1.2" it predates the phase 0 close-out and describes four defects that are fixed, a checklist that is not versioned, and no `StatusTransition`. Replace it.**
+> **If it says "Version 1.3" it predates the PM approval gate: it says, with a verification tick, that the gate does not exist, that `DesignAssignment` is not on the ledger, that no mirror is derived, and that five OPEX tasks are mirrors. Replace it.**
 
 ---
 
@@ -116,7 +117,7 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 **R-9 · Remarks are mandatory.** `remark` is `NOT NULL` on every execution status transition, enforced at the database level rather than in a form.
 
-**R-10 · Statuses stay hardcoded constants.** Do not introduce a `workflow_status` lookup table or any rule-builder screen. The codebase has 64 migrations ✔ of module-level status constants; match that convention.
+**R-10 · Statuses stay hardcoded constants.** Do not introduce a `workflow_status` lookup table or any rule-builder screen. The codebase has 86 migrations ✔ of module-level status constants; match that convention.
 
 **R-11 · A screen ships with its navigation entry.** Any prompt that adds a user-facing screen adds the way to reach it, in the same prompt.
 
@@ -157,7 +158,7 @@ Access isolation ships before any site engineer or warehouse keeper receives a l
 
 **Why this is a rule and not a tidy-up.** Before B8 these were two near-identical ~180-line copies, reached from two screens the same person uses interchangeably. As 1.4a put it: *a rule added to one is not enforced, merely avoidable* — and the drift is silent, because the rule works on one screen and the person avoiding it never knows they are. Five features are queued behind this path (the mirror-task read-only refusal, the dependency early-start warning, two-step completion, the HSE gate, the QA/QC gate). Consolidated, each is written once.
 
-**The first of the five has landed, and it is the rule working as advertised.** Prompt **B22**, 31 Aug 2026, added the mirror read-only refusal as **one `if` at the top of the helper** — no view was edited, neither caller was touched, and no fourth outcome constant was invented: it returns the existing `_TASK_STATUS_REFUSED` and both callers shape their own response exactly as they do for every other refusal. Read that as the shape the remaining four take. See §14's mirror subsection for the refusal itself.
+**The first of the five has landed, and it is the rule working as advertised.** Prompt **B22**, 31 Aug 2026, added the mirror read-only refusal as **one `if` at the top of the helper** — no view was edited, neither caller was touched, and no fourth outcome constant was invented: it returns the existing `_TASK_STATUS_REFUSED` and both callers shape their own response exactly as they do for every other refusal. Read that as the shape the others take. **The second, two-step completion (prompt 2.1, 4 Sep 2026, migration `0076`), landed the same way — a rung in the helper directly below the mirror refusal — so three remain.** See §14's mirror subsection for the refusal itself.
 
 **What stays in the view**, following the house precedent `_apply_boq_acknowledgement()` — extracted by 0.2b after the same defect, and whose docstring already rules that "gates and status preconditions stay with the callers": resolving the task, the permission gate, and the response. The helper never returns an `HttpResponse` and does not know which screen called it. **The permission gate is deliberately NOT shared** — the overview row is role-or-PM, the detail block is assignee-only, and those admit different people on purpose.
 
@@ -188,7 +189,7 @@ A **mirror** (`Task.is_mirror`) has its status derived from another object — a
 
 **Why each half is the way it is.** A site is not finished because the humans finished — the deliveries and the design are part of the work, so an undelivered consignment is unfinished work *whoever* is responsible for recording it. And a mirror is nobody's task, so counting one against somebody attributes another team's queue to them: an OPEX site's two PM mirrors would sit on the PM's "pending approvals" card without the PM being able to touch either, and an EOD digest gated on open work would email somebody about tasks they cannot act on.
 
-**WHAT THE NUMBER LOOKS LIKE DOES NOT DECIDE IT — only the question does.** `dashboard_site_engineer`'s per-project `se_done / se_total` renders as a percentage and is **WORKLOAD**, because its queryset carries `assigned_to=se_profile`: it answers "how much of *my* work is done", and the proof is that two Site Engineers on one project get two different percentages out of it. A site-completeness number cannot do that. It is commented in place at `views.py` ~965 so that nobody later "fixes" it to match the PM card.
+**WHAT THE NUMBER LOOKS LIKE DOES NOT DECIDE IT — only the question does.** `dashboard_site_engineer`'s per-project `se_done / se_total` renders as a percentage and is **WORKLOAD**, because its queryset carries `assigned_to=se_profile`: it answers "how much of *my* work is done", and the proof is that two Site Engineers on one project get two different percentages out of it. A site-completeness number cannot do that. It is commented in place in `dashboard_site_engineer()` so that nobody later "fixes" it to match the PM card.
 
 ---
 
@@ -198,7 +199,7 @@ A **mirror** (`Task.is_mirror`) has its status derived from another object — a
 
 **But it was made on one screen.** `dashboard_pm`'s percentage, the CEO project cards and the SE progress figure went on excluding mirrors, so one activated OPEX site reported its completeness **out of 15 in two places and out of 23 in a third, from the same rows at the same moment.** R-20 as written had become false, and the divergence was of exactly the class this programme had spent twelve sessions removing.
 
-1.6 **split the rule rather than picking a screen.** Six lines changed: `dashboard_pm`'s four per-project counts (`views.py` ~678) and the CEO card pair (`views.py` ~2050) moved to the PROGRESS half. Every other site kept 1.3b's exclusion unchanged. `phase_data_json` was already correct.
+1.6 **split the rule rather than picking a screen.** Six lines changed: `dashboard_pm`'s four per-project counts (in `dashboard_pm()`) and the CEO card pair (in `_get_ceo_dashboard_context()`) moved to the PROGRESS half. Every other site kept 1.3b's exclusion unchanged. `phase_data_json` was already correct.
 
 **One correction went the other way in the same session.** 1.5 changed a single binding (`countable = tasks`) that **three** outputs in that loop read, and only two of them were the bar. `ext_pending` — outstanding External tasks on a phase — is a *pending* count and belongs to the WORKLOAD half; it was swept in by accident and 1.6 put it back. Inert on every row in existence (all eight OPEX mirrors are `Internal`, Residential has none) and corrected anyway, because a misclassified number that nothing exercises is the kind that surfaces the day someone adds an External mirror.
 
@@ -212,7 +213,7 @@ A **mirror** (`Task.is_mirror`) has its status derived from another object — a
 
 **METRICS, NOT VIEWS — the distinction survives the split.** A site dashboard must still *show* its mirrors; displaying derived state is the entire reason they exist. Both halves apply to counts, sums, percentages and gates, never to lists. The three `{{ phase.tasks.count }}` captions in `project_overview.html` and `project_detail.html` are **deliberately unfiltered** — each labels a table that lists every task. The one exception is a list that exists to *itemise* a metric — `tasks_drill_down` and the PM card's five-row blocked/overdue evidence lists — which must reconcile with the number it hangs off.
 
-**THE ACCEPTED COST OF THE PROGRESS HALF, restated because it inverted.** 1.3b's stated cost was that a phase could read 100% with its mirrors open. The cost now is the opposite: **a site with open mirrors can never reach 100% until derivation lands**, because no human can close one. That is a *true* statement about the site; "100% complete with four consignments undelivered" was not. B27 records that the four delivery mirrors need both B-18 and SCM's catalogue mapping before any of them can move.
+**THE ACCEPTED COST OF THE PROGRESS HALF, restated because it inverted.** 1.3b's stated cost was that a phase could read 100% with its mirrors open. The cost now is the opposite: **a site with open mirrors can never reach 100% until each mirror's source derives it**, because no human can close one. That is a *true* statement about the site; "100% complete with four consignments undelivered" was not. **Derivation is built for the Design mirror (`sync_design_mirror()`, 5 Sep 2026) and the four delivery mirrors (`sync_delivery_mirrors()`, 7 Sep 2026, from delivery challan lines); COD, As-Built Drawings and HOTO have no source object yet.**
 
 **`current_phase` is governed by R-21, not by this rule**, and R-21 is untouched: a mirror never makes its phase current, so an OPEX site does not go back to reading "Design" forever.
 
@@ -244,7 +245,7 @@ The set of keys whose integer *changed* is therefore the set of counters that co
 
 **One implementation, called by four sites.** Until B21 the rule was written **four times** — `Project.get_current_phase()`, `dashboard_pm`, `dashboard_site_engineer`, and an inline Python loop in `dashboard_bd`. `utils.current_phase(project)` is now the only copy; `Project.get_current_phase()` is a delegate that returns `.phase_name` off it, because two templates print that method's result directly. **A fifth screen calls the helper. It does not write a fifth loop.**
 
-**The exclusion was urgent, not tidy.** The OPEX template's Phase 1 is `Design`, its only task is a mirror, and no derivation hook exists to ever write it Done — nor do COD, HOTO or As-Built have a source object in existence. Every OPEX site therefore displayed its current phase as "Design", permanently, on all four screens, with all nine installation tasks complete. A fresh OPEX site now reads **Approvals (Pre-Installation)**, and `Design` can never be an OPEX site's current phase, because it holds no human-owned task at all.
+**The exclusion was urgent, not tidy.** The OPEX template's Phase 1 is `Design`, its only task is a mirror, and on 31 Aug no derivation hook wrote it (the Design mirror has been derived since 5 Sep 2026, by `sync_design_mirror()`) — nor do COD, HOTO or As-Built have a source object in existence. Every OPEX site therefore displayed its current phase as "Design", permanently, on all four screens, with all nine installation tasks complete. A fresh OPEX site now reads **Approvals (Pre-Installation)**, and `Design` can never be an OPEX site's current phase, because it holds no human-owned task at all.
 
 **The four copies already disagreed, before mirrors.** On a project with every task Done, `models.py` and `dashboard_bd` returned `None` while the PM and SE dashboards returned the LAST phase — so a finished Residential project read "Finance Closure" on the PM dashboard and "—" on the Admin project list, from the same data at the same moment. **Settled 31 Aug: the last phase that HOLDS a human-owned task.** That equals the old PM/SE answer for both templates shipping today, so the two most-used screens did not move; it differs only for a template ending in an all-mirror phase. `None` survives for a project with no phases, and for one where no phase holds a human-owned task at all.
 
@@ -254,7 +255,7 @@ The set of keys whose integer *changed* is therefore the set of counters that co
 
 **R-22 · A migration must never call live application code whose signature can change. A shared helper that crosses that boundary must tolerate fields that did not exist yet.** *(Established by prompt HOTFIX-1, 3 Sep 2026, after the phase 1 merge took production down.)*
 
-**The incident.** The phase 1 merge was pushed to `main` on **3 Sep 2026**. Railway's start command is `migrate --run-syncdb && collectstatic && gunicorn`. Migration **0067** raised `TypeError: TaskTemplateTask() got unexpected keyword arguments: 'is_mirror'`, `migrate` exited non-zero, **gunicorn never started, and production was down until the previous deployment was restored.** Production is at 0066; 0067 rolled back cleanly and no data was half-written.
+**The incident.** The phase 1 merge was pushed to `main` on **3 Sep 2026**. Railway's start command is `migrate --run-syncdb && collectstatic && gunicorn`. Migration **0067** raised `TypeError: TaskTemplateTask() got unexpected keyword arguments: 'is_mirror'`, `migrate` exited non-zero, **gunicorn never started, and production was down until the previous deployment was restored.** Production stayed at 0066 that day; 0067 rolled back cleanly and no data was half-written.
 
 **The mechanism, which is more general than the instance.** `seed_task_template_version()` in `projects/utils.py` is shared by migrations 0067 and 0075. Prompt 1.3a added `is_mirror=` to it for 0075. **`is_mirror` arrives in migration 0074 — seven migrations after 0067.** A migration runs against the model state at its own point in the chain, so 0067's `TaskTemplateTask` has no such field and Django's `Model.__init__` refuses the keyword.
 
@@ -284,9 +285,9 @@ The stored BD value is **`'BD'`** ✔. `'BD / Sales'` is a `Task.assigned_role` 
 
 **Still open:** `_get_ceo_dashboard_context()` has six hardcoded `dept_*` counter groups and no Coordinator one, so a task with this role is counted by no department. **1.3b examined it and did not fix it, by decision (30 Aug).** Completion Certificates is *not* a mirror, so 1.3b's exclusion does not touch it; closing the gap means adding a seventh department row — three new conditional counts plus a template row — which is a behaviour change beyond that session's remit. Re-recorded as **B20** in `EXECUTION_MODULE_DEFERRED.md` and now unassigned.
 
-`_PROFILE_TO_TASK_ROLE` is **one module-level constant** at `views.py:413` — `{'BD': 'BD / Sales'}`, applied as `.get(role, role)` at seven call sites. **Corrected 29 Aug by 0.6:** it used to be seven byte-identical *local* copies, and 0.2b consolidated them ahead of prompt 1.2's schedule. The two vocabularies differ in exactly one value; they differ in *membership* more than in naming.
+`_PROFILE_TO_TASK_ROLE` is **one module-level constant** in `views.py` — `{'BD': 'BD / Sales'}`, applied as `.get(role, role)` at seven call sites. **Corrected 29 Aug by 0.6:** it used to be seven byte-identical *local* copies, and 0.2b consolidated them ahead of prompt 1.2's schedule. The two vocabularies differ in exactly one value; they differ in *membership* more than in naming.
 
-**Its inverse was not consolidated.** `_TASK_TO_PROFILE_ROLE = {'BD / Sales': 'BD'}` is still declared locally at `views.py:4252` and `views.py:7372`. 0.2b's scope named three duplications and this was not one — recorded as A3 in `EXECUTION_MODULE_DEFERRED.md`, and it is the remaining half of `DESIGN_MODULE_DEFERRED.md`'s K5.
+~~**Its inverse was not consolidated.**~~ **Corrected: prompt K5 (30 Aug 2026) consolidated it.** `_TASK_TO_PROFILE_ROLE` is now one module-level definition in `views.py`, beside the forward map and **derived from it by comprehension** (R-19), where it used to be two local literals. 0.2b's scope named three duplications and this was not one; it was recorded as A3 in `EXECUTION_MODULE_DEFERRED.md`, now closed.
 
 ### New capabilities in this module — flags, not roles
 
@@ -296,7 +297,7 @@ Per R-15, and decided 24 Aug 2026:
 |---|---|---|
 | **QA/QC** | `is_qaqc` boolean on `UserProfile` | Records a verdict on a task someone else completed, raises punch points, verifies resolution. That is authority over an action, not a task assignment. No `ROLE_CHOICES` value, no `Task.ROLE_CHOICES` value. Mirrors `is_design_qc`. |
 | **HSE** | `is_hse` boolean on `UserProfile` | Signs one mobilisation clearance per site — see §9. One signature per site, not per task. |
-| **Warehouse Keeper** | `is_warehouse_keeper` boolean on `UserProfile` | **A distinct person logs in and records receipt.** Needs a warehouse-scoped view and appears in phase 1, not deferred. `DeliveryChallan.grn_confirmed_by` already exists ✔ and is the field they fill. |
+| **Warehouse Keeper** | `is_warehouse_keeper` boolean on `UserProfile` | **A distinct person logs in and records receipt.** Needs a warehouse-scoped view and appears in phase 1, not deferred. `DCLineItem.grn_confirmed_by` already exists ✔ — per line item, not per challan — and is the field they fill. |
 
 **No new `UserProfile.ROLE_CHOICES` values are added by this module.**
 
@@ -314,22 +315,22 @@ Assignments are **effective-dated rows**, never a foreign key on `Project`. Ther
 
 | Need | Existing model | Verified note |
 |---|---|---|
-| Execution phases and tasks | `ProjectPhase`, `Task` | **52** tasks across 9 phases for Residential ✔ — asserted at `utils.py:908` inside the atomic block, so a mismatch rolls back activation. 44 internal / 8 external. ~~**OPEX/CAPEX have no template at all**~~ — **superseded 30 Aug by 1.3a** (an OPEX template EXISTS as data) **and again 31 Aug by 1.3c** (`opex_site_activate` attaches it: **22** tasks across **7** phases, all Internal, **5 of them mirrors**). CAPEX still has none, and would need only a seeded template — `attach_opex_template()` resolves by `project.project_type` |
+| Execution phases and tasks | `ProjectPhase`, `Task` | **52** tasks across 9 phases for Residential ✔ — asserted by `_attach_task_template()` inside the atomic block, against counts derived from the template, so a mismatch rolls back activation. 44 internal / 8 external. ~~**OPEX/CAPEX have no template at all**~~ — **superseded 30 Aug by 1.3a** (an OPEX template EXISTS as data) **and again 31 Aug by 1.3c** (`opex_site_activate` attaches it: **22** tasks across **7** phases, all Internal, **5 of them mirrors** — **corrected 1 Sep by 1.5 to 23 tasks, 8 of them mirrors**). CAPEX still has none, and would need only a seeded template — `attach_opex_template()` resolves by `project.project_type` |
 | Task template | `TaskTemplate`, `TaskTemplatePhase`, `TaskTemplateTask` | **Built by 0.4** (migrations `0066`, `0067`). Versioned data — `RESIDENTIAL` v1 is 9 phases / 52 tasks. `attach_residential_template()` reads the active version at activation. **1.3a added `OPEX` v1** (migrations `0074`, `0075`): 7 phases / **23 tasks / 8 mirrors**, active — corrected IN PLACE by prompt 1.5 to spec v1.5 §3 rather than bumped to a v2, see below. **1.3c attaches it** — `_attach_task_template()` is now the one attach, wrapped by `attach_residential_template()` and `attach_opex_template()`, and it copies **seven** snapshots (`is_mirror` was the missing seventh — B19). See §14 and the subsection below |
 | Task dependencies | `TaskTemplateTaskDependency`, `TaskDependency` | **Built by 1.4a** (migration `0073`), answering B-08. **Finish-to-Start only, no lag, no `dependency_type`** — all three are decisions, see §12. The template-side model is **content of a template version** (R-7, guarded through the shared `_require_draft_template()`); the instance-side model is the project's **own copy**, written at activation by `materialise_task_dependencies()`, with **no FK back to the template edge** — the copy is the point (B-10 restated for edges). Both refuse self-edges (a database `CHECK`, so `bulk_create()` cannot get past it), duplicate edges (`UniqueConstraint`), cross-scope edges and **cycles** (`DependencyCycle`, naming the closing edge). `on_delete=CASCADE` on both ends of `TaskDependency`, chosen rather than inherited — an edge whose task is gone has no subject left. **1.4a did NOT wire `materialise_task_dependencies()` into `attach_residential_template()`**, and **no template version authors any edge today**, so the predicate is empty everywhere in production until somebody authors one |
 | Task durations (superseded) | `TaskDurationTemplate` | `unique_together = ('project_type', 'task_name')` ✔ — **`phase_name` is stored and displayed but never matched on**. No version, no snapshot ✔. **Superseded by 0.4:** nothing reads it at runtime any more, its two editor screens are read-only and render the active `TaskTemplate`, and the table is deliberately not dropped. Do not repoint anything back at it |
-| Checklists | `Checklist`, `ChecklistItem`, `ChecklistTaskLink`, `ChecklistItemCompletion` | Linked by `(task_name, project_type)` string match ✔ — still, until 2.4. **Corrected 29 Aug by 0.5:** the completion now carries `item_text_snapshot`, and the item FK is nullable `SET_NULL`, not `CASCADE`. `Checklist` is versioned (`code`/`version_no`/`status`) and its content is immutable once active. See §15 |
-| Punch points | `Issue` | Carries severity, status, raised_by, assigned_to, due_date, resolution_note ✔; links to both `Task` and `DeliveryChallan`, both nullable `SET_NULL` ✔ |
-| Warehouses / stock locations | `StockLocation` | **Built by 1.2a** (migration `0072`), answering B-14. One row per physical place material rests — warehouse, store, site container. `name`, unique `code`, optional `address`, `is_active`, and `keeper` → `UserProfile` (`null=True`, `SET_NULL`, `related_name='keeper_of'`, **not unique**). **Rows, never constants** — the three warehouses Horizon runs today are data the product owner enters, and nothing here seeds them. **Authority follows the warehouse, not the tender.** **No `is_deleted`** — `is_active` is the only retirement, deliberately, because this codebase has no custom managers. **Nothing reads it yet**; its consumer is 4.1. It is the *only* warehouse model — do not create a second |
-| Delivery and GRN | `DeliveryChallan`, `DCLineItem` | Project-scoped; no warehouse, movement type or serials ✔ — **`StockLocation` is now where a warehouse would be named, when 4.1 links them.** **`DCLineItem` has no FK to `BOQItem` or `BOQItemMaster`** ✔ — only `boq_category` (CharField) and free-text `item_description`. Its `CATEGORY_CHOICES` has four values against `BOQItem`'s five ✔; anything in `Other` is unreconcilable by construction |
+| Checklists | `Checklist`, `ChecklistItem`, `ChecklistTaskLink`, `ChecklistItemCompletion` | Linked by template-task `code` since prompt 2.4 (migration `0077`) ✔, through `_checklist_task_link_for()`; the old `(task_name, project_type)` string match survives only as a logged fallback. **Corrected 29 Aug by 0.5:** the completion now carries `item_text_snapshot`, and the item FK is nullable `SET_NULL`, not `CASCADE`. `Checklist` is versioned (`code`/`version_no`/`status`) and its content is immutable once active. See §15 |
+| Punch points | `PunchPoint` | **Built by 2.3a** (migration `0080`) as its **own model, not an `Issue`** — the 5 Sep entry in §12 records the reversal. Statuses `Open \| Waived`; the one act a person takes on a punch point is a PM-level waiver (`user_can_waive_punch_point()`). `Issue` stays the general blocker register: it carries severity, status, raised_by, assigned_to, due_date, resolution_note ✔; links to both `Task` and `DeliveryChallan`, both nullable `SET_NULL` ✔ |
+| Warehouses / stock locations | `StockLocation` | **Built by 1.2a** (migration `0072`), answering B-14. One row per physical place material rests — warehouse, store, site container. `name`, unique `code`, optional `address`, `is_active`, and `keeper` → `UserProfile` (`null=True`, `SET_NULL`, `related_name='keeper_of'`, **not unique**). **Rows, never constants** — the three warehouses Horizon runs today are data the product owner enters, and nothing here seeds them. **Authority follows the warehouse, not the tender.** **No `is_deleted`** — `is_active` is the only retirement, deliberately, because this codebase has no custom managers. ~~**Nothing reads it yet**; its consumer is 4.1.~~ **Read since migration `0082`:** `DeliveryChallan.issued_from_warehouse` points at it, and `create_delivery_challan` lists the active rows. It is the *only* warehouse model — do not create a second |
+| Delivery and GRN | `DeliveryChallan`, `DCLineItem` | Project-scoped; no movement type or serials; its source warehouse is `issued_from_warehouse` → `StockLocation` ✔ (migration `0082`). **`DCLineItem` has no FK to `BOQItem` or `BOQItemMaster`** ✔ — only `boq_category` (CharField) and free-text `item_description`. Its `CATEGORY_CHOICES` has four values against `BOQItem`'s five ✔; anything in `Other` is unreconcilable by construction |
 | Vendor invoices | `PaymentRequest` | Live. `pending \| confirmed` ✔. "No edit/cancel by design" ✔ |
 | Item catalogue | `BOQItemMaster` | What the BOQ is built from |
 | BOQ | `BOQ`, `BOQItem`, `BOQRevision` | `BOQRevision.snapshot` is a `JSONField` ✔ — existing precedent for R-8 |
 | Documents | `ProjectDocument`, `TaskAttachment`, `DesignFile` | Design bucket isolated by a hard guard ✔. `DESIGN_FILE_KIND_CHOICES` has three current kinds plus two legacy ✔, and **no per-file approval field exists anywhere** |
 | Notifications | `send_notification()` | Single chokepoint with master switch then per-user preference ✔ — **with two documented bypasses**: `send_raw_email()` skips the master switch, `send_aggregate_email()` skips per-recipient preference ✔ |
 | Activity feed | `ActivityLog` + `log_activity()` | Keeps its role — see R-3 |
-| State ledger | `StatusTransition` + `utils.record_transition()` | **Built by 0.3** (migration `0065`). Six subject types instrumented; the helper raises rather than swallowing (R-2), and append-only is enforced by `save()`/`delete()` overrides (R-4). See §13 for exactly what is and is not covered |
-| Design workflow | `DesignAssignment`, `DesignAttempt`, `ArkaSubmission`, `DesignFile`, `DesignChangeRequest` | **OPEX ONLY — see below.** `DESIGN_RELEASED` has exactly one exit ✔; a PM approval gate does not exist ✔ |
+| State ledger | `StatusTransition` + `utils.record_transition()` | **Built by 0.3** (migration `0065`). Seven subject types instrumented — `design_assignment` joined as the seventh in migration `0079`; the helper raises rather than swallowing (R-2), and append-only is enforced by `save()`/`delete()` overrides (R-4). See §13 for exactly what is and is not covered |
+| Design workflow | `DesignAssignment`, `DesignAttempt`, `ArkaSubmission`, `DesignFile`, `DesignChangeRequest` | **OPEX ONLY — see below.** `DESIGN_RELEASED` has exactly one exit ✔ — `design_change_request_accept`, for a draft-group member only. Its product writers differ by branch: on local `main` since `1f2a137`, `design_pm_approve` alone ✔; on deployed `6cdb61e`, `design_head_qc_pass` writes it too ✔, and `design_pm_approve` is unreachable. **A PM approval gate exists** — see "The PM approval gate" below |
 
 ### The OPEX template and `is_mirror` — added by 1.3a, 30 Aug 2026
 
@@ -364,11 +365,16 @@ later correction to this table is a new migration seeding OPEX v2 as a draft and
 it. `tests_opex_template_correction.py::OpexIsStillOneVersionTests` pins that there is
 exactly one OPEX version, so a v2 appearing later is a red test rather than a quiet drift.
 
+**THE CONDITION HAS STOPPED HOLDING.** `origin/main` carries migrations `0075` through
+`0086`. As of 15 Sep 2026, production is at 0086 (product owner; not grep-verifiable from
+this repo). Any further change to the OPEX table is therefore an OPEX v2 bump under R-7.
+
 **Phase 1 and Phase 3 now BOTH hold only mirrors** — `Design` alone in Phase 1, the four
 delivery mirrors in Phase 3. Neither can ever be a site's current phase under R-21, because
 "current" means the first phase still holding a human-owned task that is not Done and a
-mirror is nobody's work. Their progress bars read `0/1` and `0/4` and cannot reach 100%
-until derivation lands (B27). A fresh OPEX site's current phase is therefore
+mirror is nobody's work. Their progress bars read `0/1` and `0/4` on a fresh site and
+move only as their sources are derived — the Design mirror from its `DesignAssignment`, the
+four deliveries from delivery challan lines. A fresh OPEX site's current phase is therefore
 `Approvals (Pre-Installation)`.
 
 **The current-phase WALK is now five phases, not six.** With Phase 3 joining Phase 1 as
@@ -390,8 +396,9 @@ does not go through it.
 
 `is_mirror` is a boolean on **`TaskTemplateTask`** and on **`Task`** (indexed on `Task`),
 added by migration `0074`. It marks a task whose status is derived from another object
-and that **no human may write**. Five OPEX tasks carry it: **Design**, **Material
-Delivery**, **COD**, **As-Built Drawings**, **HOTO**.
+and that **no human may write**. Eight OPEX tasks carry it (since 1.5): **Design**, the
+four deliveries (**Delivery — Solar Panels / Inverters / BOS Kit / MMS**), **COD**,
+**As-Built Drawings**, **HOTO**.
 
 ~~**Nothing reads it.**~~ **Corrected 31 Aug 2026.** One half of what the flag is for is
 built and live; the other is not.
@@ -428,14 +435,16 @@ mirror (four paths can do it, one of them in bulk without intent — see
 `EXECUTION_MODULE_DEFERRED.md` §B), which is now a harmless inconsistency rather than a
 hole.
 
-**The other half is still unbuilt, and this matters for reading the numbers.** The
-derivation hooks that will *write* mirror statuses do not exist: they belong to the source
-objects and arrive in phases 3–5 as each source is built, going through
-`record_transition()` like any other status change and carrying the **source event's**
-actor (spec §2.4, §2.8). They will not call `_apply_task_status_change()` — that function
-exists to say no to people. **Until then a mirror stays at its seeded status forever**, so
-an OPEX site's Design, Material Delivery, COD, As-Built Drawings and HOTO rows read Not
-Started no matter what happens to the work they describe. That is known and accepted, and
+**The other half is built for two of the five sources, and this matters for reading the
+numbers.** The derivation hooks that *write* mirror statuses belong to the source objects
+and arrive as each source is built, going through `record_transition()` like any other
+status change and carrying the **source event's** actor (spec §2.4, §2.8). ~~They do not
+exist~~ — **two do.** `sync_design_mirror()` (5 Sep 2026), called by
+`apply_design_status()`, derives the Design mirror from its `DesignAssignment`;
+`sync_delivery_mirrors()` (7 Sep 2026) derives the four delivery mirrors from delivery
+challan lines. Neither calls `_apply_task_status_change()` — that function exists to say no
+to people. **COD, As-Built Drawings and HOTO have no source object and stay at their seeded
+status**, reading Not Started no matter what happens to the work they describe. That is known and accepted, and
 it is why mirrors leave both halves of a progress fraction (R-20).
 
 **Enforced by** `projects/tests_mirror_readonly.py` — 24 tests on a really activated OPEX
@@ -481,8 +490,8 @@ in test modules 1.3c was forbidden to touch.
 missing active OPEX template raises rather than being invented from model state, because
 there is no runtime OPEX builder to invent it from.
 
-**Mirrors are created unassigned.** All five carry an owning ROLE (Design, SCM, PM,
-Design, PM) and `assigned_to = NULL`, including the two PM-role ones. Decided 31 Aug
+**Mirrors are created unassigned.** All eight carry an owning ROLE (Design; SCM for the
+four deliveries; PM, Design, PM) and `assigned_to = NULL`, including the two PM-role ones. Decided 31 Aug
 2026 — see §12.
 
 Two things recorded so they are not rediscovered:
@@ -506,12 +515,12 @@ been paid for once.
 
 | Helper | Where | Introduced | What it is for |
 |---|---|---|---|
-| `_active_project(project_id, select_related=None)` | `views.py:2409` | **0.2c** | **The single Project resolution path.** Returns a live project or 404s. `project_delete` sets `is_deleted=True` and leaves `status` untouched, so a deleted project still satisfies every status-based precondition in the codebase; with no custom managers (§6) nothing applies the filter for us. 43 call sites. See R-16 |
-| `record_transition(subject, to_status, …)` | `utils.py:246` | **0.3** | Writes one `StatusTransition`. Must be called inside the caller's own `transaction.atomic()`. **Raises; never swallows** — that is the whole difference from `log_activity()` (R-2, R-3) |
-| `_boq_snapshot(boq)` | `views.py:4678` | pre-existing, made single by **0.2b** | Builds a JSON-safe `BOQRevision.snapshot`, coercing `Decimal`. `boq_submit` used to build its own from a raw `.values()` and 500 on every call (B-7) |
-| `_apply_boq_acknowledgement(boq, profile, request)` | `views.py:4763` | **0.2b** | Status write + `ActivityLog` + notification + transition row for an SCM acknowledgement, shared by the inline `acknowledge_scm` branch and the standalone `boq_acknowledge` endpoint (B-5). **Gates and status preconditions stay with the callers.** The `BOQRevision` snapshot also stays with the inline caller — that asymmetry is open as **B-8** in `EXECUTION_MODULE_DEFERRED.md` |
-| `_FINANCE_TASK_TO_MILESTONE` / `_MILESTONE_TO_FINANCE_TASK` | `views.py:400` | **0.2b** | The Finance-task ↔ `PaymentMilestone` map, one definition for the module. Four copies previously drifted, three still naming `'Finance Confirmation'`, a task deleted from the template (B-2). **The reverse map is derived**, so the two directions cannot diverge |
-| `_PROFILE_TO_TASK_ROLE` | `views.py:413` | **0.2b** | `UserProfile.role` → `Task.assigned_role` normalisation. See §4 |
+| `_active_project(project_id, select_related=None)` | `views.py` | **0.2c** | **The single Project resolution path.** Returns a live project or 404s. `project_delete` sets `is_deleted=True` and leaves `status` untouched, so a deleted project still satisfies every status-based precondition in the codebase; with no custom managers (§6) nothing applies the filter for us. See R-16 |
+| `record_transition(subject, to_status, …)` | `utils.py` | **0.3** | Writes one `StatusTransition`. Must be called inside the caller's own `transaction.atomic()`. **Raises; never swallows** — that is the whole difference from `log_activity()` (R-2, R-3) |
+| `_boq_snapshot(boq)` | `views.py` | pre-existing, made single by **0.2b** | Builds a JSON-safe `BOQRevision.snapshot`, coercing `Decimal`. `boq_submit` used to build its own from a raw `.values()` and 500 on every call (B-7) |
+| `_apply_boq_acknowledgement(boq, profile, request)` | `views.py` | **0.2b** | Status write + `ActivityLog` + notification + transition row for an SCM acknowledgement, shared by the inline `acknowledge_scm` branch and the standalone `boq_acknowledge` endpoint (B-5). **Gates and status preconditions stay with the callers.** The `BOQRevision` snapshot also stays with the inline caller — that asymmetry is open as **B-8** in `EXECUTION_MODULE_DEFERRED.md` |
+| `_FINANCE_TASK_TO_MILESTONE` / `_MILESTONE_TO_FINANCE_TASK` | `views.py` | **0.2b** | The Finance-task ↔ `PaymentMilestone` map, one definition for the module. Four copies previously drifted, three still naming `'Finance Confirmation'`, a task deleted from the template (B-2). **The reverse map is derived**, so the two directions cannot diverge |
+| `_PROFILE_TO_TASK_ROLE` | `views.py` | **0.2b** | `UserProfile.role` → `Task.assigned_role` normalisation. See §4 |
 | `manageable_projects_q(profile, prefix='')` | `permissions.py` | **0.2** | The **queryset form** of `user_can_manage_project()`, for list surfaces that cannot load the portfolio and filter in Python. The two are pinned to each other by a stated invariant: change one, change the other in the same edit. Callers must `.distinct()` — the coordinators leg traverses an M2M |
 | `_require_draft_template()` / `TemplateVersionLocked` | `models.py` | **0.4**, shared by **0.5**, extended by **1.4a** | The R-7 immutability guard. `TaskTemplatePhase`/`TaskTemplateTask`, `ChecklistItem` and now `TaskTemplateTaskDependency` all raise through it. **Two versioned template families, one guard** — do not write a third |
 | `incomplete_predecessors(task)` | `task_dependencies.py` | **1.4a** | **The B-08 predicate.** Returns the `Task` rows whose work is not yet Done that this task waits on — the rows themselves, not a boolean and not a count, because 1.4b has to name them in the warning. **It reports; it never refuses**, and its docstring is the design of the feature. One query, ordered the way the tasks appear on screen. Not in `views.py`, and not to grow a refusal |
@@ -527,6 +536,42 @@ Residential "design" is six template tasks with `assigned_role='Design'`, moved 
 
 `DesignSubmission` has a model and two read views and **no write path at all** ✔ — one URL, no create or update view. Recorded independently as A4 in `DESIGN_MODULE_DEFERRED.md`. Treat it as dead; do not confuse it with phase 3's design package.
 
+#### The PM approval gate — prompts 3.1b-1 to 3.1b-2c, 10–13 Sep 2026
+
+**This table describes local `main` from `1f2a137` onward. On deployed `6cdb61e` the gate is
+present and unreachable: `design_head_qc_pass` writes `released` directly,
+`design_pm_reject` writes `awaiting_head_qc`, nothing writes `pm_rejected`, and so no package
+reaches `awaiting_pm_approval`.** `1f2a137` is held from Railway by the DEPLOY GATE in
+`EXECUTION_MODULE_DEFERRED.md` §D until prompt 3.1b-3's notifications exist.
+
+Two statuses sit between the Design Head's QC pass and `released`: `awaiting_pm_approval`
+(migration `0085`) and `pm_rejected` (migration `0086`). Every move goes through
+`apply_design_status()`, so each writes a `StatusTransition` row (§13).
+
+| Move | View | Who may | Remark |
+|---|---|---|---|
+| `awaiting_head_qc` → `awaiting_pm_approval` (the entry) | `design_head_qc_pass` | Design Head or deputy — `_qc_guard(gate='head')` | unchanged by the gate |
+| `awaiting_pm_approval` → `released` | `design_pm_approve` | `can_approve_design_release()`: the site's PM or a Project Coordinator, **no deputy** | optional |
+| `awaiting_pm_approval` → `pm_rejected` | `design_pm_reject` | same | mandatory, enforced in the view |
+| `pm_rejected` → `awaiting_pm_approval` | `design_head_return_to_pm` | Design Head — `_qc_guard(gate='head')` | mandatory |
+| `pm_rejected` → `in_design` or `arka_submitted`, opening attempt N+1 with reason `pm_rejected` | `design_head_send_back` | Design Head — `_qc_guard(gate='head')` | remarks and `pm_rejection_category` on attempt N, both required |
+
+- **Three sets, three questions (R-5, split by `969eed4`).** `DESIGN_WORK_FINISHED_STATUSES`
+  = {`awaiting_pm_approval`, `released`} is the metrics' "finished".
+  `DESIGN_CLOCK_STOPPED_STATUSES` adds `pm_rejected` and closes the due-date controls.
+  `DESIGN_NOT_WITH_DESIGNER_STATUSES` adds `artifacts_uploaded`, `in_qc` and
+  `awaiting_head_qc` to that, and closes Design Hold.
+- **On `DesignAttempt` (migration `0086`):** `ATTEMPT_REASON_PM_REJECTED`, and the Head's two
+  classification fields `pm_rejection_category` and `pm_rejection_remarks`, under a CHECK that
+  a category carries remarks.
+- **`design_pm_approve` stamps `released_at` and `released_by`**, so on the rows it writes they
+  mean released to SCM, not passed by the Head (`EXECUTION_MODULE_DEFERRED.md` §D11).
+- **The send-back moves the agreed due date** out by the whole days since attempt N's
+  `head_reviewed_at` (`_extend_due_date_for_pm_review()`), and an open extension request
+  refuses the send-back.
+- **Enforced by** `projects/tests_design_pm_gate_live.py`, whose writer table pins the product
+  writers of each gate status as a set equality.
+
 ---
 
 ## 6. Known problems — stated accurately
@@ -538,16 +583,16 @@ and the entry tells you which prompt moved it.
 
 ### Still open
 
-- **Delivery state is deliberately duplicated on the CEO dashboard, not the SCM one.** `dashboard_scm` reads `DeliveryChallan`/`DCLineItem` directly ✔ and reflects actual receipt state. The task-derived proxy is on the **CEO** dashboard ✔ (`_get_ceo_dashboard_context`, `views.py:1873`), and the code carries an explicit instruction: *"Do not 'improve' it by cross-checking against the SCM models — the two will disagree, and the disagreement is not a bug in either."* The reason given is coverage: production holds 1 challan and 2 BOQ rows across 28 active projects, so a challan-based card would be blank on 27 of 28. **This is a considered trade, not a defect.** It may deserve revisiting once real execution data exists — but only by decision, never by a session deciding to tidy it. **Written up in full, with the revisit condition, in [`docs/delivery-state-authority.md`](delivery-state-authority.md) — read that before touching either surface.** *(Correction 29 Aug by 0.6: the challan-backed read lives in `_build_delivery_lookup()`, which serves **both** `dashboard_pm` and `dashboard_scm`, not `dashboard_scm` alone. Three surfaces, two sources.)*
+- **Delivery state is deliberately duplicated on the CEO dashboard, not the SCM one.** `dashboard_scm` reads `DeliveryChallan`/`DCLineItem` directly ✔ and reflects actual receipt state. The task-derived proxy is on the **CEO** dashboard ✔ (`_get_ceo_dashboard_context()`), and the code carries an explicit instruction: *"Do not 'improve' it by cross-checking against the SCM models — the two will disagree, and the disagreement is not a bug in either."* The reason given is coverage: production holds 1 challan and 2 BOQ rows across 28 active projects, so a challan-based card would be blank on 27 of 28. **This is a considered trade, not a defect.** It may deserve revisiting once real execution data exists — but only by decision, never by a session deciding to tidy it. **Written up in full, with the revisit condition, in [`docs/delivery-state-authority.md`](delivery-state-authority.md) — read that before touching either surface.** *(Correction 29 Aug by 0.6: the challan-backed read lives in `_build_delivery_lookup()`, which serves **both** `dashboard_pm` and `dashboard_scm`, not `dashboard_scm` alone. Three surfaces, two sources.)*
 - **The "BOQ is finished" signals are separate on purpose.** `project_boq_is_design_locked()` and `project_boq_is_group_locked()` each carry a written rationale for being distinct predicates answering different questions — authority over a user versus state of a site ✔. Do not collapse them without an explicit decision.
-- **`log_activity()` catches bare `Exception`** ✔ (`models.py:1453`) and can silently lose rows. Still true, and deliberately so — R-3 says the feed and the ledger are allowed to fail differently. Do **not** copy that pattern into `record_transition()`, and do not "harmonise" the two.
+- **`log_activity()` catches bare `Exception`** ✔ and can silently lose rows. Still true, and deliberately so — R-3 says the feed and the ledger are allowed to fail differently. Do **not** copy that pattern into `record_transition()`, and do not "harmonise" the two.
 - **Soft delete has no custom managers** ✔ — still zero `objects =` or `models.Manager` in `models.py`. Every queryset must filter `is_deleted=False` itself. 0.2c made the *view-layer* Project resolution safe (R-16); it did not and could not fix relation traversals like `phase__project__is_deleted`, aggregate queries, or any model other than `Project`.
 - **Access scoping is closed for the endpoint surface and open for the role policy.** 0.2 fixed the endpoints; what remains is a *policy* gap, not a code gap — Finance, SCM and BD are still portfolio-wide because there is nothing in the database to scope them on. See D-4, the 25 Aug decisions in §12, and Q-E3.
 - **Tests can be run.** `solarpms/test_settings.py` exists and disables migrations so the schema builds from model state without `CREATE DATABASE` privilege: `python manage.py test projects --settings=solarpms.test_settings`. `SESSION_T_TEST_UNBLOCK.md` records the suite running green through this path. **There is no excuse for an unverified claim of "tests pass".**
 
 ### Fixed by phase 0 — kept so they are not rediscovered
 
-- ~~**No general transition history.**~~ **FIXED 28 Aug 2026 by prompt 0.3.** There were only ad-hoc terminal stamps — `Task.completed_at`, `Task.blocked_since`, `Issue.resolved_at`/`closed_at`, several on `DesignAttempt` ✔ — with no from-status, no actor role and no reason. `StatusTransition` now records all of it for six subject types. **The general case is fixed; the coverage is not universal** — §13 is the authority on where the ledger stops, and a missing row still means "not instrumented" for `DesignAssignment`, `DesignAttempt`, `PaymentRequest`, `SiteGroup`, `TaskTemplate` and `Checklist`.
+- ~~**No general transition history.**~~ **FIXED 28 Aug 2026 by prompt 0.3.** There were only ad-hoc terminal stamps — `Task.completed_at`, `Task.blocked_since`, `Issue.resolved_at`/`closed_at`, several on `DesignAttempt` ✔ — with no from-status, no actor role and no reason. `StatusTransition` now records all of it for seven subject types (the seventh, `design_assignment`, since migration `0079`). **The general case is fixed; the coverage is not universal** — §13 is the authority on where the ledger stops, and a missing row still means "not instrumented" for `DesignAttempt`, `PaymentRequest`, `SiteGroup`, `TaskTemplate`, `Checklist` and `PunchPoint`.
 - ~~**Checklist history is rewritable and deletable.**~~ **FIXED 29 Aug 2026 by prompt 0.5 — see §15.** The completion snapshots the text it answered, and the item FK is `SET_NULL`. What the fix cannot do is recover wordings edited before 0.5 shipped; the backfill records the label as it stands today.
 - ~~**Eighteen detail endpoints carry no object-level check at all, and eight Issue endpoints let any authenticated user write to any project.**~~ **FIXED 28 Aug 2026 by prompt 0.2.** Routed through **`user_can_view_project()`**, for writes as well as reads. **Note the divergence from the audit:** `ACCESS_ISOLATION_AUDIT.md`'s proposed scope named "a new `user_can_act_on_project()`" for the write half; **that helper was never created and does not exist in `permissions.py`.** The audit's own Step 1 also observes that visibility and write authority coincide under today's policy, so the one helper is behaviourally sufficient — but a future session looking for `user_can_act_on_project()` will not find it, and the day the two questions need different answers, this is the seam. Pinned by `tests_access_isolation.py`.
 - ~~**`role_required()` treated a profile-less user as `'Admin'`, and the navigation helpers sent them to `/dashboard/admin/`.**~~ **FIXED 28 Aug 2026 by prompt 0.2.** Both now deny; `role_required()` returns 403 rather than redirecting. **This is the one phase 0 change with a deployment consequence** — see the operational items in `PHASE_0_COMPLETION.md`.
@@ -571,14 +616,14 @@ If a prompt appears to require one of these, **stop and ask**. Do not build a sm
 |---|---|---|
 | ~~Q-E1~~ | ~~Residential sites cannot join a SiteGroup (`program` is non-nullable). Do Residential projects need execution grouping at all?~~ **CLOSED 29 Aug 2026 by the product owner, ahead of prompt 1.1a — the answer is NO.** PMs do not batch residential installs by crew or by area; a residential install is scheduled as one site, by itself. There is therefore nothing for an execution group to hold. **`SiteGroup.program` stays non-nullable**, and Residential keeps the structural exclusion `RESIDENTIAL_BASELINE.md` §3.3 describes — Residential can never have a Program, so it can never be grouped, and that is now a decision rather than an accident of the schema. Reopening it means making `program` nullable, which is a migration and a fresh answer to "what does a group of residential sites even mean". | — |
 | ~~Q-E2~~ | ~~BD and Design Head scoping — confirm both.~~ **CLOSED 25 Aug 2026, and the closure held through 0.2.** Both stay portfolio-wide, because **neither has a per-user term anywhere in the database to scope on**: `ACCESS_ISOLATION_AUDIT.md` F.1 found no BD field on `Project` at all, and F.2 found Design Head to be a capability flag (`is_design_head`) that grants visibility and authority through two separate mechanisms. 0.2 left both unchanged as decided. **Not "confirmed correct" — confirmed *unscopeable today***; the question reopens when an assignment table exists. | — |
-| Q-E3 | Do Finance and SCM get Program-level assignment as well as task-level, and who maintains it? **Still open, and now the gating question for the whole D-4 policy.** 0.2 deferred the narrowing on the 25 Aug decision; `ProgramAssignment` was designed in the audit (Task E) and **was not built** — no such model exists. Phase 0 answered "not yet", not "what". | 1.2 |
+| Q-E3 | Do Finance and SCM get Program-level assignment as well as task-level, and who maintains it? **Still open, and now the gating question for the whole D-4 policy.** 0.2 deferred the narrowing on the 25 Aug decision; `ProgramAssignment` was designed in the audit (Task E) and **was not built** — no such model exists. Phase 0 answered "not yet", not "what". | 1.2b |
 | B-05 | Do execution groups carry their own schedule and milestones, or are they only a grouping? **Still open, and it never blocked 1.1 — amended 29 Aug 2026.** It was listed against 1.1 as though the schema could not be written without the answer. It could: execution scheduling is **additive** — whatever the answer, it arrives as new columns or a new table hanging off `SiteGroup`, and neither shape changes `group_type` or the exclusivity constraint 1.1a shipped. Re-pointed at the prompt that actually builds it — **which has no number yet**, because no prompt in the plan builds execution scheduling. Numbering it here would be inventing a roadmap entry; it blocks that work whenever it is scheduled, and nothing before it. | execution scheduling (unscheduled) |
-| B-06 | Does a PM rejection of a design package open a design attempt, and under which reason? | 3.2 |
-| B-07 | Who may mark a drawing not-applicable — designer, or Design Head at review? | 3.1 |
+| ~~B-06~~ | ~~Does a PM rejection of a design package open a design attempt, and under which reason?~~ **CLOSED — answered by the product owner and built by the PM-gate run, 11–13 Sep 2026.** **The rejection itself opens no attempt:** `design_pm_reject` writes only the status (`pm_rejected`, since `1f2a137`; on deployed `6cdb61e` it still writes `awaiting_head_qc`) and its ledger row. The package goes to the Design Head, who either returns it to the PM with a mandatory remark (no attempt) or sends it back to the designer — and only the send-back opens attempt N+1, with reason **`pm_rejected`** (`ATTEMPT_REASON_PM_REJECTED`), after the Head has recorded on attempt N whose fault it was (`pm_rejection_category`, required). The accounting follows that classification: `07bdaa2` stopped charging designers for PM-caused rework. See "The PM approval gate" in §5 and the 11–13 Sep entries in §12. | — |
+| B-07 | Who may mark a drawing not-applicable — designer, or Design Head at review? | 3.1 — the per-drawing handover (§9), which 3.1a and 3.1b did not build |
 | ~~B-08~~ | ~~Can a site override a template task dependency?~~ **CLOSED 30 Aug 2026 — answered by the product owner and built at the model layer by prompt 1.4a.** The answer is **yes, by anyone, with a mandatory reason and a warning — no hard block and no role gate.** A dependent task may be started early; the system says what is being jumped and refuses to record it without a stated reason, and then allows it. Deliberately **not** a PM-only waiver and **not** a refusal: site sequence slips for reasons the template cannot know about, and a hard block would be routed around by marking the predecessor Done, which destroys the record the block existed to protect. The reason text is the deliverable — an override nobody explained is the failure mode, not an override itself. **What 1.4a built:** `TaskTemplateTaskDependency` and `TaskDependency` (migration `0073`), and `incomplete_predecessors()` in `projects/task_dependencies.py`, whose docstring *is* the design — *"Read-only. Empty result means nothing blocks a normal start. A non-empty result does NOT forbid the start."* **What is not built yet is the enforcement half — the warning and the mandatory reason on the status-change path — which is 1.4b**, tracked in `EXECUTION_PROMPT_LOG.md` rather than here, because the *question* is settled and only the wiring remains. **The way this decision gets undone is a future session reading the word "dependency" and adding a block**; `tests_task_dependencies.PredicateReportsNeverRefusesTests.test_incomplete_predecessors_returns_rather_than_raises` exists to fail loudly when one does. | — |
 | ~~B-09~~ | ~~Final phase and task list for the execution template (Residential is 52 tasks / 9 phases; OPEX has none).~~ **CLOSED 31 Aug 2026 across prompts 1.3a–1.3c.** Residential is 52/9; **OPEX is 23 tasks across 7 phases, 8 of them mirrors**, signed off by the Tenders team as `docs/OPEX_task_template_spec.md` v1.5, seeded by migration `0075` (corrected in place by prompt 1.5, not bumped to a v2) and attached by `opex_site_activate`. What is *not* settled and is not this question: the **durations**, which are all the field default of 1 (B18) and are a template version bump when the team supplies them. CAPEX has no list and no template. | — |
 | ~~B-10~~ | ~~What happens to an in-flight project when its template is upgraded?~~ **CLOSED 28 Aug 2026 by prompt 0.4 — see §14.** The answer is *nothing*, and it is structural rather than a matter of policy: `Task.task_name`, `assigned_role`, `task_type`, `duration_days` and `is_payment_milestone` are **copies taken at `bulk_create`**, not reads through a foreign key, so an in-flight project holds its own rows and cannot be reached by a later version. Publishing v2 changes what the *next* activation produces and nothing else. `tests_task_template.InFlightProjectIsolationTests` proves it, and guards the one thing that would reopen the question — a code path resolving a task's name, role or duration *through* `Task.template_task`, which is provenance only. | — |
-| B-12 | Who may waive a punch point, and does it need senior approval? **ANSWERED 30 Aug 2026 by the product owner — RECORDED, NOT CLOSED. It stays open until 2.3 builds it.** **The PM alone waives, at any severity, with no second signature.** Explicitly: **no severity threshold** — a critical punch point is waived by the same person and the same act as a trivial one, because a threshold only moves the argument to what counts as critical; and **no counter-signature** — there is no second approver role, and none is to be invented. The PM owns the site and the waiver is recorded against their name. Note this does **not** make the waiver a QA/QC act: `is_qaqc` grants raising a punch point and recording a verdict, never waiving one. | 2.3 |
+| ~~B-12~~ | ~~Who may waive a punch point, and does it need senior approval?~~ **ANSWERED 30 Aug 2026 by the product owner; CLOSED 5 Sep 2026 — built by prompt 2.3a (`3c939f7`, migration `0080`) as `user_can_waive_punch_point()`, which routes through `user_can_manage_project()` and refuses a holder of `is_qaqc` alone.** The answer as recorded: **The PM alone waives, at any severity, with no second signature.** Explicitly: **no severity threshold** — a critical punch point is waived by the same person and the same act as a trivial one, because a threshold only moves the argument to what counts as critical; and **no counter-signature** — there is no second approver role, and none is to be invented. The PM owns the site and the waiver is recorded against their name. Note this does **not** make the waiver a QA/QC act: `is_qaqc` grants raising a punch point and recording a verdict, never waiving one. | — |
 | ~~B-14~~ | ~~How many warehouses, and how are keepers assigned to them?~~ **CLOSED 30 Aug 2026 by the product owner, built by prompt 1.2a.** **Three warehouses today — and the count must not be structural.** That is the substance of the answer, not a footnote to it: warehouses are **rows in `StockLocation`**, added through a screen when 4.1 builds one. Not a `choices` list, not a settings constant, not seeded by a migration — each of those spellings would make a fourth warehouse a code change and a deploy. **1.2a therefore seeds nothing**; entering the three that exist is a data task for the product owner. **One keeper per warehouse** (`StockLocation.keeper`, a single FK, not an M2M), and the FK is deliberately **not unique** — nothing says one person cannot cover two buildings, and on a three-warehouse operation with someone on leave they will. **Authority follows the warehouse, not the tender:** a keeper acts on everything inside their building — receiving, holding, issuing — whatever programme or tender paid for it, and on nothing inside any other building. This matches how SCM already works, where material lands at one shared drop point and cost is attributed **at issue, not at receipt**; a keeper who could only touch their own tender's material could not sign for the lorry that brought all of it. `is_warehouse_keeper` is a **flag on `UserProfile`**, not a role (R-15, §4). **Still open beside this: B-19** — who confirms a GRN — which is a process question about the same person and is not answered here. | — |
 | B-15 | Net metering: hard block or warning, which project types, who owns it? | 5.1 |
 | B-16 | Does a vendor work order or rate contract exist to validate verified amounts against? | 5.2 |
@@ -634,13 +679,13 @@ Found by 0.2a, read from source. None is one of the fifteen findings in `ACCESS_
 
 | # | Status | Where | What |
 |---|---|---|---|
-| ~~**B-1**~~ | **FIXED by 0.2b** | `views.py:2752` | ~~Activation message says "53 tasks created". The code creates and asserts **52**.~~ The message now counts the rows actually created rather than restating a template size, so it cannot drift again when the template changes. |
-| ~~**B-2**~~ | **FIXED by 0.2b** | `views.py:400` | ~~The M2 task-name mapping is duplicated **four** times; three copies still name `'Finance Confirmation'`, a task deleted from the template.~~ One module-level `_FINANCE_TASK_TO_MILESTONE`, with the reverse map **derived** so the two directions cannot drift apart. **The behavioural half is not fixed:** M2 still syncs only from the task-row dropdown, never from the task detail page; every site keeps its "non-critical" except-pass wrapper, and a zero-row `.update()` still raises nothing. Only the *drift* was closed. |
+| ~~**B-1**~~ | **FIXED by 0.2b** | `project_activate()` | ~~Activation message says "53 tasks created". The code creates and asserts **52**.~~ The message now counts the rows actually created rather than restating a template size, so it cannot drift again when the template changes. |
+| ~~**B-2**~~ | **FIXED by 0.2b** | `_FINANCE_TASK_TO_MILESTONE` | ~~The M2 task-name mapping is duplicated **four** times; three copies still name `'Finance Confirmation'`, a task deleted from the template.~~ One module-level `_FINANCE_TASK_TO_MILESTONE`, with the reverse map **derived** so the two directions cannot drift apart. **The behavioural half is not fixed:** M2 still syncs only from the task-row dropdown, never from the task detail page; every site keeps its "non-critical" except-pass wrapper, and a zero-row `.update()` still raises nothing. Only the *drift* was closed. |
 | **B-3** | **OPEN — scheduled phase 5** | app-wide | **There is no project-closure workflow.** Only `'Draft'` and `'Active'` are ever written to `Project.status`; `Commissioned`, `In Progress`, `On Hold` and `Cancelled` are unreachable and `commissioned_at` is never written. A finished project stays Active forever. *Decided 25 Aug: fixed in **phase 5** alongside COD and HOTO; prompt 1.3 owns only the opening transition.* Re-verified 29 Aug — still zero writes of `'Commissioned'` or `commissioned_at` anywhere in `views.py` or `utils.py`. **Re-verified 31 Aug after 1.3c shipped OPEX activation: still zero.** `opex_site_activate` writes `'Active'` and nothing else, and `tests_opex_activation.OpexActivationTests.test_no_terminal_status_becomes_reachable` pins that. 1.3 owned the opening transition and stopped there, as decided. |
-| **B-4** | **OPEN by decision — phase 3** | `design_views.py:221` | The design module is OPEX-only — see §5. *Decided 25 Aug: **phase 3** targets OPEX/tender only, and Residential keeps its six design tasks unchanged.* This is a scope decision, not a defect awaiting a fix — do not port the design module to a second project type. |
-| ~~**B-5**~~ | **FIXED by 0.2b** | `views.py:4763` | ~~`_notify_boq_acknowledged()` fires from `boq_detail`'s inline acknowledge branch but not from the standalone `boq_acknowledge` endpoint.~~ Status write, `ActivityLog`, notification and (since 0.3) the transition row all live in `_apply_boq_acknowledgement()`, called by both. **One asymmetry survives on purpose:** only the inline path writes a `BOQRevision` snapshot — open as **B-8** in `EXECUTION_MODULE_DEFERRED.md`. |
-| **B-6** | **OPEN — scheduled 2.3** | `views.py:3718` | No task-completion gate consults the checklist. §9's "installation checklist blocking" is a target, not current behaviour. 0.5 versioned and snapshotted the checklist but explicitly did **not** add the gate. Re-verified 29 Aug: `task_status_update` reads no checklist state, and `views.py:8067` records the omission as intentional. **Prompt 2.3 owns it.** |
-| ~~**B-7**~~ | **FIXED by 0.2b** | `views.py:6254` | ~~The standalone `boq_submit` endpoint snapshots raw `Decimal`s into a plain `JSONField` and raises an **unhandled `TypeError` on every submission**. A live 500 on a reachable URL.~~ It now calls `_boq_snapshot()`. **0.2b also changed behaviour here deliberately:** `boq_submit`'s status precondition adopted the inline branch's rule — `Draft \| Revision Requested \| Acknowledged`, the latter two treated as a resubmission — so the two paths agree on what may be submitted. That is the one intentional behaviour change in the 0.2b commit. |
+| **B-4** | **OPEN by decision — phase 3** | `_opex_site()` in `design_views.py` | The design module is OPEX-only — see §5. *Decided 25 Aug: **phase 3** targets OPEX/tender only, and Residential keeps its six design tasks unchanged.* This is a scope decision, not a defect awaiting a fix — do not port the design module to a second project type. |
+| ~~**B-5**~~ | **FIXED by 0.2b** | `_apply_boq_acknowledgement()` | ~~`_notify_boq_acknowledged()` fires from `boq_detail`'s inline acknowledge branch but not from the standalone `boq_acknowledge` endpoint.~~ Status write, `ActivityLog`, notification and (since 0.3) the transition row all live in `_apply_boq_acknowledgement()`, called by both. **One asymmetry survives on purpose:** only the inline path writes a `BOQRevision` snapshot — open as **B-8** in `EXECUTION_MODULE_DEFERRED.md`. |
+| **B-6** | **OPEN — scheduled 2.3** | `_apply_task_status_change()` | No task-completion gate consults the checklist. §9's "installation checklist blocking" is a target, not current behaviour. 0.5 versioned and snapshotted the checklist but explicitly did **not** add the gate. Re-verified 29 Aug: `task_status_update` reads no checklist state, and the section comment above `_checklist_error()` in `views.py` records the omission as intentional. **Prompt 2.3 owns it.** |
+| ~~**B-7**~~ | **FIXED by 0.2b** | `boq_submit()` | ~~The standalone `boq_submit` endpoint snapshots raw `Decimal`s into a plain `JSONField` and raises an **unhandled `TypeError` on every submission**. A live 500 on a reachable URL.~~ It now calls `_boq_snapshot()`. **0.2b also changed behaviour here deliberately:** `boq_submit`'s status precondition adopted the inline branch's rule — `Draft \| Revision Requested \| Acknowledged`, the latter two treated as a resubmission — so the two paths agree on what may be submitted. That is the one intentional behaviour change in the 0.2b commit. |
 
 **The pattern that mattered more than any single item:** B-2, B-5 and B-7 were each a business act implemented twice, where only one copy was kept current — whether the system behaved correctly depended on which button the user pressed. A permissions lockdown applied to each duplicate separately would have multiplied that class of defect rather than exposing it, which is why 0.2b consolidated **before** 0.2's gates went on. **That ordering is the reusable lesson: deduplicate the act, then gate it once.**
 
@@ -711,6 +756,15 @@ Found by 0.2a, read from source. None is one of the fifteen findings in `ACCESS_
 | **31 Aug** | **"Current phase" is consolidated into `utils.current_phase()` and excludes mirrors (R-21).** Four copies became one. The trigger was not tidiness: OPEX Phase 1 is `Design`, its only task is a mirror with no derivation hook, so every OPEX site displayed "Design" as its current phase permanently on all four screens. Residential carries no mirror at all and is unmoved. |
 | **31 Aug** | **The empty case is the LAST PHASE HOLDING A HUMAN-OWNED TASK — chosen over `None` and over "the last phase".** The four copies disagreed here already: `models.py` and `dashboard_bd` returned `None`, the PM and SE dashboards returned the last phase, so a finished Residential project read "Finance Closure" on one screen and "—" on another. The chosen answer equals the old PM/SE answer for both templates shipping today, so the two most-used screens do not move; it differs only for a template ending in an all-mirror phase, and it never names a phase in which no human had anything to do. |
 | **31 Aug** | **R-21 is a Python loop over prefetched relations, not a queryset, and `dashboard_pm` / `dashboard_site_engineer` gained a `Prefetch` to match.** `phases.filter(...)` ignores the prefetch cache: the queryset form cost 1–2 queries per project everywhere, including the two call sites that already prefetched. Six projects: 13 queries before, 0 after. The cost of the decision is that a NEW call site must prefetch or pay 1 + `phase_count` per project, which is stated at the definition. |
+| **5 Sep** | **`DesignAssignment` becomes the seventh `StatusTransition` subject (migration `0079`, `fc24728`).** Every product design status write goes through `apply_design_status()`, which calls `record_transition()` in the caller's transaction and is deliberately not wrapped in `try/except`, so a ledger failure takes the move with it. The 28 Aug entry's "the design module is a session of its own" — this was that session. §13 moved its row. |
+| **5 Sep** | **Punch points are their own model, `PunchPoint` (migration `0080`, `3c939f7`) — NOT an extension of `Issue`. This REVERSES a recorded position.** §5's "What already exists — extend these, do not duplicate" table mapped punch points onto `Issue`, and the 30 Aug entry above dropped the Punch Points mirror on the ground that `Issue` would conflate task blockers with the punch list. 2.3a chose a separate model ("Option D" in its docstring): `Issue` is the general blocker register — read by the issue dashboards, the per-project counts, the task-detail Issues panel and the CEO report, with an assignment-and-resolution workflow — while a punch point is raised only by a rejection, never assigned, and closed by one act, a PM waiver. A discriminator on the shared table would have made every existing `Issue` reader decide which kind of row it held; a separate table costs them zero reads, asserted by `tests_punch_point.PunchPointIsolationTests`. Statuses `Open \| Waived`; the waiver authority is B-12's answer, `user_can_waive_punch_point()`. |
+| **10 Sep** | **The PM gate starts as a status of its own, `awaiting_pm_approval` on `DesignAssignment` (migration `0085`, with `pm_approved_by` / `pm_approved_at`; `c212043`), shipped unreachable first.** A site there is **finished, not released**: `DESIGN_WORK_FINISHED_STATUSES` is {`awaiting_pm_approval`, `released`}, and it is the one definition of "finished" the design metrics read. |
+| **11 Sep** | **B-06's accounting: designers stop being charged for PM-caused rework (`07bdaa2`).** The rework, input and PM-change figures come from one implementation, `rework_contribution()`, used by `designer_workload()` and the analytics dataset, and they divide by finished sites (`DESIGN_WORK_FINISHED_STATUSES`) — so a site waiting on the PM neither drops out of a denominator nor inflates a ratio. |
+| **12 Sep** | **The PM's authority over the gate is `can_approve_design_release()`, which is `user_can_manage_project()`: the site's PM or any of its Project Coordinators, and NO deputy (`9a02858`).** The Design Head's deputy exists for review capacity; this gate is the customer side accepting the package, and a Design deputy accepting it would be Design approving its own work. Cover for an absent PM is a Coordinator on the site. `design_pm_approve` stamps `released_at` / `released_by`, so on the rows it writes they mean released to SCM (`EXECUTION_MODULE_DEFERRED.md` §D11). `design_pm_reject`'s mandatory remark is enforced in the view, because `REMARK_REQUIRED_SUBJECT_TYPES` is empty (§D12). |
+| **13 Sep** | **A PM rejection gets its own status, `pm_rejected` (migration `0086`, `9104ee7`), rather than returning the package to `awaiting_head_qc`.** At `awaiting_head_qc` the attempt already carries `head_verdict='passed'`, and `design_head_qc_fail()` would overwrite that verdict — destroying the record the second gate exists to keep (`EXECUTION_MODULE_DEFERRED.md` §D9). The same migration adds `ATTEMPT_REASON_PM_REJECTED` and the Head's two classification fields on `DesignAttempt`, `pm_rejection_category` and `pm_rejection_remarks`, under a CHECK that a category carries remarks. `classify_attempt_causes()` reads the category on the attempt before a PM-rejection loop to decide whose rework it is. |
+| **13 Sep** | **The designer-holds-it guard is split from the clock-stopped guard (R-5; `969eed4`).** One set had been answering two questions. `DESIGN_CLOCK_STOPPED_STATUSES` (finished plus `pm_rejected`) closes the due-date controls — `design_due_date_propose`, `design_due_date_change` and the sites screens' date flags. `DESIGN_NOT_WITH_DESIGNER_STATUSES` (clock-stopped plus `artifacts_uploaded`, `in_qc`, `awaiting_head_qc`) closes Design Hold — `design_mark_blocked` and the Hold controls' flags — so a package under review can no longer be put on hold. `DESIGN_WORK_FINISHED_STATUSES` stays the metrics' question and closes neither. |
+| **13 Sep** | **A PM rejection routes to the Design Head, never straight to the designer (§9) — two answers, shipped with their screens in one commit (`6cdb61e`).** `design_head_return_to_pm` overrules the PM, with a mandatory remark and no attempt. `design_head_send_back` records on attempt N whose fault it was (category required) and opens attempt N+1 with reason `pm_rejected`. The send-back moves the agreed due date out by the whole days since attempt N's `head_reviewed_at` (`_extend_due_date_for_pm_review()`; product decision (c), `EXECUTION_MODULE_DEFERRED.md` §D15), and an open extension request refuses it. |
+| **13 Sep** | **The Head's QC pass hands the package to the PM, and the gate goes live (`1f2a137`) — on local `main` only.** `design_head_qc_pass` writes `awaiting_pm_approval` instead of `released`, and `design_pm_reject` writes `pm_rejected` instead of `awaiting_head_qc`. Held from Railway until prompt 3.1b-3's notifications exist, because without them nobody is told a package is waiting (DEPLOY GATE, `EXECUTION_MODULE_DEFERRED.md` §D). |
 
 ---
 
@@ -746,6 +800,7 @@ that — an unreconstructable gap is exactly the thing that cannot be reconstruc
 | `delivery_challan` | `DeliveryChallan` | `create_delivery_challan` (→ Expected) and every outcome of `recalculate_dc_status()`, which is instrumented **inside the function** so `confirm_grn` and `override_grn` cannot diverge |
 | `issue` | `Issue` | all five creation sites (→ Open), `update_issue_status`, `resolve_issue`, `close_issue`, `reopen_issue` |
 | `payment_milestone` | `PaymentMilestone` | `milestone_invoice`, `milestone_receive`, the Finance branch of `project_overview`'s `update_milestone`, and both directions of the task↔milestone sync |
+| `design_assignment` | `DesignAssignment` — 16 statuses (`DESIGN_ASSIGNMENT_STATUS_CHOICES`) ✔ | **Added by migration `0079` (5 Sep 2026).** Every product status write goes through `apply_design_status()`, which calls `record_transition()` in the caller's transaction and is deliberately not wrapped in `try/except` ✔. The seed commands create fixture rows with a status directly and write no transition. Pinned by `tests_design_transition_ledger` |
 
 **Corrections to the record made while instrumenting.** ~~`Project.status` is written in
 **four** places, not the two previously believed — `create_opex_site` and the Zoho
@@ -772,11 +827,11 @@ consolidating them is 0.2b-shaped work and was not done in 0.3 (R-12).
 
 | Model | Statuses | Why not |
 |---|---|---|
-| `DesignAssignment` | 14 (`DESIGN_ASSIGNMENT_STATUS_CHOICES`) | The richest workflow in the product. Instrumenting it means editing `design_views.py`, which has been correctly scoped and untouched all programme. **It is a session of its own.** |
-| `DesignAttempt` | its own lifecycle, plus several existing terminal stamps | Same reason. Note it already carries ad-hoc stamps, so a future session must decide whether those become transitions or stay beside them. |
+| `DesignAttempt` | its own lifecycle, plus several existing terminal stamps | Not a subject type; since migration `0079` the `DesignAssignment` rows carry the design moves (first table). Note it already carries ad-hoc stamps, so a future session must decide whether those become transitions or stay beside them. |
 | `PaymentRequest` | `pending \| confirmed` (`payment_request_confirm`) | A seventh status-bearing model outside 0.3's six-value subject vocabulary. Adding it means a new `subject_type` constant and a `SUBJECT_TYPE_CHOICES` migration — a schema change, so R-1 applies. |
-| `SiteGroup` | `SITE_GROUP_STATUS_CHOICES` | Not yet reached by the execution build plan; prompt 1.1 owns it. |
+| `SiteGroup` | `SITE_GROUP_STATUS_CHOICES` | Prompts 1.1a and 1.1b shipped without instrumenting it. |
 | `Milestone` (legacy) | `pending \| in_progress \| completed \| delayed` | Superseded by `PaymentMilestone` and kept only for schema compatibility. Do not instrument it; do not revive it. |
+| `PunchPoint` | `Open \| Waived` | **Added by 2.3a** (migration `0080`). Not a subject type; a waiver stamps `waived_by`, `waived_at` and `waiver_reason` on the row itself. |
 | `TaskTemplate` | `draft \| active \| archived` (`activate()`) | **Added by 0.4.** A new `subject_type` is a schema change (R-1). Version history is legible without it: the rows themselves are the record, `effective_from` stamps the promotion, and R-7 makes them immutable. |
 | `Checklist` | `draft \| active \| archived` (`activate()`) | **Added by 0.5.** Same reasoning as `TaskTemplate` above. |
 
@@ -873,7 +928,10 @@ never a subject type. Editing it writes past no ledger, because it has none by d
 - **R-9 (mandatory remarks)** is enforced by `record_transition()` against
   `REMARK_REQUIRED_SUBJECT_TYPES`, which is **empty today**. It cannot be a `NOT NULL`
   column while the retrofitted paths collect no remark; making it one would 500 every
-  task status change. Phase 2 adds `task` to the set when two-step completion ships.
+  task status change. ~~Phase 2 adds `task` to the set when two-step completion ships.~~
+  Two-step completion shipped (prompt 2.1, migration `0076`) without adding `task`: the set
+  is still `frozenset()`, and the design transitions enforce their mandatory remarks per
+  view (`EXECUTION_MODULE_DEFERRED.md` §D12).
 - **R-4 (append-only)** is enforced by `save()`/`delete()` overrides on the model. Those
   are bypassed by `QuerySet.update()` and `QuerySet.delete()`. The stronger form is a
   database-level `REVOKE UPDATE, DELETE ON projects_statustransition`, deliberately left
@@ -975,7 +1033,8 @@ folded this row into §13's "NOT instrumented" table**, so that table is now com
 paragraph is the reasoning behind one of its rows rather than an instruction to patch it.
 
 The §13 "Instrumented" table is **unchanged** — the six subject types 0.3 covered are still
-exactly the six that are covered.
+exactly the six that are covered. **True when 0.4 wrote it; migration `0079` (5 Sep 2026)
+added `design_assignment` as the seventh.**
 
 ### Decision log addition
 
@@ -1157,7 +1216,7 @@ a chain of placeholders produces a schedule nobody entered.
 ### What enforces it — three places, and why each
 
 1. **`opex_site_activate` does not call `calculate_due_dates()`** (1.3c). An activated site
-   starts with 22 nulls.
+   starts with 23 nulls.
 2. **`project_recalculate_dates` refuses `project_type != 'Residential'`** (B18). This view
    renders in **no template** and never did — the original B18 entry said it sat on
    `project_overview`, which was wrong. Its exposure was always the view accepting a direct
@@ -1168,8 +1227,8 @@ a chain of placeholders produces a schedule nobody entered.
    both (B18). **This is the door that mattered**, and the original entry did not name it:
    - It calls the same `calculate_due_dates()`, so it writes the same wrong chain.
    - `cascade_scheduling` is **irreversible by design** — there is no path back.
-   - Once on, `task_set_due_date` refuses every non-PM role owner outright. Nine of the 22
-     OPEX tasks are the Site Engineer's, two are SCM's, one is the Coordinator's. Manual
+   - Once on, `task_set_due_date` refuses every non-PM role owner outright. Eleven of the 23
+     OPEX tasks are the Site Engineer's and one is the Coordinator's; SCM's four are mirrors. Manual
      per-task dates are the **only** scheduling a tender site has in v1, and this would
      permanently remove them from everyone but the PM.
 
@@ -1189,8 +1248,8 @@ context.
 `assigned_role`** — the role-match rule lives entirely inside that view's `if not is_pm:` arm,
 and the PM path consults only `user_can_view_project()` and `_pm_owns_project()`. This has
 always been true and is not new work; `ManualDueDatesOnOpexTests` exists so it stays true.
-A later tightening that made the PM path role-aware would silently strand nine Site Engineer
-tasks, two SCM tasks and a Coordinator task per site across 95 sites, and nothing else in the
+A later tightening that made the PM path role-aware would silently strand eleven Site Engineer
+tasks and a Coordinator task per site across 95 sites, and nothing else in the
 suite would notice.
 
 Role owners can also set dates on their own tasks — **but only while `cascade_scheduling` is
@@ -1264,20 +1323,20 @@ tooling notes, and they are in `EXECUTION_MODULE_DEFERRED.md` §B27.
 ### The chain guard lives INSIDE the suite, and that is deliberate
 
 ```
-python manage.py test projects --settings=solarpms.test_settings   # 1061 tests, ~75s
+python manage.py test projects --settings=solarpms.test_settings   # 1566 tests, ~135s (15 Sep 2026)
 python manage.py test projects.tests_migration_chain               # just the chain, ~15s
 ```
 
 `tests_migration_chain.py` sits in `projects/`, so **the ordinary suite run picks it up and
 a session cannot miss it by running the suite the way it always has.** It shells out to real
 settings and a real Postgres from inside a SQLite run, so it holds regardless of how the
-suite was launched. It costs about **11 seconds of the 75**.
+suite was launched.
 
 That is why it is a test module and not a separate script: a check that has to be remembered
 is a check that will be forgotten, and the prompt template's "run the suite" line now covers
 it for free. **The second command exists for a different job** — checking the chain in
 fifteen seconds after touching a migration or a seeding helper, without paying for the other
-1,059 tests. Run it whenever `projects/migrations/` or a helper a migration imports changes.
+1,564 tests. Run it whenever `projects/migrations/` or a helper a migration imports changes.
 
 The reason any of this exists is R-22: the phase 1 merge could not deploy, and all 1,060
 tests were green.
