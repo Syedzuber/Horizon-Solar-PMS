@@ -11,6 +11,10 @@ dropped. A total that is silently short is worse than no total.
 WRITE controls render only for SCM (`can_manage`); Admin and the Design Head read the
 same page. The view refuses their POSTs either way.
 
+"Request design change" (session 3.1c-i) renders on a member row or a pool row only when
+that project pk is in `change_request_project_ids`, built in the view from the predicate
+the change-request POST enforces. A locked group's members are never in it.
+
 Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
 {% endcomment %}
 
@@ -145,6 +149,7 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
           <th style="width:9rem;">Site code</th>
           <th style="width:13rem;">Added</th>
           <th style="width:9rem;">BOQ</th>
+          {% if change_request_project_ids %}<th style="width:13rem;"></th>{% endif %}
           {% if can_manage and group.status == 'draft' %}<th style="width:22rem;">Remove</th>{% endif %}
         </tr>
       </thead>
@@ -161,6 +166,14 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
             <a href="{% url 'boq_detail' m.project.project_id %}"
                class="btn btn-sm btn-outline-secondary py-0">View</a>
           </td>
+          {% if change_request_project_ids %}
+          <td class="text-end">
+            {% if m.project.pk in change_request_project_ids %}
+            <a href="{% url 'design_change_request_form' project_id=m.project.project_id %}"
+               class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+            {% endif %}
+          </td>
+          {% endif %}
           {% if can_manage and group.status == 'draft' %}
           <td>
             <form method="post" action="{% url 'site_group_remove_site' pk=group.pk %}"
@@ -187,8 +200,9 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
 {# ── Departures ──────────────────────────────────────────────────────────── #}
 {% comment %}
 Removal is soft, so this list is the record of what was in the group and why it left.
-The PM-change-request case is called out separately because SCM did not do it — the
-aggregate above changed underneath them and they need to see why.
+The change-request case is called out separately because SCM did not do it — the Design
+Head's acceptance changed the aggregate above underneath them (session 3.1c-i moved the
+departure from raise to acceptance), and they need to see why.
 {% endcomment %}
 {% if removed %}
 <div class="card shadow-sm border-0 mb-4">
@@ -213,8 +227,8 @@ aggregate above changed underneath them and they need to see why.
           </td>
           <td class="small">
             {% if m.removal_reason == change_request_reason %}
-              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>PM change request</span>
-              <span class="text-muted">— the PM raised a change, so the site left the group and went back to design.</span>
+              <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>Change request</span>
+              <span class="text-muted">— the site left the group because of a design change request. Since 16 Sep 2026 that happens only when the Design Head accepts one, which sends the site back to design.</span>
             {% else %}
               {{ m.removal_reason|default:"—" }}
             {% endif %}
@@ -247,6 +261,7 @@ aggregate above changed underneath them and they need to see why.
             <th>Site</th>
             <th style="width:13rem;">Released</th>
             <th style="width:8rem;">Waiting</th>
+            {% if change_request_project_ids %}<th style="width:13rem;"></th>{% endif %}
           </tr>
         </thead>
         <tbody>
@@ -256,6 +271,14 @@ aggregate above changed underneath them and they need to see why.
             <td class="fw-semibold">{{ a.project.project_id }}</td>
             <td class="small text-muted">{{ a.released_at|date:"d M Y, H:i"|default:"—" }}</td>
             <td>{% if a.age_days is None %}—{% else %}{{ a.age_days }} day{{ a.age_days|pluralize }}{% endif %}</td>
+            {% if change_request_project_ids %}
+            <td class="text-end">
+              {% if a.project.pk in change_request_project_ids %}
+              <a href="{% url 'design_change_request_form' project_id=a.project.project_id %}"
+                 class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+              {% endif %}
+            </td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>
@@ -282,7 +305,7 @@ aggregate above changed underneath them and they need to see why.
     {% endif %}
     <p class="small text-muted mb-3">
       Locking freezes the BOQ of every site in this group. Designers can no longer change
-      quantities, and a PM change request on a member site will be refused.
+      quantities, and a design change request on a member site will be refused.
       <strong>There is no unlock</strong> — once quantities are committed to a purchase, a
       correction is a variance against the order, which this system does not handle yet.
     </p>

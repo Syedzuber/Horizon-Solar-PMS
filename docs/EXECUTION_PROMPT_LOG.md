@@ -788,3 +788,56 @@ helper; **0069 is still exposed** through `models.derive_checklist_code`, narrow
 field, `Checklist.code`) and not imminently. Not fixed: it is not broken, its trigger is a
 rename of that field, and fixing an unbroken migration is a change with no test to prove it
 right. **§B31** — the two suite runs check different things and nothing reconciles them.
+
+---
+
+## 3.1c-i — one design-change window for the PM and SCM (16 Sep 2026)
+
+Audit-then-build, with a hard stop between. No log rows exist for the sessions between
+HOTFIX-1 and this one; this row does not back-fill them.
+
+### What changed
+
+- **One predicate, asked everywhere.** `design_views.change_request_window_open(user, assignment)`
+  is what the raise POST, the form, `pm_change_request_targets()` and the two SCM group screens
+  ask. The PM and coordinators get Part 4's pre-release window OR
+  `permissions.design_change_window_open()` (released, no locked procurement membership — D-a);
+  SCM gets the latter only. `_change_request_refusal()` words every closed window for both the
+  POST and the form, which closes `EXECUTION_MODULE_DEFERRED.md` §B1's duplicated
+  `in_draft_group`.
+- **SCM may raise** (D-b): `user_can_request_design_change()` is now
+  `user_can_manage_project() OR user_may_raise_design_change_as_scm()`, a distinct helper that
+  delegates to `user_can_manage_site_groups()` today.
+- **Removal from a draft group moved from raise to acceptance** (Q2, reverses Part 4.6 —
+  `execution-model.md` §12, v1.6). Acceptance locks the request, the group and the assignment
+  rows, refuses if `project_boq_is_group_locked()`, then removes the site and opens the attempt
+  with `released_at` / `released_by` cleared in the same status write (`_open_next_attempt()`
+  gained `extra_fields`; only acceptance passes it).
+- **`site_group_lock()` was not changed.** It already refused a group holding a pending request
+  and named the site; the audit found the prompt's B5 already satisfied.
+- **`m_change_request_rate` attributes to the site's `assigned_pm`** (D-c); a PM-less site files
+  under "Unassigned". Column header "Requesting PM" → "Site PM".
+- **"Request design change" links** on the post-QC pool rows (`site_groups`, `site_group_detail`)
+  and on draft-group member rows, from a pk set built in the view.
+
+### Tests
+
+`tests_design_change_window.py`, 13 tests. Three were mutation-checked: removing the accept
+re-check, giving SCM the PM window, and dropping the stamp clear each turn exactly the pinning
+test red. No existing test asserted removal at raise; one docstring said so
+(`tests_design_part46.GroupLockTests`) and was reworded, assertions unchanged.
+
+### Verification
+
+Baseline at `b54ac21`: **1633 tests, 1 failure** (the standing `tests_design_part46` SQLite
+constraint-name one) — not 1598 as the prompt stated. After: **1646 tests, the same 1 failure.**
+`check` clean; `makemigrations --check --dry-run` "No changes detected". Figure snapshot before
+and after against `solarpms_local` byte-identical (same SHA-256). Writers of `released_at` /
+`released_by` by AST: `design_pm_approve`, `design_change_request_accept`, and the three seed
+commands.
+
+### Findings recorded
+
+**§D43** — approve-then-change-request, the narrowed-not-closed lock race, admin-created
+requests, `_add_sites()` admitting a site with a pending request, and five stale sentences
+outside the MODE.

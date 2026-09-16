@@ -577,9 +577,13 @@ class VisibilityTests(Part46Base):
 # ===========================================================================
 
 class GroupLockTests(Part46Base):
-    """A released, grouped site: the one shape in which a change request and a draft group
-    coexist. Raising pulls the site out of the group (Part 6 §4, unchanged by 4.6), so the
-    lock guard is exercised on a SECOND site that stays in."""
+    """A released, grouped site with a change request pending against it.
+
+    Written when raising pulled the site out of the group (Part 6 §4, unchanged by 4.6),
+    which is why the guard is exercised on a SECOND site and the request is created
+    directly. Since session 3.1c-i the site stays in its group until the Design Head
+    accepts, so a raise through the view reaches this state too; that path is pinned in
+    tests_design_change_window.LockRefusalTests. The assertions here are unchanged."""
 
     def setUp(self):
         super().setUp()

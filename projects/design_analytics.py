@@ -261,11 +261,11 @@ METRIC_CATALOGUE = [
     # ── C — brief stability ──────────────────────────────────────────────────
     Metric('change_request_rate', GROUP_C, 'Change request rate',
            'Accepted change requests over finished sites (released, or awaiting PM '
-           'approval), per REQUESTING PM.',
+           'approval), per site PM — the PM assigned to the site, whoever raised it.',
            core=True,
            why='Locked: an accepted change request is rework the designer did not cause. '
-               'Counting it against the PM who raised it is what stops it being counted '
-               'against the designer by default.'),
+               "Counting it against the site's PM is what stops it being counted against "
+               'the designer by default.'),
     Metric('cr_rejection_rate', GROUP_C, 'Change request rejection rate',
            'Rejected change requests over all requests raised. A rate near zero means '
            'the Head\'s triage is a rubber stamp, not a gate.'),
@@ -906,12 +906,20 @@ def m_hold_duration(data):
 # ---------------------------------------------------------------------------
 
 def m_change_request_rate(data):
-    """Accepted change requests over finished sites, PER REQUESTING PM.
+    """Accepted change requests over finished sites, PER SITE PM.
 
     THE PM IS THE UNIT, not the designer, and that is the whole point of the metric. The
     denominator for one PM is the finished sites THEY are the assigned PM of — dividing
     every PM's accepted requests by the tender's total would make a PM holding two sites
     look identical to one holding forty.
+
+    ATTRIBUTED TO THE SITE'S assigned_pm, NOT TO `requested_by` (D-c, Zuber, 16 Sep 2026,
+    session 3.1c-i). A coordinator or an SCM user may raise a request too, and charging it
+    to them put it in a row with no finished sites while the site's PM never saw it
+    (EXECUTION_MODULE_DEFERRED.md §D41). Numerator and denominator are now keyed to the
+    same person. A site with no assigned PM files its requests in the "Unassigned" row,
+    beside that site in the denominator — `_bucket(None)` — never dropped. The PM is read
+    through `assignment_by_id`, already loaded, so this adds no query.
 
     FINISHED, NOT RELEASED (B-06, B4; §D1). A site awaiting PM approval stays in the
     denominator, the same as in the rework multiplier and the tender dashboard. Otherwise
@@ -930,7 +938,8 @@ def m_change_request_rate(data):
     for cr in data['change_requests']:
         if cr.verdict != CHANGE_REQUEST_ACCEPTED:
             continue
-        row = _bucket(per, cr.requested_by, {'finished': 0, 'released': 0, 'accepted': 0})
+        site_pm = data['assignment_by_id'][cr.attempt.assignment_id].project.assigned_pm
+        row = _bucket(per, site_pm, {'finished': 0, 'released': 0, 'accepted': 0})
         row['accepted'] += 1
 
     team_accepted = sum(1 for cr in data['change_requests']

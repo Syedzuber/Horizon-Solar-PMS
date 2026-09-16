@@ -1,19 +1,23 @@
 {% extends "base.html" %}
 {% comment %}
-PM — raise a design change request on a site they manage.
+Raise a design change request — the site's PM, one of its coordinators, or SCM.
 
-Reachable by the assigned PM and by any active Project Coordinator on the site, because
-user_can_manage_project() covers both and this screen routes through it rather than
-comparing assigned_pm itself.
+Reachable by whoever permissions.user_can_request_design_change() admits: the assigned PM
+and the site's Project Coordinators through user_can_manage_project(), and any SCM user
+(session 3.1c-i, D-b).
 
-THE WINDOW. A change request is only a system action once QC has started on the current
-attempt; before that the form is replaced by an explanation, because a change at that
-stage is a conversation with the Design Head, not a record.
+THE WINDOW IS DECIDED IN THE VIEW, NEVER HERE. `window_open` is
+design_views.change_request_window_open() — the predicate the POST enforces — and
+`closed_reason` is the code _change_request_refusal() gives the POST. The branches below
+render from those two values and re-derive nothing:
 
-PART 6 CLOSES IT AT THE BOQ LOCK, which is what release was standing in for. Three cases,
-matching design_change_request(): a site in a LOCKED procurement group is refused and told
-a variance is needed; a site in a DRAFT group may still be changed and LEAVES THE GROUP
-when it is; a site in no group keeps Part 4's behaviour, release included.
+  locked              the site is in a LOCKED procurement group — refused for everybody
+  scm_before_release  SCM, and the design is not released yet
+  qc_not_started      the PM, before QC has started on the current attempt
+  stage               the PM, at a status outside the window (e.g. with the PM for approval)
+
+A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS the request
+(3.1c-i, Q2); `draft_group` names the group so the note can say so.
 {% endcomment %}
 
 {% block title %}Change request — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -74,26 +78,31 @@ when it is; a site in no group keeps Part 4's behaviour, release included.
             review, and no verdict can be recorded until he rules.</strong>
           {% endif %}
           {% if draft_group %}
-            <strong>This site is in procurement group "{{ draft_group.name }}". Raising a
-            change removes it from that group, so SCM's aggregated quantities drop this
-            site.</strong>
+            <strong>This site is in procurement group "{{ draft_group.name }}". It stays
+            in the group while the Design Head decides, and the group cannot be locked
+            until he does. If he accepts the request, the site leaves the group and SCM's
+            aggregated quantities drop it; if he rejects it, the site stays.</strong>
           {% endif %}
         </div>
       </form>
 
-    {% elif group_locked %}
+    {% elif closed_reason == 'locked' %}
       <div class="alert alert-secondary py-2 small mb-0">
         The BOQ for this site is <strong>locked</strong> — it is in a locked procurement
         group and its quantities have been committed to a purchase. A change now needs a
-        variance against the order, which this system does not handle yet. Raise it with
-        SCM directly.
+        variance against the order, which this system does not handle yet.
       </div>
 
-    {% elif released %}
+    {% elif closed_reason == 'scm_before_release' %}
       <div class="alert alert-secondary py-2 small mb-0">
-        The design for this site was released
-        {% if assignment.released_at %}on {{ assignment.released_at|date:"d M Y H:i" }}{% endif %}.
-        A change now is a new scope of work rather than a change request.
+        SCM can raise a design change request once the design for this site is
+        <strong>released</strong>. It is currently at "{{ assignment.get_status_display }}".
+      </div>
+
+    {% elif closed_reason == 'stage' %}
+      <div class="alert alert-secondary py-2 small mb-0">
+        A change request cannot be raised while the design is at
+        "{{ assignment.get_status_display }}".
       </div>
 
     {% else %}

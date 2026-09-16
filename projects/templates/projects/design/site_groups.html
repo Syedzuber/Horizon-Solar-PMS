@@ -12,6 +12,10 @@ WRITE controls render only for SCM (`can_manage`). Admin and the Design Head see
 page with no forms — the view refuses their POSTs regardless, this only stops the page
 offering a button that will 403.
 
+"Request design change" (session 3.1c-i) renders on a pool row only when the row's project
+pk is in `change_request_project_ids`, which the view builds from the same predicate the
+change-request POST enforces. This template tests membership and decides nothing.
+
 Bootstrap, matching dashboard/scm.html and the Part 5 tender dashboard. No Tailwind, no
 CDN. The `.chip` pills are the same set the design module already uses.
 {% endcomment %}
@@ -136,6 +140,7 @@ oldest site, which is the one that matters.
             <th style="width:13rem;">Released</th>
             <th style="width:8rem;">Waiting</th>
             <th style="width:14rem;">Released by</th>
+            {% if change_request_project_ids %}<th style="width:13rem;"></th>{% endif %}
           </tr>
         </thead>
         <tbody>
@@ -153,6 +158,14 @@ oldest site, which is the one that matters.
             <td class="small text-muted">
               {% if a.released_by %}{{ a.released_by.user.get_full_name|default:a.released_by.user.username }}{% else %}—{% endif %}
             </td>
+            {% if change_request_project_ids %}
+            <td class="text-end">
+              {% if a.project.pk in change_request_project_ids %}
+              <a href="{% url 'design_change_request_form' project_id=a.project.project_id %}"
+                 class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+              {% endif %}
+            </td>
+            {% endif %}
           </tr>
           {% endfor %}
         </tbody>

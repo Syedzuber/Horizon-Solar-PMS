@@ -132,6 +132,8 @@ from .permissions import (
     can_approve_design_release, manageable_projects_q,
     # Prompt 3.1b-3 — the same PM audience, as a list of people to notify.
     project_managers,
+    # Session 3.1c-i — the design-change window (D-a) and its two audiences (D-b).
+    design_change_window_open, user_can_manage_project, user_may_raise_design_change_as_scm,
 )
 
 logger = logging.getLogger(__name__)
@@ -3587,7 +3589,7 @@ def _carry_forward_artifacts(old_attempt, new_attempt, redo):
     return carried
 
 
-def _open_next_attempt(assignment, reason, actor, detail, redo=None):
+def _open_next_attempt(assignment, reason, actor, detail, redo=None, extra_fields=None):
     """Close the current attempt and open the next one. THE ONLY PLACE THIS HAPPENS.
 
     Both rework loops call this with a different `reason`; the mechanics are identical
@@ -3618,6 +3620,10 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None):
     `in_design` and the designer submits one. With an Arka carried forward and approved at
     both gates, the site opens at `arka_submitted` — Part 3's "artifacts outstanding"
     state — so the designer can go straight to whatever actually failed.
+
+    `extra_fields` (3.1c-i) rides on the status write below, for companion columns a caller
+    needs moved in the same write. Only design_change_request_accept() passes it, to clear
+    the release stamp. `current_attempt_number` is set here and cannot be overridden by it.
 
     Returns the new DesignAttempt.
     """
@@ -3656,7 +3662,7 @@ def _open_next_attempt(assignment, reason, actor, detail, redo=None):
         f'Attempt {next_number} opened ({new_attempt.get_opened_reason_display()}): '
         f'{detail}{detail_suffix}',
         f'design_attempt_opened_{reason}',
-        extra_fields={'current_attempt_number': next_number},
+        extra_fields={**(extra_fields or {}), 'current_attempt_number': next_number},
         entity_type='DesignAttempt', entity_id=new_attempt.pk)
 
     # Everything may have carried forward — a failure whose fix was entirely inside the
@@ -4784,12 +4790,98 @@ def design_head_send_back(request, project_id):
 
 
 # ---------------------------------------------------------------------------
-# 13. PM change requests
+# 13. Design change requests — the PM's, a coordinator's, or SCM's
+#
+# SESSION 3.1c-i — THE WINDOW IS ASKED IN ONE PLACE, PER USER. design_change_request()
+# (the POST), design_change_request_form() (the GET), pm_change_request_targets() (the PM
+# dashboard link) and the two SCM group screens all ask change_request_window_open().
+# Before this the POST and the GET each computed `in_draft_group`, spelled differently
+# (EXECUTION_MODULE_DEFERRED.md §B1), and the dashboard link used a third rule that
+# skipped every released site.
 # ---------------------------------------------------------------------------
+
+# The 403 both change-request views return. Authority only — a refusal about the WINDOW is
+# a message and a redirect, never a 403.
+CHANGE_REQUEST_FORBIDDEN = ("Only the site's PM, one of its coordinators, or SCM may request "
+                            "a design change.")
+
+
+def _pre_release_window_open(assignment, attempt):
+    """Part 4's window: QC has started on the current attempt, and the status is one of
+    CHANGE_REQUEST_STATUSES. `released` is not in that tuple, so this is before release
+    only."""
+    return bool(attempt is not None and attempt.qc_started_at is not None
+                and assignment.status in CHANGE_REQUEST_STATUSES)
+
+
+def change_request_window_open(user, assignment):
+    """Whether `user` may raise a design change request against `assignment` now.
+
+    Two audiences, two windows (3.1c-i, Q1):
+
+      the PM or a coordinator (user_can_manage_project)
+          Part 4's pre-release window, OR permissions.design_change_window_open() —
+          released and not in a locked procurement group (D-a).
+      SCM (user_may_raise_design_change_as_scm)
+          design_change_window_open() ONLY. SCM may not raise before release.
+
+    Anybody else gets False. Somebody holding both authorities gets the PM's window, which
+    contains SCM's.
+
+    THIS IS THE WINDOW, NOT THE 403. Every caller asks user_can_request_design_change()
+    first; the group screens ask it first so that a viewer who may not raise at all costs
+    no window query.
+    """
+    if assignment is None:
+        return False
+    project = assignment.project
+    if user_can_manage_project(user, project):
+        return (design_change_window_open(assignment)
+                or _pre_release_window_open(assignment, _current_attempt(assignment)))
+    if user_may_raise_design_change_as_scm(user):
+        return design_change_window_open(assignment)
+    return False
+
+
+def _change_request_refusal(user, assignment, attempt):
+    """Why the window is closed for `user`, as (code, message).
+
+    Call only where change_request_window_open() has returned False. The POST flashes the
+    message; the form renders its branch from the code. One function, so the two screens
+    cannot give different reasons for the same closed window.
+
+    Checked in the order the POST always checked them — the lock first, because a locked
+    BOQ is the one refusal no wait will lift.
+    """
+    project = assignment.project
+    pid = project.project_id
+    if project_boq_is_group_locked(project):
+        membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+        name = membership.group.name if membership is not None else ''
+        return 'locked', (
+            f'{pid}: change request refused — the BOQ is locked. This site is in the '
+            f'locked procurement group "{name}", so its quantities are committed to a '
+            f'purchase. A change now needs a variance against the order, which this system '
+            f'does not handle yet.')
+    # Released and not locked is open to both audiences, so from here on the design is
+    # not released — which is a window SCM does not have.
+    if not user_can_manage_project(user, project):
+        return 'scm_before_release', (
+            f'{pid}: SCM may raise a design change request only once the design is '
+            f'released. This site is at "{assignment.get_status_display()}".')
+    if attempt is None or attempt.qc_started_at is None:
+        return 'qc_not_started', (
+            f'{pid}: QC has not started on this package yet, so there is nothing settled '
+            f'to raise a change against. Talk to the Design Head — a change at this stage '
+            f'does not need a formal request.')
+    return 'stage', (
+        f'{pid}: a change request cannot be raised at this stage (status '
+        f'"{assignment.get_status_display()}").')
+
 
 @login_required
 def design_change_request(request, project_id):
-    """The site's assigned PM (or a coordinator) requests a change.
+    """Raise a design change request: the site's PM, one of its coordinators, or SCM.
 
     PART 4.6 — RAISING A REQUEST NOW DOES ONE THING: IT CREATES A PENDING ROW.
 
@@ -4798,10 +4890,14 @@ def design_change_request(request, project_id):
     opens attempt N+1. Part 4 opened it here, automatically, which meant any assigned PM
     could push rework into a queue the Head owns without the Head being consulted.
 
-    WINDOW: unchanged. `qc_started_at` must be set on the current attempt, and the site
-    must not be released (settled decision 3). Before QC starts there is nothing settled
-    to raise a change against and the request is refused with a message; after release
-    the design is finished. The real close condition is BOQ locking, which is Part 6.
+    THE WINDOW is change_request_window_open(), per user (3.1c-i):
+
+      PM / coordinator  QC started and not yet released (Part 4, settled decision 3), OR
+                        released and not in a locked procurement group (D-a).
+      SCM               released and not in a locked procurement group, only.
+
+    Every closed window is a message and a redirect, not a 403; _change_request_refusal()
+    words it. The 403 is authority alone.
 
     ONE PENDING REQUEST PER ATTEMPT. A second raise while one is untriaged is refused
     here with a message, and by a partial unique constraint underneath — two pending
@@ -4813,29 +4909,26 @@ def design_change_request(request, project_id):
     same attempt. Marking anything 'failed' here would charge the designer with a rework
     loop the PM caused, which is the reason both `opened_reason` values exist.
 
-    PART 6 — THE GROUP DECIDES, IN THREE CASES (Part 6 §4):
+    THE GROUP, SINCE 3.1c-i:
 
-      LOCKED group  -> REFUSED. This is where the real close condition finally lands. The
-                       quantities have been committed to a purchase; the correction is a
-                       variance against that order, which is a separate feature.
-      DRAFT group   -> the SITE LEAVES THE GROUP and the request proceeds. The group is not
-                       held hostage to one site, and SCM keeps procuring the rest. The
-                       removal is explicit and logged — never an invisible side effect —
-                       and it is what makes this branch reachable at all: a group member is
-                       `released` by construction, which Part 4 refuses outright.
-      NO group      -> unchanged from Part 4, including that refusal. A released ungrouped
-                       site is still a new scope of work, not a change request.
+      LOCKED procurement group -> REFUSED, for everybody. The quantities are committed to
+                                  a purchase; the correction is a variance against that
+                                  order, which is a separate feature.
+      DRAFT procurement group  -> the request proceeds AND THE SITE STAYS IN THE GROUP.
+      no group                 -> the request proceeds. Part 6 §4 refused this case as "a
+                                  new scope of work"; D-a opened it.
 
-    The resulting asymmetry (released-and-grouped is change-requestable, released-and-
-    ungrouped is not) is Part 6 §4 as specified; it is recorded in
-    DESIGN_MODULE_DEFERRED.md rather than resolved here.
+    THE SITE NO LONGER LEAVES ITS GROUP HERE (3.1c-i, Q2 — reverses Part 4.6's choice).
+    It leaves when the Design Head ACCEPTS, inside design_change_request_accept()'s
+    transaction; a rejection leaves it where it was, so SCM never re-adds a site nobody
+    changed. While the request is pending the site stays in its group's aggregate, and
+    site_group_lock() refuses to lock a group holding it. Recorded in
+    docs/execution-model.md §12.
     """
     project = _opex_site(project_id)
     assignment = getattr(project, 'design_assignment', None)
     if not user_can_request_design_change(request.user, project):
-        return HttpResponseForbidden(
-            'Only the PM assigned to this site (or one of its coordinators) may request '
-            'a design change.')
+        return HttpResponseForbidden(CHANGE_REQUEST_FORBIDDEN)
     if request.method != 'POST':
         return redirect('design_change_request_form', project_id=project.project_id)
 
@@ -4854,38 +4947,13 @@ def design_change_request(request, project_id):
     if attempt is None:
         return _back(f'{project.project_id}: design has not started on this site yet.')
 
-    # PROCUREMENT: the gate below asks whether this site's BOQ has been committed to a
-    # purchase, and only a procurement group commits one. A PM's execution batch says
-    # nothing about whether the design may still be changed.
+    # The one window question, asked the way the form and both dashboards ask it.
+    if not change_request_window_open(request.user, assignment):
+        return _back(_change_request_refusal(request.user, assignment, attempt)[1])
+
+    # PROCUREMENT: only a procurement group commits a BOQ, and the window above has already
+    # refused a locked one — so a membership here is a DRAFT group, named in the message.
     membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
-
-    if membership is not None and membership.group.status == SITE_GROUP_LOCKED:
-        return _back(f'{project.project_id}: the BOQ is locked — this site is in the '
-                     f'locked procurement group "{membership.group.name}" and its '
-                     f'quantities have been committed. A change now needs a variance '
-                     f'against the order, which this system does not handle yet. Raise it '
-                     f'with SCM directly.')
-
-    # A draft-group member is `released` by construction, so admitting it here means
-    # stepping past BOTH of Part 4's release guards — the explicit one below and the
-    # absence of `released` from CHANGE_REQUEST_STATUSES. Nothing else is relaxed.
-    in_draft_group = membership is not None
-    allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
-                        if in_draft_group else CHANGE_REQUEST_STATUSES)
-
-    if assignment.status == DESIGN_RELEASED and not in_draft_group:
-        return _back(f'{project.project_id}: the design is already released — a change '
-                     f'now is a new scope of work, not a change request.')
-
-    if attempt.qc_started_at is None:
-        return _back(f'{project.project_id}: QC has not started on this package yet, so '
-                     f'there is nothing settled to raise a change against. Talk to the '
-                     f'Design Head — a change at this stage does not need a formal '
-                     f'request.')
-
-    if assignment.status not in allowed_statuses:
-        return _back(f'{project.project_id}: a change request cannot be raised at this '
-                     f'stage (status "{assignment.get_status_display()}").')
 
     # PART 4.6 — one untriaged request at a time. The message is here; the partial unique
     # constraint underneath is what makes the rule true against a double submit or a
@@ -4902,23 +4970,19 @@ def design_change_request(request, project_id):
     # `awaiting_head_qc` has passed Design QC and is with the Head, so the request
     # suspends his review exactly as it suspends gate 1's — the message must say so.
     was_in_qc = assignment.status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)
+    # Who is raising it, for the activity feed only. An SCM request is still a
+    # `pm_change_request` everywhere else — no new reason value (3.1c-i).
+    raised_as = ('PM change request raised' if user_can_manage_project(request.user, project)
+                 else 'Change request raised by SCM')
     try:
         with transaction.atomic():
-            # PART 6, AND STILL ON RAISE. The removal shares the request's transaction on
-            # purpose: a site that left a group without the request that pulled it out, or
-            # a request recorded against a site still counted in an aggregate, are both
-            # worse than neither. Part 4.6 deliberately did NOT move this to acceptance —
-            # SCM must not be left aggregating a site whose BOQ is under dispute while the
-            # Head thinks about it. If the Head rejects, SCM re-adds the site; it is still
-            # `released`, so `_add_sites()` accepts it back.
-            if in_draft_group:
-                remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
-
+            # NO GROUP REMOVAL HERE ANY MORE (3.1c-i, Q2). A draft-group site stays in its
+            # group until the Design Head accepts — see design_change_request_accept().
             change = DesignChangeRequest.objects.create(
                 attempt=attempt, requested_by=profile, reason=reason,
                 verdict=CHANGE_REQUEST_PENDING)
             log_activity(project, profile,
-                         f'PM change request raised on attempt '
+                         f'{raised_as} on attempt '
                          f'{attempt.attempt_number} — awaiting the Design Head: {reason}'
                          + (' (review in progress — suspended)' if was_in_qc else ''),
                          entity_type='DesignChangeRequest', entity_id=change.pk,
@@ -4937,10 +5001,10 @@ def design_change_request(request, project_id):
     if was_in_qc:
         msg += (' The review in progress is suspended: no verdict can be recorded until '
                 'he rules.')
-    if in_draft_group:
-        msg += (f' The site was removed from procurement group '
-                f'"{membership.group.name}" — its quantities are no longer in that '
-                f'group\'s aggregate.')
+    if membership is not None:
+        msg += (f' The site stays in procurement group "{membership.group.name}" while he '
+                f'decides, and the group cannot be locked until he does. It leaves the '
+                f'group only if he accepts.')
     return _back(msg, ok=True)
 
 
@@ -5008,6 +5072,27 @@ def design_change_request_accept(request, pk):
     Writing 'failed' at either gate would charge the designer with a rework loop the PM
     caused and inflate the QC failure rate with work nobody found fault in — the exact
     corruption `opened_reason` exists to prevent.
+
+    SESSION 3.1c-i ADDS THREE THINGS, all inside the one transaction:
+
+      * A RE-CHECK OF THE LOCK. If the site's BOQ has been committed to a purchase since the
+        request was raised — project_boq_is_group_locked() — the acceptance is refused and
+        nothing is written; the request stays pending for the Head to reject with a reason.
+        Asked whichever window the request was raised in: a locked BOQ is the one thing
+        that forbids reopening at any stage.
+      * THE GROUP DEPARTURE (Q2). A site in a draft procurement group leaves it HERE, not at
+        raise, through remove_from_group() — so a rejected request leaves the group as it
+        was.
+      * THE RELEASE STAMP IS CLEARED. `released_at` / `released_by` go to None in the SAME
+        apply_design_status() write that moves the status, through _open_next_attempt()'s
+        `extra_fields`. The StatusTransition row keeps the history; the stamps describe a
+        release that no longer stands. Only this caller passes it — the QC-fail and
+        send-back loops are unchanged.
+
+    LOCK ORDER: the request row, then the group row (if the site has a live procurement
+    membership), then the assignment row. site_group_lock() takes no row lock of its own
+    (EXECUTION_MODULE_DEFERRED.md §D43), so the re-check narrows the race with a concurrent
+    lock rather than closing it.
     """
     change = _change_request_or_404(pk)
     project, refusal = _triage_guard(request, change)
@@ -5030,16 +5115,37 @@ def design_change_request_accept(request, pk):
             return _back(f'{project.project_id}: that change request has already been '
                          f'{change.get_verdict_display().lower()}.')
 
+        membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+        if membership is not None:
+            SiteGroup.objects.select_for_update().get(pk=membership.group_id)
+            # Re-read once the group is held: SCM may have removed the site or locked the
+            # group between the read above and the lock.
+            membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+        assignment = DesignAssignment.objects.select_for_update().get(pk=assignment.pk)
+
+        if project_boq_is_group_locked(project):
+            name = membership.group.name if membership is not None else ''
+            return _back(f'{project.project_id}: change request not accepted — the BOQ was '
+                         f'locked in procurement group "{name}" after this request was '
+                         f'raised, so it can no longer reopen the design. Nothing was '
+                         f'changed. Reject it with a reason to close it.')
+
         change.verdict    = CHANGE_REQUEST_ACCEPTED
         change.decided_by = profile
         change.decided_at = timezone.now()
         change.save(update_fields=['verdict', 'decided_by', 'decided_at'])
 
+        left_group = None
+        if membership is not None:
+            remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
+            left_group = membership.group.name
+
         # The outgoing attempt's verdicts are deliberately untouched — see the docstring.
         # _open_next_attempt() sets closed_at and nothing else on it.
         new_attempt = _open_next_attempt(
             assignment, ATTEMPT_REASON_PM_CHANGE_REQUEST, profile,
-            f'change request accepted on attempt {change.attempt.attempt_number}')
+            f'change request accepted on attempt {change.attempt.attempt_number}',
+            extra_fields={'released_at': None, 'released_by': None})
 
         change.resulting_attempt = new_attempt
         change.save(update_fields=['resulting_attempt'])
@@ -5050,9 +5156,11 @@ def design_change_request_accept(request, pk):
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_accepted')
 
-    return _back(f'{project.project_id}: change request accepted — attempt '
-                 f'{new_attempt.attempt_number} opened and the site is back with the '
-                 f'designer.', ok=True)
+    msg = (f'{project.project_id}: change request accepted — attempt '
+           f'{new_attempt.attempt_number} opened and the site is back with the designer.')
+    if left_group is not None:
+        msg += f' It left procurement group "{left_group}".'
+    return _back(msg, ok=True)
 
 
 @login_required
@@ -5723,22 +5831,21 @@ def design_qc_dashboard_counts(user):
 def pm_change_request_targets(user, projects):
     """Which of `projects` the PM may raise a design change request against right now.
 
-    Returns {project_pk: True} for OPEX sites where the change window is open — QC has
-    started on the current attempt and the site is not yet released (settled decision 3
-    of Part 4). Authority is re-decided by design_change_request() on POST; this only
-    decides whether to offer the link.
+    Returns {project_pk: True} for OPEX sites where change_request_window_open() is True
+    for `user` — the same predicate design_change_request() enforces on POST. Until 3.1c-i
+    this skipped every released site, so a released site in a draft group was
+    change-requestable by URL and offered no link anywhere.
     """
     out = {}
     for project in projects:
         if project.project_type != 'OPEX':
             continue
         assignment = getattr(project, 'design_assignment', None)
-        if assignment is None or assignment.status == DESIGN_RELEASED:
+        if assignment is None:
             continue
         if not user_can_request_design_change(user, project):
             continue
-        attempt = _current_attempt(assignment)
-        if attempt is not None and attempt.qc_started_at is not None:
+        if change_request_window_open(user, assignment):
             out[project.pk] = True
     return out
 
@@ -5873,34 +5980,32 @@ def design_qc_dashboard(request, pk):
 
 @login_required
 def design_change_request_form(request, project_id):
-    """PM: raise a change request on a site they manage, and see the history of the ones
-    already raised. GET only — the POST target is design_change_request()."""
+    """Raise a change request on a site — the PM, a coordinator or SCM — and see the history
+    of the ones already raised. GET only — the POST target is design_change_request().
+
+    The window is change_request_window_open(), the predicate the POST enforces, so the
+    form cannot offer a button that refuses or hide one that would have worked. When it is
+    closed, `closed_reason` is the code _change_request_refusal() gives the POST, and the
+    template renders its explanation from that code rather than re-deriving it.
+    """
     project = _opex_site(project_id)
     if not user_can_request_design_change(request.user, project):
-        return HttpResponseForbidden(
-            'Only the PM assigned to this site (or one of its coordinators) may request '
-            'a design change.')
+        return HttpResponseForbidden(CHANGE_REQUEST_FORBIDDEN)
 
     assignment = getattr(project, 'design_assignment', None)
     if assignment is None:
         raise Http404('Design has not started on this site yet.')
 
     attempt = _current_attempt(assignment)
+    window_open = change_request_window_open(request.user, assignment)
+    closed_reason = ('' if window_open
+                     else _change_request_refusal(request.user, assignment, attempt)[0])
 
-    # Part 6: the window the FORM offers must agree with the one design_change_request()
-    # enforces, or the PM gets a button that 403s or a missing button that would have
-    # worked. Same three cases, same order — see that view's docstring.
-    # PROCUREMENT, and it must be the SAME type the POST view asks for or the form and
-    # the gate stop agreeing — which is the one thing this block exists to prevent.
-    membership   = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
-    group_locked = membership is not None and membership.group.status == SITE_GROUP_LOCKED
-    in_draft_group = membership is not None and not group_locked
-    allowed_statuses = (CHANGE_REQUEST_STATUSES + (DESIGN_RELEASED,)
-                        if in_draft_group else CHANGE_REQUEST_STATUSES)
-
-    window_open = bool(attempt and attempt.qc_started_at
-                       and assignment.status in allowed_statuses
-                       and not group_locked)
+    # PROCUREMENT — for the template's note only: a draft-group site stays in its group
+    # until the Head accepts (3.1c-i, Q2), and the PM should know that before raising.
+    membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+    draft_group = (membership.group if membership is not None
+                   and membership.group.status == SITE_GROUP_DRAFT else None)
 
     return render(request, 'projects/design/change_request.html', {
         'project':     project,
@@ -5908,9 +6013,8 @@ def design_change_request_form(request, project_id):
         'attempt':     attempt,
         'history':     _attempt_history(assignment),
         'window_open': window_open,
-        'group_locked':   group_locked,
-        'draft_group':    membership.group if in_draft_group else None,
-        'released':    assignment.status == DESIGN_RELEASED and not in_draft_group,
+        'closed_reason': closed_reason,
+        'draft_group':   draft_group,
         'requests':    list(DesignChangeRequest.objects
                             .filter(attempt__assignment=assignment)
                             .select_related('requested_by__user', 'attempt',
@@ -5951,9 +6055,11 @@ def design_change_request_form(request, project_id):
 # to the permission check that authorises them. Same rule as every prior part.
 # ---------------------------------------------------------------------------
 
-# The reason string stamped on a membership pulled out by a PM change request. A
-# constant because two places must agree on it exactly: the change-request view writes
-# it, and the group screen reads it back to explain to SCM why a site left.
+# The reason string stamped on a membership pulled out by a change request. A constant
+# because two places must agree on it exactly: design_change_request_accept() writes it
+# (at acceptance since 3.1c-i, at raise before), and the group screen reads it back to
+# explain to SCM why a site left. The stored value still says "PM" for an SCM-raised
+# request; rows already carry it, so it is not reworded.
 CHANGE_REQUEST_REMOVAL_REASON = 'PM change request'
 
 
@@ -6261,7 +6367,27 @@ def site_group_list(request, pk):
         'released':     released,
         'total_sites':  total,
         'can_manage':   user_can_manage_site_groups(request.user),
+        'change_request_project_ids': change_request_link_ids(request.user, pool),
     })
+
+
+def change_request_link_ids(user, assignments):
+    """Project pks among `assignments` whose "Request design change" link renders for
+    `user` (3.1c-i, Q3).
+
+    THE SAME TWO QUESTIONS THE POST ASKS, decided here so a template only tests membership
+    and never re-derives the window: user_can_request_design_change(), then
+    change_request_window_open(). Authority first, so Admin and the Design Head — who read
+    these screens and may not raise — cost no window query. A locked-group row fails the
+    window, which is why no locked row carries the link.
+
+    None entries are skipped: a group member always has an assignment, but the relation is
+    nullable and a missing one is no reason to fail the page.
+    """
+    return {a.project_id for a in assignments
+            if a is not None
+            and user_can_request_design_change(user, a.project)
+            and change_request_window_open(user, a)}
 
 
 @login_required
@@ -6458,6 +6584,8 @@ def site_group_detail(request, pk):
     member_ids = [m.project_id for m in memberships]
     agg = aggregate_group_boq(member_ids)
     released, total = tender_release_completeness(group.program)
+    pool = (post_qc_pool(group.program)
+            if group.status == SITE_GROUP_DRAFT else [])
 
     return render(request, 'projects/design/site_group_detail.html', {
         'program':      group.program,
@@ -6469,10 +6597,15 @@ def site_group_detail(request, pk):
         'total_sites':  total,
         'blockers':     (pending_change_requests_for(member_ids)
                          if group.status == SITE_GROUP_DRAFT else []),
-        'pool':         (post_qc_pool(group.program)
-                         if group.status == SITE_GROUP_DRAFT else []),
+        'pool':         pool,
         'can_manage':   user_can_manage_site_groups(request.user),
         'change_request_reason': CHANGE_REQUEST_REMOVAL_REASON,
+        # 3.1c-i, Q3 — members and pool rows alike. A locked group's members fail the
+        # window, so they never appear in this set.
+        'change_request_project_ids': change_request_link_ids(
+            request.user,
+            [getattr(m.project, 'design_assignment', None) for m in memberships]
+            + list(pool)),
     })
 
 

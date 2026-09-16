@@ -2796,6 +2796,66 @@ Everything below was confirmed by grep in that session.
   verified fact, and the rule that every claim be re-grepped in the session that writes it
   earned itself again here.
 
+### D43 — what session 3.1c-i (one design-change window) left open
+
+Recorded by session 3.1c-i, 16 Sep 2026. **Recorded, not fixed.** Every claim below was
+checked by grep in that session.
+
+- **Approve-then-change-request.** D-a opens released sites to a change request, so a PM can
+  approve at the gate (`design_pm_approve`) and then raise one instead of rejecting. The two
+  are charged differently: `classify_attempt_causes()` files an attempt opened by an accepted
+  request as `CAUSE_PM_CHANGE`, which is never the designer's, while a rejection the Head sends
+  back reads `pm_rejection_category` — Group A or a blank category charges the designer. **Watch
+  for accepted change requests clustering soon after the same PM's approval.** For the record,
+  `CHANGE_REQUEST_STATUSES` is `in_qc, qc_failed, in_design, arka_submitted, arka_rejected,
+  artifacts_uploaded, awaiting_head_arka, awaiting_head_qc`: neither `awaiting_pm_approval` nor
+  `pm_rejected` is in it, so the PM cannot raise while the package is with them. Approve first
+  is the only route.
+- **A request refused at acceptance is NOT stranded** — the audit prompt assumed no reject path;
+  `design_change_request_reject` exists. But it stays pending until the Head rejects it with a
+  reason; nothing else closes it, and `uniq_pending_change_request_per_attempt` refuses another
+  raise on that attempt meanwhile.
+- **The lock race is narrowed, not closed.** `site_group_lock()` takes no row lock: it resolves
+  the group with `_group_or_404()`, runs its pending-request check outside any transaction, and
+  saves with a plain `group.save()`. `design_change_request_accept()` now locks the SiteGroup row
+  and then the DesignAssignment row and re-checks `project_boq_is_group_locked()`, so a group
+  locked between a raise and its acceptance is caught. What remains: the lock view's pending check
+  is not serialised against a raise, so a group can be locked over a request raised at the same
+  moment (acceptance then refuses, and the Head must reject); and a lock whose check ran before an
+  acceptance commits waits on the row lock, then locks and writes its "BOQ locked" activity line
+  for a member list read before the site left. Closing it needs `site_group_lock()` to lock the
+  group and member rows before checking — outside "precondition only", declined by decision (Q4).
+- **Django admin can create a change request with no window check.** `DesignChangeRequestAdmin`
+  has no `has_add_permission` override.
+- **`_add_sites()` admits a site with a pending change request.** It checks `released` and the
+  absence of a live procurement membership only. Since Q2 such a site then blocks its new group's
+  lock, which the blockers panel on `site_group_detail` shows.
+- **`site_group_lock()`'s refusal says "has"/"have" by `len(blockers)`**, a count of requests, not
+  of the sites it names. Equal today because only one request per attempt can be pending.
+- **`tests_design_pm_gate_fixtured.RejectTests.test_02`'s docstring** — *"A reopened site keeps
+  its old released_at (audit P2)"* — is no longer true of a reopen by an accepted change request,
+  which clears both stamps. It stays true of the QC-fail and send-back loops, which call
+  `_open_next_attempt()` without `extra_fields`. Outside this session's MODE.
+- **`post_qc_pool()`'s docstring** says a change request "returns the site to the queue rather
+  than losing it". Since Q2 the site leaves its group only at acceptance, which moves it to
+  `in_design`, so it returns to the pool only when it is released again. Outside the MODE.
+- **The stored `removal_reason` still says "PM change request"** for an SCM-raised request
+  (`CHANGE_REQUEST_REMOVAL_REASON`; rows already carry the value, so it was not reworded). The
+  departures chip on `site_group_detail` now reads "Change request". The acceptance's activity
+  line also still says "PM change request accepted"; only the raise's text was made neutral.
+- **The SCM dashboard's OPEX pool (`_scm_opex_groups.html`) has no "Request design change" link.**
+  Its rows come from `scm_opex_tender_rows()` via `dashboard_scm`, not from the two group views
+  this session was admitted to.
+- **§D41's first bullet is closed** by D-c: attribution to the site's `assigned_pm`, the column
+  header "Site PM", and the catalogue description. Its `released`-key bullet is unchanged.
+- **§D40 is unchanged and now reaches further.** An inactive coordinator passes
+  `user_can_manage_project()`, so it has both the authority and the PM's window, before and after
+  release. Not fixed and not pinned, by instruction.
+- **`DESIGN_APPROVAL_AUDIT.md` rows 11, 12 and 26** describe the form saying "QC has not started"
+  at `awaiting_pm_approval` and the "new scope of work" branch. Both are gone: the form now renders
+  a `stage` explanation from the POST's own refusal code. The audit document is a dated record and
+  was not edited.
+
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
 _No entries yet._

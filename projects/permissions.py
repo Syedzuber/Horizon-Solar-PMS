@@ -784,19 +784,28 @@ def user_can_view_qc_queue(user):
     return profile.qc_design_assignments.exists()
 
 
+# D-b (Zuber, 16 Sep 2026, session 3.1c-i): SCM may raise a design change request as well
+# as the PM and the site's coordinators. This answers WHO; WHEN is a separate question —
+# design_change_window_open() below, and design_views.change_request_window_open(),
+# which gives the two audiences different windows.
 def user_can_request_design_change(user, project):
-    """Return True if `user` may raise a PM change request against `project`.
+    """Return True if `user` may raise a design change request against `project` at all.
 
-    Routed straight through user_can_manage_project() — the one canonical PM-authority
-    path, which already covers the assigned PM and every active Project Coordinator
-    (settled decision 5). Deliberately NOT re-derived here and that function is NOT
-    modified; this wrapper exists only so the change-request view states its rule by
-    name like every other view in the design module, rather than reaching for a
-    general-purpose helper directly.
+    The OR of two sources, and nothing else:
+
+        user_can_manage_project()             the assigned PM or a Project Coordinator on
+                                              the site (settled decision 5) — the one
+                                              canonical PM-authority path, not re-derived
+        user_may_raise_design_change_as_scm() any SCM user (D-b)
+
+    AUTHORITY, NOT THE WINDOW. Passing this does not mean a request may be raised now: the
+    PM and SCM windows differ (Q1 of 3.1c-i), and every entry point asks
+    design_views.change_request_window_open() for that. This decides the 403.
     """
     if project is None:
         return False
-    return user_can_manage_project(user, project)
+    return (user_can_manage_project(user, project)
+            or user_may_raise_design_change_as_scm(user))
 
 
 def can_approve_design_release(user, project):
@@ -942,7 +951,8 @@ def project_boq_is_group_locked(project):
     Reverse relation only (`Project.group_memberships` from SiteGroupMembership), keeping
     this module import-free like the rest of it. A removed membership does not count —
     a site that has left a group is free again, which is what makes settled decision 6
-    (a PM change request pulls the site out of a draft group) work at all.
+    (a change request pulls the site out of a draft group — at the Design Head's acceptance
+    since session 3.1c-i) work at all.
 
     PROCUREMENT ONLY (prompt 1.1b, D-1). A BOQ freeze is a procurement act: it means a
     purchase order has gone out against these quantities, which is why there is no
@@ -969,6 +979,48 @@ def project_boq_is_group_locked(project):
         removed_at__isnull=True, group__status='locked',
         group_type='procurement',
     ).exists()
+
+
+# D-b (Zuber, 16 Sep 2026, session 3.1c-i). A DISTINCT HELPER, although today it answers
+# exactly what user_can_manage_site_groups() answers. The precedent is
+# BOQ_PORTFOLIO_READ_ROLES, which is its own set rather than PORTFOLIO_VIEW_ROLES "so that
+# widening project VISIBILITY never silently widens BOQ access as a side effect". Same
+# here: forming a procurement group and asking Design to change a released site are two
+# rights that happen to belong to the same people. It delegates rather than comparing the
+# role string a second time; the day the two must differ, THIS body changes and
+# user_can_manage_site_groups() does not.
+def user_may_raise_design_change_as_scm(user):
+    """Return True if `user` may raise a design change request in SCM's capacity.
+
+    Any SCM user, on any site (D-b) — not scoped to a site, because SCM's remit over
+    released sites is portfolio-wide. Confers no triage authority; the Design Head decides.
+    """
+    return user_can_manage_site_groups(user)
+
+
+# D-a (Zuber, 16 Sep 2026, session 3.1c-i). ONE window for a RELEASED design, the same for
+# the PM, the site's coordinators and SCM: released, and not committed to a purchase. It
+# replaces "released AND in a draft group" — a released site in no group is now as
+# change-requestable as one in a draft group.
+def design_change_window_open(assignment):
+    """Return True if a design change request may be raised against a RELEASED design.
+
+    `status == 'released'` AND the site holds no live membership of a LOCKED procurement
+    group. The second half is project_boq_is_group_locked(), reused rather than restated,
+    so "the BOQ is committed" means the same thing to the BOQ write paths and to this.
+
+    NOT THE WHOLE ANSWER FOR A PM. The PM and coordinators also keep the pre-release
+    window (QC started, not yet released), which needs the current attempt and the design
+    module's status tuple; design_views.change_request_window_open() combines the two per
+    user. SCM gets this window only.
+
+    'released' is a literal for the reason 'locked' and 'procurement' are literals above:
+    this module imports no models.
+    """
+    if assignment is None:
+        return False
+    return (assignment.status == 'released'
+            and not project_boq_is_group_locked(assignment.project))
 
 
 def project_boq_is_design_locked(project):
