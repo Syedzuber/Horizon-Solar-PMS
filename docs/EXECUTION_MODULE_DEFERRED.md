@@ -2611,7 +2611,29 @@ Recorded by the execution-model v1.4 session, 15 Sep 2026. **Recorded, not fixed
   keep it tracked and document the phantom modifications. Check the deploy first: this
   session did not.
 
-### D36 — false claims the v1.4 sweep found and its MODE could not fix
+### D36 — PARTLY CLOSED (three of seven, 16 Sep 2026): false claims the v1.4 sweep found and its MODE could not fix
+
+#### PARTLY CLOSED 16 Sep 2026 BY THE v1.5 SESSION — the three in `execution-model.md`
+
+The last three bullets are fixed and `docs/execution-model.md` is now **v1.5**. The **first four
+are unchanged and still live**, each outside that session's MODE, which admitted only
+`execution-model.md` and section D: three name a `.py` file or another document, and the
+fourth is §B27's premise, in **section B of this file**.
+
+- **§5's mirrors/progress claim** → replaced. R-20's PROGRESS half counts mirrors, so the three
+  sourceless mirrors sit in every OPEX progress denominator and can never reach its numerator.
+- **§12's "Nine of the 22"** → **corrected to "Eleven of the 22", and the date kept.** This
+  session established what v1.4 could not: **nine was wrong when it was written.** The seed live
+  on 31 Aug (`0075` at `2051f89`) gave the Site Engineer **11 of 22**; today's gives 11 of 23.
+  A transcription error in a dated entry is not stale history, so it was corrected rather than
+  annotated — the 1 Sep seed change carries a separate dated note beneath the row. Rewriting a
+  *decision* to match today's code is what §12 guards against; correcting a *figure* preserves
+  the entry's moment.
+- **§13's "this table is the whole answer"** → replaced with a counted statement. Sixteen models
+  carry a field named `status`; thirteen are in §13's two tables; three — `Program`,
+  `DesignSubmission`, `NotificationLog` — are in neither.
+
+The original entry follows.
 
 Recorded by the execution-model v1.4 session, 15 Sep 2026. Each was confirmed by grep in that
 session. The first four are outside a MODE that admitted only `docs/execution-model.md` and
@@ -2631,14 +2653,17 @@ that were approved one by one, so they were left byte-identical.
 - **§B27's premise** (section B, outside this session's mandate). Its heading says the four
   delivery mirrors need SCM's catalogue mapping **and** B-18. `sync_delivery_mirrors()`
   derives them from delivery challan lines through `DC_CATEGORY_TO_MIRROR_CODE`, with neither.
-- **`execution-model.md` §5, OPEX template:** *"it is why mirrors leave both halves of a
-  progress fraction (R-20)"*. Since prompt 1.6, R-20's progress half counts mirrors.
-- **`execution-model.md` §12, the 31 Aug `enable_cascade_scheduling` entry:** *"Nine of the 22
+- ~~**`execution-model.md` §5, OPEX template:** *"it is why mirrors leave both halves of a
+  progress fraction (R-20)"*. Since prompt 1.6, R-20's progress half counts mirrors.~~
+  **FIXED in v1.5.**
+- ~~**`execution-model.md` §12, the 31 Aug `enable_cascade_scheduling` entry:** *"Nine of the 22
   OPEX tasks are the Site Engineer's."* The 0075 seed gives the Site Engineer 11 of 23 today.
-  It is a dated decision-log row, and whether "nine" held on 31 Aug was not checked.
-- **`execution-model.md` §13:** *"so this table is the whole answer"*. v1.4 added the approved
+  It is a dated decision-log row, and whether "nine" held on 31 Aug was not checked.~~
+  **FIXED in v1.5 — and the unchecked half was the important one: it did not hold. 11 of 22.**
+- ~~**`execution-model.md` §13:** *"so this table is the whole answer"*. v1.4 added the approved
   `PunchPoint` row, but `Program`, `DesignSubmission` and `NotificationLog` also carry a
-  `status` field and appear in neither of §13's tables.
+  `status` field and appear in neither of §13's tables.~~ **FIXED in v1.5, and counted: 16
+  models carry a `status` field, 13 are in the tables, those 3 are not.**
 
 ### D37 — THE IN-APP SWITCH DOES NOTHING, so the PM gate's notifications have no off switch
 
@@ -2727,6 +2752,49 @@ Recorded by the D32 caption prompt, 15 Sep 2026. **Recorded, not fixed.**
 - **`tests_design_part10` line 427 docstring,** "the Group B failure appears in B and nowhere
   else", echoes the catalogue claim that session deleted. What the test asserts is narrower
   and still true; the docstring was outside the MODE.
+
+### D42 — what the v1.5 correction session found outside its MODE
+
+Recorded by the execution-model v1.5 session, 16 Sep 2026. Its MODE admitted
+`docs/execution-model.md` and this section only — no `.py` file, template, migration or test.
+Everything below was confirmed by grep in that session.
+
+- **A caption is pinned word for word by a test, so any future caption change is also a test
+  change.** `tests_design_zero_display.test_the_captions_describe_what_the_figures_now_measure`
+  asserts whole caption sentences with `assertIn` on the rendered HTML — *"Sites and kW are
+  current load: they exclude finished work (released, or awaiting PM approval)."*, the
+  designer-caused-attempts divisor, *"a clean record reads 0.0&times;"*, *"A dash means the
+  designer has no finished site yet."* — and `test_the_false_tooltips_are_gone` asserts the
+  absence of others. §D32's close-out records this for the Rework footer alone ("`tests_design_zero_display`
+  pins it verbatim"), which reads as one local obstacle; it is general. **A session told to
+  change a caption and forbidden to touch tests cannot do both.** Scope the caption work and the
+  test edit into one prompt, or the session stops. Belongs beside §D41's bullets, which the
+  caption session recorded on 15 Sep; this is the same class of finding, one session later.
+- **`execution-model.md` §18 says the suite is 1566 tests; it is 1598.** `683a0ea` and `5e51080`
+  added two test modules after that line's "(15 Sep 2026)" stamp. **Left alone by decision**, not
+  oversight: a test count goes stale every session — the same class as the line-number anchors
+  v1.4 removed rather than refreshed — and the number already carries its own date adjacent to
+  it. Checked against the condition for changing it: §18's baseline that a future session is
+  meant to compare against is the **failure set**, not the count (§B31's trigger is "a failure
+  that is not already on the baseline list"). The count is colour beside a runtime. The same
+  applies to the derived "1,564" further down the section.
+- **The deployment-state sweep, so a future session need not re-grep it.** Nine claims in
+  `execution-model.md` about what is deployed, held or pending were checked on 16 Sep 2026. Two
+  were false and are fixed in v1.5 (§5's deploy-gate sentence; §12's 13 Sep row, which was true
+  when written and now carries a dated note). One is the §18 count above. **Six were verified
+  true and deliberately not touched:** §5's "on deployed `6cdb61e` the gate is present and
+  unreachable"; §5's Design-workflow row and §8's B-06 row, both of which split local `main`
+  from deployed `6cdb61e`; §5's "`origin/main` carries migrations `0075` through `0086`"
+  (`git ls-tree` confirms 0086; its production half is dated, attributed to the product owner
+  and already flagged in-text as not grep-verifiable); §5's "no template version authors any
+  edge today" (`TaskTemplateTaskDependency` appears in migration `0073` and in no view, form,
+  admin or url); and §5's "`materialise_task_dependencies()` — **Not yet called from anywhere**".
+- **The method note this session owes its own successor.** Its instruction was to treat §12's
+  "Nine of the 22" as a dated entry that must not be corrected, on the stated assumption that
+  nine held on 31 Aug. **Grep showed the assumption was false** — the 31 Aug seed gave 11 of 22
+  — which reversed the handling from annotate to correct. An approved instruction is not a
+  verified fact, and the rule that every claim be re-grepped in the session that writes it
+  earned itself again here.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
