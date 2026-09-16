@@ -3323,6 +3323,149 @@ DESIGN_ASSIGNMENT_STATUS_CHOICES = [
     (DESIGN_SURVEY_RETURNED,     'Design Hold — survey inadequate'),
 ]
 
+
+# ---------------------------------------------------------------------------
+# "PENDING AT" — WHO IS HOLDING THIS SITE UP, DERIVED AND NEVER STORED.
+#
+# A display-only answer for the Design Head's site list. It is computed at render time
+# from rows that screen has already fetched; nothing here is persisted, no column backs
+# it, and no writer maintains it. If the answer is ever wanted in a query, the right move
+# is a new annotation on the ledger, not a denormalised column fed from this.
+#
+# IT LIVES HERE, BESIDE DESIGN_ASSIGNMENT_STATUS_CHOICES, ON PURPOSE. The dict below must
+# cover every member of that list, and a status added ten lines above this comment with no
+# entry here is a row the screen cannot describe. Keeping the two adjacent means the
+# omission is visible in the same screenful; tests_design_pending_at.py iterates the
+# choices list and fails on any status that has no mapping, so the omission is also loud.
+#
+# ALWAYS ADDRESS THESE BY CONSTANT, NEVER BY LITERAL. The labels are the only strings in
+# this block that are safe to read as text — they are what the badge shows.
+# ---------------------------------------------------------------------------
+
+PENDING_AT_SURVEY         = 'Survey'
+PENDING_AT_DESIGN_HEAD    = 'Design Head'
+PENDING_AT_DESIGNER       = 'Designer'
+PENDING_AT_QC             = 'QC'
+# NULL qc_assigned_to IS THE OPEN POOL, NOT AN UNASSIGNED SITE — see the field's own
+# comment on DesignAssignment. The two are genuinely different states of the world: one
+# person owes this verdict, or any is_design_qc holder may pick it up. A single "QC" label
+# for both would tell the Head a site is somebody's when it is nobody's in particular,
+# which is exactly the question this column exists to answer.
+PENDING_AT_QC_POOL        = 'QC (pool)'
+PENDING_AT_PM             = 'PM'
+PENDING_AT_ON_HOLD        = 'On hold'
+PENDING_AT_SCM            = 'With SCM'
+# A PENDING CHANGE REQUEST OUTRANKS THE STATUS, AND THAT IS THE POINT. Part 4.6 made a
+# raised request inert — no attempt, no status change — so the assignment still reads
+# `in_qc` or `released` or anything else while both review gates are suspended underneath
+# it and the Head owes a triage verdict. Without this label the column would name a
+# reviewer who is, in fact, blocked.
+PENDING_AT_CHANGE_REQUEST = 'Design Head (change request)'
+
+#: Statuses where a Design QC reviewer owes the verdict. `arka_submitted` is NOT a member
+#: and cannot be: it is the one status whose bottleneck depends on a row rather than on
+#: itself — see design_pending_at().
+DESIGN_QC_STAGE_STATUSES = frozenset({DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC})
+
+#: Every status in DESIGN_ASSIGNMENT_STATUS_CHOICES, mapped to the party that owes the
+#: next move. Members of DESIGN_QC_STAGE_STATUSES hold the ASSIGNED label; the pool
+#: variant is substituted by design_pending_at(), which is the only place that knows
+#: whether a reviewer was named.
+DESIGN_PENDING_AT = {
+    # The Design Head owns the survey, but "Survey" is the honest answer rather than his
+    # name: a site can sit here because the client has not sent one, which is not a
+    # queue he can clear by acting.
+    DESIGN_AWAITING_SURVEY:      PENDING_AT_SURVEY,
+    DESIGN_AWAITING_ALLOCATION:  PENDING_AT_DESIGN_HEAD,
+    DESIGN_ALLOCATED:            PENDING_AT_DESIGNER,
+    DESIGN_DUE_DATE_PROPOSED:    PENDING_AT_DESIGN_HEAD,
+    DESIGN_IN_DESIGN:            PENDING_AT_DESIGNER,
+    # Resolved by design_pending_at() against the current Arka's head_verdict. This entry
+    # is the UNAPPROVED reading — Design QC still owes a verdict — and is what the
+    # function falls back to when no Arka row was supplied.
+    DESIGN_ARKA_SUBMITTED:       PENDING_AT_QC,
+    DESIGN_AWAITING_HEAD_ARKA:   PENDING_AT_DESIGN_HEAD,
+    DESIGN_ARKA_REJECTED:        PENDING_AT_DESIGNER,
+    DESIGN_ARTIFACTS_UPLOADED:   PENDING_AT_QC,
+    DESIGN_IN_QC:                PENDING_AT_QC,
+    DESIGN_AWAITING_HEAD_QC:     PENDING_AT_DESIGN_HEAD,
+    # NO COMMITTED ROW CAN CARRY THIS. Session C dropped the write — design_qc_fail()
+    # opens attempt N+1 in the same atomic block, so `qc_failed` was overwritten before
+    # anything could observe it. It is mapped anyway because it is still a legal member of
+    # DESIGN_ASSIGNMENT_STATUS_CHOICES, and a mapping that covers the list is worth more
+    # than one that covers only the reachable part of it. The designer is the right answer
+    # if a row ever does carry it: a failed package goes back to be redone.
+    DESIGN_QC_FAILED:            PENDING_AT_DESIGNER,
+    # The Head decides whether a PM-rejected package returns to the PM or to the designer.
+    DESIGN_PM_REJECTED:          PENDING_AT_DESIGN_HEAD,
+    DESIGN_AWAITING_PM_APPROVAL: PENDING_AT_PM,
+    DESIGN_RELEASED:             PENDING_AT_SCM,
+    DESIGN_SURVEY_RETURNED:      PENDING_AT_ON_HOLD,
+}
+
+
+def design_pending_at(assignment, current_arka=None, change_request_pending=False):
+    """The party that owes the next move on `assignment`, as a short label for display.
+
+    PURE. It reads only what it is handed and issues no query of its own — it is called
+    once per row on a list screen, so a single lazy attribute here would be an N+1 by
+    construction. Everything it needs must be prefetched by the caller:
+
+        assignment.qc_assigned_to   select_related on the view's queryset
+        current_arka                the current attempt's is_current ArkaSubmission,
+                                    or None — see design_head_sites() for the nested
+                                    Prefetch that batches it
+        change_request_pending      whether that attempt carries a DesignChangeRequest
+                                    with verdict='pending'
+
+    `assignment` may be None. A site with no DesignAssignment row is awaiting its survey,
+    which is what the site list's own fallback badge already says.
+
+    THREE RULES, IN THIS ORDER, AND THE ORDER IS THE MEANING:
+
+    1. A PENDING CHANGE REQUEST WINS AGAINST EVERY STATUS, INCLUDING `released`. Part 4.6
+       made a raised request inert: it writes no status and opens no attempt, so the
+       assignment carries on reading whatever it read before while both gates are
+       suspended and the Design Head owes a triage verdict. Any status-first answer here
+       would name a reviewer who cannot act.
+
+    2. `arka_submitted` MEANS TWO OPPOSITE THINGS and is settled by the Arka's
+       head_verdict, not by the status. The classification already exists — this delegates
+       to design_metrics._classify() rather than restating it, so the site list and the
+       tender dashboard cannot drift apart on the same site. A head-approved Arka at this
+       status means both gates are done and the designer owes CAD and BOQ; anything else
+       means Design QC still owes the Arka verdict.
+
+       Imported inside the function because design_metrics imports this module; at module
+       scope it would be a cycle. Same pattern as record_transition above.
+
+    3. WHERE DESIGN QC OWES THE VERDICT, WHO owes it depends on qc_assigned_to, and null
+       is the open pool rather than a gap — see PENDING_AT_QC_POOL.
+
+    Everything else is the dict lookup, which covers the whole choices list.
+    """
+    if assignment is None:
+        return PENDING_AT_SURVEY
+
+    if change_request_pending:
+        return PENDING_AT_CHANGE_REQUEST
+
+    status = assignment.status
+
+    qc_stage = status in DESIGN_QC_STAGE_STATUSES
+    if status == DESIGN_ARKA_SUBMITTED:
+        from .design_metrics import _classify
+        if _classify(assignment, current_arka) == 'arka_approved':
+            return PENDING_AT_DESIGNER
+        qc_stage = True
+
+    if qc_stage:
+        return (PENDING_AT_QC if assignment.qc_assigned_to_id
+                else PENDING_AT_QC_POOL)
+
+    return DESIGN_PENDING_AT.get(status, PENDING_AT_DESIGN_HEAD)
+
+
 # "The designer's work on this attempt is done" — the Head has passed it, whether or not
 # it has been released yet.
 #

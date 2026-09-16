@@ -73,7 +73,13 @@ page, and any markup named inside it becomes real elements.
             <th style="width:2.5rem;"></th>
             <th>Site</th>
             <th>Status</th>
+            {% comment %}
+            Derived at render time from the status, the current Arka and any pending
+            change request — see design_pending_at() in models.py. Nothing stores it.
+            {% endcomment %}
+            <th>Pending at</th>
             <th>Designer</th>
+            <th>QC</th>
             <th>Due date</th>
             <th>Survey</th>
             <th class="text-end">Actions</th>
@@ -125,9 +131,37 @@ page, and any markup named inside it becomes real elements.
                 </div>{% endif %}
             </td>
             <td class="small">
+              {% comment %}
+              NEUTRAL BY DESIGN. The Status badge beside it is the coloured one — it
+              carries the Design Hold warning — and a second coloured badge on the same
+              row would compete with it for the eye without adding a state. This one is
+              a label, so it stays grey at every value, including the change-request one.
+
+              Always rendered, never conditional: an empty cell reads as "nobody is
+              waiting on this", which is never true. A site with no assignment row at all
+              gets "Survey" from the helper's None branch, matching the hard-coded
+              "Awaiting survey" badge in the cell above.
+              {% endcomment %}
+              <span class="badge bg-light text-dark border fw-normal">{{ row.pending_at }}</span>
+            </td>
+            <td class="small">
               {% if row.assignment.assigned_to %}
                 {{ row.assignment.assigned_to.user.get_full_name|default:row.assignment.assigned_to.user.username }}
               {% else %}<span class="text-muted">—</span>{% endif %}
+            </td>
+            <td class="small">
+              {% comment %}
+              `row.qc_reviewer` is assignment.qc_assigned_to, select_related in the view
+              and already used by the Save-QC panel below — one source, no second read.
+
+              "Open pool" RATHER THAN AN EM DASH, and the distinction is the field's whole
+              meaning: null here is not a missing value, it is the state where any
+              is_design_qc holder may take the review. An em dash would say nobody can,
+              which is the opposite. See DesignAssignment.qc_assigned_to.
+              {% endcomment %}
+              {% if row.qc_reviewer %}
+                {{ row.qc_reviewer.user.get_full_name|default:row.qc_reviewer.user.username }}
+              {% else %}<span class="text-muted">Open pool</span>{% endif %}
             </td>
             <td class="small">
               {% comment %}
@@ -234,7 +268,7 @@ page, and any markup named inside it becomes real elements.
 
           {# ── inline action panels (collapse, one row each) ───────────────── #}
           <tr class="collapse" id="up{{ row.site.pk }}">
-            <td colspan="7" class="bg-light">
+            <td colspan="9" class="bg-light">
               <form method="post" enctype="multipart/form-data"
                     action="{% url 'design_survey_upload' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
@@ -251,7 +285,7 @@ page, and any markup named inside it becomes real elements.
           </tr>
 
           <tr class="collapse" id="lk{{ row.site.pk }}">
-            <td colspan="7" class="bg-light">
+            <td colspan="9" class="bg-light">
               <form method="post"
                     action="{% url 'design_survey_link_set' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
@@ -271,7 +305,7 @@ page, and any markup named inside it becomes real elements.
 
           {% if row.allocatable or row.qc_assignable %}
           <tr class="collapse" id="al{{ row.site.pk }}">
-            <td colspan="7" class="bg-light">
+            <td colspan="9" class="bg-light">
               {% if row.allocatable %}
               <form method="post" action="{% url 'design_allocate' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
@@ -342,7 +376,7 @@ page, and any markup named inside it becomes real elements.
 
           {% if row.pending_extension %}
           <tr class="collapse" id="ap{{ row.site.pk }}">
-            <td colspan="7" class="bg-light">
+            <td colspan="9" class="bg-light">
               <div class="d-flex flex-wrap align-items-center gap-3 py-2">
                 <span class="small">
                   Extension to
@@ -377,7 +411,7 @@ page, and any markup named inside it becomes real elements.
 
           {% if row.current_due and not row.clock_stopped %}
           <tr class="collapse" id="ch{{ row.site.pk }}">
-            <td colspan="7" class="bg-light">
+            <td colspan="9" class="bg-light">
               <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
@@ -395,7 +429,7 @@ page, and any markup named inside it becomes real elements.
           {% endif %}
 
         {% empty %}
-          <tr><td colspan="7" class="text-center text-muted py-4 small">
+          <tr><td colspan="9" class="text-center text-muted py-4 small">
             This tender has no sites yet.
           </td></tr>
         {% endfor %}

@@ -1524,3 +1524,110 @@ feature bolted onto a reporting screen. `tests_design_part10.test_no_export_rout
 pins the absence so it cannot be added without someone noticing.
 
 **Location:** `projects/design_views.py` — Part 10 section
+---
+
+## R. Found while adding the QC and Pending-at columns (Design allocation screen)
+
+Three findings from the pre-flight of that prompt. All three were in the code before those
+columns existed, none was introduced by them, and the prompt's MODE forbade fixing any of
+them. Recorded here so the next person to open `design_head_sites` is not surprised.
+
+### R1 — "Assign QC" is offered on a site whose review is already under way
+
+The Allocate/Assign-QC toggle renders whenever gate 1 has not RULED, not whenever gate 1
+has not STARTED. So a site at `in_qc` — a reviewer has taken it into review and owes a
+verdict — still shows an "Assign QC" button, and the Head can swap the reviewer out from
+under an in-progress review.
+
+The condition:
+
+```python
+gate1_decided = _gate1_verdict_recorded(attempt)        # attempt.qc_reviewed_by_id is not None
+...
+'qc_assignable': bool(assignment and not gate1_decided),
+```
+
+and the label is not chosen by that flag at all — it falls out of the OTHER one:
+
+```django
+{% if row.allocatable or row.qc_assignable %}
+  <button …>{% if row.allocatable %}Allocate{% else %}Assign QC{% endif %}</button>
+{% endif %}
+```
+
+`in_qc` is not in `REALLOCATABLE_STATUSES`, so `allocatable` is false and the label falls
+through to "Assign QC".
+
+IT IS DELIBERATE, AND THAT IS WHY IT IS ONLY RECORDED. The Session B comment on the same
+block says the reviewer "stays changeable until gate 1 rules", which is a defensible rule:
+a reviewer who has started but stalled is exactly the case a Head might need to reassign.
+What is NOT deliberate is that the screen gives no sign the review has begun — the button
+reads the same on a site nobody has picked up and on one somebody is halfway through.
+
+If it is ever changed, the honest fix is in the LABEL and not in the condition: "Reassign
+QC" once `qc_started_at` is stamped. Changing `qc_assignable` itself would remove a power
+the Head currently has, which is a product decision and not a tidy-up.
+
+**Location:** `projects/design_views.py` — `design_head_sites` (`qc_assignable`),
+`_gate1_verdict_recorded`; `projects/templates/projects/design/head_sites.html` — the
+Actions column
+
+### R2 — no overdue marker on a past due date
+
+The Due date cell renders the agreed date and, beside it, a green "agreed" chip and any
+pending extension. It never says the date has PASSED. A site three weeks late and a site
+due next Tuesday render identically, in the same colour, and the Head has to read and
+compare every date on the screen to find the late ones.
+
+The derivation already exists and is used elsewhere: `design_metrics.is_overdue()`, which
+also knows the statuses that stop the clock (`DESIGN_CLOCK_STOPPED_STATUSES` — a package
+under review is still on it, a released one is not). So this is a rendering gap and not a
+missing rule; nothing new has to be decided to close it.
+
+Not fixed here because the prompt was scoped to two columns and this is a third change to
+a cell it was told not to touch. Whoever picks it up should reuse `is_overdue()` rather
+than comparing dates in the view — a second definition of "late" is how the site list and
+the tender dashboard start disagreeing about which sites are.
+
+**Location:** `projects/templates/projects/design/head_sites.html` — the Due date cell;
+`projects/design_metrics.py` — `is_overdue`
+
+### R3 — three queries per row for the due dates, measured
+
+`design_head_sites()` reads `DueDateCommitment` three times per site inside the row loop:
+
+```python
+current = _effective_commitment(assignment)                       # 1
+pending = _pending_extension(assignment)                          # 2
+'revisions': (assignment.due_date_commitments.count() - 1)        # 3
+```
+
+Measured on the local database, logged in and warm, second request:
+
+| Tender | Sites | Assignments | Queries |
+|---|---|---|---|
+| SCMPILOT | 6 | 6 | 26 |
+| MPUVNL | 86 | 86 | 266 |
+| TESTTENDER26 | 10 | 1 | 11 |
+
+Fixed overhead is 8. Everything above it is this loop: **18 of SCMPILOT's 26 queries are
+against `projects_duedatecommitment`, and 258 of MPUVNL's 266.** TESTTENDER26 costs almost
+nothing because 9 of its 10 sites have no `DesignAssignment` row, which is what makes the
+shape unambiguous — the cost tracks ASSIGNMENTS, not sites.
+
+The QC and Pending-at columns did not add to this. They cost **+2 flat** — SCMPILOT 26 to
+28, MPUVNL 266 to 268 — because the QC reviewer rides the existing `select_related` and
+the Arka and change-request reads are one batched `Prefetch` each for the whole table.
+`tests_design_pending_at.PendingAtQueryCostTests` pins the per-row slope at exactly 3.0
+and would fail if a fourth per-row read were added.
+
+THE FIX IS NOT HARD, WHICH IS WHY IT IS WORTH DOING PROPERLY RATHER THAN QUICKLY. All
+three reads want the same rows — every `DueDateCommitment` for these assignments — so one
+`Prefetch` plus in-Python selection would replace the lot. The care needed is in
+`_effective_commitment()`, whose ordering (approved rows before the `is_current` one) is
+the rule that keeps a pending extension from changing what the site is committed to; that
+ordering has to survive the move into Python, and Part 8's tests are what say whether it
+did. When it is fixed, change the 3.0 in that test to the new slope.
+
+**Location:** `projects/design_views.py` — `design_head_sites`, `_effective_commitment`,
+`_pending_extension`

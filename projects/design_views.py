@@ -26,7 +26,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Max, OuterRef, Q, Subquery, Sum
+from django.db.models import Count, Max, OuterRef, Prefetch, Q, Subquery, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -72,6 +72,10 @@ from .models import (
     GROUP_TYPE_PROCUREMENT,
     # Part 10 — the ONLY row this session's screen writes.
     DesignAnalyticsPreference,
+    # The display-only "who owes the next move" derivation, beside the status
+    # constants it is keyed on. Pure and query-free; design_head_sites() hands it the
+    # three prefetched facts it reads. See its docstring in models.py.
+    design_pending_at,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_SURVEY_RETURNED,
     DESIGN_ARKA_SUBMITTED, DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED,
@@ -1041,7 +1045,31 @@ def design_head_sites(request, pk):
              # Session B: the QC-assignable flag needs the current attempt's gate-1
              # reviewer. Prefetched rather than reached through _current_attempt() in the
              # loop, which runs its own query per site.
-             .prefetch_related('design_assignment__attempts')
+             #
+             # TWO NESTED PREFETCHES HANG OFF IT, for the Pending-at column. Both are
+             # batched across every attempt on the screen — TWO QUERIES FOR THE WHOLE
+             # TABLE, not two per row — which is the only reason that column can be
+             # derived here at all. Measured: SCMPILOT 26 -> 28 queries, MPUVNL
+             # 266 -> 268. The +2 is flat; it does not move with the row count.
+             #
+             # `to_attr` on both, deliberately: a filtered Prefetch written back into the
+             # relation's own cache makes `attempt.arka_submissions.all()` quietly mean
+             # "the current one" for every later reader in this request. Under their own
+             # names the filtered lists cannot be mistaken for the full relations, and
+             # _current_arka()/_approved_arka() keep working unchanged anywhere else.
+             .prefetch_related(Prefetch(
+                 'design_assignment__attempts',
+                 queryset=DesignAttempt.objects.prefetch_related(
+                     Prefetch('arka_submissions',
+                              queryset=ArkaSubmission.objects.filter(is_current=True),
+                              to_attr='current_arka_rows'),
+                     # Part 4.6: a raised request writes NO status, so a pending one is
+                     # invisible to anything that reads `status` alone. The Pending-at
+                     # column is the first thing on this screen to say so.
+                     Prefetch('change_requests',
+                              queryset=DesignChangeRequest.objects.filter(
+                                  verdict=CHANGE_REQUEST_PENDING),
+                              to_attr='pending_change_request_rows'))))
              # PROMPT 3.1b-2b — the PM's latest rejection, read off the ledger IN THIS
              # QUERY: two correlated subqueries on the same SELECT, no query per row.
              .annotate(
@@ -1072,6 +1100,11 @@ def design_head_sites(request, pk):
         assignment = getattr(site, 'design_assignment', None)
         current = pending = None
         gate1_decided = False
+        # The two facts design_pending_at() cannot fetch for itself. Defaults chosen so a
+        # site with no assignment, or one whose attempts have not been opened yet, answers
+        # "Survey" rather than raising.
+        current_arka = None
+        change_request_pending = False
         if assignment is not None:
             # The AGREED date, not the is_current row — a pending extension must not
             # change what this screen says the site is committed to (Part 8).
@@ -1082,6 +1115,13 @@ def design_head_sites(request, pk):
                 (t for t in assignment.attempts.all()
                  if t.attempt_number == assignment.current_attempt_number), None)
             gate1_decided = _gate1_verdict_recorded(attempt)
+            if attempt is not None:
+                # Both lists come from the nested Prefetch above and are already filtered
+                # (is_current / verdict='pending'), so these are list reads and not
+                # queries. Indexing would raise on the empty case; next() is the read that
+                # says "there may be none".
+                current_arka = next(iter(attempt.current_arka_rows), None)
+                change_request_pending = bool(attempt.pending_change_request_rows)
         rows.append({
             'site':          site,
             'assignment':    assignment,
@@ -1122,6 +1162,13 @@ def design_head_sites(request, pk):
             # rather than in the template so the rule has one home.
             'qc_assignable': bool(assignment and not gate1_decided),
             'qc_reviewer':   assignment.qc_assigned_to if assignment else None,
+            # WHO OWES THE NEXT MOVE — derived at render time, stored nowhere. The three
+            # arguments are all prefetched above; the helper issues no query of its own,
+            # which is what keeps this column free at any row count. A site with no
+            # assignment passes None and gets "Survey", matching the Status cell's own
+            # hard-coded fallback on the same row.
+            'pending_at':    design_pending_at(
+                assignment, current_arka, change_request_pending),
             # THE TWO SELECTORS EXCLUDE EACH OTHER'S CURRENT HOLDER, and the symmetry is
             # the point: one person cannot be both the designer and the gate-1 reviewer of
             # the same site, so whichever role is already filled removes that person from
