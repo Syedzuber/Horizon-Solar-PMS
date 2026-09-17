@@ -906,3 +906,67 @@ host in the link, no deputy on a raise, the gate branches' inactive PM, the demo
 production data, email preferences mostly off, the hardcoded Zoho webhook recipient, the
 link in the HTML part only, and `test_14`'s name. The hardcoded digest addresses were already
 §G3.
+
+---
+
+## D18 — a lifted Design Hold restores the Arka review status it interrupted (17 Sep 2026)
+
+Audit-then-build, with a hard stop after the audit and a second stop at the change-request
+probe (below). Built on HEAD `66edf8e`.
+
+### What changed
+
+- **`_status_after_unblock()`** (the hold is stored as `survey_returned`) now asks
+  `_arka_status_before_hold()` first, and returns `arka_submitted` or `awaiting_head_arka`
+  BY NAME when that helper says so; otherwise its derivation is unchanged. Returning the names
+  keeps `tests_design_pm_gate_live`'s parse able to resolve every status a lift writes.
+- **`_arka_status_before_hold()`** reads the hold's from-status and the site's latest ledger row
+  in one query through `latest_design_transition()`. R3: latest row not the hold → derived,
+  warning. Pre-§D13: from-status in `DESIGN_NOT_WITH_DESIGNER_STATUSES` → derived, warning
+  "pre-§D13 hold; needs repair". R1: any other non-Arka from-status → derived. R2:
+  `_arka_matches_status()` false → derived, warning.
+- **Both lift views** evaluate `_maybe_advance_to_artifacts_uploaded()` after a restore to
+  `arka_submitted`, in the same transaction.
+- **Docstrings** of `design_survey_upload` and `latest_design_transition()` updated to match
+  (the latter listed §D18 as planned, not built).
+
+### The change-request probe
+
+The sign-off asked for a test that a hold is refused over a pending change request, and to stop
+if it was accepted. It was accepted, at `in_design` and `arka_submitted`, when the attempt
+carried a hand-set `qc_started_at`. Before building, the session confirmed the four QC verdict
+views refuse while a request is pending (`_blocking_change_request()`), so the state is
+unreachable through the product; the product owner confirmed zero `DesignChangeRequest` rows in
+production. Recorded as §D45 and kept as an `expectedFailure` test.
+
+### Tests
+
+`tests_design_hold_restore.py`, 19 tests (18 pass, 1 expected failure). Sites are driven
+through the real endpoints. The exceptions are named in the file: a queryset hold with no
+ledger row (R3), a hold written through `apply_design_status()` at a §D13 door (which the
+endpoint now refuses), a verdict edited as the Arka admin could, and a hand-set
+`qc_started_at`. Against HEAD's `design_views.py` the §D13 door test passes and the four restore
+tests fail (`in_design`). Mutations: dropping R2 turned 2 tests red, dropping R3 turned 2 red,
+ignoring the last-row guard turned 1 red. The expected failure fails on its assertion
+(`'survey_returned' != 'arka_submitted'`), not an error.
+
+### Verification
+
+Before: **1668 tests, 1 failure** (the standing `tests_design_part46` SQLite constraint-name
+one). After: **1687 tests, the same 1 failure, 1 expected failure**, no unexpected successes.
+`check` clean (host `localhost`, name `solarpms_local`);
+`makemigrations --check --dry-run` "No changes detected". `design_figure_snapshot --today
+2026-09-17` before and after byte-identical (md5 `effafcc558b8ea1912e3a26da7951c10`): no site
+on the local dump has ever been held. Callers of `_status_after_unblock()` parsed by AST at HEAD
+and in the working tree: `design_survey_link_set` and `design_survey_upload`, equal.
+
+### Findings recorded
+
+**§D18** marked fixed forward, with the MB0005/SCMPILOT06 wording corrected (exposed, never
+held) and the `m_stage_dwell` claim corrected (timestamps, not the ledger). **§D45** the hold
+over a pending change request. **§D46** repair of existing orphans (production A8 output not
+yet reported). **§D47** the overdue clock during a hold, CAD/BOQ unguarded, the Head cannot
+hold, the Arka admin, accept's missing status guard, and `CHANGE_REQUEST_STATUSES` members that
+look unreachable. **§D13** MB0005 wording corrected. **§D44** `demo.designhead` corrected (not
+in production) and `NotificationLog.error_detail` added. A standing note on local counts heads
+the file.

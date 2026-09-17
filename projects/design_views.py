@@ -281,13 +281,113 @@ def _get_or_create_assignment(project):
     return assignment
 
 
+def _arka_matches_status(arka, status):
+    """Whether the current Arka `arka` is in the state `status` says it is in. STRICT.
+
+        arka_submitted      QC and Head both pending (Design QC owes the verdict), OR both
+                            approved (the "artifacts outstanding" state of the Part 9 note)
+        awaiting_head_arka  QC approved, Head pending
+
+    Every other combination, a missing Arka included, is False. Through the product a
+    verdict cannot land while the site is `survey_returned`: _verdict_target() and
+    _head_verdict_target() both test the status first. A mismatch here therefore means an
+    out-of-band edit, and ArkaSubmissionAdmin can make one — `verdict`, `head_verdict` and
+    `is_current` are all editable there. The lift does not guess what that edit meant.
+    """
+    if arka is None:
+        return False
+    if status == DESIGN_ARKA_SUBMITTED:
+        return ((arka.verdict == ARKA_PENDING and arka.head_verdict == ARKA_PENDING)
+                or (arka.verdict == ARKA_APPROVED and arka.head_verdict == ARKA_APPROVED))
+    if status == DESIGN_AWAITING_HEAD_ARKA:
+        return arka.verdict == ARKA_APPROVED and arka.head_verdict == ARKA_PENDING
+    return False
+
+
+def _arka_status_before_hold(assignment):
+    """The Arka review status this site's current Design Hold was taken from, if lifting it
+    should RESTORE that status. None means "derive, as before". §D18.
+
+    THE HOLD'S OWN LEDGER ROW is the evidence: design_mark_blocked() writes through
+    apply_design_status(), so a hold placed since fc24728 (5 Sep 2026, migration 0079) left
+    a StatusTransition to `survey_returned` whose `from_status` is the status it interrupted.
+    Read through latest_design_transition(), as that function's docstring asked, in one
+    query that also reads the site's LATEST ledger row of any kind.
+
+    FOUR ANSWERS, in this order:
+
+      1. THE LATEST LEDGER ROW IS NOT THE HOLD -> None, with a warning. Either no row exists
+         (a hold placed before the ledger) or the latest row moved the site somewhere else,
+         so the hold now being lifted has no row of its own. Using an OLDER hold's row would
+         restore a status this hold never interrupted. The lift is never refused.
+      2. THE HOLD WAS TAKEN FROM A STATUS WHERE A HOLD IS NOW REFUSED -> None, with a
+         warning. Only `in_qc`, `artifacts_uploaded` and `awaiting_head_qc` can carry such a
+         ledgered row: the ledger began after the refusal at `released` (57ae66f) and
+         before §D13's (969eed4), and `awaiting_pm_approval` and `pm_rejected` were
+         refused by the commits that added them (c212043, 9104ee7). Deriving returns such a
+         site to `in_design` on the same
+         attempt, which is the §D13 defect; it is logged for repair, not repeated silently.
+      3. THE HOLD WAS TAKEN FROM ANYTHING BUT THE TWO ARKA STATUSES -> None, silently. The
+         derivation reads the current rows and is right for them (a date approved during
+         the hold, say), where the stored from-status could be stale.
+      4. THE CURRENT ARKA DOES NOT MATCH THAT STATUS -> None, with a warning (see
+         _arka_matches_status). Otherwise, the from-status.
+    """
+    hold = (DesignAssignment.objects.filter(pk=assignment.pk)
+            .annotate(hold_from=latest_design_transition(
+                          'from_status', to_status=DESIGN_SURVEY_RETURNED),
+                      last_to=latest_design_transition('to_status'))
+            .values('hold_from', 'last_to')
+            .first())
+    site = assignment.project.project_id
+
+    if hold is None or hold['last_to'] != DESIGN_SURVEY_RETURNED:
+        logger.warning('Design Hold on %s has no ledger row of its own (a pre-ledger hold); '
+                       'lifting it to the derived status (§D18 R3).', site)
+        return None
+
+    from_status = hold['hold_from']
+    if from_status in DESIGN_NOT_WITH_DESIGNER_STATUSES:
+        logger.warning('Design Hold on %s was taken from %s, where a hold has been refused '
+                       'since §D13 (only in_qc, artifacts_uploaded or awaiting_head_qc can '
+                       'carry such a row): pre-§D13 hold; needs repair. Lifting it to the '
+                       'derived status.', site, from_status)
+        return None
+
+    if from_status not in (DESIGN_ARKA_SUBMITTED, DESIGN_AWAITING_HEAD_ARKA):
+        return None
+
+    arka = _current_arka(_current_attempt(assignment))
+    if not _arka_matches_status(arka, from_status):
+        state = (f'v{arka.version} qc={arka.verdict} head={arka.head_verdict}'
+                 if arka is not None else 'missing')
+        logger.warning('Design Hold on %s was taken from %s, but the current Arka is %s; '
+                       'lifting it to the derived status (§D18 R2).', site, from_status, state)
+        return None
+
+    return from_status
+
+
 def _status_after_unblock(assignment):
     """Status to restore when the Head clears a Design Hold by uploading a replacement
-    survey.
+    survey or recording a survey folder link. THE ONE PLACE THAT DECIDES; both lift views
+    call it.
 
-    DERIVED, not stored — Part 2 adds no schema. The prior state is recoverable from the
-    rows that already exist: no designer means the site never left the allocation queue;
-    an APPROVED commitment means design was under way.
+    §D18 — A HOLD TAKEN FROM AN ARKA REVIEW STATUS RESTORES THAT STATUS. Until 17 Sep 2026
+    every lift was derived, so a hold at `arka_submitted` or `awaiting_head_arka` came back
+    at `in_design` on the same attempt: the pending verdict could no longer be recorded,
+    the Arka left the review queue, and the designer's only way on was a resubmission that
+    stood the old version down with its verdict pending forever. When the hold's ledger row
+    and the current Arka both say the site was in review, it goes back into review — see
+    _arka_status_before_hold() for the conditions and its three logged fallbacks.
+
+    The two restorable statuses are returned by NAME below, not as the value read from the
+    ledger, so tests_design_pm_gate_live's parse can still resolve every status a lift can
+    write.
+
+    OTHERWISE DERIVED, exactly as before — Part 2 adds no schema. The prior state is
+    recoverable from the rows that already exist: no designer means the site never left the
+    allocation queue; an APPROVED commitment means design was under way.
 
     PART 8 reads the approved commitment rather than the `is_current` one. A site can now
     be on hold with an extension request pending, and `is_current` would then be the
@@ -295,6 +395,12 @@ def _status_after_unblock(assignment):
     pre-design stage it had long since left. An approved date is the evidence design had
     started, and a pending request does not undo it.
     """
+    before_hold = _arka_status_before_hold(assignment)
+    if before_hold == DESIGN_ARKA_SUBMITTED:
+        return DESIGN_ARKA_SUBMITTED
+    if before_hold == DESIGN_AWAITING_HEAD_ARKA:
+        return DESIGN_AWAITING_HEAD_ARKA
+
     if assignment.assigned_to_id is None:
         return DESIGN_AWAITING_ALLOCATION
     if _effective_commitment(assignment) is not None:
@@ -1013,14 +1119,15 @@ def latest_design_transition(field, outer_ref='pk', **match):
     Served by sttrans_subject_idx (subject_type, subject_id, occurred_at). `-pk` breaks a
     tie between two rows written in the same instant.
 
-    THREE LIVE CONSUMERS, AND ONE PLANNED:
+    FOUR LIVE CONSUMERS:
       1. design_head_sites — the PM's rejection remark and time (prompt 3.1b-2b).
       2. design_qc_review — the same, beside the Head's two actions (prompt 3.1b-2c, §D25).
       3. design_pm_approval_queue — the latest arrival at the PM, and the Head's return
          remark (prompt 3.1b-2c, §D22).
-      Planned: §D18, not built — the status a Design Hold was taken FROM (field='from_status',
-         to_status=DESIGN_SURVEY_RETURNED), so that clearing a hold can restore it instead
-         of deriving `in_design`. Reuse this for that; do not write a second reader.
+      4. _arka_status_before_hold — the status a Design Hold was taken FROM
+         (field='from_status', to_status=DESIGN_SURVEY_RETURNED) and the site's latest
+         ledger row, so that lifting a hold can restore an Arka review status (§D18). It
+         annotates a one-row queryset rather than a list.
     """
     return Subquery(
         StatusTransition.objects
@@ -1264,9 +1371,10 @@ def design_survey_upload(request, project_id):
     so a storage failure can never leave a DesignAssignment pointing at an object that
     does not exist.
 
-    Replacing a survey is how the Head clears a designer's blocked flag: when the site
-    is blocked, status returns to whatever it was before the block (derived, see
-    _status_after_unblock), preserving the allocation and any approved due date.
+    Replacing a survey is how the Head clears a designer's blocked flag. The status it
+    returns to is decided by _status_after_unblock(): the Arka review status the hold was
+    taken from where the ledger and the current Arka both support it (§D18), otherwise
+    derived from the allocation and any approved due date.
     """
     project = _opex_site(project_id)
     if not user_has_design_head_authority(request.user):
@@ -1323,6 +1431,13 @@ def design_survey_upload(request, project_id):
                 f'Design Hold cleared by replacement survey; status restored to '
                 f'{restored}',
                 'design_survey_unblocked', extra_fields=survey_fields)
+            # §D18: CAD upload and BOQ completion carry no status guard, so a package can
+            # become complete DURING the hold, when the progression rule cannot fire (it
+            # fires only from `arka_submitted`). Evaluate it on the way back, in the same
+            # transaction, exactly as _open_next_attempt() does after a carry-forward.
+            if restored == DESIGN_ARKA_SUBMITTED:
+                _maybe_advance_to_artifacts_uploaded(
+                    assignment, _current_attempt(assignment), profile)
         elif assignment.status == DESIGN_AWAITING_SURVEY:
             apply_design_status(
                 assignment, DESIGN_AWAITING_ALLOCATION, profile,
@@ -1451,6 +1566,10 @@ def design_survey_link_set(request, project_id):
                 f'Design Hold cleared by survey folder link; status restored to '
                 f'{restored}',
                 'design_survey_unblocked', extra_fields=link_fields)
+            # §D18 — the progression rule, on the way back. See design_survey_upload().
+            if restored == DESIGN_ARKA_SUBMITTED:
+                _maybe_advance_to_artifacts_uploaded(
+                    assignment, _current_attempt(assignment), profile)
         elif assignment.status == DESIGN_AWAITING_SURVEY:
             apply_design_status(
                 assignment, DESIGN_AWAITING_ALLOCATION, profile,

@@ -29,6 +29,12 @@ fixed, and what it blocks or risks if left. Close an item by striking its headin
 appending **— CLOSED by <prompt>**; never delete a closed entry, so the history of what
 was known and when stays readable.
 
+**Standing note on counts (added by the D18 session, 17 Sep 2026).** `solarpms_local` is a
+restored production dump PLUS seeded data: the SCMPILOT tender and the `demo.*` users are
+local, and the dump is older than production. A pre-flight count taken there must exclude
+SCMPILOT sites and `demo.*` users and say "local, stale", or be checked in production. A site
+named in an entry from the local dump is evidence of an exposure, not of a production case.
+
 ---
 
 ## A. Phase 0 — foundations (prompts 0.1 – 0.6)
@@ -1931,6 +1937,10 @@ does not belong in a schema commit.
 - **Adjacent, same mechanism.** A hold at `arka_submitted` or `awaiting_head_arka` also
   clears to `in_design`. That drops a pending Arka out of the Arka queue and reopens Arka
   submission. MB0005 and SCMPILOT06 sit at `arka_submitted`.
+  - **Correction, D18 session, 17 Sep 2026.** Those two were EXPOSED, not affected: neither
+    had ever been held. On the local dump no site has ever been held (no `design_blocked`
+    ActivityLog row, no `survey_returned_at`), and SCMPILOT06 is local seed data, not a
+    production site. This is fixed forward as §D18.
 - **The open question for its own prompt.** Either the hold refuses post-hand-in statuses,
   or the clear restores the pre-hold status instead of deriving `in_design`. This is not
   obviously the first: a survey defect can surface during review. Re-run the counts on
@@ -2084,7 +2094,51 @@ changed**, because `designer_workload` is outside that MODE.
 - **LIVE since 3.1b-2c, 13 Sep 2026.** `design_pm_reject` writes `pm_rejected`, so this now
   happens on every PM rejection.
 
-### D18 — LIVE: a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
+### D18 — FIXED FORWARD (17 Sep 2026), ORPHANS NOT REPAIRED: a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
+
+#### FIXED FORWARD 17 Sep 2026 BY THE D18 SESSION — new lifts restore; existing orphans are §D46
+
+- **What a lift does now.** `_status_after_unblock()` is still the one function that decides,
+  and `design_survey_upload` and `design_survey_link_set` are still its only two callers
+  (parsed before and after: the same set). It asks `_arka_status_before_hold()`, which reads
+  the hold's own `StatusTransition` row through `latest_design_transition()`:
+  - **R1.** The from-status is restored only when it is `arka_submitted` or
+    `awaiting_head_arka`. Every other from-status is derived exactly as before.
+  - **R2.** ...and only when the current Arka matches it (`_arka_matches_status()`, strict):
+    `arka_submitted` needs both verdicts pending or both approved; `awaiting_head_arka` needs
+    QC approved and the Head pending. Anything else is derived, with a `logger.warning`
+    naming the site, the from-status and the Arka's state. Through the product no verdict can
+    land during a hold (both verdict targets test the status); the Arka admin can make one.
+  - **R3.** If the site's latest ledger row is not the hold itself, the hold has no row of its
+    own. That is a hold placed before the ledger (`fc24728`, 5 Sep 2026, migration `0079`), or
+    one written outside the product. It is derived, with a warning, and never refused. The
+    latest-row test is what stops an OLDER ledgered hold being read as this one.
+  - **Pre-§D13 holds.** A ledgered hold from a member of `DESIGN_NOT_WITH_DESIGNER_STATUSES`
+    is derived, with a warning containing "pre-§D13 hold; needs repair". Only `in_qc`,
+    `artifacts_uploaded` and `awaiting_head_qc` can carry one: the ledger began after the
+    refusal at `released` (`57ae66f`) and before §D13's (`969eed4`), and
+    `awaiting_pm_approval` and `pm_rejected` were refused by the commits that added them
+    (`c212043`, `9104ee7`). Their derived result is the §D13 defect, so no test pins it.
+  - **R5 (the progression rule).** After restoring `arka_submitted`, both lift views call
+    `_maybe_advance_to_artifacts_uploaded()` in the same transaction. CAD upload and BOQ
+    completion have no status guard (§D47), so a package can become complete during a hold.
+- **R4 — no repair here.** Existing orphans are §D46.
+- **Tests.** `tests_design_hold_restore.py`: every site driven through the real endpoints;
+  §D13's three doors refused exactly as on the commit before (the same test class passes
+  there); three mutations — dropping R2, dropping R3, ignoring the last-row guard — each turn
+  named tests red.
+- **Metrics.** Nothing reads the ledger for a figure. `m_stage_dwell` reads timestamps on
+  `DesignAssignment`, `DesignAttempt` and `ArkaSubmission`, not `StatusTransition` (the D18
+  prompt called it ledger-based; it is not). `design_figure_snapshot` on `solarpms_local`
+  was byte-identical before and after, because no site there has ever been held.
+- **Production (A8).** The two read-only console blocks were written and dry-run through a
+  line-by-line console. **Their production output had not been reported when this entry was
+  written (17 Sep 2026)**, so no production orphan or open Arka-status hold is listed here.
+  §D46 must run them first.
+- **Corrected below, not deleted.** MB0005 and SCMPILOT06 were EXPOSED, not affected: neither
+  was ever held, and SCMPILOT06 is local seed data.
+
+The original entry follows.
 
 Recorded by the D13 prompt (its A4), 13 Sep 2026. **Reported, not fixed.** These are the
 two of D13's five doors that a refusal cannot close.
@@ -2111,6 +2165,10 @@ two of D13's five doors that a refusal cannot close.
     orphans a pending verdict.
   - `SCMPILOT06` is at `arka_submitted` with v1 approved at both gates. A hold and clear
     reopens resubmission over an approved Arka.
+  - **Correction, D18 session, 17 Sep 2026.** These rows show EXPOSURE, not damage. Neither
+    site had been held: `solarpms_local` has no `design_blocked` ActivityLog row and no
+    non-null `survey_returned_at` on any assignment. SCMPILOT06 is seeded pilot data that does
+    not exist in production.
 - **Proposed shape, for the session that takes it.** For these two statuses,
   `_status_after_unblock()` should return the status the hold was taken FROM, not
   `in_design` unconditionally.
@@ -2887,6 +2945,16 @@ from `solarpms_local`, a restored production dump, read on 16 Sep 2026.
 - **`demo.designhead` is an active, global Design Head on production data** (profile 127 on the
   dump). It receives every change-request raise and may triage any real tender. An owner
   decision about the demo accounts, not code.
+  - **Correction, D18 session, 17 Sep 2026. FALSE as written.** `demo.designhead` does NOT
+    exist in production (the product owner's production check). It exists only in
+    `solarpms_local`, whose `auth.User` row was created on 6 Sep 2026. No seed command in the
+    repository creates that username today (`seed_opex_test_data`'s list has no Design Head,
+    and `seed_scm_pilot` creates `scmpilot.designhead`). The demo Head is not a production
+    recipient; the "only the demo Head has `email_notifications` on" count below is local and
+    includes seeded users.
+- **`NotificationLog`'s reason field is `error_detail`** (added by the D18 session, 17 Sep
+  2026). There is no `reason` field. A query for why a notification was skipped or failed
+  reads `error_detail`.
 - **Email will rarely deliver without a people change.** On the dump, of the 2 active Design
   Heads only the demo Head has `email_notifications` on; of the 3 PMs with OPEX sites, only
   the demo PM; of the 4 active SCM profiles, 1. On MPUVNL (86 sites, one PM, no
@@ -2908,6 +2976,86 @@ from `solarpms_local`, a restored production dump, read on 16 Sep 2026.
 - **`tests_design_part46.test_14`'s name still says "no_notification".** Its NotificationLog
   assertion now allows the two change-request labels and nothing else; the name was left so the
   test id did not change.
+
+### D45 — a Design Hold is accepted over a pending change request
+
+Recorded by the D18 session, 17 Sep 2026. **Recorded, not fixed.** Belongs to a change-request
+session.
+
+- **The gap.** A Design Hold is accepted over a pending change request: `design_mark_blocked`
+  reads no request. Driven through the real endpoints (a PM raises the request, the designer
+  places the hold), the hold was accepted at `in_design` and at `arka_submitted`.
+- **Unreachable today.** A pre-release raise needs `qc_started_at` on the current attempt
+  (`_pre_release_window_open()`). Its only product writer is `design_qc_start`, which moves the
+  site to `in_qc`; `_open_next_attempt()` creates attempts without it (three seed commands also
+  write it, on released fixtures). All four QC verdict views refuse while a request is pending
+  (`_blocking_change_request()` in `design_qc_pass`, `design_qc_fail`, `design_head_qc_pass`,
+  `design_head_qc_fail`), so a package cannot leave `in_qc` or `awaiting_head_qc` with one
+  pending, except by the request's own triage.
+- **Reachable only before §D13** (`969eed4`): a hold at `in_qc` or `awaiting_head_qc` was
+  allowed then, and a pending request can sit at both. **Production had zero
+  `DesignChangeRequest` rows on 17 Sep 2026** (product owner's Railway shell), so no historical
+  instance exists.
+- **The fix.** Refuse the hold while a change request is pending, and remove the
+  `@unittest.expectedFailure` on
+  `tests_design_hold_restore.HoldOverPendingChangeRequestTests.test_02_the_hold_is_refused_while_a_change_request_is_pending`.
+  That test asserts the correct behaviour today and fails on an assertion, not an error;
+  `test_01` in the same class pins its fixture.
+- **Related:** `design_change_request_accept` has no current-status guard (§D47). An accept
+  during such a hold would move the site out of `survey_returned` with no lift event, and
+  `m_hold_duration` would count that hold as open for good.
+
+### D46 — repair of sites already orphaned by §D18
+
+Recorded by the D18 session, 17 Sep 2026. **A separate session.** The §D18 fix changes future
+lifts only (R4).
+
+- **Find them first, in production.** Run the two A8 console blocks from the D18 session (every
+  ledgered lift, flagged ORPHAN where a hold from an Arka status was lifted to anything else;
+  and every site currently on hold, with its from-status). Their output had not been reported
+  when this entry was written. A hold lifted before the ledger (`fc24728`) cannot be diagnosed
+  from the ledger at all.
+- **The shape: a management command, `--dry-run` by default,** writing through
+  `apply_design_status()` so the repair leaves a `StatusTransition` (with an explicit repair
+  `reason_code` and a remark naming §D18 and the hold row), an ActivityLog line and a mirror
+  sync. It restores a site only if its current Arka still matches the status the hold was taken
+  from, the same test as `_arka_matches_status()`.
+- **List resubmitted sites; never revive them.** Where the designer has already resubmitted,
+  the old version is `is_current=False` with its verdict pending for good, and the new version
+  is live. Repair must not revive the old version.
+- **Not the repair:** asking for a re-hold and re-lift (the Head cannot place a hold, §D47, and
+  a designer's re-hold records a false "survey inadequate" hold in `m_hold_duration`), or
+  Django admin (`DesignAssignmentAdmin` has `status` read-only, and an admin edit leaves no
+  ledger row).
+
+### D47 — what the D18 session found outside its MODE
+
+Recorded by the D18 session, 17 Sep 2026. **Recorded, not fixed.**
+
+- **The overdue clock runs during a Design Hold, and `design_mark_blocked`'s docstring says it
+  stops** ("This stops their clock"). `design_metrics.is_overdue()` does not exclude
+  `survey_returned`, and its docstring says it "does not extend the due date for time spent
+  blocked"; `DESIGN_CLOCK_STOPPED_STATUSES` does not contain it either, so the date controls stay
+  open. **A product question for Sudhir:** should a hold caused by the survey charge the designer
+  lateness? It conflicts with the Group B/C principle behind the rework figures, which do not
+  charge the designer for input problems. The docstring was deliberately not changed.
+- **CAD upload and BOQ completion have no status guard.** `design_artifact_upload` requires only
+  a current Arka (`_require_current_arka()`); `design_boq_complete` requires quantities. Both
+  land while a site is `survey_returned`. §D18's R5 advances such a package on the lift.
+- **The Head cannot place a hold.** `design_mark_blocked` accepts only
+  `user_is_assigned_designer()`, which the Design Head does not satisfy.
+- **The Arka admin edits verdicts with no ledger row.** `ArkaSubmissionAdmin` has
+  `readonly_fields = ['submitted_at']` only, so `verdict`, `head_verdict` and `is_current` are
+  editable, and an edit writes neither a `StatusTransition` nor an ActivityLog line.
+  `DesignAssignmentAdmin` closed its own status field for the same reason.
+- **`design_change_request_accept` has no current-status guard.** It checks the request's own
+  verdict and the procurement lock, then calls `_open_next_attempt()` whatever the assignment's
+  status. See §D45 for the one status where that matters today.
+- **`CHANGE_REQUEST_STATUSES` includes `in_design` and `arka_submitted`, but a pre-release raise
+  needs `qc_started_at`, which new attempts never carry.** Those two members appear unreachable
+  for a raise, and so, by the same reasoning, may `arka_rejected` and `awaiting_head_arka` (the
+  tuple's own comment already says so of the latter). Record only; confirm in the change-request
+  session.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
