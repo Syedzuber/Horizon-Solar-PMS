@@ -2856,6 +2856,59 @@ checked by grep in that session.
   a `stage` explanation from the POST's own refusal code. The audit document is a dated record and
   was not edited.
 
+### D44 — what session 3.1c-ii (change-request notifications) left open
+
+Recorded by session 3.1c-ii, 17 Sep 2026. **Recorded, not fixed.** Every claim below was
+checked by grep, AST or a read-only query in that session. Figures from the local dump are
+from `solarpms_local`, a restored production dump, read on 16 Sep 2026.
+
+- **Change-request email has no off switch of its own.** The three sends name
+  `channels=['in_app', 'email']`. The only thing that stops the email is
+  `SystemSettings.email_enabled`, which also stops the EOD digest and every other email, or a
+  recipient's own `email_notifications`. The in-app half cannot be stopped at all (§D37).
+- **A deliberate asymmetry, to review.** The four PM-gate notifications (3.1b-3) stay in-app
+  only while change requests also email. A package waiting at the PM gate is told to the bell;
+  a change request is told to the bell and the inbox.
+- **The email link carries the ACTOR's host** (§D38 family). The link is
+  `request.build_absolute_uri()` on the raise, accept or reject request, so an actor on the
+  Railway-generated domain sends that domain to every recipient. On 16 Sep 2026 both the custom
+  domain and the Railway-generated domain answered `/login/` with 200, so the link works but
+  needs its own login. Whether `CSRF_TRUSTED_ORIGINS` lists the Railway-generated domain was
+  not verified (no Railway CLI in the session); if it does not, a POST after following such a
+  link is refused. `APP_BASE_URL` is §D38's fix and was not added.
+- **A raise does not reach a Design Head's deputy** (D4). Deputies may triage
+  (`user_has_design_head_authority()`), but `GATE_CHANGE_RAISED` reads active
+  `is_design_head` holders only. No deputy is named on the dump today; one appointed later
+  will not hear about requests they can decide.
+- **The gate branches still notify an inactive assigned PM** (D5). `project_managers()` does
+  not check the assigned PM's `is_active`, and neither the four gate branches nor that function
+  were changed. Only the three change-request branches drop inactive profiles and inactive
+  `auth.User` rows (`_change_request_audience()`).
+- **`demo.designhead` is an active, global Design Head on production data** (profile 127 on the
+  dump). It receives every change-request raise and may triage any real tender. An owner
+  decision about the demo accounts, not code.
+- **Email will rarely deliver without a people change.** On the dump, of the 2 active Design
+  Heads only the demo Head has `email_notifications` on; of the 3 PMs with OPEX sites, only
+  the demo PM; of the 4 active SCM profiles, 1. On MPUVNL (86 sites, one PM, no
+  coordinators) a raise per site would produce 172 in-app notes and 86 emails, all to the demo
+  Head.
+- **The EOD digest's recipients are hardcoded** — already §G3 (`ADMIN_DIGEST_EMAIL` and
+  `HR_DIGEST_EMAIL` reassigned to literals at the bottom of `solarpms/settings.py`). Still open.
+- **The Zoho webhook's alert recipient is hardcoded.** `zoho_deal_closed_webhook` calls
+  `send_raw_email(to_email=...)` with a literal personal address, and its body appends the
+  Railway-generated domain. No setting names either value.
+- **The accept path's group-owner lookup reads two FKs after the transaction.**
+  `_change_request_group_owner()` follows `membership.added_by` and `membership.group.created_by`
+  on the membership carried out of the atomic block. It does not re-read the membership (D6), but
+  the people it names are read after commit, so an SCM deactivated in that instant is still told.
+- **`message` is both the bell text and the email's plain-text part** (`send_notification()`).
+  The absolute link is therefore in the HTML part only; a mail client that shows plain text
+  alone shows no link. Separating the two needs a `send_notification()` change, which was out
+  of this session's MODE.
+- **`tests_design_part46.test_14`'s name still says "no_notification".** Its NotificationLog
+  assertion now allows the two change-request labels and nothing else; the name was left so the
+  test id did not change.
+
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
 _No entries yet._

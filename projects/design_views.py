@@ -29,6 +29,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, OuterRef, Prefetch, Q, Subquery, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
+from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -4200,6 +4201,15 @@ _PM_GATE_FORBIDDEN = ('Design release approval is for the site\'s Project Manage
 # The absolute hosts elsewhere in the codebase are wrong for production (§D38).
 #
 # SCM IS NOT TOLD WHEN A DESIGN IS RELEASED. Deliberately: a new audience (§D39).
+#
+# DESIGN CHANGE REQUESTS EMAIL AS WELL (session 3.1c-ii, decisions N-a to N-e). The three
+# change-request call sites name channels=['in_app', 'email']; the four gate sites above
+# are unchanged and stay in-app only (§D44 records the asymmetry). Each is still one call
+# per recipient, after the atomic block, inside a try/except. send_notification() uses ONE
+# `message` as both the bell text and the email's plain-text part, so that message carries
+# no URL. The email's absolute link lives only in `html_message`, rendered from
+# projects/email/design_change_request.html (autoescaped) with request.build_absolute_uri(),
+# so the host is whichever host the ACTOR is on (§D44).
 # ---------------------------------------------------------------------------
 
 GATE_HEAD_PASSED   = 'head_passed'     # design_head_qc_pass      -> the site's PM
@@ -4207,8 +4217,24 @@ GATE_PM_REJECTED   = 'pm_rejected'     # design_pm_reject         -> the Design 
 GATE_HEAD_RETURNED = 'head_returned'   # design_head_return_to_pm -> the site's PM
 GATE_SENT_BACK     = 'sent_back'       # design_head_send_back    -> the designer
 
+# Session 3.1c-ii. Raise -> PM, coordinators, Design Heads; accept -> requester, PM,
+# coordinators, designer; reject -> requester. The actor is never among them.
+GATE_CHANGE_RAISED   = 'change_request_raised'    # design_change_request
+GATE_CHANGE_ACCEPTED = 'change_request_accepted'  # design_change_request_accept
+GATE_CHANGE_REJECTED = 'change_request_rejected'  # design_change_request_reject
 
-def design_gate_next_actors(assignment, transition):
+
+def _change_request_audience(people, actor):
+    """The change-request branches' filter: drop a missing person, anyone whose UserProfile
+    OR auth.User is inactive (D5), and the actor (N-c). De-duplication stays in the shared
+    tail of design_gate_next_actors(). The four gate branches do not call this, so their
+    audiences are exactly what they were (§D44: they still reach an inactive assigned PM)."""
+    return [person for person in people
+            if person is not None and person.is_active and person.user.is_active
+            and (actor is None or person.pk != actor.pk)]
+
+
+def design_gate_next_actors(assignment, transition, *, change=None, actor=None):
     """Whose turn it is after `transition` on `assignment`: the UserProfiles to notify,
     deduplicated by pk. Call it ONCE per transition, after the atomic block. Never per row.
 
@@ -4229,6 +4255,18 @@ def design_gate_next_actors(assignment, transition):
            fan-out to several people nobody chose should be findable later.
         A step is skipped when its person is null or no longer active. One query on the
         normal path, three on the full fall-through.
+
+    THE CHANGE-REQUEST KEYS (session 3.1c-ii) take `change` (the DesignChangeRequest) and
+    `actor` (the UserProfile who acted). Each drops the actor and every inactive person,
+    profile or auth.User, through _change_request_audience():
+
+    GATE_CHANGE_RAISED -> project_managers(), then every active is_design_head holder. NOT
+        the Heads' deputies (D4), so a raise will not reach a deputy once one is named.
+    GATE_CHANGE_ACCEPTED -> change.requested_by, project_managers(), then `assigned_to`.
+        _open_next_attempt() never writes `assigned_to`, so it names the designer of the
+        attempt the acceptance just opened. The SCM owner of a group the site left is added
+        by design_change_request_accept() itself, from the membership it removed (D6).
+    GATE_CHANGE_REJECTED -> change.requested_by only.
     """
     if transition in (GATE_HEAD_PASSED, GATE_HEAD_RETURNED):
         people = project_managers(assignment.project)
@@ -4268,6 +4306,16 @@ def design_gate_next_actors(assignment, transition):
                     'ALL %d active Design Head flag-holders: %s.',
                     assignment.project.project_id, assignment.current_attempt_number,
                     len(people), ', '.join(p.user.username for p in people) or 'none')
+    elif transition == GATE_CHANGE_RAISED:
+        heads = list(UserProfile.objects.filter(is_design_head=True, is_active=True)
+                     .select_related('user').order_by('pk'))
+        people = _change_request_audience(project_managers(assignment.project) + heads, actor)
+    elif transition == GATE_CHANGE_ACCEPTED:
+        people = _change_request_audience(
+            [change.requested_by, *project_managers(assignment.project),
+             assignment.assigned_to], actor)
+    elif transition == GATE_CHANGE_REJECTED:
+        people = _change_request_audience([change.requested_by], actor)
     else:
         raise ValueError(f'design_gate_next_actors: unknown transition {transition!r}')
 
@@ -4879,6 +4927,58 @@ def _change_request_refusal(user, assignment, attempt):
         f'"{assignment.get_status_display()}").')
 
 
+# ---------------------------------------------------------------------------
+# 13a-n. Who hears about a change request (session 3.1c-ii)
+#
+# The recipients are design_gate_next_actors()'s three change-request keys; these helpers
+# only word and link the message. See the block above that function for the channels, and
+# why the absolute link lives in the HTML part alone.
+# ---------------------------------------------------------------------------
+
+def _change_request_raiser_label(user, project):
+    """The capacity a change request was raised in, for the message (D7). The order is the
+    authority's own: the site's assigned PM, else a manager of the site (a Project
+    Coordinator), else SCM. "requester" is the fall-through for anyone else; today
+    user_can_request_design_change() admits nobody else, so a raise never reaches it."""
+    profile = user.profile
+    if project.assigned_pm_id == profile.pk:
+        return 'PM'
+    if user_can_manage_project(user, project):
+        return 'Project Coordinator'
+    if user_may_raise_design_change_as_scm(user):
+        return 'SCM'
+    return 'requester'
+
+
+def _change_request_decider_label(user):
+    """Who triaged: the Design Head, or his named deputy (user_has_design_head_authority
+    admits both to the two triage views)."""
+    return 'Design Head' if user_is_design_head(user) else "Design Head's deputy"
+
+
+def _change_request_email(request, subject, body, quote_label, quote, link):
+    """The HTML part: autoescaped, so a reason typed as markup arrives as text, and the one
+    place the absolute URL appears. `link` is the relative in-app link; the host is the
+    request's own, never a literal."""
+    return render_to_string('projects/email/design_change_request.html', {
+        'subject': subject, 'body': body, 'quote_label': quote_label, 'quote': quote,
+        'url': request.build_absolute_uri(link),
+    })
+
+
+def _change_request_group_owner(membership):
+    """D6. The SCM user to tell that an accepted request took a site out of their draft
+    procurement group: whoever added the site, if active, else whoever created the group,
+    if active. `membership` is the row design_change_request_accept() removed in its own
+    transaction, or None, in which case nobody is added."""
+    if membership is None:
+        return None
+    for person in (membership.added_by, membership.group.created_by):
+        if person is not None and person.is_active and person.user.is_active:
+            return person
+    return None
+
+
 @login_required
 def design_change_request(request, project_id):
     """Raise a design change request: the site's PM, one of its coordinators, or SCM.
@@ -4992,6 +5092,39 @@ def design_change_request(request, project_id):
         # constraint is the authority and this is the message that says so.
         return _back(f'{project.project_id}: refused by the database — only one change '
                      f'request at a time may await the Design Head on an attempt.')
+
+    # SESSION 3.1c-ii — the Design Heads, the site's PM and its coordinators hear about it,
+    # in-app AND by email. After the atomic block, so no send can unwind the request.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        capacity = _change_request_raiser_label(request.user, project)
+        subject = f'{project.project_id}: design change request raised'
+        body = (f'{project.project_id}: a design change request is waiting for the Design '
+                f'Head. {who} ({capacity}) raised it on attempt {attempt.attempt_number}.'
+                + (' The review in progress is suspended until it is decided.'
+                   if was_in_qc else ''))
+        for recipient in design_gate_next_actors(assignment, GATE_CHANGE_RAISED,
+                                                 change=change, actor=profile):
+            # The triage buttons are on the QC review screen, which the PM, a coordinator
+            # and SCM cannot open; they get the change-request screen instead.
+            if user_has_design_head_authority(recipient.user):
+                link = reverse('design_qc_review', kwargs={'project_id': project.project_id})
+            else:
+                link = reverse('design_change_request_form',
+                               kwargs={'project_id': project.project_id})
+            send_notification(
+                recipient=recipient,
+                message=f'{body} Reason: "{reason}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, 'Reason',
+                                                   reason, link),
+                template='design_change_request_raised',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request: the notification for %s failed; the '
+                         'change request stands.', project.project_id)
 
     # NOTHING ELSE HAPPENED, and the message must not imply otherwise. No attempt was
     # opened and the site did not move; the designer is still on whatever they were on.
@@ -5136,9 +5269,13 @@ def design_change_request_accept(request, pk):
         change.save(update_fields=['verdict', 'decided_by', 'decided_at'])
 
         left_group = None
+        # The membership removed IN THIS TRANSACTION, carried out of the block for the
+        # notification (D6) rather than re-read after it.
+        left_membership = None
         if membership is not None:
             remove_from_group(membership, profile, CHANGE_REQUEST_REMOVAL_REASON)
             left_group = membership.group.name
+            left_membership = membership
 
         # The outgoing attempt's verdicts are deliberately untouched — see the docstring.
         # _open_next_attempt() sets closed_at and nothing else on it.
@@ -5155,6 +5292,50 @@ def design_change_request_accept(request, pk):
                      f'{new_attempt.attempt_number} opened: {change.reason}',
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_accepted')
+
+    # SESSION 3.1c-ii — the requester, the site's PM and coordinators, the designer and, if
+    # the site left a draft group here, that group's SCM owner. In-app AND email, after
+    # the atomic block. The Design Heads are not told: one of them made the decision.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        label = _change_request_decider_label(request.user)
+        requester = change.requested_by
+        requester_name = requester.user.get_full_name() or requester.user.username
+        subject = (f'{project.project_id}: design change request accepted — attempt '
+                   f'{new_attempt.attempt_number} opened')
+        recipients = design_gate_next_actors(assignment, GATE_CHANGE_ACCEPTED,
+                                             change=change, actor=profile)
+        owner = _change_request_group_owner(left_membership)
+        if (owner is not None and owner.pk != profile.pk
+                and all(person.pk != owner.pk for person in recipients)):
+            recipients.append(owner)
+        for recipient in recipients:
+            whose = ('your design change request' if recipient.pk == requester.pk
+                     else f'the design change request {requester_name} raised')
+            body = (f'{project.project_id}: {who} ({label}) accepted {whose}. Attempt '
+                    f'{new_attempt.attempt_number} is open and the site is back with the '
+                    f'designer.'
+                    + (f' The site left procurement group "{left_group}".'
+                       if left_group is not None else ''))
+            if recipient.pk == assignment.assigned_to_id:
+                link = reverse('design_site_workspace',
+                               kwargs={'project_id': project.project_id})
+            else:
+                link = reverse('design_change_request_form',
+                               kwargs={'project_id': project.project_id})
+            send_notification(
+                recipient=recipient,
+                message=f'{body} Request: "{change.reason}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, 'Request',
+                                                   change.reason, link),
+                template='design_change_request_accepted',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_accept: the notification for %s failed; '
+                         'the acceptance stands.', project.project_id)
 
     msg = (f'{project.project_id}: change request accepted — attempt '
            f'{new_attempt.attempt_number} opened and the site is back with the designer.')
@@ -5213,6 +5394,33 @@ def design_change_request_reject(request, pk):
                      f'{reason}',
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_rejected')
+
+    # SESSION 3.1c-ii — the requester alone, with the Head's reason. In-app AND email,
+    # after the atomic block.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        label = _change_request_decider_label(request.user)
+        subject = f'{project.project_id}: design change request rejected'
+        body = (f'{project.project_id}: {who} ({label}) rejected your design change request '
+                f'on attempt {change.attempt.attempt_number}. The current design stands and '
+                f'no new attempt was opened.')
+        link = reverse('design_change_request_form', kwargs={'project_id': project.project_id})
+        for recipient in design_gate_next_actors(change.attempt.assignment,
+                                                 GATE_CHANGE_REJECTED,
+                                                 change=change, actor=profile):
+            send_notification(
+                recipient=recipient,
+                message=f'{body} Reason: "{reason}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, 'Reason',
+                                                   reason, link),
+                template='design_change_request_rejected',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_reject: the notification for %s failed; '
+                         'the rejection stands.', project.project_id)
 
     return _back(f'{project.project_id}: change request rejected — the current version '
                  f'stands and no new attempt was opened. Any review suspended by it can '

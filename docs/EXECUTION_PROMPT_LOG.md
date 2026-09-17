@@ -841,3 +841,68 @@ commands.
 **§D43** — approve-then-change-request, the narrowed-not-closed lock race, admin-created
 requests, `_add_sites()` admitting a site with a pending request, and five stale sentences
 outside the MODE.
+
+---
+
+## 3.1c-ii — notifications for design change requests, in-app and email (16–17 Sep 2026)
+
+Audit-then-build, with a hard stop between; built after the 3.1c-i browser walk was
+confirmed done.
+
+### What changed
+
+- **B0, first.** `solarpms/test_settings.py` empties `ZEPTOMAIL_API_KEY` and
+  `INTERAKT_API_KEY`. Both senders read the key through `getattr(settings, ...)` at send time
+  and return before HTTP when it is empty. Before B0 the suite ran with the development
+  `.env`'s live keys loaded. The suite with an HTTP tripwire (every `requests` call recorded
+  and refused) was 1646 tests, 1 failure, 0 attempts, both before and after B0: no existing
+  test changed behaviour.
+- **Recipients.** Three keys on `design_gate_next_actors(assignment, transition, *,
+  change=None, actor=None)`: `GATE_CHANGE_RAISED` (PM, active coordinators, active
+  `is_design_head` holders), `GATE_CHANGE_ACCEPTED` (requester, PM, coordinators, designer),
+  `GATE_CHANGE_REJECTED` (requester). `_change_request_audience()` drops the actor and anyone
+  whose profile or `auth.User` is inactive, in the new branches only. The accept view adds the
+  SCM owner of a draft group the site left in its own transaction
+  (`_change_request_group_owner()`: `added_by`, else `group.created_by`).
+- **Sends.** One `send_notification()` per recipient in each of `design_change_request`,
+  `design_change_request_accept` and `design_change_request_reject`, after the atomic block,
+  in `try/except` with `logger.exception`, `channels=['in_app', 'email']`. `message` carries no
+  URL (it is also the bell text); the absolute link is only in `html_message`, rendered from
+  the new `projects/email/design_change_request.html` (autoescaped) with
+  `request.build_absolute_uri()`.
+- **Labels.** The raiser is PM / Project Coordinator / SCM / requester
+  (`_change_request_raiser_label()`, by identity and the authority helpers, no role string);
+  the decider is Design Head or Design Head's deputy.
+
+### Tests
+
+`tests_design_change_notifications.py`, 22 tests. `_zeptomail_post` replaced by a recorder
+and `Session.request` made to raise, checked uncalled after every test. Three existing tests
+edited: `tests_design_gate_notifications.CallSiteParseTests` `test_a2` (7 sites: gate views
+`['in_app']`, change-request views `['in_app', 'email']`) and `test_7` (helper called from
+both sets), and `tests_design_part46.BlastRadiusTests.test_14` (NotificationLog assertion now
+allows only the two change-request labels). Mutations: removing actor exclusion turned 5
+tests red; weakening the raise's `except Exception` turned 2 red (`e1` and the gate parse
+pin); a hardcoded host turned `d1` and `d2` red, or `d2` alone when the literal equals the
+test host.
+
+### Verification
+
+HEAD `7b78fde` (the amended 3.1c-i commit; its tree is identical to `3668f86`). Before: **1646
+tests, 1 failure** (the standing `tests_design_part46` SQLite constraint-name one). After:
+**1668 tests, the same 1 failure**, 0 HTTP attempts. `check` clean;
+`makemigrations --check --dry-run` "No changes detected". Figure snapshot before and after
+against `solarpms_local` byte-identical. AST proof: with the new branches removed, the
+gate branches (four keys in three `if` branches), the `else` and the tail are identical by
+`ast.dump` and by source text; the signature and an appended docstring are the only
+differences; three mutants (a renamed recipient, a changed tail, a changed `else`) are
+caught. Added lines carry no host literal, no WhatsApp and no role comparison. Exactly three
+new `send_notification` sites name email; the four gate sites are unchanged.
+
+### Findings recorded
+
+**§D44** — no dedicated off switch, the in-app/email asymmetry with the gate, the actor's
+host in the link, no deputy on a raise, the gate branches' inactive PM, the demo Head on
+production data, email preferences mostly off, the hardcoded Zoho webhook recipient, the
+link in the HTML part only, and `test_14`'s name. The hardcoded digest addresses were already
+§G3.

@@ -636,7 +636,11 @@ class GroupLockTests(Part46Base):
 class BlastRadiusTests(Part46Base):
 
     def test_14_triage_touches_no_residential_row_no_task_and_no_notification(self):
-        """VERIFICATION 14."""
+        """VERIFICATION 14.
+
+        Since session 3.1c-ii a raise and an accept DO notify, so "no notification" now
+        means no notification other than the change request's own: every NotificationLog
+        row written here carries one of the two change-request labels."""
         from django.forms.models import model_to_dict
         from .models import Task, BOQ, BOQItem
 
@@ -653,7 +657,8 @@ class BlastRadiusTests(Part46Base):
             'tasks':        Task.objects.count(),
             'boqs':         BOQ.objects.count(),
             'boq_items':    BOQItem.objects.count(),
-            'notifications': NotificationLog.objects.count(),
+            'last_log_pk':  NotificationLog.objects.order_by('-pk')
+                            .values_list('pk', flat=True).first() or 0,
         }
 
         self._into_qc()
@@ -669,4 +674,8 @@ class BlastRadiusTests(Part46Base):
         self.assertEqual(Task.objects.count(), before['tasks'])
         self.assertEqual(BOQ.objects.count(), before['boqs'])
         self.assertEqual(BOQItem.objects.count(), before['boq_items'])
-        self.assertEqual(NotificationLog.objects.count(), before['notifications'])
+        self.assertEqual(
+            NotificationLog.objects.filter(pk__gt=before['last_log_pk'])
+            .exclude(template_name__in=('design_change_request_raised',
+                                        'design_change_request_accepted'))
+            .count(), 0)

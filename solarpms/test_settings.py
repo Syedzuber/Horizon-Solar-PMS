@@ -62,3 +62,13 @@ MIGRATION_MODULES = _DisableMigrations()
 
 # Faster hashing for the test users.
 PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
+
+# NO LIVE KEYS UNDER TEST (session 3.1c-ii). The development .env carries a real ZeptoMail
+# key and a real Interakt key, and `from .settings import *` above copies both in. Each
+# sender reads its key through getattr(settings, ...) at send time and returns before any
+# HTTP call when it is empty: _zeptomail_post() with (False, '... not configured'),
+# send_raw_email() with a logged error, the Interakt sender with a 'failed' log row. So a
+# test that reaches a real sender with the switches on records a failure instead of
+# emailing or messaging a real person.
+ZEPTOMAIL_API_KEY = ''
+INTERAKT_API_KEY = ''

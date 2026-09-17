@@ -1,0 +1,53 @@
+{% autoescape on %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ subject }}</title>
+</head>
+<!--
+  Design change request email (session 3.1c-ii): raised, accepted and rejected share it.
+  Table layout and inline styles only, as in eod_digest.html, because email clients strip
+  <style>. AUTOESCAPED: `quote` is free text a user typed, and it must arrive as text.
+  `url` is the ONLY absolute link in the message. The caller builds it with
+  request.build_absolute_uri(), so no host is written here or in the view. The plain-text
+  part (send_notification's `message`) carries no URL, because the same string is the
+  in-app bell text.
+-->
+<body style="margin:0; padding:0; background-color:#f4f6f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px; max-width:600px; background-color:#ffffff; border-radius:10px; overflow:hidden; border:1px solid #e5e9ee;">
+          <tr>
+            <td style="background-color:#0f4c81; padding:24px 28px;">
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:20px; font-weight:bold; color:#ffffff;">Horizon Solar</div>
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#cfe0f0; margin-top:4px;">{{ subject }}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 28px 8px 28px; font-family:Arial,Helvetica,sans-serif; font-size:15px; line-height:1.5; color:#22303c;">
+              {{ body }}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:bold; color:#22303c;">
+              {{ quote_label }}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 28px 16px 28px;">
+              <div style="border-left:3px solid #0f4c81; padding:8px 14px; background-color:#f4f6f8; font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:1.5; color:#22303c; white-space:pre-wrap;">{{ quote }}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 28px 28px;">
+              <a href="{{ url }}" style="display:inline-block; background-color:#0f4c81; color:#ffffff; font-family:Arial,Helvetica,sans-serif; font-size:14px; text-decoration:none; padding:11px 22px; border-radius:6px;">Open in Horizon Solar PMS</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>{% endautoescape %}
