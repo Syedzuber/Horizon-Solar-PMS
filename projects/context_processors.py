@@ -1,4 +1,5 @@
 from .decorators import get_user_dashboard
+from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
 
 
@@ -29,3 +30,16 @@ def home_url(request):
     if not request.user.is_authenticated:
         return {'home_url': None}
     return {'home_url': get_user_dashboard(request.user)}
+
+
+def typed_date_bounds(request):
+    """min/max for every <input type="date"> that stores a typed date.
+
+    The server-side rule is forms.check_typed_date(); these two values let the picker
+    say the same thing before the POST. The ceiling moves with the calendar, so it is
+    computed per request, not hard-coded in a template.
+    """
+    return {
+        'typed_date_min': TYPED_DATE_FLOOR.isoformat(),
+        'typed_date_max': typed_date_ceiling().isoformat(),
+    }

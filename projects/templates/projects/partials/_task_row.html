@@ -124,7 +124,7 @@ Expected context:
         <p class="text-xs text-gray-400 mt-1 italic">Assign task to enable status change</p>
         {% endif %}
         {% if not is_assigned_pm and not task.due_date %}
-        <input type="date" name="due_date"
+        <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
                class="form-control form-control-sm mt-1"
                style="display:none; width:130px; font-size:.75rem;"
                onchange="var sel=this.form.querySelector('select[name=status]'); if(sel) sel.value='In Progress'; this.form.requestSubmit();">
@@ -149,7 +149,7 @@ Expected context:
             hx-post="{% url 'task_set_due_date' project.project_id task.pk %}"
             hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
         {% csrf_token %}
-        <input type="date" name="due_date"
+        <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
                value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
                class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
                style="width:135px; font-size:.78rem;"
@@ -161,7 +161,7 @@ Expected context:
             hx-post="{% url 'task_set_due_date' project.project_id task.pk %}"
             hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
         {% csrf_token %}
-        <input type="date" name="due_date"
+        <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
                value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
                class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
                style="width:135px; font-size:.78rem;"

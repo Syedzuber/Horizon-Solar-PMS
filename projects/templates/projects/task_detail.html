@@ -383,6 +383,16 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 {# ── Raise Issue modal ────────────────────────────────────────────────────── #}
+{% if issue_draft %}
+{% comment %}A refused issue (due date out of range) comes back here with what was typed —
+views._stash_issue_draft. Reopen the modal so the user fixes the date, not the text.{% endcomment %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var el = document.getElementById('raiseIssueModal');
+  if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+});
+</script>
+{% endif %}
 <div class="modal fade" id="raiseIssueModal" tabindex="-1" aria-labelledby="raiseIssueModalLabel" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -396,12 +406,12 @@ document.addEventListener('DOMContentLoaded', function () {
           <div class="mb-3">
             <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
             <input type="text" name="title" class="form-control" required maxlength="200"
-                   placeholder="Brief description of the issue">
+                   placeholder="Brief description of the issue" value="{{ issue_draft.title|default:'' }}">
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Description</label>
             <textarea name="description" class="form-control" rows="3"
-                      placeholder="Optional detail…"></textarea>
+                      placeholder="Optional detail…">{{ issue_draft.description|default:'' }}</textarea>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
@@ -426,7 +436,7 @@ document.addEventListener('DOMContentLoaded', function () {
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
-            <input type="date" name="due_date" class="form-control">
+            <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date" class="form-control">
             <div class="text-danger small mt-1" id="taskIssueDateError"></div>
           </div>
         </div>

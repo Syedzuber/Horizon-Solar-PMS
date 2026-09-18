@@ -415,7 +415,7 @@ page, and any markup named inside it becomes real elements.
               <form method="post" action="{% url 'design_due_date_change' project_id=row.site.project_id %}"
                     class="d-flex flex-wrap align-items-center gap-2 py-2">
                 {% csrf_token %}
-                <input type="date" name="proposed_date" class="form-control form-control-sm"
+                <input type="date" min="{% now 'Y-m-d' %}" max="{{ typed_date_max }}" name="proposed_date" class="form-control form-control-sm"
                        style="max-width:12rem;" required>
                 <input type="text" name="change_reason" class="form-control form-control-sm"
                        placeholder="Reason for the change (required)" style="max-width:22rem;" required>

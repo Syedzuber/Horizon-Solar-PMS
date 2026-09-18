@@ -1330,6 +1330,16 @@ and treats a missing profile as Admin [:104-109](projects/decorators.py#L104-L10
 `permissions.py` helpers return `HttpResponseForbidden` and treat a missing profile as False.
 Any 0.2 that mixes the two mechanisms inherits both failure modes.
 
+### 16 — `create_delivery_challan` lets any SCM user raise a challan on any project · **WRITE** · RE-RAISED, currently deliberate
+
+*Added 18 Sep 2026 by the typed-date session, which found it while listing every view that
+accepts a date. Not a new discovery, and not fixed.* The view is `@role_required(['SCM'])`
+and resolves the project with `_active_project()` alone: no `user_can_view_project()`, no
+assignment term. This audit already classes it as relationship-creating (D.4, H.2, and
+blocking question Q2), and `execution-model.md` §12's 25 Aug row keeps SCM portfolio-wide
+until an assignment table exists. It is listed here so the access work that builds that table
+revisits it, rather than it staying settled by default. `EXECUTION_MODULE_DEFERRED.md` G10.
+
 ---
 
 ## Blocking questions

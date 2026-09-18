@@ -48,7 +48,7 @@ markup.
 
 <div class="mb-4">
   <label class="form-label">Due Date</label>
-  <input type="date" name="due_date"
+  <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
          class="form-control{% if form.due_date.errors %} is-invalid{% endif %}"
          value="{{ form.due_date.value|default:'' }}">
   {% for e in form.due_date.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}

@@ -305,7 +305,7 @@
           </div>
           <div class="mb-0">
             <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
-            <input type="date" name="due_date" class="form-control">
+            <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date" class="form-control">
             <div class="text-danger small mt-1" id="seIssueDateError"></div>
           </div>
         </div>

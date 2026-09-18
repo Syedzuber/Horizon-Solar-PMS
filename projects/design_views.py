@@ -32,7 +32,6 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
-from django.utils.dateparse import parse_date
 
 from .decorators import login_required
 from .design_analytics import (
@@ -52,7 +51,7 @@ from .design_storage import (
 )
 # Part 12 — the catalogue screen reuses the Admin screen's form class unchanged rather
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
-from .forms import BOQItemMasterForm
+from .forms import BOQItemMasterForm, check_typed_date
 from .models import (
     # Session E — the Design mirror derivation. `Task` is read and written ONLY by
     # apply_mirror_status() below, never by a view in this module: the design workspace
@@ -2070,9 +2069,11 @@ def design_due_date_propose(request, project_id):
         return _deny(request, f'{project.project_id}: a reason is required to request an '
                               f'extension.', 'design_my_sites')
 
-    proposed = parse_date((request.POST.get('proposed_date') or '').strip())
+    # check_typed_date, not a bare parse_date: '2026-02-30' made parse_date raise and
+    # this view answer 500. The past-date and later-than-agreed checks below still run.
+    proposed, date_error = check_typed_date(request.POST.get('proposed_date'))
     if proposed is None:
-        return _deny(request, 'Please provide a valid date.', 'design_my_sites')
+        return _deny(request, date_error or 'Please provide a valid date.', 'design_my_sites')
     if proposed < timezone.localdate():
         return _deny(request, 'The requested due date cannot be in the past.', 'design_my_sites')
     if proposed <= approved.proposed_date:
@@ -2265,9 +2266,10 @@ def design_due_date_change(request, project_id):
     if not reason:
         return _back(f'{project.project_id}: a reason is required to change an agreed due date.')
 
-    proposed = parse_date((request.POST.get('proposed_date') or '').strip())
+    # check_typed_date, not a bare parse_date — see design_due_date_propose.
+    proposed, date_error = check_typed_date(request.POST.get('proposed_date'))
     if proposed is None:
-        return _back('Please provide a valid date.')
+        return _back(date_error or 'Please provide a valid date.')
     if proposed < timezone.localdate():
         return _back('The new due date cannot be in the past.')
 

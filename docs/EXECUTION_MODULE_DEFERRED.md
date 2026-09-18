@@ -3164,7 +3164,7 @@ the aggregate send while either address still contains `REPLACE_WITH`) can never
 recipient requires a code change and a deploy, and looks from the top of the file as though
 it should be an env var. Two people editing the "wrong" one is the predictable failure.
 
-### G4 — `parse_date()` raises on an in-range-looking but invalid date
+### ~~G4 — `parse_date()` raises on an in-range-looking but invalid date~~ — **CLOSED by the typed-date session, 18 Sep 2026**
 
 Not a codebase defect — a Django API sharp edge found while building the report, recorded so
 the next person does not repeat it. `django.utils.dateparse.parse_date` returns `None` for a
@@ -3174,6 +3174,14 @@ regex with out-of-range values (`'2026-13-45'` → `month must be in 1..12`).
 Code that treats it as "returns None or a date" ships a 500 on a hand-edited query string.
 `report_views._resolve_report_date()` catches both. **Any other view parsing a user-supplied
 date should be checked** — this session did not audit for other call sites (R-12).
+
+**Closed 18 Sep 2026.** The typed-date session audited every date parser in the views. The
+other call sites were `design_due_date_propose` and `design_due_date_change`, which called
+`parse_date()` bare and answered `'2026-02-30'` with a 500. Both now go through
+`forms.check_typed_date()`, which catches the `ValueError`, and
+`tests_date_validation.py` posts that string to both. The remaining parsers are the admin
+log filters (`date.fromisoformat` inside `try/except ValueError`, see G9) and the Zoho
+webhook (`strptime` inside `try/except ValueError`, see G6).
 
 ### G5 — the per-user status report is not covered by a committed test module
 
@@ -3188,6 +3196,71 @@ prompt's fixed scope.
 change adding a column or a relation to `build_user_status_rows()` has nothing standing guard
 over it. The scaffold is reconstructable from this entry; committing it as
 `projects/tests_user_status_report.py` is a small, self-contained follow-up.
+
+### G6 — typed dates that bypass every view: Zoho, Django admin, the seed command
+
+Found by the typed-date session (18 Sep 2026), not fixed: the prompt scoped the range rule
+(`forms.check_typed_date()`: 2020-01-01 to today + 5 years) to views, and said to propose
+nothing for these.
+
+- **`zoho_deal_closed_webhook`** writes `Project.target_commissioning_date` from the deal's
+  `Closing_Date` with `datetime.strptime(raw_date, '%Y-%m-%d')`. A malformed value is
+  dropped silently (`except ValueError: pass`); an out-of-range one is stored. No range check.
+- **Django admin** forms expose typed dates with no range check. Checked by building each
+  registered `ModelAdmin`'s form: `Program` (`expected_completion_date`, `award_date`,
+  `ppa_signed_date`), `Project` (`survey_date`, `target_commissioning_date`), `Task`
+  (`due_date`), `Milestone` (`due_date`, `completed_date`, also through `MilestoneInline` on
+  `Project`), `DueDateCommitment` (`proposed_date`), `Checklist` and `TaskTemplate`
+  (`effective_from`). The Program and Milestone dates can be typed nowhere else.
+- **`seed_opex_test_data`** sets `DeliveryChallan.dc_date` and `expected_delivery_date`
+  relative to `timezone.localdate()`, so it stays in range; listed for completeness.
+- **Computed dates are not checked either.** `recalculate_from_task()` and
+  `calculate_due_dates()` add durations to an anchor, so an anchor typed at the ceiling
+  cascades later tasks past it. Those dates are computed, not typed, and the rule does not
+  apply to them.
+
+**Risk if left:** the admin and the webhook can still store a year-26 date. `manage.py
+list_implausible_dates` covers every `DateField`, so it will find what they write.
+
+### G7 — the ceiling moves, and the three production rows are not corrected
+
+The upper bound is today + 5 years, recomputed on every request (`forms.typed_date_ceiling()`,
+and the `typed_date_max` context key). A date accepted today can fall outside the range
+later, and nothing re-checks stored rows. That is by design: the rule is enforced when a date
+is typed, never as a model constraint, because a constraint would refuse the bad rows on the
+very save that corrects them. `list_implausible_dates` prints the range it used on every run.
+
+The three production rows that started this (Task 2077 and 2072 on UKRU001, Task 405 on
+HRP-RES-2026-012) were **not** corrected in code or by hand. Their owners fix them on screen;
+every edit path accepts a valid date over a stored bad one (`tests_date_validation.py`,
+`test_a_row_already_holding_a_bad_date_can_be_corrected`). Local, stale: `solarpms_local`
+holds Task 405 at `0026-04-25`.
+
+### G8 — `project_detail.html` is a dead template with three date inputs and no bounds
+
+`project_detail` only redirects to `project_overview`, and no view renders
+`projects/project_detail.html`. Its three `<input type="date">` (a task due date, the
+milestone due date, the issue due date) did not get `min`/`max`, because nobody can reach
+them. If the template is ever rendered again it needs the same two attributes as every other
+date input, or it should be deleted.
+
+### G9 — query-parameter dates do not use the typed-date helper, deliberately
+
+`ceo_daily_report` resolves `?date=` in `report_views._resolve_report_date()`: an absent value
+means today, and an unparseable or future one means today with a warning. The four admin
+filters (`portal_activity_log`, `admin_whatsapp_log`, `admin_send_records`,
+`admin_audit_log`) ignore an unparseable `date_from`/`date_to`. None of them stores anything,
+and a filter date before 2020 is a legitimate question, so they keep their own handling and
+get no `min`/`max`. Revisit only if one of them starts storing a date.
+
+### G10 — `create_delivery_challan` is role-gated with no project scope
+
+It is `@role_required(['SCM'])` and resolves the project with `_active_project()` only, so any
+SCM user can raise a challan on any project. **This is known and currently deliberate:**
+`ACCESS_ISOLATION_AUDIT.md` classes it as relationship-creating (D.4, and blocking question
+Q2), and the 25 Aug row of `execution-model.md` §12 keeps SCM portfolio-wide. It is re-raised
+here, and added as finding 16 in `ACCESS_ISOLATION_AUDIT.md`, so the access work revisits it
+once an assignment table exists. The typed-date session did not change it.
 
 ---
 

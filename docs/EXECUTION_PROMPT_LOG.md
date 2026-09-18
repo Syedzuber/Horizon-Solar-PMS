@@ -972,3 +972,81 @@ hold, the Arka admin, accept's missing status guard, and `CHANGE_REQUEST_STATUSE
 look unreachable. **§D13** MB0005 wording corrected. **§D44** `demo.designhead` corrected (not
 in production) and `NotificationLog.error_detail` added. A standing note on local counts heads
 the file.
+
+## Typed dates — a date a person types must fall between 01 Jan 2020 and today + 5 years (18 Sep 2026)
+
+Audit-then-build, with a hard stop after the audit. Built on HEAD `d1428af`. Production held
+three Task rows with due dates in the years 20 and 26 (ids 2077 and 2072 on UKRU001, 405 on
+HRP-RES-2026-012).
+
+### What the audit found
+
+- Every parser the views used (`date.fromisoformat`, `parse_date`, `strptime`,
+  `forms.DateField`) accepts `0026-09-17` as the year 26. Tested directly; not inferred.
+- **Fourteen entry points** store a typed date, into nine fields. The prompt said
+  `Task.due_date` and `DueDateCommitment.proposed_date` were the only two; that was false.
+  The other seven: `Project.survey_date`, `Project.target_commissioning_date`,
+  `PaymentMilestone.due_date`, `PaymentRequest.payment_date`, `Issue.due_date`,
+  `DeliveryChallan.dc_date`, `DeliveryChallan.expected_delivery_date`.
+- `DueDateCommitment` was clean because both design views already refuse a past date. They
+  also called `parse_date()` bare, so `'2026-02-30'` got a 500 (G4's warning, realised).
+- The PM branch of `project_overview`'s milestone edit turned a malformed date into None:
+  it erased the stored date and reported "updated".
+
+### What changed
+
+- **`forms.check_typed_date(value, *, today=None)`** returns `(date, None)` or
+  `(None, message)` and never raises. `TYPED_DATE_FLOOR` and `typed_date_ceiling()` sit
+  beside it (today + 5 years; 29 Feb maps to 28 Feb). Out of range: *"Enter a date between
+  01 Jan 2020 and 18 Sep 2031. 17 Sep 0026 is outside that range — check the year."*
+  Malformed: *'"2026-02-30" is not a valid date. Pick a date from the calendar.'* Empty input
+  returns `(None, None)`, so every view keeps its own rule on whether a date is required.
+- **Ten views call it directly**, refuse with `messages.error` and save nothing:
+  `task_set_due_date` (both branches, checked before the cascade), `_apply_task_status_change`
+  (Finance's inline date; now a refusal rather than a silent drop), the milestone edit in
+  `project_overview`, `confirm_payment_request`, `create_project_issue`, `create_task_issue`,
+  `create_delivery_issue`, `create_delivery_challan` (both dates), `design_due_date_propose`
+  and `design_due_date_change` (the range first, then their past-date rule, unchanged).
+- **Four views reach it through `clean_<field>` hooks**, so the refusal is an inline field
+  error: `TaskAddForm`, `ProjectCreateForm`, `ProjectEditForm` (both dates each) and
+  `PostActivationFieldEditForm` (whose widget also gets `min`/`max` per instance).
+- **A refused issue keeps what was typed.** `_stash_issue_draft()` parks the title and
+  description in the session, tagged with the form it came from. The destination view
+  (`project_overview`, `task_detail`, `delivery_challan_detail`) takes it out once with
+  `_pop_issue_draft()`, and the template pre-fills the modal and reopens it.
+- **`context_processors.typed_date_bounds`** supplies `typed_date_min` and `typed_date_max`,
+  registered in `settings.py`. 18 date inputs in 12 templates carry `min`/`max`; the three
+  design inputs use `min` = `{% now 'Y-m-d' %}`.
+- **`manage.py list_implausible_dates`**: read-only; prints the DB host and name, then the
+  range used, then one row per date outside it across all 22 `DateField`s.
+
+### Tests
+
+`projects/tests_date_validation.py`, 220 tests. One battery (`DateRuleCases`) runs against
+18 classes covering the 14 entry points. It checks that year 26, year 20, 2019-12-31, the
+ceiling + 1 day, a malformed string and `2026-02-30` are refused with a message, no 500, and
+nothing saved. It checks that the ceiling, 2020-01-01 and 2021-01-01 are accepted (for the
+design views, the last two are refused with their past-date message instead). It checks that a
+stored bad date can be corrected wherever the view edits a row; 10 skips are the create-only
+entry points. The file also covers the PM cascade, the milestone keeping its date, the issue
+redisplay (once), the bounds on the widget and the task row, and the command (it lists a
+seeded row and issues no non-SELECT query). Mutations: removing the lower bound turned 78
+tests red, including `test_year_20_is_refused` and `test_year_26_is_refused` in all 18
+classes; removing the upper bound turned 20 red, including
+`test_one_day_past_the_ceiling_is_refused` in all 18.
+
+### Verification
+
+Before: **1687 tests, 1 failure** (the standing `tests_design_part46` one), 1 expected
+failure. After: **1907 tests, the same 1 failure, 1 expected failure, 10 skips**, no unexpected
+successes. `check` clean (host `localhost`, name `solarpms_local`);
+`makemigrations --check --dry-run` "No changes detected". Locally (stale) the command lists
+one row: Task 405, `0026-04-25`.
+
+### Findings recorded
+
+**G4** closed. **G6** Zoho, Django admin and the seed command bypass the rule. **G7** the
+moving ceiling; the three production rows are not corrected. **G8** dead
+`project_detail.html`. **G9** query-parameter dates keep their own handling. **G10**
+`create_delivery_challan` has no project scope; this is currently deliberate, and it is
+re-raised as finding 16 in `ACCESS_ISOLATION_AUDIT.md`.

@@ -10,7 +10,7 @@
       <form method="post" action="{% url 'design_due_date_propose' project_id=p.project_id %}"
             class="d-flex flex-wrap align-items-center gap-2">
         {% csrf_token %}
-        <input type="date" name="proposed_date" class="form-control form-control-sm"
+        <input type="date" min="{% now 'Y-m-d' %}" max="{{ typed_date_max }}" name="proposed_date" class="form-control form-control-sm"
                style="max-width:11rem;" required>
         <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">
           {{ p.design.action_label }}

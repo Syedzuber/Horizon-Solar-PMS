@@ -338,7 +338,7 @@
                            value="{% if m.amount %}{{ m.amount }}{% endif %}">
                   </div>
                   <div class="col">
-                    <input type="date" name="due_date" class="form-control form-control-sm"
+                    <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date" class="form-control form-control-sm"
                            value="{% if m.due_date %}{{ m.due_date|date:'Y-m-d' }}{% endif %}">
                   </div>
                 </div>
@@ -1103,7 +1103,7 @@
           <p id="confirmPaymentInfo" class="text-muted small mb-3"></p>
           <div class="mb-3">
             <label class="form-label fw-semibold">Payment Date <span class="text-danger">*</span></label>
-            <input type="date" name="payment_date" id="confirmPaymentDateInput"
+            <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="payment_date" id="confirmPaymentDateInput"
                    class="form-control" required>
           </div>
           <div class="mb-2">
@@ -1161,6 +1161,16 @@
 </div>
 {% endif %}
 
+{% if issue_draft %}
+{% comment %}A refused issue (due date out of range) comes back here with what was typed —
+views._stash_issue_draft. Reopen the modal so the user fixes the date, not the text.{% endcomment %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var el = document.getElementById('raiseProjectIssueModal');
+  if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+});
+</script>
+{% endif %}
 <div class="modal fade" id="raiseProjectIssueModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog">
     <div class="modal-content">
@@ -1173,11 +1183,11 @@
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
-            <input type="text" name="title" class="form-control" required maxlength="200">
+            <input type="text" name="title" class="form-control" required maxlength="200" value="{{ issue_draft.title|default:'' }}">
           </div>
           <div class="mb-3">
             <label class="form-label">Description</label>
-            <textarea name="description" class="form-control" rows="3"></textarea>
+            <textarea name="description" class="form-control" rows="3">{{ issue_draft.description|default:'' }}</textarea>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
@@ -1200,7 +1210,7 @@
           </div>
           <div class="mb-1">
             <label class="form-label fw-semibold">Due Date <span class="text-danger">*</span></label>
-            <input type="date" name="due_date" class="form-control">
+            <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date" class="form-control">
             <div class="text-danger small mt-1" id="projIssueDateError"></div>
           </div>
         </div>

@@ -1,6 +1,10 @@
 import re
+from datetime import date
+
 from django import forms
 from django.contrib.auth.models import User
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster
 
 
@@ -252,6 +256,75 @@ def _validate_phone(value):
         raise forms.ValidationError('Phone number must start with 6, 7, 8, or 9.')
 
 
+# ---------------------------------------------------------------------------
+# Typed dates
+# ---------------------------------------------------------------------------
+#
+# A date a human types is plausible when it falls between TYPED_DATE_FLOOR and five
+# years from today. Every parser the views used (date.fromisoformat, parse_date,
+# strptime, forms.DateField) accepts '0026-09-17' as the year 26, and a browser date
+# picker lets a two-digit year through, so production collected due dates in the
+# years 20 and 26. This is the one rule for every view that stores a typed date.
+#
+# IT LIVES IN THE VIEWS AND FORMS, NOT IN A MODEL CONSTRAINT. A constraint would
+# refuse the existing bad rows on their next save — the very save that corrects them.
+# System timestamps (created_at, completed_at, approved_at ...) never come through here.
+#
+# THE CEILING MOVES. A date accepted today can fall outside the range later; nothing
+# re-checks stored rows. `manage.py list_implausible_dates` prints the range it used.
+
+TYPED_DATE_FLOOR = date(2020, 1, 1)
+
+
+def typed_date_ceiling(today=None):
+    """Five years from today (timezone.localdate()). 29 Feb maps to 28 Feb."""
+    today = today or timezone.localdate()
+    try:
+        return today.replace(year=today.year + 5)
+    except ValueError:
+        return today.replace(year=today.year + 5, day=28)
+
+
+def check_typed_date(value, *, today=None):
+    """Validate one typed date. Returns (date, None) or (None, message).
+
+    `value` is the raw POST string or an already-parsed date. Empty input returns
+    (None, None): whether a date is required is the caller's rule, not this one's.
+    Never raises — parse_date returns None for a string that does not look like a
+    date but RAISES ValueError for one that does and is impossible ('2026-02-30'),
+    and both must come back as a message, not a 500.
+    """
+    if value is None or value == '':
+        return None, None
+    if isinstance(value, date):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None, None
+        try:
+            parsed = parse_date(raw)
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            return None, f'"{raw}" is not a valid date. Pick a date from the calendar.'
+    ceiling = typed_date_ceiling(today)
+    if parsed < TYPED_DATE_FLOOR or parsed > ceiling:
+        return None, (
+            f'Enter a date between {TYPED_DATE_FLOOR:%d %b %Y} and {ceiling:%d %b %Y}. '
+            f'{parsed:%d %b %Y} is outside that range — check the year.'
+        )
+    return parsed, None
+
+
+def _clean_typed_date(value):
+    """clean_<field> body for a forms.DateField: DateField has already parsed it."""
+    _, error = check_typed_date(value)
+    if error:
+        raise forms.ValidationError(error)
+    return value
+
+
 class ProjectCreateForm(forms.ModelForm):
 
     class Meta:
@@ -297,6 +370,12 @@ class ProjectCreateForm(forms.ModelForm):
         value = self.cleaned_data['customer_phone'].strip()
         _validate_phone(value)
         return value
+
+    def clean_survey_date(self):
+        return _clean_typed_date(self.cleaned_data.get('survey_date'))
+
+    def clean_target_commissioning_date(self):
+        return _clean_typed_date(self.cleaned_data.get('target_commissioning_date'))
 
     def clean_project_type(self):
         # Defense-in-depth: reject a hand-crafted POST that smuggles OPEX past the
@@ -360,6 +439,12 @@ class ProjectEditForm(forms.ModelForm):
         value = self.cleaned_data['customer_phone'].strip()
         _validate_phone(value)
         return value
+
+    def clean_survey_date(self):
+        return _clean_typed_date(self.cleaned_data.get('survey_date'))
+
+    def clean_target_commissioning_date(self):
+        return _clean_typed_date(self.cleaned_data.get('target_commissioning_date'))
 
     def clean_dc_capacity_kw(self):
         value = self.cleaned_data.get('dc_capacity_kw')
@@ -445,6 +530,15 @@ class PostActivationFieldEditForm(forms.ModelForm):
             raise forms.ValidationError('AC capacity must be greater than zero.')
         return value
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # The bounds move with the calendar, so they are set per instance, not in Meta.
+        self.fields['target_commissioning_date'].widget.attrs.update(
+            min=TYPED_DATE_FLOOR.isoformat(), max=typed_date_ceiling().isoformat())
+
+    def clean_target_commissioning_date(self):
+        return _clean_typed_date(self.cleaned_data.get('target_commissioning_date'))
+
     def clean_contract_value(self):
         value = self.cleaned_data.get('contract_value')
         if value is not None and value <= 0:
@@ -474,6 +568,9 @@ class TaskAddForm(forms.Form):
         super().__init__(*args, **kwargs)
         if project is not None:
             self.fields['phase'].queryset = ProjectPhase.objects.filter(project=project)
+
+    def clean_due_date(self):
+        return _clean_typed_date(self.cleaned_data.get('due_date'))
 
 
 # ---------------------------------------------------------------------------

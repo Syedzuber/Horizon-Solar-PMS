@@ -77,12 +77,12 @@
           <label class="form-label fw-semibold">
             DC Date <span class="text-danger">*</span>
           </label>
-          <input type="date" name="dc_date" class="form-control" required>
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="dc_date" class="form-control" required>
         </div>
 
         <div class="col-md-4">
           <label class="form-label fw-semibold">Expected Delivery Date <span class="text-muted">(optional)</span></label>
-          <input type="date" name="expected_delivery_date" class="form-control">
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="expected_delivery_date" class="form-control">
         </div>
 
         <div class="col-12">

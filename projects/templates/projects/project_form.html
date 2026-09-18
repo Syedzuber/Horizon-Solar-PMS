@@ -121,7 +121,7 @@
 
         <div class="col-md-4">
           <label class="form-label">Survey Date</label>
-          <input type="date" name="survey_date"
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="survey_date"
                  class="form-control{% if form.survey_date.errors %} is-invalid{% endif %}"
                  value="{{ form.survey_date.value|default:'' }}">
           {% for e in form.survey_date.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
@@ -129,7 +129,7 @@
 
         <div class="col-md-4">
           <label class="form-label">Target Commissioning Date <span class="text-danger">*</span></label>
-          <input type="date" name="target_commissioning_date"
+          <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="target_commissioning_date"
                  class="form-control{% if form.target_commissioning_date.errors %} is-invalid{% endif %}"
                  value="{{ form.target_commissioning_date.value|default:'' }}">
           {% for e in form.target_commissioning_date.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}

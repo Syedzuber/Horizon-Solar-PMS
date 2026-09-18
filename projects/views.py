@@ -55,7 +55,7 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
@@ -4413,12 +4413,14 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # Finance can supply due_date inline when switching to In Progress — save before the guard
     _due_date_str = request.POST.get('due_date', '').strip()
     if _due_date_str and new_status == Task.IN_PROGRESS and not task.due_date:
-        try:
-            _parsed_due = date.fromisoformat(_due_date_str)
-            Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
-            task.due_date = _parsed_due
-        except ValueError:
-            pass
+        _parsed_due, _due_error = check_typed_date(_due_date_str)
+        if _due_error:
+            # Refused outright, not dropped: dropping it fell through to the guard
+            # below, which told the user to set the date they had just set.
+            messages.error(request, _due_error)
+            return _TASK_STATUS_REFUSED
+        Task.objects.filter(pk=task.pk).update(due_date=_parsed_due)
+        task.due_date = _parsed_due
 
     # Server-side guard: In Progress requires a due date
     if new_status == Task.IN_PROGRESS and not task.due_date:
@@ -5362,13 +5364,14 @@ def task_set_due_date(request, project_id, task_id):
         # Non-PM: save this task's date only, no cascade ripple
         date_str = request.POST.get('due_date', '').strip()
         if date_str:
-            try:
-                task.due_date = date.fromisoformat(date_str)
+            new_date, date_error = check_typed_date(date_str)
+            if date_error:
+                messages.error(request, date_error)
+            else:
+                task.due_date = new_date
                 task.save()
                 log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
                 messages.success(request, 'Due date updated.')
-            except ValueError:
-                messages.error(request, 'Invalid date.')
         else:
             task.due_date = None
             task.save()
@@ -5382,8 +5385,12 @@ def task_set_due_date(request, project_id, task_id):
     changed_tasks = []
     date_str = request.POST.get('due_date', '').strip()
     if date_str:
-        try:
-            new_date = date.fromisoformat(date_str)
+        # Checked BEFORE the cascade: a refused anchor must not ripple into the tasks
+        # after it, and recalculate_from_task writes DueDateChangeLog rows as it goes.
+        new_date, date_error = check_typed_date(date_str)
+        if date_error:
+            messages.error(request, date_error)
+        else:
             if project.cascade_scheduling:
                 count, changed_tasks = recalculate_from_task(project, task, new_date, user=request.user)
                 messages.success(request, f'Due date updated. {count} task(s) recalculated.')
@@ -5392,8 +5399,6 @@ def task_set_due_date(request, project_id, task_id):
                 task.save()
                 messages.success(request, 'Due date updated.')
             log_activity(project, profile, f"Updated due date for task: {task.task_name}", entity_type='Task', entity_id=task.pk)
-        except ValueError:
-            messages.error(request, 'Invalid date.')
     else:
         task.due_date = None
         task.save()
@@ -8023,10 +8028,9 @@ def confirm_payment_request(request, project_id, request_id):
         messages.error(request, 'Payment date is required.')
         return redirect('project_overview', project_id=project_id)
 
-    try:
-        payment_date = date.fromisoformat(payment_date_str)
-    except ValueError:
-        messages.error(request, 'Invalid payment date.')
+    payment_date, payment_date_error = check_typed_date(payment_date_str)
+    if payment_date_error:
+        messages.error(request, payment_date_error)
         return redirect('project_overview', project_id=project_id)
 
     pr.status            = PaymentRequest.CONFIRMED
@@ -8434,14 +8438,18 @@ def project_overview(request, project_id):
                         milestone.milestone_description = request.POST.get('milestone_description', '').strip()
                         amount_str   = request.POST.get('amount', '').strip()
                         due_date_str = request.POST.get('due_date', '').strip()
+                        # A refused date refuses the whole edit and leaves the row as it
+                        # was. This branch used to turn a malformed date into None, which
+                        # erased the stored date and then reported "updated".
+                        _ms_due, _ms_due_error = check_typed_date(due_date_str)
+                        if _ms_due_error:
+                            messages.error(request, f'{milestone.milestone_name} not updated. {_ms_due_error}')
+                            return redirect('project_overview', project_id=project.project_id)
                         try:
                             milestone.amount = Decimal(amount_str) if amount_str else None
                         except InvalidOperation:
                             milestone.amount = None
-                        try:
-                            milestone.due_date = date.fromisoformat(due_date_str) if due_date_str else None
-                        except ValueError:
-                            milestone.due_date = None
+                        milestone.due_date = _ms_due
                         milestone.save(update_fields=['milestone_description', 'amount', 'due_date'])
                     messages.success(request, f'{milestone.milestone_name} updated.')
                 except PaymentMilestone.DoesNotExist:
@@ -8766,6 +8774,7 @@ def project_overview(request, project_id):
 
     return render(request, 'projects/project_overview.html', {
         'project':                     project,
+        'issue_draft':                 _pop_issue_draft(request, f'project:{project.project_id}'),
         'milestones':                  milestones,
         'milestone_amounts':           milestone_amounts,
         'phases':                      phases,
@@ -9124,6 +9133,7 @@ def task_detail(request, project_id, task_id):
     # Checklist — items come from the Checklist linked to this (task_name, project_type);
     # completion is per-(item, task). Shared with the HTMX swap via _checklist_context().
     context.update(_checklist_context(request, project, task))
+    context['issue_draft'] = _pop_issue_draft(request, f'task:{task.pk}')
     return render(request, 'projects/task_detail.html', context)
 
 
@@ -9671,6 +9681,36 @@ def _issue_assignable_profiles(project):
     )
 
 
+# ---------------------------------------------------------------------------
+# Issue drafts — a refused issue keeps what the user typed
+# ---------------------------------------------------------------------------
+#
+# The three create_*_issue views post from a modal and redirect. When the due date is
+# refused, the issue is not created, and a redirect alone would throw away the title
+# and description. So the typed text is parked in the session under one key, tagged
+# with the form it came from, and the destination view takes it out ONCE — the next
+# render pre-fills the modal and reopens it; any later render shows an empty one.
+
+_ISSUE_DRAFT_SESSION_KEY = 'issue_draft'
+
+
+def _stash_issue_draft(request, where, error):
+    messages.error(request, f'Issue not raised. {error}')
+    request.session[_ISSUE_DRAFT_SESSION_KEY] = {
+        'where':       where,
+        'title':       request.POST.get('title', '').strip(),
+        'description': request.POST.get('description', '').strip(),
+    }
+
+
+def _pop_issue_draft(request, where):
+    draft = request.session.get(_ISSUE_DRAFT_SESSION_KEY)
+    if not draft or draft.get('where') != where:
+        return None
+    del request.session[_ISSUE_DRAFT_SESSION_KEY]
+    return draft
+
+
 @login_required
 def create_project_issue(request, project_id):
     """
@@ -9703,12 +9743,10 @@ def create_project_issue(request, project_id):
     if severity not in dict(Issue.SEVERITY_CHOICES):
         severity = Issue.MEDIUM
 
-    due_date = None
-    if due_date_s:
-        try:
-            due_date = date.fromisoformat(due_date_s)
-        except ValueError:
-            pass
+    due_date, due_date_error = check_typed_date(due_date_s)
+    if due_date_error:
+        _stash_issue_draft(request, f'project:{project.project_id}', due_date_error)
+        return redirect('project_overview', project_id=project_id)
 
     assigned_to = None
     if assignee_id:
@@ -9809,12 +9847,10 @@ def create_task_issue(request, project_id, task_id):
     if severity not in dict(Issue.SEVERITY_CHOICES):
         severity = Issue.MEDIUM
 
-    due_date = None
-    if due_date_s:
-        try:
-            due_date = date.fromisoformat(due_date_s)
-        except ValueError:
-            pass
+    due_date, due_date_error = check_typed_date(due_date_s)
+    if due_date_error:
+        _stash_issue_draft(request, f'task:{task_id}', due_date_error)
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
 
     assigned_to = None
     if assignee_id:
@@ -9919,12 +9955,10 @@ def create_delivery_issue(request, project_id, dc_id):
     if severity not in dict(Issue.SEVERITY_CHOICES):
         severity = Issue.MEDIUM
 
-    due_date = None
-    if due_date_s:
-        try:
-            due_date = date.fromisoformat(due_date_s)
-        except ValueError:
-            pass
+    due_date, due_date_error = check_typed_date(due_date_s)
+    if due_date_error:
+        _stash_issue_draft(request, f'dc:{dc_id}', due_date_error)
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
     assigned_to = None
     if assignee_id:
@@ -10684,18 +10718,16 @@ def create_delivery_challan(request, project_id):
         messages.error(request, 'DC Number and DC Date are required.')
         return render(request, 'projects/delivery_challan_create.html', _form_context())
 
-    try:
-        dc_date = date.fromisoformat(dc_date_s)
-    except ValueError:
-        messages.error(request, 'Invalid DC Date format.')
+    dc_date, dc_date_error = check_typed_date(dc_date_s)
+    if dc_date_error:
+        messages.error(request, f'DC Date: {dc_date_error}')
         return render(request, 'projects/delivery_challan_create.html', _form_context())
 
-    expected_delivery_date = None
-    if expected_delivery_s:
-        try:
-            expected_delivery_date = date.fromisoformat(expected_delivery_s)
-        except ValueError:
-            pass
+    # Refused, not dropped: a bad expected date used to be saved as None, silently.
+    expected_delivery_date, expected_delivery_error = check_typed_date(expected_delivery_s)
+    if expected_delivery_error:
+        messages.error(request, f'Expected Delivery Date: {expected_delivery_error}')
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     vendor = None
     if vendor_id:
@@ -10831,6 +10863,7 @@ def delivery_challan_detail(request, project_id, dc_id):
 
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
+        'issue_draft':       _pop_issue_draft(request, f'dc:{challan.pk}'),
         'challan':           challan,
         'line_items':        line_items,
         'dc_issues':         dc_issues,

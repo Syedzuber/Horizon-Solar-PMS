@@ -308,6 +308,16 @@
 {% endif %}
 
 {# ── Raise Issue modal (DC-scoped) ────────────────────────────────────────── #}
+{% if issue_draft %}
+{% comment %}A refused issue (due date out of range) comes back here with what was typed —
+views._stash_issue_draft. Reopen the modal so the user fixes the date, not the text.{% endcomment %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var el = document.getElementById('raiseDcIssueModal');
+  if (el) bootstrap.Modal.getOrCreateInstance(el).show();
+});
+</script>
+{% endif %}
 <div class="modal fade" id="raiseDcIssueModal" tabindex="-1"
      aria-labelledby="raiseDcIssueModalLabel" aria-hidden="true">
   <div class="modal-dialog">
@@ -326,12 +336,12 @@
           <div class="mb-3">
             <label class="form-label fw-semibold">Title <span class="text-danger">*</span></label>
             <input type="text" name="title" class="form-control" required maxlength="200"
-                   placeholder="e.g. 2 solar panels arrived cracked">
+                   placeholder="e.g. 2 solar panels arrived cracked" value="{{ issue_draft.title|default:'' }}">
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Details</label>
             <textarea name="description" class="form-control" rows="3"
-                      placeholder="Describe the problem, quantities affected, next steps…"></textarea>
+                      placeholder="Describe the problem, quantities affected, next steps…">{{ issue_draft.description|default:'' }}</textarea>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">Severity</label>
