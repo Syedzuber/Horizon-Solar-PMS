@@ -16,10 +16,12 @@ below filters `is_deleted=False` itself — including through relation traversal
 liveness comes entirely from its project.
 """
 
+from datetime import datetime, time, timedelta
+
 from django.db.models import Count, Q
 from django.utils import timezone
 
-from .models import Project, Task, UserProfile
+from .models import ActivityLog, Project, StatusTransition, Task, UserProfile
 from .utils import human_owned_tasks_q
 
 
@@ -48,25 +50,27 @@ def _active_project_filter(prefix=''):
 
 
 def build_user_status_rows(report_date):
-    """Per-user task and login summary for the CEO daily report.
+    """Per-user task and activity summary for the CEO daily report.
     Read-only. report_date is a date in Asia/Kolkata terms.
 
     Returns {'report_date': date, 'rows': [dict, ...], 'totals': dict}.
 
     Each row carries: profile, name, role, projects_assigned, tasks_assigned,
-    not_started, in_progress, completed, blocked, overdue, done_today, logged_in.
+    not_started, in_progress, completed, blocked, overdue, done_today, active_today.
 
-    Query count is CONSTANT at six regardless of how many users exist — one grouped
-    conditional aggregate, four id-pair sweeps, one profile fetch. There is deliberately
-    no per-user loop hitting the DB, matching the pattern send_eod_digest.py already
-    documents for its own metrics.
+    Query count is CONSTANT at eight regardless of how many users exist — one grouped
+    conditional aggregate, four id-pair sweeps, one profile fetch, and two actor-id
+    sweeps for active_today. There is deliberately no per-user loop hitting the DB,
+    matching the pattern send_eod_digest.py already documents for its own metrics.
 
-    LOGGED IN uses `User.last_login`, not ActivityLog's 'user_login' rows. The login
-    signal at signals.py:28-43 wraps its write in `except Exception: pass`, so an
-    ActivityLog login can be silently missing; `last_login` is written by Django's own
-    auth machinery. The consequence, stated plainly: `last_login` holds only the MOST
-    RECENT login, so for a past report_date this column answers "was their latest login
-    on that day", not "did they log in at all that day". It is exact for today.
+    ACTIVE TODAY is true if ANY of three sources puts the user on report_date:
+      a. `User.last_login` falls on that day
+      b. at least one ActivityLog row names them as actor that day
+      c. at least one StatusTransition row names them as actor that day
+    It replaced a Logged In column that read (a) alone. `last_login` holds only the MOST
+    RECENT login, so someone who logged in yesterday and worked all day today on the
+    same session read as absent. (b) and (c) record actions, not page views: a user who
+    only read the portal is not active, and the report's footnote says so.
     """
     # --- 1. Task metrics: ONE grouped conditional aggregate across every user ---------
     # Task has no soft-delete of its own, so the project carries the liveness filter.
@@ -106,7 +110,12 @@ def build_user_status_rows(report_date):
             # completed_at is a DateTimeField; the `__date` lookup is timezone-aware
             # under USE_TZ=True and resolves against TIME_ZONE (Asia/Kolkata), which is
             # the same IST calendar day report_date is expressed in.
-            done_today=Count('id', filter=Q(completed_at__date=report_date)),
+            #
+            # status=Done as well, because completed_at alone is not enough: the human
+            # status path never clears completed_at when a task leaves Done, so a task
+            # completed and reopened on the same day would still count. Done Today
+            # overlaps Completed and sits outside the row-sum, so this does not move it.
+            done_today=Count('id', filter=Q(status=Task.DONE, completed_at__date=report_date)),
             projects_via_tasks=Count('phase__project', distinct=True),
         )
     )
@@ -166,15 +175,40 @@ def build_user_status_rows(report_date):
         .select_related('user')
     )
 
+    # --- 3a. Who acted on report_date: ONE query per source ------------------------
+    # The day is local midnight to the next local midnight in TIME_ZONE (Asia/Kolkata),
+    # built as aware datetimes, so a 00:30 IST action is not read as the previous UTC
+    # day. A half-open range rather than `__date` so each sweep can use the timestamp
+    # index. Both actor FKs point at UserProfile, so the ids compare directly with
+    # profile.pk; no mapping from User is needed.
+    day_start = timezone.make_aware(datetime.combine(report_date, time.min))
+    day_end = timezone.make_aware(datetime.combine(report_date + timedelta(days=1), time.min))
+    active_profile_ids = set(
+        ActivityLog.objects
+        .filter(timestamp__gte=day_start, timestamp__lt=day_end, actor__isnull=False)
+        .values_list('actor_id', flat=True).distinct()
+    )
+    # A null actor on StatusTransition is the system (a derivation, not a person); the
+    # isnull filter keeps it out rather than adding None to the set.
+    active_profile_ids |= set(
+        StatusTransition.objects
+        .filter(occurred_at__gte=day_start, occurred_at__lt=day_end, actor__isnull=False)
+        .values_list('actor_id', flat=True).distinct()
+    )
+
     rows = []
     for profile in profiles:
         metrics = metrics_by_profile.get(profile.pk, {})
         user = profile.user
-        # last_login is stored UTC-aware; localtime() puts it in IST before the date
-        # comparison, so a 01:00 IST login is not read as the previous UTC day.
-        logged_in = False
-        if user.last_login is not None:
-            logged_in = timezone.localtime(user.last_login).date() == report_date
+        # last_login stays as a source on purpose. The login signal wraps its
+        # ActivityLog write in `except Exception: pass`, so a 'user_login' row can be
+        # missing when the login happened; last_login is written by Django's own auth
+        # machinery. It holds only the MOST RECENT login, which is why it cannot stand
+        # alone. localtime() puts it in IST before the date comparison.
+        active_today = profile.pk in active_profile_ids or (
+            user.last_login is not None
+            and timezone.localtime(user.last_login).date() == report_date
+        )
 
         rows.append({
             'profile':           profile,
@@ -188,21 +222,21 @@ def build_user_status_rows(report_date):
             'blocked':           metrics.get('blocked', 0),
             'overdue':           metrics.get('overdue', 0),
             'done_today':        metrics.get('done_today', 0),
-            'logged_in':         logged_in,
+            'active_today':      active_today,
         })
 
     # Busiest-and-absent first: most overdue at the top, and within the same overdue
-    # count the people who have not logged in today lead, because that is the pairing
+    # count the people who were not active today lead, because that is the pairing
     # a CEO acts on. Name breaks the remaining ties so the order is stable run to run.
-    rows.sort(key=lambda r: (-r['overdue'], r['logged_in'], r['name'].lower()))
+    rows.sort(key=lambda r: (-r['overdue'], r['active_today'], r['name'].lower()))
 
     # --- 4. Totals -----------------------------------------------------------------
     totals = _empty_totals()
     for row in rows:
         for key in _NUMERIC_COLUMNS:
             totals[key] += row[key]
-        if not row['logged_in']:
-            totals['not_logged_in_count'] += 1
+        if not row['active_today']:
+            totals['not_active_count'] += 1
     totals['user_count'] = len(rows)
 
     return {'report_date': report_date, 'rows': rows, 'totals': totals}
@@ -220,6 +254,6 @@ _NUMERIC_COLUMNS = (
 
 def _empty_totals():
     totals = {key: 0 for key in _NUMERIC_COLUMNS}
-    totals['not_logged_in_count'] = 0
+    totals['not_active_count'] = 0
     totals['user_count'] = 0
     return totals

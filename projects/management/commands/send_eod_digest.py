@@ -565,7 +565,7 @@ class Command(BaseCommand):
             f"[aggregate][ceo] per-user rows={len(user_status['rows'])} "
             f"tasks={user_status['totals']['tasks_assigned']} "
             f"overdue={user_status['totals']['overdue']} "
-            f"not_logged_in={user_status['totals']['not_logged_in_count']}"
+            f"not_active={user_status['totals']['not_active_count']}"
         )
         ceo_ctx = dict(base_ctx)
         ceo_ctx['show_ceo_sections'] = True

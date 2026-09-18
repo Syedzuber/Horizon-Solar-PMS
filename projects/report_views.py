@@ -60,7 +60,7 @@ def _resolve_report_date(request):
 @login_required
 @role_required(['CEO', 'Admin', 'System Admin'])
 def ceo_daily_report(request):
-    """Per-user task and login status for one day.
+    """Per-user task and activity status for one day.
     Access: CEO, Admin, System Admin.
     """
     # Two gates on purpose. They agree on the answer; they differ in who OWNS it.

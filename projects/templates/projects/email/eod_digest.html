@@ -217,10 +217,10 @@
                   <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">In<br>Prog</th>
                   <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Done</th>
                   <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Over<br>due</th>
-                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Log<br>in</th>
+                  <th align="center" style="padding:6px 2px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; letter-spacing:.03em; border-bottom:1px solid #dbe6f2;">Active<br>Today</th>
                 </tr>
                 {% for row in user_status.rows %}
-                <tr{% if not row.logged_in %} style="background-color:#fdf6ec;"{% endif %}>
+                <tr{% if not row.active_today %} style="background-color:#fdf6ec;"{% endif %}>
                   <td align="left" style="padding:6px 4px; color:#22303c; border-bottom:1px solid #eef1f4;">
                     {{ row.name }}<br><span style="color:#9aa7b4; font-size:10px;">{{ row.role }}</span>
                   </td>
@@ -230,7 +230,7 @@
                   <td align="center" style="padding:6px 2px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.in_progress }}</td>
                   <td align="center" style="padding:6px 2px; color:#2e7d32; border-bottom:1px solid #eef1f4;">{{ row.completed }}</td>
                   <td align="center" style="padding:6px 2px; {% if row.overdue %}color:#c0392b; font-weight:bold;{% else %}color:#5a6b7b;{% endif %} border-bottom:1px solid #eef1f4;">{{ row.overdue }}</td>
-                  <td align="center" style="padding:6px 2px; {% if row.logged_in %}color:#2e7d32;{% else %}color:#c0392b;{% endif %} border-bottom:1px solid #eef1f4;">{% if row.logged_in %}Yes{% else %}No{% endif %}</td>
+                  <td align="center" style="padding:6px 2px; {% if row.active_today %}color:#2e7d32;{% else %}color:#c0392b;{% endif %} border-bottom:1px solid #eef1f4;">{% if row.active_today %}Yes{% else %}No{% endif %}</td>
                 </tr>
                 {% endfor %}
                 <tr>
@@ -241,7 +241,7 @@
                   <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.in_progress }}</td>
                   <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.completed }}</td>
                   <td align="center" style="padding:7px 2px; color:#22303c; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.overdue }}</td>
-                  <td align="center" style="padding:7px 2px; color:#9aa7b4; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.not_logged_in_count }}&nbsp;no</td>
+                  <td align="center" style="padding:7px 2px; color:#9aa7b4; font-weight:bold; border-top:2px solid #dbe6f2;">{{ user_status.totals.not_active_count }}&nbsp;not active</td>
                 </tr>
               </table>
             </td>
@@ -256,6 +256,8 @@
               Task counts cover projects that use the task template. RESCO and CAPEX design work is tracked separately.
               <br>
               Projects counts every project that is still Active; the system has no project-closure step yet.
+              <br>
+              Active Today means the user logged in, or performed at least one recorded action (creating, updating, approving, uploading) on the portal that day. Viewing pages is not recorded, so a user who only read the portal shows as not active.
             </td>
           </tr>
           {% else %}

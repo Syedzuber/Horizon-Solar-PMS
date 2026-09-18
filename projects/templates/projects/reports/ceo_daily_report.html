@@ -13,7 +13,7 @@ Every figure comes from reports.build_user_status_rows(); this template computes
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
   <div>
     <h4 class="mb-0">Daily Report</h4>
-    <div class="text-muted small">Per-user task and login status &middot; {{ report_date|date:"d M Y" }} (IST)</div>
+    <div class="text-muted small">Per-user task and activity status &middot; {{ report_date|date:"d M Y" }} (IST)</div>
   </div>
 
   {# Date picker reloads the page with ?date=. GET so the view stays read-only and the #}
@@ -46,9 +46,9 @@ Every figure comes from reports.build_user_status_rows(); this template computes
           <th class="text-center">Blocked</th>
           <th class="text-center">Overdue</th>
           <th class="text-center">Done<br>Today</th>
-          <th class="text-center">Logged<br>In</th>
+          <th class="text-center">Active<br>Today</th>
           {% comment %}
-          A "Design Assignments" column would slot in HERE, immediately after Logged In,
+          A "Design Assignments" column would slot in HERE, immediately after Active Today,
           reading DesignAssignment rows per designer. Deliberately not built this session:
           the design workflow is OPEX-only (design_views.py:218 404s on any other project
           type), so the column would be structurally blank for every Residential project
@@ -60,9 +60,9 @@ Every figure comes from reports.build_user_status_rows(); this template computes
       </thead>
       <tbody>
         {% for row in rows %}
-        {# Rows for people who have not logged in are tinted, because "carrying overdue #}
-        {# work and not logged in today" is the pairing this report exists to surface.  #}
-        <tr {% if not row.logged_in %}class="table-warning"{% endif %}>
+        {# Rows for people not active today are tinted, because "carrying overdue work #}
+        {# and not active today" is the pairing this report exists to surface.         #}
+        <tr {% if not row.active_today %}class="table-warning"{% endif %}>
           <td>
             <div class="fw-semibold">{{ row.name }}</div>
             <div class="text-muted small">{{ row.role }}</div>
@@ -82,11 +82,11 @@ Every figure comes from reports.build_user_status_rows(); this template computes
             {% if row.done_today %}<span class="badge text-bg-success">{{ row.done_today }}</span>{% else %}0{% endif %}
           </td>
           <td class="text-center">
-            {% if row.logged_in %}
-              <i class="bi bi-check-circle-fill text-success" title="Logged in"></i>
+            {% if row.active_today %}
+              <i class="bi bi-check-circle-fill text-success" title="Active today"></i>
               <span class="visually-hidden">Yes</span>
             {% else %}
-              <i class="bi bi-x-circle text-danger" title="Not logged in"></i>
+              <i class="bi bi-x-circle text-danger" title="Not active today"></i>
               <span class="visually-hidden">No</span>
             {% endif %}
           </td>
@@ -108,7 +108,7 @@ Every figure comes from reports.build_user_status_rows(); this template computes
           <td class="text-center">{{ totals.overdue }}</td>
           <td class="text-center">{{ totals.done_today }}</td>
           <td class="text-center">
-            <span class="text-muted small fw-normal">{{ totals.not_logged_in_count }} not logged in</span>
+            <span class="text-muted small fw-normal">{{ totals.not_active_count }} not active</span>
           </td>
         </tr>
       </tfoot>
@@ -126,9 +126,14 @@ Every figure comes from reports.build_user_status_rows(); this template computes
     Task counts cover projects that use the task template. RESCO and CAPEX design work is
     tracked separately and does not appear in these columns.
   </p>
-  <p class="mb-0">
+  <p class="mb-2">
     Projects Assigned counts every project that is still Active. The system has no
     project-closure step yet, so completed projects remain counted.
+  </p>
+  <p class="mb-0">
+    Active Today means the user logged in, or performed at least one recorded action
+    (creating, updating, approving, uploading) on the portal that day. Viewing pages is
+    not recorded, so a user who only read the portal shows as not active.
   </p>
 </div>
 

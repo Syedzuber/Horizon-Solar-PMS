@@ -3262,6 +3262,41 @@ Q2), and the 25 Aug row of `execution-model.md` §12 keeps SCM portfolio-wide. I
 here, and added as finding 16 in `ACCESS_ISOLATION_AUDIT.md`, so the access work revisits it
 once an assignment table exists. The typed-date session did not change it.
 
+### G11 — the human status path never clears `completed_at` when a task leaves Done
+
+Found by the Active Today session (18 Sep 2026), not fixed: the prompt forbade touching
+`_apply_task_status_change()` or any code that writes `completed_at`.
+
+`_apply_task_status_change()` stamps `completed_at` on entering Done and does nothing to it on
+the way out. `VALID_TRANSITIONS` lets a human move Done → Blocked, so a reopened task keeps a
+completion date for work that is no longer complete. `apply_mirror_status()` already clears it
+on the way out of Done, so the two writers disagree.
+
+The CEO daily report now guards itself: Done Today in `build_user_status_rows()` requires
+`status=Done` as well as `completed_at` on the date. Every other reader of `completed_at` is
+still exposed — `dashboard_ceo`'s weekly and monthly done windows filter `status=Done` too and
+are safe, but anything that reads `completed_at` without a status condition is not.
+
+**Why not fixed here:** clearing `completed_at` on reopen changes what the column means, not
+just one report. Decide it in the status path, with `apply_mirror_status()` as the model.
+
+### G12 — Active Today cannot see page views or unrecorded actions
+
+`build_user_status_rows()` marks a user active if they logged in that day, or are the actor on
+at least one `ActivityLog` or `StatusTransition` row that day. Two gaps, both stated in the
+report's footnote rather than fixed:
+
+- **Page views are not recorded anywhere.** A user who only reads the portal on a session
+  started the day before shows as not active. Closing this needs a request-level record
+  (middleware or a last-seen field), which the session forbade.
+- **Swallowed log writes.** `log_activity()` and the login signal both swallow exceptions, so a
+  failed write removes a row. A user drops out only if every row they had that day failed, so
+  the effect is small; `ActivityLog failed:` lines in the Railway logs measure it exactly.
+
+`G5` is partly closed by `projects/tests_user_status_report.py`: the row-sum invariant and the
+constant query count (eight) are now pinned. The deactivated-user drop, soft-delete/cancelled
+exclusion, role matrix and malformed-date inputs from the original scaffold are still uncovered.
+
 ---
 
 ### B23 — six things the demo seed could not build through any product code path
