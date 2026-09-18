@@ -965,7 +965,9 @@ and in the working tree: `design_survey_link_set` and `design_survey_upload`, eq
 **§D18** marked fixed forward, with the MB0005/SCMPILOT06 wording corrected (exposed, never
 held) and the `m_stage_dwell` claim corrected (timestamps, not the ledger). **§D45** the hold
 over a pending change request. **§D46** repair of existing orphans (production A8 output not
-yet reported). **§D47** the overdue clock during a hold, CAD/BOQ unguarded, the Head cannot
+yet reported at commit time; run 18 Sep 2026 in the Railway shell: 12 design ledger rows from
+2026-09-16 08:46:33 UTC, 0 hold/lift rows, 0 pre-ledger `design_blocked` rows, 0 open holds, no
+ORPHAN, 0 sites on Design Hold, so §D46 is NOT NEEDED and §D18's fix is preventive). **§D47** the overdue clock during a hold, CAD/BOQ unguarded, the Head cannot
 hold, the Arka admin, accept's missing status guard, and `CHANGE_REQUEST_STATUSES` members that
 look unreachable. **§D13** MB0005 wording corrected. **§D44** `demo.designhead` corrected (not
 in production) and `NotificationLog.error_detail` added. A standing note on local counts heads

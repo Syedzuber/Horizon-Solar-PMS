@@ -2094,7 +2094,7 @@ changed**, because `designer_workload` is outside that MODE.
 - **LIVE since 3.1b-2c, 13 Sep 2026.** `design_pm_reject` writes `pm_rejected`, so this now
   happens on every PM rejection.
 
-### D18 — FIXED FORWARD (17 Sep 2026), ORPHANS NOT REPAIRED: a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
+### D18 — FIXED FORWARD (17 Sep 2026), NO ORPHAN IN PRODUCTION (18 Sep 2026): a Design Hold cleared from `arka_submitted` or `awaiting_head_arka` orphans a pending Arka verdict
 
 #### FIXED FORWARD 17 Sep 2026 BY THE D18 SESSION — new lifts restore; existing orphans are §D46
 
@@ -2111,7 +2111,8 @@ changed**, because `designer_workload` is outside that MODE.
     land during a hold (both verdict targets test the status); the Arka admin can make one.
   - **R3.** If the site's latest ledger row is not the hold itself, the hold has no row of its
     own. That is a hold placed before the ledger (`fc24728`, 5 Sep 2026, migration `0079`), or
-    one written outside the product. It is derived, with a warning, and never refused. The
+    one written outside the product. In production the ledger's first design row is
+    16 Sep 2026 08:46:33 UTC (A8, 18 Sep 2026), so there "before the ledger" means before that. It is derived, with a warning, and never refused. The
     latest-row test is what stops an OLDER ledgered hold being read as this one.
   - **Pre-§D13 holds.** A ledgered hold from a member of `DESIGN_NOT_WITH_DESIGNER_STATUSES`
     is derived, with a warning containing "pre-§D13 hold; needs repair". Only `in_qc`,
@@ -2131,10 +2132,26 @@ changed**, because `designer_workload` is outside that MODE.
   `DesignAssignment`, `DesignAttempt` and `ArkaSubmission`, not `StatusTransition` (the D18
   prompt called it ledger-based; it is not). `design_figure_snapshot` on `solarpms_local`
   was byte-identical before and after, because no site there has ever been held.
-- **Production (A8).** The two read-only console blocks were written and dry-run through a
-  line-by-line console. **Their production output had not been reported when this entry was
-  written (17 Sep 2026)**, so no production orphan or open Arka-status hold is listed here.
-  §D46 must run them first.
+- **Production (A8) — run 18 Sep 2026.** The two read-only console blocks were written and
+  dry-run through a line-by-line console on 17 Sep, and run in the Railway shell on
+  18 Sep 2026 (database `railway`, host `postgres.railway.internal`):
+  - **Block 1:** 12 design ledger rows; first ledger row 2026-09-16 08:46:33 UTC; 0 hold or
+    lift rows; 0 pre-ledger `design_blocked` ActivityLog rows; 0 holds still open in the
+    ledger; no rows printed, so no ORPHAN.
+  - **Block 2:** 0 sites on Design Hold.
+
+  **No orphan exists in production. The fix is preventive:** no production site has been
+  held since the ledger began, and none was held before it on the ActivityLog's evidence.
+  §D46 is therefore NOT NEEDED.
+- **The ledger began on 16 Sep in production, not 5 Sep.** `fc24728` (migration `0079`) is
+  correctly dated 5 Sep 2026; that is when the ledger was written. The first production row
+  is simply later, 16 Sep 2026 08:46:33 UTC. No doc stated a 5 Sep production start; every
+  "5 Sep" beside `0079` or `fc24728` dates the commit, and stands.
+- **The one residual blind spot.** A hold placed before the production ledger whose
+  `design_blocked` ActivityLog row was swallowed by `log_activity()` (which does not raise)
+  would be invisible to both blocks: no ledger row, no ActivityLog row, and — if since lifted
+  — no current hold. Judged not worth chasing: it needs a hold in an 11-day window and a
+  logging failure on the same request, and Block 2's zero rules out any such hold still open.
 - **Corrected below, not deleted.** MB0005 and SCMPILOT06 were EXPOSED, not affected: neither
   was ever held, and SCMPILOT06 is local seed data.
 
@@ -3010,10 +3027,20 @@ session.
 Recorded by the D18 session, 17 Sep 2026. **A separate session.** The §D18 fix changes future
 lifts only (R4).
 
+#### NOT NEEDED as of 18 Sep 2026 — production has no orphan
+
+The A8 blocks were run in production on 18 Sep 2026 (§D18): 12 design ledger rows from
+2026-09-16 08:46:33 UTC, 0 hold or lift rows, 0 pre-ledger `design_blocked` ActivityLog rows,
+0 open holds, no ORPHAN printed, and 0 sites on Design Hold. There is nothing to repair. **The
+entry is kept, not deleted:** it is the method if an orphan ever appears (a hold lifted by
+some path that bypasses §D18's fix, or the blind spot recorded in §D18).
+
+The original entry follows.
+
 - **Find them first, in production.** Run the two A8 console blocks from the D18 session (every
   ledgered lift, flagged ORPHAN where a hold from an Arka status was lifted to anything else;
   and every site currently on hold, with its from-status). Their output had not been reported
-  when this entry was written. A hold lifted before the ledger (`fc24728`) cannot be diagnosed
+  when this entry was written (reported 18 Sep 2026: none; see above). A hold lifted before the ledger (`fc24728`) cannot be diagnosed
   from the ledger at all.
 - **The shape: a management command, `--dry-run` by default,** writing through
   `apply_design_status()` so the repair leaves a `StatusTransition` (with an explicit repair
