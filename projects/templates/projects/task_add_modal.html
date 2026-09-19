@@ -23,7 +23,7 @@ standalone task_add_form.html). `blocked` is set when the project isn't Active.
         hx-target="#taskFormModalContent" hx-swap="innerHTML">
     {% csrf_token %}
     <div class="modal-body">
-      {% include 'projects/partials/_task_add_fields.html' %}
+      {% include 'projects/partials/_task_add_fields.html' with narrow=True %}
     </div>
     <div class="modal-footer">
       <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>

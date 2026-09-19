@@ -6,6 +6,7 @@ from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster
+from .utils import roles_for_phase
 
 
 class UserCreateForm(forms.Form):
@@ -555,10 +556,28 @@ class PostActivationFieldEditForm(forms.ModelForm):
 
 
 class TaskAddForm(forms.Form):
+    """Add one task to a live project, ASSIGNED, in a role its phase actually uses.
+
+    WHY THE FIELDS VALIDATE AGAINST THE FULL VOCABULARY AND clean() NARROWS. The role
+    and assignee a person may pick depend on the phase, and the phase is only known
+    once the form is bound. So the fields accept any known role and any active
+    profile, `role_options` / `assignee_options` carry the narrowed lists the template
+    renders, and clean() is the ONE place the phase-role and role-assignee rules are
+    enforced. The narrowed selects are convenience; both add-task templates are
+    `novalidate` and a hand-made POST skips them entirely.
+
+    THE ASSIGNEE RULE IS task_assign's RULE: an active profile whose role matches the
+    task's role. A form that could create a task that endpoint would refuse to assign
+    has created a task nobody can move.
+    """
 
     phase         = forms.ModelChoiceField(queryset=ProjectPhase.objects.none())
     task_name     = forms.CharField(max_length=200)
     assigned_role = forms.ChoiceField(choices=Task.ROLE_CHOICES)
+    assigned_to   = forms.ModelChoiceField(
+        queryset=UserProfile.objects.filter(is_active=True),
+        label='Assign To',
+    )
     due_date      = forms.DateField(
         required=False,
         widget=forms.DateInput(attrs={'type': 'date'}),
@@ -569,8 +588,74 @@ class TaskAddForm(forms.Form):
         if project is not None:
             self.fields['phase'].queryset = ProjectPhase.objects.filter(project=project)
 
+        # Narrowed lists for the template, from the raw (possibly unvalidated) input.
+        phase = self._selected_phase()
+        self.phase_roles = roles_for_phase(phase) if phase is not None else []
+        labels = dict(Task.ROLE_CHOICES)
+        self.role_options = [(role, labels[role]) for role in self.phase_roles]
+
+        role = self._raw('assigned_role')
+        if len(self.phase_roles) == 1:
+            # Exactly one role: preselected. More than one: the template leads with a
+            # blank option — never a silent first choice.
+            self.initial['assigned_role'] = self.phase_roles[0]
+            if not role:
+                role = self.phase_roles[0]
+        self.selected_role = role if role in self.phase_roles else ''
+        self.assignee_options = (
+            UserProfile.objects.filter(role=_profile_role_for(self.selected_role), is_active=True)
+            .select_related('user')
+            if self.selected_role else UserProfile.objects.none()
+        )
+
+    def _raw(self, name):
+        source = self.data if self.is_bound else self.initial
+        value = source.get(name, '')
+        return str(value.pk if hasattr(value, 'pk') else value or '').strip()
+
+    def _selected_phase(self):
+        pk = self._raw('phase')
+        if not pk.isdigit():
+            return None
+        return self.fields['phase'].queryset.filter(pk=pk).first()
+
     def clean_due_date(self):
         return _clean_typed_date(self.cleaned_data.get('due_date'))
+
+    def clean(self):
+        cleaned = super().clean()
+        phase    = cleaned.get('phase')
+        role     = cleaned.get('assigned_role')
+        assignee = cleaned.get('assigned_to')
+
+        if phase is not None and role:
+            allowed = roles_for_phase(phase)
+            if role not in allowed:
+                labels = dict(Task.ROLE_CHOICES)
+                self.add_error('assigned_role', (
+                    f"'{labels.get(role, role)}' is not a role used in "
+                    f"{phase.phase_name}. Choose one of: "
+                    f"{', '.join(labels[r] for r in allowed)}."
+                ))
+                return cleaned
+
+        if role and assignee is not None and assignee.role != _profile_role_for(role):
+            self.add_error('assigned_to', (
+                f"{assignee.user.get_full_name() or assignee.user.username} is "
+                f"{assignee.role}, not {dict(Task.ROLE_CHOICES).get(role, role)}. "
+                f"Choose someone in the task's role."
+            ))
+        return cleaned
+
+
+def _profile_role_for(task_role):
+    """Task.assigned_role -> UserProfile.role, through views' one mapping.
+
+    Imported at call time: views imports this module, so a module-level import would
+    be a cycle. The mapping is not restated here — two copies drift.
+    """
+    from .views import _TASK_TO_PROFILE_ROLE
+    return _TASK_TO_PROFILE_ROLE.get(task_role, task_role)
 
 
 # ---------------------------------------------------------------------------

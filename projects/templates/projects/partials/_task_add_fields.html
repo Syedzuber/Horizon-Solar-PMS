@@ -1,9 +1,8 @@
 {% comment %}
 Add-Task form fields — single source of truth shared by the standalone page
 (task_add_form.html) and the modal (task_add_modal.html). Expects `form`
-(TaskAddForm) and `project` in context. Renders non-field errors + the four
-fields with inline Bootstrap validation, identical to the original standalone
-markup.
+(TaskAddForm) and `project` in context, plus `narrow` from the modal. Renders
+non-field errors + the five fields with inline Bootstrap validation.
 {% endcomment %}
 {% if form.non_field_errors %}
   <div class="alert alert-danger">
@@ -13,7 +12,9 @@ markup.
 
 <div class="mb-3">
   <label class="form-label">Phase <span class="text-danger">*</span></label>
-  <select name="phase" class="form-select{% if form.phase.errors %} is-invalid{% endif %}">
+  <select name="phase" class="form-select{% if form.phase.errors %} is-invalid{% endif %}"
+          {% if narrow %}hx-get="{% url 'task_add' project.project_id %}" hx-trigger="change"
+          hx-include="closest form" hx-target="#taskFormModalContent" hx-swap="innerHTML"{% endif %}>
     <option value="">— Select phase —</option>
     {% for phase in form.fields.phase.queryset %}
       <option value="{{ phase.pk }}"
@@ -33,17 +34,39 @@ markup.
   {% for e in form.task_name.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
 </div>
 
+{% comment %}ROLE AND ASSIGNEE ARE NARROWED BY THE PHASE, then by the role. The lists come
+   from TaskAddForm.role_options / assignee_options; TaskAddForm.clean() enforces the same
+   rules, so this narrowing is convenience only. In the modal (`narrow`), changing the
+   phase or role re-fetches the modal through the same hx-get that opened it, carrying the
+   form's current values. The standalone page has no HTMX: it narrows on its re-render
+   after a POST.{% endcomment %}
 <div class="mb-3">
   <label class="form-label">Assigned Role <span class="text-danger">*</span></label>
-  <select name="assigned_role" class="form-select{% if form.assigned_role.errors %} is-invalid{% endif %}">
-    {% for val, label in form.fields.assigned_role.choices %}
-      <option value="{{ val }}"
-        {% if form.assigned_role.value == val %}selected{% endif %}>
-        {{ label }}
-      </option>
+  <select name="assigned_role" class="form-select{% if form.assigned_role.errors %} is-invalid{% endif %}"
+          {% if narrow %}hx-get="{% url 'task_add' project.project_id %}" hx-trigger="change"
+          hx-include="closest form" hx-target="#taskFormModalContent" hx-swap="innerHTML"{% endif %}>
+    {% if form.role_options|length != 1 %}
+      <option value="">{% if form.role_options %}— Select —{% else %}— Select a phase first —{% endif %}</option>
+    {% endif %}
+    {% for val, label in form.role_options %}
+      <option value="{{ val }}" {% if form.selected_role == val %}selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
   {% for e in form.assigned_role.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
+</div>
+
+<div class="mb-3">
+  <label class="form-label">Assign To <span class="text-danger">*</span></label>
+  <select name="assigned_to" class="form-select{% if form.assigned_to.errors %} is-invalid{% endif %}">
+    <option value="">{% if form.selected_role %}— Select —{% else %}— Select a role first —{% endif %}</option>
+    {% for p in form.assignee_options %}
+      <option value="{{ p.pk }}"
+        {% if form.assigned_to.value|stringformat:"s" == p.pk|stringformat:"s" %}selected{% endif %}>
+        {{ p.user.get_full_name|default:p.user.username }}
+      </option>
+    {% endfor %}
+  </select>
+  {% for e in form.assigned_to.errors %}<div class="invalid-feedback">{{ e }}</div>{% endfor %}
 </div>
 
 <div class="mb-4">

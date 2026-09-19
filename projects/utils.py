@@ -1468,6 +1468,35 @@ def resolve_residential_template():
     return template
 
 
+def roles_for_phase(phase):
+    """Roles a task in this phase may be assigned to.
+    Derived from the phase's template tasks. Read-only.
+
+    ProjectPhase has no link to its TaskTemplatePhase, so the template phase is reached
+    through the phase's own tasks: any task carrying `template_task` names it. Three
+    sources, first non-empty wins:
+
+      1. the distinct assigned_role of every task in that TEMPLATE phase — mirrors
+         included, since a mirror's role still says whose work the phase is;
+      2. the distinct assigned_role already on this phase's tasks — a phase built
+         before templates existed, whose tasks carry no template_task;
+      3. every Task.ROLE_CHOICES role — a phase with no tasks at all.
+
+    Returned in Task.ROLE_CHOICES order, as role values. Writes nothing.
+    """
+    from .models import Task, TaskTemplateTask
+
+    order = [role for role, _ in Task.ROLE_CHOICES]
+    roles = set(TaskTemplateTask.objects
+                .filter(phase__tasks__tasks__phase=phase)
+                .values_list('assigned_role', flat=True))
+    if not roles:
+        roles = set(phase.tasks.values_list('assigned_role', flat=True))
+    if not roles:
+        return order
+    return [role for role in order if role in roles]
+
+
 def _attach_task_template(project, template):
     """Create `project`'s phases and tasks from `template`. THE ONE ATTACH.
 

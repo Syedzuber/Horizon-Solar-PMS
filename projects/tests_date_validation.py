@@ -339,7 +339,7 @@ class TaskAddTests(DateRuleCases, DateFixture):
         return _client(self.pm).post(
             reverse('task_add', args=[self.project.project_id]),
             {'phase': self.phase.pk, 'task_name': 'Added', 'assigned_role': Task.PM,
-             'due_date': value})
+             'assigned_to': self.pm.pk, 'due_date': value})
 
     def snapshot(self):
         return Task.objects.filter(task_name='Added').count()

@@ -3230,13 +3230,19 @@ def task_add(request, project_id):
             cd = form.cleaned_data
             phase = cd['phase']
             last_order = phase.tasks.aggregate(Max('task_order'))['task_order__max'] or 0
-            Task.objects.create(
-                phase=phase,
-                task_name=cd['task_name'],
-                task_order=last_order + 1,
-                assigned_role=cd['assigned_role'],
-                due_date=cd['due_date'],
-            )
+            with transaction.atomic():
+                task = Task.objects.create(
+                    phase=phase,
+                    task_name=cd['task_name'],
+                    task_order=last_order + 1,
+                    assigned_role=cd['assigned_role'],
+                    due_date=cd['due_date'],
+                )
+                # Created assigned: an unassigned task can never change status. Same
+                # chokepoint, notification and log line as task_assign.
+                assign_task_to(task, cd['assigned_to'], notify=True,
+                               actor=request.user.profile, request=request)
+                _log_task_assignment(project, request.user.profile, task, None, cd['assigned_to'])
             messages.success(request, f"Task '{cd['task_name']}' added successfully.")
             if hx:
                 # New row(s) + updated count swapped OOB into the chosen phase; modal closes.
@@ -3246,7 +3252,10 @@ def task_add(request, project_id):
         if hx:
             return render(request, 'projects/task_add_modal.html', {'form': form, 'project': project})
     else:
-        form = TaskAddForm(project=project)
+        # A GET carrying field values is the modal re-narrowing itself after the phase
+        # or role changed: the same hx-get that opens the modal, with the form's current
+        # values. Unbound, so a half-filled form shows no errors.
+        form = TaskAddForm(initial=request.GET.dict(), project=project)
         if hx:
             # hx-get → load the form into the modal instead of the standalone page.
             return render(request, 'projects/task_add_modal.html', {'form': form, 'project': project})
