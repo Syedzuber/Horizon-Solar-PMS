@@ -314,12 +314,16 @@ def build_user_status_rows(report_date):
             'last_active':       last_active,
         })
 
-    # Most work done that day first: the user's own completions plus the tasks they
-    # closed for others, so a coordinator who holds no tasks ranks by what they closed.
-    # done_by_others is left out: someone else did that work, and it is already counted
-    # in that person's closed_for_others. Name breaks ties so the order is stable.
-    rows.sort(key=lambda r: (-(r['done_today'] + r['closed_for_others']),
-                             r['name'].lower()))
+    # Most recently active first, by last_active (capped at the end of report_date).
+    # Users with no recorded activity at all go last. Name breaks ties so the order is
+    # stable run to run. Compared to the MINUTE, the precision the report displays:
+    # two users shown at the same time are then in name order, rather than ordered by
+    # seconds nobody can see.
+    rows.sort(key=lambda r: (
+        r['last_active'] is None,
+        -(int(r['last_active'].timestamp()) // 60) if r['last_active'] is not None else 0,
+        r['name'].lower(),
+    ))
 
     # --- 4. Totals -----------------------------------------------------------------
     totals = _empty_totals()

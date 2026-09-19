@@ -199,6 +199,43 @@ class LastActiveTests(_ReportFixture):
         self.assertEqual(row['last_active'], _local_dt(two_days_ago, 17))
         self.assertFalse(row['active_today'])
 
+    def test_sorted_by_latest_activity_most_recent_first(self):
+        _, early = self._worker('usr_sort_early')
+        _, late = self._worker('usr_sort_late')
+        _, old = self._worker('usr_sort_old')
+        _, never = self._worker('usr_sort_never')
+        self._al(early, _local_dt(self.today, 9))
+        self._al(late, _local_dt(self.today, 17))
+        self._al(old, _local_dt(self.today - timedelta(days=5), 20))
+        order = [r['profile'].pk for r in build_user_status_rows(self.today)['rows']]
+        mine = [pk for pk in order if pk in (early.pk, late.pk, old.pk, never.pk)]
+        self.assertEqual(mine, [late.pk, early.pk, old.pk, never.pk])
+        # No recorded activity goes after everyone who has any, the PM included.
+        self.assertEqual(set(order[-2:]), {never.pk, self.pm.pk})
+
+    def test_same_timestamp_is_broken_by_name(self):
+        _, b = self._worker('usr_tie_b')
+        _, a = self._worker('usr_tie_a')
+        for p in (a, b):
+            self._al(p, _local_dt(self.today, 11, 30))
+        names = [r['name'] for r in build_user_status_rows(self.today)['rows']]
+        self.assertEqual(names[:2], ['usr_tie_a', 'usr_tie_b'])
+
+    def test_same_displayed_minute_is_broken_by_name(self):
+        """b acted 40 seconds after a, but both show as 11:30, so name decides."""
+        _, b = self._worker('usr_min_b')
+        _, a = self._worker('usr_min_a')
+        self._al(a, _local_dt(self.today, 11, 30))
+        self._al(b, _local_dt(self.today, 11, 30) + timedelta(seconds=40))
+        names = [r['name'] for r in build_user_status_rows(self.today)['rows']]
+        self.assertEqual(names[:2], ['usr_min_a', 'usr_min_b'])
+
+    def test_no_recorded_activity_sorts_by_name(self):
+        self._worker('usr_none_b')
+        self._worker('usr_none_a')
+        names = [r['name'] for r in build_user_status_rows(self.today)['rows']]
+        self.assertEqual(names, sorted(names, key=str.lower))
+
     def test_no_activity_at_all_is_none(self):
         _, profile = self._worker('usr_la_none')
         row = self._row(profile)
@@ -365,31 +402,6 @@ class DoneBySelfOrOthersTests(_ReportFixture):
     def test_singular_phrase(self):
         self._done(self.se, self.coord)
         self.assertIn('Closed 1 task for others', self._page())
-
-    def test_sorted_by_work_done_today_most_first(self):
-        """Own completions plus tasks closed for others; tasks others closed for you
-        do not count towards your place."""
-        _, se2 = _make_user('usr_split_se2')
-        _, se3 = _make_user('usr_split_se3')
-        self._done(self.se, self.se)                      # se: 1 own
-        self._done(se2, self.coord)                       # coord: 1 for others
-        self._done(se2, self.coord)                       # coord: 2 for others
-        self._done(se2, self.coord)                       # coord: 3 for others; se2: 3 by others
-        self._done(se3, se3)                              # se3: 2 own
-        self._done(se3, se3)
-        rows =build_user_status_rows(self.today)['rows']
-        order = [r['profile'].pk for r in rows]
-        self.assertEqual(order[:3], [self.coord.pk, se3.pk, self.se.pk])
-        # se2 did none of their own, so ranks below everyone who did work.
-        self.assertGreater(order.index(se2.pk), order.index(self.se.pk))
-
-    def test_ties_are_broken_by_name(self):
-        _, a = _make_user('usr_split_a')
-        _, b = _make_user('usr_split_b')
-        self._done(b, b)
-        self._done(a, a)
-        names = [r['name'] for r in build_user_status_rows(self.today)['rows']]
-        self.assertLess(names.index('usr_split_a'), names.index('usr_split_b'))
 
     def test_row_sum_invariant_with_a_reopened_task(self):
         _, profile = _make_user('usr_sum')
