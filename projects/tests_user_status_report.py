@@ -143,16 +143,14 @@ class ActiveTodayTests(_ReportFixture):
         ActivityLog.objects.create(actor=busy, action='busy')
         self.assertFalse(self._row(idle)['active_today'])
 
-    def test_not_active_count_and_sort(self):
+    def test_not_active_count(self):
         _, idle = self._worker('usr_a_idle')
         _, busy = self._worker('usr_b_busy')
         ActivityLog.objects.create(actor=busy, action='busy')
         report = build_user_status_rows(self.today)
-        names = [r['name'] for r in report['rows']]
-        # Same overdue (0) for all: inactive first, then by name.
         inactive = [r['name'] for r in report['rows'] if not r['active_today']]
-        self.assertEqual(names[:len(inactive)], sorted(inactive, key=str.lower))
-        self.assertLess(names.index('usr_a_idle'), names.index('usr_b_busy'))
+        self.assertIn('usr_a_idle', inactive)
+        self.assertNotIn('usr_b_busy', inactive)
         self.assertEqual(report['totals']['not_active_count'], len(inactive))
         self.assertNotIn('not_logged_in_count', report['totals'])
         self.assertNotIn('logged_in', report['rows'][0])
@@ -239,8 +237,159 @@ class DoneTodayTests(_ReportFixture):
 
     def test_completed_today_and_still_done_counts(self):
         _, profile = _make_user('usr_done')
-        self._task(profile, status=Task.DONE, completed_at=timezone.now())
+        task = self._task(profile, status=Task.DONE, completed_at=timezone.now())
+        record_transition(task, to_status=Task.DONE, from_status=Task.IN_PROGRESS,
+                          actor=profile)
         self.assertEqual(self._row(profile)['done_today'], 1)
+
+
+class DoneBySelfOrOthersTests(_ReportFixture):
+    """Done Today is split by who did the work; the other side of "by others" is
+    credited to the closer as Closed for Others."""
+
+    def setUp(self):
+        super().setUp()
+        _, self.se = _make_user('usr_split_se')
+        # A coordinator with no task and no project link: before this split, nothing
+        # on the report showed anything for them.
+        _, self.coord = _make_user('usr_split_coord', 'Project Coordinator')
+
+    def _done(self, owner, actor, submitted_by=None, ledger=True):
+        task = self._task(owner, status=Task.DONE, completed_at=timezone.now(),
+                          submitted_by=submitted_by)
+        if ledger:
+            record_transition(task, to_status=Task.DONE, from_status=Task.IN_PROGRESS,
+                              actor=actor)
+        return task
+
+    def _rows(self):
+        return {r['profile'].pk: r for r in build_user_status_rows(self.today)['rows']}
+
+    def test_assignee_marks_own_task_done(self):
+        self._done(self.se, self.se)
+        rows = self._rows()
+        self.assertEqual((rows[self.se.pk]['done_today'], rows[self.se.pk]['done_by_others']), (1, 0))
+        self.assertNotIn(self.coord.pk, rows)
+
+    def test_coordinator_closes_an_assignees_task(self):
+        self._done(self.se, self.coord)
+        rows = self._rows()
+        self.assertEqual((rows[self.se.pk]['done_today'], rows[self.se.pk]['done_by_others']), (0, 1))
+        self.assertEqual(rows[self.coord.pk]['closed_for_others'], 1)
+        self.assertEqual(rows[self.coord.pk]['tasks_assigned'], 0)
+
+    def test_opex_submitted_by_assignee_and_approved_by_pm_is_the_assignees_own(self):
+        self._done(self.se, self.pm, submitted_by=self.se)
+        rows = self._rows()
+        self.assertEqual((rows[self.se.pk]['done_today'], rows[self.se.pk]['done_by_others']), (1, 0))
+        self.assertEqual(rows[self.pm.pk]['closed_for_others'], 0)
+
+    def test_opex_submitted_by_coordinator_credits_the_coordinator(self):
+        self._done(self.se, self.pm, submitted_by=self.coord)
+        rows = self._rows()
+        self.assertEqual(rows[self.se.pk]['done_by_others'], 1)
+        self.assertEqual(rows[self.coord.pk]['closed_for_others'], 1)
+        self.assertEqual(rows[self.pm.pk]['closed_for_others'], 0)
+
+    def test_unassigned_task_closed_by_coordinator_counts_for_them(self):
+        task = Task.objects.create(
+            phase=self.phase, task_name='Unassigned', task_order=1,
+            assigned_role=Task.SITE_ENGINEER, task_type=Task.INTERNAL,
+            status=Task.DONE, completed_at=timezone.now())
+        record_transition(task, to_status=Task.DONE, from_status=Task.IN_PROGRESS,
+                          actor=self.coord)
+        self.assertEqual(self._rows()[self.coord.pk]['closed_for_others'], 1)
+
+    def test_no_ledger_row_stays_with_the_assignee_and_credits_nobody(self):
+        """Completions before 7 Sep 2026 have no ledger row. Calling them "by others"
+        would say someone else did every task completed before September."""
+        self._done(self.se, None, ledger=False)
+        rows = self._rows()
+        self.assertEqual((rows[self.se.pk]['done_today'], rows[self.se.pk]['done_by_others']), (1, 0))
+        self.assertEqual(sum(r['closed_for_others'] for r in rows.values()), 0)
+
+    def test_latest_done_transition_decides(self):
+        """Done by the coordinator, reopened, then Done again by the assignee."""
+        task = self._done(self.se, self.coord)
+        record_transition(task, to_status=Task.BLOCKED, from_status=Task.DONE, actor=self.se)
+        record_transition(task, to_status=Task.DONE, from_status=Task.BLOCKED, actor=self.se)
+        rows = self._rows()
+        self.assertEqual(rows[self.se.pk]['done_today'], 1)
+        self.assertNotIn(self.coord.pk, rows)
+
+    def test_a_task_completed_yesterday_counts_for_nobody_today(self):
+        self._task(self.se, status=Task.DONE,
+                   completed_at=_local_dt(self.yesterday))
+        rows = self._rows()
+        self.assertEqual((rows[self.se.pk]['done_today'], rows[self.se.pk]['done_by_others']), (0, 0))
+
+    def test_by_others_and_closed_for_others_balance(self):
+        """Every assigned task someone else closed appears once on each side."""
+        _, se2 = _make_user('usr_split_se2')
+        self._done(self.se, self.coord)
+        self._done(se2, self.coord)
+        self._done(se2, self.pm)
+        self._done(self.se, self.se)
+        report = build_user_status_rows(self.today)
+        self.assertEqual(report['totals']['done_by_others'], 3)
+        self.assertEqual(report['totals']['closed_for_others'], 3)
+        self.assertEqual(report['totals']['done_today'], 1)
+        for row in report['rows'] + [report['totals']]:
+            self.assertEqual(
+                row['not_started'] + row['in_progress'] + row['completed'] + row['blocked'],
+                row['tasks_assigned'])
+
+    def _page(self):
+        ceo_user, _ = _make_user('usr_split_ceo', 'CEO')
+        c = Client(SERVER_NAME='localhost')
+        c.force_login(ceo_user)
+        return ' '.join(c.get(reverse('ceo_daily_report')).content.decode().split())
+
+    def test_page_shows_the_split_under_done_today(self):
+        _, se2 = _make_user('usr_split_se2')
+        self._done(self.se, self.coord)
+        self._done(se2, self.coord)
+        html = self._page()
+        self.assertIn('+1 by others', html)
+        self.assertIn('Closed 2 tasks for others', html)
+        # A phrase under Done Today, not a column of its own.
+        self.assertNotIn('Closed for<br>Others', html)
+
+    def test_page_shows_no_closed_phrase_when_nobody_closed_for_others(self):
+        self._done(self.se, self.se)
+        html = self._page()
+        # The footnote explains the phrase, so look for the rendered line itself.
+        self.assertNotIn('for others</div>', html)
+        self.assertNotIn('Closed 0', html)
+
+    def test_singular_phrase(self):
+        self._done(self.se, self.coord)
+        self.assertIn('Closed 1 task for others', self._page())
+
+    def test_sorted_by_work_done_today_most_first(self):
+        """Own completions plus tasks closed for others; tasks others closed for you
+        do not count towards your place."""
+        _, se2 = _make_user('usr_split_se2')
+        _, se3 = _make_user('usr_split_se3')
+        self._done(self.se, self.se)                      # se: 1 own
+        self._done(se2, self.coord)                       # coord: 1 for others
+        self._done(se2, self.coord)                       # coord: 2 for others
+        self._done(se2, self.coord)                       # coord: 3 for others; se2: 3 by others
+        self._done(se3, se3)                              # se3: 2 own
+        self._done(se3, se3)
+        rows =build_user_status_rows(self.today)['rows']
+        order = [r['profile'].pk for r in rows]
+        self.assertEqual(order[:3], [self.coord.pk, se3.pk, self.se.pk])
+        # se2 did none of their own, so ranks below everyone who did work.
+        self.assertGreater(order.index(se2.pk), order.index(self.se.pk))
+
+    def test_ties_are_broken_by_name(self):
+        _, a = _make_user('usr_split_a')
+        _, b = _make_user('usr_split_b')
+        self._done(b, b)
+        self._done(a, a)
+        names = [r['name'] for r in build_user_status_rows(self.today)['rows']]
+        self.assertLess(names.index('usr_split_a'), names.index('usr_split_b'))
 
     def test_row_sum_invariant_with_a_reopened_task(self):
         _, profile = _make_user('usr_sum')
@@ -273,7 +422,7 @@ class QueryCountTests(_ReportFixture):
             record_transition(self._task(p), to_status=Task.IN_PROGRESS,
                               from_status=Task.NOT_STARTED, actor=p)
         self.assertEqual(self._count(), small)
-        self.assertEqual(small, 8)
+        self.assertEqual(small, 9)
 
 
 class RenderingTests(_ReportFixture):

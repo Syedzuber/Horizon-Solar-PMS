@@ -84,6 +84,10 @@ Every figure comes from reports.build_user_status_rows(); this template computes
           </td>
           <td class="text-center">
             {% if row.done_today %}<span class="badge text-bg-success">{{ row.done_today }}</span>{% else %}0{% endif %}
+            {% if row.done_by_others %}<div class="text-muted small text-nowrap">+{{ row.done_by_others }} by others</div>{% endif %}
+            {# Shown only when non-zero; in practice PMs and coordinators. No column, #}
+            {# because it would read 0 on nearly every other row.                      #}
+            {% if row.closed_for_others %}<div class="small text-nowrap text-primary">Closed {{ row.closed_for_others }} task{{ row.closed_for_others|pluralize }} for others</div>{% endif %}
           </td>
           <td class="text-center">
             {% if row.active_today %}
@@ -110,7 +114,10 @@ Every figure comes from reports.build_user_status_rows(); this template computes
           <td class="text-center">{{ totals.completed }}</td>
           <td class="text-center">{{ totals.blocked }}</td>
           <td class="text-center">{{ totals.overdue }}</td>
-          <td class="text-center">{{ totals.done_today }}</td>
+          <td class="text-center">
+            {{ totals.done_today }}
+            {% if totals.done_by_others %}<div class="text-muted small fw-normal text-nowrap">+{{ totals.done_by_others }} by others</div>{% endif %}
+          </td>
           <td class="text-center">
             <span class="text-muted small fw-normal">{{ totals.not_active_count }} not active</span>
           </td>
@@ -129,6 +136,19 @@ Every figure comes from reports.build_user_status_rows(); this template computes
   <p class="mb-2">
     Task counts cover projects that use the task template. RESCO and CAPEX design work is
     tracked separately and does not appear in these columns.
+  </p>
+  <p class="mb-2">
+    Done Today counts the user's own tasks that they finished themselves that day: marked
+    Done by them or, on RESCO sites, submitted by them and approved by a reviewer.
+    "+N by others" are the user's tasks that someone else marked Done. "Closed N tasks for
+    others" counts tasks this user finished on someone else's behalf, or that were
+    assigned to nobody, and appears only when there are any. The portal has recorded who
+    completes each task only since 7 Sep 2026, so for earlier dates every completion
+    counts as the assignee's own.
+  </p>
+  <p class="mb-2">
+    Users are listed by the work they did that day, most first: their own tasks done plus
+    tasks they closed for others.
   </p>
   <p class="mb-2">
     Projects Assigned counts every project that is still Active. The system has no

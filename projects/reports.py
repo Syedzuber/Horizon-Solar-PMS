@@ -18,10 +18,13 @@ liveness comes entirely from its project.
 
 from datetime import datetime, time, timedelta
 
-from django.db.models import Count, Max, Q
+from django.db.models import BigIntegerField, Count, F, Max, OuterRef, Q, Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
-from .models import ActivityLog, Project, StatusTransition, Task, UserProfile
+from .models import (
+    SUBJECT_TASK, ActivityLog, Project, StatusTransition, Task, UserProfile,
+)
 from .utils import human_owned_tasks_q
 
 
@@ -56,18 +59,25 @@ def build_user_status_rows(report_date):
     Returns {'report_date': date, 'rows': [dict, ...], 'totals': dict}.
 
     Each row carries: profile, name, role, projects_assigned, tasks_assigned,
-    not_started, in_progress, completed, blocked, overdue, done_today, active_today,
-    last_active.
+    not_started, in_progress, completed, blocked, overdue, done_today, done_by_others,
+    closed_for_others, active_today, last_active.
+
+    DONE TODAY is split by who did the work (the submitter where OPEX has an approval
+    step, otherwise whoever marked it Done). done_today is the user's own tasks they
+    finished themselves; done_by_others is their tasks someone else closed. The same
+    tasks, seen from the other side, are the closer's closed_for_others, together with
+    any unassigned task they closed. That is how a coordinator who holds no tasks but
+    closes them for others gets a figure at all.
 
     LAST ACTIVE is the latest of the same three sources below, capped at the end of
     report_date: an aware datetime, or None if the user has no recorded activity up to
     then. Active Today is true exactly when last_active falls on report_date.
 
-    Query count is CONSTANT at eight regardless of how many users exist — one grouped
-    conditional aggregate, four id-pair sweeps, one profile fetch, and two grouped
-    last-action sweeps for last_active / active_today. There is deliberately no per-user
-    loop hitting the DB, matching the pattern send_eod_digest.py already documents for
-    its own metrics.
+    Query count is CONSTANT at nine regardless of how many users exist — one grouped
+    conditional aggregate, one grouped closed-for-others count, four id-pair sweeps, one
+    profile fetch, and two grouped last-action sweeps for last_active / active_today.
+    There is deliberately no per-user loop hitting the DB, matching the pattern
+    send_eod_digest.py already documents for its own metrics.
 
     ACTIVE TODAY is true if ANY of three sources puts the user on report_date:
       a. `User.last_login` falls on that day
@@ -98,10 +108,41 @@ def build_user_status_rows(report_date):
         .exclude(**task_cancelled)
     )
 
+    # WHO DID THE WORK on a completed task. Where there is an approval step (OPEX) it is
+    # the person who submitted it: the approver is by rule someone else, so the Done
+    # transition's actor would credit the reviewer, never the engineer. Otherwise it is
+    # the actor of the task's latest transition to Done. submitted_by is written only by
+    # the OPEX submit view and cleared on reject, so it is null on every Residential
+    # task.
+    #
+    # A Done task with no ledger row has no doer. That is history, not a live path:
+    # every path that marks a task Done now records its actor, but task completions
+    # were first written to the ledger on 7 Sep 2026, and nothing before that has one.
+    # Such a task stays with its assignee, as the column counted it before the split,
+    # and credits nobody with Closed for Others. Reading it as "by others" would claim
+    # someone else did every task completed before September.
+    doer = Coalesce(
+        'submitted_by',
+        Subquery(
+            StatusTransition.objects
+            .filter(subject_type=SUBJECT_TASK, subject_id=OuterRef('pk'),
+                    to_status=Task.DONE)
+            .order_by('-occurred_at', '-pk')
+            .values('actor_id')[:1]
+        ),
+        # The FK and the subquery's column resolve to different field types; both hold
+        # a UserProfile pk.
+        output_field=BigIntegerField(),
+    )
+    done_on_date = Q(status=Task.DONE, completed_at__date=report_date)
+
     # Status constants, never the literal strings — a renamed constant must break loudly
     # here rather than silently return zero.
     task_rows = (
         task_base
+        # alias(), not annotate(): an annotation here would be selected and would join
+        # the GROUP BY, splitting each user's row by doer and breaking the row-sum.
+        .alias(doer_id=doer)
         .values('assigned_to')
         .annotate(
             tasks_assigned=Count('id'),
@@ -121,11 +162,40 @@ def build_user_status_rows(report_date):
             # status path never clears completed_at when a task leaves Done, so a task
             # completed and reopened on the same day would still count. Done Today
             # overlaps Completed and sits outside the row-sum, so this does not move it.
-            done_today=Count('id', filter=Q(status=Task.DONE, completed_at__date=report_date)),
+            #
+            # Split by who did the work. done_today is the user's own; done_by_others is
+            # their task closed by someone else (a PM, a coordinator, or a milestone
+            # receipt). Together they are every task of theirs completed that day. An
+            # unknown doer counts as the user's own (see the doer comment above); the
+            # isnull test is explicit because NOT (NULL = x) is NULL in SQL, not true.
+            done_today=Count('id', filter=done_on_date & (
+                Q(doer_id__isnull=True) | Q(doer_id=F('assigned_to')))),
+            done_by_others=Count('id', filter=done_on_date & Q(doer_id__isnull=False)
+                                 & ~Q(doer_id=F('assigned_to'))),
             projects_via_tasks=Count('phase__project', distinct=True),
         )
     )
     metrics_by_profile = {row['assigned_to']: row for row in task_rows}
+
+    # --- 1b. Tasks each user closed on someone else's behalf: ONE grouped query ------
+    # The other side of done_by_others, credited to the person who did the work. This is
+    # what makes a coordinator's effort visible: they hold no tasks, so every column
+    # above reads zero for them however many tasks they closed. Counts tasks assigned
+    # to someone else AND tasks assigned to nobody. Same liveness and mirror rules as
+    # task_base, minus its assigned_to filter.
+    closed_for_others_by_profile = dict(
+        Task.objects
+        .filter(**task_active)
+        .filter(human_owned_tasks_q())
+        .exclude(**task_cancelled)
+        .filter(done_on_date)
+        .annotate(doer_id=doer)
+        .filter(doer_id__isnull=False)
+        .filter(Q(assigned_to__isnull=True) | ~Q(assigned_to=F('doer_id')))
+        .values('doer_id')
+        .annotate(n=Count('id'))
+        .values_list('doer_id', 'n')
+    )
 
     # --- 2. Project sets per user ----------------------------------------------------
     # "Projects Assigned" is the UNION of four sources, deduplicated per user: the three
@@ -171,7 +241,10 @@ def build_user_status_rows(report_date):
     # is about who holds work, and every role that can hold work belongs in it.
     # (EOD_DIGEST_EXCLUDED_ROLES governs who RECEIVES the individual digest — a
     # different question entirely, and not applicable here.)
-    candidate_ids = set(metrics_by_profile) | set(project_ids_by_profile)
+    # Anyone who closed a task for someone else is a candidate too, so that work shows
+    # even for a user with no task and no project link of their own.
+    candidate_ids = (set(metrics_by_profile) | set(project_ids_by_profile)
+                     | set(closed_for_others_by_profile))
     if not candidate_ids:
         return {'report_date': report_date, 'rows': [], 'totals': _empty_totals()}
 
@@ -235,14 +308,18 @@ def build_user_status_rows(report_date):
             'blocked':           metrics.get('blocked', 0),
             'overdue':           metrics.get('overdue', 0),
             'done_today':        metrics.get('done_today', 0),
+            'done_by_others':    metrics.get('done_by_others', 0),
+            'closed_for_others': closed_for_others_by_profile.get(profile.pk, 0),
             'active_today':      active_today,
             'last_active':       last_active,
         })
 
-    # Busiest-and-absent first: most overdue at the top, and within the same overdue
-    # count the people who were not active today lead, because that is the pairing
-    # a CEO acts on. Name breaks the remaining ties so the order is stable run to run.
-    rows.sort(key=lambda r: (-r['overdue'], r['active_today'], r['name'].lower()))
+    # Most work done that day first: the user's own completions plus the tasks they
+    # closed for others, so a coordinator who holds no tasks ranks by what they closed.
+    # done_by_others is left out: someone else did that work, and it is already counted
+    # in that person's closed_for_others. Name breaks ties so the order is stable.
+    rows.sort(key=lambda r: (-(r['done_today'] + r['closed_for_others']),
+                             r['name'].lower()))
 
     # --- 4. Totals -----------------------------------------------------------------
     totals = _empty_totals()
@@ -262,7 +339,8 @@ def build_user_status_rows(report_date):
 # column and is what the per-row figures add up to; it is not a portfolio size.
 _NUMERIC_COLUMNS = (
     'projects_assigned', 'tasks_assigned', 'not_started', 'in_progress',
-    'completed', 'blocked', 'overdue', 'done_today',
+    'completed', 'blocked', 'overdue', 'done_today', 'done_by_others',
+    'closed_for_others',
 )
 
 
