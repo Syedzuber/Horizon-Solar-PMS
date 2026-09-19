@@ -8,6 +8,27 @@ with a different stack, and mixing the two produces a page that looks broken in 
 Every figure comes from reports.build_user_status_rows(); this template computes nothing.
 {% endcomment %}
 
+{% block extra_head %}
+<style>
+  /* Fixed header: the table shows at full length and its column headings stick to the
+     top of the window as the PAGE scrolls. Sticky attaches to the nearest ancestor with
+     any overflow set, so the wrapper is .table-responsive-xl rather than
+     .table-responsive: it sets overflow-x only below 1200px. On a desktop nothing
+     between the table and the page scrolls, and the header sticks to the page; on a
+     narrower screen the table scrolls sideways instead and the header does not stick.
+     The solid background stops rows showing through the heading.
+     position: relative keeps the .visually-hidden Yes/No labels in Active Today
+     (position: absolute) inside the wrapper. They once escaped a scrolling box here
+     and stretched the page by a screen of blank space. */
+  .report-table-wrap { position: relative; }
+  .report-table-wrap thead th {
+    position: sticky; top: 0; z-index: 2;
+    background-color: var(--bs-light, #f8f9fa);
+    box-shadow: inset 0 -1px 0 #dee2e6;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -33,11 +54,11 @@ Every figure comes from reports.build_user_status_rows(); this template computes
 
 {% if rows %}
 <div class="card shadow-sm">
-  <div class="table-responsive">
+  <div class="table-responsive-xl report-table-wrap">
     <table class="table table-hover table-sm align-middle mb-0">
       <thead class="table-light">
         <tr>
-          <th>User</th>
+          <th>User<br><span class="fw-normal text-muted small">(latest activity)</span></th>
           <th class="text-center">Projects<br><span class="fw-normal text-muted small">Assigned</span></th>
           <th class="text-center">Tasks<br><span class="fw-normal text-muted small">Assigned</span></th>
           <th class="text-center">Not<br>Started</th>

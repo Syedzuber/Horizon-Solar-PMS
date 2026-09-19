@@ -434,6 +434,10 @@ class RenderingTests(_ReportFixture):
         c.force_login(ceo_user)
         html = ' '.join(c.get(reverse('ceo_daily_report')).content.decode().split())
         self.assertIn('Active<br>Today', html)
+        self.assertIn('<th>User<br><span class="fw-normal text-muted small">(latest activity)</span></th>', html)
+        # The fixed header needs the table to scroll inside its own box.
+        self.assertIn('class="table-responsive-xl report-table-wrap"', html)
+        self.assertIn('position: sticky', html)
         self.assertIn('2 not active', html)
         self.assertIn(FOOTNOTE, html)
         self.assertNotIn('Logged', html)
