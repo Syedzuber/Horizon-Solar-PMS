@@ -18,7 +18,7 @@ liveness comes entirely from its project.
 
 from datetime import datetime, time, timedelta
 
-from django.db.models import Count, Q
+from django.db.models import Count, Max, Q
 from django.utils import timezone
 
 from .models import ActivityLog, Project, StatusTransition, Task, UserProfile
@@ -56,12 +56,18 @@ def build_user_status_rows(report_date):
     Returns {'report_date': date, 'rows': [dict, ...], 'totals': dict}.
 
     Each row carries: profile, name, role, projects_assigned, tasks_assigned,
-    not_started, in_progress, completed, blocked, overdue, done_today, active_today.
+    not_started, in_progress, completed, blocked, overdue, done_today, active_today,
+    last_active.
+
+    LAST ACTIVE is the latest of the same three sources below, capped at the end of
+    report_date: an aware datetime, or None if the user has no recorded activity up to
+    then. Active Today is true exactly when last_active falls on report_date.
 
     Query count is CONSTANT at eight regardless of how many users exist — one grouped
-    conditional aggregate, four id-pair sweeps, one profile fetch, and two actor-id
-    sweeps for active_today. There is deliberately no per-user loop hitting the DB,
-    matching the pattern send_eod_digest.py already documents for its own metrics.
+    conditional aggregate, four id-pair sweeps, one profile fetch, and two grouped
+    last-action sweeps for last_active / active_today. There is deliberately no per-user
+    loop hitting the DB, matching the pattern send_eod_digest.py already documents for
+    its own metrics.
 
     ACTIVE TODAY is true if ANY of three sources puts the user on report_date:
       a. `User.last_login` falls on that day
@@ -175,26 +181,30 @@ def build_user_status_rows(report_date):
         .select_related('user')
     )
 
-    # --- 3a. Who acted on report_date: ONE query per source ------------------------
-    # The day is local midnight to the next local midnight in TIME_ZONE (Asia/Kolkata),
-    # built as aware datetimes, so a 00:30 IST action is not read as the previous UTC
-    # day. A half-open range rather than `__date` so each sweep can use the timestamp
-    # index. Both actor FKs point at UserProfile, so the ids compare directly with
-    # profile.pk; no mapping from User is needed.
+    # --- 3a. When each user last acted, up to the end of report_date --------------
+    # ONE grouped Max per source. The day is local midnight to the next local midnight
+    # in TIME_ZONE (Asia/Kolkata), built as aware datetimes, so a 00:30 IST action is
+    # not read as the previous UTC day. Everything is capped at day_end, so a past
+    # report_date never shows activity that happened after it. Both actor FKs point at
+    # UserProfile, so the ids compare directly with profile.pk; no mapping from User is
+    # needed. A null actor on StatusTransition is the system (a derivation, not a
+    # person) and is left out.
     day_start = timezone.make_aware(datetime.combine(report_date, time.min))
     day_end = timezone.make_aware(datetime.combine(report_date + timedelta(days=1), time.min))
-    active_profile_ids = set(
+    last_action_by_profile = dict(
         ActivityLog.objects
-        .filter(timestamp__gte=day_start, timestamp__lt=day_end, actor__isnull=False)
-        .values_list('actor_id', flat=True).distinct()
+        .filter(actor_id__in=candidate_ids, timestamp__lt=day_end)
+        .values('actor_id').annotate(last=Max('timestamp'))
+        .values_list('actor_id', 'last')
     )
-    # A null actor on StatusTransition is the system (a derivation, not a person); the
-    # isnull filter keeps it out rather than adding None to the set.
-    active_profile_ids |= set(
+    for actor_id, last in (
         StatusTransition.objects
-        .filter(occurred_at__gte=day_start, occurred_at__lt=day_end, actor__isnull=False)
-        .values_list('actor_id', flat=True).distinct()
-    )
+        .filter(actor_id__in=candidate_ids, occurred_at__lt=day_end)
+        .values('actor_id').annotate(last=Max('occurred_at'))
+        .values_list('actor_id', 'last')
+    ):
+        if actor_id not in last_action_by_profile or last > last_action_by_profile[actor_id]:
+            last_action_by_profile[actor_id] = last
 
     rows = []
     for profile in profiles:
@@ -203,12 +213,15 @@ def build_user_status_rows(report_date):
         # last_login stays as a source on purpose. The login signal wraps its
         # ActivityLog write in `except Exception: pass`, so a 'user_login' row can be
         # missing when the login happened; last_login is written by Django's own auth
-        # machinery. It holds only the MOST RECENT login, which is why it cannot stand
-        # alone. localtime() puts it in IST before the date comparison.
-        active_today = profile.pk in active_profile_ids or (
-            user.last_login is not None
-            and timezone.localtime(user.last_login).date() == report_date
-        )
+        # machinery. It holds only the MOST RECENT login, so for a past report_date a
+        # later login is ignored rather than read as activity on that day.
+        candidates = [last_action_by_profile.get(profile.pk)]
+        if user.last_login is not None and user.last_login < day_end:
+            candidates.append(user.last_login)
+        last_active = max((c for c in candidates if c is not None), default=None)
+        # Active Today follows from last_active: every source is already capped at
+        # day_end, so the latest one falling on or after day_start is the whole test.
+        active_today = last_active is not None and last_active >= day_start
 
         rows.append({
             'profile':           profile,
@@ -223,6 +236,7 @@ def build_user_status_rows(report_date):
             'overdue':           metrics.get('overdue', 0),
             'done_today':        metrics.get('done_today', 0),
             'active_today':      active_today,
+            'last_active':       last_active,
         })
 
     # Busiest-and-absent first: most overdue at the top, and within the same overdue

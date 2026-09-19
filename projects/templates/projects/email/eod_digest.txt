@@ -20,7 +20,7 @@ Executive snapshot (today):
 - Most active user today            : {% if ceo.most_active %}{{ ceo.most_active.name }} ({{ ceo.most_active.count }} action{{ ceo.most_active.count|pluralize }}){% else %}No activity recorded today{% endif %}
 
 Per-user status ({{ date_str }}):
-{% if user_status.rows %}{% for row in user_status.rows %}- {{ row.name }} ({{ row.role }}): {{ row.projects_assigned }} project{{ row.projects_assigned|pluralize }}, {{ row.tasks_assigned }} task{{ row.tasks_assigned|pluralize }} ({{ row.not_started }} not started, {{ row.in_progress }} in progress, {{ row.completed }} completed), {{ row.overdue }} overdue, active today: {% if row.active_today %}yes{% else %}NO{% endif %}
+{% if user_status.rows %}{% for row in user_status.rows %}- {{ row.name }} ({{ row.role }}; {% if row.last_active %}{{ row.last_active|date:"d M Y, H:i" }}{% else %}no recorded activity{% endif %}): {{ row.projects_assigned }} project{{ row.projects_assigned|pluralize }}, {{ row.tasks_assigned }} task{{ row.tasks_assigned|pluralize }} ({{ row.not_started }} not started, {{ row.in_progress }} in progress, {{ row.completed }} completed), {{ row.overdue }} overdue, active today: {% if row.active_today %}yes{% else %}NO{% endif %}
 {% endfor %}- TOTALS: {{ user_status.totals.projects_assigned }} projects, {{ user_status.totals.tasks_assigned }} tasks ({{ user_status.totals.not_started }} not started, {{ user_status.totals.in_progress }} in progress, {{ user_status.totals.completed }} completed), {{ user_status.totals.overdue }} overdue, {{ user_status.totals.not_active_count }} of {{ user_status.totals.user_count }} not active
 
 Blocked and Done-Today counts are on the full report.{% if user_status_url %} Open it: {{ user_status_url }}{% endif %}

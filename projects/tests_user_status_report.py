@@ -158,6 +158,77 @@ class ActiveTodayTests(_ReportFixture):
         self.assertNotIn('logged_in', report['rows'][0])
 
 
+class LastActiveTests(_ReportFixture):
+    """`last_active` is the latest of the three Active Today sources, capped at the end
+    of the report date."""
+
+    def _al(self, profile, when):
+        log = ActivityLog.objects.create(actor=profile, action='x')
+        ActivityLog.objects.filter(pk=log.pk).update(timestamp=when)
+
+    def test_latest_of_the_three_sources_wins(self):
+        user, profile = self._worker('usr_la_all')
+        user.last_login = _local_dt(self.today, 9)
+        user.save(update_fields=['last_login'])
+        self._al(profile, _local_dt(self.today, 11))
+        record_transition(self._task(profile), to_status=Task.IN_PROGRESS,
+                          from_status=Task.NOT_STARTED, actor=profile,
+                          occurred_at=_local_dt(self.today, 15, 30))
+        self.assertEqual(self._row(profile)['last_active'], _local_dt(self.today, 15, 30))
+
+    def test_each_source_alone_sets_it(self):
+        u1, login_only = self._worker('usr_la_login')
+        u1.last_login = _local_dt(self.today, 8, 5)
+        u1.save(update_fields=['last_login'])
+        _, al_only = self._worker('usr_la_al')
+        self._al(al_only, _local_dt(self.today, 10, 15))
+        _, st_only = self._worker('usr_la_st')
+        record_transition(self._task(st_only), to_status=Task.IN_PROGRESS,
+                          from_status=Task.NOT_STARTED, actor=st_only,
+                          occurred_at=_local_dt(self.today, 13, 45))
+        self.assertEqual(self._row(login_only)['last_active'], _local_dt(self.today, 8, 5))
+        self.assertEqual(self._row(al_only)['last_active'], _local_dt(self.today, 10, 15))
+        self.assertEqual(self._row(st_only)['last_active'], _local_dt(self.today, 13, 45))
+
+    def test_activity_after_a_past_report_date_is_ignored(self):
+        user, profile = self._worker('usr_la_past')
+        two_days_ago = self.today - timedelta(days=2)
+        self._al(profile, _local_dt(two_days_ago, 17))
+        self._al(profile, _local_dt(self.today, 10))
+        user.last_login = _local_dt(self.today, 9)
+        user.save(update_fields=['last_login'])
+        row = self._row(profile, report_date=self.yesterday)
+        self.assertEqual(row['last_active'], _local_dt(two_days_ago, 17))
+        self.assertFalse(row['active_today'])
+
+    def test_no_activity_at_all_is_none(self):
+        _, profile = self._worker('usr_la_none')
+        row = self._row(profile)
+        self.assertIsNone(row['last_active'])
+        self.assertFalse(row['active_today'])
+
+    def test_page_shows_last_active_below_the_role(self):
+        ceo_user, _ = _make_user('usr_la_ceo', 'CEO')
+        _, today_p = self._worker('usr_la_today')
+        self._al(today_p, _local_dt(self.today, 14, 7))
+        _, old_p = self._worker('usr_la_old')
+        self._al(old_p, _local_dt(self.today - timedelta(days=3), 16, 20))
+        self._worker('usr_la_never')
+        c = Client(SERVER_NAME='localhost')
+        c.force_login(ceo_user)
+        html = ' '.join(c.get(reverse('ceo_daily_report')).content.decode().split())
+        # Name, then role, then the date and time with no label in front of it.
+        today = self.today.strftime('%d %b %Y')
+        old = (self.today - timedelta(days=3)).strftime('%d %b %Y')
+        self.assertIn(f'usr_la_today</div> <div class="text-muted small">Site Engineer</div> '
+                      f'<div class="text-muted small"> {today}, 14:07 </div>', html)
+        self.assertIn(f'usr_la_old</div> <div class="text-muted small">Site Engineer</div> '
+                      f'<div class="text-muted small"> {old}, 16:20 </div>', html)
+        self.assertIn('usr_la_never</div> <div class="text-muted small">Site Engineer</div> '
+                      '<div class="text-muted small"> No recorded activity </div>', html)
+        self.assertNotIn('Last active', html)
+
+
 class DoneTodayTests(_ReportFixture):
 
     def test_completed_then_reopened_today_is_not_done_today(self):

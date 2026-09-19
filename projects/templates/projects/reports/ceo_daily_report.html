@@ -66,6 +66,10 @@ Every figure comes from reports.build_user_status_rows(); this template computes
           <td>
             <div class="fw-semibold">{{ row.name }}</div>
             <div class="text-muted small">{{ row.role }}</div>
+            {# Last recorded activity (login, action or status change), rendered in IST. #}
+            <div class="text-muted small">
+              {% if row.last_active %}{{ row.last_active|date:"d M Y, H:i" }}{% else %}No recorded activity{% endif %}
+            </div>
           </td>
           <td class="text-center">{{ row.projects_assigned }}</td>
           <td class="text-center fw-semibold">{{ row.tasks_assigned }}</td>
