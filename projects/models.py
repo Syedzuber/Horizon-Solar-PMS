@@ -527,6 +527,56 @@ class Task(models.Model):
     # rather than a stand-in for "unknown".
     approval_self_certified = models.BooleanField(default=False)
 
+    # NOT APPLICABLE — four columns BESIDE the status, never inside it.
+    #
+    # WHY A FLAG AND NOT A FIFTH `STATUS_CHOICES` VALUE, which is the obvious shape
+    # and the wrong one. This is the same question 2.1 answered for "submitted", and
+    # it is answered the same way for the same reasons — see `submitted_at` above and
+    # `task_submit_for_approval()`'s docstring, which costs the alternative out.
+    # A fifth status would have been absorbed as OPEN WORK by nine readers that ask
+    # "not Done" rather than naming the statuses they mean (the overdue counts on four
+    # dashboards, `current_phase()`, the EOD digest, `ext_pending`), rendered as the
+    # literal word "Not Started" through the bare `{% else %}` ending three badge
+    # chains, appeared in every status dropdown on every project type the moment it
+    # was added, and had no `VALID_TRANSITIONS` key — which would have frozen the task
+    # permanently, because `VALID_TRANSITIONS.get(status, set())` refuses everything
+    # for an unknown from-state. `DailyReportInvariantTests` exists to fail if anyone
+    # folds a state into the status vocabulary; this does not.
+    #
+    # THE STATUS IS UNTOUCHED AND KEEPS ITS STORED VALUE. An N/A task is still Not
+    # Started or In Progress underneath, which is what makes un-marking a one-field
+    # write with nothing to reconstruct. Only the presentation layer substitutes the
+    # word, and only the metrics drop the row.
+    #
+    # N/A LEAVES BOTH HALVES OF EVERY RATIO. It is not "done" and it is not
+    # "outstanding" — it is work that turned out not to be in scope, so a phase of
+    # 8 Done and 2 N/A reads 100%, not 80%. That is the one rule that makes this
+    # different from `is_mirror`, which stays IN the progress denominator precisely
+    # because an undelivered consignment IS outstanding work (R-20's PROGRESS half).
+    # The two flags are both "drop from metrics" and they drop from DIFFERENT metrics;
+    # do not merge them into one predicate.
+    #
+    # REVERSIBLE, AND THE REASON IS APPEND-ONLY. Un-marking requires its own reason
+    # and appends it to this column with a timestamp rather than overwriting, so the
+    # column reads as the history of the decision rather than only its current state.
+    # `not_applicable_marked_by` / `_at` name the LAST person to touch the flag in
+    # either direction; the full sequence is in ActivityLog under the two dedicated
+    # action codes.
+    #
+    # NULLABLE / BLANK AT THE DB LEVEL for the reason the six above are: every task
+    # in the database predates this feature, and "a reason is required" is a rule
+    # about the ACTION. `task_set_not_applicable()` is the only writer and refuses an
+    # empty reason in both directions before writing anything.
+    is_not_applicable          = models.BooleanField(default=False, db_index=True)
+    not_applicable_reason      = models.TextField(blank=True, default='')
+    not_applicable_marked_by   = models.ForeignKey(
+        'UserProfile',
+        null=True, blank=True,
+        on_delete=models.SET_NULL,  # Same reasoning as assigned_to: a departure must not delete work
+        related_name='not_applicable_tasks',
+    )
+    not_applicable_marked_at   = models.DateTimeField(null=True, blank=True)
+
     created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:

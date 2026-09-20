@@ -82,6 +82,10 @@ from .permissions import (
     # 2.3a - waiving a punch point is PM-only and NARROWER than approving a task;
     # the docstring on the predicate says why is_qaqc is not enough.
     user_can_waive_punch_point,
+    # Not Applicable is the assigned PM's call alone — NARROWER than
+    # user_can_manage_project, which admits a coordinator. The predicate says why,
+    # and also refuses mirrors.
+    user_can_mark_task_not_applicable,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -110,6 +114,11 @@ from .utils import (
     # and called anyway so that a counter which deliberately includes mirrors is
     # distinguishable from one that forgot to exclude them — see its docstring.
     human_owned_tasks_q, is_human_owned, site_progress_tasks_q,
+    # `applicable_tasks_q` / `is_applicable` are the THIRD predicate and compose with
+    # BOTH of the two above rather than replacing either — a task marked Not
+    # Applicable is neither done nor outstanding, so it leaves every metric on both
+    # sides of the R-20 split. Unlike site_progress_tasks_q this one really filters.
+    applicable_tasks_q, is_applicable,
     # Prompt B21 — the ONE implementation of "current phase" (R-21), mirrors
     # excluded. Aliased because all three dashboards below already use
     # `current_phase` as a local name. Never recompute this inline.
@@ -513,7 +522,7 @@ def tasks_drill_down(request, filter_type):
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    ).filter(human_owned_tasks_q()).select_related('phase__project')
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).select_related('phase__project')
 
     # 0.2 lockdown: EVERY role now has an explicit branch. Six roles previously reached
     # the whole portfolio through a trailing `# SCM and others` comment rather than a
@@ -637,24 +646,24 @@ def dashboard_pm(request):
         due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).filter(human_owned_tasks_q()).count()
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
     blocked_tasks = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         status='Blocked',
-    ).filter(human_owned_tasks_q()).count()
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
     pending_approvals = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         assigned_role=Task.PM,
         status='Not Started',
-    ).filter(human_owned_tasks_q()).count()
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
     external_pending = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
         task_type=Task.EXTERNAL,
         status__in=['Not Started', 'In Progress'],
-    ).filter(human_owned_tasks_q()).count()
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
     # Draft projects assigned to this PM (Zoho-created or manually created and not yet activated)
     draft_projects = list(
@@ -710,29 +719,29 @@ def dashboard_pm(request):
         # The per-project OVERDUE, BLOCKED, PENDING and DUE-TODAY counts a few lines
         # down are the other question and still exclude mirrors. Do not make these
         # match those.
-        total_tasks    = Task.objects.filter(phase__project=project).filter(site_progress_tasks_q()).count()
-        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(site_progress_tasks_q()).count()
-        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(site_progress_tasks_q()).count()
-        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(site_progress_tasks_q()).count()
+        total_tasks    = Task.objects.filter(phase__project=project).filter(site_progress_tasks_q()).filter(applicable_tasks_q()).count()
+        done_tasks     = Task.objects.filter(phase__project=project, status='Done').filter(site_progress_tasks_q()).filter(applicable_tasks_q()).count()
+        internal_total = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL).filter(site_progress_tasks_q()).filter(applicable_tasks_q()).count()
+        internal_done  = Task.objects.filter(phase__project=project, task_type=Task.INTERNAL, status='Done').filter(site_progress_tasks_q()).filter(applicable_tasks_q()).count()
         internal_percent = int(internal_done / internal_total * 100) if internal_total else 0
         ext_pending    = Task.objects.filter(
             phase__project=project, task_type=Task.EXTERNAL,
             status__in=['Not Started', 'In Progress'],
-        ).filter(human_owned_tasks_q()).count()
+        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
         overdue_count  = Task.objects.filter(
             phase__project=project, task_type=Task.INTERNAL,
             due_date__lt=date.today(), due_date__isnull=False,
             status__in=['Not Started', 'In Progress'],
-        ).filter(human_owned_tasks_q()).count()
+        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
         blocked_count = Task.objects.filter(
             phase__project=project, status='Blocked',
-        ).filter(human_owned_tasks_q()).count()
+        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
         # The two five-row evidence lists under the counts above. Filtered to match:
         # they itemise blocked_count and overdue_count, so a mirror appearing in a list
         # whose own headline number excludes it would contradict the card.
         blocked_tasks_for_project = list(
             Task.objects.filter(phase__project=project, status='Blocked')
-            .filter(human_owned_tasks_q())
+            .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
             .select_related('phase')[:5]
         )
         overdue_tasks_for_project = list(
@@ -740,7 +749,7 @@ def dashboard_pm(request):
                 phase__project=project, task_type=Task.INTERNAL,
                 due_date__lt=date.today(), due_date__isnull=False,
                 status__in=['Not Started', 'In Progress'],
-            ).filter(human_owned_tasks_q()).select_related('phase')[:5]
+            ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).select_related('phase')[:5]
         )
         is_delayed = bool(
             project.target_commissioning_date
@@ -758,7 +767,7 @@ def dashboard_pm(request):
             phase__project=project,
             due_date=date.today(), due_date__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-        ).filter(human_owned_tasks_q()).count()
+        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
         milestones_list = []
         for _m in project.milestones.all():
@@ -889,7 +898,7 @@ def dashboard_pm(request):
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    ).filter(human_owned_tasks_q())
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
     _active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _soon   = date.today() + timedelta(days=7)
     tasks_due_today_count = _pm_task_base.filter(due_date=date.today(), status__in=_active).count()
@@ -969,7 +978,7 @@ def dashboard_site_engineer(request):
                 phases__tasks__due_date__lt=today,
                 phases__tasks__due_date__isnull=False,
                 phases__tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ) & human_owned_tasks_q('phases__tasks__'),
+            ) & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         blocked_count=Count(
@@ -977,7 +986,7 @@ def dashboard_site_engineer(request):
             filter=Q(
                 phases__tasks__assigned_to=se_profile,
                 phases__tasks__status=Task.BLOCKED,
-            ) & human_owned_tasks_q('phases__tasks__'),
+            ) & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         pending_grn_count=Count(
@@ -1011,7 +1020,7 @@ def dashboard_site_engineer(request):
         # so the rule is uniform when one does.
         se_tasks_qs = Task.objects.filter(
             phase__project=project, assigned_to=se_profile,
-        ).filter(human_owned_tasks_q())
+        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
         se_total    = se_tasks_qs.count()
         se_done     = se_tasks_qs.filter(status=Task.DONE).count()
         progress    = int(se_done / se_total * 100) if se_total else 0
@@ -1094,7 +1103,7 @@ def dashboard_site_engineer(request):
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
-    ).filter(human_owned_tasks_q())
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
     _se_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _se_soon   = today + timedelta(days=7)
     se_tasks_due_today = _se_task_base.filter(due_date=today, status__in=_se_active).count()
@@ -1239,7 +1248,7 @@ def dashboard_design(request):
     _design_task_base = Task.objects.filter(
         phase__project__in=projects_qs,
         due_date__isnull=False,
-    ).filter(human_owned_tasks_q()).distinct()
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).distinct()
     _d_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _d_soon   = today + timedelta(days=7)
     design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
@@ -1723,7 +1732,7 @@ def dashboard_scm(request):
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
         **_context_filter(ctx, 'phase__project__'),
-    ).filter(human_owned_tasks_q())
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
     _s_active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
     _s_soon   = today + timedelta(days=7)
     scm_tasks_due_today = _scm_task_base.filter(due_date=today, status__in=_s_active).count()
@@ -2102,9 +2111,20 @@ def _get_ceo_dashboard_context(context=None):
             # QUERY 2's ~40 conditional counts below are a SEPARATE queryset asking a
             # separate question — 18 of them are department workload — and still
             # exclude mirrors. Changing this does not touch that.
-            task_total_count=Count('phases__tasks', filter=site_progress_tasks_q('phases__tasks__')),
+            #
+            # N/A IS EXCLUDED FROM BOTH TERMS, AND THAT IS THE WHOLE FIX FOR `pending`.
+            # `pending` is `task_total_count - task_done_count` in the loop below — a
+            # subtraction, so it has no filter of its own to add a predicate to. The
+            # only place to exclude an N/A task from it is in the two operands, which
+            # is what these two lines do: an N/A task is in neither, so it is in
+            # neither `completed` nor `pending`, and the card's two numbers still sum
+            # to the total shown beside them. It also makes the bar reach 100% on a
+            # site of 8 Done + 2 N/A, because the denominator loses the 2 as well —
+            # which is the product rule N/A exists for and the one way it differs from
+            # a mirror, which stays in this denominator deliberately.
+            task_total_count=Count('phases__tasks', filter=site_progress_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__')),
             task_done_count=Count('phases__tasks', filter=Q(phases__tasks__status=Task.DONE)
-                                                         & site_progress_tasks_q('phases__tasks__')),
+                                                         & site_progress_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__')),
         )
         .order_by('target_commissioning_date', 'project_id')
     )
@@ -2185,7 +2205,7 @@ def _get_ceo_dashboard_context(context=None):
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
         **_context_filter(context, 'phase__project__'),
-    ).filter(human_owned_tasks_q()).aggregate(
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
         task_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -2366,7 +2386,7 @@ def _get_ceo_dashboard_context(context=None):
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
             **_context_filter(context, 'phase__project__'),
         )
-        .filter(human_owned_tasks_q())
+        .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -2398,7 +2418,7 @@ def _get_ceo_dashboard_context(context=None):
             completed_at__gte=top_people_cutoff,
             **_context_filter(context, 'phase__project__'),
         )
-        .filter(human_owned_tasks_q())
+        .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
         .values(
             'assigned_to',
             'assigned_to__user__first_name',
@@ -5314,6 +5334,135 @@ def punch_point_waive(request, project_id, punch_point_id):
         entity_type='Task', entity_id=task.pk, action_code='punch_point_waived',
     )
     messages.success(request, f"Punch point on '{task.task_name}' waived.")
+    return back
+
+
+@login_required
+def task_set_not_applicable(request, project_id, task_id):
+    """
+    Mark a task Not Applicable, or undo it. One view, both directions, because the
+    two halves share every guard and differ only in which way the flag moves.
+
+    NOT A STATUS CHANGE, AND `_apply_task_status_change()` IS DELIBERATELY NOT
+    CALLED. The task's `status` is never read or written here and keeps its stored
+    value — an N/A task is still Not Started or In Progress underneath, which is
+    what makes un-marking a plain field write with nothing to reconstruct. Routing
+    this through the status path would have meant a fifth `STATUS_CHOICES` value,
+    which is costed out on the columns themselves in `models.py` and was refused for
+    the same reasons 2.1 refused it for "submitted".
+
+    WHAT N/A MEANS TO THE NUMBERS, since that is the whole product decision: the row
+    leaves BOTH halves of every ratio. It is not done and it is not outstanding, so a
+    phase of 8 Done and 2 N/A reads 100%, and no overdue or open-work count anywhere
+    includes it. That is the opposite of `is_mirror`, which stays IN the progress
+    denominator because an undelivered consignment really is outstanding. The two
+    predicates sit side by side at every reader and are not interchangeable.
+
+    A REASON IS REQUIRED IN BOTH DIRECTIONS, and un-marking APPENDS rather than
+    overwrites. `not_applicable_reason` is the history of the decision, not merely
+    its current state: a task marked out of scope in March and pulled back in June
+    has two reasons and both matter, and the second is worthless without the first
+    to contradict. The column is the readable form; the machine-readable sequence is
+    the two ActivityLog codes.
+
+    A DONE TASK IS REFUSED. "This work was not applicable" and "this work is
+    finished" are contradictory claims about the same row, and allowing it would
+    silently remove a completed task from the numerator it is already counted in —
+    the progress bar would go DOWN on marking a finished task out of scope. If a
+    task was completed in error that is an un-completion, which this is not.
+
+    Access: the project's assigned PM (`user_can_mark_task_not_applicable`, which
+    also refuses mirrors). POST only.
+    """
+    if request.method != 'POST':
+        return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+
+    try:
+        profile = request.user.profile
+    except Exception:
+        return HttpResponseForbidden()
+
+    if not user_can_mark_task_not_applicable(request.user, task, project):
+        return HttpResponseForbidden()
+
+    back = redirect('task_detail', project_id=project.project_id, task_id=task.pk)
+
+    # The direction is the caller's, not inferred from the current flag: a
+    # double-submitted form would otherwise toggle twice and land back where it
+    # started, having written two contradictory reasons and two log lines.
+    marking = request.POST.get('not_applicable') == '1'
+
+    if marking and task.is_not_applicable:
+        messages.warning(request, f"'{task.task_name}' is already marked Not Applicable.")
+        return back
+    if not marking and not task.is_not_applicable:
+        messages.warning(request, f"'{task.task_name}' is not marked Not Applicable.")
+        return back
+
+    # Refused BEFORE the reason check so a PM who picked the wrong row is told the
+    # real problem rather than being asked for a reason that would be rejected next.
+    if marking and task.status == Task.DONE:
+        messages.error(
+            request,
+            f"'{task.task_name}' is already Done and cannot be marked Not Applicable. "
+            f"Completed work is not out of scope — if it was finished in error, reopen "
+            f"it first."
+        )
+        return back
+
+    reason = request.POST.get('not_applicable_reason', '').strip()
+    if not reason:
+        messages.error(
+            request,
+            'Please state why this task is not applicable.' if marking else
+            'Please state why this task applies after all.'
+        )
+        return back
+
+    now = timezone.now()
+
+    if marking:
+        # First mark on a task that has been round this loop before still appends,
+        # so the column reads as one history rather than restarting at each mark.
+        history = task.not_applicable_reason
+        entry   = f"[{now:%d %b %Y %H:%M}] Marked not applicable: {reason}"
+        updated = f"{history}\n{entry}".strip() if history else entry
+    else:
+        entry   = f"[{now:%d %b %Y %H:%M}] Un-marked, now applicable: {reason}"
+        updated = f"{task.not_applicable_reason}\n{entry}".strip()
+
+    Task.objects.filter(pk=task.pk).update(
+        is_not_applicable=marking,
+        not_applicable_reason=updated,
+        # Names the LAST person to touch the flag in either direction. The full
+        # sequence is in ActivityLog; this is who to ask about the current state.
+        not_applicable_marked_by=profile,
+        not_applicable_marked_at=now,
+    )
+
+    log_activity(
+        project, profile,
+        # ActivityLog.action is 255 chars and log_activity swallows the error a
+        # longer value would raise, so a long reason would cost the audit line
+        # silently. The full text is on the Task row either way — same trim and
+        # same reasoning as punch_point_waive above.
+        (f"Marked task Not Applicable: {task.task_name} — {reason}" if marking else
+         f"Task applies after all: {task.task_name} — {reason}")[:255],
+        entity_type='Task', entity_id=task.pk,
+        action_code='task_marked_not_applicable' if marking else 'task_unmarked_not_applicable',
+    )
+    messages.success(
+        request,
+        f"'{task.task_name}' marked Not Applicable. It no longer counts toward this "
+        f"project's progress or any overdue total." if marking else
+        f"'{task.task_name}' is applicable again and counts toward progress as before."
+    )
     return back
 
 
@@ -8764,7 +8913,15 @@ def project_overview(request, project_id):
             # two keys in PROGRESS_KEYS as numbers that MUST move when mirrors arrive.
             # The two BAR numbers ask "how much of this phase is done", so mirrors
             # count. The row-at-a-time form of the rule; no queryset exists here.
-            internal       = [t for t in tasks if t.task_type == 'Internal']
+            # N/A LEAVES THE DENOMINATOR, NOT JUST THE NUMERATOR, and the filter is on
+            # the `internal` binding for exactly that reason — `internal_total` is
+            # `len()` of it, so dropping the row here drops it from both halves in one
+            # place and the two cannot drift. A phase of 8 Done + 2 N/A reads 8/8 and
+            # 100%, which is the product rule: work ruled out of scope is neither done
+            # nor outstanding. This is the one way N/A differs from a mirror, which
+            # stays IN this denominator on purpose (R-20's PROGRESS half, above).
+            internal       = [t for t in tasks
+                              if t.task_type == 'Internal' and is_applicable(t)]
             internal_done  = sum(1 for t in internal if t.status == 'Done')
             internal_total = len(internal)
             pct            = int(internal_done / internal_total * 100) if internal_total else 0
@@ -8781,9 +8938,12 @@ def project_overview(request, project_id):
             # corrected now because a misclassified number that nothing exercises is
             # the kind that surfaces the day someone adds an External mirror and
             # cannot work out why one screen disagrees with the rest.
+            # `is_applicable()` beside `is_human_owned()`, not folded into it: this is
+            # the "not Done" shape that would have absorbed an N/A task as outstanding
+            # external work, and it is a PENDING count, so it takes both predicates.
             ext_pending    = sum(1 for t in tasks
                                  if t.task_type == 'External' and t.status != 'Done'
-                                 and is_human_owned(t))
+                                 and is_human_owned(t) and is_applicable(t))
             phase_data_json.append({
                 'pk':             phase.pk,
                 'pct':            pct,
@@ -9319,6 +9479,12 @@ def task_detail(request, project_id, task_id):
     # user_can_view_project() check this view already made above.
     context['delivery_detail'] = delivery_detail_for_task(task)
     context['issue_draft'] = _pop_issue_draft(request, f'task:{task.pk}')
+    # Not Applicable. ONE predicate for the panel and for the endpoint, so the control
+    # is never offered to somebody the view would then refuse. It is the assigned PM
+    # only and it refuses mirrors — a coordinator sees the state and no buttons.
+    context['can_mark_not_applicable'] = user_can_mark_task_not_applicable(
+        request.user, task, project,
+    )
     return render(request, 'projects/task_detail.html', context)
 
 

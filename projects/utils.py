@@ -288,6 +288,57 @@ def is_human_owned(task):
     return not task.is_mirror
 
 
+# ---------------------------------------------------------------------------
+# NOT APPLICABLE — a THIRD predicate, and it is not a third question.
+#
+# The two helpers above split task metrics by WHICH QUESTION a number answers:
+# site completeness (mirrors in) or a person's workload (mirrors out). This one
+# does not add a third question — it applies to BOTH of them, because a task
+# that is not applicable is neither done nor outstanding under either reading.
+# So it COMPOSES with whichever of the two a call site already uses rather than
+# replacing it, and a reader that asks either question needs both predicates:
+#
+#     .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
+#     .filter(site_progress_tasks_q()).filter(applicable_tasks_q())
+#
+# WHY IT IS NOT FOLDED INTO EITHER ONE, which would be fewer characters at 30
+# call sites and wrong. `is_mirror` and `is_not_applicable` drop a row from
+# DIFFERENT metrics: a mirror stays IN the progress denominator (an undelivered
+# consignment is real outstanding work — R-20's PROGRESS half, argued at length
+# above), while an N/A task leaves the denominator as well as the numerator.
+# Merging them would silently change the mirror rule, which is the one thing
+# prompts 1.5 and 1.6 were spent getting right.
+#
+# UNLIKE `site_progress_tasks_q()` THIS ONE ACTUALLY FILTERS. It is not a naming
+# device; it compiles to a real predicate and removing it from a call site
+# changes that number.
+# ---------------------------------------------------------------------------
+
+def applicable_tasks_q(prefix=''):
+    """Q() excluding tasks their PM has marked Not Applicable.
+
+    `prefix` is the relation path to Task — '' when querying Task itself,
+    'phases__tasks__' when querying Project, 'tasks__' when querying
+    ProjectPhase. Same convention as `human_owned_tasks_q()`.
+
+    Positive (`is_not_applicable=False`), never a negation, for the reason that
+    helper gives: a negated Q across a multi-valued relation takes Django's
+    exclude() subquery path instead of a plain SQL FILTER, which changes the
+    join fan-out that the CEO card counts deliberately share.
+    """
+    from django.db.models import Q
+
+    return Q(**{f'{prefix}is_not_applicable': False})
+
+
+def is_applicable(task):
+    """Row-at-a-time form of applicable_tasks_q(), for prefetched lists.
+
+    Same rule, applied in Python where no queryset exists to filter.
+    """
+    return not task.is_not_applicable
+
+
 def site_progress_tasks_q(prefix=''):
     """Q() matching every task that counts toward SITE COMPLETENESS.
 
@@ -380,7 +431,15 @@ def current_phase(project):
     last_human_phase = None
     for phase in project.phases.all():
         for task in phase.tasks.all():
-            if not is_human_owned(task):
+            # N/A is skipped for the SAME REASON as a mirror, which is what R-21 is
+            # about: a phase is "current" as the answer to "what is this site waiting
+            # on", and nobody is waiting on a task the PM has ruled out of scope.
+            # Counting one would pin a phase open permanently with no action that
+            # could ever close it — the exact defect B21 was written to fix, where an
+            # OPEX site read "Design" forever because its only task was a mirror.
+            # Skipped BEFORE `last_human_phase` is set, so a phase holding nothing but
+            # N/A tasks is not the fallback answer either.
+            if not is_human_owned(task) or not is_applicable(task):
                 continue
             last_human_phase = phase
             if task.status != Task.DONE:

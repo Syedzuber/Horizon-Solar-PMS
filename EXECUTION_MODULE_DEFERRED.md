@@ -752,3 +752,33 @@ is reachable only for legacy rows.
 
 **Not fixed** — nothing to fix in code. **Risk if left:** user-facing documentation lives
 somewhere no code audit can check it against, and it will drift.
+
+## 22. Not Applicable is excluded from metrics but not from the Gantt or the status path
+
+Found 20 Sep 2026, building the Not Applicable flag.
+
+Three surfaces were left alone deliberately, each because touching it was out of the
+prompt's scope and none is wrong today:
+
+**`compute_gantt_schedule()` has no applicability filter.** It reads every task on the
+project and passes `task.status` through as a display string, so an N/A task still gets a
+bar. `_gantt_grid.html` only special-cases `'Done'`, so the bar renders as ordinary open
+work with its stored status in the tooltip. The metric readers all exclude N/A, so this is
+the one screen where an N/A task looks live. **Risk if left:** low and cosmetic, but a PM
+reading the Gantt sees a bar for work that no longer counts anywhere else.
+
+**The status path still accepts an N/A task.** `_apply_task_status_change()` is untouched
+by design, so the assignee of an N/A task can still move it Not Started -> In Progress ->
+Done. Nothing breaks — the row is excluded from every metric either way, and the stored
+status is exactly what un-marking restores — but "Done and not applicable" is a reachable
+state that means nothing. Marking a *Done* task N/A is refused; completing an *N/A* task is
+not. **Risk if left:** low. The two guards belong together and only one was in scope.
+
+**`sync_delivery_mirrors()` / `sync_design_mirror()` are untouched**, correctly:
+`user_can_mark_task_not_applicable()` refuses a mirror, so no mirror can carry the flag and
+the derivations cannot encounter one. If a future prompt ever lets a mirror be marked N/A,
+both sync paths must learn the flag first — they recompute status from the source and would
+write straight past it.
+
+**Not fixed** — out of scope for the build prompt, which named its readers exhaustively and
+listed the status path and the design module as MUST NOT TOUCH.

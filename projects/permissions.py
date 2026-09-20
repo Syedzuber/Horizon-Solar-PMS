@@ -1409,3 +1409,54 @@ def user_can_waive_punch_point(user, project):
     if profile is None:
         return False
     return user_can_manage_project(user, project)
+
+
+def user_can_mark_task_not_applicable(user, task, project):
+    """Return True if `user` may mark `task` Not Applicable on `project`, or undo it.
+
+    Authority: the project's PM. Refuses mirrors.
+
+    THE ASSIGNED PM ONLY — NARROWER THAN `user_can_manage_project()`, AND THE ONE
+    PLACE IN THIS MODULE THAT NARROWS IT. Every other PM-ownership check routes
+    through that function and therefore admits a Project Coordinator too, because
+    coordinator authority is additive PM authority everywhere in the portal; the
+    docstring of `user_can_waive_punch_point()` above argues exactly that and is
+    still right about a waiver. This is different in kind. A waiver accepts a defect
+    on work that HAPPENED; marking a task Not Applicable says the work is not in
+    scope and removes it from every progress ratio and every open-work count on the
+    site — it edits what the plan WAS. That is the project owner's call, and on a
+    site with a coordinator there is exactly one of those.
+
+    ROUTED THROUGH `user_can_manage_project()` ANYWAY, and the order matters. It is
+    the canonical comparison path — it holds the profile guard, the null-`assigned_pm`
+    behaviour and the additive-OR invariant, and re-deriving any of that here would be
+    a second definition of "PM" to keep in step. So the rule is stated as
+    "manages the project AND is its assigned PM": the first clause keeps this call
+    site inheriting anything that predicate learns later, the second is the narrowing
+    this function exists for. Do NOT rewrite it as a bare `project.assigned_pm ==
+    profile` — that is what the first clause is there to stop.
+
+    MIRRORS ARE REFUSED, matching rung 0 of `_apply_task_status_change()` and
+    `_approval_preconditions()`. A mirror's state is derived from the object it
+    follows, so "not applicable" is not a thing a person can assert about one: the
+    next `sync_design_mirror()` / `sync_delivery_mirrors()` run recomputes the row
+    from its source and would sail straight past the flag, leaving a task that reads
+    N/A on screen and is still counted as live by the derivation that owns it. The
+    refusal is here rather than only in the view because it is a fact about the ROW,
+    the same way rung 0 is.
+
+    WHAT IS DELIBERATELY NOT HERE. No project-type gate — this applies to Residential,
+    OPEX and CAPEX alike (a scope change is not an OPEX idea). No approval step:
+    production carries nought `is_qaqc` holders and nought OPEX coordinators, so a
+    second signature would resolve to the PM signing their own decision, which is the
+    deadlock `task_has_independent_approver()` was written to escape. One PM, one
+    reason, recorded — and reversible, which is the real safeguard.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if task.is_mirror:
+        return False
+    if not user_can_manage_project(user, project):
+        return False
+    return project.assigned_pm == profile

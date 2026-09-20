@@ -213,7 +213,12 @@
                   </select>
                 </form>
               {% else %}
-                {% if task.status == 'Done' %}
+                {% comment %}N/A first — see _task_row.html. The bare else below prints
+                   "Not Started", so an N/A task would be mislabelled with the status it
+                   still stores. Presentation only.{% endcomment %}
+                {% if task.is_not_applicable %}
+                  <span class="badge bg-light text-muted border">Not Applicable</span>
+                {% elif task.status == 'Done' %}
                   <span class="badge bg-success">Done</span>
                 {% elif task.status == 'Blocked' %}
                   <span class="badge bg-danger">Blocked</span>

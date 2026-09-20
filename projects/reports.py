@@ -25,7 +25,7 @@ from django.utils import timezone
 from .models import (
     SUBJECT_TASK, ActivityLog, Project, StatusTransition, Task, UserProfile,
 )
-from .utils import human_owned_tasks_q
+from .utils import human_owned_tasks_q, applicable_tasks_q
 
 
 # The active-project predicate, in one place. Deliberately identical to the one
@@ -100,11 +100,22 @@ def build_user_status_rows(report_date):
     # Narrowing the BASE (rather than each Count) is what keeps the row-sum invariant
     # not_started + in_progress + completed + blocked == tasks_assigned true: the four
     # partition the same rows, before grouping, adding no join.
+    #
+    # N/A IS EXCLUDED ON THE BASE FOR EXACTLY THAT REASON, and it is the only place it
+    # could go. The four status columns partition BY STATUS, and an N/A task still
+    # holds one of the four stored values — so excluding it per-Count would drop it
+    # from the four while `tasks_assigned=Count('id')` went on counting it, and the
+    # invariant would break by precisely the number of N/A tasks. On the base the row
+    # simply is not there, all six counts agree, and `DailyReportInvariantTests`,
+    # `tests_progress_vs_workload` and `tests_mirror_metrics` pass untouched.
+    # The `overdue` annotation inherits the exclusion here too, which is the whole of
+    # what "N/A is never overdue" means on this report.
     task_active, task_cancelled = _active_project_filter('phase__project__')
     task_base = (
         Task.objects
         .filter(assigned_to__isnull=False, **task_active)
         .filter(human_owned_tasks_q())
+        .filter(applicable_tasks_q())
         .exclude(**task_cancelled)
     )
 
@@ -181,12 +192,16 @@ def build_user_status_rows(report_date):
     # The other side of done_by_others, credited to the person who did the work. This is
     # what makes a coordinator's effort visible: they hold no tasks, so every column
     # above reads zero for them however many tasks they closed. Counts tasks assigned
-    # to someone else AND tasks assigned to nobody. Same liveness and mirror rules as
-    # task_base, minus its assigned_to filter.
+    # to someone else AND tasks assigned to nobody. Same liveness, mirror and
+    # applicability rules as task_base, minus its assigned_to filter — the three
+    # filters are repeated rather than shared because this queryset deliberately
+    # drops one of task_base's four and copying the remaining three is clearer than
+    # building task_base in two stages.
     closed_for_others_by_profile = dict(
         Task.objects
         .filter(**task_active)
         .filter(human_owned_tasks_q())
+        .filter(applicable_tasks_q())
         .exclude(**task_cancelled)
         .filter(done_on_date)
         .annotate(doer_id=doer)

@@ -26,7 +26,13 @@ The Blocked transition still routes through the shared base.html block modal
     </select>
   </form>
 {% else %}
-  {% if task.status == 'Done' %}
+  {% comment %}N/A first — the chain below ends in a bare else that prints "Not Started",
+     so an unrecognised row is mislabelled rather than unstyled. An N/A task keeps its
+     original stored status, so without this it would read as whatever it was when the
+     PM marked it. Presentation only.{% endcomment %}
+  {% if task.is_not_applicable %}
+    <span class="badge bg-light text-muted border">Not Applicable</span>
+  {% elif task.status == 'Done' %}
     <span class="badge bg-success">Done</span>
   {% elif task.status == 'In Progress' %}
     <span class="badge bg-primary">In Progress</span>

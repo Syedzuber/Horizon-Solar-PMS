@@ -51,6 +51,87 @@
   </div>
 </div>
 
+{# ── Not Applicable — the PM's scope call, reversible, reason required both ways ── #}
+{# Renders the STATE to anyone who may see the task, and the CONTROLS only to the     #}
+{# assigned PM (can_mark_not_applicable, which also refuses mirrors). Two separate    #}
+{# conditions on purpose: a coordinator or engineer must be able to see that the work #}
+{# was ruled out of scope, and why, without being able to change it.                  #}
+{% if task.is_not_applicable or can_mark_not_applicable %}
+<div class="card mb-3 border-secondary">
+  <div class="card-body py-3">
+    {% if task.is_not_applicable %}
+      <div class="d-flex align-items-center gap-2 mb-2">
+        <span class="badge bg-light text-muted border">Not Applicable</span>
+        <span class="small text-muted">
+          This task is excluded from progress and from every overdue count.
+          Its status is unchanged underneath.
+        </span>
+      </div>
+      <p class="small text-muted mb-2">
+        Last changed by
+        {% if task.not_applicable_marked_by %}
+          {{ task.not_applicable_marked_by.user.get_full_name|default:task.not_applicable_marked_by.user.username }}
+        {% else %}—{% endif %}
+        on {{ task.not_applicable_marked_at|date:"d M Y H:i"|default:"—" }}
+      </p>
+      {# The full append-only history, not only the latest entry — a task marked out  #}
+      {# of scope and later pulled back has two reasons and both matter.              #}
+      <pre class="small text-muted bg-light border rounded p-2 mb-3"
+           style="white-space:pre-wrap;">{{ task.not_applicable_reason }}</pre>
+
+      {% if can_mark_not_applicable %}
+        <form method="post" action="{% url 'task_set_not_applicable' project.project_id task.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="not_applicable" value="0">
+          <label for="naReasonUndo" class="form-label small mb-1">
+            Why does this task apply after all? <span class="text-danger">*</span>
+          </label>
+          <textarea id="naReasonUndo" name="not_applicable_reason" rows="2" required
+                    class="form-control form-control-sm mb-2"
+                    placeholder="This reason is appended to the history above, not replacing it."></textarea>
+          <button type="submit" class="btn btn-sm btn-outline-secondary">
+            Mark as applicable again
+          </button>
+        </form>
+      {% endif %}
+
+    {% else %}
+      {# Not currently N/A, and this user may mark it. Refused server-side for a Done #}
+      {# task, so the control is not offered for one either.                          #}
+      {% if task.status == 'Done' %}
+        <p class="small text-muted mb-0">
+          This task is Done and cannot be marked Not Applicable.
+        </p>
+      {% else %}
+        <details>
+          <summary class="small text-muted" style="cursor:pointer;">
+            Mark this task Not Applicable
+          </summary>
+          <p class="small text-muted mt-2 mb-2">
+            Use this when the work turns out not to be in scope for this site. The task
+            stays visible and keeps its status, but drops out of progress percentages and
+            every overdue count. You can reverse it.
+          </p>
+          <form method="post" action="{% url 'task_set_not_applicable' project.project_id task.pk %}">
+            {% csrf_token %}
+            <input type="hidden" name="not_applicable" value="1">
+            <label for="naReason" class="form-label small mb-1">
+              Why is this task not applicable? <span class="text-danger">*</span>
+            </label>
+            <textarea id="naReason" name="not_applicable_reason" rows="2" required
+                      class="form-control form-control-sm mb-2"
+                      placeholder="e.g. Site already has a compliant earthing pit; no new pit required."></textarea>
+            <button type="submit" class="btn btn-sm btn-outline-secondary">
+              Mark Not Applicable
+            </button>
+          </form>
+        </details>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── Two-step approval (2.1) — renders only for an OPEX, non-mirror task ── #}
 <div id="taskApprovalBlock">
   {% include 'projects/partials/_task_approval.html' %}

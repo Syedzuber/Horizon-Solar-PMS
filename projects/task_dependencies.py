@@ -34,11 +34,24 @@ def incomplete_predecessors(task):
     warning lists them in the sequence the reader is looking at.
     """
     from .models import Task
+    from .utils import applicable_tasks_q
 
+    # A predecessor the PM has marked Not Applicable does not hold anything up: it is
+    # work that turned out not to be in scope, so it can never reach Done and would
+    # otherwise warn about this task forever. Same reasoning as its exclusion from
+    # `current_phase()` — nobody is waiting on it. `.exclude(status=Task.DONE)` above
+    # is exactly the "not Done" shape that absorbs an N/A task, which is why the
+    # predicate is stated here rather than assumed.
+    #
+    # INERT TODAY AND CORRECT ANYWAY: `materialise_task_dependencies()` is still
+    # unwired, so `TaskDependency` holds no rows and this function returns empty for
+    # every task. Fixed now because the day that call lands is not the day to discover
+    # an N/A task blocking its successors.
     return list(
         Task.objects
         .filter(dependents__successor=task)      # edges where `task` is the successor
         .exclude(status=Task.DONE)
+        .filter(applicable_tasks_q())
         .select_related('phase')
         .order_by('phase__phase_order', 'task_order')
     )

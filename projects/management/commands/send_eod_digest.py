@@ -115,7 +115,7 @@ class Command(BaseCommand):
 
         from projects.models import Task, ActivityLog, UserProfile, Project, Issue
         from projects.notifications import send_notification, _log
-        from projects.utils import human_owned_tasks_q
+        from projects.utils import human_owned_tasks_q, applicable_tasks_q
 
         dry_run   = options['dry_run']
         only_email = options['user'].strip().lower()
@@ -201,6 +201,7 @@ class Command(BaseCommand):
             Task.objects
             .filter(assigned_to__in=recipient_pks)
             .filter(human_owned_tasks_q())
+            .filter(applicable_tasks_q())
             .exclude(status=Task.DONE)
             .values_list('assigned_to')
             .annotate(c=Count('id'))
@@ -273,6 +274,7 @@ class Command(BaseCommand):
                         phase__project__is_deleted=False,
                         phase__project__activated_at__isnull=False)
                 .filter(human_owned_tasks_q())
+                .filter(applicable_tasks_q())
                 .exclude(phase__project__status='Cancelled')
                 .exclude(status=Task.DONE)
                 .values_list('phase__project__coordinators')
@@ -421,7 +423,7 @@ class Command(BaseCommand):
     def _company_totals(self, today):
         """Company-wide totals — every user's activity counts, no actor filter."""
         from projects.models import Task, ActivityLog
-        from projects.utils import human_owned_tasks_q
+        from projects.utils import human_owned_tasks_q, applicable_tasks_q
 
         # Metric 1: open assigned tasks across active (not soft-deleted) projects.
         # Mirrors excluded (R-20) — the company total must agree with the per-user
@@ -430,6 +432,7 @@ class Command(BaseCommand):
             Task.objects
             .filter(assigned_to__isnull=False, phase__project__is_deleted=False)
             .filter(human_owned_tasks_q())
+            .filter(applicable_tasks_q())
             .exclude(status=Task.DONE)
             .count()
         )

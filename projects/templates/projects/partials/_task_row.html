@@ -17,8 +17,13 @@ Expected context:
                                   option below and the compact approval block
   oob                          — when True, mark the <tr> for out-of-band swap
 {% endcomment %}
+{% comment %}An N/A row is DE-EMPHASISED, NEVER HIDDEN. The work was ruled out of scope,
+   not deleted, and a PM has to be able to see what they excluded in order to reverse
+   it — a hidden row is an un-auditable one. Opacity only: the row keeps its position,
+   its task_order and every control that is not the status dropdown.{% endcomment %}
 <tr id="task-row-{{ task.pk }}"{% if oob %} hx-swap-oob="true"{% endif %}
-    {% if task.assigned_to and task.assigned_to == request.user.profile %}class="task-row-mine"{% endif %}
+    {% if task.is_not_applicable %}class="task-row-na" style="opacity:.55;"
+    {% elif task.assigned_to and task.assigned_to == request.user.profile %}class="task-row-mine"{% endif %}
     data-task-id="{{ task.pk }}"
     data-project-id="{{ project.project_id }}"
     data-attachment-count="{{ task.active_attachment_count }}">
@@ -103,7 +108,14 @@ Expected context:
        so the status control is never rendered for one, rather than rendered and then
        refusing on submit. NO NEW MARKUP and no new branch: the disabled-select and
        due-date-prompt logic below is untouched for every other row.{% endcomment %}
-    {% if not task.is_mirror and is_assigned_pm or not task.is_mirror and user_task_role == task.assigned_role %}
+    {% comment %}`not task.is_not_applicable` added beside the mirror term, by the SAME
+       mechanism and for a similar reason: an N/A row falls through to the read-only
+       badge branch below, which now has an N/A branch of its own. Nothing about the
+       dropdown's CONTENTS changes — `Task.STATUS_CHOICES` is untouched and there is no
+       fifth option — the control simply is not rendered for a row whose work is out of
+       scope, exactly as it is not rendered for a mirror. The stored status is still
+       whatever it was; un-marking brings the control straight back.{% endcomment %}
+    {% if not task.is_mirror and not task.is_not_applicable and is_assigned_pm or not task.is_mirror and not task.is_not_applicable and user_task_role == task.assigned_role %}
       <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline"
             hx-post="{% url 'task_status_update' project.project_id task.pk %}"
             hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
@@ -159,7 +171,15 @@ Expected context:
         {% endif %}
       </form>
     {% else %}
-      {% if task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
+      {% comment %}N/A IS TESTED FIRST, AND THAT ORDER IS THE POINT. The chain below ends
+         in a bare {% templatetag openblock %} else {% templatetag closeblock %} that
+         prints the literal words "Not Started", so any row it does not recognise is
+         MISLABELLED rather than unstyled. An N/A task still holds its original stored
+         status underneath — that is the whole design — so without this branch it would
+         read as Not Started, In Progress or Blocked depending on when it was marked.
+         Presentation only: nothing here writes or reads a fifth status.{% endcomment %}
+      {% if task.is_not_applicable %}<span class="badge bg-light text-muted border" title="Not applicable — excluded from progress and overdue counts">Not Applicable</span>
+      {% elif task.status == 'Done' %}<span class="badge" style="background:var(--hz-green)">Done</span>
       {% elif task.status == 'Blocked' %}<span class="badge bg-danger">Blocked</span>
       {% elif task.status == 'In Progress' %}<span class="badge bg-primary">In Progress</span>
       {% else %}<span class="badge bg-secondary">Not Started</span>{% endif %}
