@@ -3517,3 +3517,53 @@ branching on it:
 The column is fine and every one of those reads is correct. The COMMENT is false, and it is
 the kind of false that gets a column deleted: it tells the next reader that dropping the
 write is safe. One comment edit, out of MODE for every session that has noticed it.
+
+### B32 — three things found while removing the approval deadlock (prompt 2.1 self-certification), none of them in that session's MODE
+
+Recorded by the self-certification session, whose MODE was "remove the approval deadlock"
+and explicitly forbade notifications, the design module, the CEO report and the two live
+rows being repaired by hand. Each was verified at the time and left untouched. Numbered B32
+because B25 was already taken when this was first appended; the follow-up session that
+narrowed who may self-certify renumbered it and closed one of the four.
+
+**1. A site with no active approver waits correctly, but nothing says so (departed-PM
+reassignment).** `user_may_self_certify()` now requires the submitter to hold the approval
+signature themselves, so a site engineer on a project whose PM has been deactivated takes
+the ordinary path: the submission is recorded and the task sits at "Awaiting approval". That
+is the correct outcome and the deadlock is not back — the task is neither lost nor silently
+completed, and reassigning `assigned_pm` lets the new PM approve it with no code change
+(`tests_approval_pool.DeactivatedPmTests` asserts exactly that, end to end).
+
+What is missing is the SIGNAL. On every screen that task is indistinguishable from one
+waiting on a PM who will be along shortly: the row badge reads "Awaiting approval", its
+tooltip names "the project manager or QA/QC", and no surface anywhere says the project has
+nobody active who can give that approval. `task_has_independent_approver(project, None)`
+already answers the question — it was deliberately left taking a nullable submitter so this
+work would not need a new helper — but nothing calls it that way. The shape is a warning on
+the project overview, or a filter on an admin screen listing sites whose approver pool is
+empty, plus most likely a nudge at the point `assigned_pm` is deactivated. Out of MODE for
+both sessions, which were fixing the completion rule and not building notifications.
+
+**2. `due_date` has no validation below the view layer, and one live row proves it
+(task 2072).** `forms.check_typed_date()` guards all four task entry points — `TaskAddForm`,
+the Finance inline set on In Progress, and both arms of the due-date update — but
+`Task.due_date` is a bare `DateField` with no validators and no `CheckConstraint`, and
+`TaskAdmin` neither makes it read-only nor cleans it. A Django-admin edit writes any year at
+all. The local database holds one such row (`HRP-RES-2026-012`, "DEV Conduct",
+`0026-04-25` — a dropped "20"). The model-level absence is deliberate and documented in
+`forms.py`: a constraint would refuse the existing bad rows on the very save that corrects
+them. What is NOT deliberate is the admin form bypassing the helper. `manage.py
+list_implausible_dates` already reports the rows.
+
+**3. GRN is not the only writer of blank `action_code` rows.** B24 item 8 recorded
+`confirm_grn` and `override_grn`; the same is true of the due-date update path, which calls
+`log_activity()` with no `action_code` for both "Updated due date for task" and "Cleared due
+date for task". The EOD digest groups on `action_code`, so due-date maintenance is counted
+nowhere. Same one-line fix as B24 item 8, same reason it was not made here.
+
+*Closed from the original four:* **the phase-list confirm modal wording.** The modal in
+`project_overview.html` kept the old "Submit for approval" title, body and confirm button
+while the row button beside it said "Complete (self-certified)". Closed by the follow-up
+session — all three strings now branch on `can_self_certify`, and
+`tests_approval_pool.ButtonLabelTests` asserts the dialog and the row agree in both
+directions.

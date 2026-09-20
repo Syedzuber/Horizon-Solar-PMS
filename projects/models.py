@@ -509,6 +509,23 @@ class Task(models.Model):
     # rejection reason when it is not. One column because a task holds one open
     # verdict at a time, and the ActivityLog line beside it names which it was.
     approval_remarks     = models.TextField(blank=True, default='')
+    # True when the two signatures on this task are ONE person's, because at the
+    # moment of submission the project had no approver other than the submitter
+    # (permissions.task_has_independent_approver). `approved_by` then equals
+    # `submitted_by` and both timestamps are the same instant, which is exactly what
+    # this flag exists to make greppable: without it "PM approved their own work" and
+    # "nobody else could" are the same two rows and cannot be told apart afterwards.
+    #
+    # A COLUMN AND NOT A DERIVATION. `submitted_by == approved_by` looks like it says
+    # the same thing and does not: it is also true of any row an admin repaired by
+    # hand, and it would go on being true if the approver pool later gained a member.
+    # This records the state of the pool AT THE TIME, which is the fact an audit of
+    # self-certified completions actually needs.
+    #
+    # DEFAULT False AND NEVER NULL: every task predating this feature was completed
+    # under a rule that had no such path, so False is the true answer for all of them
+    # rather than a stand-in for "unknown".
+    approval_self_certified = models.BooleanField(default=False)
 
     created_at           = models.DateTimeField(auto_now_add=True)
 

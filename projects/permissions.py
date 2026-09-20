@@ -1257,6 +1257,129 @@ def user_can_approve_task(user, project):
     return bool(profile.is_qaqc) and user_can_view_project(user, project)
 
 
+def task_has_independent_approver(project, submitter_profile):
+    """
+    Return True if at least one ACTIVE user OTHER THAN `submitter_profile` passes
+    `user_can_approve_task()` for `project`.
+
+    This is the question `task_approve`'s self-approval guard creates and never
+    answers: that guard refuses the submitter, and on a project whose only approver
+    IS the submitter it therefore refuses everybody. Verified on production 20 Sep
+    2026 — nought `is_qaqc` holders company-wide and nought OPEX projects with a
+    coordinator, so every OPEX project's approver pool was exactly its assigned PM
+    and every PM submission deadlocked. Answering it here lets
+    `task_submit_for_approval` complete such a task as self-certified instead.
+
+    THE TRIGGER IS THE EMPTY POOL, NOT A ROLE. Nothing in this function looks at who
+    the submitter is or what they do — a PM submitting their own task, a PM
+    submitting on an engineer's behalf and an engineer on a site whose PM has been
+    deactivated all reach the same answer by the same route. A "skip the step when
+    the assignee is the PM" rule was considered and rejected: it would have been a
+    second, role-shaped copy of the authority model, true today only because the
+    pool happens to be one person.
+
+    IT CANNOT DRIFT FROM `user_can_approve_task()`, BY CONSTRUCTION. The set built
+    below is a CANDIDATE set, not an answer: it exists only to bound the number of
+    users this has to ask about, and every candidate is then put through
+    `user_can_approve_task()` itself. Widening or narrowing that predicate changes
+    this function's result with no edit here. What the candidate set must stay is a
+    SUPERSET of everyone the predicate admits, and it is exactly that by reading the
+    predicate's own two arms: `user_can_manage_project()` admits the assigned PM and
+    this project's coordinators, and the second arm admits `is_qaqc` holders. There
+    is no third source. Should a third ever be added to `user_can_approve_task()`,
+    it must be added to the candidate set here too — that is the one coupling, and
+    it is stated rather than hidden.
+
+    ACTIVE ON BOTH MODELS. `UserProfile.is_active` is the portal's soft
+    deactivation and `User.is_active` is Django's login gate; a person switched off
+    by either cannot sign anything, so counting them would hand the site an approver
+    who can never arrive. This is the only term NOT delegated to the predicate,
+    which has no opinion on deactivation because every other caller reaches it
+    through `request.user` and Django has already refused an inactive login.
+
+    NO MODEL IMPORT, deliberately — see the note at the top of this module. The
+    `UserProfile` class is reached through `project.coordinators.model`, the target
+    of the relation, so this module stays free of the circular imports that the
+    no-model-imports rule exists to prevent.
+    """
+    if project is None:
+        return False
+
+    user_profile_model = project.coordinators.model
+
+    candidate_pks = set()
+    # Read from the FK id, not `project.assigned_pm`, so an unset PM costs no query.
+    if project.assigned_pm_id is not None:
+        candidate_pks.add(project.assigned_pm_id)
+    candidate_pks.update(project.coordinators.values_list('pk', flat=True))
+    candidate_pks.update(
+        user_profile_model.objects.filter(is_qaqc=True).values_list('pk', flat=True)
+    )
+
+    # The whole point of the function: the submitter is not their own second
+    # signature. Dropped from the CANDIDATES rather than tested inside the loop, so
+    # a project whose only approver is the submitter does not even reach the
+    # predicate.
+    if submitter_profile is not None:
+        candidate_pks.discard(submitter_profile.pk)
+
+    if not candidate_pks:
+        return False
+
+    candidates = (
+        user_profile_model.objects
+        .filter(pk__in=candidate_pks, is_active=True, user__is_active=True)
+        .select_related('user')
+    )
+    for candidate in candidates:
+        if user_can_approve_task(candidate.user, project):
+            return True
+    return False
+
+
+def user_may_self_certify(user, project):
+    """
+    Return True if `user` submitting a task on `project` would COMPLETE it under
+    their own name rather than queue it for someone else's signature.
+
+    TWO TERMS, AND BOTH ARE NECESSARY:
+
+        user_can_approve_task(user, project)              — they hold the signature
+        not task_has_independent_approver(project, ...)   — nobody else does
+
+    THE FIRST TERM IS THE ONE THIS FUNCTION EXISTS FOR. Self-certification collapses
+    two signatures into one; it can only do that for somebody who was entitled to
+    give the second one. Without this term an empty pool promoted WHOEVER happened
+    to be submitting — on a site whose PM had been deactivated, a site engineer
+    self-certified their own work, which is not one person doing two jobs but a
+    person doing a job that was never theirs. That case now takes the ordinary path
+    and waits at "Awaiting approval" for a manager who must be reassigned; see the
+    departed-PM entry in the deferred log.
+
+    SO AN EMPTY POOL NO LONGER IMPLIES SELF-CERTIFICATION, and the two helpers stay
+    separate for that reason. `task_has_independent_approver()` answers a question
+    about the PROJECT ("is there a second signature available"), which the deferred
+    work on departed PMs will want on its own to warn about sites that have no
+    active approver at all. This answers a question about a PERSON on that project,
+    and only this one may relabel a button or complete a task.
+
+    ONE FUNCTION, THREE CALLERS, DELIBERATELY. `task_submit_for_approval` decides
+    with it, and `_task_approval_context()` and `_phase_list_two_step()` label the
+    button with it. A button that offered to complete a task the endpoint would
+    merely queue — or the reverse — is the one failure this feature cannot have,
+    because it would take a completion under someone's name while the control they
+    pressed said it was asking for review. Reassembling the two terms at each site
+    is exactly how that drift starts, so they are assembled once, here.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # Cheap term first, and it is also the one that refuses most callers: every site
+    # engineer on a healthy project fails here without the pool ever being built.
+    if not user_can_approve_task(user, project):
+        return False
+    return not task_has_independent_approver(project, profile)
+
 
 def user_can_waive_punch_point(user, project):
     """

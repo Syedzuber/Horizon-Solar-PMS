@@ -1349,7 +1349,15 @@ at the top of this page unmodified, exactly as it does on task_detail.
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header py-2">
-        <h6 class="modal-title mb-0">Submit for approval</h6>
+        {% comment %}THE DIALOG IS WHERE THE PERSON ACTUALLY CONFIRMS, so it carries the
+           same three words the row button does. `can_self_certify` comes from
+           _phase_list_two_step() and is the endpoint's own predicate
+           (permissions.user_may_self_certify), not a second reading of it: the row said
+           "Complete", and the box they press OK in must not say "Submit for approval" and
+           then complete the task anyway. The modal is rendered ONCE per page and the flag
+           is per-viewer, not per-task, so this one conditional covers every row that opens
+           it. Two more follow: the body line and the footer's confirm button.{% endcomment %}
+        <h6 class="modal-title mb-0">{% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}</h6>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <form id="submitApprovalForm" method="post"
@@ -1368,7 +1376,11 @@ at the top of this page unmodified, exactly as it does on task_detail.
                     name="submission_remarks" rows="3" required
                     placeholder="Describe the completed work"></textarea>
           <p class="text-muted mb-0 mt-2" style="font-size:.72rem;">
-            The task stays In Progress until the project manager or QA/QC approves it.
+            {% if can_self_certify %}
+              No other approver on this project — this completes the task under your name.
+            {% else %}
+              The task stays In Progress until the project manager or QA/QC approves it.
+            {% endif %}
           </p>
           {% comment %}A SINK FOR AN OOB SWAP THAT BELONGS TO ANOTHER SCREEN.
              `_task_approval_response.html` also swaps `#taskStatusBlock`, which is
@@ -1381,7 +1393,7 @@ at the top of this page unmodified, exactly as it does on task_detail.
         </div>
         <div class="modal-footer py-2">
           <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-brand btn-sm">Submit for approval</button>
+          <button type="submit" class="btn btn-brand btn-sm">{% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}</button>
         </div>
       </form>
     </div>

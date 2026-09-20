@@ -16,7 +16,9 @@ Three states, and they are mutually exclusive:
   approved                 -> a completed task; show who signed it off
   submitted, not approved  -> the approver sees Approve/Reject; everyone else
                               sees that it is waiting and on whom
-  neither                  -> the assignee (or PM) sees the submit form
+  neither                  -> the assignee (or PM) sees the submit form, labelled
+                              "Complete (self-certified)" when `can_self_certify`
+                              says this project has no approver but them
 {% endcomment %}
 {% if show_approval_panel %}
   <div class="card shadow-sm mb-4">
@@ -143,7 +145,21 @@ Three states, and they are mutually exclusive:
                           name="submission_remarks" rows="2"
                           placeholder="Describe the completed work"></textarea>
               </div>
-              <button type="submit" class="btn btn-brand btn-sm">Submit for approval</button>
+              {% comment %}`can_self_certify` is computed by _task_approval_context() and
+                 means "this project has no approver other than you", so pressing Submit
+                 completes the task instead of queueing it. The label says so BEFORE the
+                 press: the one thing this panel must never do is take a completion under
+                 someone's name while the button they pressed said it was asking for
+                 review. The endpoint decides on its own reading of the pool either way —
+                 this is the honest label, not the rule.{% endcomment %}
+              {% if can_self_certify %}
+                <button type="submit" class="btn btn-brand btn-sm">Complete (self-certified)</button>
+                <p class="text-muted small mb-0 mt-2">
+                  No other approver on this project — this completes the task under your name.
+                </p>
+              {% else %}
+                <button type="submit" class="btn btn-brand btn-sm">Submit for approval</button>
+              {% endif %}
             </form>
           {% else %}
             <p class="text-muted small mb-0">

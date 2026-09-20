@@ -35,8 +35,15 @@ status (2.1 §3), so the badge is the only thing on the row that changes and the
 swap below can keep it honest. The approver's controls stay on task_detail, and
 this row tells them the task is waiting.
 
+`can_self_certify` IS NOT A PER-ROW QUERY, for the same reason the rest of this
+file exists. `permissions.task_has_independent_approver()` takes no task — it asks
+about the project and the viewer — so `_phase_list_two_step()` computes it once per
+page render and every row reads the same value. The button it relabels still POSTs
+to the same endpoint; the endpoint reads the pool itself and decides. This is the
+honest label, not the rule.
+
 Expected context:
-  task, project, is_assigned_pm, two_step_completion
+  task, project, is_assigned_pm, two_step_completion, can_self_certify
 {% endcomment %}
 {% if two_step_completion and not task.is_mirror %}
   {% comment %}The id is the hx-target of the submit form in project_overview.html's
@@ -66,9 +73,18 @@ Expected context:
                 data-task-name="{{ task.task_name }}"
                 data-target-id="#task-approval-{{ task.pk }}"
                 data-submit-url="{% url 'task_submit_for_approval' project.project_id task.pk %}"
-                title="Submit this work for approval — a RESCO task is completed by its approver, not here.">
-          Submit for approval
+                {% if can_self_certify %}title="No other approver on this project — this completes the task under your name."{% else %}title="Submit this work for approval — a RESCO task is completed by its approver, not here."{% endif %}>
+          {% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}
         </button>
+        {% if can_self_certify %}
+          {% comment %}The note is a sibling of the button and INSIDE the swap target, so
+             the badge the endpoint returns replaces it along with the button — after a
+             self-certified completion the row reads "Approved" and nothing else, rather
+             than keeping an offer that has already been taken.{% endcomment %}
+          <span class="text-muted d-block" style="font-size:.7rem;">
+            No other approver on this project — this completes the task under your name.
+          </span>
+        {% endif %}
       {% else %}
         {% comment %}`task_submit_for_approval` refuses anything that is not In Progress,
            so the button is not drawn and the reason is given instead — the row never

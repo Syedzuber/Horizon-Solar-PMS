@@ -75,6 +75,10 @@ from .permissions import (
     # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
     # section header in permissions.py.
     user_can_submit_task_for_approval, user_can_approve_task,
+    # "would this person's submission complete the task under their own name" - the
+    # question the self-approval guard in task_approve creates and does not answer.
+    # One predicate for the endpoint and for both button labels; see its docstring.
+    user_may_self_certify,
     # 2.3a - waiving a punch point is PM-only and NARROWER than approving a task;
     # the docstring on the predicate says why is_qaqc is not enough.
     user_can_waive_punch_point,
@@ -3945,8 +3949,9 @@ def _gate_task_pk(project):
     return first_task.pk if first_task else None
 
 
-def _phase_list_two_step(project):
-    """Is the two-step completion rule (2.1) in force for this project's task rows?
+def _phase_list_two_step(project, request):
+    """Is the two-step completion rule (2.1) in force for this project's task rows,
+    and would this viewer's submission complete a task outright?
 
     ONE BUILDER, TWO CALLERS -- the same reason `_task_approval_context()` exists.
     The phase list renders a row twice: once by `project_overview` on the full page
@@ -3964,8 +3969,25 @@ def _phase_list_two_step(project):
     task whatever the markup offered. This flag only stops the row offering a choice
     that rung would refuse -- delete it and the refusal is unchanged, the user simply
     meets it after clicking instead of before.
+
+    `can_self_certify` IS PER-PAGE, NOT PER-ROW, and that is why it is computed in
+    this builder rather than in the row partial. `user_may_self_certify()` asks about
+    the project and the viewer only -- it takes no task -- so the answer is the same
+    for all 23 rows of a stock OPEX site, and asking it once here keeps the promise
+    `_task_row_approval.html` makes in its own header about not putting a query on a
+    row. It is scoped to OPEX for the same reason as `two_step_completion`: on a
+    Residential site nothing reads it and the query would be pure waste.
+
+    IT IS THE ENDPOINT'S OWN PREDICATE, not a restatement of it. Both this and
+    `task_submit_for_approval` call `user_may_self_certify()`, so the label on the
+    button and the act behind it cannot disagree. It also feeds the confirm modal in
+    project_overview.html, which is the dialog the person actually presses OK in.
     """
-    return {'two_step_completion': project.project_type == 'OPEX'}
+    two_step = project.project_type == 'OPEX'
+    return {
+        'two_step_completion': two_step,
+        'can_self_certify': two_step and user_may_self_certify(request.user, project),
+    }
 
 
 def _render_task_row_hx(request, project, task, oob_tasks=None):
@@ -3987,7 +4009,7 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
         'user_task_role':      user_task_role,
         'role':                role,
         'task_status_choices': Task.STATUS_CHOICES,
-        **_phase_list_two_step(project),
+        **_phase_list_two_step(project, request),
     })
 
 
@@ -4017,14 +4039,20 @@ def _task_approval_context(request, project, task):
     """
     profile = getattr(request.user, 'profile', None)
     eligible = project.project_type == 'OPEX' and not task.is_mirror
+    can_submit = (eligible and profile is not None
+                  and user_can_submit_task_for_approval(request.user, task, project))
     return {
         'show_approval_panel': eligible,
         # Both are False for an ineligible task, so a stray include renders nothing
         # actionable rather than an unguarded form.
-        'can_submit_task':  eligible and profile is not None
-                            and user_can_submit_task_for_approval(request.user, task, project),
+        'can_submit_task':  can_submit,
         'can_approve_task': eligible and profile is not None
                             and user_can_approve_task(request.user, project),
+        # Would pressing Submit complete the task outright? THE ENDPOINT'S OWN
+        # PREDICATE, called here rather than restated, so the button and the act
+        # behind it cannot disagree. Gated on `can_submit` so it costs its queries
+        # only for someone actually being offered the button it relabels.
+        'can_self_certify': can_submit and user_may_self_certify(request.user, project),
     }
 
 
@@ -4286,10 +4314,12 @@ _TASK_STATUS_NEEDS_BLOCK_REASON = 'needs_block_reason'
 
 
 class _ApprovalRolledBack(Exception):
-    """Internal control flow for `task_approve`: raised to abort its transaction when
+    """Internal control flow for the two views that write approval columns and then
+    ask for Done - `task_approve`, and `task_submit_for_approval` on its
+    self-certified branch. Raised to abort their transaction when
     `_apply_task_status_change()` refuses the completion, so the approval columns are
-    not left written against a task that never reached Done. Never escapes that view
-    and is never raised anywhere else."""
+    not left written against a task that never reached Done. Never escapes either
+    view and is never raised anywhere else."""
 
 
 def _apply_task_status_change(task, new_status, profile, request, project):
@@ -4877,25 +4907,107 @@ def task_submit_for_approval(request, project_id, task_id):
         )
         return _approval_response(request, project, task)
 
-    Task.objects.filter(pk=task.pk).update(
-        submitted_by=profile,
-        submitted_at=timezone.now(),
-        submission_remarks=remarks,
-        # A resubmission after a rejection must not inherit the rejection's text.
-        approval_remarks='',
-    )
-    # ActivityLog and NOT a StatusTransition, deliberately. The ledger records
-    # STATUS CHANGES (R-2) and the status did not change; a row reading
-    # 'In Progress -> In Progress' would be a transition that never happened, and
-    # would mislead every reader that pairs from- and to-status. The feed is the
-    # right home for "something happened to this task".
+    # THE FORK. Everything above this line is unchanged and applies to both paths;
+    # everything below depends on one question only - would this submission complete
+    # the task under this person's own name (permissions.user_may_self_certify), which
+    # is true when they hold the approval signature AND nobody else on the project
+    # does. Asked HERE and not in the template, not from the submitter's role, and not
+    # from the assignee's: see that helper for why BOTH terms are needed, and why an
+    # empty approver pool on its own is not enough.
+    #
+    # WHY THE BLANK-REMARK REFUSAL IS NOT REPEATED BELOW. Self-certification needs a
+    # non-empty remark more than an ordinary submission does - it is the only account
+    # of the work that will ever exist on that task - and the guard immediately above
+    # already refuses a blank one on BOTH paths, before any write. A second check
+    # inside the branch would be unreachable code asserting a rule that has already
+    # held.
+    if not user_may_self_certify(request.user, project):
+        Task.objects.filter(pk=task.pk).update(
+            submitted_by=profile,
+            submitted_at=timezone.now(),
+            submission_remarks=remarks,
+            # A resubmission after a rejection must not inherit the rejection's text.
+            approval_remarks='',
+        )
+        # ActivityLog and NOT a StatusTransition, deliberately. The ledger records
+        # STATUS CHANGES (R-2) and the status did not change; a row reading
+        # 'In Progress -> In Progress' would be a transition that never happened, and
+        # would mislead every reader that pairs from- and to-status. The feed is the
+        # right home for "something happened to this task".
+        log_activity(
+            project, profile,
+            f"Submitted for approval: {task.task_name}",
+            entity_type='Task', entity_id=task.pk,
+            action_code='task_submitted_for_approval',
+        )
+        messages.success(request, f"'{task.task_name}' submitted for approval.")
+        return _approval_response(request, project, task)
+
+    # ---- SELF-CERTIFIED COMPLETION ----------------------------------------
+    # This person holds the approval signature and nobody else on the project does,
+    # so there is no second signature to wait for and the submission IS it. Both
+    # halves of the handshake are written against the same person at the same
+    # instant, `approval_self_certified` records that this was the pool's doing and
+    # not a person approving past a rule, and the task then goes to Done THROUGH
+    # `_apply_task_status_change()` - the identical call `task_approve` makes, with
+    # the identical arguments.
+    #
+    # WHY THAT CALL AND NOT A DIRECT WRITE TO `status`. It is the only path that
+    # writes a StatusTransition (R-2/R-18), and a self-certified completion must be
+    # indistinguishable from any other in the ledger - a Done task with no
+    # transition row is a hole no reader can reconstruct. It also re-checks the
+    # transition table and rung 1, which is why `approved_at` is set on the
+    # in-memory instance FIRST: rung 1 reads it off the object it is handed and
+    # would otherwise refuse the very completion this branch exists to perform.
+    #
+    # THE PAIR IS ATOMIC, for the reason `task_approve` gives: if the status change
+    # is refused for any reason the approval columns unwind with it, rather than
+    # leaving a task marked approved-and-self-certified that never reached Done.
+    certified_at = timezone.now()
+    try:
+        with transaction.atomic():
+            Task.objects.filter(pk=task.pk).update(
+                submitted_by=profile,
+                submitted_at=certified_at,
+                submission_remarks=remarks,
+                approved_by=profile,
+                approved_at=certified_at,
+                # The submitter's account of the work is also the approval note:
+                # there is no second person to have written a different one, and an
+                # empty `approval_remarks` on a completed task would read as a
+                # sign-off nobody explained.
+                approval_remarks=remarks,
+                approval_self_certified=True,
+            )
+            task.submitted_by            = profile
+            task.submitted_at            = certified_at
+            task.submission_remarks      = remarks
+            task.approved_by             = profile
+            task.approved_at             = certified_at
+            task.approval_remarks        = remarks
+            task.approval_self_certified = True
+
+            outcome = _apply_task_status_change(
+                task, Task.DONE, profile, request, project,
+            )
+            if outcome != _TASK_STATUS_APPLIED:
+                # The helper has already told the user why; unwind so nothing is
+                # left written against a task that never completed.
+                raise _ApprovalRolledBack
+    except _ApprovalRolledBack:
+        return _approval_response(request, project, task)
+
     log_activity(
         project, profile,
-        f"Submitted for approval: {task.task_name}",
+        f"Self-certified and completed: {task.task_name}",
         entity_type='Task', entity_id=task.pk,
-        action_code='task_submitted_for_approval',
+        action_code='task_self_certified',
     )
-    messages.success(request, f"'{task.task_name}' submitted for approval.")
+    messages.success(
+        request,
+        f"'{task.task_name}' completed as self-certified - there is no other "
+        f"approver on this project, so it was signed off under your name."
+    )
     return _approval_response(request, project, task)
 
 
@@ -8876,7 +8988,7 @@ def project_overview(request, project_id):
         'gantt_can_view_client':       gantt_can_view_client,
         'gantt_internal':              gantt_internal,
         'gantt_client':                gantt_client,
-        **_phase_list_two_step(project),
+        **_phase_list_two_step(project, request),
     })
 
 
