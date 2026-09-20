@@ -56,6 +56,11 @@
   {% include 'projects/partials/_task_approval.html' %}
 </div>
 
+{# ── Delivery consignments (T4) — only for the four OPEX delivery mirrors ── #}
+{% if delivery_detail %}
+  {% include 'projects/partials/_task_delivery_detail.html' %}
+{% endif %}
+
 {# ── Attachments section ──────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

@@ -1,0 +1,166 @@
+{% comment %}
+Delivery consignments panel (T4). Included by task_detail.html and rendered only when
+`delivery_detail` is not None — i.e. only for the four OPEX delivery mirror tasks. The
+template asks nothing about project type or template codes: that decision is
+`delivery_detail_for_task()`'s, and asking it a second time here is how the two would
+come to disagree.
+
+READ-ONLY. There is no form, no button and no link that writes anything. The task's
+status stays the business of sync_delivery_mirrors() and the "Derived" badge above.
+
+THE TWO FIGURES ARE SEPARATE ON PURPOSE (R3): consignments counts challans, the
+quantity line counts units of material. They are never combined into one percentage.
+
+THE QUANTITY LINE IS AGAINST WHAT WAS DISPATCHED (R4). Nothing joins a delivery line
+to the site's BOQ (B-18 is not built), so this page cannot say what share of the site's
+requirement has arrived and must never imply it. The words "dispatched so far" carry
+that, and the muted line under the figure says it again in full. Do not reword either
+into "delivered", "complete" or a percentage.
+{% endcomment %}
+<div class="card shadow-sm mb-4" id="deliveryDetailSection">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold">
+      Consignments
+      {% if delivery_detail.consignments.total %}
+        <span class="badge bg-secondary ms-1">{{ delivery_detail.consignments.total }}</span>
+      {% endif %}
+    </span>
+    <small class="text-muted">
+      {% for category in delivery_detail.categories %}{% if not forloop.first %}, {% endif %}{{ category }}{% endfor %}
+    </small>
+  </div>
+
+  {% if delivery_detail.challans %}
+  <div class="card-body pb-2">
+    <div class="row g-3">
+
+      {# Figure (a): challans, always shown #}
+      <div class="col-md-6">
+        <small class="text-muted d-block">Consignments</small>
+        <span class="small">
+          <span class="fw-semibold">{{ delivery_detail.consignments.received }}</span> fully received
+          &middot;
+          <span class="fw-semibold">{{ delivery_detail.consignments.partial }}</span> partial
+          &middot;
+          <span class="fw-semibold">{{ delivery_detail.consignments.expected }}</span> expected
+        </span>
+      </div>
+
+      {# Figure (b): quantity, only when the category holds a single unit #}
+      <div class="col-md-6">
+        {% if delivery_detail.quantity %}
+          <small class="text-muted d-block">Received against dispatched so far</small>
+          <span class="small">
+            <span class="fw-semibold">{{ delivery_detail.quantity.received|floatformat:"-2" }}</span>
+            of
+            <span class="fw-semibold">{{ delivery_detail.quantity.ordered|floatformat:"-2" }}</span>
+            {{ delivery_detail.quantity.unit }} dispatched
+            {% if delivery_detail.quantity.damaged %}
+              <span class="text-danger">&middot; {{ delivery_detail.quantity.damaged }} damaged</span>
+            {% endif %}
+          </span>
+          <small class="text-muted d-block" style="font-size:.7rem;">
+            Against the quantity dispatched on these challans, not the site's requirement.
+          </small>
+        {% else %}
+          <small class="text-muted d-block">Received against dispatched so far</small>
+          <span class="small text-muted">
+            Mixed units ({% for unit in delivery_detail.units %}{% if not forloop.first %}, {% endif %}{{ unit }}{% endfor %}) &mdash; per-line figures below.
+          </span>
+          <small class="text-muted d-block" style="font-size:.7rem;">
+            Quantities in different units are never added together.
+          </small>
+        {% endif %}
+      </div>
+
+    </div>
+  </div>
+
+  <div class="table-responsive">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr>
+          <th style="width:9rem;">Challan</th>
+          <th>Item</th>
+          <th class="text-end" style="width:7rem;">Dispatched</th>
+          <th class="text-end" style="width:7rem;">Received</th>
+          <th class="text-end" style="width:6rem;">Damaged</th>
+          <th style="width:11rem;">GRN</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for challan in delivery_detail.challans %}
+        <tr class="table-light">
+          <td colspan="6" class="small">
+            <span class="fw-semibold">{{ challan.dc_number }}</span>
+            <span class="text-muted">&middot; {{ challan.dc_date|date:"d M Y" }}</span>
+            {% if challan.vendor %}<span class="text-muted">&middot; {{ challan.vendor.name }}</span>{% endif %}
+            {% if challan.state == 'received' %}
+              <span class="badge bg-success-subtle text-success-emphasis border ms-1">Fully received</span>
+            {% endif %}
+            {% if challan.state == 'partial' %}
+              <span class="badge bg-warning-subtle text-warning-emphasis border ms-1">Partial</span>
+            {% endif %}
+            {% if challan.state == 'expected' %}
+              <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-1">Expected</span>
+            {% endif %}
+            <span class="text-muted ms-1" style="font-size:.7rem;">Challan status: {{ challan.status }}</span>
+            {% comment %}"Expected delivery", not "Expected": this sits next to the
+               challan's own status, which has a value literally called Expected, and
+               the two side by side read as one contradictory phrase.{% endcomment %}
+            {% if challan.expected_delivery_date %}
+              <span class="text-muted ms-1" style="font-size:.7rem;">Expected delivery {{ challan.expected_delivery_date|date:"d M Y" }}</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% for line in challan.lines %}
+        <tr>
+          <td></td>
+          <td class="small">{{ line.item_description }}</td>
+          <td class="text-end small">{{ line.ordered|floatformat:"-2" }} {{ line.unit }}</td>
+          <td class="text-end small">
+            {% if line.received is None %}
+              <span class="text-muted">&mdash;</span>
+            {% else %}
+              {{ line.received|floatformat:"-2" }} {{ line.unit }}
+            {% endif %}
+          </td>
+          <td class="text-end small">
+            {% if line.damaged %}
+              <span class="text-danger">{{ line.damaged }}</span>
+            {% else %}
+              <span class="text-muted">0</span>
+            {% endif %}
+          </td>
+          <td class="small text-muted">
+            {% if line.grn_date %}
+              {{ line.grn_date|date:"d M Y" }}
+              {% if line.grn_confirmed_by %}
+                &middot; {{ line.grn_confirmed_by.user.get_full_name|default:line.grn_confirmed_by.user.username }}
+              {% endif %}
+            {% else %}
+              Not confirmed
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% else %}
+  {% comment %}
+  R5: the empty state NAMES THE CATEGORY. A blank panel reads as a broken page; this
+  says which material nothing has been raised for, which is the thing the PM would
+  otherwise have to work out from the task name.
+  {% endcomment %}
+  <div class="card-body">
+    <p class="small text-muted mb-0">
+      No delivery challan has been raised for
+      {% for category in delivery_detail.categories %}{% if not forloop.first %} or {% endif %}<span class="fw-semibold">{{ category }}</span>{% endfor %}
+      on this site yet.
+    </p>
+  </div>
+  {% endif %}
+</div>

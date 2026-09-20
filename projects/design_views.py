@@ -974,6 +974,185 @@ def sync_delivery_mirrors(project):
     return written
 
 
+# The reverse of DC_CATEGORY_TO_MIRROR_CODE, built from it rather than written out —
+# the dict is the extension point, and a second literal here would be a second thing to
+# extend. A LIST per code, not a single category: the mapping is one-to-one today, and
+# T4 may point several of the sixteen OPEX categories at one bucket, which the read
+# below already handles because it filters on `category__in`.
+DELIVERY_MIRROR_CODE_TO_CATEGORIES = {}
+for _category, _code in DC_CATEGORY_TO_MIRROR_CODE.items():
+    DELIVERY_MIRROR_CODE_TO_CATEGORIES.setdefault(_code, []).append(_category)
+del _category, _code
+
+
+def delivery_detail_for_task(task):
+    """Consignments and received quantities behind a delivery mirror task.
+    Read-only. Returns None for a non-delivery task.
+
+    ONE HELPER, TWO SCREENS (T4 R2). The task-detail panel and the consignment count
+    on the project-overview row are the same numbers; computing them twice is how the
+    page ends up contradicting itself. The overview uses only `consignments`, which is
+    why that key is a plain dict of counts and not a rendering.
+
+    THE PREDICATE IS THE SAME PAIR `_delivery_mirror_tasks()` USES — `is_mirror` AND a
+    template code in `DELIVERY_MIRROR_CODES`. Not the code alone: a row carrying a
+    delivery code with the mirror flag off is not something this product produces, and
+    a panel is not the place to start interpreting one. Not `is_mirror` alone either,
+    which would render an empty delivery panel on COD, HOTO, As-Built and Design. A
+    task added by hand has no `template_task` at all and returns None here, whatever it
+    is called — there is no name matching in this function and must never be.
+
+    CATEGORY IS THE ONLY JOIN THERE IS. `DCLineItem` carries no FK to a Task and none
+    to a BOQItem (B-18, still not built), so this reads the lines whose `boq_category`
+    maps to this task's code and nothing else can be inferred. In particular this
+    function knows NOTHING about what the site was supposed to receive — see the
+    `quantity` key.
+
+    WHAT IT RETURNS (None, or a dict):
+        categories   the DC categories feeding this bucket, for the empty state
+        challans     one row per challan HOLDING LINES IN THIS CATEGORY, oldest first
+                     by dc_date; each with its lines, and a `state` of
+                     'received' / 'partial' / 'expected'
+        consignments {'received': n, 'partial': n, 'expected': n, 'total': n} — R3(a)
+        quantity     R3(b): {'unit', 'ordered', 'received', 'damaged'} when every line
+                     in the category shares one unit, else None
+        units        the distinct units present, so a caller can say why `quantity`
+                     is None
+
+    THE TWO FIGURES ARE NOT ONE FIGURE (R3). `consignments` counts challans and
+    `quantity` counts units of material; a site with three challans and 600 modules has
+    two different denominators and no honest way to blend them.
+
+    `quantity` IS AGAINST WHAT WAS DISPATCHED, NEVER AGAINST THE SITE'S REQUIREMENT
+    (R4). Its denominator is the `ordered_quantity` written on the challans themselves
+    — what a vendor said it sent — so it answers "did what was dispatched arrive",
+    which is the only question the delivery records can answer. It is NOT a percentage
+    of the site's need: nothing joins a DCLineItem to the BOQ, so no reader of this
+    dict may label it delivered, complete, or a percentage of anything. Both templates
+    say "dispatched so far" in those words.
+
+    NEVER SUMMED ACROSS UNITS. 400 Nos plus 1 Lot is not 401 of anything. One unit in
+    the category yields the aggregate; more than one yields None and the per-line
+    figures on each row carry the answer instead. `unit` is free text on DCLineItem
+    (no choices, default 'Nos'), so it is compared stripped of surrounding whitespace
+    and by nothing else — no case folding, no synonyms, because deciding that 'nos'
+    and 'Nos' are one unit is a data decision and this is a read helper.
+
+    A CHALLAN'S `state` IS CLASSIFIED FROM ITS LINES IN THIS CATEGORY, not from
+    `DeliveryChallan.status`. The stored status is computed across ALL the challan's
+    lines, so a challan carrying received modules and an undelivered BOS kit would
+    otherwise read "Received" inside the BOS panel. The raw status travels on the row
+    beside it, unchanged, for anyone who wants it.
+
+    IT CANNOT DISAGREE WITH THE BADGE (R7), and that is structural rather than
+    checked: `_dc_item_severity()` is the predicate here exactly as it is in
+    `sync_delivery_mirrors()`, and 'received' means the same "every line green" that
+    the sync requires for Done. So every challan reading fully received is precisely
+    the condition under which the bucket reads Done, and this panel reports the state —
+    it does not decide it.
+
+    ONE QUERY. The lines come back with their challan attached and are grouped in
+    Python; a page with four of these (an OPEX site's four delivery mirrors) costs four
+    queries and a Residential page costs none, because the predicate fails first.
+    """
+    if not task.is_mirror or task.template_task_id is None:
+        return None
+
+    code = task.template_task.code
+    categories = DELIVERY_MIRROR_CODE_TO_CATEGORIES.get(code)
+    if categories is None:
+        return None
+
+    lines = (DCLineItem.objects
+             .filter(challan__project=task.phase.project,
+                     boq_category__in=categories)
+             .select_related('challan', 'challan__vendor',
+                             'grn_confirmed_by__user')
+             # dc_date first so the panel reads as a delivery history; pk breaks a
+             # same-day tie so two page loads cannot order the rows differently.
+             .order_by('challan__dc_date', 'challan_id', 'pk'))
+
+    challans = []
+    by_challan = {}
+    for line in lines:
+        row = by_challan.get(line.challan_id)
+        if row is None:
+            dc = line.challan
+            row = {
+                'dc_number':              dc.dc_number,
+                'dc_date':                dc.dc_date,
+                'vendor':                 dc.vendor,
+                'status':                 dc.status,
+                'expected_delivery_date': dc.expected_delivery_date,
+                'lines':                  [],
+                '_severities':            [],
+            }
+            by_challan[line.challan_id] = row
+            challans.append(row)
+        row['lines'].append({
+            'item_description': line.item_description,
+            'unit':             (line.unit or '').strip(),
+            'ordered':          line.ordered_quantity,
+            'received':         line.received_quantity,
+            'damaged':          line.damaged_quantity,
+            'condition':        line.condition,
+            'grn_date':         line.grn_date,
+            'grn_confirmed_by': line.grn_confirmed_by,
+        })
+        row['_severities'].append(_dc_item_severity(
+            line.received_quantity, line.ordered_quantity, line.damaged_quantity))
+
+    counts = {'received': 0, 'partial': 0, 'expected': 0, 'total': len(challans)}
+    for row in challans:
+        severities = row.pop('_severities')
+        if all(sev is None for sev in severities):
+            # Nothing in this category confirmed yet — the GRN has not been done.
+            row['state'] = 'expected'
+        elif all(sev == 'green' for sev in severities):
+            row['state'] = 'received'
+        else:
+            # Short, damaged, or confirmed in part: not received, and deliberately not
+            # split further — 'partial' is what the PM can act on.
+            row['state'] = 'partial'
+        counts[row['state']] += 1
+
+    units = []
+    for row in challans:
+        for line in row['lines']:
+            if line['unit'] not in units:
+                units.append(line['unit'])
+
+    quantity = None
+    if len(units) == 1:
+        ordered = received = damaged = 0
+        for row in challans:
+            for line in row['lines']:
+                ordered  += line['ordered'] or 0
+                # A line not yet confirmed contributes nothing to received. It is not
+                # zero-received — it is unknown — but the pair is read as "arrived out
+                # of dispatched" and an unconfirmed line has not arrived.
+                received += line['received'] or 0
+                damaged  += line['damaged'] or 0
+        quantity = {
+            'unit':     units[0],
+            'ordered':  ordered,
+            'received': received,
+            # Reported BESIDE received, never subtracted from it: `received_quantity`
+            # is what physically arrived and `damaged_quantity` is how much of that
+            # arrived broken. Netting them here would invent a third number that no
+            # column holds and that the GRN screens do not show.
+            'damaged':  damaged,
+        }
+
+    return {
+        'categories':   categories,
+        'challans':     challans,
+        'consignments': counts,
+        'quantity':     quantity,
+        'units':        units,
+    }
+
+
 def apply_design_status(assignment, new_status, actor, detail, action_code,
                         extra_fields=None, entity_type='DesignAssignment',
                         entity_id=None, reason_code='', remark=''):

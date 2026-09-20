@@ -125,6 +125,10 @@ from .design_views import (
     # that writer, which is what keeps the door single — and is why neither the writer
     # nor the Design derivation is named anywhere in this file, by test, on purpose.
     sync_delivery_mirrors,
+    # T4 — the READ side of the same subject, beside the derivation for the same
+    # reason. It writes nothing and decides no status: it reports the challans behind
+    # a delivery mirror to the two screens that show one.
+    delivery_detail_for_task,
 )
 
 logger = logging.getLogger(__name__)
@@ -8550,13 +8554,32 @@ def project_overview(request, project_id):
     if project.status != 'Draft':
         phases = list(
             ProjectPhase.objects.filter(project=project)
-            .prefetch_related('tasks')
+            # `template_task` is joined because the delivery-consignment attach below
+            # reads its code on every task; without it the four OPEX delivery mirrors
+            # would each cost a second query to answer which bucket they are.
+            .prefetch_related(Prefetch(
+                'tasks', queryset=Task.objects.select_related('template_task')))
             .order_by('phase_order')
         )
         for phase in phases:
             tasks = list(phase.tasks.all())
             if not tasks:
                 continue
+
+            # DELIVERY CONSIGNMENT COUNTS (T4 R6). Attached to the prefetched instances
+            # the template iterates, so `_task_row.html` reads one attribute and no
+            # second queryset is built for the rows. `delivery_detail_for_task()`
+            # returns None for everything that is not one of the four delivery mirrors
+            # — before it queries anything — so a Residential site pays nothing here and
+            # an OPEX site pays one query per delivery mirror.
+            #
+            # THE SAME HELPER THE PANEL USES, deliberately: the number on the row and
+            # the panel it opens are one computation, so they cannot drift apart.
+            for _task in tasks:
+                _delivery = delivery_detail_for_task(_task)
+                if _delivery is not None:
+                    _task.delivery_consignments = _delivery['consignments']
+
             # THIS IS PHASE COMPLETENESS, SO DERIVED WORK COUNTS. The bar answers
             # "how much of this phase is finished", and an undelivered consignment is
             # unfinished work whoever is responsible for recording it. R-20's PROGRESS
@@ -9142,6 +9165,11 @@ def task_detail(request, project_id, task_id):
     # Checklist — items come from the Checklist linked to this (task_name, project_type);
     # completion is per-(item, task). Shared with the HTMX swap via _checklist_context().
     context.update(_checklist_context(request, project, task))
+    # Delivery consignments (T4). None for every task that is not one of the four OPEX
+    # delivery mirrors, which is what hides the panel — the template asks nothing about
+    # project type or template codes. Read-only, and scoped by the
+    # user_can_view_project() check this view already made above.
+    context['delivery_detail'] = delivery_detail_for_task(task)
     context['issue_draft'] = _pop_issue_draft(request, f'task:{task.pk}')
     return render(request, 'projects/task_detail.html', context)
 

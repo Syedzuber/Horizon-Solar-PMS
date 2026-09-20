@@ -43,6 +43,34 @@ Expected context:
         <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
       </span>
     {% endif %}
+    {% comment %}CONSIGNMENTS ON A DELIVERY MIRROR ROW (T4 R6). `delivery_consignments` is
+       attached to the task in project_overview from the same helper the task-detail
+       panel uses, so this count and that panel are one computation and cannot drift.
+
+       COUNTS CHALLANS, NOT MATERIAL, and says so in the title: quantities are never
+       summed across units and never shown against the site's requirement — see
+       `delivery_detail_for_task()`. Nothing here is a status: the row's badge is still
+       whatever sync_delivery_mirrors() derived.
+
+       ABSENT EVERYWHERE ELSE, harmlessly. Every other renderer of this partial (the
+       HTMX row swaps, the add-task success) passes a task with no such attribute, and
+       Django renders a missing attribute as nothing — the row is byte-identical to
+       what it was before this block existed.{% endcomment %}
+    {% if task.delivery_consignments %}
+      {% if task.delivery_consignments.total %}
+      <span class="text-muted ms-1" style="font-size:.68rem;vertical-align:middle;"
+            title="Delivery challans raised for this material: {{ task.delivery_consignments.received }} fully received, {{ task.delivery_consignments.partial }} partial, {{ task.delivery_consignments.expected }} expected. Counts consignments, not quantities.">
+        {{ task.delivery_consignments.received }}/{{ task.delivery_consignments.total }} consignment{{ task.delivery_consignments.total|pluralize }} received
+      </span>
+      {% else %}
+      {% comment %}Nothing raised yet says so, rather than reading "0/0" — which looks
+         like a broken count. The panel behind the link names the category.{% endcomment %}
+      <span class="text-muted ms-1" style="font-size:.68rem;vertical-align:middle;"
+            title="No delivery challan has been raised for this material yet.">
+        No consignments yet
+      </span>
+      {% endif %}
+    {% endif %}
   </td>
   <td class="small">
     {% if task.assigned_to %}{{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}
