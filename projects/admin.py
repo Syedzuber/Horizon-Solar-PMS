@@ -227,6 +227,48 @@ class TaskAdmin(admin.ModelAdmin):
     # each would have had.
     readonly_fields = ['status', 'is_mirror']
 
+    def has_delete_permission(self, request, obj=None):
+        """A Task is never deleted from the admin. There is no soft delete to fall
+        back on, and a hard delete destroys more than the row.
+
+        Unlike Project above, Task has NO `is_deleted` column, so `delete_model()`
+        has nothing to set and there is no reversible form of this action to offer
+        instead. What a delete actually does:
+
+        * CASCADES six children away — TaskAttachment, Comment, DueDateChangeLog,
+          ChecklistItemCompletion, PunchPoint, and TaskDependency on BOTH its
+          `predecessor` and `successor` FKs. Nothing pointing at Task is PROTECT,
+          so none of this raises; the delete simply succeeds and takes them.
+        * ORPHANS the append-only ledger, permanently. StatusTransition reaches a
+          Task through `subject_type`/`subject_id`, not a FK, so its rows are not
+          cascaded — they are left pointing at a subject_id that no longer
+          resolves. They cannot be cleaned up afterwards either: `delete()` raises
+          AppendOnlyViolation by R-4. The mess is unrecoverable in both directions.
+          ActivityLog reaches a Task the same soft way and orphans the same way.
+        * STRANDS Supabase objects. TaskAttachment carries `supabase_path`, and
+          `purge_deleted_files` only ever walks rows with `is_deleted=True`. A
+          cascade removes the row outright without ever setting that flag, so the
+          path is lost and the stored object can never be reached again.
+
+        This also closes the back door around `readonly_fields` above: `status` is
+        frozen there so no admin edit can move a task without record_transition()
+        writing the ledger row, and deleting the task walks straight past that
+        guarantee by removing the row the ledger describes.
+
+        Deleting a Task is a data-repair operation, not an administrative one. It
+        belongs to a command that can account for all of the above.
+        """
+        return False
+
+    def get_actions(self, request):
+        # Remove the built-in "Delete selected" action — has_delete_permission()
+        # above already hides it, but that is a consequence of Django's wiring
+        # rather than a statement, and the bulk path is the one that would take
+        # hundreds of rows at once. Popped explicitly, matching ProjectAdmin.
+        actions = super().get_actions(request)
+        actions.pop('delete_selected', None)
+        return actions
+
     def save_model(self, request, obj, form, change):
         """Route Task.assigned_to through the assignment chokepoint.
 
