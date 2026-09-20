@@ -137,6 +137,15 @@ into "delivered", "complete" or a percentage.
               {{ line.grn_date|date:"d M Y" }}
               {% if line.grn_confirmed_by %}
                 &middot; {{ line.grn_confirmed_by.user.get_full_name|default:line.grn_confirmed_by.user.username }}
+                {% if line.grn_on_behalf %}
+                  {% comment %}
+                  Same phrase as the challan detail page, deliberately: one wording for
+                  one fact, with the reason on hover.
+                  {% endcomment %}
+                  <span class="text-warning" title="{{ line.grn_on_behalf_reason }}">
+                    — on behalf of the site team
+                  </span>
+                {% endif %}
               {% endif %}
             {% else %}
               Not confirmed

@@ -160,6 +160,17 @@
             <td class="text-muted small">
               {% if item.grn_confirmed_by %}
                 {{ item.grn_confirmed_by.user.get_full_name|default:item.grn_confirmed_by.user.username }}
+                {% if item.grn_on_behalf %}
+                  {% comment %}
+                  The receipt was recorded by the person named, who was not the
+                  receiver. Both facts in one phrase, and the stated reason on hover,
+                  so the cell is never a bare name that implies presence.
+                  {% endcomment %}
+                  <span class="d-block text-warning" style="font-size:.72rem;"
+                        title="{{ item.grn_on_behalf_reason }}">
+                    — on behalf of the site team
+                  </span>
+                {% endif %}
               {% else %}
                 —
               {% endif %}
@@ -405,9 +416,37 @@ document.addEventListener('DOMContentLoaded', function () {
         <div class="modal-body">
           <p class="text-muted small mb-3">
             Override received quantities and damage counts.
-            The original SE submitter is preserved; this action is logged as an SCM override.
+            On a line an engineer has already confirmed, the original submitter is preserved.
             Enter how many of the received units are damaged in the <strong>Damaged</strong> column.
           </p>
+
+          {% comment %}
+          ── On-behalf reason ──
+          ONE input for the whole submission, applied to every line nobody has
+          confirmed yet. Not per line: the reason answers "why are you recording this
+          instead of the site team", which is a fact about this visit to the screen,
+          not about a particular material category.
+
+          Deliberately not hidden behind a conditional on the line items. A line's
+          branch is decided at the view by grn_confirmed_by, and hiding the input on
+          what the page believed at render time would mean a submission that turns out
+          to need it arrives without it. The view refuses that case with a readable
+          message; the field is always here so that path stays rare.
+          {% endcomment %}
+          <div class="mb-3">
+            <label for="grnOnBehalfReason" class="form-label small fw-semibold mb-1">
+              Reason — if you are recording a receipt the site team has not confirmed
+            </label>
+            <input type="text" name="grn_on_behalf_reason" id="grnOnBehalfReason"
+                   class="form-control form-control-sm"
+                   maxlength="500"
+                   placeholder="e.g. Site engineer unreachable; material verified by warehouse over call">
+            <div class="form-text" style="font-size:.72rem;">
+              Required for any line nobody has confirmed yet. That line will be recorded
+              against your name and shown as <em>on behalf of the site team</em>.
+              Lines an engineer already confirmed are corrections and need no reason.
+            </div>
+          </div>
           <div class="table-responsive">
             <table class="table table-sm">
               <thead class="table-light">

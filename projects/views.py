@@ -11013,12 +11013,35 @@ def confirm_grn(request, project_id, dc_id):
 @role_required(['SCM'])
 def override_grn(request, project_id, dc_id):
     """
-    SCM overrides an SE-submitted GRN. grn_confirmed_by is NOT overwritten —
-    original SE submitter is preserved. ActivityLog records who made the override.
-    No status restriction: SCM can override even on Received/Rejected DCs (to correct mistakes).
-    Captures received_quantity and damaged_quantity separately — mirrors confirm_grn logic.
+    Edit a GRN. TWO BRANCHES PER LINE, decided by whether anyone has confirmed it yet.
+
+    CORRECTION (grn_confirmed_by already set) — unchanged behaviour. The quantities are
+    rewritten and the confirmer is left exactly as it stands; the original submitter is
+    preserved, pinned by
+    tests_residential_baseline.DeliveryGRNWorkflowTests
+    .test_scm_overrides_a_grn_without_overwriting_the_original_engineer.
+
+    FIRST-TIME RECEIPT (grn_confirmed_by is NULL) — this is not a correction of anything.
+    It used to write the quantities and leave the confirmer NULL, so the receipt rendered
+    as recorded by nobody on both surfaces that display it. It now names the ACTING user
+    and marks the row `grn_on_behalf` with a mandatory reason. The absent engineer's
+    profile is never written here: this endpoint records who typed it, never impersonates
+    the person who took delivery.
+
+    THE REASON IS ALL-OR-NOTHING FOR THE SUBMISSION. One input on the modal, applied to
+    every line that takes the first-time branch. A blank or whitespace-only reason refuses
+    the WHOLE submission before anything is written — no partial line writes, no status
+    recalculation, no ledger row — following punch_point_waive's refusal shape. That is
+    why the parse runs as a first pass into `pending` and the writes run as a second: the
+    decision to refuse has to be reachable before the first save().
+
+    NOTHING HERE NAMES A ROLE. SCM is the only role that can reach this endpoint today,
+    but the mechanism is actor-neutral by design (see DCLineItem.grn_on_behalf) so a
+    warehouse keeper receiving alongside the site engineer needs no new column or string.
+
+    No status restriction: an override may correct a Received or Rejected DC.
     recalculate_dc_status() called ONCE after all items saved.
-    Access: SCM only. POST only.
+    Access: SCM role, and project scope. POST only.
     """
     if request.method != 'POST':
         return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
@@ -11026,13 +11049,29 @@ def override_grn(request, project_id, dc_id):
     project = _active_project(project_id)
     profile = request.user.profile
 
+    # SCOPE, matching confirm_grn. The role gate above asks only "are you SCM", with no
+    # project term of any kind -- confirm_grn carries both questions and this carried
+    # only one. NOT A WIDENING OR A NARROWING TODAY: SCM is in PORTFOLIO_VIEW_ROLES, so
+    # this helper returns True for SCM on every project, and tests_grn_on_behalf pins
+    # that a supply-chain user still succeeds on a site they hold no task on. It is here
+    # so the pair of GRN endpoints answers the same two questions the same way, and so
+    # that a future change to SCM's scope reaches both rather than one.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+
     # Cross-project guard
     challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)
     if challan.project.project_id != project_id:
         raise Http404
 
+    back       = redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
     today      = date.today()
     line_items = challan.line_items.all()
+    on_behalf_reason = request.POST.get('grn_on_behalf_reason', '').strip()
+
+    # ── First pass: parse and decide. Writes NOTHING. ──────────────────────────
+    pending      = []
+    any_on_behalf = False
 
     for item in line_items:
         qty_str        = request.POST.get(f'received_qty_{item.pk}', '').strip()
@@ -11040,7 +11079,7 @@ def override_grn(request, project_id, dc_id):
         grn_notes      = request.POST.get(f'grn_notes_{item.pk}', '').strip()
 
         if not qty_str:
-            continue  # Skip items where SCM didn't enter a received quantity
+            continue  # Skip items where no received quantity was entered
 
         received_qty = _safe_decimal(qty_str)
         if received_qty is None:
@@ -11061,28 +11100,58 @@ def override_grn(request, project_id, dc_id):
         else:
             derived_condition = DCLineItem.PARTIAL
 
-        item.received_quantity = received_qty
-        item.damaged_quantity  = damaged_qty
-        item.condition         = derived_condition
-        item.grn_date          = today
-        item.grn_notes         = grn_notes
-        # grn_confirmed_by NOT overwritten — original SE submitter is preserved
-        item.save()
+        # `_id`, so an unconfirmed line costs no query to recognise.
+        first_time = item.grn_confirmed_by_id is None
+        any_on_behalf = any_on_behalf or first_time
 
-    # Recalculate DC status ONCE after all line items saved.
-    # The ledger records the SCM overrider here, not the original SE submitter —
-    # grn_confirmed_by deliberately keeps the latter, and the two answer different
-    # questions.
-    recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
-    challan.refresh_from_db()
+        pending.append((item, received_qty, damaged_qty, derived_condition,
+                        grn_notes, first_time))
 
-    log_activity(
-        project, profile,
-        f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
-        entity_type='DeliveryChallan', entity_id=challan.pk,
-    )
+    # R3 refusal, before the first write. A pure correction submission needs no reason
+    # and is unaffected -- `any_on_behalf` is False and this branch is not reached.
+    if any_on_behalf and not on_behalf_reason:
+        messages.error(
+            request,
+            'Please state why you are recording this receipt on behalf of the site '
+            'team. A receipt recorded for someone else with no reason records that '
+            'the material arrived without recording why you signed for it.'
+        )
+        return back
+
+    # ── Second pass: one transaction for every write this request makes. ───────
+    with transaction.atomic():
+        for item, received_qty, damaged_qty, derived_condition, grn_notes, first_time in pending:
+            item.received_quantity = received_qty
+            item.damaged_quantity  = damaged_qty
+            item.condition         = derived_condition
+            item.grn_date          = today
+            item.grn_notes         = grn_notes
+            if first_time:
+                # Nobody had confirmed this line. Name who recorded it, and say that
+                # they were not the receiver.
+                item.grn_confirmed_by        = profile
+                item.grn_on_behalf           = True
+                item.grn_on_behalf_reason    = on_behalf_reason
+            # Otherwise grn_confirmed_by is NOT overwritten, and the on-behalf pair is
+            # left exactly as it stands -- correcting a quantity does not change who
+            # received the material, nor how that receipt was captured.
+            item.save()
+
+        # Recalculate DC status ONCE after all line items saved.
+        # The ledger records the overriding actor here. On a correction that differs
+        # from grn_confirmed_by, which deliberately keeps the original submitter; the
+        # two answer different questions.
+        recalculate_dc_status(challan, actor=profile, reason_code=REASON_GRN_OVERRIDDEN)
+        challan.refresh_from_db()
+
+        log_activity(
+            project, profile,
+            f"SCM overrode GRN for DC {challan.dc_number} — override by {profile.user.get_full_name() or profile.user.username}",
+            entity_type='DeliveryChallan', entity_id=challan.pk,
+        )
+
     messages.success(request, f'GRN overridden. DC status: {challan.status}.')
-    return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
+    return back
 
 
 # ---------------------------------------------------------------------------

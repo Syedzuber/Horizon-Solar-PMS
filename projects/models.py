@@ -1561,8 +1561,52 @@ class DCLineItem(models.Model):
     )
     grn_notes = models.TextField(blank=True, default='')
 
+    # ── On-behalf receipt ───────────────────────────────────────────────────
+    #
+    # THE PAIR MOVES TOGETHER, following PunchPoint's waiver columns: a flag, and the
+    # stated reason that makes the flag readable. A receipt recorded by somebody other
+    # than the person who took delivery is acceptable, and it must say so.
+    #
+    # WHAT THIS FIXES. `override_grn` used to write the quantities and leave
+    # `grn_confirmed_by` alone. On a line an engineer had already confirmed that is
+    # right — the original submitter is preserved, and a test pins it. On a line NOBODY
+    # had confirmed it left the column NULL, so the receipt rendered as recorded by
+    # nobody on both surfaces that display it. `grn_confirmed_by` now names whoever
+    # actually recorded it, and this flag is what keeps that honest: the column means
+    # "who recorded this receipt", not "who took delivery", and on an on-behalf row
+    # those are different people.
+    #
+    # DELIBERATELY ACTOR-NEUTRAL. Not `grn_by_scm`, not an `is_scm_override`. SCM is
+    # the only role that can reach the override endpoint TODAY; warehouse keepers
+    # (`UserProfile.is_warehouse_keeper`) are expected to receive alongside the site
+    # engineer once they have a screen, and when that lands these two columns take it
+    # without a rename or a migration. No column, helper or user-facing string in this
+    # mechanism names a role.
+    #
+    # NOT SET ON A CORRECTION. A line that already has a confirmer keeps it and keeps
+    # this flag as it stands — re-typing a quantity does not change who received the
+    # material. A row that was recorded on behalf therefore stays marked through every
+    # later correction, which is the truth about how that receipt was captured.
+    grn_on_behalf        = models.BooleanField(default=False)
+    # Required whenever the flag is set — CHECK constraint below, and refused at the
+    # view before anything is written (see override_grn).
+    grn_on_behalf_reason = models.TextField(blank=True, default='')
+
     class Meta:
         ordering = ['boq_category']
+        constraints = [
+            # Same shape and the same reasoning as
+            # `checklist_completion_no_requires_remarks`: the flag records that
+            # something out of the ordinary happened, and a flag with no reason
+            # records that it happened without saying why — the exact failure the
+            # pair exists to prevent. Tests only the empty string; the field is NOT
+            # NULL with default='', so there is no null case, and the view strips
+            # whitespace before it ever reaches here.
+            models.CheckConstraint(
+                condition=~models.Q(grn_on_behalf=True, grn_on_behalf_reason=''),
+                name='grn_on_behalf_requires_reason',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.challan.dc_number} — {self.boq_category}: {self.item_description[:40]}"

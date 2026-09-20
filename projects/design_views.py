@@ -1098,6 +1098,11 @@ def delivery_detail_for_task(task):
             'condition':        line.condition,
             'grn_date':         line.grn_date,
             'grn_confirmed_by': line.grn_confirmed_by,
+            # Carried through so the panel can say the receipt was recorded on behalf
+            # of the site team rather than by the person named. Read-only, like every
+            # other value in this dict; nothing here decides anything.
+            'grn_on_behalf':        line.grn_on_behalf,
+            'grn_on_behalf_reason': line.grn_on_behalf_reason,
         })
         row['_severities'].append(_dc_item_severity(
             line.received_quantity, line.ordered_quantity, line.damaged_quantity))

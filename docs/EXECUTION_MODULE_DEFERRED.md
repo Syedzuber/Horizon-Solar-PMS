@@ -3358,3 +3358,87 @@ the demo set is **seven roles, not eight**. That is a real product rule working 
 the seed does not bypass it, and `docs/demo-data.md` tells the operator to log in as the
 existing Admin. Noted here only so a later reader does not file the missing demo Admin as an
 omission.
+
+### B24 — nine findings carried out of sessions T2, T3, T4 and G1, none of them in that session's MODE
+
+Recorded here because each was found while building something else, verified at the time,
+and left untouched because the session's MODE did not reach it. They have been restated in
+session reports since T2 without ever landing in this file; appended by G2 so they stop
+being re-discovered.
+
+**1. Nothing in the product UI edits `Task.assigned_role` (T2 / 1.3).** The column is
+written once, at task creation — by the template attach, or by the add-task form, which is
+where `roles_for_phase()` narrows the choice. After that no screen offers it. Reassigning a
+task changes `assigned_to` and leaves `assigned_role` saying whatever it said when the row
+was made, so a task moved to a person of another role carries a stale role label. Whether
+that label should follow the assignee, or stay as the phase's statement about the work, is
+a product question nobody has been asked.
+
+**2. `_TASK_TO_PROFILE_ROLE` lives in `views.py` and belongs in a shared module (T2).** It is
+a mapping between two role vocabularies, consulted by assignment code, and it sits in the
+view layer with no importable home. `gantt_constants.py` and `models.py`'s
+`DELIVERY_MIRROR_CODE_TO_CATEGORIES` are both precedents for where a mapping like this
+should live. Moving it is a rename across its call sites and nothing else, but it is not
+free and no session has had it in MODE.
+
+**3. The standalone add-task page cannot narrow its role list without a POST (T2).** The
+narrowing added by T2 works on the modal, which knows its phase. The standalone page is
+reached before a phase is chosen, so `roles_for_phase()` has nothing to answer about and the
+full role list is offered. A user can still create a task whose role the phase does not use
+and only find out on submit. Fixing it means either a phase-first step or an HTMX round trip
+on the phase select.
+
+**4. The assignee list is not scoped to the project — neither in `task_assign` nor in the
+add form (T2).** Both render `UserProfile.objects.filter(is_active=True)`, the whole
+company, so a PM can assign a task on their site to an engineer who has never worked on it.
+Not a security hole (the assignment is visible and logged, and holding a task is itself what
+grants visibility), but it makes the dropdown long and the wrong choice easy. Any fix has to
+decide what "on this project" means for a person who has not been given work there yet,
+which is the chicken-and-egg that stopped T2 doing it.
+
+**5. The HTMX row swap drops `delivery_consignments`, so a delivery row loses its count
+until reload (T4).** The phase-list row partial is re-rendered by the task-action endpoints
+with a context that does not include the delivery lookup T4 added, so a delivery mirror row
+that is swapped in place shows its status without the consignment count beside it. A full
+page load restores it. The fix is to thread the lookup through the swap context, which
+touches every task-action endpoint — the reason T4 left it.
+
+**6. `material_status_by_category` and `get_material_status` sum across units, and can read
+Received where the delivery panel reads partial (T4).** They aggregate `DCLineItem`
+quantities without grouping by `unit`, so 400 Nos and 1 Lot become 401 of nothing. The
+delivery panel T4 built deliberately refuses to aggregate a category holding two units, so
+the two surfaces can disagree about the same material on the same site. The panel is the
+correct one; the older helpers are the ones to change.
+
+**7. `BOQItem.category`'s declared choices do not match live OPEX values; it is not a
+BOQ-to-delivery join (T4, B-18).** The field's `choices` were written for the Residential
+vocabulary, and the OPEX catalogue stores values (`Module`, `MMS`, `Conduit`, …) that are not
+in that list and do not share spellings with `DCLineItem.CATEGORY_CHOICES` either. So
+nothing joins a BOQ line to a delivery line, and any figure implying "received against what
+the site needs" would be invented. T4's panel reports against what was DISPATCHED for exactly
+this reason. Closing B-18 means agreeing one vocabulary first.
+
+**8. GRN `ActivityLog` rows are written with a blank `action_code`, so they are invisible to
+consumers filtering on it (G1).** Both `confirm_grn` and `override_grn` call `log_activity()`
+without the `action_code` argument, so their rows carry `''`. The per-user EOD digest metrics
+group on `action_code`, so a site engineer who spent the day receiving material has that work
+counted nowhere — the sentence is in the feed, but no consumer can find it by event type.
+Two codes and two call-site arguments; out of MODE for G1, which was an audit, and for G2,
+whose MODE forbids touching `confirm_grn`.
+
+**9. `Task.template_task`'s model comment claims nothing reads it back; seven things do
+(T3).** The comment on the field reads "PROVENANCE ONLY — which TaskTemplateTask this task
+was created from. Nothing reads it back to decide behaviour." Verified readers, all
+branching on it:
+
+  * `design_views.sync_design_mirror()` — `template_task__code=DESIGN_MIRROR_CODE`
+  * `design_views._delivery_mirror_tasks()` — `template_task__code__in=DELIVERY_MIRROR_CODES`
+  * `design_views.delivery_detail_for_task()` — returns `None` on `template_task_id is None`
+  * `views._checklist_for_task()` — resolves the checklist by `template_task__code`
+  * `task_dependencies` — keys the template-edge copy on `template_task_id`
+  * the phase list in `views.py` — `select_related('template_task')` for the consignment attach
+  * the OPEX template correction path in `views.py` — matches on `template_task__code`
+
+The column is fine and every one of those reads is correct. The COMMENT is false, and it is
+the kind of false that gets a column deleted: it tells the next reader that dropping the
+write is safe. One comment edit, out of MODE for every session that has noticed it.
