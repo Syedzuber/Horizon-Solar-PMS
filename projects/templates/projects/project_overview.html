@@ -148,7 +148,11 @@
       </span>
       <span class="info-pill">
         <i class="bi bi-pen-fill"></i>Design:
-        {% if can_assign_design %}
+        {% comment %}show_design_selector is False on OPEX (RESCO) sites: there the field
+           is stamped by Design Head allocation, and a PM saving over it would revoke the
+           allocated designer's BOQ write access. The assigned name still shows below —
+           only the selector and its Save button are withheld.{% endcomment %}
+        {% if can_assign_design and show_design_selector %}
           <form method="post" action="{% url 'project_overview' project.project_id %}"
                 class="d-flex align-items-center gap-1">
             {% csrf_token %}

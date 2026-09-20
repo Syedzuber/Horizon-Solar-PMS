@@ -8382,7 +8382,28 @@ def project_overview(request, project_id):
         raise Http404
 
     is_assigned_pm    = user_can_manage_project(request.user, project)
-    can_assign_design = is_assigned_pm and project.status in ('Active', 'In Progress')
+
+    # THE HEADER DESIGN SELECTOR IS NOT OFFERED ON OPEX (RESCO) SITES.
+    #
+    # `Project.assigned_design` is design-module-owned state on OPEX. `_allocate_one()`
+    # in design_views stamps it at the one moment a designer is chosen, deliberately, so
+    # that it never diverges from `DesignAssignment.assigned_to` — divergence is what
+    # locks the allocated designer out of BOQ entry (user_can_edit_project_boq() is
+    # W-narrow: the FK alone carries the write gate) and drops the site off their
+    # dashboard. Migration 0051 repaired the rows that had already diverged.
+    #
+    # The PM selector is a second writer into that same field with none of that
+    # context, so a PM saving it on an activated OPEX site silently revokes the
+    # allocated designer's BOQ write access. Measured locally: all 11 non-deleted OPEX
+    # sites carrying the FK agree with their allocation exactly, and 7 OPEX sites are
+    # Active — the 7 where allocation is in flight and an overwrite would bite.
+    #
+    # Tested against the STORED constant, never the 'RESCO' display label.
+    # Residential and CAPEX are unchanged.
+    show_design_selector = project.project_type != 'OPEX'
+    can_assign_design    = (is_assigned_pm
+                            and show_design_selector
+                            and project.status in ('Active', 'In Progress'))
 
     # Handle POST actions — PM for all actions; Finance limited to update_milestone
     if request.method == 'POST' and (is_assigned_pm or (role == 'Finance' and request.POST.get('action') == 'update_milestone')):
@@ -8467,6 +8488,20 @@ def project_overview(request, project_id):
                     messages.success(request, f'{milestone.milestone_name} updated.')
                 except PaymentMilestone.DoesNotExist:
                     messages.error(request, 'Milestone not found.')
+            return redirect('project_overview', project_id=project.project_id)
+
+        # REFUSE, rather than fall through. `can_assign_design` is already False for
+        # every OPEX site, so without this branch the POST would be silently ignored and
+        # the caller told nothing. A hand-rolled or stale-tab POST gets an answer.
+        #
+        # SCOPED TO THIS VIEW'S assign_design ACTION ONLY. `_allocate_one()` writes the
+        # field directly on the model and does not route through here, so Head allocation
+        # and reallocation on OPEX are untouched — see tests_opex_design_selector.
+        if action == 'assign_design' and not show_design_selector:
+            messages.error(
+                request,
+                'Design for RESCO sites is allocated by the Design Head on the site '
+                'workspace, not from this page. No change was made.')
             return redirect('project_overview', project_id=project.project_id)
 
         if action == 'assign_design' and can_assign_design:
@@ -8827,6 +8862,7 @@ def project_overview(request, project_id):
         'dc_condition_choices':        DCLineItem.CONDITION_CHOICES,
         'is_assigned_pm':              is_assigned_pm,
         'can_assign_design':           can_assign_design,
+        'show_design_selector':        show_design_selector,
         'design_candidates':           design_candidates,
         'task_status_choices':         Task.STATUS_CHOICES,
         'candidates_by_role':          candidates_by_role,

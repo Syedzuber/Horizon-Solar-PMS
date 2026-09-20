@@ -3084,6 +3084,81 @@ Recorded by the D18 session, 17 Sep 2026. **Recorded, not fixed.**
   tuple's own comment already says so of the latter). Record only; confirm in the change-request
   session.
 
+### D48 — `Project.assigned_design` readers still see OPEX, after the header selector stopped offering it
+
+Recorded by the OPEX design-selector session, 20 Sep 2026. **Recorded, not fixed — by
+instruction.** That session hid the header Design selector on OPEX (RESCO) sites in
+`project_overview` and refused its `assign_design` POST. It changed **no permission helper,
+no dashboard and not the CEO report**, and it did **not** null any existing
+`assigned_design` value. This entry is the standing exposure that leaves behind.
+
+**ALL COUNTS BELOW CAME FROM THE LOCAL DEVELOPMENT DATABASE on 20 Sep 2026, by read-only
+query — NOT from Railway production.** They are the basis on which the change was judged safe
+and they must be re-measured against production before any follow-up acts on them.
+
+```
+Residential  total= 44   assigned_design set= 32
+OPEX         total=103   assigned_design set= 12   (11 not soft-deleted)
+CAPEX        total=  1   assigned_design set=  1
+
+OPEX DesignAssignments with a designer allocated: 11
+  ...where project.assigned_design matches       : 11   (100%)
+  ...where it is NULL: 0      ...diverged: 0
+OPEX not soft-deleted, by status: Draft 95, Active 7
+```
+
+Two facts carried the decision. **The field is already design-module-owned in practice on
+OPEX** — all 11 populated rows agree exactly with their allocation, so there was no
+PM-entered data to preserve. And **only 7 OPEX sites could see the selector at all**, since
+`can_assign_design` also required `status in ('Active','In Progress')` and 95 of 102 are
+Draft; those 7 are precisely the sites where allocation is in flight and a PM save would
+have done damage.
+
+**The readers that still take OPEX rows, none of them changed:**
+
+- `permissions.user_can_view_project()` — Design branch, the FK **or** task-holding. This is
+  how an allocated OPEX designer sees the site at all.
+- `permissions.user_can_view_project_boq()` — the same union.
+- `permissions.user_can_edit_project_boq()` — **W-narrow: the FK alone carries the BOQ write
+  gate, with no task-holding fallback.** This is why allocation must keep stamping the field,
+  and why a second writer was worth removing.
+- `views.dashboard_design()` and its revision counter — and OPEX is *explicitly exempted*
+  from their status filter, so Draft OPEX sites are keyed off this FK too.
+- `views.py` task drill-down Design scoping; the two BOQ lock-reason strings; the
+  issue-assignee candidate helper.
+- `reports.build_user_status_rows()` (the CEO report) — sweeps `assigned_design__isnull=False`
+  with **no `project_type` filter**, so OPEX rows are in it. Read-only; unaffected by the
+  hiding, and deliberately untouched.
+
+`permissions.user_can_manage_project()` does **not** read this field (verified: `assigned_pm`
++ `coordinators` only).
+
+**THE REPAIR PATH FOR OPEX IS NOW SINGULAR, and that is the real cost of this change.** With
+the selector gone there is exactly one way to correct a wrong or stale `assigned_design` on an
+OPEX site: **the Design Head reallocating through `_allocate_one()`** (design_views), which
+re-stamps the field as part of moving `DesignAssignment.assigned_to`. The only thing that
+*surfaces* a divergence to a human is **the `site_workspace.html` banner**, which tells a
+designer their site's `assigned_design` names someone else. Banner to notice it, Head
+reallocation to fix it — there is no other route, and in particular:
+
+- `_allocate_one()` refuses once `assignment.status` is outside `REALLOCATABLE_STATUSES`, so a
+  site whose design work has started **cannot be reallocated at all** today ("reallocation at
+  this stage is not supported yet"). A divergence discovered after that point has **no repair
+  path in the product** — only Django admin, which leaves no `StatusTransition` and no
+  ActivityLog row.
+- Nothing reconciles the two fields in the background. Migration 0051 was a one-off backfill,
+  not a recurring job.
+
+**If this bites, the shape of the fix** is a reconcile — either a management command
+(`--dry-run` by default) that reports and optionally re-stamps `assigned_design` from
+`DesignAssignment.assigned_to` on OPEX, or widening `REALLOCATABLE_STATUSES` so a Head can
+reallocate a started site. Do **not** reinstate the PM selector: it is the second writer this
+session removed.
+
+**Not covered anywhere, and out of this session's MODE:** `project_detail.html:81` carries a
+second `assigned_design` selector. It was left alone because §G8 records that template as
+dead. If it is ever revived, it needs this same gate.
+
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
 _No entries yet._
