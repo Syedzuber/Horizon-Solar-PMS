@@ -11,3 +11,8 @@ fix_fixtures.py
 # Derived catalogue export (regenerate from BOQItemMaster; the checked-in
 # copy was a UTF-16 PowerShell redirect, not a clean CSV).
 opex_catalogue.csv
+
+# Source checklist PDFs: traced by docs/INSTALLATION_CHECKLIST_PROVENANCE.md
+# (doc no. + revision) rather than committed. Held by GM-Projects.
+docs/Installation check list_Final/
+docs/QA QC Check List_Final/
