@@ -7,3 +7,7 @@ seed_data.json
 railway_backup.dump
 .audit_*
 fix_fixtures.py
+
+# Derived catalogue export (regenerate from BOQItemMaster; the checked-in
+# copy was a UTF-16 PowerShell redirect, not a clean CSV).
+opex_catalogue.csv
