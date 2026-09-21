@@ -74,6 +74,8 @@ from .permissions import (
     user_is_design_head,
     # Warehouse maintenance screens. Admin / System Admin / SCM; see its frozenset.
     user_can_manage_stock_locations,
+    # Vendor master list. SCM / Admin; see VENDOR_LIST_ROLES.
+    user_can_view_vendor_list,
     # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
     # section header in permissions.py.
     user_can_submit_task_for_approval, user_can_approve_task,
@@ -5788,12 +5790,9 @@ def assign_coordinators(request, project_id):
 def vendor_list(request):
     """
     List all vendors with optional category and active/inactive filters.
-    Access: SCM and Admin only (inline role check — not via decorator).
+    Access: permissions.user_can_view_vendor_list (SCM and Admin).
     """
-    profile = request.user.profile
-    # Inline role check used here (not @role_required) because vendor views
-    # are shared between SCM and Admin with identical permission logic
-    if profile.role not in ('SCM', 'Admin'):
+    if not user_can_view_vendor_list(request.user):
         return HttpResponseForbidden()
 
     vendors = Vendor.objects.prefetch_related('categories').order_by('-is_active', 'name')

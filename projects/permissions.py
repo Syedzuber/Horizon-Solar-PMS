@@ -1188,6 +1188,26 @@ def user_can_manage_stock_locations(user):
     return profile.role in STOCK_LOCATION_ADMIN_ROLES
 
 
+# Who may open the vendor master list. Extracted verbatim from vendor_list's former
+# inline check, `profile.role not in ('SCM', 'Admin')`: the same two roles, no more.
+# System Admin is NOT here, unlike STOCK_LOCATION_ADMIN_ROLES; the two are separate
+# sets so that one cannot widen the other.
+VENDOR_LIST_ROLES = frozenset({'SCM', 'Admin'})
+
+
+def user_can_view_vendor_list(user):
+    """Who may open vendor_list. Also drives the Vendors entry in the navbar's
+    Masters menu, so the link and the view cannot disagree.
+
+    vendor_add, vendor_edit and vendor_toggle_status still carry their own inline copy
+    of the same role pair; they were out of scope for this change.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in VENDOR_LIST_ROLES
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:
