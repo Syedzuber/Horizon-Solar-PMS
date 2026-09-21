@@ -226,6 +226,18 @@ def _context_filter(context, prefix=''):
     return {f'{prefix}project_type__in': types}
 
 
+def _context_includes(context, project_type):
+    """
+    True when `context` shows projects of `project_type`. For a section that is not a
+    Project queryset (so `_context_filter` cannot apply) but belongs to one type.
+
+    Reads CONTEXT_PROJECT_TYPES like `_context_filter` does, so the two cannot disagree.
+    context=None (no ?context=) includes nothing here: a type-specific section shows
+    only under a context that names its type.
+    """
+    return project_type in CONTEXT_PROJECT_TYPES.get(context, ())
+
+
 def _context_nav(request, context):
     """
     Template context for the header switcher rendered by base.html.
@@ -1748,10 +1760,10 @@ def dashboard_scm(request):
     # DesignAssignment instead, exactly as Part 6's settled decision 9 requires, so nothing
     # on the existing Residential half of this dashboard changes.
     #
-    # Not context-filtered: the two-context switch (_context_filter) separates Residential
-    # from Tenders, and this section IS the tender half — filtering it by the Residential
-    # context would empty it.
-    opex_tender_rows = scm_opex_tender_rows()
+    # Its rows are OPEX tenders, so it renders only under a context that includes OPEX
+    # (tenders). Under residential, or with no context, it is not built at all and the
+    # partial renders nothing (absent, not empty).
+    opex_tender_rows = scm_opex_tender_rows() if _context_includes(ctx, 'OPEX') else []
 
     return render(request, 'dashboard/scm.html', {
         'summary': {
