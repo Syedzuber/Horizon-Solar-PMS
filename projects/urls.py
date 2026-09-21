@@ -389,6 +389,13 @@ urlpatterns = [
     path('portal-admin/boq-items/<int:item_id>/edit/',     views.admin_boq_item_edit,   name='admin_boq_item_edit'),
     path('portal-admin/boq-items/<int:item_id>/toggle/',   views.admin_boq_item_toggle, name='admin_boq_item_toggle'),
 
+    # Warehouses (StockLocation). Deactivate only, no delete. Admin / System Admin / SCM
+    # via permissions.user_can_manage_stock_locations — hence portal/, not portal-admin/.
+    path('portal/warehouses/',                             views.stock_locations,       name='stock_locations'),
+    path('portal/warehouses/add/',                         views.stock_location_create, name='stock_location_create'),
+    path('portal/warehouses/<int:location_id>/edit/',      views.stock_location_edit,   name='stock_location_edit'),
+    path('portal/warehouses/<int:location_id>/toggle/',    views.stock_location_toggle, name='stock_location_toggle'),
+
     # Redirect old activity-log URL to the new audit-log screen
     path('portal/activity-log/',
          RedirectView.as_view(pattern_name='admin_audit_log', permanent=False),

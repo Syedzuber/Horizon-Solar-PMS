@@ -109,6 +109,13 @@
           Task Durations
         </a>
 
+        {# Warehouses lives in the System Admin shell (shared with SCM); this is a way #}
+        {# in from here, not a section of this shell, so it never marks nav-active.   #}
+        <a href="{% url 'stock_locations' %}" class="nav-item">
+          <i data-lucide="warehouse" class="w-4 h-4 shrink-0"></i>
+          Warehouses
+        </a>
+
         <a href="/portal-admin/checklists/"
            class="nav-item {% block nav_checklists %}{% endblock %}">
           <i data-lucide="check-square" class="w-4 h-4 shrink-0"></i>

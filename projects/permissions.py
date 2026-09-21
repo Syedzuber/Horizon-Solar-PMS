@@ -1159,6 +1159,35 @@ def can_view_boq_corrections(user):
     return profile.role in BOQ_CORRECTION_AUDIT_ROLES
 
 
+# Who may create, edit and deactivate warehouses (StockLocation rows) and name their
+# keeper.
+#
+# ITS OWN FROZENSET, NOT PORTFOLIO_VIEW_ROLES, for the reason the two above are their
+# own: so widening one authority can never silently widen another. PORTFOLIO_VIEW_ROLES
+# is a READ remit over projects and holds CEO and Finance, neither of whom runs the
+# stores; this set is a WRITE remit over reference data every challan points at, and
+# holds System Admin, who that set does not. The overlap (SCM, Admin) is coincidence,
+# not derivation.
+#
+# MAINTAINING A WAREHOUSE IS NOT KEEPING ONE. Nothing here reads `keeper` or
+# `is_warehouse_keeper`, and naming someone keeper on this screen grants them nothing
+# they did not already have.
+STOCK_LOCATION_ADMIN_ROLES = frozenset({'Admin', 'System Admin', 'SCM'})
+
+
+def user_can_manage_stock_locations(user):
+    """Who may maintain the warehouse list: add, edit, deactivate, reactivate.
+
+    Takes the user alone — warehouses serve every site, so there is no project to scope
+    to. Same `getattr` guard as every helper in this module: no profile, no role, no
+    access.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in STOCK_LOCATION_ADMIN_ROLES
+
+
 def project_managers(project):
     """
     Return the list of UserProfiles with PM-level authority on `project`:

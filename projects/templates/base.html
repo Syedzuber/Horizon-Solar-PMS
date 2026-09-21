@@ -75,6 +75,14 @@
         <i class="bi bi-clipboard-data me-1"></i>Daily Report
       </a>
     {% endif %}
+    {# Warehouses — SCM's only way to the warehouse screens, which live in the Tailwind #}
+    {# System Admin shell. Gated by permissions.user_can_manage_stock_locations via the #}
+    {# stock_location_nav context processor, not by an inline role list.              #}
+    {% if can_manage_stock_locations %}
+      <a href="{% url 'stock_locations' %}" class="nav-link text-white small" title="Warehouses">
+        <i class="bi bi-building me-1"></i>Warehouses
+      </a>
+    {% endif %}
     <div class="position-relative" id="user-hover-menu">
       <span class="text-white-50 small" style="cursor:default;">
         {{ user.get_full_name|default:user.username }}

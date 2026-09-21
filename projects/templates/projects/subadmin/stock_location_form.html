@@ -1,0 +1,77 @@
+{% extends "projects/subadmin/subadmin_base.html" %}
+
+{% block page_title %}{{ title }}{% endblock %}
+
+{% block nav_warehouses %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <a href="{% url 'stock_locations' %}" class="text-sm text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i> Back to Warehouses
+  </a>
+  <h1 class="text-xl font-semibold text-gray-900 mt-2">{{ title }}</h1>
+  {% if location %}
+    <p class="text-sm text-gray-500 mt-1">
+      {{ challan_count }} delivery challan{{ challan_count|pluralize }} name{{ challan_count|pluralize:"s," }} this warehouse.
+      {% if not location.is_active %}It is <strong>inactive</strong> and is not offered on new challans.{% endif %}
+    </p>
+  {% endif %}
+</div>
+
+<form method="POST" class="bg-white border border-gray-200 rounded-lg p-6 max-w-2xl">
+  {% csrf_token %}
+
+  {% if form.non_field_errors %}
+    <div class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200">
+      {{ form.non_field_errors }}
+    </div>
+  {% endif %}
+
+  <!-- Code -->
+  <div class="mb-5">
+    <label for="id_code" class="block text-sm font-medium text-gray-700 mb-1">
+      Code <span class="text-red-500">*</span>
+    </label>
+    <input type="text" name="code" id="id_code" maxlength="20" value="{{ form.code.value|default:'' }}"
+           class="w-full text-sm border rounded-lg px-3 py-2 font-mono focus:outline-none focus:ring-1 focus:ring-green-500 {% if form.code.errors %}border-red-400 bg-red-50{% else %}border-gray-200{% endif %}">
+    <p class="text-xs text-gray-500 mt-1">Short identifier used on paperwork and in pickers, e.g. HYD-1. Must be unique.</p>
+    {% for error in form.code.errors %}<p class="text-xs text-red-600 mt-1">{{ error }}</p>{% endfor %}
+  </div>
+
+  <!-- Name -->
+  <div class="mb-5">
+    <label for="id_name" class="block text-sm font-medium text-gray-700 mb-1">
+      Name <span class="text-red-500">*</span>
+    </label>
+    <input type="text" name="name" id="id_name" maxlength="120" value="{{ form.name.value|default:'' }}"
+           class="w-full text-sm border rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500 {% if form.name.errors %}border-red-400 bg-red-50{% else %}border-gray-200{% endif %}">
+    {% for error in form.name.errors %}<p class="text-xs text-red-600 mt-1">{{ error }}</p>{% endfor %}
+  </div>
+
+  <!-- Keeper -->
+  <div class="mb-5">
+    <label for="id_keeper" class="block text-sm font-medium text-gray-700 mb-1">Keeper</label>
+    <select name="keeper" id="id_keeper"
+            class="w-full text-sm border rounded-lg px-3 py-2 focus:outline-none focus:ring-1 focus:ring-green-500 {% if form.keeper.errors %}border-red-400 bg-red-50{% else %}border-gray-200{% endif %}">
+      {% for value, label in form.fields.keeper.choices %}
+        <option value="{{ value }}" {% if form.keeper.value|stringformat:"s" == value|stringformat:"s" %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <p class="text-xs text-gray-500 mt-1">
+      Optional. Only users flagged as warehouse keepers are listed — set the flag on the
+      user's edit screen first. Choosing someone here does not set it.
+    </p>
+    {% for error in form.keeper.errors %}<p class="text-xs text-red-600 mt-1">{{ error }}</p>{% endfor %}
+  </div>
+
+  <div class="flex items-center gap-3 pt-2">
+    <button type="submit"
+            class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white"
+            style="background:#1a7a4a;"
+            onmouseover="this.style.background='#155f3a'" onmouseout="this.style.background='#1a7a4a'">
+      <i data-lucide="save" class="w-4 h-4"></i> Save
+    </button>
+    <a href="{% url 'stock_locations' %}" class="text-sm text-gray-500 hover:text-gray-800">Cancel</a>
+  </div>
+</form>
+{% endblock %}

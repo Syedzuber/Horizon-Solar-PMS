@@ -5,7 +5,7 @@ from django import forms
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster
+from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation
 from .utils import roles_for_phase
 
 
@@ -175,6 +175,13 @@ class AdminUserEditForm(forms.Form):
                    'already see, and raises a punch point when they reject one. '
                    'Independent of role, and does NOT confer the PM-only power to '
                    'waive a punch point.'),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
+    is_warehouse_keeper = forms.BooleanField(
+        required=False,
+        label='Warehouse keeper',
+        help_text=('May be named keeper of a warehouse. Holding the flag grants '
+                   'nothing on its own; being named keeper does not set it.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
     new_password = forms.CharField(
@@ -1144,3 +1151,34 @@ class OpexSiteForm(forms.ModelForm):
 
         self.composed_project_id = project_id
         return cleaned
+
+
+class StockLocationForm(forms.ModelForm):
+    """Add / edit one warehouse from the admin panel (see stock_location_create).
+
+    `is_active` is NOT on this form: retirement has its own POST (stock_location_toggle)
+    so that saving a name can never close a warehouse by an unticked box.
+
+    THE KEEPER MUST ALREADY HOLD THE FLAG. The dropdown offers only profiles with
+    `is_warehouse_keeper=True`, and a posted id outside that set fails as an invalid
+    choice — the flag is granted on the user edit screen, never as a side effect of
+    being picked here. That also covers a keeper who has since lost the flag: re-saving
+    their warehouse refuses until someone who holds it is chosen, or the field is
+    cleared.
+    """
+
+    class Meta:
+        model  = StockLocation
+        fields = ['code', 'name', 'keeper']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        keeper = self.fields['keeper']
+        keeper.required = False
+        keeper.queryset = (UserProfile.objects
+                           .filter(is_warehouse_keeper=True)
+                           .select_related('user')
+                           .order_by('user__first_name', 'user__last_name', 'user__username'))
+        keeper.label_from_instance = (
+            lambda p: p.user.get_full_name() or p.user.username)
+        keeper.empty_label = '— No keeper —'

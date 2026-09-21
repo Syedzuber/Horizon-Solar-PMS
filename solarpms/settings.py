@@ -90,6 +90,7 @@ TEMPLATES = [
                 'django.contrib.messages.context_processors.messages',
                 'projects.context_processors.notifications',  # Injects unread_count into every template
                 'projects.context_processors.home_url',  # Injects the user's own dashboard URL for the Home control
+                'projects.context_processors.stock_location_nav',  # can_manage_stock_locations, for the Warehouses nav entry
                 'projects.context_processors.typed_date_bounds',  # typed_date_min / typed_date_max for date inputs
             ],
         },

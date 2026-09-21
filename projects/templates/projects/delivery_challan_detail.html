@@ -52,6 +52,17 @@
         <small class="text-muted d-block">PO Reference</small>
         <span>{{ challan.po_number|default:"—" }}</span>
       </div>
+      {# Shown whether or not the warehouse is still active: deactivating one drops it #}
+      {# from the create form's dropdown, never from a challan that already names it. #}
+      <div class="col-sm-6 col-md-3">
+        <small class="text-muted d-block">Warehouse</small>
+        {% if challan.issued_from_warehouse %}
+          <span>{{ challan.issued_from_warehouse }}</span>
+          {% if not challan.issued_from_warehouse.is_active %}<span class="badge bg-secondary ms-1">Inactive</span>{% endif %}
+        {% else %}
+          <span class="text-muted">—</span>
+        {% endif %}
+      </div>
       <div class="col-sm-6 col-md-3">
         <small class="text-muted d-block">DC Date</small>
         <span>{{ challan.dc_date|date:"d M Y" }}</span>

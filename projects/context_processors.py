@@ -1,6 +1,7 @@
 from .decorators import get_user_dashboard
 from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
+from .permissions import user_can_manage_stock_locations
 
 
 def notifications(request):
@@ -30,6 +31,18 @@ def home_url(request):
     if not request.user.is_authenticated:
         return {'home_url': None}
     return {'home_url': get_user_dashboard(request.user)}
+
+
+def stock_location_nav(request):
+    """Whether to show the Warehouses nav entry, in all three shells.
+
+    The answer comes from permissions.user_can_manage_stock_locations() (R-13) so the
+    link and the view can never disagree about who is let in. Visibility only — every
+    warehouse view calls the helper itself.
+    """
+    if not request.user.is_authenticated:
+        return {'can_manage_stock_locations': False}
+    return {'can_manage_stock_locations': user_can_manage_stock_locations(request.user)}
 
 
 def typed_date_bounds(request):

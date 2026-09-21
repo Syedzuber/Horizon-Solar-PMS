@@ -33,13 +33,13 @@
 
   <!-- Top navbar -->
   <header class="bg-white border-b border-gray-200 h-14 flex items-center px-6 gap-4 fixed top-0 left-0 right-0 z-30">
-    <a href="{% url 'subadmin_projects' %}" class="flex items-center gap-2">
+    <a href="{{ home_url }}" class="flex items-center gap-2">
       <span class="text-lg font-bold" style="color:#1a7a4a;">Horizon Solar</span>
       <span class="text-gray-300">/</span>
       <span class="text-sm text-gray-500 font-medium">System Admin</span>
     </a>
     <div class="ml-auto flex items-center gap-4">
-      <span class="text-xs px-2 py-1 rounded-full font-medium bg-blue-50 text-blue-700">System Admin</span>
+      <span class="text-xs px-2 py-1 rounded-full font-medium bg-blue-50 text-blue-700">{{ user.profile.role }}</span>
       <a href="/logout/" class="text-sm text-gray-500 hover:text-red-600 flex items-center gap-1">
         <i data-lucide="log-out" class="w-4 h-4"></i> Logout
       </a>
@@ -47,10 +47,14 @@
   </header>
 
   <div class="flex pt-14">
-    <!-- Sidebar — three items only, no admin-only sections -->
+    <!-- Sidebar — no admin-only sections -->
     <aside class="w-56 bg-white border-r border-gray-200 min-h-[calc(100vh-3.5rem)] fixed left-0 top-14 bottom-0 overflow-y-auto">
       <nav class="py-4 flex flex-col gap-1">
 
+        {# The first three are System Admin screens (system_admin_required, which the  #}
+        {# views enforce). Warehouses also renders in this shell for Admin and SCM, so #}
+        {# the three are hidden from them rather than offered as links that 403.       #}
+        {% if user.profile.role == 'System Admin' %}
         <a href="{% url 'subadmin_projects' %}"
            class="nav-item {% block nav_projects %}{% endblock %}">
           <i data-lucide="folder-open" class="w-4 h-4 shrink-0"></i>
@@ -68,6 +72,17 @@
           <i data-lucide="users" class="w-4 h-4 shrink-0"></i>
           Users
         </a>
+        {% endif %}
+
+        {# Warehouses — permissions.user_can_manage_stock_locations, via the context #}
+        {# processor, so the link and the views never disagree.                      #}
+        {% if can_manage_stock_locations %}
+        <a href="{% url 'stock_locations' %}"
+           class="nav-item {% block nav_warehouses %}{% endblock %}">
+          <i data-lucide="warehouse" class="w-4 h-4 shrink-0"></i>
+          Warehouses
+        </a>
+        {% endif %}
 
         {# Daily Report — CEO / Admin / System Admin only, the same three roles as   #}
         {# permissions.USER_STATUS_REPORT_ROLES, which the view itself enforces.     #}

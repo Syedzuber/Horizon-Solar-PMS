@@ -111,6 +111,18 @@
             </label>
           </div>
 
+          <!-- Warehouse keeper -- makes the user choosable as a warehouse's keeper.
+               Grants nothing on its own; being named keeper does not set it. -->
+          <div class="col-span-2 flex items-center gap-2 pt-1">
+            <input type="checkbox" name="is_warehouse_keeper" id="id_is_warehouse_keeper"
+                   {% if form.is_warehouse_keeper.value %}checked{% endif %}
+                   class="form-check-input">
+            <label for="id_is_warehouse_keeper" class="text-sm text-gray-700">
+              Warehouse keeper — may be named keeper of a warehouse. Grants nothing on its
+              own; naming someone keeper does not set this flag.
+            </label>
+          </div>
+
           <!-- Design QC (Part 9) — the FIRST of the two OPEX design review gates -->
           <div class="col-span-2 flex items-center gap-2 pt-1">
             <input type="checkbox" name="is_design_qc" id="id_is_design_qc"

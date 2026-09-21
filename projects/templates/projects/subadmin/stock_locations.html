@@ -1,0 +1,87 @@
+{% extends "projects/subadmin/subadmin_base.html" %}
+
+{% block page_title %}Warehouses{% endblock %}
+
+{% block nav_warehouses %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6 flex items-start justify-between gap-4">
+  <div>
+    <h1 class="text-xl font-semibold text-gray-900">Warehouses</h1>
+    <p class="text-sm text-gray-500 mt-1">
+      Every place material is issued from. Active warehouses are offered on the delivery
+      challan form; a deactivated one is no longer offered, but challans that already name
+      it keep showing it. Warehouses are never deleted.
+    </p>
+    <p class="text-sm text-gray-500 mt-1">
+      Only users flagged as warehouse keepers (on the user edit screen) can be named keeper.
+    </p>
+    <p class="text-sm text-gray-500 mt-1">
+      {{ active_count }} active of {{ locations|length }} total.
+    </p>
+  </div>
+  <a href="{% url 'stock_location_create' %}"
+     class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white whitespace-nowrap shrink-0"
+     style="background:#1a7a4a;"
+     onmouseover="this.style.background='#155f3a'" onmouseout="this.style.background='#1a7a4a'">
+    <i data-lucide="plus" class="w-4 h-4"></i> Add Warehouse
+  </a>
+</div>
+
+<table class="w-full bg-white border border-gray-200 rounded-lg overflow-hidden text-sm">
+  <thead>
+    <tr class="bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">
+      <th class="px-4 py-2 w-36">Code</th>
+      <th class="px-4 py-2">Name</th>
+      <th class="px-4 py-2 w-56">Keeper</th>
+      <th class="px-4 py-2 w-24 text-center">Active</th>
+      <th class="px-4 py-2 w-40"></th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-gray-100">
+    {% for loc in locations %}
+    <tr class="hover:bg-gray-50 transition-colors {% if not loc.is_active %}bg-gray-50/60{% endif %}">
+      <td class="px-4 py-3 font-mono text-xs text-gray-700">{{ loc.code }}</td>
+      <td class="px-4 py-3 text-gray-800">
+        <a href="{% url 'stock_location_edit' loc.pk %}" class="text-green-700 hover:underline">{{ loc.name }}</a>
+      </td>
+      <td class="px-4 py-3 text-gray-600">
+        {% if loc.keeper %}
+          {{ loc.keeper.user.get_full_name|default:loc.keeper.user.username }}
+          {% if not loc.keeper.is_warehouse_keeper %}
+            <span class="ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700"
+                  title="This user no longer holds the warehouse keeper flag">not flagged</span>
+          {% endif %}
+        {% else %}
+          <span class="text-gray-300">—</span>
+        {% endif %}
+      </td>
+      <td class="px-4 py-3 text-center">
+        {% if loc.is_active %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+        {% else %}
+          <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">Inactive</span>
+        {% endif %}
+      </td>
+      <td class="px-4 py-3 text-right whitespace-nowrap">
+        <a href="{% url 'stock_location_edit' loc.pk %}" class="text-gray-500 hover:text-gray-800 inline-flex items-center gap-1 mr-3">
+          <i data-lucide="pencil" class="w-4 h-4"></i> Edit
+        </a>
+        <form method="POST" action="{% url 'stock_location_toggle' loc.pk %}" class="inline">
+          {% csrf_token %}
+          <button type="submit" class="text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+            {% if loc.is_active %}
+              <i data-lucide="eye-off" class="w-4 h-4"></i> Deactivate
+            {% else %}
+              <i data-lucide="eye" class="w-4 h-4"></i> Activate
+            {% endif %}
+          </button>
+        </form>
+      </td>
+    </tr>
+    {% empty %}
+    <tr><td colspan="5" class="px-4 py-8 text-center text-gray-400">No warehouses yet. Add the first one above.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

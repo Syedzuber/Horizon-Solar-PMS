@@ -55,7 +55,7 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, normalize_program_code, check_typed_date
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
@@ -72,6 +72,8 @@ from .permissions import (
     # Part 12 — the narrow helper, deputy excluded. Used on the design dashboard only, to
     # decide whether the OPEX catalogue link renders. No gate in this module reads it.
     user_is_design_head,
+    # Warehouse maintenance screens. Admin / System Admin / SCM; see its frozenset.
+    user_can_manage_stock_locations,
     # 2.1 - two-step completion. Two authorities, kept separate on purpose; see the
     # section header in permissions.py.
     user_can_submit_task_for_approval, user_can_approve_task,
@@ -11975,6 +11977,8 @@ def admin_user_edit(request, user_id):
             # field is indistinguishable from "off" and would clear the flag on
             # every save that did not render it.
             profile.is_qaqc         = cd['is_qaqc']
+            # Same reading, same reason: the template renders this box on every save.
+            profile.is_warehouse_keeper = cd['is_warehouse_keeper']
             profile.save()
 
             log_activity(
@@ -12007,6 +12011,7 @@ def admin_user_edit(request, user_id):
                 'is_design_head': profile.is_design_head,
                 'is_design_qc':   profile.is_design_qc,
                 'is_qaqc':        profile.is_qaqc,
+                'is_warehouse_keeper': profile.is_warehouse_keeper,
             },
             instance_user=target_user,
         )
@@ -13008,6 +13013,119 @@ def admin_boq_item_toggle(request, item_id):
                  entity_type='BOQItemMaster', entity_id=item.pk)
     messages.success(request, f'Catalogue item "{item.code}" {state}.')
     return redirect('admin_boq_items')
+
+
+# ---------------------------------------------------------------------------
+# Admin Panel — Warehouses (StockLocation)
+#
+# The warehouse list DeliveryChallan.issued_from_warehouse points at. Deactivate, never
+# delete: that FK is PROTECT, so a delete would be refused the moment a challan names
+# the row — and even before then, retirement already has a spelling (`is_active=False`)
+# that keeps history readable. Hence no delete view exists.
+#
+# Access is user_can_manage_stock_locations() — Admin, System Admin, SCM. Rendered in
+# the System Admin (subadmin_base) shell for all three.
+#
+# NOTHING HERE CHANGES WHAT A KEEPER MAY DO. `keeper` is recorded, not read: no view in
+# the product consults it today, and these screens add no reader.
+# ---------------------------------------------------------------------------
+
+def _stock_location_label(location):
+    return f"'{location.code} — {location.name}'"
+
+
+@login_required
+def stock_locations(request):
+    """List every warehouse, active and inactive, with its keeper."""
+    if not user_can_manage_stock_locations(request.user):
+        return HttpResponseForbidden()
+
+    locations = (StockLocation.objects
+                 .select_related('keeper__user')
+                 .order_by('-is_active', 'code'))
+    return render(request, 'projects/subadmin/stock_locations.html', {
+        'locations':    locations,
+        'active_count': sum(1 for loc in locations if loc.is_active),
+    })
+
+
+@login_required
+def stock_location_create(request):
+    """Add one warehouse. New rows are active; there is no inactive-on-create path."""
+    if not user_can_manage_stock_locations(request.user):
+        return HttpResponseForbidden()
+
+    if request.method == 'POST':
+        form = StockLocationForm(request.POST)
+        if form.is_valid():
+            location = form.save()
+            log_activity(None, request.user.profile,
+                         f"Created warehouse {_stock_location_label(location)}",
+                         entity_type='StockLocation', entity_id=location.pk)
+            messages.success(request, f'Warehouse "{location.code}" added.')
+            return redirect('stock_locations')
+    else:
+        form = StockLocationForm()
+
+    return render(request, 'projects/subadmin/stock_location_form.html', {
+        'form':     form,
+        'title':    'Add Warehouse',
+        'location': None,
+    })
+
+
+@login_required
+def stock_location_edit(request, location_id):
+    """Edit code, name and keeper. Challans reference the row by pk, so a code change
+    re-labels them rather than orphaning them."""
+    if not user_can_manage_stock_locations(request.user):
+        return HttpResponseForbidden()
+
+    location = get_object_or_404(StockLocation, pk=location_id)
+
+    if request.method == 'POST':
+        form = StockLocationForm(request.POST, instance=location)
+        if form.is_valid():
+            form.save()
+            log_activity(None, request.user.profile,
+                         f"Updated warehouse {_stock_location_label(location)} "
+                         f"(keeper={location.keeper.user.username if location.keeper else '-'})",
+                         entity_type='StockLocation', entity_id=location.pk)
+            messages.success(request, f'Warehouse "{location.code}" saved.')
+            return redirect('stock_locations')
+    else:
+        form = StockLocationForm(instance=location)
+
+    return render(request, 'projects/subadmin/stock_location_form.html', {
+        'form':     form,
+        'title':    f'Edit Warehouse — {location.code}',
+        'location': location,
+        'challan_count': location.delivery_challans.count(),
+    })
+
+
+@login_required
+def stock_location_toggle(request, location_id):
+    """Deactivate / reactivate one warehouse. POST only.
+
+    An inactive warehouse drops out of the DC-create dropdown (and that view's own POST
+    re-check); every challan already naming it keeps the link and still shows it.
+    """
+    if not user_can_manage_stock_locations(request.user):
+        return HttpResponseForbidden()
+    if request.method != 'POST':
+        return redirect('stock_locations')
+
+    location = get_object_or_404(StockLocation, pk=location_id)
+    location.is_active = not location.is_active
+    location.save(update_fields=['is_active'])
+
+    state = 'activated' if location.is_active else 'deactivated'
+    log_activity(None, request.user.profile,
+                 f"{state.capitalize()} warehouse {_stock_location_label(location)}",
+                 entity_type='StockLocation', entity_id=location.pk)
+    messages.success(request, f'Warehouse "{location.code}" {state}.')
+    return redirect('stock_locations')
 
 
 # ---------------------------------------------------------------------------
