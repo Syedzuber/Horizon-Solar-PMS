@@ -14,6 +14,18 @@
   </a>
 </div>
 
+<div class="flex items-center gap-2 mb-4" data-testid="project-type-filter">
+  <i data-lucide="filter" class="w-4 h-4 text-gray-400"></i>
+  <a href="?"
+     class="px-3 py-1.5 rounded-lg text-sm font-medium border {% if not selected_type %}border-transparent text-white{% else %}border-gray-200 bg-white text-gray-600 hover:bg-gray-50{% endif %}"
+     {% if not selected_type %}style="background:#1a7a4a;"{% endif %}>All</a>
+  {% for value, label in type_choices %}
+  <a href="?type={{ value|urlencode }}"
+     class="px-3 py-1.5 rounded-lg text-sm font-medium border {% if selected_type == value %}border-transparent text-white{% else %}border-gray-200 bg-white text-gray-600 hover:bg-gray-50{% endif %}"
+     {% if selected_type == value %}style="background:#1a7a4a;"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</div>
+
 <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
   <table class="w-full text-sm">
     <thead>

@@ -12211,9 +12211,18 @@ def admin_audit_log(request):
 @role_required(['Admin'])
 def admin_project_list(request):
     """All projects table inside the Admin Panel. Admin only."""
+    # ?type= carries the STORED project_type ('OPEX', not its 'RESCO' label).
+    # Anything else falls back to All.
+    type_choices = Project.PROJECT_TYPE_CHOICES
+    selected_type = request.GET.get('type', '')
+    if selected_type not in dict(type_choices):
+        selected_type = ''
+
+    projects = Project.objects.filter(is_deleted=False)
+    if selected_type:
+        projects = projects.filter(project_type=selected_type)
     projects = (
-        Project.objects
-        .filter(is_deleted=False)
+        projects
         .select_related('assigned_pm__user')
         .prefetch_related(
             Prefetch('phases',
@@ -12230,6 +12239,8 @@ def admin_project_list(request):
     return render(request, 'projects/admin/projects_list.html', {
         'projects': projects,
         'pm_users': pm_users,
+        'type_choices': type_choices,
+        'selected_type': selected_type,
     })
 
 
