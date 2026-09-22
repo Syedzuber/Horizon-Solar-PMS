@@ -17,6 +17,7 @@ Expected context:
                                   option below and the compact approval block
   oob                          — when True, mark the <tr> for out-of-band swap
 {% endcomment %}
+{% load duplicate_tags %}
 {% comment %}An N/A row is DE-EMPHASISED, NEVER HIDDEN. The work was ruled out of scope,
    not deleted, and a PM has to be able to see what they excluded in order to reverse
    it — a hidden row is an un-auditable one. Opacity only: the row keeps its position,
@@ -30,6 +31,28 @@ Expected context:
   <td class="text-muted small">{{ task.task_order }}</td>
   <td><a href="{% url 'task_detail' project.project_id task.pk %}"
          class="text-decoration-none text-body small">{{ task.task_name }}</a>
+    {% if task.location_label %}
+      <span class="badge rounded-pill bg-success-subtle text-success-emphasis border border-success-subtle ms-1"
+            style="font-size:.62rem;font-weight:500;vertical-align:middle;" title="Location on this site">
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px;"><path d="M12 21s-7-6.1-7-11a7 7 0 0 1 14 0c0 4.9-7 11-7 11z"></path><circle cx="12" cy="10" r="2.5"></circle></svg>
+        {{ task.location_label }}
+      </span>
+    {% endif %}
+    {% comment %}DUPLICATE FOR LOCATIONS. Shown only where the predicate is True, asked
+       through the filter so every responder that renders this row gets the same answer
+       (templatetags/duplicate_tags.py). Presentation only: both views ask the predicate
+       again and 404 on a refusal. The tooltip is CSS on :hover and :focus-visible; the
+       accessible name is the aria-label.{% endcomment %}
+    {% if task|can_duplicate_for_locations:request.user %}
+      <button type="button" class="dup-locations-btn float-end"
+              aria-label="Duplicate {{ task.task_name }} for locations"
+              hx-get="{% url 'task_duplicate_locations' project.project_id task.pk %}"
+              hx-target="#taskFormModalContent" hx-swap="innerHTML"
+              hx-on::after-request="if (event.detail.successful) window.showTaskFormModal();">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></svg>
+        <span class="dup-tip" aria-hidden="true">Duplicate for locations</span>
+      </button>
+    {% endif %}
     {% if task.is_mirror %}
       {% comment %}A MIRROR SAYS WHY IT CANNOT BE EDITED, not merely that it is special.
 

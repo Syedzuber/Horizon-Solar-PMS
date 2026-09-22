@@ -17,6 +17,19 @@
   /* ── Lucide icons ─────────────────────────────────────────── */
   .lucide-icon { width:14px; height:14px; stroke-width:2; vertical-align:text-bottom; }
 
+  /* ── Duplicate for locations (row icon, _task_row.html) ────────
+     Quiet until pointed at. The tooltip shows on hover AND keyboard focus, and sits to
+     the LEFT of the icon so the table's overflow wrapper cannot clip it on row one. */
+  .dup-locations-btn { position:relative; color:#8a9690; background:transparent;
+                       border:1px solid transparent; border-radius:6px; padding:1px 4px; line-height:1; }
+  .dup-locations-btn:hover, .dup-locations-btn:focus-visible { color:var(--hz-green); background:#eef5f1; border-color:#c9ddd0; }
+  .dup-locations-btn:focus-visible { outline:3px solid #f0a020; outline-offset:1px; }
+  .dup-locations-btn .dup-tip { position:absolute; right:calc(100% + 6px); top:50%; transform:translateY(-50%);
+                                white-space:nowrap; padding:3px 8px; border-radius:4px; background:#1f2a24; color:#fff;
+                                font-size:.72rem; pointer-events:none; opacity:0; transition:opacity .12s ease .25s; z-index:5; }
+  .dup-locations-btn:hover .dup-tip, .dup-locations-btn:focus-visible .dup-tip { opacity:1; }
+  @media (prefers-reduced-motion:reduce) { .dup-locations-btn .dup-tip { transition:none; } }
+
   /* ── Project info strip ────────────────────────────────────── */
   .info-pill { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
   .info-pill i { color:var(--hz-green); font-size:.85rem; }
@@ -1536,6 +1549,60 @@ at the top of this page unmodified, exactly as it does on task_detail.
     var inst = bootstrap.Modal.getInstance(el);
     if (inst) inst.hide();
   });
+
+  /* ── Duplicate for locations: LOCAL preview only ─────────────────────── */
+  /* Keeps the panel's preview and button label in step with its inputs. No network:
+     the POST goes through the form's hx-post, and the server re-derives every label
+     and ignores this preview. Mirrors the server's reading closely enough to preview:
+     trim + collapse spaces, existing site spelling wins, already-added skipped,
+     repeats collapse. Delegated, so it survives the modal's content being swapped. */
+  (function () {
+    function norm(s) { return String(s).split(/\s+/).filter(Boolean).join(' '); }
+    function update(form) {
+      var dataEl = form.querySelector('#dup-locations-data');
+      if (!dataEl) return;
+      var d = JSON.parse(dataEl.textContent);
+      var spelling = {}, added = {}, seen = {}, labels = [], skipped = [];
+      d.site_labels.forEach(function (l) { spelling[l.toLowerCase()] = l; });
+      d.added.forEach(function (l) { added[l.toLowerCase()] = true; });
+      var raw = [];
+      form.querySelectorAll('input[name="existing_locations"]:checked').forEach(function (c) { raw.push(c.value); });
+      raw = raw.concat(form.querySelector('textarea[name="new_locations"]').value.split('\n'));
+      raw.forEach(function (r) {
+        var l = norm(r); if (!l) return;
+        var k = l.toLowerCase(); l = spelling[k] || l;
+        if (added[k]) { if (skipped.indexOf(l) < 0) skipped.push(l); return; }
+        if (seen[k]) return;
+        seen[k] = true; labels.push(l);
+      });
+      var n = labels.length;
+      form.querySelector('[data-dup-preview-title]').textContent =
+        n === 0 ? 'Nothing will be created yet' : (n === 1 ? 'Will create 1 task' : 'Will create ' + n + ' tasks');
+      var list = form.querySelector('[data-dup-preview-list]');
+      while (list.firstChild) list.removeChild(list.firstChild);
+      labels.forEach(function (l) {
+        var li = document.createElement('li');
+        li.textContent = d.source_name + ' — ' + l;
+        list.appendChild(li);
+      });
+      var sk = form.querySelector('[data-dup-preview-skipped]');
+      sk.hidden = skipped.length === 0;
+      sk.textContent = skipped.length ? 'Skipped, this task already exists at: ' + skipped.join(', ') : '';
+      var btn = form.querySelector('[data-dup-submit]');
+      btn.disabled = n === 0;
+      btn.textContent = n === 0 ? 'Create tasks' : (n === 1 ? 'Create 1 task' : 'Create ' + n + ' tasks');
+    }
+    function fromEvent(e) {
+      var f = e.target && e.target.closest && e.target.closest('form[data-dup-locations]');
+      if (f) update(f);
+    }
+    document.addEventListener('input', fromEvent);
+    document.addEventListener('change', fromEvent);
+    document.body.addEventListener('htmx:afterSwap', function () {
+      var f = document.querySelector('#taskFormModalContent form[data-dup-locations]');
+      if (f) update(f);
+    });
+  })();
 
   /* ── Post-activation field-edit modal ────────────────────────────────── */
   /* Same pattern as the task-form modal: shown only from an hx-on::after-request

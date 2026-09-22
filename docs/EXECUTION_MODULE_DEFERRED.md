@@ -3588,3 +3588,20 @@ work should be checkable. Fixing this entry must not change that.
 
 Sibling of G11 (`completed_at` not cleared on the same transition). Decide both in the status
 path together.
+
+### G14 — no single "N tasks assigned" message with the true N
+
+Found by the Duplicate for locations session (22 Sep 2026), not fixed: `utils.py` was
+outside that session's MODE.
+
+No path sends a single 'N tasks assigned' message with the true N. assign_tasks_bulk
+exists only as the cooldown's second message and undercounts.
+
+`_notify_assignment()` sends `assign_task` for the first assignment to a person on a
+project inside the hour, `assign_tasks_bulk` for the second (its count is `sends + 1`,
+i.e. always 2), and nothing after that. `assign_tasks_to()` is silent by design. So
+creating 9 location tasks for one engineer with `notify=True` on each would say "2 tasks".
+`task_duplicate_locations_create` therefore notifies on the FIRST new task only and
+creates the rest silently: one accurate message about one task, rather than an
+inaccurate one about two.
+

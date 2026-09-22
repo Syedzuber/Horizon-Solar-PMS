@@ -94,6 +94,9 @@ from .permissions import (
     # Asked inside _user_can_complete_checklist_item, and once more in the view so the
     # refusal can say why.
     checklist_answers_open,
+    # Duplicate for locations: task_add's gate plus scope, asked by both views and,
+    # through templatetags/duplicate_tags, by every row.
+    can_duplicate_task_for_locations,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -3320,6 +3323,252 @@ def task_add(request, project_id):
         'form':    form,
         'project': project,
     })
+
+
+# ---------------------------------------------------------------------------
+# Duplicate for locations
+#
+# One template task split into per-location tasks ("Module Installation — Block A").
+# Before this, PMs made them with task_add, so they had no template_task and therefore
+# no checklist. These copies share the source's template_task, which is all the
+# checklist lookup needs (_checklist_task_link_for joins on its code), and carry a
+# structured Task.location_label so the copies can be told apart.
+#
+# Gate: can_duplicate_task_for_locations() — task_add's gate plus scope. Both views ask
+# it; a refusal is a 404, the same answer task_add gives a project that is not yours.
+# ---------------------------------------------------------------------------
+
+LOCATION_LABEL_MAX_LENGTH = 100   # Task.location_label max_length
+LOCATION_DUPLICATE_MAX    = 30    # per request; a site with more is a data problem, not a click
+
+
+def _location_source(request, project_id, task_id):
+    """(project, source task), or 404 when the predicate refuses."""
+    project = _active_project(project_id)
+    task = get_object_or_404(
+        Task.objects.select_related('phase__project', 'template_task', 'assigned_to__user'),
+        pk=task_id, phase__project=project,
+    )
+    if not can_duplicate_task_for_locations(request.user, task):
+        raise Http404
+    return project, task
+
+
+def _normalise_location_label(raw):
+    """Trim and collapse inner whitespace. Length is the caller's refusal to make."""
+    return ' '.join(str(raw).split())
+
+
+def _site_location_labels(project):
+    """Distinct location labels on this site, compared case-insensitively, in order of
+    first appearance (lowest task pk). The first spelling seen is the one kept."""
+    labels = {}
+    for label in (Task.objects.filter(phase__project=project)
+                  .exclude(location_label='')
+                  .order_by('pk')
+                  .values_list('location_label', flat=True)):
+        labels.setdefault(label.casefold(), label)
+    return list(labels.values())
+
+
+def _locations_added_for(source):
+    """Casefolded labels already carrying a copy of `source`'s template task here."""
+    return {
+        label.casefold() for label in
+        Task.objects.filter(phase__project=source.phase.project,
+                            template_task_id=source.template_task_id)
+        .exclude(location_label='')
+        .values_list('location_label', flat=True)
+    }
+
+
+def _location_assignee_candidates(source):
+    """task_assign's rule, which TaskAddForm.clean() also enforces: an active profile
+    whose role is the task's role. Through the one _TASK_TO_PROFILE_ROLE mapping."""
+    profile_role = _TASK_TO_PROFILE_ROLE.get(source.assigned_role, source.assigned_role)
+    return (UserProfile.objects.filter(role=profile_role, is_active=True)
+            .select_related('user').order_by('user__first_name', 'user__username'))
+
+
+def _resolve_location_labels(selected, free_text, site_labels, added):
+    """The server's reading of the panel. Returns (labels, skipped, error).
+
+    Existing chips first, in the order posted, then one label per line of free text.
+    A label matching a site label case-insensitively takes the site's spelling; one
+    already carrying a copy of this task is skipped (and named back); repeats collapse.
+    Any label over the column's length refuses the whole request rather than being
+    cut, because a cut label can silently collide with another."""
+    spelling = {label.casefold(): label for label in site_labels}
+    labels, seen, skipped = [], set(), []
+    for raw in list(selected) + str(free_text).splitlines():
+        label = _normalise_location_label(raw)
+        if not label:
+            continue
+        if len(label) > LOCATION_LABEL_MAX_LENGTH:
+            return [], [], (f'"{label[:40]}…" is longer than {LOCATION_LABEL_MAX_LENGTH} '
+                            f'characters. Shorten it and try again.')
+        key = label.casefold()
+        label = spelling.get(key, label)
+        if key in added:
+            if label not in skipped:
+                skipped.append(label)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+    if not labels:
+        return [], skipped, ('No new locations to create. Pick a location on this site '
+                             'or type a new one.')
+    if len(labels) > LOCATION_DUPLICATE_MAX:
+        return [], skipped, (f'{len(labels)} locations is more than the '
+                             f'{LOCATION_DUPLICATE_MAX} allowed at once.')
+    return labels, skipped, ''
+
+
+def _location_panel_context(project, source, error='', selected=(), new_text='',
+                            assignee_pk=None):
+    site_labels = _site_location_labels(project)
+    added       = _locations_added_for(source)
+    checklist   = _checklist_for_task(source, project)
+    chosen      = {_normalise_location_label(s).casefold() for s in selected}
+    return {
+        'project':   project,
+        'source':    source,
+        'site_locations': [
+            {'label': label, 'added': label.casefold() in added,
+             'checked': label.casefold() in chosen}
+            for label in site_labels
+        ],
+        'all_locations_added': bool(site_labels) and all(
+            label.casefold() in added for label in site_labels),
+        'checklist':            checklist,
+        'checklist_item_count': checklist.items.count() if checklist else 0,
+        'assignees':            _location_assignee_candidates(source),
+        'selected_assignee_pk': assignee_pk if assignee_pk is not None else source.assigned_to_id,
+        'new_locations_text':   new_text,
+        'error':                error,
+        # For the panel's local preview only; the POST re-derives all of it.
+        'preview_data': {
+            'source_name': source.task_name,
+            'site_labels': site_labels,
+            'added':       sorted(added),
+            'max_length':  LOCATION_LABEL_MAX_LENGTH,
+        },
+    }
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def task_duplicate_locations(request, project_id, task_id):
+    """GET: the "Duplicate for locations" panel for one task, into the task-form modal."""
+    project, source = _location_source(request, project_id, task_id)
+    return render(request, 'projects/partials/_duplicate_locations_panel.html',
+                  _location_panel_context(project, source))
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def task_duplicate_locations_create(request, project_id, task_id):
+    """POST: create one task per new location, right after the source's last sibling.
+
+    THE SERVER IS AUTHORITATIVE. The panel's preview is a convenience; every label is
+    re-normalised, re-matched and re-checked against what is already on the site here,
+    inside the transaction that holds the phase's rows.
+
+    ORDER. New rows go immediately after the LAST task in this phase with the same
+    template_task, and every later task in the phase moves down by N, under
+    select_for_update on the phase's tasks — so two creates cannot interleave and the
+    phase keeps contiguous, unique orders. Non-Residential only (the predicate), so no
+    Gantt or due-date cascade reads these orders.
+
+    ASSIGNMENT through assign_task_to only. The first new task notifies and the rest are
+    silent: the chokepoint's cooldown would otherwise send one per-task message and one
+    "2 tasks" summary for any N, which undercounts. See EXECUTION_MODULE_DEFERRED.md.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+    project, source = _location_source(request, project_id, task_id)
+    hx = _is_hx(request)
+
+    selected     = request.POST.getlist('existing_locations')
+    new_text     = request.POST.get('new_locations', '')
+    assignee_raw = request.POST.get('assigned_to', '').strip()
+
+    def refuse(message, assignee_pk=None):
+        if hx:
+            return render(request, 'projects/partials/_duplicate_locations_panel.html',
+                          _location_panel_context(project, source, error=message,
+                                                  selected=selected, new_text=new_text,
+                                                  assignee_pk=assignee_pk))
+        messages.error(request, message)
+        return redirect('project_overview', project_id=project.project_id)
+
+    assignee = (_location_assignee_candidates(source).filter(pk=assignee_raw).first()
+                if assignee_raw.isdigit() else None)
+    if assignee is None:
+        return refuse('Choose who the new tasks are assigned to. It must be an active '
+                      f'{source.get_assigned_role_display()} user.', assignee_pk='')
+
+    phase   = source.phase
+    created = []
+    skipped = []
+    with transaction.atomic():
+        phase_tasks = list(Task.objects.select_for_update()
+                           .filter(phase=phase).order_by('task_order', 'pk'))
+        labels, skipped, error = _resolve_location_labels(
+            selected, new_text, _site_location_labels(project), _locations_added_for(source))
+        if not error:
+            too_long = [label for label in labels
+                        if len(f'{source.task_name} — {label}') > Task._meta.get_field('task_name').max_length]
+            if too_long:
+                error = (f'"{source.task_name} — {too_long[0]}" is longer than a task name '
+                         f'may be. Shorten the location and try again.')
+        if error:
+            return refuse(error, assignee_pk=assignee.pk)
+
+        last_sibling = max(t.task_order for t in phase_tasks
+                           if t.template_task_id == source.template_task_id)
+        n = len(labels)
+        Task.objects.filter(phase=phase, task_order__gt=last_sibling).update(
+            task_order=F('task_order') + n)
+        for offset, label in enumerate(labels, start=1):
+            created.append(Task.objects.create(
+                phase=phase,
+                task_name=f'{source.task_name} — {label}',
+                task_order=last_sibling + offset,
+                template_task_id=source.template_task_id,
+                location_label=label,
+                assigned_role=source.assigned_role,
+                task_type=source.task_type,
+                duration_days=source.duration_days,
+                due_date=source.due_date,
+                # Set explicitly, whatever the source holds: a copy is ordinary work.
+                is_mirror=False,
+                is_payment_milestone=False,
+            ))
+        for index, task in enumerate(created):
+            assign_task_to(task, assignee, notify=(index == 0),
+                           actor=request.user.profile, request=request)
+
+    # After the saves, outside the block: log_activity swallows its own failures, and a
+    # failed INSERT inside the transaction would poison it on Postgres.
+    for task in created:
+        log_activity(
+            project, request.user.profile,
+            f"Created '{task.task_name}' from task #{source.pk} for location "
+            f"'{task.location_label}'",
+            entity_type='Task', entity_id=task.pk,
+            action_code='task_duplicated_for_location',
+        )
+
+    n = len(created)
+    messages.success(request, f'{n} task{"s" if n != 1 else ""} created for {source.task_name}.')
+    if skipped:
+        messages.info(request, 'Skipped, this task already exists at: ' + ', '.join(skipped) + '.')
+    if hx:
+        return _render_task_add_success_hx(request, project, phase)
+    return redirect('project_overview', project_id=project.project_id)
 
 
 # ---------------------------------------------------------------------------

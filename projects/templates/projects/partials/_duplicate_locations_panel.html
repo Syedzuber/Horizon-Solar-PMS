@@ -1,0 +1,98 @@
+{% comment %}
+"Duplicate for locations" panel — rendered into #taskFormModalContent by
+task_duplicate_locations (GET), and re-rendered with the refusal by
+task_duplicate_locations_create when a POST is refused, so the modal stays open with
+what was typed. Success closes the modal through _render_task_add_success_hx's
+taskFormDone trigger, exactly as Add Task does.
+
+The preview box and the button label are kept in step by the page's local script in
+project_overview.html (no network). The POST re-derives every label on the server and
+ignores the preview entirely; with the script absent the form still works.
+
+Expects: project, source, site_locations, all_locations_added, checklist,
+checklist_item_count, assignees, selected_assignee_pk, new_locations_text, error,
+preview_data.
+{% endcomment %}
+<div class="modal-header align-items-start">
+  <div>
+    <h5 class="modal-title" id="dupLocationsTitle">Duplicate for locations</h5>
+    <div class="small text-body-secondary">{{ source.task_name }}</div>
+  </div>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form method="post" action="{% url 'task_duplicate_locations_create' project.project_id source.pk %}" novalidate
+      hx-post="{% url 'task_duplicate_locations_create' project.project_id source.pk %}"
+      hx-target="#taskFormModalContent" hx-swap="innerHTML"
+      data-dup-locations>
+  {% csrf_token %}
+  <div class="modal-body">
+    {% if error %}
+      <div class="alert alert-danger py-2 small" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <div class="rounded px-3 py-2 small mb-3 {% if checklist %}bg-success-subtle text-success-emphasis{% else %}bg-warning-subtle text-warning-emphasis{% endif %}">
+      {% if checklist %}
+        Each new task gets the {{ checklist.name }} checklist ({{ checklist_item_count }} item{{ checklist_item_count|pluralize }}), answered separately at each location.
+      {% else %}
+        No checklist is defined for this task yet, so the new tasks will have none until one is added.
+      {% endif %}
+    </div>
+
+    <fieldset class="mb-3">
+      <legend class="fs-6 fw-semibold mb-2">Locations on this site</legend>
+      {% if not site_locations %}
+        <p class="small text-body-secondary mb-0">No locations on this site yet. Type them below.</p>
+      {% elif all_locations_added %}
+        <p class="small text-body-secondary mb-2">This task already exists at every location on this site. Add a new location below.</p>
+      {% endif %}
+      {% if site_locations %}
+      <div class="d-flex flex-wrap gap-2">
+        {% for loc in site_locations %}
+          <input type="checkbox" class="btn-check" name="existing_locations" value="{{ loc.label }}"
+                 id="dup-loc-{{ forloop.counter }}" autocomplete="off"
+                 {% if loc.added %}disabled{% elif loc.checked %}checked{% endif %}>
+          <label class="btn btn-sm rounded-pill {% if loc.added %}btn-light text-body-secondary border{% else %}btn-outline-success{% endif %}"
+                 for="dup-loc-{{ forloop.counter }}">{{ loc.label }}{% if loc.added %} <span class="small">already added</span>{% endif %}</label>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </fieldset>
+
+    <div class="mb-3">
+      <label for="dup-new-locations" class="form-label fw-semibold mb-1">New locations</label>
+      <textarea id="dup-new-locations" name="new_locations" rows="3" class="form-control form-control-sm"
+                placeholder="One per line, for example ESS-1"
+                aria-describedby="dup-new-locations-hint">{{ new_locations_text }}</textarea>
+      <div id="dup-new-locations-hint" class="form-text">One per line. A name that matches a location above uses that location's spelling.</div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-sm-6">
+        <label for="dup-assignee" class="form-label fw-semibold mb-1">Assign new tasks to</label>
+        <select id="dup-assignee" name="assigned_to" class="form-select form-select-sm">
+          <option value="">— Choose —</option>
+          {% for p in assignees %}
+            <option value="{{ p.pk }}" {% if p.pk == selected_assignee_pk %}selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-sm-6">
+        <div class="form-label fw-semibold mb-1">Due date</div>
+        <div class="small py-1">
+          {% if source.due_date %}{{ source.due_date|date:"d-m-Y" }} (copied, editable per task later){% else %}None set on the original task{% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="border rounded p-2 bg-body-tertiary" aria-live="polite">
+      <div class="fw-semibold small" data-dup-preview-title>Nothing will be created yet</div>
+      <ul class="list-unstyled small mb-0" data-dup-preview-list></ul>
+      <div class="small text-warning-emphasis" data-dup-preview-skipped hidden></div>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+    <button type="submit" class="btn btn-brand btn-sm" data-dup-submit>Create tasks</button>
+  </div>
+  {{ preview_data|json_script:"dup-locations-data" }}
+</form>

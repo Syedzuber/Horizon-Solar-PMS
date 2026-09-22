@@ -464,6 +464,12 @@ class Task(models.Model):
         on_delete=models.SET_NULL,
         related_name='tasks',
     )
+    # WHERE ON THE SITE this copy of a template task is done, when one template task is
+    # split into several per-location tasks ("Module Installation — Block A"). Blank on
+    # every original. Written only by task_duplicate_locations_create, which copies the
+    # source's template_task so the checklist still resolves by code; the label is what
+    # tells the copies apart. Not null: blank means "the whole site", not "unknown".
+    location_label       = models.CharField(max_length=100, blank=True, default='')
 
     # TWO-STEP COMPLETION, OPEX ONLY (2.1). Six columns, one for each half of a
     # two-party handshake: the person who did the work SUBMITS it, and a second

@@ -1542,3 +1542,66 @@ def checklist_answers_open(task):
     its no-model-imports property (see the import note at the top).
     """
     return task.status != task.DONE and not task.is_awaiting_approval
+
+
+# The roles task_add's @role_required admits. "Duplicate for locations" is task_add's
+# gate by rule (the same people, on the same projects), so the pair is restated here
+# only because a decorator cannot be asked a question. If task_add's decorator changes,
+# this set changes in the same edit.
+TASK_ADD_ROLES = frozenset({'PM', 'Project Coordinator'})
+
+
+def _project_allows_location_duplication(user, project):
+    """The PROJECT half of can_duplicate_task_for_locations(): may `user` add tasks to
+    `project` at all, and is `project` in scope for per-location copies.
+
+        task_add's gate     role in TASK_ADD_ROLES, and user_can_manage_project()
+        live                status == 'Active' and not soft-deleted
+        not Residential     v1 scope: a Residential site is one rooftop, and its task
+                            order drives the Gantt and the due-date cascade
+
+    Split out so a page of rows can ask it once per project — see the `project_cache`
+    argument below. It holds no rule of its own beyond these lines."""
+    if project is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in TASK_ADD_ROLES:
+        return False
+    if project.is_deleted or project.status != 'Active':
+        return False
+    if project.project_type == 'Residential':
+        return False
+    return user_can_manage_project(user, project)
+
+
+def _task_is_location_duplication_source(task):
+    """The TASK half: only an ORIGINAL built from a template may be copied.
+
+        template_task set   the copies share it, which is how their checklist resolves
+        location_label ''   a copy is never itself copied
+        not a mirror        a mirror's status is derived and nobody's to split
+        not a milestone     a payment milestone is one event, not one per location
+
+    Row fields only, no query."""
+    return (task.template_task_id is not None
+            and task.location_label == ''
+            and not task.is_mirror
+            and not task.is_payment_milestone)
+
+
+def can_duplicate_task_for_locations(user, task, project_cache=None):
+    """Return True if `user` may create per-location copies of `task`.
+
+    The AND of the two halves above. The views ask it without a cache, so a POST always
+    reads the project as it is now; the row filter passes `project_cache`, a dict it
+    keeps for one request, so a 40-row page runs the project half once per project and
+    not 40 times. The cache is keyed on the phase's project_id, which needs no query.
+    """
+    if task is None or not _task_is_location_duplication_source(task):
+        return False
+    if project_cache is None:
+        return _project_allows_location_duplication(user, task.phase.project)
+    key = task.phase.project_id
+    if key not in project_cache:
+        project_cache[key] = _project_allows_location_duplication(user, task.phase.project)
+    return project_cache[key]

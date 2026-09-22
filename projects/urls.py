@@ -189,6 +189,8 @@ urlpatterns = [
     path('projects/<str:project_id>/activate-site/',           views.opex_site_activate,         name='opex_site_activate'),         # PM only, POST only — OPEX/CAPEX: phases/tasks, NO designer, NO milestones (prompt 1.3c)
     path('projects/<str:project_id>/recalculate-dates/',       views.project_recalculate_dates,  name='project_recalculate_dates'),  # PM only, POST only
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),              # PM only
+    path('projects/<str:project_id>/tasks/<int:task_id>/duplicate-locations/',        views.task_duplicate_locations,        name='task_duplicate_locations'),         # task_add's gate + can_duplicate_task_for_locations; GET panel
+    path('projects/<str:project_id>/tasks/<int:task_id>/duplicate-locations/create/', views.task_duplicate_locations_create, name='task_duplicate_locations_create'),  # same gate; POST only
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',        views.task_status_update,        name='task_status_update'),        # Assigned role or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/detail-status/', views.task_detail_status_update, name='task_detail_status_update'), # Assigned user only
     # Two-step completion (2.1) — OPEX only, POST only. The scope is enforced in the
