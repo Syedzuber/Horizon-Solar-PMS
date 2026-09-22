@@ -3828,29 +3828,19 @@ def _render_phase_tasks_hx(request, project, phase, status=200):
     """Re-render one phase's <tbody> and task count out-of-band, in
     _task_add_success.html's shape, WITHOUT its taskFormDone trigger: no modal is open.
 
-    Carries two pieces of row context the add-success helper does not: the two-step
-    flags (so an OPEX row still withholds Done) and the delivery consignment counts
-    project_overview attaches to mirror rows. Without them a reorder would redraw rows
-    that differ from the page it came from."""
-    profile = getattr(request.user, 'profile', None)
-    role    = getattr(profile, 'role', None)
+    Row context comes from `_task_row_context()` and `_attach_delivery_consignments()`,
+    as on every other responder, so a reorder redraws rows identical to the page it
+    came from."""
     phase_tasks = list(phase.tasks.select_related('template_task'))
     for task in phase_tasks:
         task.phase = phase
-        delivery = delivery_detail_for_task(task)
-        if delivery is not None:
-            task.delivery_consignments = delivery['consignments']
+    _attach_delivery_consignments(phase_tasks)
     return render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
         'phase_tasks':         phase_tasks,
         'phase_count':         len(phase_tasks),
-        'gate_task_pk':        _gate_task_pk(project),
-        'is_assigned_pm':      _pm_owns_project(request, project),
-        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
-        'role':                role,
-        'task_status_choices': Task.STATUS_CHOICES,
-        **_phase_list_two_step(project, request),
+        **_task_row_context(request, project),
     }, status=status)
 
 
@@ -4595,7 +4585,7 @@ def _phase_list_two_step(project, request):
 
     ONE BUILDER, TWO CALLERS -- the same reason `_task_approval_context()` exists.
     The phase list renders a row twice: once by `project_overview` on the full page
-    and once by `_render_task_row_hx()` after every status / assign / due-date swap.
+    and once by an HTMX responder (through `_task_row_context()`) after every swap.
     A row that offered Done on one path and withheld it on the other would be the
     same control disagreeing with itself depending only on how it was drawn.
 
@@ -4630,26 +4620,57 @@ def _phase_list_two_step(project, request):
     }
 
 
+def _task_row_context(request, project):
+    """The shared context `_task_row.html` reads, for every HTMX responder that redraws
+    a row or a phase: role gating, the gate pk, and the two-step flags.
+
+    ONE BUILDER FOR ALL FOUR RESPONDERS. Each used to assemble this dict by hand, and
+    two of them (task add / duplicate, and the Design Head modal) left out the
+    two-step flags, so a redrawn OPEX row offered a Done the server then refused. A
+    responder that spreads this cannot drop a key the others carry.
+
+    The flags still come from `_phase_list_two_step()`, the only place they are
+    decided; this only gathers them. project_overview keeps its own context (it needs
+    these values for more than the rows) but spreads the same flag builder."""
+    profile = getattr(request.user, 'profile', None)
+    role    = getattr(profile, 'role', None)
+    return {
+        'role':                role,
+        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
+        'is_assigned_pm':      _pm_owns_project(request, project),
+        'task_status_choices': Task.STATUS_CHOICES,
+        'gate_task_pk':        _gate_task_pk(project),
+        **_phase_list_two_step(project, request),
+    }
+
+
+def _attach_delivery_consignments(tasks):
+    """Attach the consignment counts `_task_row.html` shows on a delivery mirror row
+    (T4 R6), as `task.delivery_consignments`, on the instances the template iterates.
+
+    `delivery_detail_for_task()` returns None for everything that is not one of the
+    four delivery mirrors before it queries anything, so non-mirror rows cost nothing;
+    pass tasks with `template_task` joined or each mirror costs one more query."""
+    for task in tasks:
+        delivery = delivery_detail_for_task(task)
+        if delivery is not None:
+            task.delivery_consignments = delivery['consignments']
+
+
 def _render_task_row_hx(request, project, task, oob_tasks=None):
     """Render the HTMX task-row response for project_overview (#1/#3/#5):
     the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
     rows, and the OOB flash-message fragment. Recomputes the same per-row
     permission context the page uses so role-gating is identical to a full render."""
-    profile = getattr(request.user, 'profile', None)
-    role    = getattr(profile, 'role', None)
-    user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
-    is_assigned_pm = _pm_owns_project(request, project)
-    gate_pk        = _gate_task_pk(project)
+    oob_tasks = oob_tasks or []
+    _attach_delivery_consignments([task, *oob_tasks])
+    row_context = _task_row_context(request, project)
     return render(request, 'projects/partials/_task_row_response.html', {
         'project':             project,
         'row_task':            task,
-        'oob_tasks':           oob_tasks or [],
-        'primary_is_gate':     task.pk == gate_pk,
-        'is_assigned_pm':      is_assigned_pm,
-        'user_task_role':      user_task_role,
-        'role':                role,
-        'task_status_choices': Task.STATUS_CHOICES,
-        **_phase_list_two_step(project, request),
+        'oob_tasks':           oob_tasks,
+        'primary_is_gate':     task.pk == row_context['gate_task_pk'],
+        **row_context,
     })
 
 
@@ -4913,16 +4934,13 @@ def _render_task_assign_design_success_hx(request, project, task):
     close the modal (taskFormDone trigger). Recomputes the same per-row context
     the page uses, from the requesting user's perspective (a Design Head need not
     be the PM)."""
-    profile = getattr(request.user, 'profile', None)
-    role    = getattr(profile, 'role', None)
+    _attach_delivery_consignments([task])
+    row_context = _task_row_context(request, project)
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
         'row_task':            task,
-        'primary_is_gate':     task.pk == _gate_task_pk(project),
-        'is_assigned_pm':      _pm_owns_project(request, project),
-        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
-        'role':                role,
-        'task_status_choices': Task.STATUS_CHOICES,
+        'primary_is_gate':     task.pk == row_context['gate_task_pk'],
+        **row_context,
     })
     resp['HX-Trigger'] = 'taskFormDone'
     return resp
@@ -4933,19 +4951,14 @@ def _render_task_add_success_hx(request, project, phase):
     freshly-queried server truth, and close the modal (taskFormDone trigger).
     phase.tasks uses Task Meta ordering ['task_order'] so the re-render matches the
     page order and correctly places the new row."""
-    profile = getattr(request.user, 'profile', None)
-    role    = getattr(profile, 'role', None)
-    phase_tasks = list(phase.tasks.all())
+    phase_tasks = list(phase.tasks.select_related('template_task'))
+    _attach_delivery_consignments(phase_tasks)
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
         'phase_tasks':         phase_tasks,
         'phase_count':         len(phase_tasks),
-        'gate_task_pk':        _gate_task_pk(project),
-        'is_assigned_pm':      _pm_owns_project(request, project),
-        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
-        'role':                role,
-        'task_status_choices': Task.STATUS_CHOICES,
+        **_task_row_context(request, project),
     })
     resp['HX-Trigger'] = 'taskFormDone'
     return resp
@@ -9496,10 +9509,7 @@ def project_overview(request, project_id):
             #
             # THE SAME HELPER THE PANEL USES, deliberately: the number on the row and
             # the panel it opens are one computation, so they cannot drift apart.
-            for _task in tasks:
-                _delivery = delivery_detail_for_task(_task)
-                if _delivery is not None:
-                    _task.delivery_consignments = _delivery['consignments']
+            _attach_delivery_consignments(tasks)
 
             # THIS IS PHASE COMPLETENESS, SO DERIVED WORK COUNTS. The bar answers
             # "how much of this phase is finished", and an undelivered consignment is
