@@ -290,6 +290,13 @@ urlpatterns = [
          name='vendor_order_create'),
     path('orders/<int:order_pk>/',                order_views.vendor_order_detail,
          name='vendor_order_detail'),
+    # O2b — a site's order list, a further payment, and appended documents.
+    path('projects/<int:project_pk>/orders/',     order_views.vendor_order_list,
+         name='vendor_order_list'),
+    path('orders/<int:order_pk>/payments/new/',   order_views.vendor_order_add_payment,
+         name='vendor_order_add_payment'),
+    path('orders/<int:order_pk>/documents/new/',  order_views.vendor_order_add_documents,
+         name='vendor_order_add_documents'),
 
     # ---------------------------------------------------------------------------
     # Webhooks — unauthenticated, no login required

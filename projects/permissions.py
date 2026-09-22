@@ -1767,9 +1767,61 @@ def user_can_view_vendor_order(user, order):
     """
     if order is None:
         return False
+    return _user_reads_orders_on(user, (site.project for site in order.sites.all()))
+
+
+def _user_reads_orders_on(user, projects):
+    """The single reader rule behind both order predicates: a portfolio role, or anyone
+    who can see ANY of `projects`. `projects` may be a generator; it is walked lazily
+    and only when the role alone does not decide."""
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
     if profile.role in VENDOR_ORDER_PORTFOLIO_ROLES:
         return True
-    return any(user_can_view_project(user, site.project) for site in order.sites.all())
+    return any(user_can_view_project(user, project) for project in projects)
+
+
+def user_can_view_project_vendor_orders(user, project):
+    """Return True if `user` may read the list of orders placed for `project`.
+
+    The same reader rule as user_can_view_vendor_order(), applied to this one site, AND
+    user_can_view_project(): the list is a project page, so it never admits someone who
+    cannot see the project. Today the second term adds nothing (every portfolio order
+    role is also portfolio-wide on projects); it is there so a future narrowing of either
+    rule narrows this page with it.
+    """
+    if project is None:
+        return False
+    return user_can_view_project(user, project) and _user_reads_orders_on(user, (project,))
+
+
+def user_can_request_order_payment(user, order):
+    """Return True if `user` may raise a further payment request against `order`.
+
+    SCM only (VENDOR_ORDER_RAISE_ROLES — the role that records the order asks for its
+    money), and only while every site on the order is live: a payment against a deleted
+    site is money for work that is no longer happening. Whether any balance is left is
+    NOT asked here — that is the view's check, made under a row lock.
+
+    Reads `order.sites.all()`, so a prefetch with projects makes it free.
+    """
+    if order is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in VENDOR_ORDER_RAISE_ROLES:
+        return False
+    return not any(site.project.is_deleted for site in order.sites.all())
+
+
+def user_can_append_order_documents(user, order):
+    """Return True if `user` may attach further documents to `order`.
+
+    SCM only, and at ANY time — including after every payment is confirmed, because the
+    final invoice routinely arrives after the money has gone. Appending only ever adds
+    VendorOrderDocument rows, so there is nothing to protect by closing it.
+    """
+    if order is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in VENDOR_ORDER_RAISE_ROLES

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Add Documents — Order {{ order.po_number|default:order.pi_number }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Add Documents</h4>
+    <small class="text-muted">Order {{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }}{% if project %} · {{ project.project_id }}{% endif %}</small>
+  </div>
+  <a href="{% url 'vendor_order_detail' order.pk %}" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Order</a>
+</div>
+
+{% if refused %}
+  <div class="alert alert-warning py-2 small">
+    Your entries are kept below. <strong>Attach the files again</strong> — browsers do not keep a chosen file after the page reloads.
+  </div>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" id="voDocForm"
+      action="{% url 'vendor_order_add_documents' order.pk %}">
+  {% csrf_token %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      Documents
+      <div class="small text-muted fw-normal">Up to 5 files. They are added beside the order's existing documents; nothing is replaced. PDF, Word, Excel, JPG, PNG — max 20 MB each.</div>
+    </div>
+    {% include 'projects/partials/vendor_order_doc_slots.html' %}
+  </div>
+
+  <div class="alert alert-danger small py-2 d-none" id="voProblems" role="alert"></div>
+
+  <div class="d-grid d-md-flex justify-content-md-end mb-4">
+    <button type="submit" class="btn btn-brand" id="voSubmit">Add documents</button>
+  </div>
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var form = document.getElementById('voDocForm');
+  /* Only spares a reload that loses the chosen files; the server applies the same rules. */
+  form.addEventListener('submit', function (e) {
+    if (window.voShowProblems(document.getElementById('voProblems'),
+                              window.voDocProblems(form, false))) {
+      e.preventDefault();
+      return;
+    }
+    var btn = document.getElementById('voSubmit');
+    btn.disabled = true;
+    btn.textContent = 'Uploading…';
+  });
+});
+</script>
+
+{% endblock %}

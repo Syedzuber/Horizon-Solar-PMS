@@ -8,9 +8,17 @@
     <h4 class="mb-0">Order {{ order.po_number|default:order.pi_number }}</h4>
     <small class="text-muted">{{ order.vendor.name }} · {{ order.project_type }}</small>
   </div>
-  {% with first=sites.0 %}{% if first %}
-  <a href="{% url 'project_overview' first.project.project_id %}" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Project</a>
-  {% endif %}{% endwith %}
+  <div class="d-flex flex-wrap justify-content-end gap-2 flex-shrink-0">
+    {% if can_request_payment %}
+    <a href="{% url 'vendor_order_add_payment' order.pk %}" class="btn btn-brand btn-sm"><i class="bi bi-cash-coin me-1"></i>Request payment</a>
+    {% endif %}
+    {% if can_add_documents %}
+    <a href="{% url 'vendor_order_add_documents' order.pk %}" class="btn btn-outline-primary btn-sm"><i class="bi bi-paperclip me-1"></i>Add documents</a>
+    {% endif %}
+    {% if orders_project %}
+    <a href="{% url 'vendor_order_list' orders_project.pk %}" class="btn btn-outline-secondary btn-sm">← Back to orders</a>
+    {% endif %}
+  </div>
 </div>
 
 {% if invoice_awaited %}
@@ -62,6 +70,8 @@
         <dl class="row mb-0 small">
           <dt class="col-6 text-muted fw-normal">Order total</dt>
           <dd class="col-6 text-end fw-semibold">₹{{ total|floatformat:2 }}</dd>
+          <dt class="col-6 text-muted fw-normal">Committed</dt>
+          <dd class="col-6 text-end">₹{{ committed|floatformat:2 }}</dd>
           <dt class="col-6 text-muted fw-normal">Paid</dt>
           <dd class="col-6 text-end">₹{{ paid|floatformat:2 }}</dd>
           <dt class="col-6 text-muted fw-normal">Balance</dt>

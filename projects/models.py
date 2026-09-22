@@ -2388,6 +2388,25 @@ VENDOR_ORDER_DOC_TYPE_CHOICES = [
 ]
 
 
+def committed_total(payments):
+    """THE ONE RULE for how much of an order's total is spoken for: the sum of every
+    payment whose status is not REJECTED. Awaiting approval, approved, on hold and paid
+    all count — each is money someone asked for and nobody refused.
+
+    Written for all five statuses now, although until O4 every payment is created
+    APPROVED, so that O4's approval flow changes which status a payment is in and never
+    this rule. ON_HOLD counts on purpose: a held payment may yet be released, and freeing
+    its amount would let a second request spend the same money.
+
+    Takes an iterable of PaymentRequest rather than a queryset so prefetched rows cost no
+    query. VendorOrder.committed_amount and every order view call this; nothing else
+    re-derives it.
+    """
+    from decimal import Decimal
+    return sum((p.amount for p in payments if p.status != PaymentRequest.REJECTED),
+               Decimal('0'))
+
+
 class VendorOrder(models.Model):
     """A RECORD of one purchase order issued to one vendor outside PMS.
 
@@ -2419,6 +2438,11 @@ class VendorOrder(models.Model):
     # order was recorded, any of its sites' BOQ quantities were still unfrozen (the site
     # was in no locked procurement group). A later lock does not make it False and must
     # not: the question it answers is "was this order placed against moving numbers".
+    #
+    # MEANINGFUL FOR GROUP-SCOPED ORDERS ONLY. Residential has no procurement groups, so
+    # nothing is ever frozen or unfrozen and a Residential order always stores False —
+    # read it there as "not applicable", never as "quantities were frozen". O3's group
+    # ordering is the first writer that can set it True.
     raised_with_unfrozen_quantities = models.BooleanField(default=False)
 
     note = models.TextField(blank=True, default='')
@@ -2464,6 +2488,19 @@ class VendorOrder(models.Model):
         """total − paid. Negative if more was paid than ordered; not clamped, because
         an overpayment is a fact someone needs to see."""
         return self.total - self.paid
+
+    @property
+    def committed_amount(self):
+        """Sum of payments that hold part of the order total — see committed_total().
+
+        Reads `self.payments.all()`, so a caller that prefetched payments pays no query.
+        """
+        return committed_total(self.payments.all())
+
+    @property
+    def available_to_request(self):
+        """total − committed_amount: the most a new payment request may be for."""
+        return self.total - self.committed_amount
 
     @property
     def invoiced(self):

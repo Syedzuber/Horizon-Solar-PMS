@@ -1487,11 +1487,14 @@ def dashboard_scm(request):
         **_context_filter(ctx, 'project__'),
     ).count()
 
-    # Active projects SCM tracks: all Active/In Progress non-deleted projects
+    # Active projects SCM tracks: all Active/In Progress non-deleted projects.
+    # vendor_order_count (O2b) rides on this same query for each card's "Orders (n)"
+    # link — one VendorOrderSite row per order per site, so no distinct is needed.
     active_projects = list(
         Project.objects.filter(is_deleted=False, status__in=['Active', 'In Progress'],
                                **_context_filter(ctx))
         .select_related('assigned_pm__user')
+        .annotate(vendor_order_count=Count('vendor_order_sites'))
         .order_by('project_id')
     )
     active_project_ids = [p.project_id for p in active_projects]
@@ -1688,6 +1691,9 @@ def dashboard_scm(request):
         raise_order_url       = (reverse('vendor_order_create', args=[project.pk])
                                  if user_can_raise_vendor_order(request.user, project)
                                  else None)
+        # O2b: the site's order list, drawn beside Raise Order.
+        orders_url            = (reverse('vendor_order_list', args=[project.pk])
+                                 if raise_order_url else None)
         # raise_issue_url: scope to the most recent pending DC if one exists
         latest_pending_dc = (pending_challans[0] if pending_challans
                              else (challans[0] if challans else None))
@@ -1716,6 +1722,8 @@ def dashboard_scm(request):
             'schedule_delivery_url': schedule_delivery_url,
             'finance_url':         finance_url,
             'raise_order_url':     raise_order_url,
+            'orders_url':          orders_url,
+            'order_count':         project.vendor_order_count,
             'raise_issue_url':     raise_issue_url,
         })
 

@@ -811,3 +811,39 @@ Documents whatever the entry point, and its role allowlist leaves out CEO, altho
 order page admits CEO. confirm_payment_request writes no StatusTransition (O5's job).
 
 **Not fixed**: out of scope (R-12).
+
+## 24. O2b order payments, document append, order list — what was left
+
+Found 22 Sep 2026, building O2b.
+
+**#23's "order with no payment cannot be found again" is only partly closed.** The order
+list (`vendor_order_list`) is linked from the SCM dashboard's Residential card ("Orders
+(n)") and from each order page ("Back to orders"). Nothing links to it for a PM or for
+Finance. Their natural entry point is project_overview card 4b, and O2b was barred from
+changing 4b. **Risk if left:** low. They can read the list, but only by URL or through a
+payment's "View order". **Fix in O6** when 4b is rewritten.
+
+**Appending documents has no idempotency key.** VendorOrderDocument has no `client_uuid`,
+and O2b could not add fields. A double-submit, or a retry after a slow upload, appends the
+same files twice. The page disables its button on submit, and the records are append-only
+anyway, so a duplicate costs clutter, not money. **Risk if left:** low. Add a key if an
+offline or queued client ever posts here.
+
+**A further payment is filed under the order's FIRST site** (`_order_project`). That is
+exact for Residential, where an order has one site. A group-scoped order (O3) has several,
+and PaymentRequest.project must name one. **O3 must decide** before
+user_can_request_order_payment admits group orders. Today the predicate checks only role and
+live sites, not project_type.
+
+**The order list 404s on a deleted site.** An order placed for a site that was later
+soft-deleted can still be read on its own page, but it no longer appears in any list.
+**Risk if left:** low. Deleted sites are rare, and the order is still readable through its
+payments.
+
+**The client-side checks are not browser-verified.** The raise, add-payment and
+add-documents pages block and explain problems before submit (missing PO/PI, an
+incomplete invoice slot, a payment above the total or the available balance). The JS was
+compiled into the templates, but no browser run exercised it. The server rules are
+unchanged, so the worst case is a refusal after a reload, as in O2.
+
+**Not fixed**: out of scope (R-12).

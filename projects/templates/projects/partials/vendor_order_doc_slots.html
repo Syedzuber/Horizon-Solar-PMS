@@ -1,0 +1,86 @@
+{% comment %}
+  The document file slots, shared by the raise page and the append page.
+  Needs doc_rows and doc_type_choices (order_views._doc_rows / _DOC_TYPE_SELECT).
+  Defines window.voDocProblems(form, requirePoPi): the client-side twin of
+  _validate_document_slots — it only spares a reload that loses the chosen files;
+  the server's checks are the rule.
+{% endcomment %}
+<ul class="list-group list-group-flush">
+  {% for d in doc_rows %}
+  <li class="list-group-item js-vo-doc">
+    <div class="row g-2">
+      <div class="col-4 col-md-2">
+        <select name="doc_type_{{ d.index }}" class="form-select form-select-sm js-vo-doctype" aria-label="Document type">
+          <option value="">Type</option>
+          {% for value, label in doc_type_choices %}
+          <option value="{{ value }}"{% if d.doc_type == value %} selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-8 col-md-10">
+        <input type="file" name="doc_file_{{ d.index }}" class="form-control form-control-sm js-vo-docfile"
+               accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" aria-label="File">
+      </div>
+    </div>
+    <div class="row g-2 mt-1 js-vo-invoice{% if d.doc_type != 'invoice' %} d-none{% endif %}">
+      <div class="col-6">
+        <input type="text" name="doc_invoice_number_{{ d.index }}" maxlength="100"
+               class="form-control form-control-sm js-vo-invno" placeholder="Invoice number *"
+               value="{{ d.invoice_number }}" aria-label="Invoice number">
+      </div>
+      <div class="col-6">
+        <input type="number" step="0.01" min="0.01" inputmode="decimal"
+               name="doc_invoice_amount_{{ d.index }}" class="form-control form-control-sm js-vo-invamt"
+               placeholder="Invoice amount ₹ *" value="{{ d.invoice_amount }}" aria-label="Invoice amount">
+      </div>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+<script>
+window.voDocProblems = function (form, requirePoPi) {
+  var problems = [], hasPoPi = false, fileCount = 0;
+  form.querySelectorAll('.js-vo-doc').forEach(function (li) {
+    var input = li.querySelector('.js-vo-docfile');
+    if (!input.files || !input.files.length) return;
+    fileCount += 1;
+    var name = input.files[0].name;
+    var type = li.querySelector('.js-vo-doctype').value;
+    if (!type) { problems.push(name + ': choose what kind of document it is.'); return; }
+    if (type === 'po' || type === 'pi') hasPoPi = true;
+    if (type === 'invoice') {
+      if (!li.querySelector('.js-vo-invno').value.trim())
+        problems.push(name + ': an invoice needs its invoice number.');
+      var amt = parseFloat(li.querySelector('.js-vo-invamt').value);
+      if (isNaN(amt) || amt <= 0)
+        problems.push(name + ': an invoice needs an amount more than 0.');
+    }
+  });
+  if (requirePoPi && !hasPoPi) problems.push('Attach at least one PO or PI document.');
+  if (!requirePoPi && !fileCount) problems.push('Attach at least one document.');
+  return problems;
+};
+
+/* Show the invoice number / amount inputs only on an Invoice slot. */
+document.addEventListener('DOMContentLoaded', function () {
+  document.querySelectorAll('.js-vo-doc').forEach(function (li) {
+    var sel = li.querySelector('.js-vo-doctype');
+    sel.addEventListener('change', function () {
+      li.querySelector('.js-vo-invoice').classList.toggle('d-none', sel.value !== 'invoice');
+    });
+  });
+});
+
+/* Write problems into a page's alert box; returns true when there were any. */
+window.voShowProblems = function (box, problems) {
+  box.innerHTML = '';
+  problems.forEach(function (text) {
+    var div = document.createElement('div');
+    div.textContent = text;
+    box.appendChild(div);
+  });
+  box.classList.toggle('d-none', !problems.length);
+  if (problems.length) box.scrollIntoView({block: 'center'});
+  return problems.length > 0;
+};
+</script>
