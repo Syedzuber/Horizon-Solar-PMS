@@ -2366,9 +2366,10 @@ class PaymentRequest(models.Model):
 # NO EDIT, NO DELETE, NO SOFT DELETE, on any of the four models. A mistake is corrected
 # by recording what actually happened next to it, not by rewriting the record. Every FK
 # INTO an order is PROTECT, so an order with any line, site, document or payment cannot
-# be deleted by the ORM either. There is no save()/delete() override: the absence of any
-# write path other than creation is the enforcement, and a future edit view is the thing
-# to refuse in review.
+# be deleted by the ORM either. There is no delete() override, and the only save()
+# override (VendorOrderDocument's) merely trims a value: the absence of any write path
+# other than creation is the enforcement, and a future edit view is the thing to refuse
+# in review.
 #
 # TOTALS ARE PROPERTIES, NEVER COLUMNS. Total, paid, balance and invoiced are sums over
 # the children, computed at read time — the same reason aggregate_group_boq() stores
@@ -2633,10 +2634,29 @@ class VendorOrderDocument(models.Model):
                               & models.Q(invoice_amount__gt=0))),
                 name='vendor_order_invoice_needs_number_and_amount',
             ),
+            # One invoice number per order: a second upload of the same invoice would be
+            # summed twice into VendorOrder.invoiced. The BACKSTOP only — the views refuse
+            # a duplicate before any upload, and more strictly (trimmed AND
+            # case-insensitive); this index compares the stored text exactly. save()
+            # trims, so the two agree on whitespace.
+            models.UniqueConstraint(
+                fields=['order', 'invoice_number'],
+                condition=models.Q(doc_type=VENDOR_ORDER_DOC_INVOICE),
+                name='uniq_invoice_number_per_order',
+            ),
         ]
 
     def __str__(self):
         return f"{self.order} — {self.get_doc_type_display()}: {self.file_name}"
+
+    def save(self, *args, **kwargs):
+        """Store invoice_number trimmed, case as entered, so the unique index and the
+        views' duplicate check agree on what "the same number" is. Normalisation only —
+        this is not an edit path (see the section note). bulk_create skips save(); its
+        only callers pass numbers already trimmed by order_views._validate_document_slots.
+        """
+        self.invoice_number = (self.invoice_number or '').strip()
+        super().save(*args, **kwargs)
 
 
 class DesignSubmission(models.Model):

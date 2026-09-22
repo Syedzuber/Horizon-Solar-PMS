@@ -140,6 +140,32 @@ def _validate_document_slots(request):
     return documents, errors
 
 
+def _duplicate_invoice_numbers(documents, order=None):
+    """The invoice numbers in `documents` that repeat — within this submission, or
+    against an invoice already recorded on `order`. Compared trimmed and
+    case-insensitive, so "inv-1 " and "INV-1" are one invoice. Returned as entered, each
+    once, in submission order. The unique index uniq_invoice_number_per_order is the
+    backstop; this is the check the user sees, and it runs before any upload.
+    """
+    seen = set()
+    if order is not None:
+        seen = {number.strip().casefold() for number in order.documents.filter(
+            doc_type=VENDOR_ORDER_DOC_INVOICE).values_list('invoice_number', flat=True)}
+    duplicates = []
+    for doc in documents:
+        if doc['doc_type'] != VENDOR_ORDER_DOC_INVOICE or not doc['invoice_number']:
+            continue
+        key = doc['invoice_number'].strip().casefold()
+        if key in seen and doc['invoice_number'] not in duplicates:
+            duplicates.append(doc['invoice_number'])
+        seen.add(key)
+    return duplicates
+
+
+def _duplicate_invoice_errors(duplicates):
+    return [f'Invoice {number} is already recorded on this order.' for number in duplicates]
+
+
 def _parse_submission(request, boq_items):
     """Read and validate the whole POST. Returns (cleaned, errors).
 
@@ -197,6 +223,8 @@ def _parse_submission(request, boq_items):
     # ── Documents ────────────────────────────────────────────────────────────
     documents, doc_errors = _validate_document_slots(request)
     errors.extend(doc_errors)
+    # A new order has no invoices yet, so only repeats within this submission.
+    errors.extend(_duplicate_invoice_errors(_duplicate_invoice_numbers(documents)))
     if not any(d['doc_type'] in (VENDOR_ORDER_DOC_PO, VENDOR_ORDER_DOC_PI)
                for d in documents):
         errors.append('Attach at least one PO or PI document.')
@@ -494,12 +522,18 @@ def vendor_order_create(request, project_pk):
             cleaned['documents'], client_uuid, profile, write)
     except _UploadRefused as exc:
         return _refuse(request, project, boq_items, [str(exc)], client_uuid)
-    except _SaveFailed:
+    except _SaveFailed as exc:
         # Two submissions with one key can both pass the check above; the loser lands
         # here on the unique index. Send it to the winner rather than to an error.
         existing = VendorOrder.objects.filter(client_uuid=client_uuid).first()
         if existing is not None:
             return redirect('vendor_order_detail', order_pk=existing.pk)
+        # uniq_invoice_number_per_order: same message as the check, files already removed.
+        if isinstance(exc.__cause__, IntegrityError):
+            duplicates = _duplicate_invoice_numbers(cleaned['documents'])
+            if duplicates:
+                return _refuse(request, project, boq_items,
+                               _duplicate_invoice_errors(duplicates), client_uuid)
         return _refuse(request, project, boq_items,
                        ['The order could not be saved. Nothing was recorded; try again.'],
                        client_uuid)
@@ -722,6 +756,7 @@ def vendor_order_add_documents(request, order_pk):
     documents, errors = _validate_document_slots(request)
     if not documents and not errors:
         errors.append('Attach at least one document.')
+    errors.extend(_duplicate_invoice_errors(_duplicate_invoice_numbers(documents, order)))
     if errors:
         return refuse(errors)
 
@@ -731,7 +766,14 @@ def vendor_order_add_documents(request, order_pk):
         _upload_and_record_documents(documents, folder, profile, lambda: (order, None))
     except _UploadRefused as exc:
         return refuse([str(exc)])
-    except _SaveFailed:
+    except _SaveFailed as exc:
+        # The files are already removed. If uniq_invoice_number_per_order refused the
+        # write — a second tab recorded the same invoice between the check and here — say
+        # which invoice, exactly as the check would have.
+        if isinstance(exc.__cause__, IntegrityError):
+            duplicates = _duplicate_invoice_numbers(documents, order)
+            if duplicates:
+                return refuse(_duplicate_invoice_errors(duplicates))
         return refuse(['The documents could not be saved. Nothing was recorded; try again.'])
 
     ref = order.po_number or order.pi_number
