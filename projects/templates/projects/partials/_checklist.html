@@ -21,8 +21,23 @@ the wording as it stood when the item was answered — and for an unchecked row 
 item's current label. Never render row.item.label here; that is the defect 0.5 fixed.
 The SECTION HEADING is deliberately not part of that snapshot: it is read live off the
 item, so renaming a heading re-groups history. See ChecklistItem.section.
+
+THE ANSWER WINDOW IS DECIDED HERE, IN THE PARTIAL, so the full page and every HTMX
+re-render (_checklist_response.html, including a refused POST) apply the same rule.
+Answers close at submission and at Done (permissions.checklist_answers_open):
+  closed, nothing recorded   -> one factual line, no table, no headings, no badges. The
+                                wording is a fact, not a verdict: it does not say why.
+  closed, something recorded -> the rows, read-only; each unanswered one "Not answered".
+  open                       -> the form where can_complete_items, otherwise "Pending".
+checklist_has_answers counts every recorded answer, No and NA included (is_checked is
+True for all three). The card header and count badge live outside this partial and stay.
 {% endcomment %}
-{% if checklist_rows %}
+{% if checklist_rows and not checklist_answers_open and not checklist_has_answers %}
+<div class="text-center text-muted py-4">
+  <i class="bi bi-check2-square fs-3 d-block mb-2"></i>
+  No checklist answers were recorded for this task.
+</div>
+{% elif checklist_rows %}
 {% if can_complete_items %}
 {% comment %}The witness caveat is stated ONCE here rather than under every row's input.
    It is the same sentence it always was; a forty-item commissioning sheet repeated it
@@ -153,6 +168,8 @@ item, so renaming a heading re-groups history. See ChecklistItem.section.
                   {% if checklist.requires_photo %}Record + Upload Photo{% else %}Record Answer{% endif %}
                 </button>
               </form>
+            {% elif not checklist_answers_open %}
+              <span class="badge bg-light text-muted border">Not answered</span>
             {% else %}
               <span class="badge bg-secondary">Pending</span>
             {% endif %}

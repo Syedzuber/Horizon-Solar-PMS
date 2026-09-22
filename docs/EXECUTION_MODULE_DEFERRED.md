@@ -3567,3 +3567,24 @@ while the row button beside it said "Complete (self-certified)". Closed by the f
 session — all three strings now branch on `can_self_certify`, and
 `tests_approval_pool.ButtonLabelTests` asserts the dialog and the row agree in both
 directions.
+
+### G13 — reopening a task does not clear its approval
+
+Found by the checklist answer-window session (22 Sep 2026), not fixed: the prompt forbade
+any change to status or approval behaviour.
+
+Done → Blocked → In Progress does not clear approved_at/approved_by. A reopened task keeps a
+stale approval, and its behaviour on resubmission is unverified.
+
+`VALID_TRANSITIONS` allows the reopen, and nothing on that path touches the six 2.1 columns.
+The task ends up In Progress with `submitted_at` and `approved_at` both set, so
+`is_awaiting_approval` is False and `task_submit_for_approval()` refuses on its
+`approved_at is not None` guard before it reaches the `submitted_at` one. Whether a reopened
+OPEX task can be resubmitted at all has not been tested.
+
+`checklist_answers_open()` deliberately does not read `approved_at`: a task reopened after
+approval is OPEN for checklist answers, because reopening is a deliberate act and the redone
+work should be checkable. Fixing this entry must not change that.
+
+Sibling of G11 (`completed_at` not cleared on the same transition). Decide both in the status
+path together.

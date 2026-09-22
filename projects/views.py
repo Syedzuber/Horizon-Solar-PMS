@@ -4298,10 +4298,12 @@ def _checklist_context(request, project, task):
         'checklist_items':    items,   # truthiness + count badge
         'user_profile':       profile,
         'can_complete_items': _user_can_complete_checklist_item(request.user, task, project),
-        # Read by task_detail.html's checklist card: a CLOSED task with no answer on
-        # record shows one factual line instead of a table of blank Pending rows. A
-        # closed task WITH answers keeps the table, read-only, because
-        # can_complete_items above is already False for it.
+        # Read by partials/_checklist.html, so the full page and every HTMX re-render
+        # share one rule: a CLOSED task with no answer on record shows one factual line
+        # instead of a table of blank rows; a closed task WITH answers keeps the table,
+        # read-only (can_complete_items above is already False for it), and badges its
+        # blanks "Not answered". is_checked is True for Yes, No and NA alike, so a sheet
+        # answered entirely No counts as answered.
         'checklist_answers_open':  checklist_answers_open(task),
         'checklist_has_answers':   any(c.is_checked for c in completions.values()),
     }
