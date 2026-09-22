@@ -41,6 +41,7 @@ from .models import (
     DESIGN_AWAITING_ALLOCATION, DESIGN_IN_DESIGN,
     DeliveryChallan, DesignAssignment, DueDateChangeLog, DueDateCommitment, Issue,
     PaymentMilestone, PaymentRequest, Program, Project, ProjectPhase, Task, Vendor,
+    VendorOrder,
 )
 
 YEAR_26 = '0026-09-17'
@@ -486,7 +487,9 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
             project=self.project, vendor=vendor, invoice_number='INV-1', invoice_document_name='i.pdf',
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('1000.00'), requested_by=self.scm.user,
-            status=PaymentRequest.APPROVED)
+            status=PaymentRequest.APPROVED,
+            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
+                vendor=vendor, project_type='Residential', created_by=self.scm))
 
     def submit(self, value):
         return _client(self.finance).post(

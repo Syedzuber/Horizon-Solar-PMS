@@ -782,3 +782,32 @@ write straight past it.
 
 **Not fixed** — out of scope for the build prompt, which named its readers exhaustively and
 listed the status path and the design module as MUST NOT TOUCH.
+
+## 23. O2 vendor orders — what the raise and order pages left for later
+
+Found 22 Sep 2026, building O2 (Residential vendor order raise and order detail).
+
+**An order with no payment cannot be found again.** The order page is reached from the
+redirect after raising and from the "View order" link on each payment (overview card 4b,
+payment detail). An order recorded without a first payment has no payment row, so once
+the user leaves the page nothing links back to it. O2 was limited to one link per payment
+in both templates. **Risk if left:** medium. SCM records an order, navigates away and cannot
+reopen it until O2b adds a payment path or an order list.
+
+**`raised_with_unfrozen_quantities` is always False on a Residential order.** Its
+definition ("any site in no locked procurement group") would make EVERY Residential order
+True, because Residential sites are never grouped. The raise view leaves the default, since
+the flag is meant to mark a risk and a flag that is always True marks nothing. **Decide in O3**,
+which is where it starts to mean something.
+
+**Card 4b and the payment detail page still read the legacy fields.** The BOQ-item column,
+Invoice # and the invoice-document link are blank on every O2-raised payment, which writes
+the NOT NULL legacy columns as ''. Both screens also still show two statuses
+(Pending/Confirmed) out of the five O1 introduced. O2 was allowed to add one link to each
+screen and change nothing else. **O6 rewrites these readers** when it drops the fields.
+
+**Pre-existing, seen in passing:** payment_request_detail's back button goes to My
+Documents whatever the entry point, and its role allowlist leaves out CEO, although the new
+order page admits CEO. confirm_payment_request writes no StatusTransition (O5's job).
+
+**Not fixed**: out of scope (R-12).

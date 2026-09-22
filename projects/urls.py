@@ -3,6 +3,7 @@ from django.views.generic import RedirectView
 from . import views
 from . import design_views   # OPEX design workflow (Part 2) — separate module, no existing view changed
 from . import report_views   # Read-only management reports — separate module, same pattern
+from . import order_views    # O2 vendor orders — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -279,6 +280,16 @@ urlpatterns = [
     # Confirm payment request — Finance role only
     path('projects/<str:project_id>/payment-requests/<int:request_id>/confirm/',
          views.confirm_payment_request, name='confirm_payment_request'),
+
+    # ---------------------------------------------------------------------------
+    # Vendor orders (O2) — SCM records a Residential order and its first payment;
+    # the order page is read-only. order_views.py, a separate module.
+    # Keyed on the project's pk, not project_id: an order is not a project page.
+    # ---------------------------------------------------------------------------
+    path('projects/<int:project_pk>/orders/new/', order_views.vendor_order_create,
+         name='vendor_order_create'),
+    path('orders/<int:order_pk>/',                order_views.vendor_order_detail,
+         name='vendor_order_detail'),
 
     # ---------------------------------------------------------------------------
     # Webhooks — unauthenticated, no login required

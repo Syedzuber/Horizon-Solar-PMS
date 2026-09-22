@@ -1720,3 +1720,56 @@ def can_reorder_phase(user, phase, project_cache=None):
     if key not in project_cache:
         project_cache[key] = _project_allows_phase_reorder(user, phase.project)
     return project_cache[key]
+
+
+# ---------------------------------------------------------------------------
+# O2 — vendor orders
+# ---------------------------------------------------------------------------
+
+VENDOR_ORDER_RAISE_ROLES = frozenset({'SCM'})
+
+# Portfolio-wide readers of any order. Finance and SCM are here because D-4's
+# assignment-based scoping for them does not exist yet — there is no ProgramAssignment,
+# and neither role holds tasks on most sites — so they are portfolio-wide exactly as
+# user_can_view_project() already makes them. When D-4 lands, this set narrows with it.
+# Its own set rather than PORTFOLIO_VIEW_ROLES so that widening project VISIBILITY never
+# silently widens access to vendor prices (the BOQ_PORTFOLIO_READ_ROLES precedent).
+VENDOR_ORDER_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'SCM'})
+
+
+def user_can_raise_vendor_order(user, project):
+    """Return True if `user` may record a new vendor order for `project`.
+
+    SCM only, on a live Residential project. RESIDENTIAL-ONLY IS DELIBERATE: an OPEX
+    order spans a procurement group's sites and arrives with group ordering in O3; this
+    single-site path must not become the back door for it.
+    """
+    if project is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in VENDOR_ORDER_RAISE_ROLES:
+        return False
+    if project.is_deleted:
+        return False
+    return project.project_type == 'Residential'
+
+
+def user_can_view_vendor_order(user, order):
+    """Return True if `user` may read `order` — its lines, prices, documents, payments.
+
+    Portfolio roles (VENDOR_ORDER_PORTFOLIO_ROLES) see every order; see the note on the
+    set for why Finance and SCM are in it. Anyone else sees an order if they can see ANY
+    site on it: a PM whose site shares a consolidated order is entitled to the order the
+    material for their site was bought on.
+
+    Reads `order.sites.all()`, so a caller that prefetched sites with their projects
+    (vendor_order_detail does) pays no query for the walk.
+    """
+    if order is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if profile.role in VENDOR_ORDER_PORTFOLIO_ROLES:
+        return True
+    return any(user_can_view_project(user, site.project) for site in order.sites.all())

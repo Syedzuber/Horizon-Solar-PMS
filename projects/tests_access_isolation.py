@@ -55,7 +55,7 @@ from django.urls import reverse
 
 from .models import (
     DCLineItem, DeliveryChallan, Issue, PaymentRequest, Project, Task, UserProfile,
-    Vendor,
+    Vendor, VendorOrder,
 )
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to
 
@@ -443,6 +443,8 @@ class RoleGateScopingTests(AccessIsolationBase):
         pr = PaymentRequest.objects.create(
             project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
             requested_by=self.pm_b.user,
+            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
+                vendor=vendor, project_type='Residential', created_by=self.scm),
         )
         response = _client_for(self.pm_a).get(
             reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))
@@ -453,6 +455,8 @@ class RoleGateScopingTests(AccessIsolationBase):
         pr = PaymentRequest.objects.create(
             project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
             requested_by=self.pm_b.user,
+            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
+                vendor=vendor, project_type='Residential', created_by=self.scm),
         )
         response = _client_for(self.pm_b).get(
             reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))

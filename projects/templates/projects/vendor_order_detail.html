@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Order {{ order.po_number|default:order.pi_number }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Order {{ order.po_number|default:order.pi_number }}</h4>
+    <small class="text-muted">{{ order.vendor.name }} · {{ order.project_type }}</small>
+  </div>
+  {% with first=sites.0 %}{% if first %}
+  <a href="{% url 'project_overview' first.project.project_id %}" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Project</a>
+  {% endif %}{% endwith %}
+</div>
+
+{% if invoice_awaited %}
+<div class="alert alert-warning d-flex align-items-center gap-2 py-2" role="alert">
+  <i class="bi bi-exclamation-triangle"></i>
+  <div><strong>Invoice awaited.</strong> ₹{{ paid|floatformat:2 }} has been paid against ₹{{ invoiced|floatformat:2 }} invoiced.</div>
+</div>
+{% endif %}
+
+<div class="row g-3 mb-3">
+  {# ── Header ──────────────────────────────────────────────────────────── #}
+  <div class="col-lg-7">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-semibold">Order</div>
+      <div class="card-body">
+        <dl class="row mb-0 small">
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Vendor</dt>
+          <dd class="col-7 col-sm-8">{{ order.vendor.name }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">PO number</dt>
+          <dd class="col-7 col-sm-8">{{ order.po_number|default:"—" }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">PI number</dt>
+          <dd class="col-7 col-sm-8">{{ order.pi_number|default:"—" }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Type</dt>
+          <dd class="col-7 col-sm-8">{{ order.project_type }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Raised by</dt>
+          <dd class="col-7 col-sm-8">{{ order.created_by.user.get_full_name|default:order.created_by.user.username }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Raised on</dt>
+          <dd class="col-7 col-sm-8">{{ order.created_at|date:"d M Y, H:i" }}</dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Sites</dt>
+          <dd class="col-7 col-sm-8 mb-0">
+            {% for site in sites %}
+              <div>
+                <a href="{% url 'project_overview' site.project.project_id %}" class="text-decoration-none">{{ site.project.project_id }}</a>
+                <span class="text-muted">— {{ site.project.customer_name }}</span>
+                {% if site.via_site_group %}<span class="text-muted">(via {{ site.via_site_group }})</span>{% endif %}
+              </div>
+            {% endfor %}
+          </dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  {# ── Money ───────────────────────────────────────────────────────────── #}
+  <div class="col-lg-5">
+    <div class="card shadow-sm h-100">
+      <div class="card-header fw-semibold">Totals</div>
+      <div class="card-body">
+        <dl class="row mb-0 small">
+          <dt class="col-6 text-muted fw-normal">Order total</dt>
+          <dd class="col-6 text-end fw-semibold">₹{{ total|floatformat:2 }}</dd>
+          <dt class="col-6 text-muted fw-normal">Paid</dt>
+          <dd class="col-6 text-end">₹{{ paid|floatformat:2 }}</dd>
+          <dt class="col-6 text-muted fw-normal">Balance</dt>
+          <dd class="col-6 text-end">₹{{ balance|floatformat:2 }}</dd>
+          <dt class="col-6 text-muted fw-normal">Invoiced</dt>
+          <dd class="col-6 text-end mb-0">₹{{ invoiced|floatformat:2 }}</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Lines ─────────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header fw-semibold">Lines</div>
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 small">
+      <thead class="table-light">
+        <tr><th>Item</th><th>Category</th><th class="text-end">Qty</th><th class="text-end">Amount (₹)</th></tr>
+      </thead>
+      <tbody>
+        {% for line in lines %}
+        <tr>
+          <td>{% if line.item_code %}<span class="text-muted">{{ line.item_code }}</span> {% endif %}{{ line.item_description }}</td>
+          <td class="text-muted">{{ line.item_category|default:"—" }}</td>
+          <td class="text-end text-nowrap">{{ line.quantity|floatformat:2 }} {{ line.item_unit }}</td>
+          <td class="text-end">{{ line.amount|floatformat:2 }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr><th colspan="3" class="text-end">Total</th><th class="text-end">{{ total|floatformat:2 }}</th></tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+{# ── Documents ─────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-3">
+  <div class="card-header fw-semibold">Documents</div>
+  <div class="card-body small">
+    {% for group in document_groups %}
+      <div class="fw-semibold text-muted text-uppercase mb-1" style="letter-spacing:.04em; font-size:.72rem;">{{ group.label }}</div>
+      <ul class="list-unstyled mb-3">
+        {% for entry in group.docs %}
+        <li class="mb-1">
+          <a href="{{ entry.url }}" target="_blank" rel="noopener" class="text-decoration-none">
+            <i class="bi bi-file-earmark-arrow-down me-1"></i>{{ entry.doc.file_name }}
+          </a>
+          {% if entry.doc.doc_type == 'invoice' %}
+            <span class="text-muted">— {{ entry.doc.invoice_number }}, ₹{{ entry.doc.invoice_amount|floatformat:2 }}</span>
+          {% endif %}
+          <span class="text-muted">· {{ entry.doc.uploaded_at|date:"d M Y" }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    {% empty %}
+      <span class="text-muted">No documents.</span>
+    {% endfor %}
+  </div>
+</div>
+
+{# ── Payments ──────────────────────────────────────────────────────────── #}
+<div class="card shadow-sm mb-4">
+  <div class="card-header fw-semibold">Payments</div>
+  {% if payments %}
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 small">
+      <thead class="table-light">
+        <tr><th>Raised</th><th>By</th><th class="text-end">Amount (₹)</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for p in payments %}
+        <tr>
+          <td class="text-nowrap">{{ p.requested_date|date:"d M Y" }}</td>
+          <td>{{ p.requested_by.get_full_name|default:p.requested_by.username }}</td>
+          <td class="text-end">{{ p.amount|floatformat:2 }}</td>
+          <td>
+            {{ p.get_status_display }}
+            {% if p.payment_date %}<div class="text-muted">{{ p.payment_date|date:"d M Y" }}{% if p.payment_reference %} · {{ p.payment_reference }}{% endif %}</div>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card-body small text-muted">No payments against this order yet.</div>
+  {% endif %}
+</div>
+
+{% endblock %}

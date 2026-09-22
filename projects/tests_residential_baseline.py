@@ -62,6 +62,7 @@ See RESIDENTIAL_BASELINE.md for the lifecycle these tests encode, and for the si
 found while writing it (B-1..B-6). The two tests that were @skip'd against B-2 and
 B-7 are live again: prompt 0.2b fixed both defects.
 """
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -77,7 +78,7 @@ from .models import (
     BOQ, BOQItem, BOQItemMaster, BOQRevision, Checklist, ChecklistItem,
     ChecklistItemCompletion, ChecklistTaskLink, DCLineItem, DeliveryChallan, Issue,
     PaymentMilestone, PaymentRequest, Project, ProjectDocument, SystemSettings, Task,
-    UserProfile, Vendor,
+    UserProfile, Vendor, VendorOrder,
 )
 from .utils import (
     INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL,
@@ -871,6 +872,8 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(m3.amount_received, Decimal('100000.00'))
 
     def test_scm_raises_a_payment_request_and_finance_confirms_it(self):
+        """O2: the request is raised as an order's first payment on vendor_order_create;
+        what Finance then does with it is unchanged."""
         boq = self._seed_boq(self.project_a)
         boq_item = boq.items.first()
         vendor = Vendor.objects.create(name='Sunrise Traders',
@@ -879,14 +882,19 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         with patch('projects.supabase_storage.get_supabase_client',
                    return_value=MagicMock()):
             response = _client_for(self.scm).post(
-                reverse('raise_payment_request', args=[self.project_a.project_id]),
+                reverse('vendor_order_create', args=[self.project_a.pk]),
                 {
+                    'client_uuid': str(uuid.uuid4()),
                     'vendor_id': str(vendor.pk),
-                    'boq_item_id': str(boq_item.pk),
-                    'invoice_number': 'INV-77',
-                    'amount': '55000',
-                    'note': 'module supply',
-                    'invoice_document': _pdf('inv-77.pdf'),
+                    'po_number': 'PO-77',
+                    'line': [str(boq_item.pk)],
+                    f'qty_{boq_item.pk}': '10',
+                    f'amount_{boq_item.pk}': '60000',
+                    'doc_type_0': 'po',
+                    'doc_file_0': _pdf('po-77.pdf'),
+                    'request_payment': '1',
+                    'payment_amount': '55000',
+                    'payment_note': 'module supply',
                 },
             )
         self.assertEqual(response.status_code, 302)
@@ -895,7 +903,7 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(pr.status, PaymentRequest.APPROVED)
         self.assertEqual(pr.amount, Decimal('55000.00'))
         self.assertEqual(pr.requested_by, self.scm.user)
-        self.assertEqual(pr.invoice_document_name, 'inv-77.pdf')
+        self.assertEqual(pr.vendor_order.documents.get().file_name, 'po-77.pdf')
 
         response = _client_for(self.finance).post(
             reverse('confirm_payment_request', args=[self.project_a.project_id, pr.pk]),
@@ -908,14 +916,18 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(pr.payment_reference, 'UTR-991')
         self.assertEqual(pr.confirmed_by, self.finance.user)
 
-    def test_a_payment_request_without_an_invoice_document_is_refused(self):
-        """invoice_document is a hard business rule, not a UI nicety."""
+    def test_a_payment_request_without_a_po_or_pi_document_is_refused(self):
+        """O2: the document rule moved from "an invoice file" to "a PO or PI file" on the
+        order the payment is raised with. Still a hard rule, not a UI nicety."""
         boq = self._seed_boq(self.project_a)
+        item = boq.items.first()
         vendor = Vendor.objects.create(name='V2', contact_person='X', phone='9000000002')
         _client_for(self.scm).post(
-            reverse('raise_payment_request', args=[self.project_a.project_id]),
-            {'vendor_id': str(vendor.pk), 'boq_item_id': str(boq.items.first().pk),
-             'invoice_number': 'INV-78', 'amount': '100'},
+            reverse('vendor_order_create', args=[self.project_a.pk]),
+            {'client_uuid': str(uuid.uuid4()), 'vendor_id': str(vendor.pk),
+             'po_number': 'PO-78', 'line': [str(item.pk)],
+             f'qty_{item.pk}': '1', f'amount_{item.pk}': '100',
+             'request_payment': '1', 'payment_amount': '100'},
         )
         self.assertEqual(PaymentRequest.objects.count(), 0)
 
@@ -1560,6 +1572,8 @@ class NotificationTests(ResidentialBaselineBase):
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('25000.00'), requested_by=self.scm.user,
             status=PaymentRequest.APPROVED,
+            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
+                vendor=vendor, project_type='Residential', created_by=self.scm),
         )
 
         with patch('projects.views.send_notification') as sender:

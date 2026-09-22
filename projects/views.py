@@ -101,6 +101,8 @@ from .permissions import (
     # non-milestone work whose name nothing looks up.
     can_rename_task, reserved_task_names,
     can_reorder_phase,
+    # O2 - the SCM card offers "Raise Order" only where vendor_order_create accepts it.
+    user_can_raise_vendor_order,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -1681,8 +1683,11 @@ def dashboard_scm(request):
         boq_url               = f'/projects/{pid}/boq/'
         schedule_delivery_url = f'/projects/{pid}/delivery-challans/create/'
         finance_url           = f'/projects/{pid}/overview/'
-        # payment_request_url: POST endpoint for SCM to raise a payment request against a vendor invoice
-        payment_request_url   = f'/projects/{pid}/payment-requests/raise/'
+        # raise_order_url: O2's order page. None — and so no button — wherever
+        # vendor_order_create would refuse, which today means every non-Residential card.
+        raise_order_url       = (reverse('vendor_order_create', args=[project.pk])
+                                 if user_can_raise_vendor_order(request.user, project)
+                                 else None)
         # raise_issue_url: scope to the most recent pending DC if one exists
         latest_pending_dc = (pending_challans[0] if pending_challans
                              else (challans[0] if challans else None))
@@ -1710,7 +1715,7 @@ def dashboard_scm(request):
             'boq_url':             boq_url,
             'schedule_delivery_url': schedule_delivery_url,
             'finance_url':         finance_url,
-            'payment_request_url': payment_request_url,
+            'raise_order_url':     raise_order_url,
             'raise_issue_url':     raise_issue_url,
         })
 
@@ -1724,31 +1729,6 @@ def dashboard_scm(request):
         )
         .select_related('project', 'delivery_challan', 'raised_by__user')
         .order_by('-raised_at')[:20]
-    )
-
-    # BOQ items per project — grouped by category for the raise-payment-request dropdown.
-    # Loaded here (not per-request in the modal) so the template can render them as JSON
-    # once and the JS layer filters by project without extra round-trips.
-    # BOQItem FK chain: BOQItem.boq → BOQ (OneToOne) → Project.
-    all_boq_items = (
-        BOQItem.objects.filter(boq__project__project_id__in=active_project_ids)
-        .select_related('boq__project')
-        .order_by('boq__project__project_id', 'serial_no')
-    )
-    boq_items_by_project = {}
-    for item in all_boq_items:
-        pid = item.boq.project.project_id
-        cat = item.category
-        boq_items_by_project.setdefault(pid, {}).setdefault(cat, []).append({
-            'id':          item.pk,
-            'serial_no':   item.serial_no,
-            'description': item.description,
-        })
-
-    # All active vendors for the raise-payment-request vendor dropdown
-    scm_vendors = list(
-        Vendor.objects.filter(is_active=True).order_by('name')
-        .values('id', 'name')
     )
 
     # Portfolio-wide task stat block with no role term — the OPEX Material Delivery
@@ -1792,8 +1772,6 @@ def dashboard_scm(request):
         'delivery_issues':      delivery_issues,
         'today':                today,
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
-        'boq_items_by_project': json.dumps(boq_items_by_project),
-        'scm_vendors':          json.dumps(scm_vendors),
         'context_nav':          _context_nav(request, ctx),
     })
 
@@ -8822,98 +8800,21 @@ def milestone_create(request, project_id):
 
 @login_required
 def raise_payment_request(request, project_id):
-    """SCM raises a payment request against a vendor invoice. SCM role only. POST."""
+    """RETIRED IN O2. A payment is now raised against a VendorOrder, recorded on
+    vendor_order_create's page; this endpoint created a PaymentRequest with no order,
+    which the NOT NULL `vendor_order` column no longer admits.
+
+    GET redirects to the new page; POST answers 410 Gone. Kept, not deleted: O6 removes
+    it together with the legacy PaymentRequest fields its old body wrote.
+    """
     if request.method != 'POST':
-        return redirect('dashboard_scm')
-
-    # Raising a payment request is SCM-only — other roles get 403
-    profile = request.user.profile
-    if profile.role != 'SCM':
-        return HttpResponse(status=403)
-
-    project = _active_project(project_id)
-
-    vendor_id      = request.POST.get('vendor_id', '').strip()
-    boq_item_id    = request.POST.get('boq_item_id', '').strip()
-    invoice_number = request.POST.get('invoice_number', '').strip()
-    amount_str     = request.POST.get('amount', '').strip()
-    note           = request.POST.get('note', '').strip()
-    invoice_file   = request.FILES.get('invoice_document')
-
-    # Server-side validation — invoice_document is mandatory (hard business rule, not a UI nicety)
-    errors = []
-    if not vendor_id:
-        errors.append('Vendor is required.')
-    if not boq_item_id:
-        errors.append('BOQ item is required.')
-    if not invoice_number:
-        errors.append('Invoice number is required.')
-    if not amount_str:
-        errors.append('Amount is required.')
-    if not invoice_file:
-        errors.append('Invoice document is required.')
-
-    if errors:
-        messages.error(request, ' '.join(errors))
-        return redirect('dashboard_scm')
-
-    try:
-        amount = Decimal(amount_str)
-    except InvalidOperation:
-        messages.error(request, 'Invalid amount.')
-        return redirect('dashboard_scm')
-
-    vendor = get_object_or_404(Vendor, pk=vendor_id, is_active=True)
-
-    # BOQ item dropdown scoped to THIS project only — never show another
-    # project's BOQ items in the raise-request form.
-    boq_item = get_object_or_404(BOQItem, pk=boq_item_id, boq__project=project)
-
-    # Upload invoice document to Supabase — reuse same pattern as ProjectDocument/TaskAttachment
-    try:
-        from .supabase_storage import get_supabase_client
-        client = get_supabase_client()
-    except (ValueError, ImportError) as exc:
-        messages.error(request, f"Upload service unavailable. ({exc})")
-        return redirect('dashboard_scm')
-
-    supabase_path = (
-        f"payment-requests/{project.project_id}/"
-        f"{_uuid.uuid4()}_{invoice_file.name}"
+        project = _active_project(project_id)
+        return redirect('vendor_order_create', project_pk=project.pk)
+    return HttpResponse(
+        'Raising a payment request on its own was retired. Record the vendor order and '
+        'its first payment from the Raise Order page instead.',
+        status=410,
     )
-    try:
-        _validate_and_upload(invoice_file, client, settings.SUPABASE_BUCKET, supabase_path)
-        invoice_document_url = (
-            f"{settings.SUPABASE_URL}/storage/v1/object/public/"
-            f"{settings.SUPABASE_BUCKET}/{supabase_path}"
-        )
-    except ValueError as exc:
-        messages.error(request, f"Invoice upload failed: {exc}")
-        return redirect('dashboard_scm')
-
-    pr = PaymentRequest.objects.create(
-        project=project,
-        vendor=vendor,
-        boq_item=boq_item,
-        invoice_number=invoice_number,
-        invoice_document_name=invoice_file.name,
-        invoice_document_url=invoice_document_url,
-        invoice_document_path=supabase_path,
-        amount=amount,
-        note=note,
-        requested_by=request.user,
-        status=PaymentRequest.APPROVED,
-    )
-
-    # Confirm actions are state-mutating — log them so they surface in the
-    # project's Recent Activity panel for audit trail.
-    log_activity(
-        project, profile,
-        f"Raised payment request to {vendor.name}: ₹{amount} (Invoice {invoice_number})",
-        entity_type='PaymentRequest', entity_id=pr.pk,
-    )
-    messages.success(request, f'Payment request raised for ₹{amount} to {vendor.name}.')
-    return redirect('dashboard_scm')
 
 
 @login_required
@@ -10013,10 +9914,10 @@ def zoho_deal_closed_webhook(request):
 # ---------------------------------------------------------------------------
 
 
-def _validate_and_upload(file, supabase_client, bucket, supabase_path, allowed_extensions=None):
-    """Validate one file and upload to Supabase. Raises ValueError on validation failure.
-    Pass allowed_extensions (e.g. ALLOWED_PHOTO_EXTENSIONS) to restrict the accepted types
-    for this call; defaults to ALLOWED_EXTENSIONS, preserving every existing caller."""
+def _validate_upload_file(file, allowed_extensions=None):
+    """The checks _validate_and_upload() applies, without the upload. Raises ValueError;
+    returns the lower-cased extension. Split out so a caller holding several files (O2's
+    vendor order) can refuse the whole submission before ANY of them reaches storage."""
     allowed = allowed_extensions if allowed_extensions is not None else ALLOWED_EXTENSIONS
     ext = file.name.rsplit('.', 1)[-1].lower() if '.' in file.name else ''
     if ext not in allowed:
@@ -10028,6 +9929,14 @@ def _validate_and_upload(file, supabase_client, bucket, supabase_path, allowed_e
     actual_mime   = (file.content_type or '').split(';')[0].strip()
     if expected_mime and actual_mime and actual_mime not in (expected_mime, 'application/octet-stream'):
         raise ValueError("MIME type does not match extension")
+    return ext
+
+
+def _validate_and_upload(file, supabase_client, bucket, supabase_path, allowed_extensions=None):
+    """Validate one file and upload to Supabase. Raises ValueError on validation failure.
+    Pass allowed_extensions (e.g. ALLOWED_PHOTO_EXTENSIONS) to restrict the accepted types
+    for this call; defaults to ALLOWED_EXTENSIONS, preserving every existing caller."""
+    ext = _validate_upload_file(file, allowed_extensions)
 
     file.seek(0)
     supabase_client.storage.from_(bucket).upload(

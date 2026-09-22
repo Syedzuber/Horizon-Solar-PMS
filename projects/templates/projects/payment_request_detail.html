@@ -21,6 +21,9 @@
             {{ project.project_id }} — {{ project.customer_name }}
           </a>
         </p>
+        {% if pr.vendor_order_id %}
+        <a href="{% url 'vendor_order_detail' pr.vendor_order_id %}" class="small text-decoration-none">View order</a>
+        {% endif %}
       </div>
       <div>
         {% if pr.status == 'confirmed' %}

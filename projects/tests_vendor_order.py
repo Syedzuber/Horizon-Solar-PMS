@@ -249,6 +249,7 @@ class StatusVocabularyTests(VendorOrderFixture):
     def test_a_request_created_without_a_status_is_approved(self):
         """raise_payment_request's behaviour is unchanged: straight to Finance."""
         pr = PaymentRequest.objects.create(
+            vendor_order=self.make_order(),   # O2: NOT NULL; fixture only
             project=self.project, vendor=self.vendor, invoice_number='INV-1',
             invoice_document_name='i.pdf', invoice_document_url='http://x/i.pdf',
             invoice_document_path='p/i.pdf', amount=Decimal('10'),

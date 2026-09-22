@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Raise Order — {{ project.project_id }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Raise Order</h4>
+    <small class="text-muted">{{ project.project_id }} — {{ project.customer_name }}</small>
+  </div>
+  <a href="{% url 'dashboard_scm' %}" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Back</a>
+</div>
+
+{% if refused %}
+  <div class="alert alert-warning py-2 small">
+    Your entries are kept below. <strong>Attach the files again</strong> — browsers do not keep a chosen file after the page reloads.
+  </div>
+{% endif %}
+
+<form method="post" enctype="multipart/form-data" id="voForm"
+      action="{% url 'vendor_order_create' project.pk %}">
+  {% csrf_token %}
+  <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
+
+  {# ── Order header ─────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">Order</div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-md-6">
+          <label class="form-label fw-semibold" for="voVendor">Vendor <span class="text-danger">*</span></label>
+          <select name="vendor_id" id="voVendor" class="form-select" required>
+            <option value="">— Select Vendor —</option>
+            {% for v in vendors %}
+            <option value="{{ v.pk }}"{% if form.vendor_id == v.pk|stringformat:"s" %} selected{% endif %}>{{ v.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label fw-semibold" for="voPo">PO number</label>
+          <input type="text" name="po_number" id="voPo" class="form-control" maxlength="100"
+                 value="{{ form.po_number }}">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label fw-semibold" for="voPi">PI number</label>
+          <input type="text" name="pi_number" id="voPi" class="form-control" maxlength="100"
+                 value="{{ form.pi_number }}">
+        </div>
+        <div class="col-12">
+          <div class="form-text mt-0">Enter a PO number, a PI number, or both.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── Lines ────────────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+      <span>Items ordered <span class="text-danger">*</span></span>
+      <span class="small">Total ₹<span id="voTotal">0.00</span></span>
+    </div>
+    {% if groups %}
+    <div class="card-body p-0">
+      {% for group in groups %}
+      <div class="px-3 py-2 bg-light border-bottom small fw-semibold text-uppercase text-muted" style="letter-spacing:.04em;">{{ group.category }}</div>
+      <ul class="list-group list-group-flush">
+        {% for row in group.rows %}
+        <li class="list-group-item js-vo-line">
+          <div class="form-check">
+            <input class="form-check-input js-vo-check" type="checkbox" name="line"
+                   value="{{ row.item.pk }}" id="voLine{{ row.item.pk }}"{% if row.checked %} checked{% endif %}>
+            <label class="form-check-label small" for="voLine{{ row.item.pk }}">
+              {{ row.item.serial_no }}. {{ row.item.description }}
+              <span class="text-muted">· BOQ {{ row.item.boq_quantity|default_if_none:"—" }} {{ row.item.uom }}</span>
+            </label>
+          </div>
+          <div class="row g-2 mt-1 js-vo-inputs{% if not row.checked %} d-none{% endif %}">
+            <div class="col-6">
+              <label class="form-label small mb-0" for="voQty{{ row.item.pk }}">Quantity ({{ row.item.uom }})</label>
+              <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                     class="form-control form-control-sm" name="qty_{{ row.item.pk }}"
+                     id="voQty{{ row.item.pk }}" value="{{ row.qty }}">
+            </div>
+            <div class="col-6">
+              <label class="form-label small mb-0" for="voAmt{{ row.item.pk }}">Amount (₹)</label>
+              <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                     class="form-control form-control-sm js-vo-amount" name="amount_{{ row.item.pk }}"
+                     id="voAmt{{ row.item.pk }}" value="{{ row.amount }}">
+            </div>
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="card-body text-muted small">This project has no BOQ items yet, so there is nothing to order against.</div>
+    {% endif %}
+  </div>
+
+  {# ── Documents ────────────────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      Documents <span class="text-danger">*</span>
+      <div class="small text-muted fw-normal">Up to 5 files; at least one PO or PI. PDF, Word, Excel, JPG, PNG — max 20 MB each.</div>
+    </div>
+    <ul class="list-group list-group-flush">
+      {% for d in doc_rows %}
+      <li class="list-group-item js-vo-doc">
+        <div class="row g-2">
+          <div class="col-4 col-md-2">
+            <select name="doc_type_{{ d.index }}" class="form-select form-select-sm js-vo-doctype" aria-label="Document type">
+              <option value="">Type</option>
+              {% for value, label in doc_type_choices %}
+              <option value="{{ value }}"{% if d.doc_type == value %} selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-8 col-md-10">
+            <input type="file" name="doc_file_{{ d.index }}" class="form-control form-control-sm"
+                   accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png" aria-label="File">
+          </div>
+        </div>
+        <div class="row g-2 mt-1 js-vo-invoice{% if d.doc_type != 'invoice' %} d-none{% endif %}">
+          <div class="col-6">
+            <input type="text" name="doc_invoice_number_{{ d.index }}" maxlength="100"
+                   class="form-control form-control-sm" placeholder="Invoice number *"
+                   value="{{ d.invoice_number }}" aria-label="Invoice number">
+          </div>
+          <div class="col-6">
+            <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                   name="doc_invoice_amount_{{ d.index }}" class="form-control form-control-sm"
+                   placeholder="Invoice amount ₹ *" value="{{ d.invoice_amount }}" aria-label="Invoice amount">
+          </div>
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+
+  {# ── Optional first payment ───────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" name="request_payment" value="1"
+               id="voPay"{% if form.request_payment %} checked{% endif %}>
+        <label class="form-check-label fw-semibold" for="voPay">Request a payment now</label>
+      </div>
+      <div class="row g-2 mt-1 js-vo-pay{% if not form.request_payment %} d-none{% endif %}">
+        <div class="col-12 col-md-4">
+          <label class="form-label small mb-0" for="voPayAmt">Amount (₹) — up to the order total</label>
+          <input type="number" step="0.01" min="0.01" inputmode="decimal" name="payment_amount"
+                 id="voPayAmt" class="form-control" value="{{ form.payment_amount }}">
+        </div>
+        <div class="col-12 col-md-8">
+          <label class="form-label small mb-0" for="voPayNote">Note (optional)</label>
+          <input type="text" name="payment_note" id="voPayNote" class="form-control"
+                 value="{{ form.payment_note }}">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-grid d-md-flex justify-content-md-end mb-4">
+    <button type="submit" class="btn btn-brand" id="voSubmit">Record order</button>
+  </div>
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var form = document.getElementById('voForm');
+
+  function recalc() {
+    var total = 0;
+    form.querySelectorAll('.js-vo-line').forEach(function (li) {
+      if (!li.querySelector('.js-vo-check').checked) return;
+      var v = parseFloat(li.querySelector('.js-vo-amount').value);
+      if (!isNaN(v)) total += v;
+    });
+    document.getElementById('voTotal').textContent = total.toFixed(2);
+  }
+
+  form.querySelectorAll('.js-vo-line').forEach(function (li) {
+    var box = li.querySelector('.js-vo-check');
+    box.addEventListener('change', function () {
+      li.querySelector('.js-vo-inputs').classList.toggle('d-none', !box.checked);
+      recalc();
+    });
+    li.querySelector('.js-vo-amount').addEventListener('input', recalc);
+  });
+
+  form.querySelectorAll('.js-vo-doc').forEach(function (li) {
+    var sel = li.querySelector('.js-vo-doctype');
+    sel.addEventListener('change', function () {
+      li.querySelector('.js-vo-invoice').classList.toggle('d-none', sel.value !== 'invoice');
+    });
+  });
+
+  var pay = document.getElementById('voPay');
+  pay.addEventListener('change', function () {
+    form.querySelector('.js-vo-pay').classList.toggle('d-none', !pay.checked);
+  });
+
+  /* The server refuses a repeat of this form's client_uuid; this only spares the
+     user a second wait. */
+  form.addEventListener('submit', function () {
+    var btn = document.getElementById('voSubmit');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+
+  recalc();
+});
+</script>
+
+{% endblock %}

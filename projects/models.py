@@ -2261,12 +2261,12 @@ class PaymentRequest(models.Model):
         related_name='payment_requests',
     )
 
-    # The order this payment is made against. Nullable ONLY until O2 replaces
-    # raise_payment_request with a path that always names an order; O2 makes it NOT NULL.
+    # The order this payment is made against. NOT NULL since O2 (migration 0093), which
+    # retired raise_payment_request — the only path that created a payment with no order.
     # PROTECT: an order that has had money paid against it cannot disappear from under
     # the payment.
     vendor_order = models.ForeignKey(
-        'VendorOrder', null=True, blank=True, on_delete=models.PROTECT,
+        'VendorOrder', on_delete=models.PROTECT,
         related_name='payments',
     )
 

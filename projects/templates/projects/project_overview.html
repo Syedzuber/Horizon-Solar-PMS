@@ -711,7 +711,8 @@
         <tbody>
           {% for pr in payment_requests %}
           <tr>
-            <td class="fw-semibold small">{{ pr.vendor.name|default:"—" }}</td>
+            <td class="fw-semibold small">{{ pr.vendor.name|default:"—" }}{% if pr.vendor_order_id %}
+              <div><a href="{% url 'vendor_order_detail' pr.vendor_order_id %}" class="fw-normal text-decoration-none" style="font-size:.72rem;">View order</a></div>{% endif %}</td>
             <td class="small text-muted" style="max-width:160px;">
               {% if pr.boq_item %}
                 <span title="{{ pr.boq_item.description }}">
