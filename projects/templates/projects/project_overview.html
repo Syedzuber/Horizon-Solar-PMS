@@ -730,7 +730,7 @@
             </td>
             <td class="small text-muted">{{ pr.requested_date|date:"d M Y" }}</td>
             <td>
-              {% if pr.status == 'pending' %}
+              {% if pr.status == 'approved' %}
                 <span class="badge" style="background:#f0a829; color:#000;">Pending</span>
               {% else %}
                 <span class="badge" style="background:var(--hz-green)">Confirmed</span>
@@ -744,7 +744,7 @@
             </td>
             {% if role == 'Finance' %}
             <td>
-              {% if pr.status == 'pending' %}
+              {% if pr.status == 'approved' %}
               {# Confirm action is Finance-only — state-mutating, logged for audit trail #}
               <button type="button"
                       class="btn btn-sm fw-semibold js-confirm-payment"

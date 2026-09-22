@@ -486,7 +486,7 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
             project=self.project, vendor=vendor, invoice_number='INV-1', invoice_document_name='i.pdf',
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('1000.00'), requested_by=self.scm.user,
-            status=PaymentRequest.PENDING)
+            status=PaymentRequest.APPROVED)
 
     def submit(self, value):
         return _client(self.finance).post(

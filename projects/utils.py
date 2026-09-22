@@ -476,6 +476,8 @@ _SUBJECT_PROJECT_RESOLVERS = {
     # what every other subject type here denormalises to, so a design transition
     # lands on the same project timeline as that site's tasks and BOQ.
     'DesignAssignment': lambda s: s.project,
+    # O1. Registered ahead of its call sites (O4/O5) so those sessions add calls only.
+    'PaymentRequest':   lambda s: s.project,
 }
 
 
@@ -485,10 +487,10 @@ def _subject_type_registry():
     if _SUBJECT_TYPE_REGISTRY is None:
         from .models import (
             Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
-            DesignAssignment,
+            DesignAssignment, PaymentRequest,
             SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
             SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
-            SUBJECT_DESIGN_ASSIGNMENT,
+            SUBJECT_DESIGN_ASSIGNMENT, SUBJECT_PAYMENT_REQUEST,
         )
         _SUBJECT_TYPE_REGISTRY = {
             Project:          SUBJECT_PROJECT,
@@ -498,6 +500,7 @@ def _subject_type_registry():
             Issue:            SUBJECT_ISSUE,
             PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
             DesignAssignment: SUBJECT_DESIGN_ASSIGNMENT,
+            PaymentRequest:   SUBJECT_PAYMENT_REQUEST,
         }
     return _SUBJECT_TYPE_REGISTRY
 

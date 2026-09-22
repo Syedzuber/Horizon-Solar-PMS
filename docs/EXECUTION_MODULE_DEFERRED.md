@@ -3643,3 +3643,30 @@ The milestone gate (_gate_task_pk / forloop.first) selects by position on every 
 type. Harmless on OPEX today only because no OPEX task can be BD. If a BD task is ever
 added to a non-Residential template, reordering could move the payment gate. Scope it to
 Residential before that happens.
+
+### G20 — `BOQItem.ordered_quantity` / `ordered_vendor` are legacy; `VendorOrder` is the authority for "ordered"
+
+Found by O1 (22 Sep 2026), not changed: out of that session's MODE.
+
+O1 made `VendorOrderLine` the record of what was ordered, from whom, for which sites. The
+two per-row fields SCM types on the BOQ screen predate it and now answer the same question
+a second way, with nothing keeping the two in step.
+
+Every reader and writer, as of O1:
+
+* **Writer** — `views.boq_detail`, the SCM `save_scm` / `acknowledge_scm` branch (sets both
+  from the `ord_qty_<pk>` / `ord_vendor_<pk>` inputs). Not group-lock gated, deliberately —
+  see `permissions.project_boq_is_group_locked`.
+* **Readers** — `views._boq_snapshot` (into `BOQRevision.snapshot`, read back by
+  `boq_history.html`), `views._notify_boq_acknowledged` (ordered ≠ BOQ quantity), the
+  `boq_detail` render (`select_related('ordered_vendor')`) and `boq_detail.html`.
+* Not these: `DCLineItem.ordered_quantity` is a different field on a different model, read by
+  `_build_delivery_lookup`, `project_overview`, `create_delivery_challan`,
+  `sync_delivery_mirrors`, `delivery_detail_for_task`, `recalculate_dc_status` and
+  `get_material_status`. It is the challan's own quantity and is not affected.
+
+**Decision to take after O3** (once orders are being raised): either derive the two BOQ
+fields from `VendorOrderLine` (sum over lines whose `boq_item` is this row, or over
+`item_master` for a single-site order) and make the inputs read-only, or retire them and
+the SCM branch that writes them. Until then a BOQ screen may show an "ordered" figure that
+no order supports.

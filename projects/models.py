@@ -826,6 +826,16 @@ class UserProfile(models.Model):
     is_qaqc                 = models.BooleanField(default=False)  # May record a QA/QC verdict on a site's work, and raise a punch point against it
     is_hse                  = models.BooleanField(default=False)  # May grant a site its HSE mobilisation clearance, without which execution may not start
     is_warehouse_keeper     = models.BooleanField(default=False)  # Runs a StockLocation — receives, holds and issues the material in it; see StockLocation.keeper
+    # O1 — may approve, hold or reject a vendor PaymentRequest before Finance pays it. A
+    # FLAG, NOT A ROLE, for the reasons the 6.5a audit established for `is_design_head`
+    # and the block above repeats: approving payments is something a person does IN
+    # ADDITION to their role (a PM, the CEO, a Finance lead), and a new ROLE_CHOICES value
+    # would cost its holder every Task.assigned_role match and role-gated queryset.
+    #
+    # STORAGE ONLY THIS SESSION. No permission helper and no UI — the predicate arrives
+    # with its first caller in O4 (R-12), and until then it is set from the shell or the
+    # Django admin. On its own it grants nothing.
+    is_payment_approver     = models.BooleanField(default=False)
 
     email_notifications     = models.BooleanField(default=True)
     whatsapp_notifications  = models.BooleanField(default=True)
@@ -1945,6 +1955,11 @@ SUBJECT_PAYMENT_MILESTONE = 'payment_milestone'
 # which had eighteen status writes across sixteen functions at the time. Session C
 # consolidated those into apply_design_status(), which is why one call site is now enough.
 SUBJECT_DESIGN_ASSIGNMENT = 'design_assignment'
+# The eighth, added by O1 so the approval lifecycle is ledgered from its first write. The
+# subject exists and is registered; NOTHING WRITES IT YET — the call sites land with the
+# approval views (O4) and the confirm rewrite (O5). Until then §13 lists PaymentRequest
+# as instrumented-pending, and a missing row still means "not instrumented".
+SUBJECT_PAYMENT_REQUEST   = 'payment_request'
 
 SUBJECT_TYPE_CHOICES = [
     (SUBJECT_PROJECT,           'Project'),
@@ -1954,6 +1969,7 @@ SUBJECT_TYPE_CHOICES = [
     (SUBJECT_ISSUE,             'Issue'),
     (SUBJECT_PAYMENT_MILESTONE, 'Payment Milestone'),
     (SUBJECT_DESIGN_ASSIGNMENT, 'Design Assignment'),
+    (SUBJECT_PAYMENT_REQUEST,   'Payment Request'),
 ]
 
 # Reason vocabulary — module-level constants per R-10, NOT a lookup table and
@@ -2208,13 +2224,35 @@ class SystemSettings(models.Model):
 
 
 class PaymentRequest(models.Model):
-    """A vendor payment request raised by SCM, confirmed by Finance, visible to PM. No edit/cancel by design."""
+    """A vendor payment request raised by SCM, confirmed by Finance, visible to PM. No edit/cancel by design.
 
-    PENDING   = 'pending'
-    CONFIRMED = 'confirmed'
+    O1 EXTENDS THIS MODEL, IT DOES NOT REPLACE IT (execution-model.md D-2). A payment is
+    still a PaymentRequest; what changes is what it is raised AGAINST (a VendorOrder, via
+    `vendor_order`) and that it now has room for an approval step before Finance pays.
+
+    "No edit/cancel by design" still holds for the request's CONTENT — vendor, amount,
+    order. The status moving through approval is not an edit; it is the lifecycle.
+    """
+
+    # O1: the approval lifecycle. The old 'pending' value is gone — every row that held it
+    # was renamed to 'approved' by migration 0092, because "pending" meant "with Finance,
+    # awaiting payment", which is exactly what APPROVED means now. raise_payment_request
+    # creates APPROVED, so a request still goes straight to Finance until O4 puts
+    # PENDING_APPROVAL in front of it.
+    #
+    # CONFIRMED keeps its name and its stored value; only its label changes, to "Paid",
+    # because that is what it has always meant.
+    PENDING_APPROVAL = 'pending_approval'
+    APPROVED         = 'approved'
+    ON_HOLD          = 'on_hold'
+    REJECTED         = 'rejected'
+    CONFIRMED        = 'confirmed'
     STATUS_CHOICES = [
-        (PENDING,   'Pending'),
-        (CONFIRMED, 'Confirmed'),
+        (PENDING_APPROVAL, 'Awaiting approval'),
+        (APPROVED,         'Approved — awaiting payment'),
+        (ON_HOLD,          'On hold'),
+        (REJECTED,         'Rejected'),
+        (CONFIRMED,        'Paid'),
     ]
 
     project  = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='payment_requests')
@@ -2222,6 +2260,19 @@ class PaymentRequest(models.Model):
         Vendor, on_delete=models.SET_NULL, null=True,
         related_name='payment_requests',
     )
+
+    # The order this payment is made against. Nullable ONLY until O2 replaces
+    # raise_payment_request with a path that always names an order; O2 makes it NOT NULL.
+    # PROTECT: an order that has had money paid against it cannot disappear from under
+    # the payment.
+    vendor_order = models.ForeignKey(
+        'VendorOrder', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='payments',
+    )
+
+    # LEGACY — superseded by VendorOrderLine (what was ordered, per catalogue item). Kept
+    # untouched because raise_payment_request, project_overview and the payment detail
+    # screen still read it; dropped in O6 once those readers are rewritten.
     # BOQItem FK: always scoped to this project via boq__project in queries.
     # Do not display another project's BOQ items in the raise-request form.
     boq_item = models.ForeignKey(
@@ -2229,8 +2280,13 @@ class PaymentRequest(models.Model):
         related_name='payment_requests',
     )
 
+    # LEGACY — superseded by VendorOrderDocument(doc_type='invoice'), which carries its
+    # own invoice_number and invoice_amount. Dropped in O6 once readers are rewritten.
     invoice_number = models.CharField(max_length=100)
 
+    # LEGACY, all three — superseded by VendorOrderDocument, which stores bucket + path and
+    # no URL (vendor_order_document_url() builds it). Dropped in O6 once readers are
+    # rewritten.
     # Supabase storage — reuse same three-field pattern as ProjectDocument/TaskAttachment.
     # invoice_document is mandatory at creation: no edit/cancel flow exists for
     # PaymentRequest by design (Zuber decision, 19-June session).
@@ -2250,9 +2306,22 @@ class PaymentRequest(models.Model):
         related_name='raised_payment_requests',
     )
     requested_date = models.DateTimeField(auto_now_add=True)
-    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default=PENDING)
+    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default=APPROVED)
+
+    # The approval decision (O4). Set when an approver approves, holds or rejects; null
+    # until then, and null forever on a row raised before O4, which never had one.
+    approved_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='approved_payment_requests',
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    # Why a request was held or rejected. Required for those two statuses — the CHECK
+    # below — because a refusal with no reason gives SCM nothing to act on.
+    decision_reason = models.TextField(blank=True, default='')
 
     # Set on confirm — null until Finance confirms
+    # No DB constraint on payment_reference: the O5 confirm view enforces it, and rows
+    # confirmed before O5 legitimately carry none.
     payment_date      = models.DateField(null=True, blank=True)
     payment_reference = models.CharField(max_length=100, blank=True)  # UTR / cheque no., set on confirm
     confirmed_by      = models.ForeignKey(
@@ -2260,11 +2329,277 @@ class PaymentRequest(models.Model):
         related_name='confirmed_payment_requests',
     )
 
+    # R-14 idempotency key for a queued or double-submitted raise. null (not '') so the
+    # unique index admits unlimited keyless rows.
+    client_uuid = models.UUIDField(null=True, blank=True, unique=True)
+
     class Meta:
         ordering = ['-requested_date']
+        constraints = [
+            # Expressed as the VALID case: either the status is not a refusal, or a
+            # reason was given.
+            models.CheckConstraint(
+                condition=(~models.Q(status__in=['rejected', 'on_hold'])
+                           | ~models.Q(decision_reason='')),
+                name='payment_request_refusal_needs_reason',
+            ),
+        ]
 
     def __str__(self):
         return f"PR-{self.pk} {self.project.project_id} — {self.vendor} ₹{self.amount}"
+
+
+# ---------------------------------------------------------------------------
+# O1 — vendor orders
+#
+# A VendorOrder RECORDS a purchase order that was issued OUTSIDE PMS. PMS never
+# generates, numbers or approves a PO: SCM places the order with the vendor the way it
+# always has, and then records here what was ordered, for which sites, and at what
+# amount. `po_number` is whatever the vendor or SCM's own system called it.
+#
+# SCOPE IS A SET OF SITES, NOT A GROUP. An order names its sites directly through
+# VendorOrderSite. A procurement SiteGroup is a PICKER — the raise view may offer "every
+# site in this locked group" — and `via_site_group` remembers that it was used, for
+# display only. Nothing reads membership through the group, so a group that later loses
+# a site (it cannot once locked, but may while draft) never changes an order.
+#
+# NO EDIT, NO DELETE, NO SOFT DELETE, on any of the four models. A mistake is corrected
+# by recording what actually happened next to it, not by rewriting the record. Every FK
+# INTO an order is PROTECT, so an order with any line, site, document or payment cannot
+# be deleted by the ORM either. There is no save()/delete() override: the absence of any
+# write path other than creation is the enforcement, and a future edit view is the thing
+# to refuse in review.
+#
+# TOTALS ARE PROPERTIES, NEVER COLUMNS. Total, paid, balance and invoiced are sums over
+# the children, computed at read time — the same reason aggregate_group_boq() stores
+# nothing: a stored roll-up is how the figure and its parts drift apart.
+# ---------------------------------------------------------------------------
+
+VENDOR_ORDER_DOC_PO      = 'po'
+VENDOR_ORDER_DOC_PI      = 'pi'
+VENDOR_ORDER_DOC_INVOICE = 'invoice'
+VENDOR_ORDER_DOC_OTHER   = 'other'
+
+VENDOR_ORDER_DOC_TYPE_CHOICES = [
+    (VENDOR_ORDER_DOC_PO,      'Purchase order'),
+    (VENDOR_ORDER_DOC_PI,      'Proforma invoice'),
+    (VENDOR_ORDER_DOC_INVOICE, 'Invoice'),
+    (VENDOR_ORDER_DOC_OTHER,   'Other'),
+]
+
+
+class VendorOrder(models.Model):
+    """A RECORD of one purchase order issued to one vendor outside PMS.
+
+    PMS never generates, numbers or approves a PO — see the section note above. This row
+    says an order exists; its lines say what was ordered, its sites say for whom, its
+    documents hold the PO / PI / invoice files, and `payments` (PaymentRequest) are the
+    money paid against it.
+
+    No edit, no delete, no soft delete.
+    """
+
+    # PROTECT: Vendor has no hard-delete path (only is_active), and an order must never
+    # lose the party it was placed with.
+    vendor = models.ForeignKey(
+        Vendor, on_delete=models.PROTECT, related_name='vendor_orders',
+    )
+
+    # Set once, at creation. Every site on an order shares it — enforced in the raise
+    # views, not here, because the sites are rows written after this one. It exists so
+    # an order is Residential or RESCO without joining through its sites.
+    project_type = models.CharField(max_length=20, choices=Project.PROJECT_TYPE_CHOICES)
+
+    # The vendor's / SCM's own numbers, as printed on their documents. Blank when not yet
+    # known; PMS assigns none of its own.
+    po_number = models.CharField(max_length=100, blank=True, default='')
+    pi_number = models.CharField(max_length=100, blank=True, default='')
+
+    # A HISTORICAL FACT ABOUT THE MOMENT OF RAISING, NOT DERIVED STATE. True if, when this
+    # order was recorded, any of its sites' BOQ quantities were still unfrozen (the site
+    # was in no locked procurement group). A later lock does not make it False and must
+    # not: the question it answers is "was this order placed against moving numbers".
+    raised_with_unfrozen_quantities = models.BooleanField(default=False)
+
+    note = models.TextField(blank=True, default='')
+
+    created_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='created_vendor_orders',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    # R-14 idempotency key — see PaymentRequest.client_uuid.
+    client_uuid = models.UUIDField(null=True, blank=True, unique=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        ref = self.po_number or f'#{self.pk}'
+        return f"Order {ref} — {self.vendor}"
+
+    # ── Computed totals. NEVER stored — see the section note. ─────────────────
+    # Each is one aggregate query; a caller rendering many orders should annotate its
+    # queryset instead of reading these in a loop.
+
+    @property
+    def total(self):
+        """Sum of the order's line amounts."""
+        from django.db.models import Sum
+        from decimal import Decimal
+        return self.lines.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+
+    @property
+    def paid(self):
+        """Sum of payments Finance has CONFIRMED (paid). Every other status — awaiting
+        approval, approved, on hold, rejected — is money not yet paid and counts nothing.
+        """
+        from django.db.models import Sum
+        from decimal import Decimal
+        return (self.payments.filter(status=PaymentRequest.CONFIRMED)
+                .aggregate(s=Sum('amount'))['s'] or Decimal('0'))
+
+    @property
+    def balance(self):
+        """total − paid. Negative if more was paid than ordered; not clamped, because
+        an overpayment is a fact someone needs to see."""
+        return self.total - self.paid
+
+    @property
+    def invoiced(self):
+        """Sum of invoice_amount over the order's invoice documents."""
+        from django.db.models import Sum
+        from decimal import Decimal
+        return (self.documents.filter(doc_type=VENDOR_ORDER_DOC_INVOICE)
+                .aggregate(s=Sum('invoice_amount'))['s'] or Decimal('0'))
+
+
+class VendorOrderSite(models.Model):
+    """One site an order was placed for. No edit, no delete."""
+
+    order = models.ForeignKey(
+        VendorOrder, on_delete=models.PROTECT, related_name='sites',
+    )
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='vendor_order_sites',
+    )
+    # DISPLAY ONLY — "this site came onto the order by picking group X". Null for
+    # Residential, which has no groups, and for a RESCO site picked individually.
+    # SET_NULL because the order's scope is the site rows, never the group; nothing may
+    # read membership through this FK.
+    via_site_group = models.ForeignKey(
+        'SiteGroup', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='vendor_order_sites',
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['order', 'project'],
+                                    name='uniq_vendor_order_site'),
+        ]
+
+    def __str__(self):
+        return f"{self.order} — {self.project.project_id}"
+
+
+class VendorOrderLine(models.Model):
+    """One ordered item: a quantity and an amount. No edit, no delete.
+
+    THE DISPLAYED IDENTITY IS A SNAPSHOT, and the FKs beside it may go null. Both FKs are
+    SET_NULL — a catalogue row can be deactivated and a BOQ row can be deleted by the
+    OPEX picker — so `item_code`, `item_description`, `item_unit` and `item_category` are
+    copied at creation and are what every screen shows, "so the record survives the row"
+    exactly as BOQCorrection does.
+    """
+
+    order = models.ForeignKey(
+        VendorOrder, on_delete=models.PROTECT, related_name='lines',
+    )
+    item_master = models.ForeignKey(
+        'BOQItemMaster', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='vendor_order_lines',
+    )
+    # Single-site Residential lines only. A consolidated RESCO line spans several sites'
+    # BOQ rows and so names none of them; it joins on item_master instead.
+    boq_item = models.ForeignKey(
+        BOQItem, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='vendor_order_lines',
+    )
+
+    #: Point-in-time identity of the line — the displayed values.
+    item_code        = models.CharField(max_length=32, blank=True, default='')
+    item_description = models.TextField()
+    item_unit        = models.CharField(max_length=20, blank=True, default='')
+    item_category    = models.CharField(max_length=64, blank=True, default='')
+
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    amount   = models.DecimalField(max_digits=14, decimal_places=2)
+
+    class Meta:
+        ordering = ['pk']
+        constraints = [
+            models.CheckConstraint(condition=models.Q(quantity__gt=0),
+                                   name='vendor_order_line_quantity_positive'),
+            models.CheckConstraint(condition=models.Q(amount__gt=0),
+                                   name='vendor_order_line_amount_positive'),
+        ]
+
+    def __str__(self):
+        return f"{self.order} — {self.item_code or '(ad-hoc)'} × {self.quantity}"
+
+
+class VendorOrderDocument(models.Model):
+    """A file attached to an order — the PO, the PI, an invoice, or anything else.
+
+    APPEND-ONLY: no edit, no delete, no soft delete. A wrong upload is superseded by a
+    correct one beside it. Shape follows ProjectDocument, minus its soft-delete fields.
+
+    AN INVOICE HERE IS A FILE, NOT AN INVOICE MODEL (D-2). doc_type='invoice' carries the
+    vendor's invoice number and amount so `VendorOrder.invoiced` can be summed, and that
+    is all. Money paid is PaymentRequest, and stays PaymentRequest.
+
+    NO URL IS STORED. `bucket` + `path` are the fact; supabase_storage.
+    vendor_order_document_url() builds the URL, which is the single place to switch to
+    signed URLs later.
+    """
+
+    order = models.ForeignKey(
+        VendorOrder, on_delete=models.PROTECT, related_name='documents',
+    )
+    doc_type = models.CharField(max_length=10, choices=VENDOR_ORDER_DOC_TYPE_CHOICES)
+
+    # Required for doc_type='invoice' — the CHECK below. Blank / null on every other type.
+    invoice_number = models.CharField(max_length=100, blank=True, default='')
+    invoice_amount = models.DecimalField(max_digits=14, decimal_places=2,
+                                         null=True, blank=True)
+
+    file_name    = models.CharField(max_length=255)   # Original filename, as uploaded
+    bucket       = models.CharField(max_length=100)
+    path         = models.CharField(max_length=500)   # Path within `bucket`
+    file_type    = models.CharField(max_length=100, blank=True, default='')  # MIME type as uploaded
+    file_size_kb = models.PositiveIntegerField(default=0)
+
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='vendor_order_documents',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-uploaded_at']
+        constraints = [
+            # Expressed as the VALID case: not an invoice, or an invoice with a number and
+            # a positive amount. An invoice that cannot be summed is not an invoice.
+            models.CheckConstraint(
+                condition=(~models.Q(doc_type=VENDOR_ORDER_DOC_INVOICE)
+                           | (~models.Q(invoice_number='')
+                              & models.Q(invoice_amount__isnull=False)
+                              & models.Q(invoice_amount__gt=0))),
+                name='vendor_order_invoice_needs_number_and_amount',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.order} — {self.get_doc_type_display()}: {self.file_name}"
 
 
 class DesignSubmission(models.Model):

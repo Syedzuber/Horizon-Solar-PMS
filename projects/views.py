@@ -1339,7 +1339,7 @@ def dashboard_finance(request):
             Prefetch(
                 'payment_requests',
                 queryset=PaymentRequest.objects.filter(
-                    status=PaymentRequest.PENDING,
+                    status=PaymentRequest.APPROVED,
                 ).select_related('vendor'),
                 to_attr='pending_payment_requests',
             ),
@@ -1357,14 +1357,14 @@ def dashboard_finance(request):
     # Trigger 2: PaymentRequest confirmed present — query real pending count and value
     total_payment_requests = PaymentRequest.objects.filter(
         project__status__in=['Active', 'In Progress'],
-        status=PaymentRequest.PENDING,
+        status=PaymentRequest.APPROVED,
         **_context_filter(ctx, 'project__'),
     ).count()
 
     total_payment_request_value = (
         PaymentRequest.objects.filter(
             project__status__in=['Active', 'In Progress'],
-            status=PaymentRequest.PENDING,
+            status=PaymentRequest.APPROVED,
             **_context_filter(ctx, 'project__'),
         ).aggregate(s=Sum('amount'))['s'] or 0
     )
@@ -2353,11 +2353,11 @@ def _get_ceo_dashboard_context(context=None):
         **_context_filter(context, 'project__'),
     }
     fin_payment_requests_pending = PaymentRequest.objects.filter(
-        status=PaymentRequest.PENDING, **active_filter
+        status=PaymentRequest.APPROVED, **active_filter
     ).count()
     fin_vendor_payments_outstanding = (
         PaymentRequest.objects.filter(
-            status=PaymentRequest.PENDING, **active_filter
+            status=PaymentRequest.APPROVED, **active_filter
         ).aggregate(s=Sum('amount'))['s'] or 0
     )
     fin_client_contract_value = (
@@ -8902,7 +8902,7 @@ def raise_payment_request(request, project_id):
         amount=amount,
         note=note,
         requested_by=request.user,
-        status=PaymentRequest.PENDING,
+        status=PaymentRequest.APPROVED,
     )
 
     # Confirm actions are state-mutating — log them so they surface in the
@@ -8930,7 +8930,7 @@ def confirm_payment_request(request, project_id, request_id):
     project = _active_project(project_id)
     pr = get_object_or_404(
         PaymentRequest.objects.select_related('vendor', 'boq_item'),
-        pk=request_id, project=project, status=PaymentRequest.PENDING,
+        pk=request_id, project=project, status=PaymentRequest.APPROVED,
     )
 
     payment_date_str  = request.POST.get('payment_date', '').strip()

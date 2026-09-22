@@ -892,7 +892,7 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(response.status_code, 302)
 
         pr = PaymentRequest.objects.get(project=self.project_a)
-        self.assertEqual(pr.status, PaymentRequest.PENDING)
+        self.assertEqual(pr.status, PaymentRequest.APPROVED)
         self.assertEqual(pr.amount, Decimal('55000.00'))
         self.assertEqual(pr.requested_by, self.scm.user)
         self.assertEqual(pr.invoice_document_name, 'inv-77.pdf')
@@ -1559,7 +1559,7 @@ class NotificationTests(ResidentialBaselineBase):
             invoice_number='INV-9', invoice_document_name='i.pdf',
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('25000.00'), requested_by=self.scm.user,
-            status=PaymentRequest.PENDING,
+            status=PaymentRequest.APPROVED,
         )
 
         with patch('projects.views.send_notification') as sender:
