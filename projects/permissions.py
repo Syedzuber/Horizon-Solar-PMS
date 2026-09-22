@@ -1509,3 +1509,36 @@ def user_can_mark_task_not_applicable(user, task, project):
     if not user_can_manage_project(user, project):
         return False
     return project.assigned_pm == profile
+
+
+def checklist_answers_open(task):
+    """Return True while checklist items on `task` may still be answered.
+
+    Open unless the task is Done or a submission is outstanding. A task rejected back
+    to the engineer is open again: reject clears `submitted_at`, so it stops awaiting
+    approval without anything here naming the rejection.
+
+    A FACT ABOUT THE TASK, NOT THE USER — which is why it takes no `user`. Who may
+    answer is `_user_can_complete_checklist_item()`'s question; that helper calls this
+    one, so the completion view and the template flag both inherit the closure from
+    the single place they already share.
+
+    WHY ANSWERS CLOSE AT SUBMISSION AND NOT ONLY AT DONE. A witnessed QMS checklist is
+    part of what the approver signs off on. An answer added after the task was handed
+    over for approval was added after the approver started reading it, and one added
+    after Done was added to a record that is already closed. The checklist seed links
+    at template level, so tasks completed before any checklist existed show one too;
+    without this gate they carry forty blank, answerable items.
+
+    "AWAITING APPROVAL" IS `Task.is_awaiting_approval`, never re-derived here from
+    `submitted_at` / `approved_at`: that property is the one reading of the 2.1 fields,
+    and a second copy of it is a second place the rule could drift.
+
+    `approved_at` IS DELIBERATELY NOT CONSULTED. A task reopened after approval (Done →
+    Blocked → In Progress) keeps its stale approval, and is OPEN here: reopening is a
+    deliberate act and the redone work should be checkable.
+
+    `task.DONE` rather than `Task.DONE`, read off the instance, so this module keeps
+    its no-model-imports property (see the import note at the top).
+    """
+    return task.status != task.DONE and not task.is_awaiting_approval

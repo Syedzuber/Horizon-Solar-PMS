@@ -90,6 +90,10 @@ from .permissions import (
     # user_can_manage_project, which admits a coordinator. The predicate says why,
     # and also refuses mirrors.
     user_can_mark_task_not_applicable,
+    # Checklist answers close at submission and at Done; a rejection reopens them.
+    # Asked inside _user_can_complete_checklist_item, and once more in the view so the
+    # refusal can say why.
+    checklist_answers_open,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -2709,7 +2713,15 @@ def _user_can_complete_checklist_item(user, task, project):
     rule task_detail_status_update uses; both surfaces live on the same page.
     Defined once and reused by both the completion view and the template context so
     the two never drift.
+
+    CLOSED TASKS REFUSE EVERYONE, PM INCLUDED. Once a task is submitted for approval
+    or Done, checklist_answers_open() is False and no role or authority answers an
+    item on it. Asked FIRST, before the role test, so the closure cannot be bypassed
+    by PM authority — and asked here rather than only in the view so the template's
+    can_complete_items flag drops the answer controls from the same rule.
     """
+    if not checklist_answers_open(task):
+        return False
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
@@ -4286,6 +4298,12 @@ def _checklist_context(request, project, task):
         'checklist_items':    items,   # truthiness + count badge
         'user_profile':       profile,
         'can_complete_items': _user_can_complete_checklist_item(request.user, task, project),
+        # Read by task_detail.html's checklist card: a CLOSED task with no answer on
+        # record shows one factual line instead of a table of blank Pending rows. A
+        # closed task WITH answers keeps the table, read-only, because
+        # can_complete_items above is already False for it.
+        'checklist_answers_open':  checklist_answers_open(task),
+        'checklist_has_answers':   any(c.is_checked for c in completions.values()),
     }
 
 
@@ -9863,6 +9881,17 @@ def checklist_item_complete(request, project_id, task_id, item_id):
     if checklist is None:
         return _checklist_error(request, project, task, 'No checklist is assigned to this task.')
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+
+    # Answers close at submission and at Done. _user_can_complete_checklist_item()
+    # below refuses a closed task too; this is asked first only so the refusal names
+    # the reason rather than claiming the person lacks permission. Same response
+    # shape as the permission refusal: HTMX re-renders the section, anything else 403.
+    if not checklist_answers_open(task):
+        if _is_hx(request):
+            return _checklist_error(request, project, task,
+                                    'Checklist answers are closed: this task has been '
+                                    'submitted for approval or completed.')
+        return HttpResponseForbidden()
 
     if not _user_can_complete_checklist_item(request.user, task, project):
         if _is_hx(request):
