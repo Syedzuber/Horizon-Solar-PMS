@@ -100,6 +100,7 @@ from .permissions import (
     # Rename task: task_add's gate on a live project, any type; open, non-mirror,
     # non-milestone work whose name nothing looks up.
     can_rename_task, reserved_task_names,
+    can_reorder_phase,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -3794,6 +3795,123 @@ def task_rename_save(request, project_id, task_id):
         resp['HX-Trigger'] = 'taskFormDone'
         return resp
     return redirect('project_overview', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# Reorder tasks within a phase
+#
+# A PM or coordinator drags a phase's rows into a new order on an OPEX or CAPEX site.
+# Gate: can_reorder_phase(). The POST carries the phase's COMPLETE ordered id list; a
+# list that is not exactly the phase's current task set (a task was added or duplicated
+# meanwhile, or the list is someone else's phase) is refused whole with 409 and the
+# phase re-rendered, so a partial list can never renumber half a phase.
+#
+# task_order is the only column written. Residential is out of scope because its order
+# drives the Gantt, the due-date cascade and the CEO card's positional lookups.
+# ---------------------------------------------------------------------------
+
+_REORDER_STALE_MESSAGE = ('The task list changed while you were reordering. '
+                          'It has been refreshed.')
+_ACTIVITY_ACTION_MAX_LENGTH = ActivityLog._meta.get_field('action').max_length
+
+
+def _parse_task_id_list(raw):
+    """'12,15,13' -> [12, 15, 13]; None when any entry is not a positive integer, which
+    the caller refuses like any other mismatch."""
+    parts = [part.strip() for part in raw.split(',')] if raw.strip() else []
+    if not all(part.isdigit() for part in parts):
+        return None
+    return [int(part) for part in parts]
+
+
+def _render_phase_tasks_hx(request, project, phase, status=200):
+    """Re-render one phase's <tbody> and task count out-of-band, in
+    _task_add_success.html's shape, WITHOUT its taskFormDone trigger: no modal is open.
+
+    Carries two pieces of row context the add-success helper does not: the two-step
+    flags (so an OPEX row still withholds Done) and the delivery consignment counts
+    project_overview attaches to mirror rows. Without them a reorder would redraw rows
+    that differ from the page it came from."""
+    profile = getattr(request.user, 'profile', None)
+    role    = getattr(profile, 'role', None)
+    phase_tasks = list(phase.tasks.select_related('template_task'))
+    for task in phase_tasks:
+        task.phase = phase
+        delivery = delivery_detail_for_task(task)
+        if delivery is not None:
+            task.delivery_consignments = delivery['consignments']
+    return render(request, 'projects/partials/_task_add_success.html', {
+        'project':             project,
+        'phase':               phase,
+        'phase_tasks':         phase_tasks,
+        'phase_count':         len(phase_tasks),
+        'gate_task_pk':        _gate_task_pk(project),
+        'is_assigned_pm':      _pm_owns_project(request, project),
+        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
+        'role':                role,
+        'task_status_choices': Task.STATUS_CHOICES,
+        **_phase_list_two_step(project, request),
+    }, status=status)
+
+
+def _reorder_log_text(phase, moves):
+    """"Reordered tasks in phase 'X': A: 7 → 3; B: 3 → 4", cut to the column length."""
+    text = (f"Reordered tasks in phase '{phase.phase_name}': "
+            + '; '.join(f'{task.task_name}: {old} → {new}' for task, old, new in moves))
+    if len(text) > _ACTIVITY_ACTION_MAX_LENGTH:
+        text = text[:_ACTIVITY_ACTION_MAX_LENGTH - 1] + '…'
+    return text
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def phase_tasks_reorder(request, project_id, phase_id):
+    """POST `order` = the phase's task ids, comma-separated, in their new order.
+
+    Refused (404) where can_reorder_phase() is False. Inside one transaction the phase's
+    tasks are locked; a submitted set that is not EXACTLY the current set (missing,
+    extra, duplicated, foreign or malformed ids) writes nothing and answers 409 with the
+    phase re-rendered. An unchanged order writes and logs nothing. Otherwise task_order
+    becomes 1..N in the submitted order, bulk_update on task_order alone, and one
+    ActivityLog row names every task whose number changed. No notification and no
+    StatusTransition: an order is not a status.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+    project = _active_project(project_id)
+    phase = get_object_or_404(ProjectPhase, pk=phase_id, project=project)
+    phase.project = project
+    if not can_reorder_phase(request.user, phase):
+        raise Http404
+
+    submitted = _parse_task_id_list(request.POST.get('order', ''))
+    moves = []
+    with transaction.atomic():
+        current = list(Task.objects.select_for_update()
+                       .filter(phase=phase).order_by('task_order', 'pk'))
+        current_ids = [task.pk for task in current]
+        stale = (submitted is None or len(submitted) != len(set(submitted))
+                 or set(submitted) != set(current_ids))
+        if not stale and submitted != current_ids:
+            by_pk = {task.pk: task for task in current}
+            for position, pk in enumerate(submitted, start=1):
+                task = by_pk[pk]
+                if task.task_order != position:
+                    moves.append((task, task.task_order, position))
+                    task.task_order = position
+            Task.objects.bulk_update([task for task, _, _ in moves], ['task_order'])
+
+    if stale:
+        messages.error(request, _REORDER_STALE_MESSAGE)
+        return _render_phase_tasks_hx(request, project, phase, status=409)
+
+    # After the writes, outside the block: log_activity swallows its own failures, and a
+    # failed INSERT inside the transaction would poison it on Postgres.
+    if moves:
+        log_activity(project, request.user.profile, _reorder_log_text(phase, moves),
+                     entity_type='ProjectPhase', entity_id=phase.pk,
+                     action_code='phase_tasks_reordered')
+    return _render_phase_tasks_hx(request, project, phase)
 
 
 # ---------------------------------------------------------------------------

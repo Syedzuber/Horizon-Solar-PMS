@@ -28,7 +28,13 @@ Expected context:
     data-task-id="{{ task.pk }}"
     data-project-id="{{ project.project_id }}"
     data-attachment-count="{{ task.active_attachment_count }}">
-  <td class="text-muted small">{{ task.task_order }}</td>
+  {% comment %}REORDER GRIP, in the # cell so no column is added (the thead and the empty
+     phase row's colspan stay as they are). Shown only where can_reorder_phase() is True,
+     asked through the filter like the icons below; the POST asks again and 404s. Hidden
+     below md: dragging is desktop-only, and mouse-only (see EXECUTION_MODULE_DEFERRED).
+     project_overview's Sortable binds to this class as its drag handle.{% endcomment %}
+  <td class="text-muted small text-nowrap">{% if task|can_reorder:request.user %}<button type="button" class="task-drag-handle d-none d-md-inline-flex"
+        aria-label="Drag to reorder {{ task.task_name }}"><svg width="12" height="14" viewBox="0 0 12 18" fill="currentColor" aria-hidden="true"><circle cx="3" cy="3" r="1.6"></circle><circle cx="9" cy="3" r="1.6"></circle><circle cx="3" cy="9" r="1.6"></circle><circle cx="9" cy="9" r="1.6"></circle><circle cx="3" cy="15" r="1.6"></circle><circle cx="9" cy="15" r="1.6"></circle></svg></button>{% endif %}{{ task.task_order }}</td>
   <td><a href="{% url 'task_detail' project.project_id task.pk %}"
          class="text-decoration-none text-body small">{{ task.task_name }}</a>
     {% if task.location_label %}

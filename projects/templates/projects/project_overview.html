@@ -32,6 +32,16 @@
   /* Rename sits beside the copy icon (both float right); a little air between them. */
   .task-rename-btn { margin-right:2px; }
 
+  /* ── Reorder grip (# cell, _task_row.html) and SortableJS states ───── */
+  .task-drag-handle { cursor:grab; align-items:center; color:#9aa5a0; background:transparent;
+                      border:1px solid transparent; border-radius:4px; padding:1px 2px;
+                      margin-right:4px; line-height:1; vertical-align:middle; }
+  .task-drag-handle:hover, .task-drag-handle:focus-visible { color:var(--hz-green); background:#eef5f1; border-color:#c9ddd0; }
+  .task-drag-handle:focus-visible { outline:3px solid #f0a020; outline-offset:1px; }
+  .task-drag-chosen .task-drag-handle { cursor:grabbing; }
+  .task-drag-ghost > td { background:#eef5f1 !important; opacity:.6; }
+  .task-reorder-busy { opacity:.6; transition:opacity .15s ease; }
+
   /* ── Project info strip ────────────────────────────────────── */
   .info-pill { display:flex; align-items:center; gap:.35rem; white-space:nowrap; }
   .info-pill i { color:var(--hz-green); font-size:.85rem; }
@@ -984,7 +994,7 @@
         <table class="table table-sm table-hover mb-0">
           <thead class="table-light">
             <tr>
-              <th style="width:2.5rem;">#</th>
+              <th style="width:3.5rem;">#</th>
               <th>Task</th>
               <th style="width:13rem;">Assigned To</th>
               <th style="width:12rem;">Status</th>
@@ -2038,6 +2048,91 @@ function saveBDMilestoneAmount(projectId, milestoneName, csrfToken, milestonePk)
 
 <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
 <script>lucide.createIcons();</script>
+
+{% comment %}
+REORDER TASKS WITHIN A PHASE. One Sortable per phase <tbody>, each in its own group so a
+row cannot cross into another phase. The grip (_task_row.html) is the only handle, and
+it is rendered only where can_reorder_phase() is True, so a tbody with no grip is never
+bound. On drop the phase's FULL id list goes to phase_tasks_reorder, which answers with
+the phase's tbody and count out-of-band (swap:'none' keeps the target untouched).
+
+RE-INITIALISED ON htmx:load. A row swap (status, assign, due date, rename) replaces a <tr>
+and leaves the tbody and its Sortable in place. Task add, duplicate for locations and
+the reorder response itself replace the whole tbody, orphaning the old instance;
+htmx:load fires for the new one. Sortable.get() guards against binding a tbody twice.
+
+409 IS SWAPPED, NOT REPORTED. The view answers a stale id list with 409 and the phase
+re-rendered with its own message. base.html's responseError handler would otherwise
+replace that with a generic "Action failed", and htmx does not swap a 4xx by default.
+
+Any other failure puts the rows back in the order they had before the drag, so the page
+never shows an order the server did not save.
+{% endcomment %}
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.7/Sortable.min.js"
+        integrity="sha384-DgmC6Xe2bSN2WjTDXzWYbUbxyhNP+NNkGDR/g78pCXV7E7rcVTGxVg0uIVCUUcBc"
+        crossorigin="anonymous"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  if (!window.Sortable || !window.htmx) return;
+
+  var URL_TEMPLATE = "{% url 'phase_tasks_reorder' project.project_id 0 %}";
+  var PHASE_TBODY  = 'tbody[id^="phase-tasks-"]';
+
+  function reorderUrl(phasePk) {
+    return URL_TEMPLATE.replace(/\/0\/reorder-tasks\/$/, '/' + phasePk + '/reorder-tasks/');
+  }
+
+  function bind(tbody) {
+    if (Sortable.get(tbody) || !tbody.querySelector('.task-drag-handle')) return;
+    var phasePk = tbody.id.replace('phase-tasks-', '');
+    var before  = null;
+    var sortable = Sortable.create(tbody, {
+      handle:      '.task-drag-handle',
+      draggable:   'tr[data-task-id]',
+      dataIdAttr:  'data-task-id',
+      group:       'phase-tasks-' + phasePk,
+      animation:   120,
+      ghostClass:  'task-drag-ghost',
+      chosenClass: 'task-drag-chosen',
+      onStart: function () { before = sortable.toArray(); },
+      onEnd: function (evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+        sortable.option('disabled', true);
+        tbody.classList.add('task-reorder-busy');
+        tbody.addEventListener('htmx:afterRequest', function (e) {
+          // A successful answer (or a swapped 409) replaced this tbody; one still in
+          // the page means nothing was saved, so its rows go back where they were.
+          if (tbody.isConnected) {
+            if (!e.detail.successful) sortable.sort(before, true);
+            sortable.option('disabled', false);
+            tbody.classList.remove('task-reorder-busy');
+          }
+        }, { once: true });
+        htmx.ajax('POST', reorderUrl(phasePk), {
+          source: tbody, swap: 'none',
+          values: { order: sortable.toArray().join(',') },
+        });
+      },
+    });
+  }
+
+  function scan(root) {
+    if (!root || !root.querySelectorAll) return;
+    if (root.matches && root.matches(PHASE_TBODY)) bind(root);
+    root.querySelectorAll(PHASE_TBODY).forEach(bind);
+  }
+
+  document.body.addEventListener('htmx:beforeSwap', function (evt) {
+    var path = evt.detail.requestConfig && evt.detail.requestConfig.path;
+    if (evt.detail.xhr.status === 409 && path && /\/reorder-tasks\/$/.test(path)) {
+      evt.detail.shouldSwap = true;
+      evt.detail.isError    = false;
+    }
+  });
+  document.body.addEventListener('htmx:load', function (evt) { scan(evt.detail.elt); });
+  scan(document);
+});
+</script>
 
 {% if role == 'Admin' %}
 <div class="modal fade" id="deleteProjectModal" tabindex="-1" aria-labelledby="deleteProjectModalLabel" aria-hidden="true">

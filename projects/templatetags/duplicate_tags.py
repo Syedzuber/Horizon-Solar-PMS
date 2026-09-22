@@ -13,12 +13,16 @@ for every request, so the cache cannot outlive the page it was built for.
     {% load duplicate_tags %}
     {% if task|can_duplicate_for_locations:request.user %}
     {% if task|can_rename:request.user %}
+    {% if task|can_reorder:request.user %}
+
+can_reorder asks permissions.can_reorder_phase() about the row's phase, with its own
+cache keyed on the project (every term of that rule is on the project).
 
 can_rename is the same arrangement around permissions.can_rename_task(), with a cache of
 its own: the two predicates' project halves are different rules (rename admits
 Residential), so one dict cannot serve both.
 
-ONE PROJECT INSTANCE PER REQUEST, SHARED BY BOTH FILTERS. project_overview loads phases
+ONE PROJECT INSTANCE PER REQUEST, SHARED BY ALL THREE FILTERS. project_overview loads phases
 with filter(project=...), so no phase has its project cached, and each filter's first
 cache miss loads the project through whichever row reached it — two loads, plus the
 assigned PM twice, whenever those rows sit in different phases. _seat_project() hands
@@ -26,12 +30,13 @@ the first loaded instance to every later row's phase. Queries only; no answer ch
 """
 from django import template
 
-from ..permissions import can_duplicate_task_for_locations, can_rename_task
+from ..permissions import can_duplicate_task_for_locations, can_rename_task, can_reorder_phase
 
 register = template.Library()
 
 _CACHE_ATTR = '_location_duplication_project_cache'
 _RENAME_CACHE_ATTR = '_task_rename_project_cache'
+_REORDER_CACHE_ATTR = '_phase_reorder_project_cache'
 _PROJECTS_ATTR = '_row_filter_projects'
 
 
@@ -71,3 +76,16 @@ def can_duplicate_for_locations(task, user):
 @register.filter
 def can_rename(task, user):
     return _ask(can_rename_task, _RENAME_CACHE_ATTR, task, user)
+
+
+@register.filter
+def can_reorder(task, user):
+    """Asked per row, answered per project: the drag handle sits in each row's # cell,
+    but can_reorder_phase() is a phase rule whose every term is on the project."""
+    if task is None:
+        return False
+    _seat_project(task, user)
+    answer = can_reorder_phase(user, task.phase,
+                               project_cache=_request_dict(user, _REORDER_CACHE_ATTR))
+    _seat_project(task, user)
+    return answer

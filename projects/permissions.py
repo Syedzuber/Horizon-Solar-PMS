@@ -1676,3 +1676,47 @@ def can_rename_task(user, task, project_cache=None):
     if key not in project_cache:
         project_cache[key] = _project_allows_task_rename(user, task.phase.project)
     return project_cache[key]
+
+
+REORDERABLE_PROJECT_TYPES = frozenset({'OPEX', 'CAPEX'})
+
+
+def _project_allows_phase_reorder(user, project):
+    """The whole of can_reorder_phase(): the rule lives on the project, not the phase.
+
+        task_add's gate     role in TASK_ADD_ROLES, and user_can_manage_project()
+        live                status == 'Active' and not soft-deleted
+        OPEX or CAPEX       a Residential site's task order drives the Gantt, the
+                            due-date cascade and the CEO card's positional lookups
+
+    STATED HERE, NOT BORROWED from the location-duplication half it currently matches:
+    the two features are scoped separately and may diverge.
+
+    The milestone gate (views._gate_task_pk) still picks by position on every type. It
+    is inert on OPEX because no OPEX task can be BD; see EXECUTION_MODULE_DEFERRED.md."""
+    if project is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in TASK_ADD_ROLES:
+        return False
+    if project.is_deleted or project.status != 'Active':
+        return False
+    if project.project_type not in REORDERABLE_PROJECT_TYPES:
+        return False
+    return user_can_manage_project(user, project)
+
+
+def can_reorder_phase(user, phase, project_cache=None):
+    """Return True if `user` may drag `phase`'s tasks into a new order.
+
+    The view asks without a cache so a POST reads the project as it is now; the row
+    filter passes a per-request dict keyed on project_id, so a page of rows runs the
+    rule once per project."""
+    if phase is None:
+        return False
+    if project_cache is None:
+        return _project_allows_phase_reorder(user, phase.project)
+    key = phase.project_id
+    if key not in project_cache:
+        project_cache[key] = _project_allows_phase_reorder(user, phase.project)
+    return project_cache[key]

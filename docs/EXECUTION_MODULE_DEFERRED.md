@@ -3628,3 +3628,18 @@ Found by the Rename task session (22 Sep 2026), not built.
 
 Location rename is per task. A site-wide location rename (all tasks sharing a label) is not
 built.
+
+### G18 — task reordering has no keyboard alternative
+
+Found by the Reorder tasks session (22 Sep 2026), not built.
+
+Task reordering is mouse-only; there is no keyboard alternative for moving a task.
+
+### G19 — the milestone gate selects by position on every project type
+
+Found by the Reorder tasks session (22 Sep 2026), not fixed: left unchanged by decision.
+
+The milestone gate (_gate_task_pk / forloop.first) selects by position on every project
+type. Harmless on OPEX today only because no OPEX task can be BD. If a BD task is ever
+added to a non-Residential template, reordering could move the payment gate. Scope it to
+Residential before that happens.
