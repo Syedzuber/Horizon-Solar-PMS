@@ -3605,3 +3605,26 @@ creating 9 location tasks for one engineer with `notify=True` on each would say 
 creates the rest silently: one accurate message about one task, rather than an
 inaccurate one about two.
 
+
+### G15 — Client Gantt friendly labels are keyed by task name
+
+Found by the Rename task session (22 Sep 2026), not fixed.
+
+Client Gantt friendly labels (`GANTT_TASK_DISPLAY_NAME_MAP`) are keyed by task_name; a
+renamed Residential task shows its raw name to the client.
+
+### G16 — the finance-milestone sync matches by name on every project type
+
+Found by the Rename task session (22 Sep 2026), not fixed: the sync was outside that
+session's MODE.
+
+`_apply_task_status_change` triggers the finance-milestone sync by task_name without
+checking project_type. Rename refuses these names; other paths that set task_name (admin)
+are not guarded.
+
+### G17 — no site-wide location rename
+
+Found by the Rename task session (22 Sep 2026), not built.
+
+Location rename is per task. A site-wide location rename (all tasks sharing a label) is not
+built.

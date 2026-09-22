@@ -97,6 +97,9 @@ from .permissions import (
     # Duplicate for locations: task_add's gate plus scope, asked by both views and,
     # through templatetags/duplicate_tags, by every row.
     can_duplicate_task_for_locations,
+    # Rename task: task_add's gate on a live project, any type; open, non-mirror,
+    # non-milestone work whose name nothing looks up.
+    can_rename_task, reserved_task_names,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -3568,6 +3571,228 @@ def task_duplicate_locations_create(request, project_id, task_id):
         messages.info(request, 'Skipped, this task already exists at: ' + ', '.join(skipped) + '.')
     if hx:
         return _render_task_add_success_hx(request, project, phase)
+    return redirect('project_overview', project_id=project.project_id)
+
+
+# ---------------------------------------------------------------------------
+# Rename task
+#
+# A PM or coordinator corrects a task's name on their own project. On a location copy
+# (location_label set) the thing corrected is the LOCATION: the label is written and the
+# name's trailing label, in either format a copy carries, follows it.
+#
+#   "<source name> — <label>"   task_duplicate_locations_create
+#   "<template label> <label>"  the 18 UKRU001 copies, which predate location_label
+#
+# Gate: can_rename_task(). One further refusal lives here and not in the predicate,
+# because it needs a lookup the row filter must not make: a task whose checklist is
+# found BY NAME (_checklist_task_link_for's fallback) may not leave that name, and a
+# task that would reach the fallback may not take a name a link is keyed on.
+# ---------------------------------------------------------------------------
+
+TASK_NAME_MAX_LENGTH = Task._meta.get_field('task_name').max_length
+_LOCATION_NAME_SEPARATORS = (' — ', ' ')   # em-dash first; see the section note
+_RENAME_CHECKLIST_TO_ERROR = 'This name is used to attach a checklist. Choose a different name.'
+_RENAME_CHECKLIST_FROM_ERROR = ("This task's checklist is attached through its name, so "
+                                "renaming it would detach the checklist.")
+
+
+def _rename_target(request, project_id, task_id):
+    """(project, task), or 404 when the predicate refuses."""
+    project = _active_project(project_id)
+    task = get_object_or_404(
+        Task.objects.select_related('phase__project', 'template_task'),
+        pk=task_id, phase__project=project,
+    )
+    if not can_rename_task(request.user, task):
+        raise Http404
+    return project, task
+
+
+def _checklist_link_path(task, project):
+    """How this task's checklist is found today: 'code', 'name', or None for no link.
+    Asks _checklist_task_link_for() and reads which path answered; it re-implements
+    neither. The code path only returns a link carrying the task's own template code."""
+    link = _checklist_task_link_for(task, project)
+    if link is None:
+        return None
+    if (task.template_task_id is not None and link.template_task_id is not None
+            and link.template_task.code == task.template_task.code):
+        return 'code'
+    return 'name'
+
+
+def _location_name_stem(name, label):
+    """(stem, separator) when `name` ends with `label` in a copy's format, else None."""
+    if not label:
+        return None
+    for sep in _LOCATION_NAME_SEPARATORS:
+        suffix = sep + label
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[:-len(suffix)], sep
+    return None
+
+
+def _rename_plan(project, task, raw, checklist_path):
+    """The server's reading of the panel. Returns a dict with `error`, or with
+    `unchanged`, or with the fields to write: `task_name` (only when it changes) and,
+    on a copy, `location_label`."""
+    value = _normalise_location_label(raw)
+    is_copy = task.location_label != ''
+    if not value:
+        return {'error': 'Enter a location.' if is_copy else 'Enter a task name.'}
+
+    if is_copy:
+        if len(value) > LOCATION_LABEL_MAX_LENGTH:
+            return {'error': f'A location may be at most {LOCATION_LABEL_MAX_LENGTH} characters.'}
+        if value == task.location_label:
+            return {'unchanged': True}
+        stem = _location_name_stem(task.task_name, task.location_label)
+        new_name = f'{stem[0]}{stem[1]}{value}' if stem else task.task_name
+        if (Task.objects.filter(phase__project=project, template_task_id=task.template_task_id,
+                                location_label__iexact=value)
+                .exclude(pk=task.pk).exists()):
+            return {'error': f'This task already exists at "{value}" on this site.'}
+    else:
+        if value == task.task_name:
+            return {'unchanged': True}
+        new_name = value
+
+    if len(new_name) > TASK_NAME_MAX_LENGTH:
+        return {'error': (f'"{new_name[:40]}…" is longer than a task name may be '
+                          f'({TASK_NAME_MAX_LENGTH} characters).')}
+
+    fields = {'location_label': value} if is_copy else {}
+    if new_name != task.task_name:
+        if new_name.casefold() in reserved_task_names():
+            return {'error': (f'"{new_name}" is a name the finance workflow looks tasks up '
+                              f'by. Choose a different name.')}
+        if (Task.objects.filter(phase=task.phase, task_name__iexact=new_name)
+                .exclude(pk=task.pk).exists()):
+            return {'error': f'A task named "{new_name}" already exists in this phase.'}
+        if (checklist_path != 'code'
+                and ChecklistTaskLink.objects.filter(project_type=project.project_type,
+                                                     task_name__iexact=new_name).exists()):
+            return {'error': _RENAME_CHECKLIST_TO_ERROR}
+        fields['task_name'] = new_name
+    return {'fields': fields}
+
+
+def _rename_panel_context(project, task, error='', value=None, blocked=False):
+    is_copy = task.location_label != ''
+    stem = _location_name_stem(task.task_name, task.location_label) if is_copy else None
+    if value is None:
+        value = task.location_label if is_copy else task.task_name
+    typed = _normalise_location_label(value)
+    if not typed:
+        preview_name = task.task_name
+    elif not is_copy:
+        preview_name = typed
+    else:
+        preview_name = f'{stem[0]}{stem[1]}{typed}' if stem else task.task_name
+    return {
+        'project':  project,
+        'task':     task,
+        'is_copy':  is_copy,
+        'value':    value,
+        'preview_name': preview_name,
+        'max_length': LOCATION_LABEL_MAX_LENGTH if is_copy else TASK_NAME_MAX_LENGTH,
+        'name_follows_label': stem is not None,
+        'error':    error,
+        'blocked':  blocked,
+        # For the panel's local preview only; the POST re-derives all of it.
+        'preview_data': {
+            'is_copy':   is_copy,
+            'name':      task.task_name,
+            'stem':      stem[0] if stem else None,
+            'separator': stem[1] if stem else None,
+        },
+    }
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def task_rename(request, project_id, task_id):
+    """GET: the "Rename task" / "Change location" panel for one task, into the task-form
+    modal. A task whose checklist is found by name gets the panel with the reason and
+    no field."""
+    project, task = _rename_target(request, project_id, task_id)
+    if _checklist_link_path(task, project) == 'name':
+        ctx = _rename_panel_context(project, task, error=_RENAME_CHECKLIST_FROM_ERROR, blocked=True)
+    else:
+        ctx = _rename_panel_context(project, task)
+    return render(request, 'projects/partials/_task_rename_panel.html', ctx)
+
+
+@login_required
+@role_required(['PM', 'Project Coordinator'])
+def task_rename_save(request, project_id, task_id):
+    """POST: rename the task, or change a copy's location.
+
+    THE SERVER IS AUTHORITATIVE; the panel's preview is a convenience. The phase's rows
+    are held under select_for_update while the new name is checked against them, so two
+    renames in one phase cannot both take the same name. The write is filter().update()
+    on the changed fields only. One ActivityLog row, after the transaction. No
+    notification and no StatusTransition: a name is not a status.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+    project, task = _rename_target(request, project_id, task_id)
+    hx = _is_hx(request)
+    raw = request.POST.get('value', '')
+
+    def refuse(message, blocked=False):
+        if hx:
+            return render(request, 'projects/partials/_task_rename_panel.html',
+                          _rename_panel_context(project, task, error=message,
+                                                value=None if blocked else raw,
+                                                blocked=blocked))
+        messages.error(request, message)
+        return redirect('project_overview', project_id=project.project_id)
+
+    checklist_path = _checklist_link_path(task, project)
+    if checklist_path == 'name':
+        return refuse(_RENAME_CHECKLIST_FROM_ERROR, blocked=True)
+
+    old_name, old_label = task.task_name, task.location_label
+    with transaction.atomic():
+        list(Task.objects.select_for_update().filter(phase=task.phase).values_list('pk', flat=True))
+        plan = _rename_plan(project, task, raw, checklist_path)
+        if plan.get('error'):
+            return refuse(plan['error'])
+        if not plan.get('unchanged'):
+            Task.objects.filter(pk=task.pk).update(**plan['fields'])
+
+    if plan.get('unchanged'):
+        messages.info(request, 'Nothing changed: the location is the same.' if old_label
+                      else 'Nothing changed: the name is the same.')
+    else:
+        fields = plan['fields']
+        new_name = fields.get('task_name', old_name)
+        if old_label:
+            new_label = fields['location_label']
+            action = f"Location changed from '{old_label}' to '{new_label}'"
+            if 'task_name' in fields:
+                message = f"Location changed to '{new_label}'. The task is now '{new_name}'."
+            else:
+                message = (f"Location changed to '{new_label}'. The task name does not end "
+                           f"with the old location, so it was left as '{old_name}'.")
+        else:
+            action = f"Renamed from '{old_name}' to '{new_name}'"
+            message = f"Renamed to '{new_name}'."
+        log_activity(project, request.user.profile, action[:255],
+                     entity_type='Task', entity_id=task.pk, action_code='task_renamed')
+        messages.success(request, message)
+
+    if hx:
+        task.refresh_from_db()
+        resp = _render_task_row_hx(request, project, task)
+        # The form posted into the modal; the row goes to its own <tr>, and the
+        # taskFormDone event closes the modal.
+        resp['HX-Retarget'] = f'#task-row-{task.pk}'
+        resp['HX-Reswap'] = 'outerHTML'
+        resp['HX-Trigger'] = 'taskFormDone'
+        return resp
     return redirect('project_overview', project_id=project.project_id)
 
 

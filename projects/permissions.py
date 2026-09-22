@@ -1605,3 +1605,74 @@ def can_duplicate_task_for_locations(user, task, project_cache=None):
     if key not in project_cache:
         project_cache[key] = _project_allows_location_duplication(user, task.phase.project)
     return project_cache[key]
+
+
+def reserved_task_names():
+    """Casefolded task names that code finds by name, so no rename may leave or take one.
+
+        RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES   the payment-milestone sync matches
+                                                      these by name, on any project type
+        INVOICE_TASK_NAMES                            the Finance back-assignment matches
+                                                      these by name at activation
+
+    IMPORTED HERE, NOT AT THE TOP OF THE MODULE. This module keeps its single `Q`
+    import (see the note at the top); utils imports the models, so a module-level
+    import would end that property and invite the circular imports it has avoided.
+    Both tuples are plain strings, so a call-time import costs nothing but the lookup.
+    Restating them here instead would be a second copy of names that already drift
+    once (the views' _FINANCE_TASK_TO_MILESTONE; a test pins the two together)."""
+    from .utils import INVOICE_TASK_NAMES, RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES
+    return frozenset(name.casefold() for name in
+                     INVOICE_TASK_NAMES + RESIDENTIAL_FINANCE_CONFIRMATION_TASK_NAMES)
+
+
+def _project_allows_task_rename(user, project):
+    """The PROJECT half of can_rename_task(): task_add's gate on a live project.
+
+        task_add's gate     role in TASK_ADD_ROLES, and user_can_manage_project()
+        live                status == 'Active' and not soft-deleted
+
+    Any project type, Residential included: a rename moves no row, so neither the Gantt
+    order nor the due-date cascade is touched."""
+    if project is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in TASK_ADD_ROLES:
+        return False
+    if project.is_deleted or project.status != 'Active':
+        return False
+    return user_can_manage_project(user, project)
+
+
+def _task_is_renamable(task):
+    """The TASK half: open work whose name nothing looks up.
+
+        not Done, not awaiting approval   the name is part of what was completed or
+                                          handed to the approver
+        not a mirror                      its row is derived and nobody's to edit
+        not a payment milestone           one event the finance side is watching
+        name not reserved                 see reserved_task_names()
+
+    Row fields only, no query. The checklist name fallback is the view's refusal, not
+    this one's: it needs a lookup per row, and the row filter must stay query-free."""
+    return (task.status != task.DONE
+            and not task.is_awaiting_approval
+            and not task.is_mirror
+            and not task.is_payment_milestone
+            and task.task_name.casefold() not in reserved_task_names())
+
+
+def can_rename_task(user, task, project_cache=None):
+    """Return True if `user` may rename `task` (or, on a location copy, its location).
+
+    Same shape as can_duplicate_task_for_locations(): the views ask without a cache so
+    a POST reads the project as it is now; the row filter passes a per-request dict so a
+    page of rows runs the project half once per project."""
+    if task is None or not _task_is_renamable(task):
+        return False
+    if project_cache is None:
+        return _project_allows_task_rename(user, task.phase.project)
+    key = task.phase.project_id
+    if key not in project_cache:
+        project_cache[key] = _project_allows_task_rename(user, task.phase.project)
+    return project_cache[key]

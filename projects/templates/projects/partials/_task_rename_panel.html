@@ -1,0 +1,88 @@
+{% comment %}
+"Rename task" / "Change location" panel — rendered into #taskFormModalContent by
+task_rename (GET), and re-rendered with the refusal by task_rename_save when a POST is
+refused, so the modal stays open with what was typed. Success re-renders the task's row
+(HX-Retarget) and closes the modal through the taskFormDone trigger.
+
+An ordinary task edits its name. A location copy edits its location; its name follows
+only when it ends with the old location, and the preview says which.
+
+`blocked` is the checklist-by-name refusal: the reason, and no field.
+
+The preview is kept in step by the script at the bottom (no network, delegated, bound
+once per page). The POST re-derives everything on the server and ignores the preview;
+with the script absent the form still works.
+
+Expects: project, task, is_copy, value, preview_name, max_length, name_follows_label, error, blocked,
+preview_data.
+{% endcomment %}
+<div class="modal-header align-items-start">
+  <div>
+    <h5 class="modal-title" id="taskRenameTitle">{% if is_copy %}Change location{% else %}Rename task{% endif %}</h5>
+    <div class="small text-body-secondary">{{ task.task_name }}</div>
+  </div>
+  <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+</div>
+<form method="post" action="{% url 'task_rename_save' project.project_id task.pk %}" novalidate
+      hx-post="{% url 'task_rename_save' project.project_id task.pk %}"
+      hx-target="#taskFormModalContent" hx-swap="innerHTML"
+      data-task-rename>
+  {% csrf_token %}
+  <div class="modal-body">
+    {% if error %}
+      <div class="alert alert-danger py-2 small" role="alert">{{ error }}</div>
+    {% endif %}
+
+    {% if not blocked %}
+    <div class="mb-3">
+      <label for="task-rename-value" class="form-label fw-semibold mb-1">{% if is_copy %}Location{% else %}Task name{% endif %}</label>
+      <input type="text" id="task-rename-value" name="value" value="{{ value }}"
+             maxlength="{{ max_length }}" class="form-control form-control-sm{% if error %} is-invalid{% endif %}"
+             autocomplete="off" required>
+      {% if is_copy and not name_follows_label %}
+        <div class="form-text">The task name does not end with this location, so only the location will change.</div>
+      {% endif %}
+    </div>
+
+    <div class="border rounded p-2 bg-body-tertiary" aria-live="polite">
+      <div class="small text-body-secondary">The task will be called</div>
+      <div class="fw-semibold small" data-task-rename-preview>{{ preview_name }}</div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="modal-footer">
+    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+    {% if not blocked %}
+      <button type="submit" class="btn btn-brand btn-sm">Save</button>
+    {% endif %}
+  </div>
+  {% if not blocked %}{{ preview_data|json_script:"task-rename-data" }}{% endif %}
+</form>
+<script>
+  /* Rename preview: LOCAL only. Mirrors the server closely enough to preview —
+     trim + collapse spaces; on a copy, the name's trailing location is swapped when
+     the server found one. Delegated on document and bound once, so it survives the
+     modal's content being swapped. */
+  (function () {
+    if (window.__taskRenamePreviewBound) return;
+    window.__taskRenamePreviewBound = true;
+    function norm(s) { return String(s).split(/\s+/).filter(Boolean).join(' '); }
+    document.addEventListener('input', function (e) {
+      var input = e.target;
+      if (!input || input.id !== 'task-rename-value') return;
+      var form = input.closest('form[data-task-rename]');
+      var dataEl = document.getElementById('task-rename-data');
+      var out = form && form.querySelector('[data-task-rename-preview]');
+      if (!dataEl || !out) return;
+      var d = JSON.parse(dataEl.textContent);
+      var v = norm(input.value);
+      if (!d.is_copy) {
+        out.textContent = v || d.name;
+      } else if (d.stem !== null && v) {
+        out.textContent = d.stem + d.separator + v;
+      } else {
+        out.textContent = d.name;
+      }
+    });
+  })();
+</script>

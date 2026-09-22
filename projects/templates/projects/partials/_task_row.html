@@ -53,6 +53,19 @@ Expected context:
         <span class="dup-tip" aria-hidden="true">Duplicate for locations</span>
       </button>
     {% endif %}
+    {% comment %}RENAME TASK, beside the copy icon and styled like it. Same arrangement: the
+       filter asks can_rename_task() so every responder agrees, and both views ask it
+       again and 404 on a refusal.{% endcomment %}
+    {% if task|can_rename:request.user %}
+      <button type="button" class="dup-locations-btn task-rename-btn float-end"
+              aria-label="Rename {{ task.task_name }}"
+              hx-get="{% url 'task_rename' project.project_id task.pk %}"
+              hx-target="#taskFormModalContent" hx-swap="innerHTML"
+              hx-on::after-request="if (event.detail.successful) window.showTaskFormModal();">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"></path></svg>
+        <span class="dup-tip" aria-hidden="true">Rename</span>
+      </button>
+    {% endif %}
     {% if task.is_mirror %}
       {% comment %}A MIRROR SAYS WHY IT CANNOT BE EDITED, not merely that it is special.
 

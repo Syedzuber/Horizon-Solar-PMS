@@ -191,6 +191,8 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/add/',               views.task_add,              name='task_add'),              # PM only
     path('projects/<str:project_id>/tasks/<int:task_id>/duplicate-locations/',        views.task_duplicate_locations,        name='task_duplicate_locations'),         # task_add's gate + can_duplicate_task_for_locations; GET panel
     path('projects/<str:project_id>/tasks/<int:task_id>/duplicate-locations/create/', views.task_duplicate_locations_create, name='task_duplicate_locations_create'),  # same gate; POST only
+    path('projects/<str:project_id>/tasks/<int:task_id>/rename/',                     views.task_rename,                     name='task_rename'),                      # task_add's gate + can_rename_task; GET panel
+    path('projects/<str:project_id>/tasks/<int:task_id>/rename/save/',                views.task_rename_save,                name='task_rename_save'),                 # same gate; POST only
     path('projects/<str:project_id>/tasks/<int:task_id>/update/',        views.task_status_update,        name='task_status_update'),        # Assigned role or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/detail-status/', views.task_detail_status_update, name='task_detail_status_update'), # Assigned user only
     # Two-step completion (2.1) — OPEX only, POST only. The scope is enforced in the
