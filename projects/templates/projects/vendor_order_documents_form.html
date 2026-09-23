@@ -6,7 +6,7 @@
 <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h4 class="mb-0">Add Documents</h4>
-    <small class="text-muted">Order {{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }}{% if project %} · {{ project.project_id }}{% endif %}</small>
+    <small class="text-muted">Order {{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }} · {{ order.scope_label }}</small>
   </div>
   <a href="{% url 'vendor_order_detail' order.pk %}" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Order</a>
 </div>

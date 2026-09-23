@@ -1757,10 +1757,20 @@ def user_can_raise_vendor_order(user, project):
 def user_can_view_vendor_order(user, order):
     """Return True if `user` may read `order` — its lines, prices, documents, payments.
 
-    Portfolio roles (VENDOR_ORDER_PORTFOLIO_ROLES) see every order; see the note on the
-    set for why Finance and SCM are in it. Anyone else sees an order if they can see ANY
-    site on it: a PM whose site shares a consolidated order is entitled to the order the
-    material for their site was bought on.
+    TWO INDEPENDENT ADMISSIONS, AND THE SITE CLAUSE IS THE SECOND ONE (restated in O2d):
+
+      1. a portfolio role (VENDOR_ORDER_PORTFOLIO_ROLES) — CEO, Admin, System Admin,
+         Finance, SCM — reads EVERY order, whatever sites it names and whether it names
+         any. See the note on the set for why Finance and SCM are in it;
+      2. ANYONE ELSE reads an order if they can see ANY site on it: a PM whose site
+         shares a consolidated order is entitled to the order the material for their
+         site was bought on.
+
+    Since O2d an order may have NO sites — a central purchase sized against a tender.
+    Clause 2 then admits nobody, which is correct: there is no site through which a PM
+    could be entitled to it. Clause 1 is unaffected, so the order stays readable by the
+    five portfolio roles. That is what "additive, not required" means here — the walk over
+    sites can only ever ADD readers, and an empty walk subtracts none.
 
     Reads `order.sites.all()`, so a caller that prefetched sites with their projects
     (vendor_order_detail does) pays no query for the walk.
@@ -1771,15 +1781,19 @@ def user_can_view_vendor_order(user, order):
 
 
 def _user_reads_orders_on(user, projects):
-    """The single reader rule behind both order predicates: a portfolio role, or anyone
-    who can see ANY of `projects`. `projects` may be a generator; it is walked lazily
-    and only when the role alone does not decide."""
+    """The single reader rule behind both order predicates: a portfolio role, OR anyone
+    who can see ANY of `projects`. The two are independent — an empty `projects` leaves
+    the portfolio arm untouched, which is what lets a site-less order (O2d) still be read
+    by CEO, Admin, System Admin, Finance and SCM.
+
+    `projects` may be a generator; it is walked lazily and only when the role alone does
+    not decide."""
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
     if profile.role in VENDOR_ORDER_PORTFOLIO_ROLES:
-        return True
-    return any(user_can_view_project(user, project) for project in projects)
+        return True   # clause 1 — decided without looking at any site
+    return any(user_can_view_project(user, project) for project in projects)  # clause 2
 
 
 def user_can_view_project_vendor_orders(user, project):
@@ -1801,8 +1815,10 @@ def user_can_request_order_payment(user, order):
 
     SCM only (VENDOR_ORDER_RAISE_ROLES — the role that records the order asks for its
     money), and only while every site on the order is live: a payment against a deleted
-    site is money for work that is no longer happening. Whether any balance is left is
-    NOT asked here — that is the view's check, made under a row lock.
+    site is money for work that is no longer happening. An order with NO sites (O2d) has
+    no deleted site and so passes this term — a central purchase is not held up by site
+    state it never had. Whether any balance is left is NOT asked here — that is the
+    view's check, made under a row lock.
 
     Reads `order.sites.all()`, so a prefetch with projects makes it free.
     """

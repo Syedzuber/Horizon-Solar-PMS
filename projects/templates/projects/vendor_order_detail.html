@@ -47,7 +47,11 @@
           <dd class="col-7 col-sm-8">{{ order.created_by.user.get_full_name|default:order.created_by.user.username }}</dd>
           <dt class="col-5 col-sm-4 text-muted fw-normal">Raised on</dt>
           <dd class="col-7 col-sm-8">{{ order.created_at|date:"d M Y, H:i" }}</dd>
-          <dt class="col-5 col-sm-4 text-muted fw-normal">Sites</dt>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Tenders</dt>
+          <dd class="col-7 col-sm-8">
+            {% for program in programs %}<div>{{ program.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}
+          </dd>
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Sites this order was sized against</dt>
           <dd class="col-7 col-sm-8 mb-0">
             {% for site in sites %}
               <div>
@@ -55,7 +59,19 @@
                 <span class="text-muted">— {{ site.project.customer_name }}</span>
                 {% if site.via_site_group %}<span class="text-muted">(via {{ site.via_site_group }})</span>{% endif %}
               </div>
+            {% empty %}
+              <span class="text-muted">{{ no_sites_text }}</span>
             {% endfor %}
+            {% comment %}
+              Says what the list above is, because a list of sites under a purchase
+              otherwise reads as a delivery list. It is neither that nor an allocation.
+              A comment TAG, not a hash comment: Django only strips a hash comment that
+              fits on one line, and a multi-line one renders as visible text.
+            {% endcomment %}
+            <div class="text-muted mt-1" style="font-size:.72rem;">
+              The quantities were worked out from these sites&rsquo; requirements. Material may be
+              held centrally and issued to sites later.
+            </div>
           </dd>
         </dl>
       </div>

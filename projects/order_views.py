@@ -24,6 +24,14 @@ capped at the uncommitted balance under a row lock), more documents
 (vendor_order_list). The raise and the append share _validate_document_slots() and
 _upload_and_record_documents(), so a file is validated, stored and cleaned up the same
 way whichever page it comes in by.
+
+O2d SAYS WHAT THE SITES MEAN. A VendorOrderSite is the REQUIREMENT the order was sized
+against, never a destination and never an allocation: material may be held centrally and
+issued later, and this module holds no stock. An order may therefore have ZERO sites and
+name only its tenders (VendorOrderProgram); a Residential order still carries exactly
+one, and vendor_order_create is unchanged in behaviour. PaymentRequest.project became a
+nullable DISPLAY ANCHOR — _order_project() is the one rule that computes it, and
+scope_label is what a screen shows when it wants to say what a payment was for.
 """
 import logging
 import uuid as _uuid
@@ -40,7 +48,7 @@ from django.urls import reverse
 from .decorators import login_required
 from .models import (
     BOQItem, PaymentRequest, Project, Vendor, VendorOrder, VendorOrderDocument,
-    VendorOrderLine, VendorOrderSite, committed_total, log_activity,
+    VendorOrderLine, VendorOrderProgram, VendorOrderSite, committed_total, log_activity,
     VENDOR_ORDER_DOC_INVOICE, VENDOR_ORDER_DOC_PI, VENDOR_ORDER_DOC_PO,
     VENDOR_ORDER_DOC_TYPE_CHOICES,
 )
@@ -421,17 +429,40 @@ def _order_money(lines, documents, payments):
 
 
 def _order_project(order):
-    """The site a payment or feed line on `order` is filed under: its first site.
-    A Residential order has exactly one. Group orders (O3) must decide their own answer
-    before they use the add-payment path. Reads prefetched sites."""
-    sites = sorted(order.sites.all(), key=lambda site: site.pk)
-    return sites[0].project if sites else None
+    """THE ANCHOR RULE (O2d): the site a payment or feed line on `order` is filed under —
+    the site with the LOWEST project_id — or None when the order names no site.
+
+    `project_id` is the FK column on VendorOrderSite, i.e. the Project's own primary key,
+    so the answer is stable however the site rows were written and does not depend on the
+    order in which they were added. A Residential order names exactly one site, so this
+    is that site and the rule is the same answer O2b's "first site" gave.
+
+    A DISPLAY ANCHOR, NOT SCOPE. It decides which site a payment is listed under and
+    which project the feed line lands on, and it decides nothing else: the money and what
+    it was for are the order's, whole. A site-less order anchors to None, and
+    PaymentRequest.project is nullable so that it can (see the note on that field).
+
+    Reads prefetched sites.
+    """
+    sites = list(order.sites.all())
+    return min(sites, key=lambda site: site.project_id).project if sites else None
+
+
+def _no_sites_text(programs):
+    """What the sites section says when an order names none. Names the tenders when it
+    has them, because "no sites recorded" alone reads like an incomplete record rather
+    than a central purchase."""
+    if programs:
+        return f"No sites recorded — sized against {', '.join(p.name for p in programs)}"
+    return 'No sites recorded'
 
 
 def _order_with_sites(order_pk):
     return get_object_or_404(
         VendorOrder.objects.select_related('vendor').prefetch_related(
-            Prefetch('sites', queryset=VendorOrderSite.objects.select_related('project'))),
+            Prefetch('sites', queryset=VendorOrderSite.objects.select_related('project')),
+            Prefetch('programs',
+                     queryset=VendorOrderProgram.objects.select_related('program'))),
         pk=order_pk,
     )
 
@@ -484,6 +515,13 @@ def vendor_order_create(request, project_pk):
             created_by=profile, client_uuid=client_uuid,
         )
         VendorOrderSite.objects.create(order=order, project=project, via_site_group=None)
+        # The tender this order was sized against, derived from the site (O2d). A
+        # Residential project is never under a Program — _validate_program_link()
+        # excludes Residential outright — so today this writes nothing and always takes
+        # the skip. It is here so the derivation lives on the raise path from the start,
+        # and O3's group raise adds sites to the same loop rather than inventing it.
+        if project.program_id is not None:
+            VendorOrderProgram.objects.create(order=order, program_id=project.program_id)
         VendorOrderLine.objects.bulk_create([
             VendorOrderLine(
                 order=order, boq_item=line['item'],
@@ -564,11 +602,20 @@ def vendor_order_detail(request, order_pk):
 
     Totals are summed by _order_money() from the prefetched rows rather than read from
     the VendorOrder properties, which issue one aggregate each. Same arithmetic.
+
+    THE SITES SECTION SAYS WHAT IT MEANS (O2d). It is headed "Sites this order was sized
+    against", not "Sites", and carries one line saying the material may be held centrally
+    and issued later — because a list of sites under a purchase reads as a delivery list,
+    and reading it that way is how someone comes to believe PMS allocates stock. The
+    tenders are shown beside it, and an order with no sites says so and names its tenders
+    instead of rendering an empty list.
     """
     order = get_object_or_404(
         VendorOrder.objects.select_related('vendor', 'created_by__user').prefetch_related(
             Prefetch('sites', queryset=VendorOrderSite.objects.select_related(
                 'project', 'project__assigned_pm', 'via_site_group')),
+            Prefetch('programs', queryset=VendorOrderProgram.objects.select_related(
+                'program')),
             'lines',
             Prefetch('documents', queryset=VendorOrderDocument.objects.select_related(
                 'uploaded_by__user')),
@@ -594,9 +641,15 @@ def vendor_order_detail(request, order_pk):
         if docs:
             document_groups.append({'label': label, 'docs': docs})
 
+    # Prefetched; the template draws both, and _no_sites_text() words the empty case.
+    sites    = list(order.sites.all())
+    programs = [link.program for link in order.programs.all()]
+
     return render(request, 'projects/vendor_order_detail.html', {
         'order':           order,
-        'sites':           list(order.sites.all()),
+        'sites':           sites,
+        'programs':        programs,
+        'no_sites_text':   _no_sites_text(programs),
         'lines':           lines,
         'document_groups': document_groups,
         'payments':        payments,
@@ -615,10 +668,11 @@ def vendor_order_detail(request, order_pk):
 # ---------------------------------------------------------------------------
 
 def _payment_context(order, available, post=None, client_uuid=None, refused=False):
+    # No 'project' key: the page names the order's SCOPE (order.scope_label), not its
+    # anchor, and a site-less order has no anchor to name (O2d).
     post = post or {}
     return {
         'order':       order,
-        'project':     _order_project(order),
         'available':   available,
         'client_uuid': client_uuid or _uuid.uuid4(),
         'form': {
@@ -633,7 +687,14 @@ def _payment_context(order, available, post=None, client_uuid=None, refused=Fals
 def vendor_order_add_payment(request, order_pk):
     """SCM requests a further payment against an existing order. GET renders; POST
     creates one PaymentRequest for at most the order's uncommitted balance
-    (total − committed_amount)."""
+    (total − committed_amount).
+
+    THE ANCHOR. `project` is _order_project(order) — the lowest project_id of the order's
+    sites, or None when it has none (O2d). It is the site the payment is LISTED under and
+    nothing else; the money and what it was for are the order's. The same value anchors
+    the feed line and the ledger row, and ActivityLog.project and
+    StatusTransition.project are both nullable, so a site-less order writes both.
+    """
     order = _order_with_sites(order_pk)
     if not user_can_request_order_payment(request.user, order):
         return HttpResponseForbidden()
@@ -719,9 +780,9 @@ def vendor_order_add_payment(request, order_pk):
 
 
 def _documents_context(order, post=None, refused=False):
+    # No 'project' key — see _payment_context.
     return {
         'order':            order,
-        'project':          _order_project(order),
         'doc_rows':         _doc_rows(post or {}, {}),
         'doc_type_choices': _DOC_TYPE_SELECT,
         'refused':          refused,

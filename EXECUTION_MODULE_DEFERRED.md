@@ -847,3 +847,67 @@ compiled into the templates, but no browser run exercised it. The server rules a
 unchanged, so the worst case is a refusal after a reload, as in O2.
 
 **Not fixed**: out of scope (R-12).
+
+## 25. O2d requirement-basis sites and the nullable payment anchor — what was left
+
+Found 23 Sep 2026, building O2d.
+
+**ALLOCATION AND STOCK ARE OUT OF SCOPE FOR THIS MODULE, and that is the headline.** O2d
+says what `VendorOrderSite` means — the requirement the order was sized against — and
+says it in the model, the order page and execution-model.md §12. It builds nothing that
+tracks where the material actually went. There is no goods-received balance against an
+order, no issue-to-site, no reservation and no variance between what a site was sized for
+and what it received. `StockLocation` and its CRUD screens exist (`9a5de0c`) but nothing
+issues stock through them, so the warehouse process is **planned and not operational**.
+**Risk if left:** medium, and it is a risk of BELIEF rather than of breakage — a list of
+sites under a purchase reads as a delivery list. The order page now carries one line
+saying otherwise; that line is the whole mitigation. **Decide with the warehouse
+process**, which owns the model that would record an issue.
+
+**Nothing raises a site-less order through the product.** `VendorOrderProgram` and the
+zero-site shape are reachable only from the shell and the tests; `vendor_order_create` is
+Residential-only and writes exactly one site, unchanged. **Risk if left:** low — this is
+deliberate. O2d is structure; **O3's group raise is the screen** that picks tenders and
+sites, and it inherits a schema that already admits its shape.
+
+**`VendorOrderProgram` has no editing screen, although the model says the raiser may
+edit it.** The docstring records that these rows are editable and removable, because a
+central purchase is often sized against a tender whose sites are not all known. No view
+adds, removes or lists them outside the raise's derivation. **Fix in O3**, with the
+screen that creates them by hand.
+
+**A site-less payment is invisible on every screen outside the order module, and this is
+the real cost of the nullable anchor.** The Finance dashboard, the CEO dashboard,
+`project_overview` card 4b, `payment_request_detail`, `confirm_payment_request` and
+`my_documents` all filter on `project`; a NULL anchor makes the join fail and the row
+drops out silently. None of them crashes —
+`tests_vendor_order_scope.NullAnchorReaderTests` asserts that for all six — but **Finance
+cannot see, and therefore cannot confirm, a payment on a central purchase**, because
+`confirm_payment_request` is reached only through a project's URL. **Risk if left:**
+high, the moment anything raises a site-less order. **O5 must** make the Finance and CEO
+screens read payments through `vendor_order` (or through a `project__isnull=True` arm)
+and give confirm a route that does not run through a site; **O6 must** give
+`payment_request_detail` a URL that does not carry a `project_id`. O2d was barred from
+all six.
+
+**`my_documents`' template would break if its queryset were ever loosened.**
+`my_documents.html` builds `{% url 'project_detail' pr.project.project_id %}` with no
+guard; on a NULL anchor that resolves to `''` and raises `NoReverseMatch`. It is
+unreachable today because the view filters `project__is_deleted=False`, which a NULL
+project cannot satisfy — so O2d changed nothing there and asserted the render instead.
+**Whoever loosens that filter must guard the template in the same commit.**
+
+**Reversing `0095` needs the NULLs gone first.** The reverse re-imposes NOT NULL on
+`PaymentRequest.project`, which Postgres refuses if any site-less payment exists by then.
+That is correct — a reverse cannot invent an anchor — but it means the migration is
+reversible in practice only before the first such payment. Stated here rather than
+discovered during a rollback.
+
+**Pre-existing, seen in passing: `0093` will refuse on Railway.** Production holds 2
+`PaymentRequest` rows and has no `vendor_order_id` column at all (the O1–O2c commits are
+unpushed). `0093_payment_request_vendor_order_not_null` is written to refuse rather than
+delete, and will stop the deploy naming both pks. **Attaching each to a `VendorOrder`, or
+removing them deliberately, is an operator decision to be made before the O1–O2d stack is
+pushed.** Not O2d's to make.
+
+**Not fixed**: out of scope (R-12).

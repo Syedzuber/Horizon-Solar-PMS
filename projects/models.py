@@ -2255,7 +2255,20 @@ class PaymentRequest(models.Model):
         (CONFIRMED,        'Paid'),
     ]
 
-    project  = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='payment_requests')
+    # A DISPLAY ANCHOR, NOT SCOPE (O2d). It exists so a payment can be listed under some
+    # site on the screens that are organised by site. It is set to the order's lowest
+    # project_id when the order has sites, and is NULL when the order has none — a
+    # central purchase sized against several tenders belongs to no one site.
+    #
+    # MONEY AND SCOPE ALWAYS COME FROM `vendor_order`: its lines are what was bought, its
+    # sites are the requirement it was sized against, its programs are the tenders. No
+    # reader may treat this column as the payment's scope, and a reader that needs the
+    # payment's scope reads `scope_label` or the order itself. Nullable since O2d
+    # (migration 0095); every row written before then carries a site.
+    project  = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name='payment_requests',
+        null=True, blank=True,
+    )
     vendor   = models.ForeignKey(
         Vendor, on_delete=models.SET_NULL, null=True,
         related_name='payment_requests',
@@ -2345,8 +2358,24 @@ class PaymentRequest(models.Model):
             ),
         ]
 
+    @property
+    def scope_label(self):
+        """What this payment is FOR, in one phrase — never `project`, which is only the
+        display anchor (see the note on that field). Delegates to the order, so the
+        payment and its order can never describe their scope differently.
+
+        Four forms: the site's project_id for a single-site order; "N sites" for several;
+        the tender names for a site-less order sized against programs; "Order #<pk>"
+        when the order names neither.
+        """
+        return self.vendor_order.scope_label
+
     def __str__(self):
-        return f"PR-{self.pk} {self.project.project_id} — {self.vendor} ₹{self.amount}"
+        # `project` is nullable since O2d and __str__ must not raise on a site-less
+        # payment. Reads the FK id, not scope_label: __str__ is called from places that
+        # hold no prefetch, and scope_label walks two relations.
+        anchor = self.project.project_id if self.project_id else f'order #{self.vendor_order_id}'
+        return f"PR-{self.pk} {anchor} — {self.vendor} ₹{self.amount}"
 
 
 # ---------------------------------------------------------------------------
@@ -2363,13 +2392,24 @@ class PaymentRequest(models.Model):
 # display only. Nothing reads membership through the group, so a group that later loses
 # a site (it cannot once locked, but may while draft) never changes an order.
 #
-# NO EDIT, NO DELETE, NO SOFT DELETE, on any of the four models. A mistake is corrected
-# by recording what actually happened next to it, not by rewriting the record. Every FK
-# INTO an order is PROTECT, so an order with any line, site, document or payment cannot
-# be deleted by the ORM either. There is no delete() override, and the only save()
-# override (VendorOrderDocument's) merely trims a value: the absence of any write path
-# other than creation is the enforcement, and a future edit view is the thing to refuse
-# in review.
+# THE SITES ARE THE REQUIREMENT AN ORDER WAS SIZED AGAINST — NOT A DESTINATION AND NOT AN
+# ALLOCATION (O2d, 23 Sep 2026). Material may be held centrally and issued later. An
+# order may have ZERO sites and name only its tenders (VendorOrderProgram); Residential is
+# the one shape that always carries exactly one site, and there it is also the
+# destination. This module holds no stock and allocates nothing.
+#
+# NO EDIT, NO DELETE, NO SOFT DELETE, on the order and on its sites, lines and
+# documents. A mistake is corrected by recording what actually happened next to it, not
+# by rewriting the record. VendorOrderProgram is the ONE exception, and a deliberate one:
+# it records which tenders the order was sized against, which is an intention rather than
+# a fact about money, and the raiser may add to it and remove from it — see its docstring.
+# The immutability rule above is about the other four.
+#
+# Every FK INTO an order is PROTECT, so an order with any line, site, program, document
+# or payment cannot be deleted by the ORM either. There is no delete() override, and the
+# only save() override (VendorOrderDocument's) merely trims a value: the absence of any
+# write path other than creation is the enforcement, and a future edit view is the thing
+# to refuse in review.
 #
 # TOTALS ARE PROPERTIES, NEVER COLUMNS. Total, paid, balance and invoiced are sums over
 # the children, computed at read time — the same reason aggregate_group_boq() stores
@@ -2412,9 +2452,9 @@ class VendorOrder(models.Model):
     """A RECORD of one purchase order issued to one vendor outside PMS.
 
     PMS never generates, numbers or approves a PO — see the section note above. This row
-    says an order exists; its lines say what was ordered, its sites say for whom, its
-    documents hold the PO / PI / invoice files, and `payments` (PaymentRequest) are the
-    money paid against it.
+    says an order exists; its lines say what was ordered, its sites and programs say
+    whose requirement it was sized against, its documents hold the PO / PI / invoice
+    files, and `payments` (PaymentRequest) are the money paid against it.
 
     No edit, no delete, no soft delete.
     """
@@ -2511,9 +2551,49 @@ class VendorOrder(models.Model):
         return (self.documents.filter(doc_type=VENDOR_ORDER_DOC_INVOICE)
                 .aggregate(s=Sum('invoice_amount'))['s'] or Decimal('0'))
 
+    @property
+    def scope_label(self):
+        """What this order was sized against, in one phrase — the one definition, which
+        PaymentRequest.scope_label delegates to so an order and its payments can never
+        describe their scope differently.
+
+        Four forms, in order: the site's project_id for a single-site order; "N sites"
+        for several; the tender names for a site-less order sized against programs;
+        "Order #<pk>" when the order names neither.
+
+        Reads `self.sites.all()` and `self.programs.all()`, so a caller that prefetched
+        them pays no query; one that did not pays two.
+        """
+        sites = list(self.sites.all())
+        if len(sites) == 1:
+            return sites[0].project.project_id
+        if sites:
+            return f'{len(sites)} sites'
+        names = [link.program.name for link in self.programs.all()]
+        if names:
+            return ', '.join(names)
+        return f'Order #{self.pk}'
+
 
 class VendorOrderSite(models.Model):
-    """One site an order was placed for. No edit, no delete."""
+    """One site whose REQUIREMENT this order was sized against. No edit, no delete.
+
+    NOT A DESTINATION AND NOT AN ALLOCATION. Naming a site here says the quantities on
+    this order were worked out from that site's needs — nothing more. The material may be
+    delivered to a central store and issued to sites later, in whatever split the work
+    turns out to need, and none of that is recorded here. AN ORDER MAY HAVE ZERO SITES:
+    a stock purchase sized against a tender as a whole names its programs
+    (VendorOrderProgram) and no site at all.
+
+    RESIDENTIAL IS THE ONE CASE WHERE IT IS ALSO THE DESTINATION. A Residential order
+    carries exactly one site, enforced in vendor_order_create, and that site is both the
+    requirement it was sized against and where the material goes.
+
+    THIS MODULE HOLDS NO STOCK AND PERFORMS NO ALLOCATION. There is no goods-received
+    balance here, no issue-to-site, no reservation; `StockLocation` exists but the
+    warehouse process that would use it is not operational. Nothing may read these rows
+    as "this much material is owed to this site" — see execution-model.md §12 (23 Sep).
+    """
 
     order = models.ForeignKey(
         VendorOrder, on_delete=models.PROTECT, related_name='sites',
@@ -2538,6 +2618,38 @@ class VendorOrderSite(models.Model):
 
     def __str__(self):
         return f"{self.order} — {self.project.project_id}"
+
+
+class VendorOrderProgram(models.Model):
+    """One tender this order was sized against. Unlike every other child of an
+    order, these rows may be edited and removed — see below.
+
+    DERIVED AT RAISE TIME, THEN OWNED BY THE RAISER. The raise view fills these in from
+    the programs of the sites that were chosen, so the common case needs no input. They
+    are then EDITABLE and REMOVABLE by the raiser, because a central purchase is often
+    sized against a tender whose sites are not all known yet, and against more than one.
+    That makes this the only mutable child of an order, and it is mutable on purpose: it
+    records an intention, not a fact about money.
+
+    NOT A COST ALLOCATION. No share of the order's total attaches to a program here, and
+    nothing may derive one. The order's money is its lines and its payments, whole.
+    """
+
+    order = models.ForeignKey(
+        VendorOrder, on_delete=models.PROTECT, related_name='programs',
+    )
+    program = models.ForeignKey(
+        'Program', on_delete=models.PROTECT, related_name='vendor_order_programs',
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['order', 'program'],
+                                    name='uniq_vendor_order_program'),
+        ]
+
+    def __str__(self):
+        return f"{self.order} — {self.program.name}"
 
 
 class VendorOrderLine(models.Model):
