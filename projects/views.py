@@ -103,6 +103,8 @@ from .permissions import (
     can_reorder_phase,
     # O2 - the SCM card offers "Raise Order" only where vendor_order_create accepts it.
     user_can_raise_vendor_order,
+    # O3 - the same, for the OPEX tender rows' group raise.
+    user_can_raise_group_order,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -1777,6 +1779,10 @@ def dashboard_scm(request):
         },
         'project_rows':         project_rows,
         'opex_tender_rows':     opex_tender_rows,
+        # O3 — whether the tender rows draw their "Raise order" action. The view the
+        # link reaches re-checks it; this only stops the page offering a button that
+        # would 403 (Admin reads this dashboard, SCM raises).
+        'can_raise_group_order': user_can_raise_group_order(request.user),
         'delivery_issues':      delivery_issues,
         'today':                today,
         'all_profiles':         UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),

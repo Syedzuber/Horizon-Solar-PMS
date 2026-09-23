@@ -66,6 +66,19 @@ Bootstrap only, matching the cards around it.
 
         <span class="collapse-icon text-muted small">&#9660;</span>
       </button>
+      {% comment %}
+        O3 — the two order entry points, beside the existing Groups button and in the
+        same markup. "Raise order" enters the group raise FROM this tender: the tender
+        decides what is pre-ticked and limits nothing, so the page still offers every
+        group in the system. The count comes from the section's own query
+        (design_views._tender_order_counts), not from a query per row.
+      {% endcomment %}
+      <a href="{% url 'program_vendor_order_list' program_pk=row.program.pk %}"
+         class="btn btn-sm btn-outline-secondary me-2">Orders ({{ row.order_count }})</a>
+      {% if can_raise_group_order %}
+      <a href="{% url 'vendor_order_create_group' %}?program={{ row.program.pk }}"
+         class="btn btn-sm btn-outline-secondary me-2">Raise order</a>
+      {% endif %}
       <a href="{% url 'site_group_list' pk=row.program.pk %}"
          class="btn btn-sm btn-outline-secondary me-3">Groups</a>
     </div>

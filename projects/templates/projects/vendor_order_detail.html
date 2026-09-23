@@ -57,7 +57,16 @@
               <div>
                 <a href="{% url 'project_overview' site.project.project_id %}" class="text-decoration-none">{{ site.project.project_id }}</a>
                 <span class="text-muted">— {{ site.project.customer_name }}</span>
-                {% if site.via_site_group %}<span class="text-muted">(via {{ site.via_site_group }})</span>{% endif %}
+                {% comment %}
+                  O3: the GROUP the site was picked through, beside the TENDER it belongs
+                  to. Both, because one order may draw sites from several groups AND
+                  several tenders, and "via Batch 1" alone does not say which tender's
+                  Batch 1. A site picked from a tender's post-QC pool has no group.
+                {% endcomment %}
+                <span class="text-muted" style="font-size:.72rem;">
+                  {% if site.via_site_group %}via {{ site.via_site_group.name }}{% else %}picked individually{% endif %}
+                  {% if site.project.program %} · {{ site.project.program.name }}{% endif %}
+                </span>
               </div>
             {% empty %}
               <span class="text-muted">{{ no_sites_text }}</span>

@@ -1841,3 +1841,44 @@ def user_can_append_order_documents(user, order):
         return False
     profile = getattr(user, 'profile', None)
     return profile is not None and profile.role in VENDOR_ORDER_RAISE_ROLES
+
+
+# ---------------------------------------------------------------------------
+# O3 — the group raise, and a tender's orders
+# ---------------------------------------------------------------------------
+
+def user_can_raise_group_order(user):
+    """Return True if `user` may open the group raise page and record an order from it.
+
+    SCM only — the same role that raises the single-site Residential order, for the same
+    reason: the person who commits the company to a supplier is the person who records
+    the commitment.
+
+    TAKES NO SCOPE, AND THAT IS THE POINT. An order may be sized against sites drawn from
+    SEVERAL groups and SEVERAL tenders (O2d: the sites are the requirement basis, not a
+    destination), so there is no single project, group or tender this predicate could be
+    asked about. Scope is validated PER SITE inside vendor_order_create_group() — every
+    posted site is resolved, checked against user_can_view_project() and checked for
+    soft-deletion there. This answers only "may this person raise a group order at all".
+    """
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in VENDOR_ORDER_RAISE_ROLES
+
+
+def user_can_view_program_vendor_orders(user, program):
+    """Return True if `user` may read the list of orders raised against `program`.
+
+    THE EXISTING ORDER-READER RULE, ASKED OF A TENDER — _user_reads_orders_on(), the same
+    function behind user_can_view_vendor_order() and user_can_view_project_vendor_orders().
+    A portfolio role reads every tender's orders; anyone else reads the list if they can
+    see ANY site in the tender, which is the tender-shaped form of "a PM whose site shares
+    a consolidated order is entitled to that order".
+
+    An EMPTY tender admits only the portfolio roles, exactly as a site-less order does.
+
+    Walks the tender's live sites lazily — the role arm decides first and costs no query.
+    """
+    if program is None:
+        return False
+    return _user_reads_orders_on(
+        user, program.sites.filter(is_deleted=False).iterator())

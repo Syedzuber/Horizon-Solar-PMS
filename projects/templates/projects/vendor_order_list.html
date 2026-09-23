@@ -1,18 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Orders — {{ project.project_id }} — SolarPMS{% endblock %}
+{% comment %}
+Orders, with their money at a glance. ONE TEMPLATE, TWO SCOPES:
+
+  * a SITE's orders (order_views.vendor_order_list) — context has `project`;
+  * a TENDER's orders (order_views.program_vendor_order_list, O3) — context has `program`.
+
+The table is identical because the question is: the row is an order and its money, and
+an order does not change shape according to which page reached it. Only the heading, the
+"back" link and the "spans N tenders" label differ, and each is behind the key that is
+present. Adding a second copy of this table for tenders would be how the two pages' money
+columns come to disagree.
+{% endcomment %}
+{% block title %}Orders — {% if project %}{{ project.project_id }}{% else %}{{ program.name }}{% endif %} — SolarPMS{% endblock %}
 
 {% block content %}
 
 <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h4 class="mb-0">Orders</h4>
-    <small class="text-muted">{{ project.project_id }} — {{ project.customer_name }}</small>
+    <small class="text-muted">
+      {% if project %}
+        {{ project.project_id }} — {{ project.customer_name }}
+      {% else %}
+        {{ program.name }}{% if program.short_tender_code %} · {{ program.short_tender_code }}{% endif %}
+        — every order sized against this tender or one of its sites
+      {% endif %}
+    </small>
   </div>
   <div class="d-flex gap-2 flex-shrink-0">
     {% if raise_url %}
     <a href="{{ raise_url }}" class="btn btn-brand btn-sm"><i class="bi bi-receipt me-1"></i>Raise Order</a>
     {% endif %}
+    {% if project %}
     <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Project</a>
+    {% else %}
+    <a href="{% url 'site_group_list' pk=program.pk %}" class="btn btn-outline-secondary btn-sm">← Groups</a>
+    {% endif %}
   </div>
 </div>
 
@@ -38,7 +61,11 @@
           <td class="text-end">{{ row.committed|floatformat:2 }}</td>
           <td class="text-end">{{ row.paid|floatformat:2 }}</td>
           <td class="text-end">{{ row.balance|floatformat:2 }}</td>
-          <td class="text-nowrap">{% if row.invoice_awaited %}<span class="badge text-bg-warning">Invoice awaited</span>{% endif %}</td>
+          <td class="text-nowrap">
+            {% if row.invoice_awaited %}<span class="badge text-bg-warning">Invoice awaited</span>{% endif %}
+            {% if row.spans and row.spans > 1 %}<span class="badge text-bg-light border">spans {{ row.spans }} tenders</span>{% endif %}
+            {% if row.order.raised_with_unfrozen_quantities %}<span class="badge text-bg-light border">unfrozen quantities</span>{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>
@@ -46,7 +73,9 @@
   </div>
   <div class="card-footer small text-muted">Committed is every payment not rejected; balance is the total less what has been paid.</div>
   {% else %}
-  <div class="card-body small text-muted">No orders recorded for this site yet.</div>
+  <div class="card-body small text-muted">
+    {% if project %}No orders recorded for this site yet.{% else %}No orders recorded against this tender yet.{% endif %}
+  </div>
   {% endif %}
 </div>
 

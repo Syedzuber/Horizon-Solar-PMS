@@ -3670,3 +3670,90 @@ fields from `VendorOrderLine` (sum over lines whose `boq_item` is this row, or o
 `item_master` for a single-site order) and make the inputs read-only, or retire them and
 the SCM branch that writes them. Until then a BOQ screen may show an "ordered" figure that
 no order supports.
+
+**O3 has now landed and the decision is still open.** O3's MODE excluded both fields
+explicitly — the group raise reads neither and writes neither — so nothing has changed here,
+except that a group order now makes the second answer reachable: a consolidated line names
+`item_master` and no `boq_item` at all, so any derivation must go through the catalogue
+join, not through `boq_item`.
+
+### G21 — a site-less order writes no feed line, because `ActivityLog` has no tender column
+
+Found by O3 (23 Sep 2026), not fixed: it needs a model field, which O3's MODE excludes.
+
+`vendor_order_create_group` logs `vendor_order_raised` once per site, on the site, exactly
+as `site_group_lock` logs its lock. An order sized against ZERO sites (O2d's central
+purchase) has nowhere to put that line: `ActivityLog.project` is nullable but there is no
+`program` FK, so the event would be written with `project=NULL`, where no feed reads it.
+Such an order is therefore **not logged at all** — it is visible on the order detail page,
+in the tender's order list and in `StatusTransition` (if it carries a payment), and
+nowhere in any activity feed.
+
+Two ways out, both a migration: add `ActivityLog.program` and teach the tender dashboard
+to read it, or give `Program` a feed of its own. The first is smaller and matches how
+`PaymentRequest.project` was made nullable in O2d.
+
+### G22 — the group raise page ships every candidate site's BOQ contributions
+
+Found by O3 (23 Sep 2026), accepted by design, recorded because it will not scale forever.
+
+O3's spec forbids a server round trip between sections, so the browser must be able to
+re-aggregate as sites are ticked. The page therefore renders one row per catalogue item
+across EVERY candidate site, each carrying a `data-contrib` map of `{project_pk: quantity}`.
+Its QUERY count is flat in the number of sites (measured: 14 at 3 sites and at 30), but its
+BYTE count is not — the map grows with sites × catalogue rows. Measured at build time on
+the local database: 167 KB for 5 candidate sites and 36 line rows.
+
+The fix, when a tender is large enough to need one, is an HTMX fetch of the aggregate on
+each selection change — which is exactly the round trip the spec ruled out, so it is a
+product decision, not a refactor.
+
+### G23 — the raise page costs one query per OPEX tender
+
+Found by O3 (23 Sep 2026), accepted deliberately.
+
+`order_views._raise_sources()` calls `design_views.post_qc_pool(program)` once per shown
+tender. The alternative is a second hand-written copy of that function's exclusion — the
+`NOT EXISTS`/LEFT-JOIN trap its docstring spends twenty lines on, and which
+`tests_design_groups` exists because of. A query per tender is the cheaper mistake. It is
+the number of TENDERS, never the number of sites; revisit if the deployment ever carries
+tenders in the hundreds.
+
+### G24 — `aggregate_group_boq()`'s `contributions` map is keyed by site CODE, not pk
+
+Found by O3 (23 Sep 2026), not changed: four screens read that function's return shape.
+
+`design_views.aggregate_group_boq()` returns `contributions` keyed by
+`boq__project__project_id` — the human site code, which is what `site_group_detail.html`
+prints. The raise page has to match a contribution against a checkbox whose value is the
+Project pk, so `order_views._candidate_contributions()` builds a second, pk-keyed map with
+its own query over the same rows and the same three filter terms. Two queries where one
+would do, and two places that must agree about which BOQ rows count.
+
+Worth collapsing when something else forces a change to that function: return both keys,
+or key by pk and have the group template look the code up.
+
+### G25 — a hand-added line may name a DEACTIVATED catalogue row
+
+Found by O3 (23 Sep 2026), not fixed: low severity, and the fix has a trade-off.
+
+The "Add a line" picker offers `BOQItemMaster.objects.filter(is_active=True)`, but
+`_parse_group_lines()` resolves posted pks without that term, so a crafted POST (or a page
+left open while the Design Head deactivates a row) can put a deactivated item on an order.
+The line's identity is snapshotted, so the record survives either way and nothing downstream
+breaks. Adding `is_active=True` to the parser is one word — but it would also refuse an
+AGGREGATE line whose catalogue row was deactivated after the BOQ was written, which is a
+legitimate thing to order. Decide which rule is wanted before changing it.
+
+### G26 — the per-site visibility check on the group raise is unreachable for its only caller
+
+Found by O3 (23 Sep 2026), by design, recorded so nobody deletes it as dead code.
+
+`_parse_group_sites()` refuses any posted site that fails `user_can_view_project()`. The
+only role `user_can_raise_group_order()` admits is SCM, and SCM is portfolio-wide in
+`user_can_view_project()`, so no site can fail that term today. It is there for the
+assignment-based narrowing D-4 will bring, and it is pinned by a unit test that hands the
+parser a PM with no claim on the site
+(`tests_vendor_order_group.test_a_site_the_user_cannot_see_is_refused`) rather than by an
+end-to-end one, which cannot exist yet. The deleted-site half of the same guard IS reachable
+and is tested through the view.

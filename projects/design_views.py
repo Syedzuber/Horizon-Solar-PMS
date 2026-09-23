@@ -115,6 +115,9 @@ from .models import (
     # Part 12 — the catalogue table itself, managed by the Design Head at the foot of
     # this module. Read here directly; the helpers above stay the only readers elsewhere.
     BOQItemMaster,
+    # O3 — counted, never rendered here: the SCM tender row carries an "Orders (n)"
+    # link, and the count comes from the section's own query rather than per row.
+    VendorOrderProgram, VendorOrderSite,
 )
 from .permissions import (
     project_boq_is_group_locked, user_can_edit_project_boq,
@@ -7201,9 +7204,10 @@ def scm_opex_tender_rows(now=None):
     """
     now = now or timezone.now()
     rows = []
-    programs = (Program.objects
-                .filter(is_deleted=False, program_type='OPEX')
-                .order_by('name'))
+    programs = list(Program.objects
+                    .filter(is_deleted=False, program_type='OPEX')
+                    .order_by('name'))
+    order_counts = _tender_order_counts(programs)
     for program in programs:
         assignments = (DesignAssignment.objects
                        .filter(project__program=program, project__is_deleted=False)
@@ -7224,8 +7228,31 @@ def scm_opex_tender_rows(now=None):
             'pool':         pool,
             'pool_count':   len(pool),
             'oldest_pool_age': pool[0].age_days if pool else None,
+            'order_count':  order_counts.get(program.pk, 0),
         })
     return rows
+
+
+def _tender_order_counts(programs):
+    """{program_pk: number of vendor orders} for `programs` — TWO QUERIES FOR THE WHOLE
+    SECTION, never one per row.
+
+    The same two arms order_views.program_vendor_order_list() lists by: an order NAMES
+    the tender (a VendorOrderProgram row, which is how a site-less central purchase
+    reaches it) OR it names a site in the tender. A SET of (program, order) pairs before
+    counting, so an order qualifying through both arms — or through three sites — counts
+    once, and the number on the row is the number of rows the link opens.
+    """
+    if not programs:
+        return {}
+    pairs = set(VendorOrderProgram.objects.filter(program__in=programs)
+                .values_list('program_id', 'order_id'))
+    pairs |= set(VendorOrderSite.objects.filter(project__program__in=programs)
+                 .values_list('project__program_id', 'order_id'))
+    counts = {}
+    for program_id, _order_id in pairs:
+        counts[program_id] = counts.get(program_id, 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------------------

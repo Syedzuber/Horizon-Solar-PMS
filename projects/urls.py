@@ -297,6 +297,13 @@ urlpatterns = [
          name='vendor_order_add_payment'),
     path('orders/<int:order_pk>/documents/new/',  order_views.vendor_order_add_documents,
          name='vendor_order_add_documents'),
+    # O3 — one order sized against sites from several groups and several tenders, and a
+    # tender's own order list. The raise takes NO scope in its URL: the sizing basis is
+    # the form's, and `?program=` only says which tender the page was entered from.
+    path('orders/new-group/',                     order_views.vendor_order_create_group,
+         name='vendor_order_create_group'),
+    path('programs/<int:program_pk>/orders/',     order_views.program_vendor_order_list,
+         name='program_vendor_order_list'),
 
     # ---------------------------------------------------------------------------
     # Webhooks — unauthenticated, no login required
