@@ -12,6 +12,16 @@
     .navbar-brand { font-weight: 700; letter-spacing: 0.5px; }
     .horizon-nav { background: linear-gradient(135deg, #1a7a4a 0%, #155f3a 100%); border-bottom: 2px solid #f0a829; }
 
+    /* The brand button, on every page. Bootstrap 5.3's own button variables, so .btn
+       supplies hover, active, focus ring and the disabled fade from these colours. */
+    .btn-brand {
+      --bs-btn-color: #fff;               --bs-btn-bg: #1a7a4a;               --bs-btn-border-color: #1a7a4a;
+      --bs-btn-hover-color: #fff;         --bs-btn-hover-bg: #155f3a;         --bs-btn-hover-border-color: #155f3a;
+      --bs-btn-active-color: #fff;        --bs-btn-active-bg: #124f30;        --bs-btn-active-border-color: #124f30;
+      --bs-btn-disabled-color: #fff;      --bs-btn-disabled-bg: #1a7a4a;      --bs-btn-disabled-border-color: #1a7a4a;
+      --bs-btn-focus-shadow-rgb: 26, 122, 74;
+    }
+
     /* Username click-dropdown */
     #user-hover-menu { display: inline-block; cursor: pointer; }
     #user-hover-dropdown {
