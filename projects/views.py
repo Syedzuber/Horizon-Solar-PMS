@@ -12546,6 +12546,9 @@ def admin_user_edit(request, user_id):
             profile.is_qaqc         = cd['is_qaqc']
             # Same reading, same reason: the template renders this box on every save.
             profile.is_warehouse_keeper = cd['is_warehouse_keeper']
+            # O4, and the same rule a fourth time: the box is rendered, so an unchecked
+            # one is a real "off" and not a field that was never on the form.
+            profile.is_payment_approver = cd['is_payment_approver']
             profile.save()
 
             log_activity(
@@ -12579,6 +12582,7 @@ def admin_user_edit(request, user_id):
                 'is_design_qc':   profile.is_design_qc,
                 'is_qaqc':        profile.is_qaqc,
                 'is_warehouse_keeper': profile.is_warehouse_keeper,
+                'is_payment_approver': profile.is_payment_approver,
             },
             instance_user=target_user,
         )

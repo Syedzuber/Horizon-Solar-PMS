@@ -159,26 +159,148 @@
   </div>
 </div>
 
-{# ── Payments ──────────────────────────────────────────────────────────── #}
+{% comment %}
+── Payments ──────────────────────────────────────────────────────────────
+O4. Each row carries its own approval state and its own actions. `payments` is a list of
+dicts from order_views._payment_row(), NOT a list of PaymentRequest, so every button here
+is drawn from a predicate the view re-checks under a row lock — drawing a button
+authorises nothing.
+
+THE THREE REASON FORMS (hold, reject, respond) ARE BOOTSTRAP COLLAPSE ROWS, not modals.
+A modal inside a loop needs a unique id and its own show/hide handling per row, and this
+page carries no page-specific JavaScript at all; collapse is markup only (Bootstrap 5.3
+hides with display:none and restores the row's own display, so a <tr> collapses cleanly).
+NO ACTION WITHOUT ITS REASON: each textarea is `required`, and the view refuses an empty
+or whitespace-only one again on arrival.
+
+AND THIS IS A `comment` TAG, NOT A HASH COMMENT, BECAUSE IT SPANS LINES. Django's
+hash-brace comment is single-line: give it a second line and the rest of it renders into
+the page. That is a real defect this module has shipped before.
+{% endcomment %}
 <div class="card shadow-sm mb-4">
   <div class="card-header fw-semibold">Payments</div>
   {% if payments %}
   <div class="table-responsive">
-    <table class="table table-sm mb-0 small">
+    <table class="table table-sm mb-0 small align-middle">
       <thead class="table-light">
-        <tr><th>Raised</th><th>By</th><th class="text-end">Amount (₹)</th><th>Status</th></tr>
+        <tr>
+          <th>Raised</th><th>By</th><th class="text-end">Amount (₹)</th>
+          <th>Status</th><th class="text-end">Action</th>
+        </tr>
       </thead>
       <tbody>
-        {% for p in payments %}
+        {% for row in payments %}
+        {% with p=row.payment %}
         <tr>
           <td class="text-nowrap">{{ p.requested_date|date:"d M Y" }}</td>
           <td>{{ p.requested_by.get_full_name|default:p.requested_by.username }}</td>
           <td class="text-end">{{ p.amount|floatformat:2 }}</td>
           <td>
             {{ p.get_status_display }}
+            {% if p.status == 'approved' and p.approved_by %}
+              <div class="text-muted">by {{ p.approved_by.user.get_full_name|default:p.approved_by.user.username }}{% if p.approved_at %} · {{ p.approved_at|date:"d M Y" }}{% endif %}</div>
+            {% endif %}
+            {% if p.status == 'rejected' and p.decision_reason %}
+              <div class="text-muted">{{ p.decision_reason }}</div>
+            {% endif %}
             {% if p.payment_date %}<div class="text-muted">{{ p.payment_date|date:"d M Y" }}{% if p.payment_reference %} · {{ p.payment_reference }}{% endif %}</div>{% endif %}
           </td>
+          <td class="text-end text-nowrap">
+            {% if row.can_approve %}
+            <form method="post" action="{% url 'payment_approve' p.pk %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-brand btn-sm">Approve</button>
+            </form>
+            {% endif %}
+            {% if row.can_hold %}
+            <button class="btn btn-outline-warning btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#hold-{{ p.pk }}">Hold</button>
+            {% endif %}
+            {% if row.can_reject %}
+            <button class="btn btn-outline-danger btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#reject-{{ p.pk }}">Reject</button>
+            {% endif %}
+            {% if row.can_respond %}
+            <button class="btn btn-outline-primary btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#respond-{{ p.pk }}">Respond</button>
+            {% endif %}
+            {% if row.is_own_request and not row.can_respond %}
+            {# An approver on their own request: say why there is no button. #}
+            <span class="text-muted">You raised this request — someone else approves it.</span>
+            {% endif %}
+          </td>
         </tr>
+
+        {% if row.open_hold or row.last_answered %}
+        <tr class="table-light">
+          <td colspan="5">
+            {% if row.open_hold %}
+              <div><span class="badge bg-warning text-dark">On hold</span>
+                <strong>{{ row.open_hold.held_by.user.get_full_name|default:row.open_hold.held_by.user.username }}</strong>
+                on {{ row.open_hold.held_at|date:"d M Y" }}: {{ row.open_hold.reason }}</div>
+              <div class="text-muted">Awaiting a response from SCM.</div>
+            {% endif %}
+            {% if row.last_answered %}
+              <div{% if row.open_hold %} class="mt-2"{% endif %}>
+                <span class="text-muted">Earlier hold</span>
+                ({{ row.last_answered.held_by.user.get_full_name|default:row.last_answered.held_by.user.username }},
+                {{ row.last_answered.held_at|date:"d M Y" }}): {{ row.last_answered.reason }}</div>
+              <div><strong>Response</strong>
+                ({{ row.last_answered.responded_by.user.get_full_name|default:"—" }},
+                {{ row.last_answered.responded_at|date:"d M Y" }}): {{ row.last_answered.response }}</div>
+            {% endif %}
+            {% if row.hold_count > 1 %}
+              <div class="text-muted">{{ row.hold_count }} holds in all on this request.</div>
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_hold %}
+        <tr class="collapse" id="hold-{{ p.pk }}">
+          <td colspan="5">
+            <form method="post" action="{% url 'payment_hold' p.pk %}">
+              {% csrf_token %}
+              <label class="form-label small mb-1" for="hold-reason-{{ p.pk }}">
+                Why is this payment being held? SCM answers this.</label>
+              <textarea class="form-control form-control-sm mb-2" rows="2" required
+                        id="hold-reason-{{ p.pk }}" name="reason"></textarea>
+              <button type="submit" class="btn btn-warning btn-sm">Hold this request</button>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_reject %}
+        <tr class="collapse" id="reject-{{ p.pk }}">
+          <td colspan="5">
+            <form method="post" action="{% url 'payment_reject' p.pk %}">
+              {% csrf_token %}
+              <label class="form-label small mb-1" for="reject-reason-{{ p.pk }}">
+                Why is this payment being rejected? This is final.</label>
+              <textarea class="form-control form-control-sm mb-2" rows="2" required
+                        id="reject-reason-{{ p.pk }}" name="reason"></textarea>
+              <button type="submit" class="btn btn-danger btn-sm">Reject this request</button>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_respond %}
+        <tr class="collapse" id="respond-{{ p.pk }}">
+          <td colspan="5">
+            <form method="post" action="{% url 'payment_hold_respond' p.pk %}">
+              {% csrf_token %}
+              <label class="form-label small mb-1" for="respond-text-{{ p.pk }}">
+                Your response to the hold. The request goes back for approval.</label>
+              <textarea class="form-control form-control-sm mb-2" rows="2" required
+                        id="respond-text-{{ p.pk }}" name="response"></textarea>
+              <button type="submit" class="btn btn-primary btn-sm">Send response</button>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+        {% endwith %}
         {% endfor %}
       </tbody>
     </table>

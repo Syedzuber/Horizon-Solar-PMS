@@ -123,9 +123,21 @@ class CheckConstraintTests(VendorOrderFixture):
         order = self.make_order()
         self.assertRefused(lambda: self.make_payment(order, '100', PaymentRequest.REJECTED))
 
-    def test_an_on_hold_payment_without_a_reason_is_refused(self):
+    def test_an_on_hold_payment_no_longer_needs_a_reason_on_the_request(self):
+        """O4 NARROWED `payment_request_refusal_needs_reason` to `rejected` alone, and
+        this test was inverted with it. The rule did not weaken: a hold's reason is now
+        MANDATORY on `PaymentRequestHold` (`payment_hold_needs_reason`), which also
+        records who held it and SCM's answer — none of which fits in this one column,
+        and the second hold of a request would have overwritten the first.
+
+        Requiring it in both places would demand the same text twice, in two columns
+        that could then disagree. `tests_payment_approval.MandatoryReasonTests` pins the
+        rule where it now lives: a hold with no reason is refused and writes nothing.
+        """
         order = self.make_order()
-        self.assertRefused(lambda: self.make_payment(order, '100', PaymentRequest.ON_HOLD))
+        pr = self.make_payment(order, '100', PaymentRequest.ON_HOLD)
+        self.assertEqual(pr.status, PaymentRequest.ON_HOLD)
+        self.assertEqual(pr.decision_reason, '')
 
     def test_a_rejected_payment_with_a_reason_is_accepted(self):
         order = self.make_order()
@@ -246,15 +258,18 @@ class DocumentUrlTests(TestCase):
 
 class StatusVocabularyTests(VendorOrderFixture):
 
-    def test_a_request_created_without_a_status_is_approved(self):
-        """raise_payment_request's behaviour is unchanged: straight to Finance."""
+    def test_a_request_created_without_a_status_awaits_approval(self):
+        """O4 changed the model default from APPROVED to PENDING_APPROVAL. The raise
+        paths all state the status explicitly, so this pins the SAFETY NET — a row made
+        anywhere else (a shell, a fixture, a seed) must land in front of the gate rather
+        than past it."""
         pr = PaymentRequest.objects.create(
             vendor_order=self.make_order(),   # O2: NOT NULL; fixture only
             project=self.project, vendor=self.vendor, invoice_number='INV-1',
             invoice_document_name='i.pdf', invoice_document_url='http://x/i.pdf',
             invoice_document_path='p/i.pdf', amount=Decimal('10'),
             requested_by=self.scm.user)
-        self.assertEqual(pr.status, PaymentRequest.APPROVED)
+        self.assertEqual(pr.status, PaymentRequest.PENDING_APPROVAL)
 
     def test_pending_is_gone_and_confirmed_reads_paid(self):
         self.assertFalse(hasattr(PaymentRequest, 'PENDING'))

@@ -1882,3 +1882,133 @@ def user_can_view_program_vendor_orders(user, program):
         return False
     return _user_reads_orders_on(
         user, program.sites.filter(is_deleted=False).iterator())
+
+
+# ---------------------------------------------------------------------------
+# O4 — the payment approval gate
+#
+# FIVE PREDICATES, ONE FLAG, AND THE SAME-PERSON RULE. `is_payment_approver` says what a
+# person MAY BE; each of the four approver predicates says what they may do to THIS
+# request, and all four refuse the person who raised it. That split is the Design QC
+# shape exactly — user_is_design_qc() reads the flag and nothing else, and
+# user_can_qc_gate_design() adds the row-level terms — and it is followed here rather
+# than inventing a third pattern.
+#
+# WHY THE SAME PERSON MAY NOT APPROVE THEIR OWN REQUEST. The design module's settled
+# decision 2 (design_views._other_gate_actor_conflict) refuses one person BOTH verdicts
+# on the same artifact, because two clicks by one person is not a second gate. A payment
+# is the same argument at its sharpest: SCM raising and approving their own request is
+# not an approval step, it is a rename of the raise. The refusal is PER REQUEST, not per
+# user — an SCM lead holding the flag approves everybody else's requests as normal, and
+# is refused only their own.
+#
+# WHY THE FIFTH PREDICATE IS ROLE-BASED, NOT FLAG-BASED. Answering a hold is not an
+# approval act: it is the requester's side of the conversation, and the role that raises
+# payments is the role that answers for them (VENDOR_ORDER_RAISE_ROLES).
+# ---------------------------------------------------------------------------
+
+def user_is_payment_approver(user):
+    """Return True if `user` holds the payment-approver flag — the flag itself, nothing
+    more.
+
+    Assigned by the Admin to Finance or CEO users (and to anyone else the company wants
+    approving spend); THE ROLE ITSELF GRANTS NOTHING, and neither does the flag on its
+    own. "Holds the flag" and "may approve THIS request" are different questions, and
+    the second one is user_can_approve_payment() below.
+
+    Reads UserProfile.is_payment_approver only, and returns False rather than raising for
+    a user with no profile, matching every other helper in this module.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return bool(profile.is_payment_approver)
+
+
+def _payment_approver_other_than_requester(user, payment_request):
+    """The two terms every approver predicate shares: the flag, and not being the person
+    who raised this request.
+
+    `requested_by` is an auth.User (not a UserProfile — see the note on that field), so
+    the comparison is against `user` itself and not against `user.profile`.
+    """
+    if payment_request is None:
+        return False
+    if not user_is_payment_approver(user):
+        return False
+    return payment_request.requested_by_id != user.pk
+
+
+def user_can_approve_payment(user, payment_request):
+    """Return True if `user` may APPROVE `payment_request`, sending it to Finance.
+
+    The flag, a status of PENDING_APPROVAL or ON_HOLD, and not the requester.
+
+    ON_HOLD IS INCLUDED ON PURPOSE: a hold is a question, and an approver who is
+    satisfied — by SCM's answer or by anything else — releases it from where it stands
+    rather than having to wait for a response first.
+
+    The same-person term cites the QC/Head precedent recorded above: one person holding
+    the flag and having raised the request would otherwise clear it with two clicks of
+    their own, which is not a gate.
+    """
+    if not _payment_approver_other_than_requester(user, payment_request):
+        return False
+    return payment_request.status in (payment_request.PENDING_APPROVAL,
+                                      payment_request.ON_HOLD)
+
+
+def user_can_hold_payment(user, payment_request):
+    """Return True if `user` may HOLD `payment_request`, with a reason, for SCM to answer.
+
+    The flag, a status of PENDING_APPROVAL or APPROVED, and not the requester.
+
+    APPROVED IS INCLUDED ON PURPOSE: money is not paid at approval, it is paid at
+    confirmation, so an approver who learns something after approving must be able to
+    stop the request before Finance acts on it. A CONFIRMED (paid) request is past
+    holding, and a REJECTED one is final.
+    """
+    if not _payment_approver_other_than_requester(user, payment_request):
+        return False
+    return payment_request.status in (payment_request.PENDING_APPROVAL,
+                                      payment_request.APPROVED)
+
+
+def user_can_reject_payment(user, payment_request):
+    """Return True if `user` may REJECT `payment_request`, finally, with a reason.
+
+    The flag, a status of ON_HOLD, and not the requester.
+
+    REJECT IS REACHABLE ONLY FROM HOLD, DELIBERATELY. A rejection is final — nothing
+    reopens it, and committed_total() stops counting the money — so SCM must have had
+    the chance to answer before it happens. An approver who wants to refuse a pending
+    request holds it first and says why; that is one extra click and it is the whole
+    protection.
+    """
+    if not _payment_approver_other_than_requester(user, payment_request):
+        return False
+    return payment_request.status == payment_request.ON_HOLD
+
+
+def user_can_respond_to_hold(user, payment_request):
+    """Return True if `user` may write the answer to `payment_request`'s open hold.
+
+    SCM (VENDOR_ORDER_RAISE_ROLES — the role that raises payments answers for them), a
+    status of ON_HOLD, and an UNANSWERED hold to answer. The third term is not implied by
+    the second: a request may be held again after an answer, and the open-hold test is
+    what says which row the answer belongs to.
+
+    NOT NARROWED TO THE REQUESTER. Procurement answers as a department — the person who
+    raised a payment may be on leave when it is held, and a hold nobody may answer is a
+    hold that stalls the order.
+
+    Costs one query unless `holds` is prefetched (open_hold walks the related manager).
+    """
+    if payment_request is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in VENDOR_ORDER_RAISE_ROLES:
+        return False
+    if payment_request.status != payment_request.ON_HOLD:
+        return False
+    return payment_request.open_hold is not None

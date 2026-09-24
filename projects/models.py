@@ -832,9 +832,14 @@ class UserProfile(models.Model):
     # ADDITION to their role (a PM, the CEO, a Finance lead), and a new ROLE_CHOICES value
     # would cost its holder every Task.assigned_role match and role-gated queryset.
     #
-    # STORAGE ONLY THIS SESSION. No permission helper and no UI — the predicate arrives
-    # with its first caller in O4 (R-12), and until then it is set from the shell or the
-    # Django admin. On its own it grants nothing.
+    # CONSUMED SINCE O4, which is when its predicates arrived (R-12): permissions.py's
+    # user_is_payment_approver() reads it, and the four user_can_*_payment helpers add
+    # the per-request terms. Set from the Admin Panel's user edit screen ("Payment
+    # approver"); the System Admin's own edit screen does not carry it, exactly as it
+    # does not carry `is_qaqc` or `is_warehouse_keeper`.
+    #
+    # ON ITS OWN IT STILL GRANTS NOTHING, and in particular it does not let its holder
+    # approve a request THEY raised — every approver predicate refuses the requester.
     is_payment_approver     = models.BooleanField(default=False)
 
     email_notifications     = models.BooleanField(default=True)
@@ -2236,9 +2241,13 @@ class PaymentRequest(models.Model):
 
     # O1: the approval lifecycle. The old 'pending' value is gone — every row that held it
     # was renamed to 'approved' by migration 0092, because "pending" meant "with Finance,
-    # awaiting payment", which is exactly what APPROVED means now. raise_payment_request
-    # creates APPROVED, so a request still goes straight to Finance until O4 puts
-    # PENDING_APPROVAL in front of it.
+    # awaiting payment", which is exactly what APPROVED means now.
+    #
+    # O4 PUT PENDING_APPROVAL IN FRONT OF FINANCE. Every raise path now creates
+    # PENDING_APPROVAL, and the four order_views actions move a request from there:
+    # approve -> APPROVED, hold -> ON_HOLD (from pending OR from approved), reject ->
+    # REJECTED (only from ON_HOLD, so SCM has had the chance to answer), and SCM's answer
+    # to a hold -> back to PENDING_APPROVAL. CONFIRMED is still Finance's, and is O5's.
     #
     # CONFIRMED keeps its name and its stored value; only its label changes, to "Paid",
     # because that is what it has always meant.
@@ -2319,17 +2328,28 @@ class PaymentRequest(models.Model):
         related_name='raised_payment_requests',
     )
     requested_date = models.DateTimeField(auto_now_add=True)
-    status         = models.CharField(max_length=20, choices=STATUS_CHOICES, default=APPROVED)
+    # PENDING_APPROVAL since O4: a raised payment now waits for an approver before it
+    # reaches Finance. Every raise path states the status explicitly, so this default is
+    # the safety net for a row created anywhere else (a shell, a fixture, a seed) —
+    # defaulting to APPROVED would let such a row skip the gate silently.
+    status         = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                                      default=PENDING_APPROVAL)
 
-    # The approval decision (O4). Set when an approver approves, holds or rejects; null
-    # until then, and null forever on a row raised before O4, which never had one.
+    # The approval decision (O4). Set when an approver APPROVES; null until then, null
+    # forever on a row raised before O4, and CLEARED again when SCM answers a hold taken
+    # on an approved request — an approval that has been reopened is not an approval.
     approved_by = models.ForeignKey(
         'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='approved_payment_requests',
     )
     approved_at = models.DateTimeField(null=True, blank=True)
-    # Why a request was held or rejected. Required for those two statuses — the CHECK
-    # below — because a refusal with no reason gives SCM nothing to act on.
+    # WHY A REQUEST WAS REJECTED, AND NOTHING ELSE (O4). O1 wrote this field for both
+    # refusals and CHECK-constrained it for both; O4 narrowed the constraint to
+    # `rejected` alone, because a HOLD's reason now lives on PaymentRequestHold. That is
+    # not a relaxation: a hold without a reason is refused by
+    # `payment_hold_needs_reason` on the row that actually carries it, and that row also
+    # carries who held it, when, and SCM's answer — none of which fits in one text
+    # column, and the second hold of a request would have overwritten the first.
     decision_reason = models.TextField(blank=True, default='')
 
     # Set on confirm — null until Finance confirms
@@ -2349,10 +2369,18 @@ class PaymentRequest(models.Model):
     class Meta:
         ordering = ['-requested_date']
         constraints = [
-            # Expressed as the VALID case: either the status is not a refusal, or a
+            # Expressed as the VALID case: either the status is not a rejection, or a
             # reason was given.
+            #
+            # NARROWED BY O4 (migration 0096) FROM ['rejected', 'on_hold'] TO
+            # ['rejected']. Read this before widening it back. A hold's reason moved to
+            # PaymentRequestHold, which constrains it there — so `on_hold` in this list
+            # would demand the SAME text twice, in two places that could then disagree,
+            # and would still say nothing about WHICH of several holds it belonged to.
+            # The rule "a refusal must say why" did not weaken; it moved to the row that
+            # can hold the whole exchange.
             models.CheckConstraint(
-                condition=(~models.Q(status__in=['rejected', 'on_hold'])
+                condition=(~models.Q(status='rejected')
                            | ~models.Q(decision_reason='')),
                 name='payment_request_refusal_needs_reason',
             ),
@@ -2370,12 +2398,101 @@ class PaymentRequest(models.Model):
         """
         return self.vendor_order.scope_label
 
+    @property
+    def open_hold(self):
+        """The hold nobody has answered yet, or None (O4).
+
+        At most one can exist — `uniq_open_hold_per_payment_request` is a partial unique
+        index on `responded_at IS NULL` — so `.first()` is the whole answer and not a
+        pick from several. Reads `self.holds.all()` rather than filtering, so a prefetch
+        of the holds makes it free; a page that lists payments should prefetch them.
+        """
+        return next((h for h in self.holds.all() if h.responded_at is None), None)
+
     def __str__(self):
         # `project` is nullable since O2d and __str__ must not raise on a site-less
         # payment. Reads the FK id, not scope_label: __str__ is called from places that
         # hold no prefetch, and scope_label walks two relations.
         anchor = self.project.project_id if self.project_id else f'order #{self.vendor_order_id}'
         return f"PR-{self.pk} {anchor} — {self.vendor} ₹{self.amount}"
+
+
+class PaymentRequestHold(models.Model):
+    """ONE HOLD, ONE RESPONSE (O4).
+
+    An approver holds a payment request and says why; SCM answers that hold once. A
+    request may be held MORE THAN ONCE — each hold is a NEW ROW, never an edit of the
+    last one — so the whole back-and-forth is readable in order, and a second hold can
+    never erase the first hold's reason or the answer SCM gave to it.
+
+    NOTHING IS EDITED AFTER IT IS WRITTEN. `reason` and `held_by` are fixed at creation;
+    `response`, `responded_by` and `responded_at` are written once, together, by the
+    answer. There is no path that rewrites either half, and a correction is a further
+    hold, the same rule the order module applies to itself (see the VendorOrder section
+    note: a mistake is corrected by recording what happened next to it).
+
+    WHY A ROW AND NOT TWO COLUMNS ON `PaymentRequest`. `decision_reason` is one text
+    field: a second hold would overwrite the first, and the answer would have nowhere to
+    go at all. The precedent is `DueDateCommitment` — a two-sided exchange that is
+    never edited in place, with a partial unique index keeping exactly one of them live.
+    """
+
+    payment_request = models.ForeignKey(
+        PaymentRequest, on_delete=models.PROTECT, related_name='holds',
+    )
+
+    # NOT NULL and non-empty (the CHECK below). A hold with no reason gives SCM nothing
+    # to answer, which is the whole purpose of holding rather than rejecting.
+    reason   = models.TextField()
+    held_by  = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='payment_holds_taken',
+    )
+    held_at  = models.DateTimeField(auto_now_add=True)
+
+    # SCM's answer. Blank until answered; the three move together — see the CHECK.
+    response     = models.TextField(blank=True, default='')
+    responded_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='payment_holds_answered',
+    )
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-held_at']
+        constraints = [
+            # A hold always says why.
+            models.CheckConstraint(
+                condition=~models.Q(reason=''),
+                name='payment_hold_needs_reason',
+            ),
+            # An answer is a whole event or none of it: text implies both stamps.
+            # Expressed as the VALID case, matching payment_request_refusal_needs_reason.
+            #
+            # KNOWN INTERACTION WITH SET_NULL, and it is the wanted one. `responded_by`
+            # is SET_NULL, so DELETING the answering profile would try to null a column
+            # this constraint requires, and the delete fails rather than half-erasing an
+            # answer. Profiles are deactivated, never deleted, so no product path reaches
+            # it; the FK stays SET_NULL rather than PROTECT because `held_by` is already
+            # PROTECT and the two halves are not equally load-bearing.
+            models.CheckConstraint(
+                condition=(models.Q(response='')
+                           | (models.Q(responded_by__isnull=False)
+                              & models.Q(responded_at__isnull=False))),
+                name='payment_hold_response_needs_responder',
+            ),
+            # AT MOST ONE OPEN HOLD per request. Partial (condition=) so any number of
+            # answered holds may sit beside the live one — the same shape as
+            # uniq_current_due_date_per_assignment.
+            models.UniqueConstraint(
+                fields=['payment_request'],
+                condition=models.Q(responded_at__isnull=True),
+                name='uniq_open_hold_per_payment_request',
+            ),
+        ]
+
+    def __str__(self):
+        state = 'answered' if self.responded_at else 'open'
+        return f"Hold ({state}) on PR-{self.payment_request_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -2434,10 +2551,11 @@ def committed_total(payments):
     payment whose status is not REJECTED. Awaiting approval, approved, on hold and paid
     all count — each is money someone asked for and nobody refused.
 
-    Written for all five statuses now, although until O4 every payment is created
-    APPROVED, so that O4's approval flow changes which status a payment is in and never
-    this rule. ON_HOLD counts on purpose: a held payment may yet be released, and freeing
-    its amount would let a second request spend the same money.
+    Written for all five statuses before any of them was reachable, so that O4's approval
+    flow changed which status a payment is in and never this rule — every payment is now
+    created PENDING_APPROVAL and this function did not move. ON_HOLD counts on purpose: a
+    held payment may yet be released, and freeing its amount would let a second request
+    spend the same money.
 
     Takes an iterable of PaymentRequest rather than a queryset so prefetched rows cost no
     query. VendorOrder.committed_amount and every order view call this; nothing else

@@ -40,6 +40,14 @@ zero-site central purchase as a first-class case. It is entered from a tender an
 by none: see the O3 section note at the foot of this module. The Residential raise above
 is untouched — the two share the header, document, invoice and payment helpers, and
 nothing else.
+
+O4 PUTS AN APPROVAL GATE IN FRONT OF FINANCE. A raised payment is PENDING_APPROVAL, not
+APPROVED: an approver (UserProfile.is_payment_approver, never a role) approves it, or
+HOLDS it with a reason for SCM to answer, and may reject it only once it has been held.
+Four POST-only views — payment_approve, payment_hold, payment_reject,
+payment_hold_respond — each locking the request row and re-checking its predicate inside
+that lock. The only screen O4 touches is this module's order detail page; the Finance
+queue and the mark-paid path are O5. See the O4 section note at the foot of this module.
 """
 import json
 import logging
@@ -53,22 +61,25 @@ from django.db.models import Count, Prefetch, Q
 from django.http import HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 
 from .decorators import login_required
 from .design_views import aggregate_group_boq, post_qc_pool
 from .models import (
-    BOQItem, BOQItemMaster, PaymentRequest, Program, Project, SiteGroup,
-    SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument, VendorOrderLine,
-    VendorOrderProgram, VendorOrderSite, committed_total, log_activity,
+    BOQItem, BOQItemMaster, PaymentRequest, PaymentRequestHold, Program, Project,
+    SiteGroup, SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument,
+    VendorOrderLine, VendorOrderProgram, VendorOrderSite, committed_total, log_activity,
     GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
     VENDOR_ORDER_DOC_INVOICE, VENDOR_ORDER_DOC_PI, VENDOR_ORDER_DOC_PO,
     VENDOR_ORDER_DOC_TYPE_CHOICES,
 )
 from .permissions import (
-    user_can_append_order_documents, user_can_raise_group_order,
-    user_can_raise_vendor_order, user_can_request_order_payment,
-    user_can_view_program_vendor_orders, user_can_view_project,
-    user_can_view_project_vendor_orders, user_can_view_vendor_order,
+    user_can_append_order_documents, user_can_approve_payment,
+    user_can_hold_payment, user_can_raise_group_order, user_can_raise_vendor_order,
+    user_can_reject_payment, user_can_request_order_payment,
+    user_can_respond_to_hold, user_can_view_program_vendor_orders,
+    user_can_view_project, user_can_view_project_vendor_orders,
+    user_can_view_vendor_order, user_is_payment_approver,
 )
 from .supabase_storage import vendor_order_document_url
 from .utils import record_transition
@@ -504,6 +515,39 @@ def _order_with_sites(order_pk):
     )
 
 
+def _payment_row(user, payment):
+    """One payment as the detail page needs it (O4): the row, its open hold, its most
+    recent answered hold, and which of the four actions this viewer may take on it.
+
+    THE FOUR FLAGS ARE THE SAME PREDICATES THE VIEWS ENFORCE, asked here only to decide
+    what to draw. Nothing is authorised by drawing it — each action re-checks under a row
+    lock (see the O4 section note at the foot of this module).
+
+    `is_own_request` is drawn rather than hidden: an approver looking at a request they
+    raised themselves must be told WHY there are no buttons, or the page reads as a bug.
+    It is true for the requester whether or not they hold the flag; the template only
+    says anything when they also hold it.
+
+    Costs no query when the caller prefetched `holds` — open_hold and the answered walk
+    the same cached list.
+    """
+    holds    = list(payment.holds.all())
+    answered = [h for h in holds if h.responded_at is not None]
+    return {
+        'payment':        payment,
+        'open_hold':      payment.open_hold,
+        # holds are ordered '-held_at', so the first answered one is the latest.
+        'last_answered':  answered[0] if answered else None,
+        'hold_count':     len(holds),
+        'can_approve':    user_can_approve_payment(user, payment),
+        'can_hold':       user_can_hold_payment(user, payment),
+        'can_reject':     user_can_reject_payment(user, payment),
+        'can_respond':    user_can_respond_to_hold(user, payment),
+        'is_own_request': (payment.requested_by_id == user.pk
+                           and user_is_payment_approver(user)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Views
 # ---------------------------------------------------------------------------
@@ -580,15 +624,16 @@ def vendor_order_create(request, project_pk):
                 vendor_order=order, project=project, vendor=vendor,
                 amount=payment['amount'], note=payment['note'],
                 requested_by=request.user,
-                # APPROVED is correct until O4 introduces approval: a raised request
-                # goes straight to Finance, exactly as raise_payment_request's did.
-                status=PaymentRequest.APPROVED,
+                # PENDING_APPROVAL since O4: a raised request waits for an approver and
+                # no longer goes straight to Finance. committed_total() counts it either
+                # way, so the order's arithmetic is unchanged.
+                status=PaymentRequest.PENDING_APPROVAL,
                 invoice_number='', invoice_document_name='',
                 invoice_document_url='', invoice_document_path='',
             )
             # Inside the atomic block: record_transition's contract is that the row
             # and the status it records commit together or not at all.
-            record_transition(pr, to_status=PaymentRequest.APPROVED, from_status='',
+            record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL, from_status='',
                               actor=profile, project=project)
         return order, (order, pr)
 
@@ -658,8 +703,12 @@ def vendor_order_detail(request, order_pk):
             'lines',
             Prefetch('documents', queryset=VendorOrderDocument.objects.select_related(
                 'uploaded_by__user')),
+            # O4: `holds` and their two people, so open_hold and the row's hold panel
+            # cost no query per payment. approved_by joins for the same reason.
             Prefetch('payments', queryset=PaymentRequest.objects.select_related(
-                'requested_by', 'confirmed_by')),
+                'requested_by', 'confirmed_by', 'approved_by__user').prefetch_related(
+                    Prefetch('holds', queryset=PaymentRequestHold.objects.select_related(
+                        'held_by__user', 'responded_by__user')))),
         ),
         pk=order_pk,
     )
@@ -691,7 +740,7 @@ def vendor_order_detail(request, order_pk):
         'no_sites_text':   _no_sites_text(programs),
         'lines':           lines,
         'document_groups': document_groups,
-        'payments':        payments,
+        'payments':        [_payment_row(request.user, p) for p in payments],
         **money,
         'orders_project':  project,
         # Each button only where its predicate passes; payment also only while some of
@@ -785,16 +834,18 @@ def vendor_order_add_payment(request, order_pk):
                 pr = PaymentRequest.objects.create(
                     vendor_order=locked, project=project, vendor=order.vendor,
                     amount=amount, note=note, requested_by=request.user,
-                    # APPROVED until O4: O4 puts PENDING_APPROVAL in front of Finance and
-                    # changes this line. committed_total() already counts both.
-                    status=PaymentRequest.APPROVED,
+                    # PENDING_APPROVAL since O4, as on both raise pages. The balance
+                    # check above is unaffected: committed_total() counts every status
+                    # but REJECTED, so a pending payment holds its money exactly as an
+                    # approved one did.
+                    status=PaymentRequest.PENDING_APPROVAL,
                     invoice_number='', invoice_document_name='',
                     invoice_document_url='', invoice_document_path='',
                     client_uuid=client_uuid,
                 )
                 # Inside the atomic block, as record_transition's contract requires.
-                record_transition(pr, to_status=PaymentRequest.APPROVED, from_status='',
-                                  actor=profile, project=project)
+                record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL,
+                                  from_status='', actor=profile, project=project)
     except IntegrityError:
         # The same key raced past the check above; the winner holds the unique index.
         if PaymentRequest.objects.filter(client_uuid=client_uuid).exists():
@@ -1465,15 +1516,14 @@ def vendor_order_create_group(request):
                 vendor_order=order, project=anchor, vendor=vendor,
                 amount=payment['amount'], note=payment['note'],
                 requested_by=request.user,
-                # APPROVED until O4 introduces approval, exactly as both other raise
-                # paths create it.
-                status=PaymentRequest.APPROVED,
+                # PENDING_APPROVAL since O4, exactly as both other raise paths create it.
+                status=PaymentRequest.PENDING_APPROVAL,
                 invoice_number='', invoice_document_name='',
                 invoice_document_url='', invoice_document_path='',
             )
             # Inside the atomic block: record_transition's contract is that the row and
             # the status it records commit together or not at all.
-            record_transition(pr, to_status=PaymentRequest.APPROVED, from_status='',
+            record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL, from_status='',
                               actor=profile, project=anchor)
         return order, (order, pr)
 
@@ -1587,3 +1637,326 @@ def program_vendor_order_list(request, program_pk):
         'rows':      rows,
         'raise_url': raise_url,
     })
+
+
+# ---------------------------------------------------------------------------
+# O4 — the payment approval gate
+#
+# FOUR ACTIONS, FOUR VIEWS, ONE SHAPE. Approve, hold, reject and answer-a-hold are
+# separate endpoints rather than one view with an `action` parameter, because each has a
+# different predicate, a different reason requirement and a different refusal, and one
+# view would decide all four inside a body where a missing branch is invisible.
+#
+# EVERY ONE OF THEM: POST only; transaction.atomic(); select_for_update() on the
+# PaymentRequest row; THE PREDICATE RE-CHECKED INSIDE THE LOCK; record_transition() in
+# that same transaction; log_activity() after it, with its own action_code.
+#
+# WHY THE RE-CHECK INSIDE THE LOCK IS NOT BELT-AND-BRACES. Two approvers may open the
+# same request and click at the same moment — one Approve, one Hold. Both pass the
+# predicate when their page is drawn, both pass it again on arrival, and without the lock
+# both write: the row ends in whichever status committed last while BOTH ledger rows
+# claim to have moved it from PENDING_APPROVAL. The lock serialises them and the re-check
+# makes the loser SEE the winner's status and refuse. The check outside the lock is what
+# draws the button; the check inside it is what decides.
+#
+# A REFUSAL IS A REFUSAL, NOT A 500 AND NOT A SILENT NO-OP. Losing the race, or arriving
+# at a status the action no longer permits, redirects to the order with a message naming
+# the status the request is actually in. Someone who was never entitled at all gets 403.
+# The two are different answers to different questions and are not merged.
+# ---------------------------------------------------------------------------
+
+#: The ActivityLog event key for each action — distinct per action, because a consumer
+#: (the EOD digest is the existing one) filters on the code and never on the sentence.
+PAYMENT_ACTION_CODES = {
+    'approve': 'payment_request_approved',
+    'hold':    'payment_request_held',
+    'reject':  'payment_request_rejected',
+    'respond': 'payment_hold_answered',
+}
+
+
+def _order_ref(order):
+    """How an order is named in a sentence — the same expression the four raise and
+    append views already use."""
+    return order.po_number or order.pi_number
+
+
+def _locked_payment(payment_pk):
+    """The PaymentRequest row, locked for update. MUST be called inside
+    transaction.atomic().
+
+    NO select_related AND NO JOIN, deliberately: `SELECT ... FOR UPDATE` over a join
+    locks every table it reads, so joining the order and the vendor in here would lock
+    those rows too and make two payments on one order serialise against each other for
+    no reason. The callers already hold an unlocked copy of everything they need to
+    write the feed line; this fetches the one row whose status is about to change.
+    """
+    return PaymentRequest.objects.select_for_update().get(pk=payment_pk)
+
+
+def _payment_for_action(request, payment_pk):
+    """Resolve the payment and the actor's profile, or return (None, None, response).
+
+    Reads the row UNLOCKED and answers only the two questions that do not need the lock:
+    does it exist, and may this person see the order it belongs to at all. Entitlement to
+    ACT is asked afterwards — once by the caller, to choose between 403 and a message,
+    and once more inside the lock, where it decides.
+    """
+    payment = get_object_or_404(
+        PaymentRequest.objects
+        .select_related('vendor_order', 'vendor', 'requested_by')
+        .prefetch_related('holds', 'vendor_order__sites__project'),
+        pk=payment_pk,
+    )
+    if not user_can_view_vendor_order(request.user, payment.vendor_order):
+        return None, None, HttpResponseForbidden()
+    profile = getattr(request.user, 'profile', None)
+    if profile is None:
+        return None, None, HttpResponseForbidden()
+    return payment, profile, None
+
+
+def _payment_redirect(order_pk):
+    return redirect('vendor_order_detail', order_pk=order_pk)
+
+
+def _refuse_stale(request, payment, order_pk):
+    """The loser of a race, or anyone arriving at a status the action no longer permits.
+
+    Names the status the request is actually in: "that is not allowed" on its own sends
+    the person back to a page that still shows the button they just pressed.
+    """
+    messages.error(
+        request,
+        f'This payment request is now "{payment.get_status_display()}", and that action '
+        f'is no longer available on it.')
+    return _payment_redirect(order_pk)
+
+
+def _log_payment(payment, profile, action, sentence):
+    """One feed line per action, anchored on the payment's display anchor (O2d) — which
+    is None for a site-less order. ActivityLog.project is nullable, so it is written
+    either way rather than skipped; the same choice both raise paths already make.
+    """
+    log_activity(
+        payment.project, profile, sentence,
+        entity_type='PaymentRequest', entity_id=payment.pk,
+        action_code=PAYMENT_ACTION_CODES[action],
+    )
+
+
+def _vendor_name(payment):
+    return payment.vendor.name if payment.vendor else 'vendor'
+
+
+def _approver_entry(request, payment_pk):
+    """The three checks the three APPROVER actions share, in the order their answers
+    differ: exists and readable, POST, holds the flag and is not the requester.
+
+    Returns (payment, profile, order_pk, response). A non-None response is the answer;
+    everything else is None in that case.
+
+    THE FLAG AND THE SAME-PERSON TERM ANSWER 403 HERE, NOT A MESSAGE, because neither can
+    change while the person looks at the page — they are facts about who is asking, not
+    about what state the request is in. The status term is deliberately NOT checked here:
+    it is the one that races, and it is checked under the lock.
+    """
+    payment, profile, refusal = _payment_for_action(request, payment_pk)
+    if refusal is not None:
+        return None, None, None, refusal
+    order_pk = payment.vendor_order_id
+    if request.method != 'POST':
+        return None, None, None, _payment_redirect(order_pk)
+    if not user_is_payment_approver(request.user):
+        return None, None, None, HttpResponseForbidden()
+    if payment.requested_by_id == request.user.pk:
+        # The same-person rule, and the one refusal in this module that is about WHO
+        # rather than WHAT: design_views._other_gate_actor_conflict refuses exactly this
+        # shape at the design gates, per artifact rather than per user.
+        return None, None, None, HttpResponseForbidden()
+    return payment, profile, order_pk, None
+
+
+@login_required
+def payment_approve(request, payment_pk):
+    """An approver approves a payment request; it goes to Finance to be paid.
+
+    From PENDING_APPROVAL or ON_HOLD. The remark is OPTIONAL here and mandatory on every
+    other action in this module: a refusal must say why, an agreement need not.
+
+    AN OPEN HOLD IS NOT ANSWERED BY AN APPROVAL. The hold stays open and unanswered — a
+    true record that the question was overtaken rather than resolved — and the detail
+    page shows it that way.
+    """
+    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    if refusal is not None:
+        return refusal
+
+    remark = request.POST.get('remark', '').strip()
+    with transaction.atomic():
+        locked = _locked_payment(payment_pk)
+        if not user_can_approve_payment(request.user, locked):
+            return _refuse_stale(request, locked, order_pk)
+        from_status = locked.status
+        locked.status      = PaymentRequest.APPROVED
+        locked.approved_by = profile
+        locked.approved_at = timezone.now()
+        locked.save(update_fields=['status', 'approved_by', 'approved_at'])
+        record_transition(locked, to_status=PaymentRequest.APPROVED,
+                          from_status=from_status, actor=profile, remark=remark,
+                          project=locked.project)
+
+    # log_activity never raises, so it sits after the commit — as everywhere else here.
+    _log_payment(payment, profile, 'approve',
+                 f'Approved payment request of ₹{payment.amount} to '
+                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)})')
+    messages.success(request, f'Payment request of ₹{payment.amount} approved.')
+    return _payment_redirect(order_pk)
+
+
+@login_required
+def payment_hold(request, payment_pk):
+    """An approver holds a payment request, with a MANDATORY reason, for SCM to answer.
+
+    From PENDING_APPROVAL and from APPROVED — user_can_hold_payment() says why an
+    already-approved request can still be stopped.
+
+    WRITES A PaymentRequestHold ROW, NEVER A FIELD ON THE REQUEST. A second hold is a
+    second row, so the first hold's reason and SCM's answer to it survive it. The partial
+    unique index refuses a second OPEN hold — the database saying what the predicate
+    already said, reachable only by a race and handled as one.
+    """
+    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    if refusal is not None:
+        return refusal
+
+    reason = request.POST.get('reason', '').strip()
+    if not reason:
+        messages.error(request, 'A hold must say why — the reason is what SCM answers.')
+        return _payment_redirect(order_pk)
+
+    try:
+        with transaction.atomic():
+            locked = _locked_payment(payment_pk)
+            if not user_can_hold_payment(request.user, locked):
+                return _refuse_stale(request, locked, order_pk)
+            from_status = locked.status
+            locked.status = PaymentRequest.ON_HOLD
+            locked.save(update_fields=['status'])
+            PaymentRequestHold.objects.create(
+                payment_request=locked, reason=reason, held_by=profile)
+            record_transition(locked, to_status=PaymentRequest.ON_HOLD,
+                              from_status=from_status, actor=profile, remark=reason,
+                              project=locked.project)
+    except IntegrityError:
+        # uniq_open_hold_per_payment_request: two approvers held one request in the same
+        # instant. The winner's hold stands; this transaction recorded nothing.
+        messages.error(request, 'This payment request is already on hold.')
+        return _payment_redirect(order_pk)
+
+    _log_payment(payment, profile, 'hold',
+                 f'Held payment request of ₹{payment.amount} to '
+                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)}): '
+                 f'{reason}')
+    messages.success(request, 'Payment request held. SCM has been asked to respond.')
+    return _payment_redirect(order_pk)
+
+
+@login_required
+def payment_reject(request, payment_pk):
+    """An approver rejects a held payment request, finally, with a MANDATORY reason.
+
+    ONLY FROM ON_HOLD (user_can_reject_payment): a rejection is final and frees the money
+    in committed_total(), so SCM must have had the chance to answer first.
+
+    The reason goes to `decision_reason` — which the CHECK constraint requires for this
+    status, and which O4 writes for REJECTION ALONE; a hold's reason lives on its own row.
+
+    THE OPEN HOLD, IF THERE IS ONE, IS LEFT OPEN. It was not answered, it was overruled,
+    and marking it answered would put words in SCM's mouth.
+    """
+    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    if refusal is not None:
+        return refusal
+
+    reason = request.POST.get('reason', '').strip()
+    if not reason:
+        messages.error(request, 'A rejection must say why. Nothing was changed.')
+        return _payment_redirect(order_pk)
+
+    with transaction.atomic():
+        locked = _locked_payment(payment_pk)
+        if not user_can_reject_payment(request.user, locked):
+            return _refuse_stale(request, locked, order_pk)
+        from_status = locked.status
+        locked.status          = PaymentRequest.REJECTED
+        locked.decision_reason = reason
+        locked.save(update_fields=['status', 'decision_reason'])
+        record_transition(locked, to_status=PaymentRequest.REJECTED,
+                          from_status=from_status, actor=profile, remark=reason,
+                          project=locked.project)
+
+    _log_payment(payment, profile, 'reject',
+                 f'Rejected payment request of ₹{payment.amount} to '
+                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)}): '
+                 f'{reason}')
+    messages.success(request, 'Payment request rejected.')
+    return _payment_redirect(order_pk)
+
+
+@login_required
+def payment_hold_respond(request, payment_pk):
+    """SCM answers the open hold; the request returns to PENDING_APPROVAL.
+
+    THE ANSWER IS WRITTEN ONCE, on the hold it answers — response, responder and
+    timestamp together, which is what the CHECK constraint requires.
+
+    APPROVED_BY / APPROVED_AT ARE CLEARED. A request held after approval and then
+    answered is back in front of an approver, and leaving the old approval stamped on it
+    would let a screen read "approved by X" on a row nobody has approved in its current
+    shape. The approver who releases it stamps it again.
+
+    NOT GUARDED BY _approver_entry(): this is the other side of the conversation, so the
+    predicate is user_can_respond_to_hold() — the SCM role, ON_HOLD, and an open hold to
+    answer — and it is the whole check, here and again under the lock.
+    """
+    payment, profile, refusal = _payment_for_action(request, payment_pk)
+    if refusal is not None:
+        return refusal
+    order_pk = payment.vendor_order_id
+    if request.method != 'POST':
+        return _payment_redirect(order_pk)
+    if not user_can_respond_to_hold(request.user, payment):
+        return HttpResponseForbidden()
+
+    response = request.POST.get('response', '').strip()
+    if not response:
+        messages.error(request, 'A response must say something. Nothing was changed.')
+        return _payment_redirect(order_pk)
+
+    with transaction.atomic():
+        locked = _locked_payment(payment_pk)
+        # The predicate again, INSIDE the lock — an approver may have approved or
+        # rejected this request between the page being drawn and this POST arriving,
+        # and either would close the hold this answer belongs to.
+        if not user_can_respond_to_hold(request.user, locked):
+            return _refuse_stale(request, locked, order_pk)
+        hold = locked.open_hold
+        hold.response     = response
+        hold.responded_by = profile
+        hold.responded_at = timezone.now()
+        hold.save(update_fields=['response', 'responded_by', 'responded_at'])
+        from_status = locked.status
+        locked.status      = PaymentRequest.PENDING_APPROVAL
+        locked.approved_by = None
+        locked.approved_at = None
+        locked.save(update_fields=['status', 'approved_by', 'approved_at'])
+        record_transition(locked, to_status=PaymentRequest.PENDING_APPROVAL,
+                          from_status=from_status, actor=profile, remark=response,
+                          project=locked.project)
+
+    _log_payment(payment, profile, 'respond',
+                 f'Responded to the hold on the ₹{payment.amount} payment request '
+                 f'(order {_order_ref(payment.vendor_order)}): {response}')
+    messages.success(request, 'Response recorded. The request is back with the approver.')
+    return _payment_redirect(order_pk)

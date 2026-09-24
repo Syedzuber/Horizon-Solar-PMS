@@ -184,6 +184,12 @@ class AdminUserEditForm(forms.Form):
                    'nothing on its own; being named keeper does not set it.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
+    is_payment_approver = forms.BooleanField(
+        required=False,
+        label='Payment approver',
+        help_text=('May approve, hold or reject payment requests they did not raise.'),
+        widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
+    )
     new_password = forms.CharField(
         min_length=8,
         required=False,

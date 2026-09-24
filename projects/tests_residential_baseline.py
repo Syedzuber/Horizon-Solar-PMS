@@ -872,8 +872,15 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(m3.amount_received, Decimal('100000.00'))
 
     def test_scm_raises_a_payment_request_and_finance_confirms_it(self):
-        """O2: the request is raised as an order's first payment on vendor_order_create;
-        what Finance then does with it is unchanged."""
+        """O2: the request is raised as an order's first payment on vendor_order_create.
+        O4: it now reaches Finance only after an approver releases it — the raise lands
+        PENDING_APPROVAL, and `confirm_payment_request` still looks for APPROVED, so the
+        approval step is a real link in this chain and not decoration. What Finance then
+        does with an approved request is unchanged.
+
+        THE RELATIONSHIP, NOT THE GATE (the rule this file is written to): what is pinned
+        here is that a raise leads to a payment Finance can confirm, through whatever
+        steps the product requires. O4 added a step; the chain still closes."""
         boq = self._seed_boq(self.project_a)
         boq_item = boq.items.first()
         vendor = Vendor.objects.create(name='Sunrise Traders',
@@ -900,10 +907,21 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(response.status_code, 302)
 
         pr = PaymentRequest.objects.get(project=self.project_a)
-        self.assertEqual(pr.status, PaymentRequest.APPROVED)
+        self.assertEqual(pr.status, PaymentRequest.PENDING_APPROVAL)
         self.assertEqual(pr.amount, Decimal('55000.00'))
         self.assertEqual(pr.requested_by, self.scm.user)
         self.assertEqual(pr.vendor_order.documents.get().file_name, 'po-77.pdf')
+
+        # O4: somebody who did not raise it approves it. Finance is the natural holder
+        # of the flag here, and approving is not confirming — the same person may do
+        # both, because only the REQUESTER is refused.
+        self.finance.is_payment_approver = True
+        self.finance.save(update_fields=['is_payment_approver'])
+        response = _client_for(self.finance).post(
+            reverse('payment_approve', args=[pr.pk]), {'remark': ''})
+        self.assertEqual(response.status_code, 302)
+        pr.refresh_from_db()
+        self.assertEqual(pr.status, PaymentRequest.APPROVED)
 
         response = _client_for(self.finance).post(
             reverse('confirm_payment_request', args=[self.project_a.project_id, pr.pk]),

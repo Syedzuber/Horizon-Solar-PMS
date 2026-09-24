@@ -911,3 +911,63 @@ removing them deliberately, is an operator decision to be made before the O1–O
 pushed.** Not O2d's to make.
 
 **Not fixed**: out of scope (R-12).
+
+## 26. O4 payment approval gate — what was left, and what the gate exposed
+
+**§O4-1. `is_payment_approver` is editable on ONE of the two user-edit screens, and that
+was a judgement call.** The prompt said to add the checkbox to whichever screen the
+pre-flight identified, and not to the other "unless both already carry the design flags".
+Both screens **do** carry `is_design_head` and `is_design_qc` — so read literally, the
+escape hatch fires. It was not taken. The Admin Panel's `admin_user_edit` is the only
+screen that carries a CAPABILITY flag (`is_qaqc`, `is_warehouse_keeper`), and
+`is_payment_approver` is one of those, not a design flag; the System Admin's
+`subadmin_departments` screen carries neither, and is a screen for a role deliberately
+barred from editing Admin and System Admin accounts. Granting a less-trusted role the
+power to create payment approvers is a widening that under-granting does not risk, and it
+is one line to reverse. **Whoever wants it there adds the checkbox to
+`subadmin/departments.html` AND the `request.POST.get(...) == 'on'` read in the
+`edit_user` branch, in the same commit** — the branch's own comment says why: an
+unchecked box posts nothing, so a read without a rendered box clears the flag on every
+save. **Risk if left:** low; the Admin can already set it.
+
+**§O4-2. `confirm_payment_request` still writes `approved -> confirmed` with no ledger
+row.** O4 instrumented five of `PaymentRequest`'s six transitions (§13). The sixth is the
+confirm, which is O5's and was explicitly out of scope here. Until it lands, §13 says a
+missing row on a `confirmed` payment means "not instrumented". **O5 must** add the
+`record_transition()` call in the same transaction as the status write.
+
+**§O4-3. Nobody is NOTIFIED of anything O4 does.** A held request tells SCM nothing; an
+approval tells nobody; a rejection tells nobody. The whole gate is discovered by opening
+the order page. The notification chokepoint exists (`send_notification`) and the design
+module's change requests are the worked precedent (3.1c-ii), so this is wiring, not
+design — but it is wiring nobody asked for in O4, and a gate people do not know they are
+standing in front of is how payments stall. **Risk if left:** medium, rising with the
+number of approvers. **Suggested owner:** O5, beside the Finance queue.
+
+**§O4-4. The five approval predicates have no PROJECT scope, only a flag.** An approver
+may decide any payment on any order they can read, and `user_can_view_vendor_order()`
+admits the five portfolio roles everywhere. That is consistent with D-4 (Finance and SCM
+are portfolio-wide because there is nothing to scope them on), and it is the right answer
+today — but it means one ticked box is company-wide spending authority, with no
+per-tender or per-value limit. **No approval threshold exists either**: a ₹500 request
+and a ₹5,000,000 request take the same single click from the same person. **Whoever adds
+limits** should put them beside `user_can_approve_payment()`, not inside the views.
+
+**Seen in passing, not fixed: the pre-existing CHECK made `on_hold` unreachable.**
+`payment_request_refusal_needs_reason` (O1) required `decision_reason` for BOTH `rejected`
+and `on_hold`. With the hold's reason living on `PaymentRequestHold`, holding a request
+raised `IntegrityError` on the status write. O4 narrowed the constraint to `rejected`
+(migration `0096`) rather than writing the same text into two places that could then
+disagree. **This is recorded because it was not foreseen by the prompt**, and because
+anyone re-widening that constraint will break every hold.
+
+**Seen in passing, not fixed: `project_overview` card 4b reads a two-state world.** Its
+badge is `{% if pr.status == 'approved' %}Pending{% else %}Confirmed{% endif %}`, so a
+`pending_approval`, `on_hold` or `rejected` payment now renders as **"Confirmed"** on that
+card — wrong, and visibly so. `payment_request_detail` and `my_documents` have the same
+two-state shape and degrade the same way. All three are O5/O6 screens and O4 was barred
+from them. **Risk if left:** medium — it is a misleading label rather than an error, but
+it says the opposite of the truth. **O5/O6 must** switch all three to
+`get_status_display`.
+
+**Not fixed**: out of scope (R-12).

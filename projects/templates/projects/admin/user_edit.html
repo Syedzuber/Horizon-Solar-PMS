@@ -123,6 +123,19 @@
             </label>
           </div>
 
+          <!-- Payment approver (O4) -- approves, holds or rejects a vendor payment
+               request before Finance pays it. Never their own request: the approval
+               views refuse the requester whatever flags they hold. -->
+          <div class="col-span-2 flex items-center gap-2 pt-1">
+            <input type="checkbox" name="is_payment_approver" id="id_is_payment_approver"
+                   {% if form.is_payment_approver.value %}checked{% endif %}
+                   class="form-check-input">
+            <label for="id_is_payment_approver" class="text-sm text-gray-700">
+              Payment approver — may approve, hold or reject payment requests they did
+              not raise.
+            </label>
+          </div>
+
           <!-- Design QC (Part 9) — the FIRST of the two OPEX design review gates -->
           <div class="col-span-2 flex items-center gap-2 pt-1">
             <input type="checkbox" name="is_design_qc" id="id_is_design_qc"

@@ -304,6 +304,18 @@ urlpatterns = [
          name='vendor_order_create_group'),
     path('programs/<int:program_pk>/orders/',     order_views.program_vendor_order_list,
          name='program_vendor_order_list'),
+    # O4 — the approval gate on a payment request. POST only; each action its own
+    # endpoint, because each has its own predicate and its own mandatory reason.
+    # Keyed on the PaymentRequest pk alone: a payment belongs to an order, and the order
+    # page is the only screen that draws these (the Finance queue is O5).
+    path('payments/<int:payment_pk>/approve/',        order_views.payment_approve,
+         name='payment_approve'),
+    path('payments/<int:payment_pk>/hold/',           order_views.payment_hold,
+         name='payment_hold'),
+    path('payments/<int:payment_pk>/reject/',         order_views.payment_reject,
+         name='payment_reject'),
+    path('payments/<int:payment_pk>/hold/respond/',   order_views.payment_hold_respond,
+         name='payment_hold_respond'),
 
     # ---------------------------------------------------------------------------
     # Webhooks — unauthenticated, no login required

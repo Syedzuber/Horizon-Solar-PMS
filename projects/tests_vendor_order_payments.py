@@ -99,11 +99,14 @@ class AddPaymentTests(PaymentFixture):
         self.assertEqual(pr.amount, Decimal('35000'))
         self.assertEqual(pr.vendor_order, self.order)
         self.assertEqual(pr.project, self.project)
-        self.assertEqual(pr.status, PaymentRequest.APPROVED)
+        # O4: a further payment is raised PENDING_APPROVAL, as on both raise pages. Was
+        # APPROVED until O4; the committed-balance arithmetic above is unaffected,
+        # because committed_total() counts every status but REJECTED.
+        self.assertEqual(pr.status, PaymentRequest.PENDING_APPROVAL)
         self.assertEqual(pr.requested_by, self.scm.user)
         transition = StatusTransition.objects.get(subject_type=SUBJECT_PAYMENT_REQUEST,
                                                   subject_id=pr.pk)
-        self.assertEqual(transition.to_status, PaymentRequest.APPROVED)
+        self.assertEqual(transition.to_status, PaymentRequest.PENDING_APPROVAL)
         self.assertTrue(ActivityLog.objects.filter(
             action_code='payment_request_raised', entity_id=pr.pk).exists())
 

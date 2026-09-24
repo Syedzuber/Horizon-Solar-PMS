@@ -162,13 +162,15 @@ class RaiseTests(RaiseFixture):
 
         pr = PaymentRequest.objects.get()
         self.assertEqual(pr.vendor_order, order)
-        self.assertEqual(pr.status, PaymentRequest.APPROVED)
+        # O4: the raise puts the payment in front of the approval gate, not in front of
+        # Finance. Was APPROVED until O4; the rest of this assertion is unchanged.
+        self.assertEqual(pr.status, PaymentRequest.PENDING_APPROVAL)
         self.assertEqual(pr.amount, Decimal('25000'))
         self.assertEqual(pr.requested_by, self.scm.user)
 
         transitions = StatusTransition.objects.filter(subject_type=SUBJECT_PAYMENT_REQUEST)
         self.assertEqual(transitions.count(), 1)
-        self.assertEqual(transitions.get().to_status, PaymentRequest.APPROVED)
+        self.assertEqual(transitions.get().to_status, PaymentRequest.PENDING_APPROVAL)
         self.assertEqual(transitions.get().subject_id, pr.pk)
 
     def test_the_same_client_uuid_twice_creates_one_order(self):
