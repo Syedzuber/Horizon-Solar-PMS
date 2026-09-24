@@ -507,7 +507,7 @@ def _subject_type_registry():
 
 def record_transition(subject, to_status, from_status='', actor=None,
                       reason_code='', remark='', project=None,
-                      client_uuid=None, occurred_at=None):
+                      client_uuid=None, occurred_at=None, notify=True):
     """
     Write one StatusTransition row. MUST be called inside the same
     transaction.atomic() block as the status change it records.
@@ -543,6 +543,13 @@ def record_transition(subject, to_status, from_status='', actor=None,
         client_uuid: R-14 idempotency key. A repeat is IGNORED — same row
                      returned, nothing duplicated, no exception.
         occurred_at: override for "now", for a replayed offline submission.
+        notify:      False records the row WITHOUT the notices a post_save receiver
+                     would send for it (today only signals.payment_transition_notices
+                     listens). Stored on the Python object as `_notify`, never in a
+                     column: the receiver reads it off the very instance it is handed,
+                     and nothing reads it after that. For tests that record a move only
+                     as setup, and for any bulk or corrective script — see
+                     docs/execution-model.md §12, 24 Sep (O6).
 
     Returns the StatusTransition row (existing one on an idempotent repeat).
     """
@@ -604,6 +611,8 @@ def record_transition(subject, to_status, from_status='', actor=None,
         client_uuid=client_uuid or None,
         occurred_at=occurred_at or timezone.now(),
     )
+    # Read by post_save receivers (signals.payment_transition_notices) during save().
+    row._notify = notify
 
     if not client_uuid:
         row.save()

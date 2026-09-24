@@ -23,8 +23,9 @@ Two shapes, and the difference is deliberate rather than sloppy:
 
   404  — the project-scope gate (`user_can_view_project`). A project you have no
          relationship to does not exist as far as you are concerned. Used by the eighteen
-         A.5 detail endpoints, confirm_grn, payment_request_detail and the PM arm of
-         set_milestone_amounts.
+         A.5 detail endpoints, confirm_grn and the PM arm of set_milestone_amounts.
+         (payment_request_detail was here until O6 made it a redirect to the order page,
+         whose own gate answers 403.)
   403  — the role gate (`role_required`). The object may well exist; your ROLE is wrong.
          0.2 standardised this on HttpResponseForbidden so it matches the
          permissions.py-gated views, which already answered 403.
@@ -55,7 +56,7 @@ from django.urls import reverse
 
 from .models import (
     DCLineItem, DeliveryChallan, Issue, PaymentRequest, Project, Task, UserProfile,
-    Vendor, VendorOrder,
+    Vendor, VendorOrder, VendorOrderSite,
 )
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to
 
@@ -436,33 +437,36 @@ class RoleGateScopingTests(AccessIsolationBase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()['success'])
 
+    def _site_payment(self):
+        """A payment on an order sized against project_b — the shape every raise writes."""
+        vendor = Vendor.objects.create(name='Acme Supplies')
+        order = VendorOrder.objects.create(
+            vendor=vendor, project_type='Residential', created_by=self.scm,
+            total_amount=Decimal('50000.00'))
+        VendorOrderSite.objects.create(order=order, project=self.project_b)
+        return PaymentRequest.objects.create(
+            project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
+            requested_by=self.pm_b.user, vendor_order=order)
+
     def test_a_pm_cannot_read_another_pms_payment_request(self):
         """The vendor invoice number, the amount and the document URL were all readable by
-        any PM in the company."""
-        vendor = Vendor.objects.create(name='Acme Supplies')
-        pr = PaymentRequest.objects.create(
-            project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
-            requested_by=self.pm_b.user,
-            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm,
-                total_amount=Decimal('50000.00')),
-        )
+        any PM in the company. O6: the old URL is a redirect to the order page, and THAT
+        page is the gate — user_can_view_vendor_order() refuses a PM with no site on it."""
+        pr = self._site_payment()
         response = _client_for(self.pm_a).get(
-            reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))
-        self.assertEqual(response.status_code, 404)
+            reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]),
+            follow=True)
+        self.assertEqual(response.status_code, 403)
 
     def test_the_owning_pm_can_still_read_their_own_payment_request(self):
-        vendor = Vendor.objects.create(name='Acme Supplies')
-        pr = PaymentRequest.objects.create(
-            project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
-            requested_by=self.pm_b.user,
-            vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm,
-                total_amount=Decimal('50000.00')),
-        )
+        pr = self._site_payment()
         response = _client_for(self.pm_b).get(
-            reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))
+            reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]),
+            follow=True)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain[-1][0],
+                         reverse('vendor_order_detail', args=[pr.vendor_order_id])
+                         + f'#payment-{pr.pk}')
 
 
 # ---------------------------------------------------------------------------

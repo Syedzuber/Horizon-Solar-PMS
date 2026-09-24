@@ -205,10 +205,10 @@ the page. That is a real defect this module has shipped before.
       <tbody>
         {% for row in payments %}
         {% with p=row.payment %}
-        <tr>
+        <tr id="payment-{{ p.pk }}">
           <td class="text-nowrap">{{ p.requested_date|date:"d M Y" }}</td>
           <td>{{ p.requested_by.get_full_name|default:p.requested_by.username }}</td>
-          <td class="text-end">{% if p.is_partially_approved %}<span class="text-nowrap">₹{{ p.amount|floatformat:2 }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:2 }} approved</span>{% else %}{{ p.amount|floatformat:2 }}{% endif %}</td>
+          <td class="text-end">{% include 'projects/partials/payment_amount.html' with p=p places=2 bare=True %}</td>
           <td>
             {{ p.get_status_display }}
             {% if p.status == 'approved' and p.approved_by %}

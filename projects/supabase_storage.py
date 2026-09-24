@@ -28,10 +28,10 @@ def vendor_order_document_url(doc):
     purpose: every screen that links a PO, PI or invoice must come through here, so the
     day these files move to a private bucket this body changes and nothing else does.
 
-    Built the way raise_payment_request builds its invoice URL — SUPABASE_URL, then
-    /storage/v1/object/public/, then bucket and path — except that the path is
-    URL-encoded. That one builds it from the raw filename, so a name with a space or a
-    '#' produces a broken link; '/' is kept so the path's folders survive.
+    Built the way the retired stand-alone payment raise built its invoice URL (deleted in
+    O6) — SUPABASE_URL, then /storage/v1/object/public/, then bucket and path — except
+    that the path is URL-encoded. That one built it from the raw filename, so a name with
+    a space or a '#' produced a broken link; '/' is kept so the path's folders survive.
     """
     from urllib.parse import quote
     from django.conf import settings

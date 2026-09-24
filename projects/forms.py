@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation
 from .utils import roles_for_phase
+from .permissions import PAYMENT_APPROVER_ROLES
 
 
 class UserCreateForm(forms.Form):
@@ -187,7 +188,8 @@ class AdminUserEditForm(forms.Form):
     is_payment_approver = forms.BooleanField(
         required=False,
         label='Payment approver',
-        help_text=('May approve, hold or reject payment requests they did not raise.'),
+        help_text=('May approve, hold or reject payment requests they did not raise. '
+                   'Finance and CEO users only.'),
         widget=forms.CheckboxInput(attrs={'class': 'form-check-input'}),
     )
     new_password = forms.CharField(
@@ -247,6 +249,13 @@ class AdminUserEditForm(forms.Form):
         if pw and pw != cpw:
             self.add_error('confirm_password', 'Passwords do not match.')
         role = cleaned.get('role')
+        # O6: the approver flag belongs to Finance and CEO only. Checked against the role
+        # being SAVED, so changing a flag holder's role to anything else is refused until
+        # the box is cleared — the flag cannot outlive the role that justified it.
+        if cleaned.get('is_payment_approver') and role and role not in PAYMENT_APPROVER_ROLES:
+            self.add_error('is_payment_approver',
+                           f'Only a Finance or CEO user may be a payment approver. '
+                           f'Untick "Payment approver" to save this user as {role}.')
         if role == 'Admin' and self._instance_user:
             already_exists = UserProfile.objects.filter(role='Admin').exclude(
                 user=self._instance_user

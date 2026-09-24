@@ -8,8 +8,9 @@ What this file pins, and why each matters:
     Draft-status OPEX sites are listed too: nothing here filters on a project's status.
   * THE APPROVER IS NOT THE PAYER. The person who approved a request, and the person who
     raised it, cannot mark it paid; another Finance user can.
-  * MARK-PAID IS ONE WRITER. The queue's form and the project page's confirm both go
-    through payments.mark_payment_paid(): the same refusals and the same ledger row.
+  * MARK-PAID IS ONE WRITER. The queue's form goes through payments.mark_payment_paid()
+    (the project page's confirm did too, until O6 deleted it): one set of refusals, one
+    ledger row.
   * AN ACTION FROM THE QUEUE COMES BACK TO THE QUEUE, same tab and filter, although the
     O4 views it reaches are unchanged and still redirect to the order on their own.
   * FOUR MOVES NOTIFY, IN-APP ONLY, NEVER THE ACTOR.
@@ -338,56 +339,9 @@ class MarkPaidTests(QueueFixture):
         self.assertEqual(self.opex_pay.status, PaymentRequest.APPROVED)
 
 
-class ConfirmThroughServiceTests(QueueFixture):
-    """The project page's confirm is the same writer as the queue's mark-paid."""
-
-    def confirm(self, profile, payment, reference='UTR-77', date=None):
-        return _client(profile).post(
-            reverse('confirm_payment_request', args=[payment.project.project_id, payment.pk]),
-            {'payment_date': (date or timezone.localdate()).isoformat(),
-             'payment_reference': reference})
-
-    def setUp(self):
-        super().setUp()
-        self.res_approved = _make_payment(self, self.res_order, status=PaymentRequest.APPROVED,
-                                          approved_by=self.approver)
-
-    def test_the_approver_is_refused_here_too(self):
-        response = self.confirm(self.approver, self.res_approved)
-        self.assertIn('You approved this request', ' '.join(_messages(response)))
-        self.res_approved.refresh_from_db()
-        self.assertEqual(self.res_approved.status, PaymentRequest.APPROVED)
-
-    def test_a_reference_is_mandatory_here_too(self):
-        self.confirm(self.finance, self.res_approved, reference='')
-        self.res_approved.refresh_from_db()
-        self.assertEqual(self.res_approved.status, PaymentRequest.APPROVED)
-
-    def test_a_held_request_is_a_message_not_a_404(self):
-        response = self.confirm(self.finance, self.res_pay)
-        self.assertEqual(response.status_code, 302)
-        self.assertIn('cannot be marked paid', ' '.join(_messages(response)))
-
-    def test_it_writes_the_same_ledger_row(self):
-        self.confirm(self.finance, self.res_approved)
-        self.res_approved.refresh_from_db()
-        self.assertEqual(self.res_approved.status, PaymentRequest.CONFIRMED)
-        row = StatusTransition.objects.get(subject_type=SUBJECT_PAYMENT_REQUEST,
-                                           subject_id=self.res_approved.pk)
-        self.assertEqual((row.from_status, row.to_status, row.actor, row.remark),
-                         (PaymentRequest.APPROVED, PaymentRequest.CONFIRMED,
-                          self.finance, 'UTR-77'))
-
-    def test_invoice_paid_is_no_longer_sent(self):
-        from unittest.mock import patch
-        with patch('projects.views.send_notification') as views_sender, \
-             patch('projects.payments.send_notification') as notice_sender:
-            with self.captureOnCommitCallbacks(execute=True):
-                self.confirm(self.finance, self.res_approved)
-        views_sender.assert_not_called()
-        for call in notice_sender.call_args_list:
-            self.assertEqual(call.kwargs['channels'], ['in_app'])
-            self.assertNotIn('template', call.kwargs)
+# ConfirmThroughServiceTests lived here until O6 deleted the project page's confirm door.
+# Everything it pinned — the approver and the requester refused, a mandatory reference,
+# the APPROVED -> CONFIRMED ledger row — is MarkPaidTests above, through the one door left.
 
 
 # ---------------------------------------------------------------------------

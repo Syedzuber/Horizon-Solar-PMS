@@ -247,14 +247,15 @@ class ResidentialRaiseUnchangedTests(RaiseFixture):
 
 
 # ---------------------------------------------------------------------------
-# The readers O2d may not change — none of them may 500
+# The readers of PaymentRequest.project — O6 rewrote them, and none may 500
 # ---------------------------------------------------------------------------
 
 class NullAnchorReaderTests(ScopeFixture):
-    """Every reader of PaymentRequest.project named in O2d's pre-flight that this prompt
-    is forbidden from changing. Each filters on `project`, so a NULL-anchor payment is
-    silently EXCLUDED rather than rendered — these assert that the exclusion is clean and
-    that no page breaks. Making such a payment VISIBLE on them is O5's and O6's work."""
+    """Every reader of PaymentRequest.project named in O2d's pre-flight. Until O6 each
+    filtered on `project` and silently EXCLUDED a NULL-anchor payment; O6 rewrote them to
+    read through `vendor_order`, so the site-less payment is now COUNTED and LISTED —
+    except on card 4b, which lists the orders sized against ONE site, and a site-less
+    order is sized against none. The confirm door that could not reach it is deleted."""
 
     def setUp(self):
         self.order    = _bare_order(self)
@@ -262,39 +263,42 @@ class NullAnchorReaderTests(ScopeFixture):
         _pay(self, self.anchored, '10000')
         self.siteless = _pay_siteless(self, '40000')
 
-    def test_the_finance_dashboard_renders_and_counts_only_anchored_payments(self):
+    def test_the_finance_dashboard_counts_the_siteless_payment(self):
         response = _client(self.finance).get(reverse('dashboard_finance'))
         self.assertEqual(response.status_code, 200)
-        # One anchored payment on the portfolio; the site-less one joins no project.
-        self.assertEqual(response.context['total_payment_requests'], 1)
-        self.assertEqual(response.context['total_payment_request_value'], Decimal('10000'))
+        self.assertEqual(response.context['total_payment_requests'], 2)
+        self.assertEqual(response.context['total_payment_request_value'], Decimal('50000'))
 
-    def test_the_ceo_dashboard_renders_and_counts_only_anchored_payments(self):
+    def test_the_ceo_dashboard_counts_the_siteless_payment(self):
         response = _client(self.ceo).get(reverse('dashboard_ceo'))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.context['fin_payment_requests_pending'], 1)
+        self.assertEqual(response.context['fin_payment_requests_pending'], 2)
 
-    def test_project_overview_renders_and_lists_only_its_own_payments(self):
+    def test_project_overview_lists_only_orders_sized_against_this_site(self):
         response = _client(self.pm).get(
             reverse('project_overview', args=[self.project.project_id]))
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(self.siteless, list(response.context['payment_requests']))
+        orders = [entry['order'] for entry in response.context['site_orders']]
+        self.assertEqual(orders, [self.anchored])
 
-    def test_my_documents_renders_for_the_scm_who_raised_it(self):
+    def test_my_documents_lists_the_siteless_payment(self):
         response = _client(self.scm).get(reverse('my_documents'))
         self.assertEqual(response.status_code, 200)
-        self.assertNotIn(self.siteless, list(response.context['pr_list']))
+        self.assertIn(self.siteless, list(response.context['pr_list']))
+        self.assertContains(response, reverse('vendor_order_detail', args=[self.order.pk]))
 
-    def test_the_payment_detail_page_has_no_url_for_a_siteless_payment(self):
-        # Its URL is /projects/<project_id>/payment-request/<pk>/. There is no project_id
-        # to build it with, so the page is unreachable rather than broken. O6 owns this.
+    def test_the_payment_detail_url_redirects_a_siteless_payment_to_its_order(self):
+        # Any project_id resolves: the lookup is by the payment alone (O6).
         response = _client(self.scm).get(reverse(
             'payment_request_detail', args=[self.project.project_id, self.siteless.pk]))
-        self.assertEqual(response.status_code, 404)
+        self.assertRedirects(
+            response,
+            reverse('vendor_order_detail', args=[self.order.pk]) + f'#payment-{self.siteless.pk}',
+            fetch_redirect_response=False)
 
-    def test_confirm_refuses_a_siteless_payment_under_any_projects_url(self):
-        response = _client(self.finance).post(reverse(
-            'confirm_payment_request', args=[self.project.project_id, self.siteless.pk]),
+    def test_the_old_confirm_url_is_gone(self):
+        response = _client(self.finance).post(
+            f'/projects/{self.project.project_id}/payment-requests/{self.siteless.pk}/confirm/',
             {'payment_date': '2026-09-23', 'payment_reference': 'UTR-1'})
         self.assertEqual(response.status_code, 404)
         self.siteless.refresh_from_db()

@@ -75,7 +75,7 @@ Bootstrap only, matching the cards around it.
         query (design_views._tender_order_counts), not from a query per row.
       {% endcomment %}
       <a href="{% url 'program_vendor_order_list' program_pk=row.program.pk %}"
-         class="btn btn-sm btn-outline-secondary text-nowrap me-2 mb-1">Payment requests ({{ row.order_count }})</a>
+         class="btn btn-sm btn-outline-secondary text-nowrap me-2 mb-1">PO / PI records ({{ row.order_count }})</a>
       {% if can_raise_group_order %}
       <a href="{% url 'vendor_order_create_group' %}?program={{ row.program.pk }}"
          class="btn btn-sm btn-outline-secondary text-nowrap me-2 mb-1">Raise payment request</a>

@@ -73,7 +73,7 @@
           {{ total_payment_requests }}
         </div>
         <div class="small text-muted mt-1">Payment Requests Pending</div>
-        {# O5: link only — the queue lists every payment, incl. site-less ones this tile misses. #}
+        {# O6: counted by payments.payment_counts(), as the queue's tabs are — the two agree. #}
         <a href="{% url 'payment_queue' %}" class="small">Open payments queue →</a>
       </div>
     </div>
@@ -82,7 +82,7 @@
     <div class="card shadow-sm border-0 h-100">
       <div class="card-body py-3 text-center">
         <div class="fin-stat-num {% if total_payment_request_value > 0 %}text-warning{% else %}text-muted{% endif %}">
-          ₹{{ total_payment_request_value|floatformat:0 }}
+          {% if total_payment_request_requested != total_payment_request_value %}<span class="fs-6"><span class="text-nowrap">₹{{ total_payment_request_requested|floatformat:0 }} requested</span> · <span class="text-nowrap">₹{{ total_payment_request_value|floatformat:0 }} approved</span></span>{% else %}₹{{ total_payment_request_value|floatformat:0 }}{% endif %}
         </div>
         <div class="small text-muted mt-1">Vendor Payments Outstanding</div>
       </div>
@@ -232,9 +232,9 @@
           <span class="ms-dot ms-dot-invoiced"></span>
           <div class="flex-grow-1" style="min-width:0;">
             <div class="small fw-semibold text-truncate">{{ pr.vendor }}</div>
-            <div class="small text-muted">Inv # {{ pr.invoice_number }} · {{ pr.requested_date|date:"d M Y" }}</div>
+            <div class="small text-muted">{{ pr.order_ref }} · {{ pr.requested_date|date:"d M Y" }}</div>
           </div>
-          <span class="small fw-bold">₹{{ pr.amount|floatformat:0 }}</span>
+          <span class="small fw-bold">{% include 'projects/partials/payment_amount.html' with p=pr.payment places=0 %}</span>
         </div>
         {% endfor %}
       </div>

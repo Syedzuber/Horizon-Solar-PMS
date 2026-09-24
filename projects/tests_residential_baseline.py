@@ -874,9 +874,10 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
     def test_scm_raises_a_payment_request_and_finance_confirms_it(self):
         """O2: the request is raised as an order's first payment on vendor_order_create.
         O4: it now reaches Finance only after an approver releases it — the raise lands
-        PENDING_APPROVAL, and `confirm_payment_request` still looks for APPROVED, so the
-        approval step is a real link in this chain and not decoration. What Finance then
-        does with an approved request is unchanged.
+        PENDING_APPROVAL, and mark-paid still looks for APPROVED, so the approval step is
+        a real link in this chain and not decoration. O6: Finance pays from the payments
+        queue (payment_mark_paid) — the project page's confirm door is deleted, so there
+        is one path to pay.
 
         THE RELATIONSHIP, NOT THE GATE (the rule this file is written to): what is pinned
         here is that a raise leads to a payment Finance can confirm, through whatever
@@ -926,7 +927,7 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(pr.status, PaymentRequest.APPROVED)
 
         response = _client_for(self.finance).post(
-            reverse('confirm_payment_request', args=[self.project_a.project_id, pr.pk]),
+            reverse('payment_mark_paid', args=[pr.pk]),
             {'payment_date': date.today().isoformat(), 'payment_reference': 'UTR-991'},
         )
         self.assertEqual(response.status_code, 302)
@@ -1587,14 +1588,12 @@ class NotificationTests(ResidentialBaselineBase):
         `invoice_paid` on three channels to every SCM, the project's managers and every
         CEO; O5 removed that send (O7 brings payment notices back on WhatsApp and email)
         and the requester now hears, in-app, from payments.send_payment_notices(). What
-        stays pinned: a confirmation tells the person who asked for the money."""
-        boq = self._seed_boq(self.project_a)
+        stays pinned: a confirmation tells the person who asked for the money. O6: through
+        the payments queue's mark-paid, the one door left."""
         vendor = Vendor.objects.create(name='Sunrise', contact_person='R',
                                        phone='9000000003')
         pr = PaymentRequest.objects.create(
-            project=self.project_a, vendor=vendor, boq_item=boq.items.first(),
-            invoice_number='INV-9', invoice_document_name='i.pdf',
-            invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
+            project=self.project_a, vendor=vendor,
             amount=Decimal('25000.00'), requested_by=self.scm.user,
             status=PaymentRequest.APPROVED, approved_amount=Decimal('25000.00'),
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
@@ -1605,8 +1604,7 @@ class NotificationTests(ResidentialBaselineBase):
         with patch('projects.views.send_notification') as sender,              patch('projects.payments.send_notification') as notice:
             with self.captureOnCommitCallbacks(execute=True):
                 _client_for(self.finance).post(
-                    reverse('confirm_payment_request',
-                            args=[self.project_a.project_id, pr.pk]),
+                    reverse('payment_mark_paid', args=[pr.pk]),
                     {'payment_date': date.today().isoformat(),
                      'payment_reference': 'UTR-1'},
                 )

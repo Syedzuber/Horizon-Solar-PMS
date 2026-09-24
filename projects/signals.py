@@ -23,8 +23,19 @@ def payment_transition_notices(sender, instance, created, **kwargs):
     notice until that transaction commits, so a move that rolls back — a refusal inside
     the lock, a lost race — tells nobody. An idempotent replay of record_transition()
     returns the existing row without saving, so it notifies nobody twice.
+
+    SUPPRESSIBLE (O6). record_transition(..., notify=False) sets `_notify = False` on the
+    row before saving it, and this receiver then sends nothing. The flag lives on the
+    Python object, not in a column: post_save hands this function the same instance
+    record_transition() built, and nothing needs it afterwards. A row saved any other way
+    has no `_notify` and notifies as before. THIS IS THE ONE SANCTIONED EXCEPTION to
+    "every send is a manual call site" (docs/execution-model.md §12, 24 Sep): a bulk or
+    corrective script that records payment moves MUST pass notify=False, or every row it
+    writes notifies real approvers and requesters.
     """
     if not created or instance.subject_type != SUBJECT_PAYMENT_REQUEST:
+        return
+    if not getattr(instance, '_notify', True):
         return
     from .payments import send_payment_notices
     transaction.on_commit(lambda: send_payment_notices(instance))

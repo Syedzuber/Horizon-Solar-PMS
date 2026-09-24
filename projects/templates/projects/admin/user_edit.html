@@ -132,9 +132,10 @@
                    class="form-check-input">
             <label for="id_is_payment_approver" class="text-sm text-gray-700">
               Payment approver — may approve, hold or reject payment requests they did
-              not raise.
+              not raise. Finance and CEO users only.
             </label>
           </div>
+          {% if form.is_payment_approver.errors %}<p class="col-span-2 text-xs text-red-600">{{ form.is_payment_approver.errors|join:", " }}</p>{% endif %}
 
           <!-- Design QC (Part 9) — the FIRST of the two OPEX design review gates -->
           <div class="col-span-2 flex items-center gap-2 pt-1">

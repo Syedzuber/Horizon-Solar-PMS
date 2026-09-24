@@ -14,9 +14,11 @@ EXECUTION_MODULE_DEFERRED.md §25 recorded against the Finance dashboard. Nothin
 filters on a project's status or joins through `project` to decide what is listed — a
 payment on a Draft OPEX site, or on no site at all, is still money somebody has to pay.
 
-FLAT IN THE NUMBER OF ROWS. One grouped query carries every tab's counts and the tiles'
-sums, one more the invoice-awaited count, then the page and its six prefetches. Fifty
-rows cost what one row costs.
+FLAT IN THE NUMBER OF ROWS. One payments.payment_counts() query per tab carries that
+tab's counts and the tiles' sums (O6: the same function the Finance and CEO dashboards
+call, so the three cannot disagree), one more asks whether any CAPEX order exists, one
+the invoice-awaited count, then the page and its six prefetches. Fifty rows cost what one
+row costs.
 """
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -24,7 +26,7 @@ from urllib.parse import urlencode
 from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import (
-    Count, DecimalField, F, OuterRef, Prefetch, Q, Subquery, Sum, Value,
+    DecimalField, F, OuterRef, Prefetch, Q, Subquery, Sum, Value,
 )
 from django.db.models.functions import Coalesce
 from django.http import Http404, HttpResponseForbidden, HttpResponseRedirect
@@ -40,7 +42,7 @@ from .models import (
     VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE, effective_amount_sum,
 )
 from .order_views import _order_money, payment_approve, payment_hold, payment_reject
-from .payments import PaymentRefused, mark_payment_paid
+from .payments import PaymentRefused, mark_payment_paid, payment_counts
 from .permissions import (
     PAYMENT_MARK_PAID_ROLES, user_can_approve_payment, user_can_hold_payment,
     user_can_mark_paid, user_can_reject_payment, user_can_view_payment_queue,
@@ -86,18 +88,6 @@ def _safe_queue_next(request):
     if not target.startswith(reverse('payment_queue')):
         return None
     return target
-
-
-def _grouped_counts():
-    """{(project_type, status): (count, amount)} over every payment. ONE query, joined
-    through `vendor_order` (NOT NULL) and never through `project`. The amount is the sum
-    of effective_amount (O4b): an approved tile totals what was approved."""
-    rows = (PaymentRequest.objects
-            .values('vendor_order__project_type', 'status')
-            .annotate(n=Count('pk'), amount=effective_amount_sum())
-            .order_by())
-    return {(r['vendor_order__project_type'], r['status']): (r['n'], r['amount'] or Decimal('0'))
-            for r in rows}
 
 
 def _invoice_awaited_orders(project_type):
@@ -180,7 +170,12 @@ def payment_queue(request):
     if not user_can_view_payment_queue(request.user):
         return HttpResponseForbidden()
 
-    tab_values = [value for value, _ in QUEUE_TABS]
+    # A5: CAPEX is not operational (EXECUTION_MODULE_DEFERRED.md §28), so its tab is drawn
+    # only once a CAPEX order exists — an always-empty tab reads as "nothing to pay".
+    shown_tabs = [(value, label) for value, label in QUEUE_TABS
+                  if value != 'CAPEX'
+                  or VendorOrder.objects.filter(project_type='CAPEX').exists()]
+    tab_values = [value for value, _ in shown_tabs]
     tab = request.GET.get('tab', '')
     if tab not in tab_values:
         tab = tab_values[0]
@@ -189,10 +184,12 @@ def payment_queue(request):
         status = ''
     q = request.GET.get('q', '').strip()[:100]
 
-    counts = _grouped_counts()
+    # One payment_counts() per tab, each with a one-item list (O6).
+    counts = {value: payment_counts([value]) for value in tab_values}
 
     def cell(project_type, st):
-        return counts.get((project_type, st), (0, Decimal('0')))
+        totals = counts[project_type][st]
+        return (totals.count, totals.amount)
 
     # Every tab's label carries its own backlog, so one tab's work is visible from the
     # others — there is deliberately no combined tab to hide it in.
@@ -201,7 +198,7 @@ def payment_queue(request):
         'to_approve': cell(value, PaymentRequest.PENDING_APPROVAL)[0],
         'to_pay':     cell(value, PaymentRequest.APPROVED)[0],
         'url':        '?' + _query_string(tab=value),
-    } for value, label in QUEUE_TABS]
+    } for value, label in shown_tabs]
 
     tiles = {
         'awaiting': cell(tab, PaymentRequest.PENDING_APPROVAL),

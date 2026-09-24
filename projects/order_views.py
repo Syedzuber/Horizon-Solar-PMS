@@ -7,8 +7,8 @@ self-contained subsystem with its own URL group. urls.py imports it beside `view
 WHAT AN ORDER IS. A VendorOrder RECORDS a purchase placed outside PMS (see the section
 note above VendorOrder in models.py). This page is where SCM writes that record: the
 vendor, the PO / PI numbers, the lines bought for this site, the documents, and
-optionally the first payment against it. It replaces raise_payment_request, which
-created a payment with no order.
+optionally the first payment against it. It replaces the project page's old stand-alone
+payment raise (retired in O2, deleted in O6), which created a payment with no order.
 
 RESIDENTIAL ONLY, ONE SITE PER ORDER. OPEX orders span a procurement group and arrive
 with group ordering in O3; user_can_raise_vendor_order() refuses them here.
@@ -633,8 +633,6 @@ def vendor_order_create(request, project_pk):
         ])
         pr = None
         if payment:
-            # The legacy invoice fields are NOT NULL until O6 drops them; an order's
-            # invoices live on VendorOrderDocument now, so they are written blank.
             pr = PaymentRequest.objects.create(
                 vendor_order=order, project=project, vendor=vendor,
                 amount=payment['amount'], note=payment['note'],
@@ -643,8 +641,6 @@ def vendor_order_create(request, project_pk):
                 # no longer goes straight to Finance. committed_total() counts it either
                 # way, so the order's arithmetic is unchanged.
                 status=PaymentRequest.PENDING_APPROVAL,
-                invoice_number='', invoice_document_name='',
-                invoice_document_url='', invoice_document_path='',
             )
             # Inside the atomic block: record_transition's contract is that the row
             # and the status it records commit together or not at all.
@@ -854,8 +850,6 @@ def vendor_order_add_payment(request, order_pk):
                     # but REJECTED, so a pending payment holds its money exactly as an
                     # approved one did.
                     status=PaymentRequest.PENDING_APPROVAL,
-                    invoice_number='', invoice_document_name='',
-                    invoice_document_url='', invoice_document_path='',
                     client_uuid=client_uuid,
                 )
                 # Inside the atomic block, as record_transition's contract requires.
@@ -1473,16 +1467,12 @@ def vendor_order_create_group(request):
             )
             for line in cleaned['lines']
         ])
-        # The legacy invoice fields are NOT NULL until O6 drops them; an order's invoices
-        # live on VendorOrderDocument now, so they are written blank.
         pr = PaymentRequest.objects.create(
             vendor_order=order, project=anchor, vendor=vendor,
             amount=payment['amount'], note=payment['note'],
             requested_by=request.user,
             # PENDING_APPROVAL since O4, exactly as both other raise paths create it.
             status=PaymentRequest.PENDING_APPROVAL,
-            invoice_number='', invoice_document_name='',
-            invoice_document_url='', invoice_document_path='',
         )
         # Inside the atomic block: record_transition's contract is that the row and the
         # status it records commit together or not at all.

@@ -111,7 +111,7 @@ single-line and the rest would render into the page.
             </div>
           </td>
           <td>{{ p.scope_label }}</td>
-          <td class="text-end">{% if p.is_partially_approved %}<span class="text-nowrap">₹{{ p.amount|floatformat:2 }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:2 }} approved</span>{% else %}<span class="text-nowrap">{{ p.amount|floatformat:2 }}</span>{% endif %}</td>
+          <td class="text-end">{% include 'projects/partials/payment_amount.html' with p=p places=2 bare=True %}</td>
           <td>
             {{ p.get_status_display }}
             {% if p.status == 'approved' and p.approved_by %}

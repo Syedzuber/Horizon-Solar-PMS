@@ -273,16 +273,6 @@ urlpatterns = [
     path('projects/<str:project_id>/overview/', views.project_overview, name='project_overview'),
 
     # ---------------------------------------------------------------------------
-    # Payment Requests — SCM raises, Finance confirms, PM/SCM/Finance view
-    # ---------------------------------------------------------------------------
-    # Raise payment request — SCM role only
-    path('projects/<str:project_id>/payment-requests/raise/',
-         views.raise_payment_request, name='raise_payment_request'),
-    # Confirm payment request — Finance role only
-    path('projects/<str:project_id>/payment-requests/<int:request_id>/confirm/',
-         views.confirm_payment_request, name='confirm_payment_request'),
-
-    # ---------------------------------------------------------------------------
     # Vendor orders (O2) — SCM records a Residential order and its first payment;
     # the order page is read-only. order_views.py, a separate module.
     # Keyed on the project's pk, not project_id: an order is not a project page.
@@ -469,6 +459,7 @@ urlpatterns = [
     path('profile/documents/',    views.my_documents,    name='my_documents'),
     path('profile/change-password/', views.change_password, name='change_password'),
     path('design-submissions/<int:pk>/', views.design_submission_detail, name='design_submission_detail'),
+    # O6: a redirect to the payment's row on its order page; the page itself is retired.
     path('projects/<str:project_id>/payment-requests/<int:request_id>/',
          views.payment_request_detail, name='payment_request_detail'),
 

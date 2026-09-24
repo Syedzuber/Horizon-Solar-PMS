@@ -674,110 +674,77 @@
 
 </div>{# end BOQ + DC + Materials row #}
 
-{# ── 4b. Invoice Confirmation (Finance action / PM + SCM read-only) ────────── #}
-{# Red/orange = cash out (payment requests) — distinct from green/gold milestones (cash in) #}
+{% comment %}
+4b. Vendor orders (O6) — every order sized against this site, newest first, with its money
+and its payments. READ-ONLY FOR EVERY ROLE: Finance pays from the payments queue, the one
+path to pay; the confirm button and its modal were retired with the view they posted to.
+Built around ORDERS, not PaymentRequest.project: a group order anchored to another site
+is listed here because this site is one it was sized against. Status is the model's own
+label (get_status_display) — never a two-state branch.
+{% endcomment %}
 {% if role == 'Finance' or role == 'PM' or role == 'SCM' or role == 'Admin' %}
-<div class="card shadow-sm mb-4">
-  <div class="card-header d-flex justify-content-between align-items-center"
+<div class="card shadow-sm mb-4" id="vendor-orders-card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2"
        style="background:#fff3cd; border-bottom:2px solid #f0a829;">
     <span class="fw-semibold small">
       <i class="bi bi-receipt me-1" style="color:#f0a829;"></i>
-      Payment Requests
+      Vendor orders
+      {% if site_orders %}<span class="badge ms-1" style="background:#f0a829; color:#000;">{{ site_orders|length }}</span>{% endif %}
     </span>
-    <div class="d-flex align-items-center gap-2">
-      {% with pending_count=payment_requests|length %}
-      {% if pending_count > 0 %}
-        <span class="badge" style="background:#f0a829; color:#000;">{{ pending_count }}</span>
+    <div class="d-flex align-items-center gap-3 small">
+      {% if show_order_list_link %}
+      <a href="{% url 'vendor_order_list' project.pk %}" class="text-decoration-none">All orders for this site</a>
       {% endif %}
-      {% endwith %}
+      {% if show_payment_queue_link %}
+      <a href="{% url 'payment_queue' %}?tab={{ project.project_type|urlencode }}" class="text-decoration-none">Pay from the payments queue</a>
+      {% endif %}
     </div>
   </div>
   <div class="card-body p-0">
-    {% if payment_requests %}
-    <div class="table-responsive">
-      <table class="table table-sm table-hover mb-0">
-        <thead class="table-light">
-          <tr>
-            <th>Vendor</th>
-            <th>BOQ Item</th>
-            <th>Invoice #</th>
-            <th class="text-end">Amount (₹)</th>
-            <th>Document</th>
-            <th style="width:8rem;">Raised</th>
-            <th style="width:9rem;">Status</th>
-            {% if role == 'Finance' %}<th style="width:7rem;">Action</th>{% endif %}
-          </tr>
-        </thead>
-        <tbody>
-          {% for pr in payment_requests %}
-          <tr>
-            <td class="fw-semibold small">{{ pr.vendor.name|default:"—" }}{% if pr.vendor_order_id %}
-              <div><a href="{% url 'vendor_order_detail' pr.vendor_order_id %}" class="fw-normal text-decoration-none" style="font-size:.72rem;">View order</a></div>{% endif %}</td>
-            <td class="small text-muted" style="max-width:160px;">
-              {% if pr.boq_item %}
-                <span title="{{ pr.boq_item.description }}">
-                  {{ pr.boq_item.serial_no }}. {{ pr.boq_item.description|truncatechars:40 }}
-                </span>
-                <div style="font-size:.68rem;" class="text-muted">{{ pr.boq_item.category }}</div>
-              {% else %}—{% endif %}
-            </td>
-            <td class="small">{{ pr.invoice_number }}</td>
-            <td class="text-end fw-semibold small">₹{{ pr.amount|floatformat:0 }}</td>
-            <td class="small">
-              <a href="{{ pr.invoice_document_url }}" target="_blank" rel="noopener"
-                 class="text-decoration-none text-muted" title="{{ pr.invoice_document_name }}">
-                <i class="bi bi-file-earmark-arrow-down me-1"></i>{{ pr.invoice_document_name|truncatechars:20 }}
-              </a>
-            </td>
-            <td class="small text-muted">{{ pr.requested_date|date:"d M Y" }}</td>
-            <td>
-              {% if pr.status == 'approved' %}
-                <span class="badge" style="background:#f0a829; color:#000;">Pending</span>
-              {% else %}
-                <span class="badge" style="background:var(--hz-green)">Confirmed</span>
-                {% if pr.payment_date %}
-                  <div class="text-muted" style="font-size:.68rem;">{{ pr.payment_date|date:"d M Y" }}</div>
-                {% endif %}
-                {% if pr.payment_reference %}
-                  <div class="text-muted" style="font-size:.68rem;">Ref: {{ pr.payment_reference }}</div>
-                {% endif %}
-              {% endif %}
-            </td>
-            {% if role == 'Finance' %}
-            <td>
-              {% if pr.status == 'approved' %}
-              {# Confirm action is Finance-only — state-mutating, logged for audit trail #}
-              <button type="button"
-                      class="btn btn-sm fw-semibold js-confirm-payment"
-                      style="background:#1a7a4a; color:#fff; font-size:.72rem;"
-                      data-pr-id="{{ pr.pk }}"
-                      data-vendor="{{ pr.vendor.name|default:'' }}"
-                      data-amount="{{ pr.amount }}"
-                      data-confirm-url="{% url 'confirm_payment_request' project.project_id pr.pk %}">
-                Confirm
-              </button>
-              {% else %}
-              <span class="text-muted small">Done</span>
-              {% endif %}
-            </td>
-            {% endif %}
-          </tr>
-          {% if pr.note %}
-          <tr>
-            <td colspan="{% if role == 'Finance' %}8{% else %}7{% endif %}"
-                class="text-muted small py-1 px-3" style="background:#fffdf5; border-top:none;">
-              <i class="bi bi-chat-text me-1"></i>Note: {{ pr.note }}
-            </td>
-          </tr>
-          {% endif %}
-          {% endfor %}
-        </tbody>
-      </table>
+    {% if site_orders %}
+    {% for entry in site_orders %}
+    {% with o=entry.order %}
+    <div class="px-3 py-2 {% if not forloop.first %}border-top{% endif %}">
+      <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+        <div class="small">
+          <div class="fw-semibold">{{ o.vendor.name|default:"—" }}</div>
+          <div class="text-muted">{% if o.po_number %}PO {{ o.po_number }}{% endif %}{% if o.po_number and o.pi_number %} · {% endif %}{% if o.pi_number %}PI {{ o.pi_number }}{% endif %}{% if not o.po_number and not o.pi_number %}Order #{{ o.pk }}{% endif %}</div>
+        </div>
+        <div class="small text-end">
+          <div>Order ₹{{ entry.total|floatformat:0 }} · paid ₹{{ entry.paid|floatformat:0 }}</div>
+          <a href="{% url 'vendor_order_detail' o.pk %}" class="text-decoration-none">Open order</a>
+        </div>
+      </div>
+      {% if entry.payments %}
+      <div class="table-responsive mt-1">
+        <table class="table table-sm mb-0 small align-middle">
+          <thead class="table-light">
+            <tr><th style="width:8rem;">Raised</th><th class="text-end">Amount</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {% for p in entry.payments %}
+            <tr>
+              <td class="text-muted">{{ p.requested_date|date:"d M Y" }}</td>
+              <td class="text-end fw-semibold">{% include 'projects/partials/payment_amount.html' with p=p places=0 %}</td>
+              <td>
+                <span class="payment-status">{{ p.get_status_display }}</span>
+                {% if p.payment_date %}<div class="text-muted" style="font-size:.68rem;">{{ p.payment_date|date:"d M Y" }}{% if p.payment_reference %} · Ref: {{ p.payment_reference }}{% endif %}</div>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="text-muted small mt-1">No payment requested against this order yet.</div>
+      {% endif %}
     </div>
+    {% endwith %}
+    {% endfor %}
     {% else %}
     <div class="text-center text-muted py-4 small">
       <i class="bi bi-receipt fs-3 d-block mb-2" style="color:#f0a829;"></i>
-      No payment requests for this project.
+      No vendor orders for this site.
     </div>
     {% endif %}
   </div>
@@ -1111,46 +1078,6 @@
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
           <button type="submit" class="btn btn-brand">Mark Received</button>
-        </div>
-      </form>
-    </div>
-  </div>
-</div>
-
-{# Confirm Payment modal — Finance only; mirrors Receive modal pattern #}
-<div class="modal fade" id="confirmPaymentModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog">
-    <div class="modal-content">
-      <div class="modal-header" style="background:#fff3cd; border-bottom:2px solid #f0a829;">
-        <h5 class="modal-title fw-semibold">
-          <i class="bi bi-check-circle me-2" style="color:#1a7a4a;"></i>Confirm Payment
-        </h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-      </div>
-      <form id="confirmPaymentForm" method="post" action="">
-        {% csrf_token %}
-        <div class="modal-body">
-          <p id="confirmPaymentInfo" class="text-muted small mb-3"></p>
-          <div class="mb-3">
-            <label class="form-label fw-semibold">Payment Date <span class="text-danger">*</span></label>
-            <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="payment_date" id="confirmPaymentDateInput"
-                   class="form-control" required>
-          </div>
-          <div class="mb-2">
-            <label class="form-label">Payment Reference
-              <span class="text-muted fw-normal">(UTR / cheque no. — optional)</span>
-            </label>
-            <input type="text" name="payment_reference" class="form-control"
-                   placeholder="e.g. UTR-20250619-001">
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary btn-sm"
-                  data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-sm fw-semibold" id="confirmPaymentSubmitBtn"
-                  style="background:#1a7a4a; color:#fff;">
-            <i class="bi bi-check-circle me-1"></i>Confirm Payment
-          </button>
         </div>
       </form>
     </div>
@@ -1877,34 +1804,6 @@ at the top of this page unmodified, exactly as it does on task_detail.
           btn.dataset.milestoneName + ' — Agreed: ₹' +
           (btn.dataset.amount ? parseFloat(btn.dataset.amount).toLocaleString('en-IN') : 'TBD');
         document.getElementById('amountReceivedInput').value = '';
-      });
-    }
-
-    /* Finance confirm payment modal — imperative (avoids relatedTarget mobile issues) */
-    var confirmPaymentModalEl = document.getElementById('confirmPaymentModal');
-    if (confirmPaymentModalEl) {
-      document.querySelectorAll('.js-confirm-payment').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          var vendor     = this.dataset.vendor;
-          var amount     = parseFloat(this.dataset.amount).toLocaleString('en-IN');
-          var confirmUrl = this.dataset.confirmUrl;
-
-          document.getElementById('confirmPaymentForm').action = confirmUrl;
-          document.getElementById('confirmPaymentInfo').textContent =
-            'Confirming payment to ' + vendor + ' — Amount: ₹' + amount;
-          document.getElementById('confirmPaymentDateInput').value = '';
-          document.getElementById('confirmPaymentForm').querySelector('[name="payment_reference"]').value = '';
-          document.getElementById('confirmPaymentSubmitBtn').disabled    = false;
-          document.getElementById('confirmPaymentSubmitBtn').textContent = 'Confirm Payment';
-
-          bootstrap.Modal.getOrCreateInstance(confirmPaymentModalEl).show();
-        });
-      });
-
-      document.getElementById('confirmPaymentForm').addEventListener('submit', function () {
-        var btn      = document.getElementById('confirmPaymentSubmitBtn');
-        btn.disabled = true;
-        btn.textContent = 'Confirming…';
       });
     }
 

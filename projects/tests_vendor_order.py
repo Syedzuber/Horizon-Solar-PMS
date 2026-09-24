@@ -76,8 +76,6 @@ class VendorOrderFixture(TestCase):
             kwargs.setdefault('approved_amount', Decimal(amount))
         return PaymentRequest.objects.create(
             project=self.project, vendor=self.vendor, vendor_order=order,
-            invoice_number='INV-1', invoice_document_name='i.pdf',
-            invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal(amount), requested_by=self.scm.user, status=status, **kwargs)
 
     def assertRefused(self, create):
@@ -287,9 +285,7 @@ class StatusVocabularyTests(VendorOrderFixture):
         than past it."""
         pr = PaymentRequest.objects.create(
             vendor_order=self.make_order(),   # O2: NOT NULL; fixture only
-            project=self.project, vendor=self.vendor, invoice_number='INV-1',
-            invoice_document_name='i.pdf', invoice_document_url='http://x/i.pdf',
-            invoice_document_path='p/i.pdf', amount=Decimal('10'),
+            project=self.project, vendor=self.vendor, amount=Decimal('10'),
             requested_by=self.scm.user)
         self.assertEqual(pr.status, PaymentRequest.PENDING_APPROVAL)
 

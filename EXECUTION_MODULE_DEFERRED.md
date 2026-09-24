@@ -785,6 +785,16 @@ listed the status path and the design module as MUST NOT TOUCH.
 
 ## 23. O2 vendor orders — what the raise and order pages left for later
 
+**CLOSED 24 Sep 2026 by O6**, item by item — the entry is kept below as written.
+"An order with no payment cannot be found again": O2b's order list, O3's tender order
+list, and since O6 card 4b, which lists every order sized against the site whether or not
+it has a payment and links the site's order list. `raised_with_unfrozen_quantities`: decided
+by O3, whose group raise writes it. "Card 4b and the payment detail page still read the
+legacy fields" and "show two statuses": O6 rewrote card 4b around orders with the five
+labels, made the detail page a redirect to the order, and migration `0101` dropped the
+fields. The pre-existing detail page back button and CEO allowlist went with the page;
+"confirm writes no StatusTransition" was closed by O5, and the confirm view is deleted.
+
 Found 22 Sep 2026, building O2 (Residential vendor order raise and order detail).
 
 **An order with no payment cannot be found again.** The order page is reached from the
@@ -813,6 +823,13 @@ order page admits CEO. confirm_payment_request writes no StatusTransition (O5's 
 **Not fixed**: out of scope (R-12).
 
 ## 24. O2b order payments, document append, order list — what was left
+
+**CLOSED 24 Sep 2026 by O6** as an O2b entry; three items are carried forward, not
+solved, into §28 (§O6-5) so this section can be closed without pretending otherwise.
+CLOSED: the missing PM / Finance link to the order list (card 4b now links it, O6); the
+further payment filed under the order's first site (O2d's anchor rule,
+`_order_project()`). CARRIED: the document append's missing idempotency key, the order
+list 404 on a soft-deleted site, and the client-side checks not browser-verified.
 
 Found 22 Sep 2026, building O2b.
 
@@ -988,7 +1005,9 @@ it says the opposite of the truth. **O5/O6 must** switch all three to
 
 Found 24 Sep 2026, building O5.
 
-**§O5-1. Card 4b's confirm modal still says the reference is "optional" and offers future
+**§O5-1. CLOSED 24 Sep 2026 by O6.** The confirm modal is deleted, with the button, its JS and the view it posted to; Finance pays from the queue, whose form already requires the reference and bounds the date. The original entry follows, struck.
+
+~~**§O5-1. Card 4b's confirm modal still says the reference is "optional" and offers future
 dates.** `project_overview.html`'s confirm form labels the payment reference "(UTR / cheque
 no. — optional)", has no `required` on it, and caps the date at `typed_date_max` (today + 5
 years). Since O5 `confirm_payment_request` goes through `mark_payment_paid()`, which refuses
@@ -996,14 +1015,18 @@ a blank reference and a future date — so a Finance user following the label ge
 message instead of a save. Nothing is written wrongly; the form just misleads. Card 4b was
 forbidden to O5. **Risk if left:** low-to-medium — one refused click per confirm until
 someone learns the rule. **O6 must** mark the field required, drop "optional", and set the
-date's `max` to today and `min` to the request's raise date, as the queue's form does.
+date's `max` to today and `min` to the request's raise date, as the queue's form does.~~
 
-**§O5-2. The three two-state badges are unchanged, as instructed.** Card 4b,
+**§O5-2. CLOSED 24 Sep 2026 by O6.** Card 4b and My Documents render `get_status_display` — the model's five labels — and the payment detail page is a redirect to the order page, which already did. The original entry follows, struck.
+
+~~**§O5-2. The three two-state badges are unchanged, as instructed.** Card 4b,
 `payment_request_detail.html` and `my_documents` still render `approved` as "Pending" and
 every other status as "Confirmed" (§26, last entry). O5 was forbidden to fix them. **O6
-owns this.**
+owns this.**~~
 
-**§O5-3. `dashboard_finance` and the CEO dashboard still read payments through
+**§O5-3. CLOSED 24 Sep 2026 by O6.** Both dashboards' payment tiles call `payments.payment_counts()`, the function the queue calls per tab, reading through `vendor_order` with no project-status filter; `tests_payment_readers_o6.ThreeWayAgreementTests` asserts the three figures are identical, site-less, Draft OPEX and partial approval included. The original entry follows, struck.
+
+~~**§O5-3. `dashboard_finance` and the CEO dashboard still read payments through
 `project`.** O5 added a link from the Finance dashboard's payment tile to the queue and
 changed nothing else there. Its tiles still filter `project__status__in=['Active', 'In
 Progress']` and `status=APPROVED`, so a site-less payment, a payment on a Draft OPEX site
@@ -1011,9 +1034,11 @@ and every pending/held payment are absent from its figures — the queue is now 
 those appear. **Risk if left:** medium — the dashboard's "Payment Requests Pending" and the
 queue's "to pay" can disagree, and the dashboard is the smaller number. **Whoever owns the
 dashboards next** should read those tiles from the same grouped query the queue uses
-(`payment_views._grouped_counts`), or drop them in favour of the link.
+(`payment_views._grouped_counts`), or drop them in favour of the link.~~
 
-**§O5-4. A payment-approver flag holder outside the portfolio roles sees rows they cannot
+**§O5-4. CLOSED 24 Sep 2026 by O6, at its source.** `AdminUserEditForm` refuses `is_payment_approver` for any role but Finance or CEO (`permissions.PAYMENT_APPROVER_ROLES`), so every flag holder is a portfolio reader of the queue and of every order. An EXISTING holder outside those roles keeps the flag until their next save — see §O6-4 for the pre-deploy check. The original entry follows, struck.
+
+~~**§O5-4. A payment-approver flag holder outside the portfolio roles sees rows they cannot
 open.** `user_can_view_payment_queue()` admits any flag holder, and the queue is
 portfolio-wide by design. But `user_can_view_vendor_order()` admits a non-portfolio role
 (a PM holding the flag, say) only to orders on sites they can see, and the O4 action views
@@ -1024,15 +1049,17 @@ refuses — but the row itself, and the "Open order" link, are still shown, and 
 flag holder is Finance or CEO, so nobody is affected. **Risk if left:** low. **Decide when
 the first non-portfolio approver is appointed** whether the flag should widen order
 visibility (a clause in `_user_reads_orders_on`) or the queue should narrow to readable
-orders; it must not be left to disagree silently.
+orders; it must not be left to disagree silently.~~
 
-**§O5-5. `docs/RESIDENTIAL_BASELINE.md` still describes `invoice_paid` on confirm.** Its
+**§O5-5. CLOSED 24 Sep 2026 by O6.** `docs/RESIDENTIAL_BASELINE.md` §6.6 carries a dated correction (both views gone; `invoice_paid` not sent; mark-paid tells the requester in-app; a raise tells the approvers) and its §10 row is struck and replaced. The original entry follows, struck.
+
+~~**§O5-5. `docs/RESIDENTIAL_BASELINE.md` still describes `invoice_paid` on confirm.** Its
 notification table (the "Vendor payment request confirmed" row) and the confirm section
 name the three-channel `invoice_paid` send to SCM, managers and CEO. That send is removed;
 `tests_residential_baseline` was updated to pin the replacement (the requester, in-app
 only). O5's doc scope was execution-model.md and this file, so the baseline document was
 left as written. **Risk if left:** low — a reader is misled about who hears of a payment.
-**Fix in O7**, when the templates return and the table is rewritten anyway.
+**Fix in O7**, when the templates return and the table is rewritten anyway.~~
 
 **§O5-6. The queue's collapse forms are not browser-verified.** Hold, reject and mark-paid
 open as Bootstrap collapse rows — the order page's markup, reused — and were verified by
@@ -1048,5 +1075,77 @@ at today's volumes. Add a sort before the queue passes a few pages per tab.
 §13 records this: from O5 onward a missing row means the change did not happen, except for
 a payment confirmed before O5. Production holds 2 `PaymentRequest` rows (§25), so this is at
 most two rows.
+
+**Not fixed**: out of scope (R-12).
+
+## 28. O6 payment readers and retirements — what was left
+
+Found 24 Sep 2026, building O6.
+
+**§O6-1. CAPEX has no payment-request raise path, and is not operational.** O2 retired the
+old modal on the project page; the only raise screens are `vendor_order_create`
+(Residential only) and the group payment-request page (`vendor_order_create_group`), which
+is the INTENDED entry point for CAPEX when CAPEX becomes operational. Until a CAPEX order
+exists, the payments queue does not draw a CAPEX tab (O6, amendment A5). **Risk if left:**
+low while nobody works CAPEX. **Decide when CAPEX goes live** whether the group page takes
+CAPEX as it stands.
+
+**§O6-2. A pending request above the order total blocks approvals on that order until it is
+rejected.** O4c's approve re-checks the order total under the lock, so a
+`pending_approval` row whose amount exceeds what the order can still take makes every
+approval on that order refuse. It is reachable only by a direct database write — every raise
+path refuses an amount above the available balance — so no screen produces it. **Risk if
+left:** low. The way out is the product's own: hold it, then reject it.
+
+**§O6-3. `0101` WILL REFUSE ON RAILWAY unless the production rows are dealt with first.**
+Production holds 2 `PaymentRequest` rows (§25), raised through the old
+`raise_payment_request`, which made the invoice number, the invoice document and the BOQ
+item MANDATORY — so both almost certainly hold values in the columns `0101` drops. `0101`
+refuses and names them rather than discarding; `0093` (§25) will already have stopped the
+deploy earlier on the same two rows. **Before the O1–O6 stack is pushed**, an operator moves
+each row's invoice number and document onto a `VendorOrderDocument(doc_type='invoice')` on
+the order it is attached to for `0093`, then clears the five columns. Local `solarpms_local`
+held 1 row with all five blank, so `0101` applied there cleanly.
+
+**§O6-4. Existing payment-approver flag holders are not re-checked.** The form refuses the
+flag for a non-Finance, non-CEO role on SAVE; a holder who already has it keeps it until an
+Admin next saves them. Locally the one holder is Finance. **Before deploy**, run
+`UserProfile.objects.filter(is_payment_approver=True).exclude(role__in=['Finance', 'CEO'])`
+on production; any row it returns is someone §O5-4 was about.
+
+**§O6-5. Carried from §24, unchanged by O6:** the document append has no idempotency key; the
+order list 404s on a soft-deleted site; and the client-side checks on the raise, add-payment
+and add-documents pages were not browser-verified.
+
+**§O6-6. None of O6's screens was browser-verified.** Card 4b, My Documents' section E, the
+Finance dashboard's rows and tiles and the amount partial were verified by rendering them in
+tests and in a rolled-back transaction, not in a browser. Nothing in them is interactive
+any more — the one script removed was the confirm modal's — so the worst case is layout.
+
+**§O6-7. The Finance dashboard's per-project payment rows are still ANCHOR-based.** Each
+project card lists the APPROVED payments whose `project` is that site, so a group order's
+payment appears under its anchor site's card only, and a site-less payment under none. The
+tiles above them are now order-based and portfolio-wide, so a tile can count a payment no card
+lists. O6 was allowed to change only those rows' order reference and amount (S2). **Risk if
+left:** low — the tile links to the queue, which lists all of them. **Whoever next owns the
+Finance dashboard** decides whether the cards should list orders sized against the site, as
+card 4b now does.
+
+**§O6-8. The old payment detail URL no longer checks project scope before redirecting.** It
+looks the payment up by pk alone (a site-less payment has no project to check), so any
+logged-in user who guesses a payment pk learns its order's pk from the `Location` header. The
+order page itself refuses anyone `user_can_view_vendor_order()` refuses, so nothing about the
+order is disclosed beyond its number. **Risk if left:** low.
+
+**§O6-9. Card 4b's role gate still leaves out CEO and System Admin**, who can read every order
+on the order pages. Pre-existing (the card's `Finance | PM | SCM | Admin` gate) and kept, since
+O6 was to rewrite the card's content, not its audience. **Risk if left:** low; both reach the
+same orders through the queue and the order list.
+
+**§O6-10. Seen in passing, not fixed: the WhatsApp `invoice_paid` template's variables name
+the dropped fields.** `management/commands/test_whatsapp.py` documents its five body
+variables as customer name, BOQ item, invoice number, amount and vendor. No code sends it
+since O5, and O6 was barred from WhatsApp and email. **O7 must** write the payment templates
+around the order (PO / PI, vendor, amount, reference), not around the columns `0101` dropped.
 
 **Not fixed**: out of scope (R-12).

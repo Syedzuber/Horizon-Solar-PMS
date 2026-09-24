@@ -1907,13 +1907,19 @@ def user_can_view_program_vendor_orders(user, program):
 # payments is the role that answers for them (VENDOR_ORDER_RAISE_ROLES).
 # ---------------------------------------------------------------------------
 
+#: The only roles that may HOLD the payment-approver flag (O6). AdminUserEditForm refuses
+#: the flag for any other role, so a flag holder is always someone the portfolio-wide
+#: queue and every order are readable to — which is what closed §O5-4 at its source.
+PAYMENT_APPROVER_ROLES = frozenset({'Finance', 'CEO'})
+
+
 def user_is_payment_approver(user):
     """Return True if `user` holds the payment-approver flag — the flag itself, nothing
     more.
 
-    Assigned by the Admin to Finance or CEO users (and to anyone else the company wants
-    approving spend); THE ROLE ITSELF GRANTS NOTHING, and neither does the flag on its
-    own. "Holds the flag" and "may approve THIS request" are different questions, and
+    Assigned by the Admin to Finance or CEO users — since O6 the only roles the Admin
+    Panel lets hold it (PAYMENT_APPROVER_ROLES); THE ROLE ITSELF GRANTS NOTHING, and
+    neither does the flag on its own. "Holds the flag" and "may approve THIS request" are different questions, and
     the second one is user_can_approve_payment() below.
 
     Reads UserProfile.is_payment_approver only, and returns False rather than raising for

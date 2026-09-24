@@ -2284,7 +2284,8 @@ class PaymentRequest(models.Model):
     )
 
     # The order this payment is made against. NOT NULL since O2 (migration 0093), which
-    # retired raise_payment_request — the only path that created a payment with no order.
+    # retired the stand-alone project-page raise — the only path that created a payment
+    # with no order (its view was deleted in O6).
     # PROTECT: an order that has had money paid against it cannot disappear from under
     # the payment.
     vendor_order = models.ForeignKey(
@@ -2292,29 +2293,10 @@ class PaymentRequest(models.Model):
         related_name='payments',
     )
 
-    # LEGACY — superseded by VendorOrderLine (what was ordered, per catalogue item). Kept
-    # untouched because raise_payment_request, project_overview and the payment detail
-    # screen still read it; dropped in O6 once those readers are rewritten.
-    # BOQItem FK: always scoped to this project via boq__project in queries.
-    # Do not display another project's BOQ items in the raise-request form.
-    boq_item = models.ForeignKey(
-        BOQItem, on_delete=models.SET_NULL, null=True,
-        related_name='payment_requests',
-    )
-
-    # LEGACY — superseded by VendorOrderDocument(doc_type='invoice'), which carries its
-    # own invoice_number and invoice_amount. Dropped in O6 once readers are rewritten.
-    invoice_number = models.CharField(max_length=100)
-
-    # LEGACY, all three — superseded by VendorOrderDocument, which stores bucket + path and
-    # no URL (vendor_order_document_url() builds it). Dropped in O6 once readers are
-    # rewritten.
-    # Supabase storage — reuse same three-field pattern as ProjectDocument/TaskAttachment.
-    # invoice_document is mandatory at creation: no edit/cancel flow exists for
-    # PaymentRequest by design (Zuber decision, 19-June session).
-    invoice_document_name = models.CharField(max_length=255)      # Original filename
-    invoice_document_url  = models.URLField(max_length=1000)      # Public Supabase URL for browser access
-    invoice_document_path = models.CharField(max_length=500)      # Supabase path for purge commands
+    # O6 DROPPED FIVE LEGACY COLUMNS HERE (migration 0101): boq_item, invoice_number and
+    # the three invoice_document_* fields. What was bought is VendorOrderLine; invoices
+    # are VendorOrderDocument(doc_type='invoice'), with their own number and amount. The
+    # migration refused rather than discarded, so no value was lost with them.
 
     amount = models.DecimalField(max_digits=12, decimal_places=2)
 

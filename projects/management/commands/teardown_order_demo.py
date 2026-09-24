@@ -44,7 +44,6 @@ quietly corrupt the order instead:
 
     PaymentRequest.project         CASCADE    SILENT — deletes the payment outright
     PaymentRequest.vendor          SET_NULL   SILENT — the payee is erased
-    PaymentRequest.boq_item        SET_NULL   SILENT
     PaymentRequest.approved_by     SET_NULL   SILENT
     PaymentRequest.confirmed_by    SET_NULL   SILENT
     VendorOrderSite.via_site_group SET_NULL   SILENT — "picked via group X" is erased
@@ -59,7 +58,7 @@ points at a VendorOrder, and the seed creates none, so it can never be a referen
 INTO seeded data. Every column that can be is above.
 
 So the guard runs BEFORE anything is deleted, names every reference it found, and
-exits non-zero. It is a positive check over those thirteen relations, not a guess:
+exits non-zero. It is a positive check over those twelve relations, not a guess:
 a reference this command does not know about is a reference it cannot report, so
 adding a column to any of those models means adding a line to `_order_references()`.
 There is no --force. Removing the order first is the operator's decision, made in the
@@ -351,9 +350,6 @@ class Command(BaseCommand):
              .select_related('vendor'),
              lambda r: f'PaymentRequest #{r.pk} is payable to vendor '
                        f'"{r.vendor.name}" (PaymentRequest.vendor, SET_NULL)'),
-            (PaymentRequest.objects.filter(boq_item_id__in=item_pks),
-             lambda r: f'PaymentRequest #{r.pk} cites a seeded BOQ row '
-                       f'(PaymentRequest.boq_item, SET_NULL)'),
             (PaymentRequest.objects.filter(requested_by_id__in=user_pks),
              lambda r: f'PaymentRequest #{r.pk} was raised by a seeded account '
                        f'(PaymentRequest.requested_by, PROTECT)'),

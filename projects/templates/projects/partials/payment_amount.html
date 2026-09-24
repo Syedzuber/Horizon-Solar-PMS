@@ -1,0 +1,14 @@
+{% comment %}
+O6 — ONE payment's amount, the one rule every payment screen follows (amendments A2, A3).
+
+  * awaiting approval or on hold, with an approval on record (O4c: it survives a hold and
+    is the ceiling for the next one) -> "₹X requested · ₹Y previously approved";
+  * an approval for less than was asked, still standing (is_partially_approved)
+    -> "₹X requested · ₹Y approved";
+  * otherwise one figure, the requested amount — which then equals effective_amount on
+    every status but a rejection, and a rejected request counts nothing anyway.
+
+Takes `p` (a PaymentRequest), `places` (floatformat decimals) and, optionally, `bare`:
+the single figure is printed without "₹" for a column whose header already says "(₹)".
+A `comment` tag, not a hash comment, because this spans lines.
+{% endcomment %}{% if p.approved_amount is not None and p.status == 'pending_approval' or p.approved_amount is not None and p.status == 'on_hold' %}<span class="text-nowrap">₹{{ p.amount|floatformat:places }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:places }} previously approved</span>{% elif p.is_partially_approved %}<span class="text-nowrap">₹{{ p.amount|floatformat:places }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:places }} approved</span>{% else %}<span class="text-nowrap">{% if not bare %}₹{% endif %}{{ p.amount|floatformat:places }}</span>{% endif %}

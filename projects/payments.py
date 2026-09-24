@@ -1,12 +1,16 @@
 """
 O5 — marking a vendor payment paid, and the in-app notices that follow a payment's moves.
+O6 — the one count of payments by status that every payment figure reads.
 
-Two things live here, and both are here because more than one door reaches them:
+Three things live here, and all three are here because more than one door reaches them:
 
-  * mark_payment_paid() — THE ONE WRITE of APPROVED -> CONFIRMED. The Finance queue's
-    mark-paid form (payment_views.payment_mark_paid) and the project page's older confirm
-    (views.confirm_payment_request) both call it and do nothing of their own, so the lock,
-    the checks, the ledger row and the feed line cannot differ between them.
+  * mark_payment_paid() — THE ONE WRITE of APPROVED -> CONFIRMED. Since O6 the Finance
+    queue's mark-paid form (payment_views.payment_mark_paid) is its only caller: the
+    project page's confirm button was retired, so there is one path to pay, not two.
+
+  * payment_counts() — per-status counts and sums. The queue's tabs and tiles, the Finance
+    dashboard's payment tiles and the CEO dashboard's finance tile all call it, so the
+    three figures cannot disagree.
 
   * send_payment_notices() — who hears about a payment's move. It is called from ONE
     place: a post_save receiver on StatusTransition (signals.py), because a payment's
@@ -18,17 +22,54 @@ Two things live here, and both are here because more than one door reaches them:
 Neither function imports views: views.py imports this module, and a cycle would follow.
 """
 import logging
+from collections import namedtuple
+from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Count, Sum
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import PaymentRequest, UserProfile, log_activity
+from .models import PaymentRequest, UserProfile, effective_amount_sum, log_activity
 from .notifications import send_notification
 from .permissions import user_can_mark_paid
 from .utils import record_transition
 
 logger = logging.getLogger(__name__)
+
+
+#: One status's figures: how many requests, what they stand for (effective_amount, O4b)
+#: and what was asked for (amount). The two sums differ only where an approval was for
+#: less than the request — the screens then show both.
+PaymentTotals = namedtuple('PaymentTotals', 'count amount requested')
+
+
+def payment_counts(project_types=None):
+    """{status: PaymentTotals} for every one of the five statuses, zero-filled. ONE query.
+
+    THE SCOPE IS THE ORDER'S. `project_types` filters on `vendor_order__project_type`
+    (None = every type); nothing here joins through `PaymentRequest.project`, which is a
+    nullable display anchor (O2d), and nothing filters on a project's status. A site-less
+    payment, and a payment on a Draft OPEX site, are counted like any other — each is
+    money somebody has to approve or pay.
+
+    `amount` sums effective_amount, never `amount` (O4b): an approved figure totals what
+    was approved. `requested` sums what was asked for, so a screen can show both.
+    """
+    queryset = PaymentRequest.objects.all()
+    if project_types is not None:
+        queryset = queryset.filter(vendor_order__project_type__in=list(project_types))
+    rows = (queryset.values('status')
+            .annotate(n=Count('pk'), effective_sum=effective_amount_sum(),
+                      requested_sum=Sum('amount'))
+            .order_by())
+    zero = Decimal('0')
+    counts = {status: PaymentTotals(0, zero, zero)
+              for status, _ in PaymentRequest.STATUS_CHOICES}
+    for row in rows:
+        counts[row['status']] = PaymentTotals(
+            row['n'], row['effective_sum'] or zero, row['requested_sum'] or zero)
+    return counts
 
 
 class PaymentRefused(Exception):

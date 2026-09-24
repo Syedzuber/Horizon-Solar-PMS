@@ -42,6 +42,9 @@ from .models import (
     # it is one physical place, not two concepts. See models.StockLocation.
     StockLocation,
     PaymentRequest, NotificationLog, SystemSettings, DesignSubmission,
+    # O6 - card 4b lists the orders sized against a site.
+    VendorOrder, VendorOrderDocument, VendorOrderProgram, VendorOrderSite,
+    VENDOR_ORDER_DOC_INVOICE,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
     # 2.4 - the checklist picker resolves its POST back to a concrete template row.
     TaskTemplateTask,
@@ -55,7 +58,7 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
-from .payments import PaymentRefused, mark_payment_paid
+from .payments import payment_counts
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -106,6 +109,8 @@ from .permissions import (
     user_can_raise_vendor_order,
     # O3 - the same, for the OPEX tender rows' group raise.
     user_can_raise_group_order,
+    # O6 - card 4b links to the site's order list and to the payments queue.
+    user_can_view_project_vendor_orders, user_can_view_payment_queue,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -242,6 +247,13 @@ def _context_filter(context, prefix=''):
     if not types:
         return {}
     return {f'{prefix}project_type__in': types}
+
+
+def _context_types(context):
+    """The context's project types as a list, or None for no narrowing — the argument
+    payments.payment_counts() takes. Reads CONTEXT_PROJECT_TYPES exactly as
+    _context_filter() does, so a dashboard's payment tiles narrow with its cards."""
+    return CONTEXT_PROJECT_TYPES.get(context) or None
 
 
 def _context_includes(context, project_type):
@@ -1345,7 +1357,7 @@ def dashboard_finance(request):
                 'payment_requests',
                 queryset=PaymentRequest.objects.filter(
                     status=PaymentRequest.APPROVED,
-                ).select_related('vendor'),
+                ).select_related('vendor', 'vendor_order'),
                 to_attr='pending_payment_requests',
             ),
         )
@@ -1359,20 +1371,13 @@ def dashboard_finance(request):
         **_context_filter(ctx, 'project__'),
     ).count()
 
-    # Trigger 2: PaymentRequest confirmed present — query real pending count and value
-    total_payment_requests = PaymentRequest.objects.filter(
-        project__status__in=['Active', 'In Progress'],
-        status=PaymentRequest.APPROVED,
-        **_context_filter(ctx, 'project__'),
-    ).count()
-
-    total_payment_request_value = (
-        PaymentRequest.objects.filter(
-            project__status__in=['Active', 'In Progress'],
-            status=PaymentRequest.APPROVED,
-            **_context_filter(ctx, 'project__'),
-        ).aggregate(s=Sum('amount'))['s'] or 0
-    )
+    # O6: approved-to-pay count and value from payments.payment_counts() — the function
+    # the payments queue and the CEO tile call — read through the ORDER's project type,
+    # so a site-less payment and one on a Draft OPEX site are counted here too.
+    to_pay = payment_counts(_context_types(ctx))[PaymentRequest.APPROVED]
+    total_payment_requests          = to_pay.count
+    total_payment_request_value     = to_pay.amount
+    total_payment_request_requested = to_pay.requested
 
     total_client_contract_value = (
         Project.objects.filter(
@@ -1413,11 +1418,16 @@ def dashboard_finance(request):
         # Trigger 2: pending payment requests from prefetch (no extra query)
         payment_requests = []
         for pr in project.pending_payment_requests:
+            order = pr.vendor_order
             payment_requests.append({
                 'pk':             pr.pk,
                 'vendor':         pr.vendor.name if pr.vendor else '—',
-                'amount':         pr.amount,
-                'invoice_number': pr.invoice_number,
+                # The payment itself, for the amount partial's two-figure rule (A2).
+                'payment':        pr,
+                # O6: the order's PO number, else its PI number, else "Order #<pk>".
+                'order_ref':      (f'PO {order.po_number}' if order.po_number
+                                   else f'PI {order.pi_number}' if order.pi_number
+                                   else f'Order #{order.pk}'),
                 'requested_date': pr.requested_date,
             })
 
@@ -1446,6 +1456,7 @@ def dashboard_finance(request):
         'total_milestones_awaiting':    total_milestones_awaiting,
         'total_payment_requests':       total_payment_requests,
         'total_payment_request_value':  total_payment_request_value,
+        'total_payment_request_requested': total_payment_request_requested,
         'total_client_contract_value':  total_client_contract_value,
         'project_rows':                 project_rows,
         'today':                        today,
@@ -2340,19 +2351,14 @@ def _get_ceo_dashboard_context(context=None):
     ]
 
     # -- QUERY 4: Finance summary (payment requests + contract value) --
-    active_filter = {
-        'project__is_deleted': False,
-        'project__status__in': ['Active', 'In Progress'],
-        **_context_filter(context, 'project__'),
-    }
-    fin_payment_requests_pending = PaymentRequest.objects.filter(
-        status=PaymentRequest.APPROVED, **active_filter
-    ).count()
-    fin_vendor_payments_outstanding = (
-        PaymentRequest.objects.filter(
-            status=PaymentRequest.APPROVED, **active_filter
-        ).aggregate(s=Sum('amount'))['s'] or 0
-    )
+    # O6: the two payment figures come from payments.payment_counts(), the function the
+    # payments queue and the Finance dashboard call — through the ORDER's project type,
+    # never through `project` and never filtered on a project's status, so a site-less
+    # payment and one on a Draft OPEX site are counted.
+    fin_to_pay = payment_counts(_context_types(context))[PaymentRequest.APPROVED]
+    fin_payment_requests_pending    = fin_to_pay.count
+    fin_vendor_payments_outstanding = fin_to_pay.amount
+    fin_vendor_payments_requested   = fin_to_pay.requested
     fin_client_contract_value = (
         Project.objects.filter(
             is_deleted=False, status__in=['Active', 'In Progress'],
@@ -2521,6 +2527,7 @@ def _get_ceo_dashboard_context(context=None):
         'usage_total_actions':    usage_total_actions,
         'fin_payment_requests_pending':    fin_payment_requests_pending,
         'fin_vendor_payments_outstanding': fin_vendor_payments_outstanding,
+        'fin_vendor_payments_requested':   fin_vendor_payments_requested,
         'fin_client_contract_value':       fin_client_contract_value,
         'fin_client_payment_pending':      fin_client_payment_pending,
     }
@@ -8810,83 +8817,6 @@ def milestone_create(request, project_id):
 
 
 # ---------------------------------------------------------------------------
-# Payment Requests
-# ---------------------------------------------------------------------------
-
-@login_required
-def raise_payment_request(request, project_id):
-    """RETIRED IN O2. A payment is now raised against a VendorOrder, recorded on
-    vendor_order_create's page; this endpoint created a PaymentRequest with no order,
-    which the NOT NULL `vendor_order` column no longer admits.
-
-    GET redirects to the new page; POST answers 410 Gone. Kept, not deleted: O6 removes
-    it together with the legacy PaymentRequest fields its old body wrote.
-    """
-    if request.method != 'POST':
-        project = _active_project(project_id)
-        return redirect('vendor_order_create', project_pk=project.pk)
-    return HttpResponse(
-        'Raising a payment request on its own was retired. Record the vendor order and '
-        'its first payment from the Raise Order page instead.',
-        status=410,
-    )
-
-
-@login_required
-def confirm_payment_request(request, project_id, request_id):
-    """Finance confirms a vendor payment has been made, from the project page. POST.
-
-    SINCE O5 THIS IS A DOOR, NOT A WRITER. payments.mark_payment_paid() does the lock,
-    the checks (Finance, APPROVED, not the approver, not the requester, a reference, a
-    date that is neither in the future nor before the raise), the write, the ledger row
-    and the feed line — the same call the Finance queue's mark-paid form makes, so the
-    two can never disagree. What stays here is the project-scoped lookup the URL implies
-    and parsing the typed date.
-
-    THE STATUS IS NO LONGER IN THE LOOKUP. It used to be (`status=APPROVED`), which
-    answered 404 to a request that had just been held; the service now refuses it with a
-    message naming the status it is in, under the lock, where the answer is current.
-
-    THE invoice_paid SEND IS GONE, NOT DISABLED. It went on three channels to every SCM,
-    the project's managers and every CEO; O5's in-app notice to the requester replaces it
-    (payments.send_payment_notices), and O7 brings payment notices back on WhatsApp and
-    email with a template written for the order module.
-    """
-    if request.method != 'POST':
-        return redirect('project_overview', project_id=project_id)
-
-    # Confirming payment is Finance-only — SCM and PM see status read-only
-    profile = request.user.profile
-    if profile.role != 'Finance':
-        return HttpResponse(status=403)
-
-    project = _active_project(project_id)
-    pr = get_object_or_404(
-        PaymentRequest.objects.select_related('vendor'), pk=request_id, project=project,
-    )
-
-    payment_date_str = request.POST.get('payment_date', '').strip()
-    if not payment_date_str:
-        messages.error(request, 'Payment date is required.')
-        return redirect('project_overview', project_id=project_id)
-
-    payment_date, payment_date_error = check_typed_date(payment_date_str)
-    if payment_date_error:
-        messages.error(request, payment_date_error)
-        return redirect('project_overview', project_id=project_id)
-
-    try:
-        mark_payment_paid(pr, request.user, payment_date,
-                          request.POST.get('payment_reference', ''))
-    except PaymentRefused as exc:
-        messages.error(request, str(exc))
-        return redirect('project_overview', project_id=project_id)
-
-    messages.success(request, f'Payment of ₹{pr.amount} to {pr.vendor} confirmed.')
-    return redirect('project_overview', project_id=project_id)
-
-
-# ---------------------------------------------------------------------------
 # BD dashboard
 # ---------------------------------------------------------------------------
 
@@ -9607,15 +9537,33 @@ def project_overview(request, project_id):
         and project.project_type == 'Residential'
     )
 
-    # Payment requests for this project — Finance sees confirm actions, PM sees read-only
-    # The queryset is shared; template role-gates control which actions are rendered.
-    payment_requests = []
+    # Card 4b (O6): the ORDERS sized against this site, newest first, each with its money
+    # and its payments — never PaymentRequest.project, which is only a display anchor
+    # (O2d): a group order anchored to a DIFFERENT site is listed here too. Read-only for
+    # every role; Finance pays from the payments queue, the one path to pay. Two
+    # prefetches carry every figure, so ten orders cost what one does.
+    site_orders = []
     if role in ('Finance', 'PM', 'SCM', 'Admin'):
-        payment_requests = list(
-            PaymentRequest.objects.filter(project=project)
-            .select_related('vendor', 'boq_item', 'requested_by', 'confirmed_by')
-            .order_by('-requested_date')
+        from .order_views import _order_money   # order_views imports views: no top-level import
+        orders = (
+            VendorOrder.objects.filter(sites__project=project)
+            .select_related('vendor')
+            .prefetch_related(
+                Prefetch('documents', queryset=VendorOrderDocument.objects.filter(
+                    doc_type=VENDOR_ORDER_DOC_INVOICE)),
+                'payments',
+            )
+            .order_by('-created_at', '-pk')
         )
+        site_orders = [
+            {'order': order,
+             'payments': list(order.payments.all()),
+             **_order_money(order, order.documents.all(), order.payments.all())}
+            for order in orders
+        ]
+    show_order_list_link = bool(site_orders) and user_can_view_project_vendor_orders(
+        request.user, project)
+    show_payment_queue_link = user_can_view_payment_queue(request.user)
 
     # ── Gantt (Residential only; computed live from activated_at + duration_days) ──
     # Internal view: every role that can see this project. Client (buffered/friendly)
@@ -9666,7 +9614,9 @@ def project_overview(request, project_id):
         'candidates_by_role':          candidates_by_role,
         'boq_revision_history':        boq_revision_history,
         'today':                       date.today(),
-        'payment_requests':            payment_requests,
+        'site_orders':                 site_orders,
+        'show_order_list_link':        show_order_list_link,
+        'show_payment_queue_link':     show_payment_queue_link,
         'user_dashboard_url':          get_user_dashboard(request.user),
         'show_cascade_option':         show_cascade_option,
         'gantt_available':             gantt_available,
@@ -12129,12 +12079,20 @@ def my_documents(request):
 
     # Section E — Payment Requests (SCM only)
     # requested_by is FK to auth.User (not UserProfile)
+    # O6: read through the ORDER, never `project` (a nullable display anchor, O2d), so a
+    # site-less payment is listed. Each row names its scope (scope_label) and links to
+    # its order; the two prefetches are what scope_label reads.
     pr_list = []
     if role == 'SCM':
-        pr_list = PaymentRequest.objects.filter(
-            requested_by=request.user,
-            project__is_deleted=False,
-        ).select_related('project', 'vendor').order_by('-requested_date')[:50]
+        pr_list = (PaymentRequest.objects.filter(requested_by=request.user)
+                   .select_related('vendor', 'vendor_order')
+                   .prefetch_related(
+                       Prefetch('vendor_order__sites',
+                                queryset=VendorOrderSite.objects.select_related('project')),
+                       Prefetch('vendor_order__programs',
+                                queryset=VendorOrderProgram.objects.select_related('program')),
+                   )
+                   .order_by('-requested_date')[:50])
 
     context = {
         'task_attachments': task_attachments,
@@ -12164,25 +12122,22 @@ def design_submission_detail(request, pk):
 
 @login_required
 def payment_request_detail(request, project_id, request_id):
-    """Read-only detail view for a PaymentRequest. SCM, Finance, PM, or Admin only."""
-    project = _active_project(project_id)
-    pr      = get_object_or_404(PaymentRequest, pk=request_id, project=project)
-    profile = request.user.profile
+    """RETIRED AS A PAGE IN O6: redirects to the payment's row on its order's page.
 
-    # 0.2 lockdown: project scope, added BESIDE the role allowlist below, not merged into
-    # it. The allowlist has no project term, so any PM could read any project's vendor
-    # invoice, amount and document URL. Finance / SCM / Admin are portfolio-wide under
-    # current policy and so are unaffected by this line; it is the PM arm it narrows.
-    if not user_can_view_project(request.user, project):
-        raise Http404
+    The order page (vendor_order_detail) already shows everything this page did — vendor,
+    amount, status, date, reference — plus the order's documents and money. The lookup is
+    by the payment's pk ALONE: `project_id` is kept in the URL only so old links resolve,
+    and is not checked, because a payment's `project` is a nullable display anchor (O2d)
+    and a site-less payment has none — this is what stops those 404ing.
 
-    if profile.role not in ('SCM', 'Finance', 'PM', 'Admin'):
-        messages.error(request, "You don't have access to this payment request.")
-        return redirect('my_documents')
-    return render(request, 'projects/payment_request_detail.html', {
-        'pr':      pr,
-        'project': project,
-    })
+    No access check here, and none is needed: the destination is the gate.
+    vendor_order_detail refuses anyone user_can_view_vendor_order() refuses, so the
+    redirect reveals only an order number.
+    """
+    payment = get_object_or_404(PaymentRequest.objects.only('pk', 'vendor_order_id'),
+                                pk=request_id)
+    return redirect(reverse('vendor_order_detail', args=[payment.vendor_order_id])
+                    + f'#payment-{payment.pk}')
 
 
 # ---------------------------------------------------------------------------

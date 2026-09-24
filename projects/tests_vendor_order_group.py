@@ -616,7 +616,7 @@ class GroupRaisePageTests(GroupRaiseFixture):
         # The tender section is drawn only under the Tenders context.
         response = _client(self.scm).get(reverse('dashboard_scm') + '?context=tenders')
         self.assertContains(response, 'Raise payment request</a>')
-        self.assertContains(response, 'Payment requests (1)</a>')
+        self.assertContains(response, 'PO / PI records (1)</a>')
         self.assertNotContains(response, '>Raise order</a>')
 
     def test_the_raise_page_query_count_does_not_grow_with_site_count(self):

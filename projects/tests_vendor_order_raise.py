@@ -310,11 +310,12 @@ class DetailTests(RaiseFixture):
         response = _client(self.scm).get(self.detail_url)
         self.assertContains(response, 'Invoice awaited')
 
-    def test_the_old_raise_endpoint_is_retired(self):
-        old = reverse('raise_payment_request', args=[self.project.project_id])
-        self.assertRedirects(_client(self.scm).get(old), self.url(),
-                             fetch_redirect_response=False)
-        self.assertEqual(_client(self.scm).post(old, {}).status_code, 410)
+    def test_the_old_raise_endpoint_is_gone(self):
+        """Retired in O2 (a redirect and a 410), deleted in O6: the URL no longer exists.
+        The path is written out because its name no longer reverses."""
+        old = f'/projects/{self.project.project_id}/payment-requests/raise/'
+        self.assertEqual(_client(self.scm).get(old).status_code, 404)
+        self.assertEqual(_client(self.scm).post(old, {}).status_code, 404)
 
 
 class DetailQueryCountTests(RaiseFixture):

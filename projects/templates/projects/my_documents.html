@@ -296,8 +296,8 @@
       <table class="table table-hover mb-0 align-middle">
         <thead class="table-light">
           <tr>
-            <th class="ps-3">Invoice No.</th>
-            <th>Project</th>
+            <th class="ps-3">Order</th>
+            <th>For</th>
             <th>Vendor</th>
             <th>Amount</th>
             <th>Raised On</th>
@@ -306,32 +306,28 @@
           </tr>
         </thead>
         <tbody>
+          {% comment %}
+          O6: each row reads through its ORDER, so a site-less payment (a central purchase
+          sized against tenders) is listed too; "For" is the order's scope_label, never the
+          nullable project anchor. Status is the model's own five-state label.
+          {% endcomment %}
           {% for pr in pr_list %}
+          {% with o=pr.vendor_order %}
           <tr>
-            <td class="ps-3 fw-semibold small">{{ pr.invoice_number }}</td>
-            <td>
-              <a href="{% url 'project_detail' pr.project.project_id %}" class="text-decoration-none small fw-semibold">
-                {{ pr.project.project_id }}
-              </a>
-              <div class="text-muted small">{{ pr.project.customer_name }}</div>
-            </td>
+            <td class="ps-3 fw-semibold small">{% if o.po_number %}PO {{ o.po_number }}{% elif o.pi_number %}PI {{ o.pi_number }}{% else %}Order #{{ o.pk }}{% endif %}</td>
+            <td class="small">{{ pr.scope_label }}</td>
             <td class="small">{{ pr.vendor.name|default:"—" }}</td>
-            <td class="small fw-semibold">₹{{ pr.amount|floatformat:0 }}</td>
+            <td class="small fw-semibold">{% include 'projects/partials/payment_amount.html' with p=pr places=0 %}</td>
             <td class="text-muted small">{{ pr.requested_date|date:"d M Y" }}</td>
-            <td>
-              {% if pr.status == 'confirmed' %}
-                <span class="badge" style="background:#1a7a4a;">Confirmed</span>
-              {% else %}
-                <span class="badge bg-warning text-dark">Pending</span>
-              {% endif %}
-            </td>
+            <td class="small">{{ pr.get_status_display }}</td>
             <td class="pe-3">
-              <a href="{% url 'payment_request_detail' pr.project.project_id pr.pk %}"
+              <a href="{% url 'vendor_order_detail' o.pk %}#payment-{{ pr.pk }}"
                  class="btn btn-outline-secondary btn-sm">
-                View
+                Open order
               </a>
             </td>
           </tr>
+          {% endwith %}
           {% endfor %}
         </tbody>
       </table>

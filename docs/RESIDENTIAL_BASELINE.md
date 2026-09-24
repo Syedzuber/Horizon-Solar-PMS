@@ -572,9 +572,24 @@ propagate.
 model docstring says **"No edit/cancel by design"**. The BOQ item is scoped to the URL project
 (`boq__project=project`), so another project's items are unreachable through the form.
 
-Confirmation **does** notify: every active `SCM`, then `project_managers(project)`, then every
+~~Confirmation **does** notify: every active `SCM`, then `project_managers(project)`, then every
 active `CEO`, deduped, on `['in_app', 'whatsapp', 'email']` with template `invoice_paid`.
-Raising notifies nobody.
+Raising notifies nobody.~~
+
+> **CORRECTED 24 Sep 2026 (O6, closing `EXECUTION_MODULE_DEFERRED.md` §O5-5).** The table and
+> paragraph above describe the baseline as audited, and three things in them no longer hold.
+> **(1) Both views are gone.** A payment is raised against a vendor order
+> (`vendor_order_create`, `vendor_order_add_payment`, `vendor_order_create_group`), waits for
+> an approver (O4), and is paid from the Finance payments queue's "Mark paid"
+> (`payment_views.payment_mark_paid` → `payments.mark_payment_paid()`); the project page's
+> raise and confirm views were deleted in O6, and their URLs 404. **(2) `invoice_paid` is not
+> sent** — O5 removed it, and O7 brings payment notices back on WhatsApp and email. Marking a
+> payment paid tells **the requester alone, in-app only**, from
+> `payments.send_payment_notices()` (a `post_save` receiver on the ledger row, never to the
+> person who acted); that is what `tests_residential_baseline` pins. **(3) Raising is no longer
+> silent:** it tells every active payment approver except the requester, in-app only. The
+> statuses are the five in `PaymentRequest.STATUS_CHOICES`, not `pending | confirmed`, and the
+> BOQ item, invoice number and invoice document columns were dropped by migration `0101`.
 
 ---
 
@@ -709,7 +724,7 @@ Six triggers, all through `send_notification()`. Everything else in the lifecycl
 | Issue created (any) | each project manager ≠ raiser, ≠ assignee | **in_app only** | — |
 | Issue resolved | project managers + assignee + raiser, minus the resolver | in_app + whatsapp + email | `issue_resolved` |
 | Payment-milestone task marked `Done` | all Finance + project managers + all BD + all CEO | in_app + whatsapp + email | `payment_notification` |
-| Vendor payment request confirmed | all SCM + project managers + all CEO | in_app + whatsapp + email | `invoice_paid` |
+| ~~Vendor payment request confirmed~~ | ~~all SCM + project managers + all CEO~~ | ~~in_app + whatsapp + email~~ | ~~`invoice_paid`~~ — **since O5: marked paid (payments queue) → the requester, in_app only, no template; see §6.6's correction** |
 
 **Silent:** activation, template seeding, bulk assignment, every BOQ transition via the
 standalone endpoints, DC creation, GRN confirmation, GRN override, milestone invoice, milestone

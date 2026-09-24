@@ -475,7 +475,8 @@ class MilestoneDueDateTests(DateRuleCases, DateFixture):
 
 
 # ---------------------------------------------------------------------------
-# #8 confirm_payment_request
+# #8 marking a vendor payment paid — the payments queue's payment_mark_paid since O6,
+# which deleted the project page's confirm door. Same check_typed_date(), same service.
 # ---------------------------------------------------------------------------
 
 class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
@@ -484,8 +485,7 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
         super().setUp()
         vendor = Vendor.objects.create(name='Sunrise', contact_person='R', phone='9000000003')
         self.pr = PaymentRequest.objects.create(
-            project=self.project, vendor=vendor, invoice_number='INV-1', invoice_document_name='i.pdf',
-            invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
+            project=self.project, vendor=vendor,
             amount=Decimal('1000.00'), requested_by=self.scm.user,
             status=PaymentRequest.APPROVED, approved_amount=Decimal('1000.00'),
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
@@ -498,7 +498,7 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
 
     def submit(self, value):
         return _client(self.finance).post(
-            reverse('confirm_payment_request', args=[self.project.project_id, self.pr.pk]),
+            reverse('payment_mark_paid', args=[self.pr.pk]),
             {'payment_date': value, 'payment_reference': 'UTR-1'})
 
     def test_the_ceiling_itself_is_accepted(self):
