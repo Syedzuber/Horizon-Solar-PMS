@@ -1,16 +1,18 @@
-import os
+from django.conf import settings
 
 
 def get_supabase_client():
     """
-    Build and return an authenticated Supabase client using environment variables.
+    Build and return an authenticated Supabase client from Django settings.
+    Settings read SUPABASE_URL / SUPABASE_KEY through python-decouple, which checks
+    os.environ before .env, so Railway's variables still win and a local .env works.
     Raises ValueError if SUPABASE_URL or SUPABASE_KEY are not set — prevents
     silent failures where uploads appear to succeed but go nowhere.
     The supabase package is imported here (not at module level) so that the app
     can start and run migrations even when the package is not installed.
     """
-    url = os.environ.get("SUPABASE_URL", "")
-    key = os.environ.get("SUPABASE_KEY", "")
+    url = settings.SUPABASE_URL
+    key = settings.SUPABASE_KEY
     if not url or not key:
         raise ValueError("SUPABASE_URL and SUPABASE_KEY must be configured")
     # import inside function so missing supabase package raises at call time, not import time
