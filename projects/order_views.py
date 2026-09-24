@@ -1754,31 +1754,41 @@ def payment_approve(request, payment_pk):
     true record that the question was overtaken rather than resolved — and the detail
     page shows it that way.
 
-    PART OF THE REQUEST MAY BE APPROVED (O4b). `approved_amount` is posted by the approve
-    form, prefilled with the requested amount; above it, zero or negative is refused, and
-    below it the remark becomes MANDATORY and the ledger remark reads "approved ₹X of ₹Y:
-    <reason>". A POST without the field approves in full — what the prefilled form
-    submits unchanged. `amount` is never rewritten; approved_amount is written with
-    approved_by, inside the same lock.
+    PART OF THE REQUEST MAY BE APPROVED (O4b). `approved_amount` is REQUIRED in the POST
+    (O4c — there is no approve-in-full fallback); the form prefills it. Above the request,
+    zero, negative, blank or missing is refused, and below the request the remark becomes
+    MANDATORY and the ledger remark reads "approved ₹X of ₹Y: <reason>". `amount` is never
+    rewritten; approved_amount is written with approved_by, inside the same lock.
+
+    THE APPROVED AMOUNT IS A CEILING (O4c). A request approved once — then held and
+    answered, or held and released — may be re-approved at or below its previous
+    approved amount, never above it: the difference was freed and may already be spent.
+
+    THE ORDER TOTAL IS RE-CHECKED UNDER A LOCK (O4c). Every other request on the order,
+    at committed_total(), plus this approval may not exceed the order's total. A request
+    raised in breach of the total — by a fixture, a shell, or a rule this module has not
+    thought of — is caught here, before Finance sees it.
+
+    LOCK ORDER: the VendorOrder row, THEN the PaymentRequest row. The order lock is what
+    serialises two approvals of different requests on one order; the request lock is the
+    one every other payment action takes. No other path takes the two in the opposite
+    order — vendor_order_add_payment locks the order and inserts a request, and hold,
+    reject, respond and mark-paid lock the request alone — so no cycle can form.
     """
     payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
     if refusal is not None:
         return refusal
 
     remark = request.POST.get('remark', '').strip()
-    raw_amount = request.POST.get('approved_amount')
-    if raw_amount is None:
-        approved_amount = payment.amount
-    else:
-        approved_amount = _parse_decimal(raw_amount, 12)
-        if approved_amount is not None:
-            # "80000" and "80000.00" are one figure; the ledger remark states it as stored.
-            approved_amount = approved_amount.quantize(Decimal('0.01'))
-        if approved_amount is None or approved_amount > payment.amount:
-            messages.error(request,
-                           f'The approved amount must be more than 0 and at most the '
-                           f'₹{payment.amount} requested. Nothing was changed.')
-            return _payment_redirect(order_pk)
+    approved_amount = _parse_decimal(request.POST.get('approved_amount'), 12)
+    if approved_amount is not None:
+        # "80000" and "80000.00" are one figure; the ledger remark states it as stored.
+        approved_amount = approved_amount.quantize(Decimal('0.01'))
+    if approved_amount is None or approved_amount > payment.amount:
+        messages.error(request,
+                       f'The approved amount must be more than 0 and at most the '
+                       f'₹{payment.amount} requested. Nothing was changed.')
+        return _payment_redirect(order_pk)
     partial = approved_amount < payment.amount
     if partial and not remark:
         messages.error(request,
@@ -1789,9 +1799,27 @@ def payment_approve(request, payment_pk):
         remark = f'approved ₹{approved_amount} of ₹{payment.amount}: {remark}'
 
     with transaction.atomic():
+        # The order first, then the request — see LOCK ORDER above. No join: the
+        # order row alone.
+        order  = VendorOrder.objects.select_for_update().get(pk=order_pk)
         locked = _locked_payment(payment_pk)
         if not user_can_approve_payment(request.user, locked):
             return _refuse_stale(request, locked, order_pk)
+        ceiling = locked.approved_amount
+        if ceiling is not None and approved_amount > ceiling:
+            messages.error(request,
+                           f'This request was previously approved for ₹{ceiling}; a new '
+                           f'approval cannot be for more. Nothing was changed.')
+            return _payment_redirect(order_pk)
+        others = committed_total(
+            PaymentRequest.objects.filter(vendor_order_id=order_pk).exclude(pk=payment_pk))
+        if others + approved_amount > order.total_amount:
+            messages.error(request,
+                           f'Approving ₹{approved_amount} would commit '
+                           f'₹{others + approved_amount} against the order total of '
+                           f'₹{order.total_amount}; at most ₹{order.total_amount - others} '
+                           f'can be approved. Nothing was changed.')
+            return _payment_redirect(order_pk)
         from_status = locked.status
         locked.status          = PaymentRequest.APPROVED
         locked.approved_by     = profile
@@ -1913,8 +1941,12 @@ def payment_hold_respond(request, payment_pk):
     APPROVED_BY / APPROVED_AT ARE CLEARED. A request held after approval and then
     answered is back in front of an approver, and leaving the old approval stamped on it
     would let a screen read "approved by X" on a row nobody has approved in its current
-    shape. The approver who releases it stamps it again. APPROVED_AMOUNT GOES WITH THEM
-    (O4b): the request counts at its requested amount again until it is re-approved.
+    shape. The approver who releases it stamps it again.
+
+    APPROVED_AMOUNT IS KEPT (O4c). It is the ceiling for the re-approval, and the request
+    keeps counting at it: clearing it would put the freed difference back into
+    committed_total() after SCM may already have requested it again, and commit more than
+    the order total.
 
     NOT GUARDED BY _approver_entry(): this is the other side of the conversation, so the
     predicate is user_can_respond_to_hold() — the SCM role, ON_HOLD, and an open hold to
@@ -1947,12 +1979,10 @@ def payment_hold_respond(request, payment_pk):
         hold.responded_at = timezone.now()
         hold.save(update_fields=['response', 'responded_by', 'responded_at'])
         from_status = locked.status
-        locked.status          = PaymentRequest.PENDING_APPROVAL
-        locked.approved_by     = None
-        locked.approved_at     = None
-        locked.approved_amount = None
-        locked.save(update_fields=['status', 'approved_by', 'approved_at',
-                                   'approved_amount'])
+        locked.status      = PaymentRequest.PENDING_APPROVAL
+        locked.approved_by = None
+        locked.approved_at = None
+        locked.save(update_fields=['status', 'approved_by', 'approved_at'])
         record_transition(locked, to_status=PaymentRequest.PENDING_APPROVAL,
                           from_status=from_status, actor=profile, remark=response,
                           project=locked.project)

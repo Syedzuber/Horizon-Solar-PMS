@@ -919,7 +919,8 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.ceo.is_payment_approver = True
         self.ceo.save(update_fields=['is_payment_approver'])
         response = _client_for(self.ceo).post(
-            reverse('payment_approve', args=[pr.pk]), {'remark': ''})
+            reverse('payment_approve', args=[pr.pk]),
+            {'remark': '', 'approved_amount': str(pr.amount)})
         self.assertEqual(response.status_code, 302)
         pr.refresh_from_db()
         self.assertEqual(pr.status, PaymentRequest.APPROVED)

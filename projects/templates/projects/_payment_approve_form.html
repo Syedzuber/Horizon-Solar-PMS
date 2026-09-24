@@ -5,16 +5,21 @@ The approve form (O4b), shared by the order page and the payments queue. Include
 The amount is prefilled with what was requested, so approving in full is one click. Less
 than that needs a reason — the view refuses it without one, and more than the request,
 zero or a negative figure, whatever the browser allowed.
+
+A request approved before (then held) is prefilled with its PREVIOUS APPROVED AMOUNT and
+capped there (O4c): a re-approval may lower it, never raise it. `ceiling` is that figure
+or the requested amount.
 {% endcomment %}
+{% firstof p.approved_amount p.amount as ceiling %}
 <form method="post" action="{{ action }}" class="row g-2 align-items-end">
   {% csrf_token %}
   {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
   <div class="col-12 col-sm-4">
     <label class="form-label small mb-1" for="approve-amount-{{ p.pk }}">Amount to approve (₹)</label>
     <input type="number" class="form-control form-control-sm" required
-           step="0.01" min="0.01" max="{{ p.amount|stringformat:'s' }}"
-           id="approve-amount-{{ p.pk }}" name="approved_amount" value="{{ p.amount|stringformat:'s' }}">
-    <div class="form-text">₹{{ p.amount|floatformat:2 }} requested.</div>
+           step="0.01" min="0.01" max="{{ ceiling|stringformat:'s' }}"
+           id="approve-amount-{{ p.pk }}" name="approved_amount" value="{{ ceiling|stringformat:'s' }}">
+    <div class="form-text">₹{{ p.amount|floatformat:2 }} requested.{% if p.approved_amount is not None %} Previously approved ₹{{ p.approved_amount|floatformat:2 }} — a new approval cannot be for more.{% endif %}</div>
   </div>
   <div class="col-12 col-sm-5">
     <label class="form-label small mb-1" for="approve-remark-{{ p.pk }}">Reason (required if approving less)</label>

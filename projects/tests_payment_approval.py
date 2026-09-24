@@ -97,8 +97,11 @@ class ApprovalFixture(RaiseFixture):
 
     # -- acts ----------------------------------------------------------------
     def approve(self, profile=None, remark='', payment=None):
+        # O4c: the amount is required; this approves in full, what the prefilled form sends.
+        payment = payment or self.payment
         return _client(profile or self.approver).post(
-            self.approve_url(payment), {'remark': remark})
+            self.approve_url(payment),
+            {'remark': remark, 'approved_amount': str(payment.amount)})
 
     def hold(self, profile=None, reason='GRN not received', payment=None):
         return _client(profile or self.approver).post(
@@ -565,7 +568,7 @@ class ConcurrentDecisionTests(TransactionTestCase):
 
     def test_approve_and_hold_serialise_and_the_ledger_chains(self):
         results = self._race(
-            (self.app_a, 'payment_approve', {'remark': ''}),
+            (self.app_a, 'payment_approve', {'remark': '', 'approved_amount': '25000'}),
             (self.app_b, 'payment_hold',    {'reason': 'wait'}),
         )
         self.assertEqual(set(results.values()), {302})    # neither 500'd
@@ -590,8 +593,8 @@ class ConcurrentDecisionTests(TransactionTestCase):
         """Here the second decision IS forbidden by its predicate — approve is not
         reachable from APPROVED — so the loser is refused rather than chained."""
         results = self._race(
-            (self.app_a, 'payment_approve', {'remark': 'a'}),
-            (self.app_b, 'payment_approve', {'remark': 'b'}),
+            (self.app_a, 'payment_approve', {'remark': 'a', 'approved_amount': '25000'}),
+            (self.app_b, 'payment_approve', {'remark': 'b', 'approved_amount': '25000'}),
         )
         self.assertEqual(set(results.values()), {302})    # a refusal, not a 500
 

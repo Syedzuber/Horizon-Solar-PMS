@@ -10,8 +10,8 @@ What this file pins, and why each matters:
     refusal changes nothing — no status, no stamp, no ledger row.
   * THE DATABASE SAYS IT TOO: approved_amount within (0, amount], and an approved or paid
     request always carries one.
-  * SCM'S ANSWER TO A HOLD CLEARS THE APPROVED AMOUNT with the rest of the approval, so the
-    re-approval sets it afresh.
+  * SCM'S ANSWER TO A HOLD KEEPS THE APPROVED AMOUNT (O4c) and clears only who approved
+    and when; the amount is the ceiling for the re-approval (tests_payment_approval_ceiling).
   * BOTH FIGURES SHOW WHEN THEY DIFFER, one when they agree. The requester hears about a
     partial approval, in-app; a full one tells nobody, as before.
 
@@ -148,11 +148,11 @@ class PartialApproveTests(PartialFixture):
         self.assertEqual(self.payment.approved_amount, Decimal('100000.00'))
         self.assertEqual(self.transitions().get(to_status=PaymentRequest.APPROVED).remark, '')
 
-    def test_a_post_without_the_field_approves_in_full(self):
-        """What the prefilled form submits unchanged, and what O4's own posts send."""
-        self.approve()
-        self.reload()
-        self.assertEqual(self.payment.approved_amount, Decimal('100000.00'))
+    def test_a_post_without_the_amount_is_refused(self):
+        """O4c removed the approve-in-full fallback: the amount is required."""
+        response = _client(self.approver).post(self.approve_url(), {'remark': 'ok'})
+        self.assertIn('must be more than 0', ' '.join(_messages(response)))
+        self.assert_unchanged()
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,8 @@ class ConstraintTests(PartialFixture):
 
 class HoldAfterPartialApprovalTests(PartialFixture):
 
-    def test_scm_answering_the_hold_clears_the_amount_and_reapproval_sets_it_afresh(self):
+    def test_scm_answering_the_hold_keeps_the_amount_as_a_ceiling(self):
+        """O4c: the answer clears who approved and when, never how much."""
         self.approve_amount('80000', remark='Short delivery')
         self.hold(reason='Check the rate first')
         self.reload()
@@ -200,15 +201,20 @@ class HoldAfterPartialApprovalTests(PartialFixture):
         self.respond(response='Rate is per the PO')
         self.reload()
         self.assertEqual(self.payment.status, PaymentRequest.PENDING_APPROVAL)
-        self.assertIsNone(self.payment.approved_amount)
+        self.assertEqual(self.payment.approved_amount, Decimal('80000.00'))
         self.assertIsNone(self.payment.approved_by)
         self.assertIsNone(self.payment.approved_at)
-        # Back to counting in full.
-        self.assertEqual(self.order.committed_amount, Decimal('100000.00'))
+        # Still counts at the approved figure, never back at the request.
+        self.assertEqual(self.order.committed_amount, Decimal('80000.00'))
 
         self.approve_amount('90000', remark='Nine delivered now', profile=self.approver_b)
         self.reload()
-        self.assertEqual(self.payment.approved_amount, Decimal('90000.00'))
+        self.assertEqual(self.payment.status, PaymentRequest.PENDING_APPROVAL)
+        self.assertEqual(self.payment.approved_amount, Decimal('80000.00'))
+
+        self.approve_amount('80000', remark='Eight, as before', profile=self.approver_b)
+        self.reload()
+        self.assertEqual(self.payment.status, PaymentRequest.APPROVED)
         self.assertEqual(self.payment.approved_by, self.approver_b)
 
 

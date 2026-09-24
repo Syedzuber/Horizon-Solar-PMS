@@ -2345,9 +2345,10 @@ class PaymentRequest(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
     # HOW MUCH OF THE REQUEST WAS APPROVED (O4b). An approver may approve less than was
     # asked for, with a reason; `amount` stays what SCM requested and is never rewritten.
-    # Written with approved_by, and CLEARED with it when SCM answers a hold, so the
-    # re-approval sets it afresh. Two CHECKs below: it lies in (0, amount], and an
-    # approved or paid request always carries it. Read it through `effective_amount`.
+    # Written with approved_by, and NOT cleared when SCM answers a hold (O4c): it is the
+    # CEILING for any re-approval, which may lower it and never raise it. Two CHECKs
+    # below: it lies in (0, amount], and an approved or paid request always carries it.
+    # Read it through `effective_amount`.
     approved_amount = models.DecimalField(max_digits=14, decimal_places=2,
                                           null=True, blank=True)
     # WHY A REQUEST WAS REJECTED, AND NOTHING ELSE (O4). O1 wrote this field for both
@@ -2412,10 +2413,10 @@ class PaymentRequest(models.Model):
     def effective_amount(self):
         """The money this request stands for (O4b): approved_amount when set, else amount.
 
-        Pending requests count at their requested amount; approved and paid ones at the
-        approved amount. A held request counts at whatever it last carried — its
-        requested amount if it was never approved, its approved amount if it was held
-        after approval (SCM's answer then clears that, and it counts in full again).
+        A request never approved counts at its requested amount; approved and paid ones
+        at the approved amount. A REQUEST ONCE APPROVED NEVER COUNTS ABOVE ITS APPROVED
+        AMOUNT AGAIN (O4c): held, answered and back awaiting approval, it still counts at
+        the approved amount, which is also the most a re-approval may be for.
         Every rule about money committed or paid reads this, never `amount`:
         committed_total(), VendorOrder.paid, _order_money(), the queue's sums.
         """

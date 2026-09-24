@@ -400,7 +400,7 @@ class ReturnToQueueTests(QueueFixture):
         here = reverse('payment_queue') + '?tab=Residential&status=pending_approval&q=RES'
         response = _client(self.approver).post(
             reverse('payment_queue_action', args=[self.res_pay.pk, 'approve']),
-            {'remark': '', 'next': here})
+            {'remark': '', 'approved_amount': '20000', 'next': here})
         self.assertRedirects(response, here, fetch_redirect_response=False)
         self.res_pay.refresh_from_db()
         self.assertEqual(self.res_pay.status, PaymentRequest.APPROVED)
@@ -435,14 +435,15 @@ class ReturnToQueueTests(QueueFixture):
     def test_an_offsite_next_is_ignored(self):
         response = _client(self.approver).post(
             reverse('payment_queue_action', args=[self.res_pay.pk, 'approve']),
-            {'remark': '', 'next': 'https://evil.example/payments/'})
+            {'remark': '', 'approved_amount': '20000',
+             'next': 'https://evil.example/payments/'})
         self.assertRedirects(response, reverse('vendor_order_detail', args=[self.res_order.pk]),
                              fetch_redirect_response=False)
 
     def test_a_next_that_is_not_the_queue_is_ignored(self):
         response = _client(self.approver).post(
             reverse('payment_queue_action', args=[self.res_pay.pk, 'approve']),
-            {'remark': '', 'next': reverse('notifications')})
+            {'remark': '', 'approved_amount': '20000', 'next': reverse('notifications')})
         self.assertRedirects(response, reverse('vendor_order_detail', args=[self.res_order.pk]),
                              fetch_redirect_response=False)
 
@@ -533,7 +534,7 @@ class NotificationTests(QueueFixture):
     def test_approve_and_reject_notify_nobody(self):
         with self.captureOnCommitCallbacks(execute=True):
             _client(self.approver).post(reverse('payment_approve', args=[self.res_pay.pk]),
-                                        {'remark': ''})
+                                        {'remark': '', 'approved_amount': '20000'})
             _client(self.approver).post(reverse('payment_reject', args=[self.central_pay.pk]),
                                         {'reason': 'No'})
         self.assertFalse(Notification.objects.exists())
