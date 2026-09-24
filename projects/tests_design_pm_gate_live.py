@@ -90,6 +90,8 @@ SEED_RELEASE_WRITERS = {
     ('management/commands/seed_opex_test_data.py', '_seed_design_state'),
     ('management/commands/seed_scm_handoff_data.py', '_release'),
     ('management/commands/seed_scm_pilot.py', '_design_state'),
+    # Demo tooling, local only, guarded by require_local_database().
+    ('management/commands/seed_order_demo.py', '_release_designs'),
 }
 
 INTENDED_WRITERS = {
