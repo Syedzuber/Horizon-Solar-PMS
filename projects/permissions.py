@@ -1885,6 +1885,38 @@ def user_can_view_program_vendor_orders(user, program):
 
 
 # ---------------------------------------------------------------------------
+# O8a — the purchases & payments workspace
+# ---------------------------------------------------------------------------
+
+# Who reads the workspace: the order portfolio readers, exactly. The workspace lists
+# every PO / PI record in the company, which is what VENDOR_ORDER_PORTFOLIO_ROLES already
+# admits one order at a time — so the set is that set, and narrows with it under D-4.
+PURCHASES_WORKSPACE_VIEW_ROLES = VENDOR_ORDER_PORTFOLIO_ROLES
+
+
+def user_can_use_purchases_workspace(user):
+    """Return True if `user` may ACT in the purchases workspace — add a PO / PI record and
+    raise a payment request from it.
+
+    SCM only (VENDOR_ORDER_RAISE_ROLES), the role that records orders and asks for their
+    money on every other page. What each submission names is still checked per site and
+    per order inside the views, exactly as the group raise and Request payment check it.
+    """
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in VENDOR_ORDER_RAISE_ROLES
+
+
+def user_can_view_purchases_workspace(user):
+    """Return True if `user` may READ the purchases workspace list.
+
+    SCM, CEO, Admin, System Admin and Finance (PURCHASES_WORKSPACE_VIEW_ROLES). Read-only
+    for all but SCM: the two actions are user_can_use_purchases_workspace()'s.
+    """
+    profile = getattr(user, 'profile', None)
+    return profile is not None and profile.role in PURCHASES_WORKSPACE_VIEW_ROLES
+
+
+# ---------------------------------------------------------------------------
 # O4 — the payment approval gate
 #
 # FIVE PREDICATES, ONE FLAG, AND THE SAME-PERSON RULE. `is_payment_approver` says what a

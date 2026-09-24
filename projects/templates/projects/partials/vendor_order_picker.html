@@ -1,0 +1,155 @@
+{% comment %}
+Section 3 (Recorded against) of a raise page — the site picker. Section 4 is
+partials/vendor_order_requirement.html. Shared by the group raise
+(vendor_order_group_form.html) and the purchases workspace's Add PO / PI
+(purchases_new.html, O8a). Needs order_views._picker_context()'s keys.
+
+ONE RENDERER: every candidate site is drawn once as a search result and once as an
+added-site chip, and every requirement row once with its per-site quantities in
+data-contrib. partials/vendor_order_picker_script.html only shows, hides and re-sums.
+
+picker_residential (O8a only) adds one result and one chip per Residential project,
+data-kind="res", under a "Residential projects" block. Off, the page draws exactly what
+the group raise has always drawn.
+{% endcomment %}
+  {# ── 3. Recorded against ──────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      3 · Recorded against <span class="text-muted fw-normal">(optional)</span>
+      <div class="small text-muted fw-normal">
+        Whose requirement this purchase answers. Material may be held centrally and issued
+        to sites later — naming a site here allocates nothing to it.
+      </div>
+    </div>
+    <div class="card-body">
+
+      <div class="small fw-semibold mb-1">Tenders</div>
+      <div class="d-flex flex-wrap gap-2 mb-3" id="voTenders">
+        {% for t in tenders %}
+          <input type="checkbox" class="btn-check js-vo-program" name="program" autocomplete="off"
+                 value="{{ t.program.pk }}" id="voProg{{ t.program.pk }}"{% if t.ticked %} checked{% endif %}>
+          <label class="btn btn-sm btn-outline-secondary rounded-pill" for="voProg{{ t.program.pk }}">{{ t.program.name }}</label>
+        {% empty %}
+          <span class="text-muted small">No tenders to name.</span>
+        {% endfor %}
+      </div>
+
+      <div class="row g-3">
+        <div class="col-12 col-lg-5">
+          <div class="small fw-semibold mb-1">Procurement groups</div>
+          <div class="border rounded p-2" style="max-height:16rem; overflow:auto;">
+            {% for t in tenders %}{% if t.groups %}
+            <div class="mb-2">
+              <div class="text-uppercase text-muted" style="font-size:.7rem; letter-spacing:.04em;">{{ t.program.name }}</div>
+              {% for g in t.groups %}
+              <div class="form-check">
+                <input class="form-check-input js-vo-group" type="checkbox" name="source"
+                       value="{{ g.key }}" id="voGrp{{ g.key }}" data-group="{{ g.group.pk }}"
+                       data-program="{{ t.program.pk }}" data-members="{{ g.members_json }}"{% if g.checked %} checked{% endif %}>
+                <label class="form-check-label small" for="voGrp{{ g.key }}">
+                  {{ g.group.name }}
+                  <span class="badge {% if g.group.status == 'locked' %}text-bg-primary{% else %}text-bg-warning{% endif %}">{{ g.group.get_status_display }}</span>
+                  <span class="text-muted">· {{ g.members|length }} site{{ g.members|length|pluralize }}</span>
+                </label>
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}{% endfor %}
+            {% if not group_rows %}<div class="text-muted small">No procurement groups yet. Add sites by search instead.</div>{% endif %}
+            <div class="form-text mt-0">Ticking a group adds its sites and ticks its tender.</div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-7">
+          <div class="small fw-semibold mb-1">Find a site</div>
+          <div class="d-flex gap-2 mb-2">
+            <input type="search" class="form-control form-control-sm" id="voSearch"
+                   placeholder="Site code, customer or city" aria-label="Search sites">
+            <select class="form-select form-select-sm" id="voGroupFilter" aria-label="Filter by group" style="max-width:14rem;">
+              <option value="">Any group</option>
+              <option value="none">Not in a group</option>
+              {% for g in group_rows %}
+              <option value="{{ g.group.pk }}" data-program="{{ g.program.pk }}">{{ g.program.name }} · {{ g.group.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <ul class="list-group small" id="voResults" style="max-height:16rem; overflow:auto;">
+            {% for t in tenders %}{% for s in t.sites %}
+            <li class="list-group-item d-flex justify-content-between align-items-center py-1 js-vo-result d-none"
+                data-site="{{ s.project.pk }}" data-program="{{ t.program.pk }}"
+                data-group="{% if s.group %}{{ s.group.pk }}{% endif %}"
+                data-text="{{ s.project.project_id|lower }} {{ s.project.customer_name|lower }} {{ s.project.city|lower }}">
+              <span>
+                <span class="fw-semibold">{{ s.project.project_id }}</span>
+                <span class="text-muted">· {{ s.project.customer_name }}{% if s.project.city %}, {{ s.project.city }}{% endif %}</span>
+                <span class="text-muted" style="font-size:.7rem;">· {% if s.group %}{{ s.group.name }}{% else %}no group{% endif %}</span>
+                {% if picker_residential %}<span class="badge text-bg-light border fw-normal" style="font-size:.65rem;">RESCO · {{ t.program.name }}</span>{% endif %}
+              </span>
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0 js-vo-add">Add</button>
+            </li>
+            {% endfor %}{% endfor %}
+            {% for r in residential_rows %}
+            <li class="list-group-item d-flex justify-content-between align-items-center py-1 js-vo-result d-none"
+                data-site="{{ r.project.pk }}" data-program="" data-kind="res" data-group=""
+                data-text="{{ r.project.project_id|lower }} {{ r.project.customer_name|lower }} {{ r.project.city|lower }}">
+              <span>
+                <span class="fw-semibold">{{ r.project.project_id }}</span>
+                <span class="text-muted">· {{ r.project.customer_name }}{% if r.project.city %}, {{ r.project.city }}{% endif %}</span>
+                <span class="badge text-bg-info fw-normal" style="font-size:.65rem;">Residential</span>
+              </span>
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0 js-vo-add">Add</button>
+            </li>
+            {% endfor %}
+          </ul>
+          <div class="small text-muted mt-1" id="voResultsHint">{% if picker_residential %}Tick a tender, or type to find a Residential project.{% else %}Tick a tender to search its sites.{% endif %}</div>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <div class="small fw-semibold mb-1">Added sites</div>
+        {% for t in tenders %}
+        <div class="mb-2 js-vo-added-block{% if not t.ticked %} d-none{% endif %}" data-program="{{ t.program.pk }}">
+          <div class="small text-muted mb-1">
+            {{ t.program.name }} · <span class="js-vo-n">0</span> of {{ t.site_count }} site{{ t.site_count|pluralize }}
+          </div>
+          <div class="d-flex flex-wrap gap-1">
+            {% for s in t.sites %}
+            <span class="badge rounded-pill text-bg-light border fw-normal js-vo-chip{% if not s.added %} d-none{% endif %}"
+                  data-site="{{ s.project.pk }}" data-program="{{ t.program.pk }}"
+                  data-group="{% if s.group %}{{ s.group.pk }}{% endif %}">
+              {{ s.project.project_id }}
+              <button type="button" class="btn-close ms-1 js-vo-remove" style="font-size:.5rem;"
+                      aria-label="Remove {{ s.project.project_id }}"></button>
+              <input type="hidden" name="site" value="{{ s.project.pk }}" class="js-vo-site-input"{% if not s.added %} disabled{% endif %}>
+              {% if s.group %}
+              <input type="hidden" name="via_group_{{ s.project.pk }}" value="{{ s.group.pk }}" class="js-vo-via"{% if not s.added or not s.via %} disabled{% endif %}>
+              {% endif %}
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+        {% if picker_residential %}
+        <div class="mb-2 js-vo-added-block d-none" data-program="">
+          <div class="small text-muted mb-1">
+            Residential projects · <span class="js-vo-n">0</span>
+          </div>
+          <div class="d-flex flex-wrap gap-1">
+            {% for r in residential_rows %}
+            <span class="badge rounded-pill text-bg-light border fw-normal js-vo-chip{% if not r.added %} d-none{% endif %}"
+                  data-site="{{ r.project.pk }}" data-program="" data-kind="res" data-group="">
+              {{ r.project.project_id }}
+              <button type="button" class="btn-close ms-1 js-vo-remove" style="font-size:.5rem;"
+                      aria-label="Remove {{ r.project.project_id }}"></button>
+              <input type="hidden" name="site" value="{{ r.project.pk }}" class="js-vo-site-input"{% if not r.added %} disabled{% endif %}>
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+        <div class="small text-muted" id="voNoSites">
+          {% if picker_residential %}Nothing added. A PO / PI may be recorded against its tenders alone, or against nothing at all.{% else %}No sites added. A payment request with no sites is valid — it is recorded against its tenders.{% endif %}
+        </div>
+      </div>
+    </div>
+  </div>

@@ -788,17 +788,12 @@ def vendor_order_add_payment(request, order_pk):
     creates one PaymentRequest for at most the order's uncommitted balance
     (total − committed_amount).
 
-    THE ANCHOR. `project` is _order_project(order) — the lowest project_id of the order's
-    sites, or None when it has none (O2d). It is the site the payment is LISTED under and
-    nothing else; the money and what it was for are the order's. The same value anchors
-    the feed line and the ledger row, and ActivityLog.project and
-    StatusTransition.project are both nullable, so a site-less order writes both.
+    The POST is _submit_order_payment(), shared with the purchases workspace (O8a); see
+    it for the anchor rule.
     """
     order = _order_with_sites(order_pk)
     if not user_can_request_order_payment(request.user, order):
         return HttpResponseForbidden()
-    profile = request.user.profile
-    project = _order_project(order)
 
     if request.method != 'POST':
         return render(request, 'projects/vendor_order_payment_form.html',
@@ -811,6 +806,65 @@ def vendor_order_add_payment(request, order_pk):
                       _payment_context(order, available, request.POST, client_uuid,
                                        refused=True),
                       status=400)
+
+    return _submit_order_payment(request, order, refuse)
+
+
+def _create_order_payment(order, project, amount, note, user, profile, client_uuid):
+    """Create one PENDING_APPROVAL payment request against `order` if `amount` fits the
+    balance still available to request, reading that balance UNDER A LOCK on the order
+    row. Returns (pr, available) — pr is None when the amount did not fit.
+
+    THE ONE WRITER for a payment against an EXISTING order record: the record page's
+    Request payment (vendor_order_add_payment), the purchases workspace's Raise payment
+    request and its Add PO / PI tick box (O8a) all come through here. May run inside an
+    outer transaction (Add PO / PI's write); its atomic block is then a savepoint and the
+    lock is held until the outer commit. Raises IntegrityError on a repeated client_uuid.
+    """
+    pr, available = None, None
+    with transaction.atomic():
+        # THE RACE. Two SCM tabs (or a retry with a new key) can each read the same
+        # uncommitted balance and each ask for all of it; checked separately, both
+        # pass and together exceed the order. Locking the ORDER row serialises every
+        # payment on this order: the second request waits here until the first
+        # commits, then recomputes committed_amount and sees the first's payment.
+        # The lock must come BEFORE the read — a balance read outside it is stale.
+        locked = VendorOrder.objects.select_for_update().get(pk=order.pk)
+        available = locked.total - locked.committed_amount
+        if amount <= available:
+            pr = PaymentRequest.objects.create(
+                vendor_order=locked, project=project, vendor=order.vendor,
+                amount=amount, note=note, requested_by=user,
+                # PENDING_APPROVAL since O4, as on both raise pages. The balance
+                # check above is unaffected: committed_total() counts every status
+                # but REJECTED, so a pending payment holds its money exactly as an
+                # approved one did.
+                status=PaymentRequest.PENDING_APPROVAL,
+                client_uuid=client_uuid,
+            )
+            # Inside the atomic block, as record_transition's contract requires.
+            record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL,
+                              from_status='', actor=profile, project=project)
+    return pr, available
+
+
+def _submit_order_payment(request, order, refuse):
+    """The POST half of a further payment request against `order` — idempotency key,
+    amount and note, the locked balance check, the write, the feed line and the redirect.
+    `refuse(errors, available, client_uuid)` renders the caller's page with the entries
+    kept. The caller has already checked user_can_request_order_payment().
+
+    Shared, not copied: the record page (vendor_order_add_payment) and the purchases
+    workspace's Raise payment request (O8a) are two doors onto this one path.
+
+    THE ANCHOR. `project` is _order_project(order) — the lowest project_id of the order's
+    sites, or None when it has none (O2d). It is the site the payment is LISTED under and
+    nothing else; the money and what it was for are the order's. The same value anchors
+    the feed line and the ledger row, and ActivityLog.project and
+    StatusTransition.project are both nullable, so a site-less order writes both.
+    """
+    profile = request.user.profile
+    project = _order_project(order)
 
     # R-14, as on the raise page: a repeated key goes to the order, and creates nothing.
     try:
@@ -830,31 +884,9 @@ def vendor_order_add_payment(request, order_pk):
     if errors:
         return refuse(errors, order.available_to_request, client_uuid)
 
-    pr, available = None, None
     try:
-        with transaction.atomic():
-            # THE RACE. Two SCM tabs (or a retry with a new key) can each read the same
-            # uncommitted balance and each ask for all of it; checked separately, both
-            # pass and together exceed the order. Locking the ORDER row serialises every
-            # payment on this order: the second request waits here until the first
-            # commits, then recomputes committed_amount and sees the first's payment.
-            # The lock must come BEFORE the read — a balance read outside it is stale.
-            locked = VendorOrder.objects.select_for_update().get(pk=order.pk)
-            available = locked.total - locked.committed_amount
-            if amount <= available:
-                pr = PaymentRequest.objects.create(
-                    vendor_order=locked, project=project, vendor=order.vendor,
-                    amount=amount, note=note, requested_by=request.user,
-                    # PENDING_APPROVAL since O4, as on both raise pages. The balance
-                    # check above is unaffected: committed_total() counts every status
-                    # but REJECTED, so a pending payment holds its money exactly as an
-                    # approved one did.
-                    status=PaymentRequest.PENDING_APPROVAL,
-                    client_uuid=client_uuid,
-                )
-                # Inside the atomic block, as record_transition's contract requires.
-                record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL,
-                                  from_status='', actor=profile, project=project)
+        pr, available = _create_order_payment(order, project, amount, note, request.user,
+                                               profile, client_uuid)
     except IntegrityError:
         # The same key raced past the check above; the winner holds the unique index.
         if PaymentRequest.objects.filter(client_uuid=client_uuid).exists():
@@ -868,13 +900,9 @@ def vendor_order_add_payment(request, order_pk):
             available, client_uuid)
 
     # log_activity never raises, so it sits after the commit.
-    ref = order.po_number or order.pi_number
-    log_activity(
-        project, profile,
-        f"Raised payment request to {order.vendor.name}: ₹{pr.amount} (order {ref})",
-        entity_type='PaymentRequest', entity_id=pr.pk, action_code='payment_request_raised',
-    )
-    messages.success(request, f'Payment of ₹{pr.amount} requested against order {ref}.')
+    _log_payment_raised(project, profile, order, pr)
+    messages.success(request, f'Payment of ₹{pr.amount} requested against order '
+                              f'{_order_ref(order)}.')
     return redirect('vendor_order_detail', order_pk=order.pk)
 
 
@@ -1170,10 +1198,24 @@ def _parse_group_amounts(post, errors):
     committed_total() rule every other payment path applies (a new order has committed
     nothing, so the cap is the total itself).
     """
+    order_total = _parse_order_total(post, errors)
+    return order_total, _parse_payment_within(post, order_total, errors)
+
+
+def _parse_order_total(post, errors):
+    """The order total from the PO, required. Shared by the group raise and the
+    purchases workspace's Add PO / PI (O8a)."""
     order_total = _parse_decimal(post.get('order_total'), 12)
     if order_total is None:
         errors.append('Enter the order total from the PO — more than 0.')
+    return order_total
 
+
+def _parse_payment_within(post, order_total, errors):
+    """The payment asked for with a NEW order, capped at its total by committed_total()
+    (a new order has committed nothing). Returns the payment dict or None. Required
+    wherever it is called: always on the group raise, and on Add PO / PI (O8a) when its
+    "Also raise a payment request now" box is ticked."""
     payment = None
     amount = _parse_decimal(post.get('payment_amount'), 10)
     if amount is None:
@@ -1183,7 +1225,7 @@ def _parse_group_amounts(post, errors):
                       f'(₹{order_total}).')
     else:
         payment = {'amount': amount, 'note': post.get('payment_note', '').strip()}
-    return order_total, payment
+    return payment
 
 
 def _parse_requirement(post, site_ids, errors):
@@ -1229,6 +1271,29 @@ def _parse_requirement(post, site_ids, errors):
     return lines, (sum(priced, Decimal('0')) if priced else None)
 
 
+def _parse_client_uuid(post, errors):
+    """The form's R-14 idempotency key, or None with the expired-form error."""
+    try:
+        return _uuid.UUID(post.get('client_uuid', ''))
+    except ValueError:
+        errors.append('This form expired. Check your entries and submit again.')
+        return None
+
+
+def _parse_new_order_documents(request, errors):
+    """The document slots of a NEW order record: validated, no invoice number repeated
+    within the submission (a new order has no invoices yet), and at least one PO or PI.
+    Appends to `errors`; returns the documents. Shared by the group raise and the
+    purchases workspace's Add PO / PI (O8a)."""
+    documents, doc_errors = _validate_document_slots(request)
+    errors.extend(doc_errors)
+    errors.extend(_duplicate_invoice_errors(_duplicate_invoice_numbers(documents)))
+    if not any(doc['doc_type'] in (VENDOR_ORDER_DOC_PO, VENDOR_ORDER_DOC_PI)
+               for doc in documents):
+        errors.append('Attach at least one PO or PI document.')
+    return documents
+
+
 def _parse_group_submission(request):
     """Read and validate the whole group-raise POST. Returns (cleaned, errors).
 
@@ -1240,21 +1305,11 @@ def _parse_group_submission(request):
     """
     post, errors = request.POST, []
 
-    try:
-        client_uuid = _uuid.UUID(post.get('client_uuid', ''))
-    except ValueError:
-        client_uuid = None
-        errors.append('This form expired. Check your entries and submit again.')
+    client_uuid = _parse_client_uuid(post, errors)
 
     # 1. PO / PI
     vendor, po_number, pi_number = _parse_header(post, errors)
-    documents, doc_errors = _validate_document_slots(request)
-    errors.extend(doc_errors)
-    # A new order has no invoices yet, so only repeats within this submission.
-    errors.extend(_duplicate_invoice_errors(_duplicate_invoice_numbers(documents)))
-    if not any(doc['doc_type'] in (VENDOR_ORDER_DOC_PO, VENDOR_ORDER_DOC_PI)
-               for doc in documents):
-        errors.append('Attach at least one PO or PI document.')
+    documents = _parse_new_order_documents(request, errors)
 
     # 2. Amounts
     order_total, payment = _parse_group_amounts(post, errors)
@@ -1284,33 +1339,54 @@ def _parse_group_submission(request):
     return cleaned, errors
 
 
-def _group_form_context(request, entering_program, post=None, client_uuid=None):
-    """Everything the group raise page draws.
+def _residential_candidates():
+    """Every Residential project SCM may record a purchase against — the set
+    vendor_order_create admits one at a time (user_can_raise_vendor_order: live and
+    Residential, whatever its status). ONE QUERY. Offered only by the purchases
+    workspace's picker (O8a); the group raise page never draws them."""
+    return list(Project.objects
+                .filter(project_type='Residential', is_deleted=False)
+                .only('pk', 'project_id', 'customer_name', 'city', 'project_type',
+                      'program_id')
+                .order_by('project_id'))
 
-    With `post`, every tick, every added site and every typed figure is put back — a
-    refused submission must never make someone find forty sites again. Files cannot be
-    put back (browsers refuse it); the page says so, exactly as the Residential one does.
+
+def _picker_context(entering_program, post, default_programs=(), default_sites=(),
+                    include_residential=False):
+    """Section 3 (Recorded against) and section 4 (Requirement) of a raise page — what
+    partials/vendor_order_picker.html draws and its script filters.
+
+    ONE ROW BUILDER FOR BOTH PAGES THAT USE THE PICKER: the group raise and the
+    purchases workspace's Add PO / PI (O8a). The workspace passes include_residential=True
+    and gets the same rows plus one per Residential project, rendered by the same
+    template, filtered by the same script.
+
+    With `post`, every tick and every added site comes back from it. Without, the
+    tenders in `default_programs` are pre-ticked and the sites in `default_sites` are
+    pre-added (both iterables of str pks) — how a page entered from a tender or a site
+    starts.
 
     THE REQUIREMENT IS RENDERED ONCE, FOR EVERY CANDIDATE SITE AT ONCE, and each row
     carries its per-site quantities in a data attribute keyed by site pk. The browser
     shows the rows the added sites contribute to and re-sums them; it builds no markup of
     its own.
     """
-    post = post or {}
     programs, group_rows, site_rows = _raise_candidates(entering_program)
+    residential = _residential_candidates() if include_residential else []
 
-    agg = aggregate_group_boq([row['project'].pk for row in site_rows])
+    candidates = [row['project'] for row in site_rows] + residential
+    agg = aggregate_group_boq([project.pk for project in candidates])
     # aggregate_group_boq() keys its per-site breakdown by the human site code; the page
     # matches on pk, and every candidate's code -> pk is already in hand.
-    pk_of = {row['project'].project_id: row['project'].pk for row in site_rows}
+    pk_of = {project.project_id: project.pk for project in candidates}
 
-    added    = set(post.getlist('site')) if post else set()
-    ticked_groups   = set(post.getlist('source')) if post else set()
-    ticked_programs = set(post.getlist('program')) if post else set()
-    if not post and entering_program is not None:
-        # Entered from a tender: that tender is offered pre-ticked, so a payment request
-        # raised straight away still says what it was recorded against.
-        ticked_programs = {str(entering_program.pk)}
+    if post:
+        added           = set(post.getlist('site'))
+        ticked_groups   = set(post.getlist('source'))
+        ticked_programs = set(post.getlist('program'))
+    else:
+        added, ticked_groups = set(default_sites), set()
+        ticked_programs = set(default_programs)
 
     for row in site_rows:
         key = str(row['project'].pk)
@@ -1343,7 +1419,6 @@ def _group_form_context(request, entering_program, post=None, client_uuid=None):
     } for line in agg['lines']]
 
     return {
-        'entering_program': entering_program,
         'tenders':          tenders,
         'group_rows':       group_rows,
         'requirement':      requirement,
@@ -1354,6 +1429,30 @@ def _group_form_context(request, entering_program, post=None, client_uuid=None):
         # rather than dropped: a requirement that is silently short is worse than one
         # that says what it left out (aggregate_group_boq).
         'unlinked':         agg['unlinked'],
+        # O8a. Empty, and the template draws no Residential row or block, unless asked.
+        'picker_residential': include_residential,
+        'residential_rows': [{'project': project, 'added': str(project.pk) in added}
+                             for project in residential],
+    }
+
+
+def _group_form_context(request, entering_program, post=None, client_uuid=None):
+    """Everything the group raise page draws.
+
+    With `post`, every tick, every added site and every typed figure is put back — a
+    refused submission must never make someone find forty sites again. Files cannot be
+    put back (browsers refuse it); the page says so, exactly as the Residential one does.
+
+    Sections 3 and 4 are _picker_context()'s (shared with the purchases workspace, O8a).
+    """
+    post = post or {}
+    # Entered from a tender: that tender is offered pre-ticked, so a payment request
+    # raised straight away still says what it was recorded against.
+    return {
+        'entering_program': entering_program,
+        **_picker_context(entering_program, post,
+                          default_programs=([str(entering_program.pk)]
+                                            if entering_program is not None else [])),
         'vendors':          Vendor.objects.filter(is_active=True).order_by('name'),
         'doc_rows':         _doc_rows(post, {0: VENDOR_ORDER_DOC_PO,
                                              1: VENDOR_ORDER_DOC_PI}),
@@ -1371,13 +1470,140 @@ def _group_form_context(request, entering_program, post=None, client_uuid=None):
     }
 
 
-def _entering_program(request):
-    """The tender the page was entered from, or None. It decides what is PRE-TICKED and
-    nothing else — every tender is offered whatever this is."""
-    raw = (request.POST.get('entered_from') or request.GET.get('program') or '').strip()
+def _picker_program(raw):
+    """A live tender by its posted or query-string pk, or None."""
+    raw = (raw or '').strip()
     if not raw.isdigit():
         return None
     return Program.objects.filter(pk=int(raw), is_deleted=False).first()
+
+
+def _entering_program(request):
+    """The tender the page was entered from, or None. It decides what is PRE-TICKED and
+    nothing else — every tender is offered whatever this is."""
+    return _picker_program(request.POST.get('entered_from') or request.GET.get('program'))
+
+
+# ── The record-writing sequence, shared by the group raise and the purchases workspace's
+# Add PO / PI (O8a). Extracted from vendor_order_create_group unchanged, so the two pages
+# cannot come to write an order record differently.
+
+def _posted_order_uuid(request):
+    """R-14: the posted client_uuid, and the order it already made if any — (uuid or
+    None, VendorOrder or None). A repeated key goes to that order and creates nothing."""
+    try:
+        posted_uuid = _uuid.UUID(request.POST.get('client_uuid', ''))
+    except ValueError:
+        return None, None
+    return posted_uuid, VendorOrder.objects.filter(client_uuid=posted_uuid).first()
+
+
+def _write_anchor(projects):
+    """THE ANCHOR (O2d), computed at write time: the site with the lowest project_id — the
+    Project pk, which is the column _order_project() reads back off VendorOrderSite — or
+    None when the order names no site. A display anchor and nothing more."""
+    return min(projects, key=lambda project: project.pk, default=None)
+
+
+def _write_order_record(cleaned, profile, client_uuid):
+    """The order record: VendorOrder, its VendorOrderSite and VendorOrderProgram rows and
+    its requirement-snapshot lines. MUST run inside _upload_and_record_documents' atomic
+    block. Returns the order.
+
+    `cleaned` carries vendor, project_type, po_number, pi_number, order_total, unfrozen,
+    sites ({'project', 'via_group_id'}), programs and lines — the shape
+    _parse_group_submission() returns."""
+    order = VendorOrder.objects.create(
+        vendor=cleaned['vendor'], project_type=cleaned['project_type'],
+        po_number=cleaned['po_number'], pi_number=cleaned['pi_number'],
+        total_amount=cleaned['order_total'],
+        raised_with_unfrozen_quantities=cleaned['unfrozen'],
+        created_by=profile, client_uuid=client_uuid,
+    )
+    VendorOrderSite.objects.bulk_create([
+        VendorOrderSite(order=order, project=site['project'],
+                        via_site_group_id=site['via_group_id'])
+        for site in cleaned['sites']
+    ])
+    VendorOrderProgram.objects.bulk_create([
+        VendorOrderProgram(order=order, program=program)
+        for program in cleaned['programs']
+    ])
+    VendorOrderLine.objects.bulk_create([
+        VendorOrderLine(
+            order=order, item_master_id=line['item_master_id'],
+            # A GROUP LINE HAS NO SINGLE BOQ ROW. Its quantity is the sum of several
+            # sites' rows, so there is no BOQItem it could name. The join that
+            # survives is item_master, which is what BOQItemMaster exists for.
+            boq_item=None,
+            item_code=line['code'],
+            item_description=line['description'],
+            item_unit=line['unit'] or '',
+            item_category=line['category'],
+            quantity=line['quantity'], amount=line['amount'],
+        )
+        for line in cleaned['lines']
+    ])
+    return order
+
+
+def _save_order_submission(documents, client_uuid, profile, write, refuse, failed_text):
+    """Upload, then write, then answer. Returns (result, None) on success — `result` is
+    what write() returned as its second item — or (None, response) when the save did not
+    happen. `refuse(errors, client_uuid)` renders the caller's page; `failed_text` is its
+    wording for a write that failed for no reason worth naming."""
+    try:
+        return _upload_and_record_documents(documents, client_uuid, profile, write), None
+    except _UploadRefused as exc:
+        return None, refuse([str(exc)], client_uuid)
+    except _SaveFailed as exc:
+        # Two submissions with one key can both pass the check above; the loser lands
+        # here on the unique index. Send it to the winner rather than to an error.
+        existing = VendorOrder.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            return None, redirect('vendor_order_detail', order_pk=existing.pk)
+        # uniq_invoice_number_per_order: same message as the check, files already removed.
+        if isinstance(exc.__cause__, IntegrityError):
+            duplicates = _duplicate_invoice_numbers(documents)
+            if duplicates:
+                return None, refuse(_duplicate_invoice_errors(duplicates), client_uuid)
+        return None, refuse([failed_text], client_uuid)
+
+
+def _log_order_recorded(order, projects, profile):
+    """The feed line for a new order record. log_activity never raises, so callers sit
+    this after the commit.
+
+    ONE LINE PER SITE, on the site itself, exactly as site_group_lock() writes its lock:
+    a group is not a project, and the site is where a PM looks to find out what was
+    bought against their requirement.
+
+    A SITE-LESS ORDER'S RECORD LINE IS NOT LOGGED, and there is no way to log it today:
+    ActivityLog has a nullable `project` and NO program column, so an event against a
+    tender has nowhere to land. Recorded in DEFERRED rather than faked. The payment line
+    (_log_payment_raised) is written either way, anchored to NULL when there is no site.
+    """
+    ref = _order_ref(order)
+    for project in projects:
+        log_activity(
+            project, profile,
+            f"Recorded PO / PI {ref} with {order.vendor.name}: ₹{order.total_amount} "
+            f"(recorded against {len(projects)} site(s))",
+            entity_type='VendorOrder', entity_id=order.pk,
+            action_code='vendor_order_raised',
+        )
+
+
+def _log_payment_raised(project, profile, order, pr):
+    """The feed line for a raised payment request, on its display anchor `project`
+    (None for a site-less order). Every path that raises one writes this sentence."""
+    log_activity(
+        project, profile,
+        f"Raised payment request to {order.vendor.name}: ₹{pr.amount} "
+        f"(order {_order_ref(order)})",
+        entity_type='PaymentRequest', entity_id=pr.pk,
+        action_code='payment_request_raised',
+    )
 
 
 @login_required
@@ -1411,14 +1637,9 @@ def vendor_order_create_group(request):
 
     # R-14, as on the Residential raise: a repeated key goes to the order it already made
     # and creates nothing.
-    try:
-        posted_uuid = _uuid.UUID(request.POST.get('client_uuid', ''))
-    except ValueError:
-        posted_uuid = None
-    if posted_uuid is not None:
-        existing = VendorOrder.objects.filter(client_uuid=posted_uuid).first()
-        if existing is not None:
-            return redirect('vendor_order_detail', order_pk=existing.pk)
+    posted_uuid, existing = _posted_order_uuid(request)
+    if existing is not None:
+        return redirect('vendor_order_detail', order_pk=existing.pk)
 
     cleaned, errors = _parse_group_submission(request)
     if errors:
@@ -1427,46 +1648,12 @@ def vendor_order_create_group(request):
     client_uuid = cleaned['client_uuid']
     vendor, payment, sites = cleaned['vendor'], cleaned['payment'], cleaned['sites']
     projects = [site['project'] for site in sites]
-
-    # THE ANCHOR (O2d), computed at write time: the site with the lowest project_id — the
-    # Project pk, which is the column _order_project() reads back off VendorOrderSite —
-    # or None when the order names no site. A display anchor and nothing more.
-    anchor = min(projects, key=lambda project: project.pk, default=None)
+    anchor = _write_anchor(projects)
 
     def write():
         """Runs inside _upload_and_record_documents' atomic block, after every file is
         stored; the documents are recorded against the order this returns."""
-        order = VendorOrder.objects.create(
-            vendor=vendor, project_type=cleaned['project_type'],
-            po_number=cleaned['po_number'], pi_number=cleaned['pi_number'],
-            total_amount=cleaned['order_total'],
-            raised_with_unfrozen_quantities=cleaned['unfrozen'],
-            created_by=profile, client_uuid=client_uuid,
-        )
-        VendorOrderSite.objects.bulk_create([
-            VendorOrderSite(order=order, project=site['project'],
-                            via_site_group_id=site['via_group_id'])
-            for site in sites
-        ])
-        VendorOrderProgram.objects.bulk_create([
-            VendorOrderProgram(order=order, program=program)
-            for program in cleaned['programs']
-        ])
-        VendorOrderLine.objects.bulk_create([
-            VendorOrderLine(
-                order=order, item_master_id=line['item_master_id'],
-                # A GROUP LINE HAS NO SINGLE BOQ ROW. Its quantity is the sum of several
-                # sites' rows, so there is no BOQItem it could name. The join that
-                # survives is item_master, which is what BOQItemMaster exists for.
-                boq_item=None,
-                item_code=line['code'],
-                item_description=line['description'],
-                item_unit=line['unit'] or '',
-                item_category=line['category'],
-                quantity=line['quantity'], amount=line['amount'],
-            )
-            for line in cleaned['lines']
-        ])
+        order = _write_order_record(cleaned, profile, client_uuid)
         pr = PaymentRequest.objects.create(
             vendor_order=order, project=anchor, vendor=vendor,
             amount=payment['amount'], note=payment['note'],
@@ -1480,49 +1667,17 @@ def vendor_order_create_group(request):
                           actor=profile, project=anchor)
         return order, (order, pr)
 
-    try:
-        order, pr = _upload_and_record_documents(
-            cleaned['documents'], client_uuid, profile, write)
-    except _UploadRefused as exc:
-        return refuse([str(exc)], client_uuid)
-    except _SaveFailed as exc:
-        # Two submissions with one key can both pass the check above; the loser lands
-        # here on the unique index. Send it to the winner rather than to an error.
-        existing = VendorOrder.objects.filter(client_uuid=client_uuid).first()
-        if existing is not None:
-            return redirect('vendor_order_detail', order_pk=existing.pk)
-        # uniq_invoice_number_per_order: same message as the check, files already removed.
-        if isinstance(exc.__cause__, IntegrityError):
-            duplicates = _duplicate_invoice_numbers(cleaned['documents'])
-            if duplicates:
-                return refuse(_duplicate_invoice_errors(duplicates), client_uuid)
-        return refuse(['The payment request could not be saved. Nothing was recorded; '
-                       'try again.'], client_uuid)
+    saved, refusal = _save_order_submission(
+        cleaned['documents'], client_uuid, profile, write, refuse,
+        'The payment request could not be saved. Nothing was recorded; try again.')
+    if refusal is not None:
+        return refusal
+    order, pr = saved
 
     # ── The feed. log_activity never raises, so it sits after the commit. ──
-    # ONE LINE PER SITE, on the site itself, exactly as site_group_lock() writes its
-    # lock: a group is not a project, and the site is where a PM looks to find out what
-    # was bought against their requirement.
-    #
-    # A SITE-LESS ORDER'S RECORD LINE IS NOT LOGGED, and there is no way to log it today:
-    # ActivityLog has a nullable `project` and NO program column, so an event against a
-    # tender has nowhere to land. Recorded in DEFERRED rather than faked. The payment line
-    # below is written either way, anchored to NULL when there is no site.
-    ref = order.po_number or order.pi_number
-    for project in projects:
-        log_activity(
-            project, profile,
-            f"Recorded PO / PI {ref} with {vendor.name}: ₹{order.total_amount} "
-            f"(recorded against {len(projects)} site(s))",
-            entity_type='VendorOrder', entity_id=order.pk,
-            action_code='vendor_order_raised',
-        )
-    log_activity(
-        anchor, profile,
-        f"Raised payment request to {vendor.name}: ₹{pr.amount} (order {ref})",
-        entity_type='PaymentRequest', entity_id=pr.pk,
-        action_code='payment_request_raised',
-    )
+    _log_order_recorded(order, projects, profile)
+    _log_payment_raised(anchor, profile, order, pr)
+    ref = _order_ref(order)
     messages.success(request, f'Payment request of ₹{pr.amount} raised against {ref} '
                               f'with {vendor.name}.')
     if cleaned['amounts_differ']:

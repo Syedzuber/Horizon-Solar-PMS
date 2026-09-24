@@ -1,0 +1,70 @@
+{% comment %}
+Section 4 (Requirement) of a raise page: every candidate requirement row, rendered once
+with its per-site quantities in data-contrib, shown and re-summed by
+partials/vendor_order_picker_script.html for the sites added in section 3
+(partials/vendor_order_picker.html). Read-only; only an optional amount per item posts.
+Needs order_views._picker_context()'s requirement, requirement_open and unlinked.
+{% endcomment %}
+  {# ── 4. Requirement ───────────────────────────────────────────────────── #}
+  <details class="card shadow-sm mb-3" id="voRequirement"{% if requirement_open %} open{% endif %}>
+    <summary class="card-header fw-semibold" style="cursor:pointer;">
+      4 · Requirement <span class="text-muted fw-normal">(read-only)</span>
+      <span class="small text-muted fw-normal">· <span id="voReqSummary">no sites added</span></span>
+    </summary>
+    <div class="card-body py-2 small text-muted">
+      The consolidated BOQ quantities of the added sites. An amount per item is optional.
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0 small align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Item</th>
+            <th style="width:4rem;">Unit</th>
+            <th style="width:8rem;" class="text-end">Quantity</th>
+            <th style="width:6rem;" class="text-end">Sites</th>
+            <th style="width:10rem;">Amount (₹, optional)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in requirement %}
+          <tr class="js-vo-req d-none" data-master="{{ row.master_id }}" data-contrib="{{ row.contrib }}">
+            <td>
+              <div class="fw-semibold">{{ row.code }}</div>
+              <div class="text-muted" style="font-size:.75rem;">{{ row.description }}</div>
+            </td>
+            <td class="text-muted">{{ row.unit }}</td>
+            <td class="text-end js-vo-agg">—</td>
+            <td class="text-end text-muted js-vo-sites"></td>
+            <td>
+              <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                     class="form-control form-control-sm js-vo-amount" name="amount_{{ row.master_id }}"
+                     value="{{ row.amount }}" aria-label="Amount for {{ row.code }}" disabled>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-body border-top py-2 small text-muted" id="voNoReq">No requirement — no sites added.</div>
+    <div class="alert alert-warning small py-2 mx-3 mt-2 d-none" id="voAmountNote" role="status"></div>
+    {% comment %}
+    BOQ rows with no catalogue item cannot be summed across sites, so they are missing from
+    every consolidated quantity above. Listed read-only rather than dropped: a requirement
+    that is silently short is worse than one that says what it left out.
+    {% endcomment %}
+    {% if unlinked %}
+    <div class="card-body border-top py-2 small" id="voUnlinkedCard">
+      <div class="fw-semibold">Not in the requirement — no catalogue item</div>
+      <ul class="list-unstyled mb-0">
+        {% for item in unlinked %}
+        <li class="d-none js-vo-unlinked" data-owner="{{ item.boq.project_id }}">
+          <span class="fw-semibold">{{ item.boq.project.project_id }}</span>
+          · {{ item.description }}
+          <span class="text-muted">· {{ item.boq_quantity }} {{ item.uom }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="text-muted js-vo-unlinked-empty">None among the added sites.</div>
+    </div>
+    {% endif %}
+  </details>

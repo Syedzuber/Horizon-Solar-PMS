@@ -1,0 +1,207 @@
+{% comment %}
+The site picker's script — shows, hides and re-sums what partials/vendor_order_picker.html
+rendered; builds no markup. Include with picker_form_id (the <form> the picker is in).
+
+Exposes window.voPicker (addedSites, tickedTenders, kinds) for the page's own
+submit checks, and fires a "vo:picked" event on the form whenever the added sites or the
+ticked tenders change.
+{% endcomment %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var form = document.getElementById('{{ picker_form_id }}');
+  var RESULT_LIMIT = 30;
+  var hasRes = !!form.querySelector('.js-vo-result[data-kind="res"]');
+
+  function all(sel) { return form.querySelectorAll(sel); }
+  function chipFor(pk) { return form.querySelector('.js-vo-chip[data-site="' + pk + '"]'); }
+
+  /* The pks of every added site — exactly the enabled `site` inputs, which is exactly
+     what will be posted. */
+  function addedSites() {
+    var added = {};
+    all('.js-vo-site-input').forEach(function (input) {
+      if (!input.disabled) added[input.value] = true;
+    });
+    return added;
+  }
+
+  function tickedTenders() {
+    var on = {};
+    all('.js-vo-program').forEach(function (box) { if (box.checked) on[box.value] = true; });
+    return on;
+  }
+
+  /* Add or remove one site. `viaGroup` is true only when it came in by ticking its
+     group; a site found by search records no group. */
+  function setAdded(pk, on, viaGroup) {
+    var chip = chipFor(pk);
+    if (!chip) return;
+    chip.classList.toggle('d-none', !on);
+    chip.querySelector('.js-vo-site-input').disabled = !on;
+    var via = chip.querySelector('.js-vo-via');
+    if (via) {
+      if (!on) via.disabled = true;
+      else if (viaGroup) via.disabled = false;
+    }
+  }
+
+  function tickTender(pk) {
+    var box = form.querySelector('.js-vo-program[value="' + pk + '"]');
+    if (box) box.checked = true;
+  }
+
+  function renderResults() {
+    var tenders = tickedTenders(), added = addedSites();
+    var q = document.getElementById('voSearch').value.trim().toLowerCase();
+    var g = document.getElementById('voGroupFilter').value;
+    var shown = 0, more = 0, anyTender = false;
+    for (var k in tenders) { anyTender = true; }
+    all('.js-vo-result').forEach(function (li) {
+      /* A RESCO site is searchable once its tender is ticked; a Residential project
+         (O8a, data-kind="res") has no tender, and is offered once something is typed. */
+      var inScope = li.dataset.kind === 'res' ? !!q : tenders[li.dataset.program];
+      var match = inScope && !added[li.dataset.site]
+        && (!q || li.dataset.text.indexOf(q) >= 0)
+        && (!g || (g === 'none' ? !li.dataset.group : li.dataset.group === g));
+      if (match && shown >= RESULT_LIMIT) { more += 1; match = false; }
+      if (match) shown += 1;
+      li.classList.toggle('d-none', !match);
+    });
+    var hint = document.getElementById('voResultsHint');
+    if (!anyTender && !(hasRes && q)) hint.textContent = hasRes
+      ? 'Tick a tender, or type to find a Residential project.'
+      : 'Tick a tender to search its sites.';
+    else if (more) hint.textContent = more + ' more — narrow the search.';
+    else if (!shown) hint.textContent = 'No matching sites that are not already added.';
+    else hint.textContent = '';
+  }
+
+  function money(v) { return Math.round(v * 100); }
+
+  function amountNote() {
+    var note = document.getElementById('voAmountNote');
+    var total = parseFloat(document.getElementById('voTotal').value);
+    var sum = 0, any = false;
+    all('.js-vo-req').forEach(function (tr) {
+      if (tr.classList.contains('d-none')) return;
+      var v = parseFloat(tr.querySelector('.js-vo-amount').value);
+      if (!isNaN(v)) { sum += v; any = true; }
+    });
+    var differ = any && !isNaN(total) && money(sum) !== money(total);
+    note.classList.toggle('d-none', !differ);
+    if (differ) {
+      note.textContent = 'Item amounts add up to ₹' + sum.toFixed(2) + '; the order total is ₹'
+        + total.toFixed(2) + '. A warning only — the request saves as entered.';
+    }
+  }
+
+  /* Rebuild everything derived from the added sites. */
+  function sync() {
+    var added = addedSites(), tenders = tickedTenders(), count = 0;
+    for (var k in added) { count += 1; }
+
+    all('.js-vo-added-block').forEach(function (block) {
+      var n = 0;
+      block.querySelectorAll('.js-vo-site-input').forEach(function (input) {
+        if (!input.disabled) n += 1;
+      });
+      block.querySelector('.js-vo-n').textContent = n;
+      block.classList.toggle('d-none', !(n > 0 || tenders[block.dataset.program]));
+    });
+    document.getElementById('voNoSites').classList.toggle('d-none', count > 0);
+
+    var items = 0;
+    all('.js-vo-req').forEach(function (tr) {
+      var contrib = JSON.parse(tr.dataset.contrib || '{}');
+      var sum = 0, sites = 0;
+      for (var pk in contrib) {
+        if (added[pk]) { sum += parseFloat(contrib[pk]); sites += 1; }
+      }
+      var show = sites > 0;
+      tr.classList.toggle('d-none', !show);
+      /* A hidden row's amount is not posted; the server ignores it anyway. */
+      tr.querySelector('.js-vo-amount').disabled = !show;
+      if (!show) return;
+      items += 1;
+      tr.querySelector('.js-vo-agg').textContent = sum.toFixed(2);
+      tr.querySelector('.js-vo-sites').textContent = sites;
+    });
+    document.getElementById('voNoReq').classList.toggle('d-none', items > 0);
+    document.getElementById('voReqSummary').textContent = count
+      ? items + ' item' + (items === 1 ? '' : 's') + ' from ' + count + ' site' + (count === 1 ? '' : 's')
+      : 'no sites added';
+
+    var card = document.getElementById('voUnlinkedCard');
+    if (card) {
+      var shown = 0;
+      card.querySelectorAll('.js-vo-unlinked').forEach(function (li) {
+        var show = !!added[li.dataset.owner];
+        li.classList.toggle('d-none', !show);
+        if (show) shown += 1;
+      });
+      card.querySelector('.js-vo-unlinked-empty').classList.toggle('d-none', shown > 0);
+    }
+
+    renderResults();
+    amountNote();
+    form.dispatchEvent(new CustomEvent('vo:picked'));
+  }
+
+  /* A tender unticked takes its sites and its groups with it. */
+  all('.js-vo-program').forEach(function (box) {
+    box.addEventListener('change', function () {
+      if (!box.checked) {
+        all('.js-vo-chip[data-program="' + box.value + '"]').forEach(function (chip) {
+          setAdded(chip.dataset.site, false);
+        });
+        all('.js-vo-group[data-program="' + box.value + '"]').forEach(function (g) {
+          g.checked = false;
+        });
+      }
+      sync();
+    });
+  });
+
+  /* A group ticked adds its sites and ticks its tender; unticked, removes its sites. */
+  all('.js-vo-group').forEach(function (box) {
+    box.addEventListener('change', function () {
+      var members = JSON.parse(box.dataset.members || '[]');
+      members.forEach(function (pk) { setAdded(pk, box.checked, true); });
+      if (box.checked) tickTender(box.dataset.program);
+      sync();
+    });
+  });
+
+  form.addEventListener('click', function (e) {
+    var add = e.target.closest('.js-vo-add');
+    if (add) { setAdded(add.closest('.js-vo-result').dataset.site, true, false); sync(); return; }
+    var remove = e.target.closest('.js-vo-remove');
+    if (remove) { setAdded(remove.closest('.js-vo-chip').dataset.site, false); sync(); }
+  });
+
+  document.getElementById('voSearch').addEventListener('input', renderResults);
+  document.getElementById('voGroupFilter').addEventListener('change', renderResults);
+  document.getElementById('voTotal').addEventListener('input', amountNote);
+  form.addEventListener('input', function (e) {
+    if (e.target.classList.contains('js-vo-amount')) amountNote();
+  });
+
+  /* For the page's own submit checks; the page reads, it never writes through these. */
+  window.voPicker = {
+    addedSites: addedSites,
+    tickedTenders: tickedTenders,
+    /* The kinds of what is added: {res: n, resco: n}. Ticked tenders count as RESCO. */
+    kinds: function () {
+      var out = {res: 0, resco: 0};
+      all('.js-vo-chip').forEach(function (chip) {
+        if (chip.querySelector('.js-vo-site-input').disabled) return;
+        out[chip.dataset.kind === 'res' ? 'res' : 'resco'] += 1;
+      });
+      for (var k in tickedTenders()) { out.resco += 1; }
+      return out;
+    }
+  };
+
+  sync();
+});
+</script>

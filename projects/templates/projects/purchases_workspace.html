@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% comment %}
+O8a — the purchases & payments workspace: every PO / PI record, newest first, fifty to a
+page (purchases_views.purchases_workspace).
+
+Read by SCM, CEO, Admin, System Admin and Finance. Only SCM (can_use) sees "Add PO / PI",
+"Raise payment request" and a row's "Request payment" — the last only where the record
+page itself would draw its Request payment button (available > 0 and
+user_can_request_order_payment).
+
+The money columns are _order_money()'s, the figures the record page and both order lists
+show, so the three cannot disagree.
+{% endcomment %}
+{% block title %}Purchases &amp; payments — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Purchases &amp; payments</h4>
+    <small class="text-muted">
+      Every PO / PI record{% if program %} recorded against {{ program.name }}{% endif %}{% if project %} recorded against {{ project.project_id }} — {{ project.customer_name }}{% endif %}
+    </small>
+  </div>
+  {% if can_use %}
+  <div class="d-flex gap-2 flex-shrink-0">
+    <a href="{{ new_url }}" class="btn btn-brand btn-sm"><i class="bi bi-plus-lg me-1"></i>Add PO / PI</a>
+    <a href="{{ pay_url }}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-cash-coin me-1"></i>Raise payment request</a>
+  </div>
+  {% endif %}
+</div>
+
+<form method="get" class="row g-2 align-items-end mb-3" role="search">
+  {% if program_pk is not None %}<input type="hidden" name="program" value="{{ program_pk }}">{% endif %}
+  {% if project_pk is not None %}<input type="hidden" name="project" value="{{ project_pk }}">{% endif %}
+  <div class="col-12 col-md-6">
+    <label class="form-label small mb-0" for="pwSearch">Search</label>
+    <input type="search" name="q" id="pwSearch" class="form-control form-control-sm" value="{{ q }}"
+           placeholder="Vendor, PO, PI, tender, site code or customer">
+  </div>
+  <div class="col-7 col-md-3">
+    <label class="form-label small mb-0" for="pwType">Project type</label>
+    <select name="type" id="pwType" class="form-select form-select-sm">
+      <option value="">All</option>
+      {% for value, label in record_types %}
+      <option value="{{ value }}"{% if record_type == value %} selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-5 col-md-3 d-flex gap-2">
+    <button type="submit" class="btn btn-sm btn-outline-secondary flex-fill">Filter</button>
+    {% if filtered %}<a href="{% url 'purchases_workspace' %}" class="btn btn-sm btn-link flex-fill">Clear</a>{% endif %}
+  </div>
+</form>
+
+<div class="card shadow-sm mb-3">
+  {% if rows %}
+  <div class="table-responsive">
+    <table class="table table-sm table-hover mb-0 small align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Vendor</th><th>PO</th><th>PI</th>
+          <th>Recorded against</th>
+          <th class="text-end">Total (₹)</th><th class="text-end">Paid (₹)</th>
+          <th class="text-end">Available (₹)</th><th></th><th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr class="js-pw-row" data-order="{{ row.order.pk }}">
+          <td><span class="fw-semibold">{{ row.order.vendor.name }}</span>
+            <div class="text-muted" style="font-size:.72rem;">{{ row.order.created_at|date:"d M Y" }} · {% if row.order.project_type == 'OPEX' %}RESCO{% else %}{{ row.order.project_type }}{% endif %}</div></td>
+          <td>{{ row.order.po_number|default:"—" }}</td>
+          <td>{{ row.order.pi_number|default:"—" }}</td>
+          <td style="max-width:18rem;">
+            {% if row.against.tenders or row.against.sites %}
+              {% if row.against.tenders %}<div>{{ row.against.tenders|join:", " }}</div>{% endif %}
+              {% if row.against.sites %}<div class="text-muted" style="font-size:.75rem;">{{ row.against.sites|join:", " }}{% if row.against.more %} +{{ row.against.more }} more{% endif %}</div>{% endif %}
+            {% else %}
+              <span class="text-muted">Not recorded against any tender</span>
+            {% endif %}
+          </td>
+          <td class="text-end">{{ row.total|floatformat:2 }}</td>
+          <td class="text-end">{{ row.paid|floatformat:2 }}</td>
+          <td class="text-end">{{ row.available|floatformat:2 }}</td>
+          <td>
+            {% if row.awaiting %}<span class="badge text-bg-warning">{{ row.awaiting }} awaiting approval</span>{% endif %}
+            {% if row.on_hold %}<span class="badge text-bg-danger">{{ row.on_hold }} on hold</span>{% endif %}
+            {% if row.invoice_awaited %}<span class="badge text-bg-light border">Invoice awaited</span>{% endif %}
+          </td>
+          <td class="text-nowrap text-end">
+            {% if can_use and row.can_request_payment %}
+            <a href="{{ pay_url }}?order={{ row.order.pk }}" class="btn btn-sm btn-outline-secondary py-0">Request payment</a>
+            {% endif %}
+            <a href="{% url 'vendor_order_detail' row.order.pk %}" class="btn btn-sm btn-outline-secondary py-0">Open</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="card-footer small text-muted d-flex flex-wrap justify-content-between gap-2">
+    <span>Available is the total less every payment not rejected.</span>
+    {% if page.paginator.num_pages > 1 %}
+    <span>
+      {% if page.has_previous %}<a href="?{% if page_query %}{{ page_query }}&amp;{% endif %}page={{ page.previous_page_number }}">← Newer</a> · {% endif %}
+      Page {{ page.number }} of {{ page.paginator.num_pages }}
+      {% if page.has_next %} · <a href="?{% if page_query %}{{ page_query }}&amp;{% endif %}page={{ page.next_page_number }}">Older →</a>{% endif %}
+    </span>
+    {% endif %}
+  </div>
+  {% else %}
+  <div class="card-body small text-muted">
+    {% if filtered %}No PO / PI records match.{% else %}No PO / PI records yet.{% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% endblock %}

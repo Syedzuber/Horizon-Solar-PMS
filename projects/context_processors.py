@@ -2,7 +2,8 @@ from .decorators import get_user_dashboard
 from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
 from .permissions import (
-    user_can_manage_stock_locations, user_can_view_payment_queue, user_can_view_vendor_list,
+    user_can_manage_stock_locations, user_can_view_payment_queue,
+    user_can_view_purchases_workspace, user_can_view_vendor_list,
 )
 
 
@@ -67,6 +68,17 @@ def payment_queue_nav(request):
     if not request.user.is_authenticated:
         return {'can_view_payment_queue': False}
     return {'can_view_payment_queue': user_can_view_payment_queue(request.user)}
+
+
+def purchases_nav(request):
+    """Whether to show the Purchases & payments nav entry (O8a).
+
+    The answer comes from permissions.user_can_view_purchases_workspace() (R-13), the
+    same helper purchases_workspace calls, so the link and the view cannot disagree.
+    """
+    if not request.user.is_authenticated:
+        return {'can_view_purchases_workspace': False}
+    return {'can_view_purchases_workspace': user_can_view_purchases_workspace(request.user)}
 
 
 def typed_date_bounds(request):

@@ -83,6 +83,14 @@
         <i class="bi bi-cash-stack me-1"></i>Payments
       </a>
     {% endif %}
+    {# Purchases & payments (O8a, R-11) — the workspace. Gated by                      #}
+    {# permissions.user_can_view_purchases_workspace() via the purchases_nav context   #}
+    {# processor, the same helper the view calls, so link and view cannot disagree.   #}
+    {% if can_view_purchases_workspace %}
+      <a href="{% url 'purchases_workspace' %}" class="nav-link text-white small" title="Purchases &amp; payments">
+        <i class="bi bi-bag-check me-1"></i>Purchases &amp; payments
+      </a>
+    {% endif %}
     {# Masters — reference-data screens. Each entry is gated by its own permissions.py  #}
     {# helper via a context processor: Vendors by user_can_view_vendor_list            #}
     {# (vendor_nav), Warehouses by user_can_manage_stock_locations (stock_location_nav). #}

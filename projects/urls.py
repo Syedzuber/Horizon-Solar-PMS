@@ -5,6 +5,7 @@ from . import design_views   # OPEX design workflow (Part 2) — separate module
 from . import report_views   # Read-only management reports — separate module, same pattern
 from . import order_views    # O2 vendor orders — separate module, same pattern
 from . import payment_views  # O5 Finance payments queue — separate module, same pattern
+from . import purchases_views  # O8a purchases & payments workspace — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -295,6 +296,15 @@ urlpatterns = [
          name='vendor_order_create_group'),
     path('programs/<int:program_pk>/orders/',     order_views.program_vendor_order_list,
          name='program_vendor_order_list'),
+    # O8a — the purchases & payments workspace: every PO / PI record (SCM, CEO, Admin,
+    # System Admin, Finance), and SCM's two doors — record a PO / PI, raise a payment
+    # against one. purchases_views.py; every rule it applies is order_views' own.
+    path('purchases/',                            purchases_views.purchases_workspace,
+         name='purchases_workspace'),
+    path('purchases/new/',                        purchases_views.purchases_new,
+         name='purchases_new'),
+    path('purchases/pay/',                        purchases_views.purchases_pay,
+         name='purchases_pay'),
     # O4 — the approval gate on a payment request. POST only; each action its own
     # endpoint, because each has its own predicate and its own mandatory reason.
     # Keyed on the PaymentRequest pk alone: a payment belongs to an order. The order page
