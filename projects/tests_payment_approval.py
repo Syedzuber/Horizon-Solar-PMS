@@ -51,10 +51,12 @@ def _order(fixture, total=Decimal('60000'), po='PO-O4'):
 
 def _payment(fixture, order, amount='25000', status=PaymentRequest.PENDING_APPROVAL,
              requested_by=None):
+    # O4b: an approved or paid row carries its approved amount — in full, here.
+    approved = status in (PaymentRequest.APPROVED, PaymentRequest.CONFIRMED)
     return PaymentRequest.objects.create(
         vendor_order=order, project=fixture.project, vendor=fixture.vendor,
         amount=Decimal(amount), requested_by=requested_by or fixture.scm.user,
-        status=status)
+        status=status, approved_amount=Decimal(amount) if approved else None)
 
 
 def _approver(username, role='Finance'):

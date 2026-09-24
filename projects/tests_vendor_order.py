@@ -71,6 +71,9 @@ class VendorOrderFixture(TestCase):
             path='vendor-orders/1/po.pdf', uploaded_by=self.scm, **kwargs)
 
     def make_payment(self, order, amount, status, **kwargs):
+        # O4b: an approved or paid row carries its approved amount — in full, here.
+        if status in (PaymentRequest.APPROVED, PaymentRequest.CONFIRMED):
+            kwargs.setdefault('approved_amount', Decimal(amount))
         return PaymentRequest.objects.create(
             project=self.project, vendor=self.vendor, vendor_order=order,
             invoice_number='INV-1', invoice_document_name='i.pdf',

@@ -56,10 +56,12 @@ def _make_order(fixture, total=Decimal('60000'), project=None, po='PO-B'):
 
 def _pay(fixture, order, amount, status=PaymentRequest.APPROVED):
     reason = 'held' if status in (PaymentRequest.ON_HOLD, PaymentRequest.REJECTED) else ''
+    # O4b: an approved or paid row carries its approved amount — in full, here.
+    approved = status in (PaymentRequest.APPROVED, PaymentRequest.CONFIRMED)
     return PaymentRequest.objects.create(
         vendor_order=order, project=order.sites.get().project, vendor=fixture.vendor,
         amount=Decimal(amount), requested_by=fixture.scm.user, status=status,
-        decision_reason=reason)
+        decision_reason=reason, approved_amount=Decimal(amount) if approved else None)
 
 
 class PaymentFixture(RaiseFixture):

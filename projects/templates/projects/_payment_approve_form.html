@@ -1,0 +1,27 @@
+{% comment %}
+The approve form (O4b), shared by the order page and the payments queue. Include with
+`p` (the PaymentRequest), `action` (the URL to post to) and, from the queue, `next`.
+
+The amount is prefilled with what was requested, so approving in full is one click. Less
+than that needs a reason — the view refuses it without one, and more than the request,
+zero or a negative figure, whatever the browser allowed.
+{% endcomment %}
+<form method="post" action="{{ action }}" class="row g-2 align-items-end">
+  {% csrf_token %}
+  {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+  <div class="col-12 col-sm-4">
+    <label class="form-label small mb-1" for="approve-amount-{{ p.pk }}">Amount to approve (₹)</label>
+    <input type="number" class="form-control form-control-sm" required
+           step="0.01" min="0.01" max="{{ p.amount|stringformat:'s' }}"
+           id="approve-amount-{{ p.pk }}" name="approved_amount" value="{{ p.amount|stringformat:'s' }}">
+    <div class="form-text">₹{{ p.amount|floatformat:2 }} requested.</div>
+  </div>
+  <div class="col-12 col-sm-5">
+    <label class="form-label small mb-1" for="approve-remark-{{ p.pk }}">Reason (required if approving less)</label>
+    <textarea class="form-control form-control-sm" rows="1"
+              id="approve-remark-{{ p.pk }}" name="remark"></textarea>
+  </div>
+  <div class="col-12 col-sm-3">
+    <button type="submit" class="btn btn-brand btn-sm w-100">Approve</button>
+  </div>
+</form>

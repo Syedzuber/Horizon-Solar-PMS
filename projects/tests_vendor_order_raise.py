@@ -306,7 +306,7 @@ class DetailTests(RaiseFixture):
         PaymentRequest.objects.create(
             vendor_order=self.order, project=self.project, vendor=self.vendor,
             amount=Decimal('5000'), requested_by=self.scm.user,
-            status=PaymentRequest.CONFIRMED)
+            status=PaymentRequest.CONFIRMED, approved_amount=Decimal('5000'))
         response = _client(self.scm).get(self.detail_url)
         self.assertContains(response, 'Invoice awaited')
 

@@ -179,7 +179,8 @@ dicts from order_views._payment_row(), NOT a list of PaymentRequest, so every bu
 is drawn from a predicate the view re-checks under a row lock — drawing a button
 authorises nothing.
 
-THE THREE REASON FORMS (hold, reject, respond) ARE BOOTSTRAP COLLAPSE ROWS, not modals.
+THE THREE REASON FORMS (hold, reject, respond) ARE BOOTSTRAP COLLAPSE ROWS, not modals,
+and so since O4b is the approve form, which carries the amount to approve.
 A modal inside a loop needs a unique id and its own show/hide handling per row, and this
 page carries no page-specific JavaScript at all; collapse is markup only (Bootstrap 5.3
 hides with display:none and restores the row's own display, so a <tr> collapses cleanly).
@@ -207,7 +208,7 @@ the page. That is a real defect this module has shipped before.
         <tr>
           <td class="text-nowrap">{{ p.requested_date|date:"d M Y" }}</td>
           <td>{{ p.requested_by.get_full_name|default:p.requested_by.username }}</td>
-          <td class="text-end">{{ p.amount|floatformat:2 }}</td>
+          <td class="text-end">{% if p.is_partially_approved %}<span class="text-nowrap">₹{{ p.amount|floatformat:2 }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:2 }} approved</span>{% else %}{{ p.amount|floatformat:2 }}{% endif %}</td>
           <td>
             {{ p.get_status_display }}
             {% if p.status == 'approved' and p.approved_by %}
@@ -220,10 +221,8 @@ the page. That is a real defect this module has shipped before.
           </td>
           <td class="text-end text-nowrap">
             {% if row.can_approve %}
-            <form method="post" action="{% url 'payment_approve' p.pk %}" class="d-inline">
-              {% csrf_token %}
-              <button type="submit" class="btn btn-brand btn-sm">Approve</button>
-            </form>
+            <button class="btn btn-brand btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#approve-{{ p.pk }}">Approve</button>
             {% endif %}
             {% if row.can_hold %}
             <button class="btn btn-outline-warning btn-sm" type="button"
@@ -265,6 +264,15 @@ the page. That is a real defect this module has shipped before.
             {% if row.hold_count > 1 %}
               <div class="text-muted">{{ row.hold_count }} holds in all on this request.</div>
             {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_approve %}
+        <tr class="collapse" id="approve-{{ p.pk }}">
+          <td colspan="5">
+            {% url 'payment_approve' p.pk as approve_url %}
+            {% include "projects/_payment_approve_form.html" with action=approve_url %}
           </td>
         </tr>
         {% endif %}

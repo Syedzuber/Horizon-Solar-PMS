@@ -53,7 +53,7 @@ def _pay_siteless(fixture, amount):
     return PaymentRequest.objects.create(
         vendor_order=fixture.order, project=None, vendor=fixture.vendor,
         amount=Decimal(amount), requested_by=fixture.scm.user,
-        status=PaymentRequest.APPROVED)
+        status=PaymentRequest.APPROVED, approved_amount=Decimal(amount))
 
 
 class ScopeFixture(RaiseFixture):

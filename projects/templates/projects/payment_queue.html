@@ -111,7 +111,7 @@ single-line and the rest would render into the page.
             </div>
           </td>
           <td>{{ p.scope_label }}</td>
-          <td class="text-end text-nowrap">{{ p.amount|floatformat:2 }}</td>
+          <td class="text-end">{% if p.is_partially_approved %}<span class="text-nowrap">₹{{ p.amount|floatformat:2 }} requested</span> · <span class="text-nowrap fw-semibold">₹{{ p.approved_amount|floatformat:2 }} approved</span>{% else %}<span class="text-nowrap">{{ p.amount|floatformat:2 }}</span>{% endif %}</td>
           <td>
             {{ p.get_status_display }}
             {% if p.status == 'approved' and p.approved_by %}
@@ -138,11 +138,8 @@ single-line and the rest would render into the page.
           </td>
           <td class="text-end text-nowrap">
             {% if row.can_approve %}
-            <form method="post" action="{% url 'payment_queue_action' p.pk 'approve' %}" class="d-inline">
-              {% csrf_token %}
-              <input type="hidden" name="next" value="{{ here }}">
-              <button type="submit" class="btn btn-brand btn-sm">Approve</button>
-            </form>
+            <button class="btn btn-brand btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#q-approve-{{ p.pk }}">Approve</button>
             {% endif %}
             {% if row.can_hold %}
             <button class="btn btn-outline-warning btn-sm" type="button"
@@ -158,6 +155,15 @@ single-line and the rest would render into the page.
             {% endif %}
           </td>
         </tr>
+
+        {% if row.can_approve %}
+        <tr class="collapse" id="q-approve-{{ p.pk }}">
+          <td colspan="6">
+            {% url 'payment_queue_action' p.pk 'approve' as approve_url %}
+            {% include "projects/_payment_approve_form.html" with action=approve_url next=here %}
+          </td>
+        </tr>
+        {% endif %}
 
         {% if row.can_hold %}
         <tr class="collapse" id="q-hold-{{ p.pk }}">
@@ -197,6 +203,11 @@ single-line and the rest would render into the page.
             <form method="post" action="{% url 'payment_mark_paid' p.pk %}" class="row g-2 align-items-end">
               {% csrf_token %}
               <input type="hidden" name="next" value="{{ here }}">
+              <div class="col-12">
+                <span class="small text-muted">Amount to pay</span>
+                <span class="fw-semibold">₹{{ p.effective_amount|floatformat:2 }}</span>
+                {% if p.is_partially_approved %}<span class="small text-muted">(₹{{ p.amount|floatformat:2 }} requested)</span>{% endif %}
+              </div>
               <div class="col-12 col-sm-4">
                 <label class="form-label small mb-1" for="q-paid-date-{{ p.pk }}">Payment date</label>
                 <input type="date" class="form-control form-control-sm" required

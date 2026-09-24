@@ -2343,6 +2343,13 @@ class PaymentRequest(models.Model):
         related_name='approved_payment_requests',
     )
     approved_at = models.DateTimeField(null=True, blank=True)
+    # HOW MUCH OF THE REQUEST WAS APPROVED (O4b). An approver may approve less than was
+    # asked for, with a reason; `amount` stays what SCM requested and is never rewritten.
+    # Written with approved_by, and CLEARED with it when SCM answers a hold, so the
+    # re-approval sets it afresh. Two CHECKs below: it lies in (0, amount], and an
+    # approved or paid request always carries it. Read it through `effective_amount`.
+    approved_amount = models.DecimalField(max_digits=14, decimal_places=2,
+                                          null=True, blank=True)
     # WHY A REQUEST WAS REJECTED, AND NOTHING ELSE (O4). O1 wrote this field for both
     # refusals and CHECK-constrained it for both; O4 narrowed the constraint to
     # `rejected` alone, because a HOLD's reason now lives on PaymentRequestHold. That is
@@ -2384,7 +2391,43 @@ class PaymentRequest(models.Model):
                            | ~models.Q(decision_reason='')),
                 name='payment_request_refusal_needs_reason',
             ),
+            # O4b: an approval is of some of the request, never more than it and never
+            # nothing. NULL until approved.
+            models.CheckConstraint(
+                condition=(models.Q(approved_amount__isnull=True)
+                           | (models.Q(approved_amount__gt=0)
+                              & models.Q(approved_amount__lte=models.F('amount')))),
+                name='payment_request_approved_amount_within_requested',
+            ),
+            # O4b: a request that is approved or paid says how much. Added by 0100, after
+            # 0099 filled every such row with its requested amount.
+            models.CheckConstraint(
+                condition=(~models.Q(status__in=['approved', 'confirmed'])
+                           | models.Q(approved_amount__isnull=False)),
+                name='payment_request_approval_has_amount',
+            ),
         ]
+
+    @property
+    def effective_amount(self):
+        """The money this request stands for (O4b): approved_amount when set, else amount.
+
+        Pending requests count at their requested amount; approved and paid ones at the
+        approved amount. A held request counts at whatever it last carried — its
+        requested amount if it was never approved, its approved amount if it was held
+        after approval (SCM's answer then clears that, and it counts in full again).
+        Every rule about money committed or paid reads this, never `amount`:
+        committed_total(), VendorOrder.paid, _order_money(), the queue's sums.
+        """
+        return self.approved_amount if self.approved_amount is not None else self.amount
+
+    @property
+    def is_partially_approved(self):
+        """True when an approval for less than was requested still stands — the screens
+        then show both figures. False on a REJECTED row, whose approval (if it had one
+        before a hold) no longer stands and counts nothing."""
+        return (self.approved_amount is not None and self.approved_amount < self.amount
+                and self.status != self.REJECTED)
 
     @property
     def scope_label(self):
@@ -2567,10 +2610,23 @@ def committed_total(payments):
     Takes an iterable of PaymentRequest rather than a queryset so prefetched rows cost no
     query. VendorOrder.committed_amount and every order view call this; nothing else
     re-derives it.
+
+    Each payment counts at its effective_amount (O4b): a request approved for less than
+    it asked frees the difference for another request.
     """
     from decimal import Decimal
-    return sum((p.amount for p in payments if p.status != PaymentRequest.REJECTED),
+    return sum((p.effective_amount for p in payments
+                if p.status != PaymentRequest.REJECTED),
                Decimal('0'))
+
+
+def effective_amount_sum():
+    """Sum(effective_amount) as a database aggregate, for the readers that sum in SQL
+    rather than over rows they hold — the same rule as PaymentRequest.effective_amount."""
+    from django.db.models import Sum
+    from django.db.models.functions import Coalesce
+    return Sum(Coalesce('approved_amount', 'amount',
+                        output_field=models.DecimalField(max_digits=14, decimal_places=2)))
 
 
 class VendorOrder(models.Model):
@@ -2654,13 +2710,13 @@ class VendorOrder(models.Model):
 
     @property
     def paid(self):
-        """Sum of payments Finance has CONFIRMED (paid). Every other status — awaiting
+        """Sum of payments Finance has CONFIRMED (paid), each at its effective_amount —
+        what was approved, which is what was paid (O4b). Every other status — awaiting
         approval, approved, on hold, rejected — is money not yet paid and counts nothing.
         """
-        from django.db.models import Sum
         from decimal import Decimal
         return (self.payments.filter(status=PaymentRequest.CONFIRMED)
-                .aggregate(s=Sum('amount'))['s'] or Decimal('0'))
+                .aggregate(s=effective_amount_sum())['s'] or Decimal('0'))
 
     @property
     def balance(self):

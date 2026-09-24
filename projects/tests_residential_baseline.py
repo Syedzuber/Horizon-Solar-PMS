@@ -1595,7 +1595,7 @@ class NotificationTests(ResidentialBaselineBase):
             invoice_number='INV-9', invoice_document_name='i.pdf',
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('25000.00'), requested_by=self.scm.user,
-            status=PaymentRequest.APPROVED,
+            status=PaymentRequest.APPROVED, approved_amount=Decimal('25000.00'),
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
                 vendor=vendor, project_type='Residential', created_by=self.scm,
                 total_amount=Decimal('50000.00')),

@@ -62,11 +62,14 @@ def _make_payment(fixture, order, *, amount='20000', status=PaymentRequest.PENDI
     if project == 'anchor':
         site = order.sites.first()
         project = site.project if site else None
+    # O4b: an approved or paid row carries its approved amount — in full, here.
+    approved = status in (PaymentRequest.APPROVED, PaymentRequest.CONFIRMED)
     return PaymentRequest.objects.create(
         vendor_order=order, project=project, vendor=order.vendor,
         amount=Decimal(amount), requested_by=requested_by or fixture.scm.user,
         status=status, approved_by=approved_by,
-        approved_at=timezone.now() if approved_by else None)
+        approved_at=timezone.now() if approved_by else None,
+        approved_amount=Decimal(amount) if approved else None)
 
 
 def _messages(response):

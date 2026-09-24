@@ -487,7 +487,7 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
             project=self.project, vendor=vendor, invoice_number='INV-1', invoice_document_name='i.pdf',
             invoice_document_url='http://x/i.pdf', invoice_document_path='p/i.pdf',
             amount=Decimal('1000.00'), requested_by=self.scm.user,
-            status=PaymentRequest.APPROVED,
+            status=PaymentRequest.APPROVED, approved_amount=Decimal('1000.00'),
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
                 vendor=vendor, project_type='Residential', created_by=self.scm,
                 total_amount=Decimal('50000.00')))

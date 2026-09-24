@@ -75,6 +75,10 @@ def mark_payment_paid(payment, actor, payment_date, reference):
     its remark. Two Finance users pressing at once serialise here, and the second sees
     CONFIRMED and is refused. The feed line is written after the commit, as everywhere in
     the order module, because log_activity() never raises.
+
+    NO AMOUNT IS WRITTEN (O4b). What is paid is the request's effective_amount — the
+    approved amount, which an APPROVED row always carries — and every "paid" figure sums
+    exactly that over CONFIRMED rows. Finance cannot change it here.
     """
     reference = (reference or '').strip()
     if not reference:
@@ -110,7 +114,7 @@ def mark_payment_paid(payment, actor, payment_date, reference):
     vendor = payment.vendor.name if payment.vendor_id else 'vendor'
     log_activity(
         locked.project, profile,
-        f'Marked paid: ₹{locked.amount} to {vendor} (Ref: {reference})',
+        f'Marked paid: ₹{locked.effective_amount} to {vendor} (Ref: {reference})',
         entity_type='PaymentRequest', entity_id=locked.pk,
         action_code='payment_request_paid',
     )
@@ -145,9 +149,13 @@ def _name(profile):
 def _notice(transition, payment):
     """(recipients, message) for one ledger row, or ([], '') when the move tells nobody.
 
-    Four moves notify; approve and reject do not (not asked for in O5 — O7 decides).
-    The raise and SCM's answer both land on PENDING_APPROVAL, so FROM decides which one
-    this is.
+    Five moves notify; a full approval and a rejection do not (not asked for in O5 — O7
+    decides). The raise and SCM's answer both land on PENDING_APPROVAL, so FROM decides
+    which one this is.
+
+    A PARTIAL APPROVAL tells the requester (O4b): they asked for more than they got. It is
+    told apart from a full one by the row itself, read after commit — approved_amount
+    below amount — so the approve view needed no signal of its own.
     """
     amount = f'₹{payment.amount}'
     vendor = payment.vendor.name if payment.vendor_id else 'vendor'
@@ -164,9 +172,13 @@ def _notice(transition, payment):
         who = requester.get_full_name() or requester.username
         return (_approvers_except(payment),
                 f'{who} raised a payment of {amount} to {vendor} for approval')
+    if to == PaymentRequest.APPROVED and payment.is_partially_approved:
+        return (_requester(payment),
+                # The remark already reads "approved ₹X of ₹Y: <reason>".
+                f'Payment request to {vendor} {transition.remark}')
     if to == PaymentRequest.CONFIRMED:
         return (_requester(payment),
-                f'Payment of {amount} to {vendor} was paid on '
+                f'Payment of ₹{payment.effective_amount} to {vendor} was paid on '
                 f'{payment.payment_date:%d %b %Y} (Ref: {payment.payment_reference})')
     return [], ''
 

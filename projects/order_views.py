@@ -470,8 +470,9 @@ def _order_money(order, documents, payments):
     zero-line order show its value.
     """
     total     = order.total_amount
-    paid      = sum((p.amount for p in payments if p.status == PaymentRequest.CONFIRMED),
-                    Decimal('0'))
+    # effective_amount (O4b): a payment is paid at what was approved.
+    paid      = sum((p.effective_amount for p in payments
+                     if p.status == PaymentRequest.CONFIRMED), Decimal('0'))
     invoiced  = sum((d.invoice_amount or Decimal('0') for d in documents
                      if d.doc_type == VENDOR_ORDER_DOC_INVOICE), Decimal('0'))
     committed = committed_total(payments)
@@ -1752,30 +1753,63 @@ def payment_approve(request, payment_pk):
     AN OPEN HOLD IS NOT ANSWERED BY AN APPROVAL. The hold stays open and unanswered — a
     true record that the question was overtaken rather than resolved — and the detail
     page shows it that way.
+
+    PART OF THE REQUEST MAY BE APPROVED (O4b). `approved_amount` is posted by the approve
+    form, prefilled with the requested amount; above it, zero or negative is refused, and
+    below it the remark becomes MANDATORY and the ledger remark reads "approved ₹X of ₹Y:
+    <reason>". A POST without the field approves in full — what the prefilled form
+    submits unchanged. `amount` is never rewritten; approved_amount is written with
+    approved_by, inside the same lock.
     """
     payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
     if refusal is not None:
         return refusal
 
     remark = request.POST.get('remark', '').strip()
+    raw_amount = request.POST.get('approved_amount')
+    if raw_amount is None:
+        approved_amount = payment.amount
+    else:
+        approved_amount = _parse_decimal(raw_amount, 12)
+        if approved_amount is not None:
+            # "80000" and "80000.00" are one figure; the ledger remark states it as stored.
+            approved_amount = approved_amount.quantize(Decimal('0.01'))
+        if approved_amount is None or approved_amount > payment.amount:
+            messages.error(request,
+                           f'The approved amount must be more than 0 and at most the '
+                           f'₹{payment.amount} requested. Nothing was changed.')
+            return _payment_redirect(order_pk)
+    partial = approved_amount < payment.amount
+    if partial and not remark:
+        messages.error(request,
+                       f'Approving ₹{approved_amount} of the ₹{payment.amount} requested '
+                       f'needs a reason. Nothing was changed.')
+        return _payment_redirect(order_pk)
+    if partial:
+        remark = f'approved ₹{approved_amount} of ₹{payment.amount}: {remark}'
+
     with transaction.atomic():
         locked = _locked_payment(payment_pk)
         if not user_can_approve_payment(request.user, locked):
             return _refuse_stale(request, locked, order_pk)
         from_status = locked.status
-        locked.status      = PaymentRequest.APPROVED
-        locked.approved_by = profile
-        locked.approved_at = timezone.now()
-        locked.save(update_fields=['status', 'approved_by', 'approved_at'])
+        locked.status          = PaymentRequest.APPROVED
+        locked.approved_by     = profile
+        locked.approved_at     = timezone.now()
+        locked.approved_amount = approved_amount
+        locked.save(update_fields=['status', 'approved_by', 'approved_at',
+                                   'approved_amount'])
         record_transition(locked, to_status=PaymentRequest.APPROVED,
                           from_status=from_status, actor=profile, remark=remark,
                           project=locked.project)
 
     # log_activity never raises, so it sits after the commit — as everywhere else here.
+    of_requested = f'₹{approved_amount} of ' if partial else ''
     _log_payment(payment, profile, 'approve',
-                 f'Approved payment request of ₹{payment.amount} to '
+                 f'Approved {of_requested}payment request of ₹{payment.amount} to '
                  f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)})')
-    messages.success(request, f'Payment request of ₹{payment.amount} approved.')
+    messages.success(request, f'Payment request of ₹{payment.amount} approved'
+                              f'{f" for ₹{approved_amount}" if partial else ""}.')
     return _payment_redirect(order_pk)
 
 
@@ -1879,7 +1913,8 @@ def payment_hold_respond(request, payment_pk):
     APPROVED_BY / APPROVED_AT ARE CLEARED. A request held after approval and then
     answered is back in front of an approver, and leaving the old approval stamped on it
     would let a screen read "approved by X" on a row nobody has approved in its current
-    shape. The approver who releases it stamps it again.
+    shape. The approver who releases it stamps it again. APPROVED_AMOUNT GOES WITH THEM
+    (O4b): the request counts at its requested amount again until it is re-approved.
 
     NOT GUARDED BY _approver_entry(): this is the other side of the conversation, so the
     predicate is user_can_respond_to_hold() — the SCM role, ON_HOLD, and an open hold to
@@ -1912,10 +1947,12 @@ def payment_hold_respond(request, payment_pk):
         hold.responded_at = timezone.now()
         hold.save(update_fields=['response', 'responded_by', 'responded_at'])
         from_status = locked.status
-        locked.status      = PaymentRequest.PENDING_APPROVAL
-        locked.approved_by = None
-        locked.approved_at = None
-        locked.save(update_fields=['status', 'approved_by', 'approved_at'])
+        locked.status          = PaymentRequest.PENDING_APPROVAL
+        locked.approved_by     = None
+        locked.approved_at     = None
+        locked.approved_amount = None
+        locked.save(update_fields=['status', 'approved_by', 'approved_at',
+                                   'approved_amount'])
         record_transition(locked, to_status=PaymentRequest.PENDING_APPROVAL,
                           from_status=from_status, actor=profile, remark=response,
                           project=locked.project)

@@ -37,7 +37,7 @@ from .decorators import login_required
 from .forms import check_typed_date
 from .models import (
     PaymentRequest, PaymentRequestHold, VendorOrder, VendorOrderDocument,
-    VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE,
+    VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE, effective_amount_sum,
 )
 from .order_views import _order_money, payment_approve, payment_hold, payment_reject
 from .payments import PaymentRefused, mark_payment_paid
@@ -90,10 +90,11 @@ def _safe_queue_next(request):
 
 def _grouped_counts():
     """{(project_type, status): (count, amount)} over every payment. ONE query, joined
-    through `vendor_order` (NOT NULL) and never through `project`."""
+    through `vendor_order` (NOT NULL) and never through `project`. The amount is the sum
+    of effective_amount (O4b): an approved tile totals what was approved."""
     rows = (PaymentRequest.objects
             .values('vendor_order__project_type', 'status')
-            .annotate(n=Count('pk'), amount=Sum('amount'))
+            .annotate(n=Count('pk'), amount=effective_amount_sum())
             .order_by())
     return {(r['vendor_order__project_type'], r['status']): (r['n'], r['amount'] or Decimal('0'))
             for r in rows}
@@ -103,10 +104,10 @@ def _invoice_awaited_orders(project_type):
     """How many of this tab's orders have had more paid against them than invoiced —
     the same rule as _order_money()'s `invoice_awaited` (paid > invoiced, an invoice with
     no amount counting 0), expressed as one query with two correlated sums so a join
-    cannot multiply either of them."""
+    cannot multiply either of them. Paid is at effective_amount, as there."""
     paid = (PaymentRequest.objects
             .filter(vendor_order=OuterRef('pk'), status=PaymentRequest.CONFIRMED)
-            .values('vendor_order').annotate(s=Sum('amount')).values('s'))
+            .values('vendor_order').annotate(s=effective_amount_sum()).values('s'))
     invoiced = (VendorOrderDocument.objects
                 .filter(order=OuterRef('pk'), doc_type=VENDOR_ORDER_DOC_INVOICE)
                 .values('order').annotate(s=Sum('invoice_amount')).values('s'))
@@ -320,5 +321,5 @@ def payment_mark_paid(request, payment_pk):
         return redirect(back)
 
     vendor = payment.vendor.name if payment.vendor_id else 'vendor'
-    messages.success(request, f'Payment of ₹{payment.amount} to {vendor} marked paid.')
+    messages.success(request, f'Payment of ₹{payment.effective_amount} to {vendor} marked paid.')
     return redirect(back)
