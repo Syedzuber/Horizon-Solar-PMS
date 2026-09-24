@@ -2528,9 +2528,16 @@ class PaymentRequestHold(models.Model):
 # write path other than creation is the enforcement, and a future edit view is the thing
 # to refuse in review.
 #
-# TOTALS ARE PROPERTIES, NEVER COLUMNS. Total, paid, balance and invoiced are sums over
-# the children, computed at read time — the same reason aggregate_group_boq() stores
-# nothing: a stored roll-up is how the figure and its parts drift apart.
+# PAID, BALANCE AND INVOICED ARE PROPERTIES, NEVER COLUMNS — sums over the children,
+# computed at read time, the same reason aggregate_group_boq() stores nothing: a stored
+# roll-up is how the figure and its parts drift apart.
+#
+# THE ORDER TOTAL IS THE ONE EXCEPTION, AND IT IS NOT A ROLL-UP (O3r). total_amount is
+# the figure printed on the PO, typed in by SCM, and `total` returns it. The lines are the
+# requirement the order was sized against — a read-only snapshot whose amounts are
+# optional — so their sum is not the order's value and nothing may treat it as such. The
+# Residential raise still prices every line and stores their sum here, so on that path the
+# two agree by construction.
 # ---------------------------------------------------------------------------
 
 VENDOR_ORDER_DOC_PO      = 'po'
@@ -2606,6 +2613,14 @@ class VendorOrder(models.Model):
 
     note = models.TextField(blank=True, default='')
 
+    # THE ORDER'S VALUE, AS PRINTED ON THE PO (O3r). Entered, never summed — see the
+    # section note. Every money rule reads it through `total`: committed_total() is
+    # measured against it, available_to_request is it minus that, balance is it minus
+    # paid. The Residential raise writes the sum of its priced lines; the group raise
+    # writes what SCM typed from the PO. Migration 0097 filled existing rows from their
+    # lines.
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2)
+
     created_by = models.ForeignKey(
         'UserProfile', on_delete=models.PROTECT, related_name='created_vendor_orders',
     )
@@ -2616,21 +2631,26 @@ class VendorOrder(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            models.CheckConstraint(condition=models.Q(total_amount__gt=0),
+                                   name='vendor_order_total_amount_positive'),
+        ]
 
     def __str__(self):
         ref = self.po_number or f'#{self.pk}'
         return f"Order {ref} — {self.vendor}"
 
-    # ── Computed totals. NEVER stored — see the section note. ─────────────────
-    # Each is one aggregate query; a caller rendering many orders should annotate its
-    # queryset instead of reading these in a loop.
+    # ── Totals. `total` is the stored PO figure; the rest are computed and NEVER
+    # stored — see the section note. Each computed one is one aggregate query; a caller
+    # rendering many orders should annotate its queryset instead of reading these in a
+    # loop.
 
     @property
     def total(self):
-        """Sum of the order's line amounts."""
-        from django.db.models import Sum
-        from decimal import Decimal
-        return self.lines.aggregate(s=Sum('amount'))['s'] or Decimal('0')
+        """The order total from the PO — total_amount. NOT the sum of the lines (O3r):
+        a line's amount is optional, and the lines describe the requirement, not the
+        price."""
+        return self.total_amount
 
     @property
     def paid(self):
@@ -2771,7 +2791,14 @@ class VendorOrderProgram(models.Model):
 
 
 class VendorOrderLine(models.Model):
-    """One ordered item: a quantity and an amount. No edit, no delete.
+    """One item of the requirement an order was sized against. No edit, no delete.
+
+    A READ-ONLY SNAPSHOT, AMOUNTS OPTIONAL (O3r). The group raise writes one line per
+    catalogue item in the consolidated requirement of the sites it names, with the
+    quantity worked out server-side and an amount only where SCM chose to give one. The
+    Residential raise still writes a priced line for every item it orders. Either way the
+    order's value is VendorOrder.total_amount, never the sum of these — so both columns
+    are nullable, and each is still positive when present.
 
     THE DISPLAYED IDENTITY IS A SNAPSHOT, and the FKs beside it may go null. Both FKs are
     SET_NULL — a catalogue row can be deactivated and a BOQ row can be deleted by the
@@ -2800,15 +2827,19 @@ class VendorOrderLine(models.Model):
     item_unit        = models.CharField(max_length=20, blank=True, default='')
     item_category    = models.CharField(max_length=64, blank=True, default='')
 
-    quantity = models.DecimalField(max_digits=12, decimal_places=2)
-    amount   = models.DecimalField(max_digits=14, decimal_places=2)
+    quantity = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    amount   = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
 
     class Meta:
         ordering = ['pk']
         constraints = [
-            models.CheckConstraint(condition=models.Q(quantity__gt=0),
+            # NULL spelled out rather than left to SQL's three-valued logic, so the
+            # constraint says the same thing in Python validation as in the database.
+            models.CheckConstraint(condition=models.Q(quantity__isnull=True)
+                                   | models.Q(quantity__gt=0),
                                    name='vendor_order_line_quantity_positive'),
-            models.CheckConstraint(condition=models.Q(amount__gt=0),
+            models.CheckConstraint(condition=models.Q(amount__isnull=True)
+                                   | models.Q(amount__gt=0),
                                    name='vendor_order_line_amount_positive'),
         ]
 

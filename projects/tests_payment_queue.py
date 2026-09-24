@@ -46,7 +46,8 @@ def _make_order(fixture, project_type, *, site=None, program=None, po='', pi='',
                 total=Decimal('90000'), vendor=None):
     order = VendorOrder.objects.create(
         vendor=vendor or fixture.vendor, project_type=project_type, po_number=po,
-        pi_number=pi, created_by=fixture.scm, client_uuid=uuid.uuid4())
+        pi_number=pi, total_amount=total, created_by=fixture.scm,
+        client_uuid=uuid.uuid4())
     if site is not None:
         VendorOrderSite.objects.create(order=order, project=site)
     if program is not None:

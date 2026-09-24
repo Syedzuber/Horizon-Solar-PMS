@@ -1597,7 +1597,8 @@ class NotificationTests(ResidentialBaselineBase):
             amount=Decimal('25000.00'), requested_by=self.scm.user,
             status=PaymentRequest.APPROVED,
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm),
+                vendor=vendor, project_type='Residential', created_by=self.scm,
+                total_amount=Decimal('50000.00')),
         )
 
         with patch('projects.views.send_notification') as sender,              patch('projects.payments.send_notification') as notice:

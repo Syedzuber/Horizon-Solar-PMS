@@ -35,11 +35,16 @@ scope_label is what a screen shows when it wants to say what a payment was for.
 
 O3 ADDS THE SECOND RAISE PAGE and a tender's order list. vendor_order_create_group()
 records ONE order sized against sites drawn from several procurement groups and several
-tenders at once, with its lines prefilled from aggregate_group_boq() and editable, and a
-zero-site central purchase as a first-class case. It is entered from a tender and limited
-by none: see the O3 section note at the foot of this module. The Residential raise above
-is untouched — the two share the header, document, invoice and payment helpers, and
+tenders at once, and a zero-site central purchase as a first-class case. It is entered
+from a tender and limited by none: see the O3 section note further down. The Residential
+raise above is untouched — the two share the header, document and invoice helpers, and
 nothing else.
+
+O3r MAKES THAT PAGE A PAYMENT REQUEST. The order's value is the total printed on the PO
+(VendorOrder.total_amount), entered, not summed; a first payment is required; the sites
+are optional; and the lines are a read-only snapshot of those sites' requirement with an
+amount only where SCM gives one. `_order_money()` and `VendorOrder.total` read the stored
+total, so every money rule — committed, available, invoice awaited — follows it.
 
 O4 PUTS AN APPROVAL GATE IN FRONT OF FINANCE. A raised payment is PENDING_APPROVAL, not
 APPROVED: an approver (UserProfile.is_payment_approver, never a role) approves it, or
@@ -57,14 +62,14 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.contrib import messages
 from django.db import IntegrityError, transaction
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Prefetch, Q
 from django.http import HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 
 from .decorators import login_required
-from .design_views import aggregate_group_boq, post_qc_pool
+from .design_views import aggregate_group_boq
 from .models import (
     BOQItem, BOQItemMaster, PaymentRequest, PaymentRequestHold, Program, Project,
     SiteGroup, SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument,
@@ -226,9 +231,10 @@ def _parse_header(post, errors):
 def _parse_optional_payment(post, lines, total, errors):
     """The optional first payment. Appends to `errors`; returns the payment dict or None.
 
-    Shared by both raise pages, for the reason given on _parse_header: the cap on a first
-    payment is a money rule and there is one of it. Extracted verbatim — the early
-    returns replace the elif/else chain and reach the same three outcomes.
+    The Residential raise's. The group raise REQUIRES its payment since O3r and reads it
+    in _parse_group_amounts(), capped by the same committed_total() rule in the same
+    words. Extracted verbatim — the early returns replace the elif/else chain and reach
+    the same three outcomes.
     """
     if not post.get('request_payment'):
         return None
@@ -452,13 +458,18 @@ def _upload_and_record_documents(documents, folder, profile, write):
     return result
 
 
-def _order_money(lines, documents, payments):
-    """Every money figure an order page shows, summed from rows the caller already
-    holds (prefetched), so a page of many orders costs no query per order. The same
-    arithmetic as the VendorOrder properties; committed uses committed_total(), the one
-    rule. The detail page and the list both call this, so their "Invoice awaited" agree.
+def _order_money(order, documents, payments):
+    """Every money figure an order page shows, from the order's stored total and rows
+    the caller already holds (prefetched), so a page of many orders costs no query per
+    order. The same arithmetic as the VendorOrder properties; committed uses
+    committed_total(), the one rule. The detail page, both lists and the Finance queue
+    call this, so their "Invoice awaited" agree.
+
+    THE TOTAL IS order.total_amount (O3r), the figure on the PO — not a sum of lines,
+    whose amounts are optional. Taking the order rather than its lines is what lets a
+    zero-line order show its value.
     """
-    total     = sum((line.amount for line in lines), Decimal('0'))
+    total     = order.total_amount
     paid      = sum((p.amount for p in payments if p.status == PaymentRequest.CONFIRMED),
                     Decimal('0'))
     invoiced  = sum((d.invoice_amount or Decimal('0') for d in documents
@@ -593,6 +604,9 @@ def vendor_order_create(request, project_pk):
         order = VendorOrder.objects.create(
             vendor=vendor, project_type=project.project_type,
             po_number=cleaned['po_number'], pi_number=cleaned['pi_number'],
+            # O3r: the Residential page prices every line, so its total IS their sum —
+            # stored, because `total` now reads the column and not the lines.
+            total_amount=cleaned['total'],
             created_by=profile, client_uuid=client_uuid,
         )
         VendorOrderSite.objects.create(order=order, project=project, via_site_group=None)
@@ -719,7 +733,7 @@ def vendor_order_detail(request, order_pk):
     documents = list(order.documents.all())
     payments  = list(order.payments.all())
 
-    money     = _order_money(lines, documents, payments)
+    money     = _order_money(order, documents, payments)
     project   = _order_project(order)
 
     document_groups = []
@@ -953,7 +967,6 @@ def vendor_order_list(request, project_pk):
         VendorOrder.objects.filter(sites__project=project)
         .select_related('vendor')
         .prefetch_related(
-            'lines',
             Prefetch('documents', queryset=VendorOrderDocument.objects.filter(
                 doc_type=VENDOR_ORDER_DOC_INVOICE)),
             'payments',
@@ -962,7 +975,7 @@ def vendor_order_list(request, project_pk):
     )
     rows = [
         {'order': order,
-         **_order_money(order.lines.all(), order.documents.all(), order.payments.all())}
+         **_order_money(order, order.documents.all(), order.payments.all())}
         for order in orders
     ]
     return render(request, 'projects/vendor_order_list.html', {
@@ -974,112 +987,81 @@ def vendor_order_list(request, project_pk):
 
 
 # ---------------------------------------------------------------------------
-# O3 — the group raise: one order sized against sites from several groups and
-#      several tenders, and a tender's own order list
+# O3 — the group raise, and a tender's own order list
 #
-# THE SITES ARE THE SIZING BASIS AND NOTHING ELSE (O2d, restated because this is the
-# page where it is easiest to get wrong). Section A of the raise page asks "whose
-# requirement did you add up to reach these quantities", not "where is this going".
-# Material bought here may sit in a central store and be issued to sites later, in a
-# split nobody has decided yet — so a site named here is owed nothing, and no reader may
-# treat a VendorOrderSite row as an allocation. The page says so in words, twice.
+# O3r: THE GROUP RAISE IS A PAYMENT REQUEST. SCM comes to this page to ask Finance for
+# money against a PO / PI a vendor has already issued. So the page asks, in this order:
+# the PO / PI and its documents; the order total from the PO and the payment wanted now
+# (both required — every submission raises a payment, and later ones use "Request
+# payment" on the record page); what the order was recorded against, optionally; and a
+# read-only view of the requirement those sites add up to. It no longer asks SCM to build
+# a priced line table: the order's value is the figure on the PO (VendorOrder.total_amount)
+# and the lines are a snapshot of the requirement, with an amount only where one is given.
+#
+# THE SITES ARE THE SIZING BASIS AND NOTHING ELSE (O2d, unchanged). "Recorded against"
+# says whose requirement the purchase answers, never where the material goes. Material
+# bought here may sit in a central store and be issued later, in a split nobody has
+# decided yet — so a site named here is owed nothing, and no reader may treat a
+# VendorOrderSite row as an allocation.
 #
 # NEVER LIMITED TO THE TENDER IT WAS ENTERED FROM. SCM reaches this page from a tender
-# row, and the entering tender only decides what is PRE-TICKED. Every procurement group
-# in the system is offered, across every tender, because a vendor's minimum order
-# quantity does not respect tender boundaries and forcing one order per tender is how
-# SCM ends up raising four orders for one truckload.
+# row, and the entering tender only decides what is PRE-TICKED. Every OPEX tender is
+# offered, with every live site in it, because a vendor's minimum order quantity does not
+# respect tender boundaries.
 #
-# ONE PAGE, ONE FORM, NO ROUND TRIP. Picking groups fills the site list and the line
-# table in the browser; nothing is fetched between sections. That is why the server
-# renders EVERY candidate line once, each carrying its per-site quantities as data, and
-# the browser only shows, hides and re-sums them. One renderer, in Django, so the table
-# a refused submission comes back with is the table the user was looking at.
+# ONE PAGE, ONE FORM, NO ROUND TRIP. Ticking a tender, ticking a group, searching and
+# adding sites all happen in the browser. The server renders EVERY candidate site (once as
+# a search result, once as an added-site chip) and EVERY candidate requirement row, each
+# carrying its per-site quantities as data; the script only shows, hides and re-sums. One
+# renderer, in Django, so the page a refused submission comes back with is the page the
+# user was looking at.
 # ---------------------------------------------------------------------------
 
-def _candidate_contributions(candidate_ids):
-    """{item_master_id: {project_pk: quantity}} over `candidate_ids`.
+def _raise_candidates(entering_program):
+    """Everything section 3 can offer: every live OPEX tender, every live site in each,
+    and every procurement group with its live members.
 
-    THE SAME ROWS aggregate_group_boq() SUMS, KEYED BY PROJECT PK. Its own
-    `contributions` map is keyed by `project__project_id` — the human site code, which is
-    what the group screen prints — and this page has to match a value against a checkbox
-    whose value is the pk. Rather than change the shape of a function four screens read,
-    the pk-keyed form is built here from the same three filter terms (`boq_quantity__gt=0`
-    and `item_master__isnull=False` over `boq__project_id__in`), so the two can never
-    disagree about which BOQ rows count.
+    Returns (programs, groups, site_rows). `groups` is one entry per procurement group
+    with the pks of its live members; `site_rows` is one row per CANDIDATE SITE with the
+    procurement group it is currently in (or None). A site is in at most one: a live
+    procurement membership is exclusive (SiteGroupMembership's partial unique
+    constraint).
 
-    One query, whatever the number of sites.
+    FOUR QUERIES, WHATEVER THE NUMBER OF SITES OR TENDERS: tenders, sites, groups, and
+    their memberships.
     """
-    contributions = {}
-    for row in (BOQItem.objects
-                .filter(boq__project_id__in=candidate_ids, boq_quantity__gt=0,
-                        item_master__isnull=False)
-                .values('item_master', 'boq__project_id', 'boq_quantity')):
-        contributions.setdefault(row['item_master'], {})[
-            row['boq__project_id']] = row['boq_quantity']
-    return contributions
+    programs = list(Program.objects.filter(program_type='OPEX', is_deleted=False)
+                    .order_by('name'))
+    if entering_program is not None and entering_program.pk not in {p.pk for p in programs}:
+        programs.append(entering_program)
+        programs.sort(key=lambda program: program.name)
+    by_pk = {program.pk: program for program in programs}
 
+    sites = list(Project.objects
+                 .filter(program_id__in=list(by_pk), is_deleted=False)
+                 .only('pk', 'project_id', 'customer_name', 'city', 'project_type',
+                       'program_id')
+                 .order_by('project_id'))
 
-def _raise_sources(entering_program):
-    """Everything section A can offer: every PROCUREMENT group in the system with its
-    live members, and each shown tender's post-QC pool.
+    groups = list(SiteGroup.objects
+                  .filter(group_type=GROUP_TYPE_PROCUREMENT, program_id__in=list(by_pk))
+                  .order_by('-created_at'))
+    group_by_pk = {group.pk: group for group in groups}
 
-    Returns (programs, sources, site_rows) where `sources` is one block per tender — its
-    groups and its pool — and `site_rows` is one row per CANDIDATE SITE, tagged with the
-    source it is reached through. A site appears ONCE: a live procurement membership is
-    exclusive (SiteGroupMembership's partial unique constraint), and the pool is defined
-    as "released and in no procurement group", so the two sets cannot overlap.
+    group_of, members = {}, {}
+    for project_id, group_id in (SiteGroupMembership.objects
+                                 .filter(group__in=groups, removed_at__isnull=True)
+                                 .values_list('project_id', 'group_id')):
+        group_of[project_id] = group_by_pk[group_id]
+        members.setdefault(group_id, []).append(project_id)
 
-    COSTS A FIXED NUMBER OF QUERIES IN THE NUMBER OF SITES, which is the property that
-    matters here: two for the groups and their members, then post_qc_pool() per shown
-    tender. It does grow with the number of TENDERS, and that is deliberate —
-    post_qc_pool() is the reviewed definition of "released and ungrouped", including the
-    LEFT-JOIN trap documented on it, and a second hand-written copy of that exclusion is
-    a worse trade than a query per tender.
-    """
-    groups = list(
-        SiteGroup.objects
-        .filter(group_type=GROUP_TYPE_PROCUREMENT, program__is_deleted=False,
-                program__program_type='OPEX')
-        .select_related('program')
-        .annotate(member_count=Count('memberships',
-                                     filter=Q(memberships__removed_at__isnull=True)))
-        .order_by('program__name', '-created_at')
-    )
-
-    programs = {}
-    for group in groups:
-        programs.setdefault(group.program_id, group.program)
-    if entering_program is not None:
-        programs.setdefault(entering_program.pk, entering_program)
-    programs = sorted(programs.values(), key=lambda program: program.name)
-
-    members = {}
-    for membership in (SiteGroupMembership.objects
-                       .filter(group__in=groups, removed_at__isnull=True)
-                       .select_related('project')
-                       .order_by('project__project_id')):
-        members.setdefault(membership.group_id, []).append(membership.project)
-
-    sources, site_rows = [], []
-    for program in programs:
-        block = {'program': program, 'groups': [], 'pool': None}
-        for group in groups:
-            if group.program_id != program.pk:
-                continue
-            key = f'g{group.pk}'
-            block['groups'].append({'group': group, 'key': key,
-                                    'count': group.member_count})
-            for project in members.get(group.pk, []):
-                site_rows.append({'project': project, 'key': key, 'group': group,
-                                  'program': program})
-        pool = [assignment.project for assignment in post_qc_pool(program)]
-        block['pool'] = {'key': f'p{program.pk}', 'count': len(pool)}
-        for project in pool:
-            site_rows.append({'project': project, 'key': f'p{program.pk}',
-                              'group': None, 'program': program})
-        sources.append(block)
-    return programs, sources, site_rows
+    group_rows = [{'group': group, 'program': by_pk[group.program_id],
+                   'key': f'g{group.pk}', 'members': members.get(group.pk, [])}
+                  for group in groups]
+    site_rows = [{'project': project, 'program': by_pk[project.program_id],
+                  'group': group_of.get(project.pk)}
+                 for project in sites]
+    return programs, group_rows, site_rows
 
 
 def _unfrozen_site_ids(project_ids):
@@ -1094,9 +1076,9 @@ def _unfrozen_site_ids(project_ids):
     one.
 
     Its answer becomes VendorOrder.raised_with_unfrozen_quantities, which is a historical
-    fact about the moment of raising and is never recomputed afterwards. A site picked
-    from the post-QC pool is in no group at all and so is unfrozen by this rule, which is
-    the right answer — its BOQ can still move.
+    fact about the moment of raising and is never recomputed afterwards. It is shown on
+    the record page only (O3r). A site in no group at all is unfrozen by this rule, which
+    is the right answer — its BOQ can still move.
     """
     project_ids = list(project_ids)
     if not project_ids:
@@ -1110,7 +1092,7 @@ def _unfrozen_site_ids(project_ids):
 
 
 def _parse_group_sites(request, errors):
-    """Section A. Returns (sites, programs, project_type, unfrozen).
+    """Section 3. Returns (sites, programs, project_type, unfrozen).
 
     `sites` is a list of {'project', 'via_group_id'} in submission order, ONE PER SITE.
 
@@ -1126,10 +1108,9 @@ def _parse_group_sites(request, errors):
     """
     post = request.POST
 
-    # dict.fromkeys: a site ticked through two sources posts twice and must still become
-    # ONE VendorOrderSite — uniq_vendor_order_site would refuse the second anyway, and
-    # refusing the whole submission over a duplicate the page itself produced is worse
-    # than collapsing it.
+    # dict.fromkeys: a site added twice must still become ONE VendorOrderSite —
+    # uniq_vendor_order_site would refuse the second anyway, and refusing the whole
+    # submission over a duplicate the page itself produced is worse than collapsing it.
     ids = [int(raw) for raw in dict.fromkeys(post.getlist('site')) if raw.isdigit()]
 
     by_pk = {project.pk: project
@@ -1145,12 +1126,12 @@ def _parse_group_sites(request, errors):
             continue
         resolved.append(project)
 
-    # The group each site was picked THROUGH. DISPLAY ONLY (see VendorOrderSite.
+    # The group each site was added THROUGH — posted only for a site that came in by
+    # ticking its group, not one found by search. DISPLAY ONLY (see VendorOrderSite.
     # via_site_group): a claim that no longer holds — the site was removed from the group
     # between the page loading and the form being submitted — is dropped to NULL rather
     # than refused, because the order's scope is the site rows and nothing reads
-    # membership through this FK. What the quantities were frozen against is a separate
-    # question, answered by _unfrozen_site_ids() from the memberships as they are now.
+    # membership through this FK.
     claimed = {}
     for project in resolved:
         raw = post.get(f'via_group_{project.pk}', '').strip()
@@ -1175,9 +1156,8 @@ def _parse_group_sites(request, errors):
                       f'are {", ".join(sorted(types))}. Raise one order per kind.')
     project_type = types.pop() if len(types) == 1 else None
 
-    # The tenders this order says it was sized against. The page pre-ticks every tender
-    # contributing a site and lets SCM remove any of them, so what is written is exactly
-    # what was ticked — VendorOrderProgram records an intention, not a derived fact.
+    # The tenders this order says it was recorded against — exactly what was ticked.
+    # VendorOrderProgram records an intention, not a derived fact.
     program_ids = {int(raw) for raw in post.getlist('program') if raw.isdigit()}
     programs = (list(Program.objects.filter(pk__in=program_ids, is_deleted=False)
                      .order_by('name'))
@@ -1187,63 +1167,71 @@ def _parse_group_sites(request, errors):
     return sites, programs, project_type, unfrozen
 
 
-def _parse_group_lines(post, site_project_type, errors):
-    """Section B. Returns (lines, total, project_type).
+def _parse_group_amounts(post, errors):
+    """Section 2. Returns (order_total, payment).
 
-    ONE TICK NAME FOR BOTH KINDS OF ROW. An aggregate row and a hand-added row are the
-    same thing by the time they are posted — a catalogue item, a quantity and an amount —
-    so both post `line` = the BOQItemMaster pk. Which half of the screen a row came from
-    is a fact about the screen, not about the order, and VendorOrderLine records no such
-    field.
-
-    THE QUANTITY IS NOT CHECKED AGAINST THE AGGREGATE, DELIBERATELY. The prefill is a
-    starting point: an order may legitimately be for more than the requirement (a vendor
-    minimum, spares) or less (part of it is already in stock). What was entered is what
-    is stored.
-
-    `project_type` comes back because a ZERO-SITE order takes its type from its lines —
-    there is nothing else to take it from.
+    BOTH ARE REQUIRED. The order total is the figure on the PO. The payment is the reason
+    the page exists: every submission raises one, capped at the order total by the same
+    committed_total() rule every other payment path applies (a new order has committed
+    nothing, so the cap is the total itself).
     """
-    chosen = post.getlist('line')
-    if not chosen:
-        errors.append('Choose at least one item to order.')
-    if len(chosen) != len(set(chosen)):
-        errors.append('An item appears twice on this order.')
+    order_total = _parse_decimal(post.get('order_total'), 12)
+    if order_total is None:
+        errors.append('Enter the order total from the PO — more than 0.')
 
-    ids = [int(raw) for raw in dict.fromkeys(chosen) if raw.isdigit()]
-    masters = {master.pk: master for master in BOQItemMaster.objects.filter(pk__in=ids)}
+    payment = None
+    amount = _parse_decimal(post.get('payment_amount'), 10)
+    if amount is None:
+        errors.append('Enter the payment requested now — more than 0.')
+    elif order_total is not None and amount > order_total - committed_total(()):
+        errors.append(f'The payment (₹{amount}) is more than the order total '
+                      f'(₹{order_total}).')
+    else:
+        payment = {'amount': amount, 'note': post.get('payment_note', '').strip()}
+    return order_total, payment
 
-    lines, types = [], set()
-    for pk in ids:
-        master = masters.get(pk)
-        if master is None:
-            errors.append('A chosen item is not in the catalogue.')
-            continue
-        types.add(master.project_type)
-        if site_project_type is not None and master.project_type != site_project_type:
-            errors.append(f'{master.code} is a {master.project_type} catalogue item and '
-                          f'this order is for {site_project_type} sites.')
-            continue
-        quantity = _parse_decimal(post.get(f'qty_{pk}'), 10)
-        amount   = _parse_decimal(post.get(f'amount_{pk}'), 12)
-        if quantity is None:
-            errors.append(f'{master.description}: quantity must be more than 0.')
-        if amount is None:
-            errors.append(f'{master.description}: amount must be more than 0.')
-        if quantity is not None and amount is not None:
-            lines.append({'master': master, 'quantity': quantity, 'amount': amount})
 
-    project_type = site_project_type
-    if project_type is None:
-        # No sites: the lines decide, and they have to agree with each other.
-        if len(types) > 1:
-            errors.append('Every item on one order must come from the same catalogue — '
-                          f'these are {", ".join(sorted(types))}.')
-        elif len(types) == 1:
-            project_type = types.pop()
+def _parse_requirement(post, site_ids, errors):
+    """Section 4. Returns (lines, priced_total).
 
-    total = sum((line['amount'] for line in lines), Decimal('0'))
-    return lines, total, project_type
+    THE QUANTITIES ARE NOT POSTED. The requirement is read-only on the page, so it is
+    worked out again here from the sites actually submitted — aggregate_group_boq(), the
+    same function the page drew it with — and a quantity in the POST would be ignored.
+    One line per catalogue item in that requirement, whether or not it is priced.
+
+    AN AMOUNT IS OPTIONAL. Blank means "not priced"; anything else must be a positive
+    figure. An amount posted for an item that is not in the submitted sites' requirement
+    is ignored — the item is not on this order.
+
+    `priced_total` is the sum of the amounts given, or None when none was. It feeds the
+    warning only; the order's value is the total entered in section 2.
+    """
+    if not site_ids:
+        return [], None
+    rows = aggregate_group_boq(site_ids)['lines']
+    # The snapshot carries the category as the Residential line does; one query.
+    category = dict(BOQItemMaster.objects
+                    .filter(pk__in=[row['item_master'] for row in rows])
+                    .values_list('pk', 'category'))
+    lines, priced = [], []
+    for row in rows:
+        raw = (post.get(f'amount_{row["item_master"]}') or '').strip()
+        amount = None
+        if raw:
+            amount = _parse_decimal(raw, 12)
+            if amount is None:
+                errors.append(f'{row["item_master__description"]}: an item amount must be '
+                              'more than 0, or left blank.')
+                continue
+            priced.append(amount)
+        lines.append({'item_master_id': row['item_master'],
+                      'code': row['item_master__code'],
+                      'description': row['item_master__description'],
+                      'unit': row['item_master__unit'],
+                      'category': category.get(row['item_master']) or '',
+                      'quantity': row['total_quantity'],
+                      'amount': amount})
+    return lines, (sum(priced, Decimal('0')) if priced else None)
 
 
 def _parse_group_submission(request):
@@ -1251,9 +1239,9 @@ def _parse_group_submission(request):
 
     The same contract as _parse_submission: touches no storage, writes nothing, and every
     check that can refuse the submission runs here, before the first upload. The header,
-    the document slots, the invoice-number check and the optional first payment go
-    through the very helpers the Residential raise uses, so a vendor, a file and a first
-    payment are held to one standard on both pages.
+    the document slots and the invoice-number check go through the very helpers the
+    Residential raise uses, so a vendor and a file are held to one standard on both
+    pages.
     """
     post, errors = request.POST, []
 
@@ -1263,13 +1251,8 @@ def _parse_group_submission(request):
         client_uuid = None
         errors.append('This form expired. Check your entries and submit again.')
 
+    # 1. PO / PI
     vendor, po_number, pi_number = _parse_header(post, errors)
-    sites, programs, site_type, unfrozen = _parse_group_sites(request, errors)
-    lines, total, project_type = _parse_group_lines(post, site_type, errors)
-    if project_type is None and not errors:
-        # Every line was refused for a reason already worded, or there were none.
-        errors.append('Choose at least one item to order.')
-
     documents, doc_errors = _validate_document_slots(request)
     errors.extend(doc_errors)
     # A new order has no invoices yet, so only repeats within this submission.
@@ -1278,132 +1261,116 @@ def _parse_group_submission(request):
                for doc in documents):
         errors.append('Attach at least one PO or PI document.')
 
-    payment = _parse_optional_payment(post, lines, total, errors)
+    # 2. Amounts
+    order_total, payment = _parse_group_amounts(post, errors)
+
+    # 3. Recorded against
+    sites, programs, site_type, unfrozen = _parse_group_sites(request, errors)
+    # Every tender this page offers is OPEX, so an order recorded against no site is an
+    # OPEX order; one with sites takes their (single, checked) type.
+    project_type = site_type or 'OPEX'
+
+    # 4. Requirement
+    lines, priced_total = _parse_requirement(
+        post, [site['project'].pk for site in sites], errors)
 
     cleaned = {
         'client_uuid': client_uuid, 'vendor': vendor,
         'po_number': po_number, 'pi_number': pi_number,
+        'documents': documents, 'order_total': order_total, 'payment': payment,
         'sites': sites, 'programs': programs, 'project_type': project_type,
-        'unfrozen': unfrozen, 'lines': lines, 'total': total,
-        'documents': documents, 'payment': payment,
+        'unfrozen': unfrozen, 'lines': lines,
+        # Warning only (O3r): item amounts that do not add up to the PO total are
+        # recorded as given and the order saves.
+        'amounts_differ': (priced_total is not None and order_total is not None
+                           and priced_total != order_total),
+        'priced_total': priced_total,
     }
     return cleaned, errors
-
-
-def _line_row_shape(master, qty, amount):
-    """One line row as the shared include draws it. `master=None` yields the PROTOTYPE
-    row whose four tokens "Add a line" substitutes in the browser.
-
-    Hand-added rows carry no contributions — no site's BOQ is behind them — and are
-    always ticked and always visible; the aggregate columns render as em dashes.
-    """
-    return {
-        'master_id':   master.pk if master else '__PK__',
-        'code':        master.code if master else '__CODE__',
-        'description': master.description if master else '__DESC__',
-        'unit':        master.unit if master else '__UNIT__',
-        'contrib':     '{}',
-        'checked':     True,
-        'qty':         qty,
-        'amount':      amount,
-        'hand':        True,
-    }
 
 
 def _group_form_context(request, entering_program, post=None, client_uuid=None):
     """Everything the group raise page draws.
 
-    With `post`, every tick and every typed figure is put back — a refused submission
-    must never make someone rebuild a fifty-line table. Files cannot be put back
-    (browsers refuse it); the page says so, exactly as the Residential one does.
+    With `post`, every tick, every added site and every typed figure is put back — a
+    refused submission must never make someone find forty sites again. Files cannot be
+    put back (browsers refuse it); the page says so, exactly as the Residential one does.
 
-    THE LINE TABLE IS RENDERED ONCE, FOR EVERY CANDIDATE SITE AT ONCE, and each row
-    carries its per-site quantities in a data attribute. The browser shows the rows whose
-    sites are ticked and re-sums them; it builds no markup of its own. That is what lets
-    section B follow section A with no round trip while leaving exactly one renderer, in
-    Django, for both the first draw and the redraw after a refusal.
+    THE REQUIREMENT IS RENDERED ONCE, FOR EVERY CANDIDATE SITE AT ONCE, and each row
+    carries its per-site quantities in a data attribute keyed by site pk. The browser
+    shows the rows the added sites contribute to and re-sums them; it builds no markup of
+    its own.
     """
     post = post or {}
-    programs, sources, site_rows = _raise_sources(entering_program)
+    programs, group_rows, site_rows = _raise_candidates(entering_program)
 
-    candidate_ids = [row['project'].pk for row in site_rows]
-    agg = aggregate_group_boq(candidate_ids)
-    contributions = _candidate_contributions(candidate_ids)
+    agg = aggregate_group_boq([row['project'].pk for row in site_rows])
+    # aggregate_group_boq() keys its per-site breakdown by the human site code; the page
+    # matches on pk, and every candidate's code -> pk is already in hand.
+    pk_of = {row['project'].project_id: row['project'].pk for row in site_rows}
 
-    ticked_sites   = set(post.getlist('site')) if post else set()
-    ticked_lines   = set(post.getlist('line')) if post else set()
-    ticked_sources = set(post.getlist('source')) if post else set()
+    added    = set(post.getlist('site')) if post else set()
+    ticked_groups   = set(post.getlist('source')) if post else set()
     ticked_programs = set(post.getlist('program')) if post else set()
     if not post and entering_program is not None:
-        # Entered from a tender: that tender is offered pre-ticked, so a zero-site order
-        # raised straight away still says what it was sized against.
+        # Entered from a tender: that tender is offered pre-ticked, so a payment request
+        # raised straight away still says what it was recorded against.
         ticked_programs = {str(entering_program.pk)}
 
     for row in site_rows:
-        row['checked'] = str(row['project'].pk) in ticked_sites
-    for block in sources:
-        for entry in block['groups']:
-            entry['checked'] = entry['key'] in ticked_sources
-        block['pool']['checked'] = block['pool']['key'] in ticked_sources
+        key = str(row['project'].pk)
+        row['added'] = key in added
+        # The via-group claim comes back only if it went out.
+        row['via'] = bool(post.get(f'via_group_{key}')) if post else False
+    for row in group_rows:
+        row['checked'] = row['key'] in ticked_groups
+        row['members_json'] = json.dumps([str(pk) for pk in row['members']])
 
-    line_rows, aggregated = [], set()
-    for line in agg['lines']:
-        key = str(line['item_master'])
-        aggregated.add(line['item_master'])
-        line_rows.append({
-            'master_id':   line['item_master'],
-            'code':        line['item_master__code'],
-            'description': line['item_master__description'],
-            'unit':        line['item_master__unit'],
-            'contrib':     json.dumps(
-                {str(pk): str(quantity) for pk, quantity
-                 in contributions.get(line['item_master'], {}).items()}),
-            'checked':     key in ticked_lines,
-            'qty':         post.get(f'qty_{key}', ''),
-            'amount':      post.get(f'amount_{key}', ''),
-            'hand':        False,
-        })
+    total_by_program = {}
+    for row in site_rows:
+        total_by_program[row['program'].pk] = total_by_program.get(row['program'].pk, 0) + 1
+    tenders = [{'program': program,
+                'ticked': str(program.pk) in ticked_programs,
+                'site_count': total_by_program.get(program.pk, 0),
+                'groups': [g for g in group_rows if g['program'].pk == program.pk],
+                'sites': [s for s in site_rows if s['program'].pk == program.pk]}
+               for program in programs]
 
-    # Rows added by hand come back the way they went out. Anything ticked that the
-    # aggregate does not know about was added by hand, by definition.
-    hand_ids = [int(raw) for raw in ticked_lines
-                if raw.isdigit() and int(raw) not in aggregated]
-    hand_rows = [
-        _line_row_shape(master, post.get(f'qty_{master.pk}', ''),
-                        post.get(f'amount_{master.pk}', ''))
-        for master in BOQItemMaster.objects.filter(pk__in=hand_ids).order_by('code')
-    ]
+    requirement = [{
+        'master_id':   line['item_master'],
+        'code':        line['item_master__code'],
+        'description': line['item_master__description'],
+        'unit':        line['item_master__unit'],
+        'contrib':     json.dumps({str(pk_of[code]): str(quantity)
+                                   for code, quantity in line['contributions']
+                                   if code in pk_of}),
+        'amount':      post.get(f'amount_{line["item_master"]}', ''),
+    } for line in agg['lines']]
 
     return {
         'entering_program': entering_program,
-        'programs':         programs,
-        'ticked_programs':  ticked_programs,
-        'sources':          sources,
-        'site_rows':        site_rows,
-        'line_rows':        line_rows,
-        'hand_rows':        hand_rows,
-        # THE ROW MARKUP EXISTS ONCE. "Add a line" clones this prototype and substitutes
-        # the four tokens, so a hand-added row is drawn by the same template include as
-        # every other row and the two cannot drift apart.
-        'proto_row':        _line_row_shape(None, '', ''),
-        # item_master IS NULL, so these cannot be summed and cannot be ordered. Shown
-        # read-only rather than dropped: a consolidated quantity that is silently short
-        # is worse than one that says what it left out (aggregate_group_boq).
+        'tenders':          tenders,
+        'group_rows':       group_rows,
+        'requirement':      requirement,
+        # Collapsed by default; open when a refused submission brings amounts back, so an
+        # amount the server refused is not hidden inside a closed section.
+        'requirement_open': any(row['amount'] for row in requirement),
+        # item_master IS NULL, so these cannot be summed across sites. Shown read-only
+        # rather than dropped: a requirement that is silently short is worse than one
+        # that says what it left out (aggregate_group_boq).
         'unlinked':         agg['unlinked'],
-        'catalogue':        list(BOQItemMaster.objects.filter(is_active=True)
-                                 .order_by('project_type', 'sort_order', 'code')),
         'vendors':          Vendor.objects.filter(is_active=True).order_by('name'),
         'doc_rows':         _doc_rows(post, {0: VENDOR_ORDER_DOC_PO,
                                              1: VENDOR_ORDER_DOC_PI}),
         'doc_type_choices': _DOC_TYPE_SELECT,
         'client_uuid':      client_uuid or _uuid.uuid4(),
         'form': {
-            'vendor_id':       post.get('vendor_id', ''),
-            'po_number':       post.get('po_number', ''),
-            'pi_number':       post.get('pi_number', ''),
-            'request_payment': bool(post.get('request_payment')),
-            'payment_amount':  post.get('payment_amount', ''),
-            'payment_note':    post.get('payment_note', ''),
+            'vendor_id':      post.get('vendor_id', ''),
+            'po_number':      post.get('po_number', ''),
+            'pi_number':      post.get('pi_number', ''),
+            'order_total':    post.get('order_total', ''),
+            'payment_amount': post.get('payment_amount', ''),
+            'payment_note':   post.get('payment_note', ''),
         },
         'refused': False,
     }
@@ -1411,7 +1378,7 @@ def _group_form_context(request, entering_program, post=None, client_uuid=None):
 
 def _entering_program(request):
     """The tender the page was entered from, or None. It decides what is PRE-TICKED and
-    nothing else — every group in the system is offered whatever this is."""
+    nothing else — every tender is offered whatever this is."""
     raw = (request.POST.get('entered_from') or request.GET.get('program') or '').strip()
     if not raw.isdigit():
         return None
@@ -1420,12 +1387,9 @@ def _entering_program(request):
 
 @login_required
 def vendor_order_create_group(request):
-    """SCM records one order sized against sites drawn from any number of procurement
-    groups and any number of tenders. GET renders; POST creates.
-
-    ONE PAGE, FOUR SECTIONS, ONE FORM — sizing basis, lines, documents, optional first
-    payment. The same shape as the Residential raise, with section A replacing that
-    page's single project.
+    """SCM raises a payment request against a PO / PI, optionally recorded against sites
+    from any number of groups and tenders. GET renders; POST creates the order record,
+    its requirement snapshot and its first payment.
 
     EVERYTHING AFTER VALIDATION IS O2'S SEQUENCE, UNCHANGED: validate the whole
     submission, upload every file, then write in one transaction, and remove the uploaded
@@ -1480,6 +1444,7 @@ def vendor_order_create_group(request):
         order = VendorOrder.objects.create(
             vendor=vendor, project_type=cleaned['project_type'],
             po_number=cleaned['po_number'], pi_number=cleaned['pi_number'],
+            total_amount=cleaned['order_total'],
             raised_with_unfrozen_quantities=cleaned['unfrozen'],
             created_by=profile, client_uuid=client_uuid,
         )
@@ -1494,37 +1459,34 @@ def vendor_order_create_group(request):
         ])
         VendorOrderLine.objects.bulk_create([
             VendorOrderLine(
-                order=order, item_master=line['master'],
+                order=order, item_master_id=line['item_master_id'],
                 # A GROUP LINE HAS NO SINGLE BOQ ROW. Its quantity is the sum of several
-                # sites' rows — or, for a hand-added line, of none at all — so there is
-                # no BOQItem it could name. The join that survives is item_master, which
-                # is what BOQItemMaster exists for.
+                # sites' rows, so there is no BOQItem it could name. The join that
+                # survives is item_master, which is what BOQItemMaster exists for.
                 boq_item=None,
-                item_code=line['master'].code,
-                item_description=line['master'].description,
-                item_unit=line['master'].unit,
-                item_category=line['master'].category,
+                item_code=line['code'],
+                item_description=line['description'],
+                item_unit=line['unit'] or '',
+                item_category=line['category'],
                 quantity=line['quantity'], amount=line['amount'],
             )
             for line in cleaned['lines']
         ])
-        pr = None
-        if payment:
-            # The legacy invoice fields are NOT NULL until O6 drops them; an order's
-            # invoices live on VendorOrderDocument now, so they are written blank.
-            pr = PaymentRequest.objects.create(
-                vendor_order=order, project=anchor, vendor=vendor,
-                amount=payment['amount'], note=payment['note'],
-                requested_by=request.user,
-                # PENDING_APPROVAL since O4, exactly as both other raise paths create it.
-                status=PaymentRequest.PENDING_APPROVAL,
-                invoice_number='', invoice_document_name='',
-                invoice_document_url='', invoice_document_path='',
-            )
-            # Inside the atomic block: record_transition's contract is that the row and
-            # the status it records commit together or not at all.
-            record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL, from_status='',
-                              actor=profile, project=anchor)
+        # The legacy invoice fields are NOT NULL until O6 drops them; an order's invoices
+        # live on VendorOrderDocument now, so they are written blank.
+        pr = PaymentRequest.objects.create(
+            vendor_order=order, project=anchor, vendor=vendor,
+            amount=payment['amount'], note=payment['note'],
+            requested_by=request.user,
+            # PENDING_APPROVAL since O4, exactly as both other raise paths create it.
+            status=PaymentRequest.PENDING_APPROVAL,
+            invoice_number='', invoice_document_name='',
+            invoice_document_url='', invoice_document_path='',
+        )
+        # Inside the atomic block: record_transition's contract is that the row and the
+        # status it records commit together or not at all.
+        record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL, from_status='',
+                          actor=profile, project=anchor)
         return order, (order, pr)
 
     try:
@@ -1543,35 +1505,39 @@ def vendor_order_create_group(request):
             duplicates = _duplicate_invoice_numbers(cleaned['documents'])
             if duplicates:
                 return refuse(_duplicate_invoice_errors(duplicates), client_uuid)
-        return refuse(['The order could not be saved. Nothing was recorded; try again.'],
-                      client_uuid)
+        return refuse(['The payment request could not be saved. Nothing was recorded; '
+                       'try again.'], client_uuid)
 
     # ── The feed. log_activity never raises, so it sits after the commit. ──
     # ONE LINE PER SITE, on the site itself, exactly as site_group_lock() writes its
     # lock: a group is not a project, and the site is where a PM looks to find out what
     # was bought against their requirement.
     #
-    # A SITE-LESS ORDER IS NOT LOGGED AT ALL, and there is no way to log it today:
+    # A SITE-LESS ORDER'S RECORD LINE IS NOT LOGGED, and there is no way to log it today:
     # ActivityLog has a nullable `project` and NO program column, so an event against a
-    # tender has nowhere to land — it would be written with project=NULL, where no feed
-    # reads it. Recorded in DEFERRED rather than faked.
+    # tender has nowhere to land. Recorded in DEFERRED rather than faked. The payment line
+    # below is written either way, anchored to NULL when there is no site.
     ref = order.po_number or order.pi_number
     for project in projects:
         log_activity(
             project, profile,
-            f"Recorded order {ref} with {vendor.name}: ₹{cleaned['total']} "
-            f"({len(cleaned['lines'])} line(s), sized against {len(projects)} site(s))",
+            f"Recorded PO / PI {ref} with {vendor.name}: ₹{order.total_amount} "
+            f"(recorded against {len(projects)} site(s))",
             entity_type='VendorOrder', entity_id=order.pk,
             action_code='vendor_order_raised',
         )
-    if pr is not None:
-        log_activity(
-            anchor, profile,
-            f"Raised payment request to {vendor.name}: ₹{pr.amount} (order {ref})",
-            entity_type='PaymentRequest', entity_id=pr.pk,
-            action_code='payment_request_raised',
-        )
-    messages.success(request, f'Order {ref} recorded with {vendor.name}.')
+    log_activity(
+        anchor, profile,
+        f"Raised payment request to {vendor.name}: ₹{pr.amount} (order {ref})",
+        entity_type='PaymentRequest', entity_id=pr.pk,
+        action_code='payment_request_raised',
+    )
+    messages.success(request, f'Payment request of ₹{pr.amount} raised against {ref} '
+                              f'with {vendor.name}.')
+    if cleaned['amounts_differ']:
+        messages.warning(request, f"The item amounts (₹{cleaned['priced_total']}) do not "
+                                  f"add up to the order total (₹{order.total_amount}). "
+                                  'Recorded as entered.')
     return redirect('vendor_order_detail', order_pk=order.pk)
 
 
@@ -1614,7 +1580,6 @@ def program_vendor_order_list(request, program_pk):
         .distinct()
         .select_related('vendor')
         .prefetch_related(
-            'lines',
             Prefetch('documents', queryset=VendorOrderDocument.objects.filter(
                 doc_type=VENDOR_ORDER_DOC_INVOICE)),
             'payments',
@@ -1626,7 +1591,7 @@ def program_vendor_order_list(request, program_pk):
     rows = [
         {'order': order,
          'spans': _order_span(order),
-         **_order_money(order.lines.all(), order.documents.all(), order.payments.all())}
+         **_order_money(order, order.documents.all(), order.payments.all())}
         for order in orders
     ]
     raise_url = None

@@ -64,7 +64,6 @@ columns come to disagree.
           <td class="text-nowrap">
             {% if row.invoice_awaited %}<span class="badge text-bg-warning">Invoice awaited</span>{% endif %}
             {% if row.spans and row.spans > 1 %}<span class="badge text-bg-light border">spans {{ row.spans }} tenders</span>{% endif %}
-            {% if row.order.raised_with_unfrozen_quantities %}<span class="badge text-bg-light border">unfrozen quantities</span>{% endif %}
           </td>
         </tr>
         {% endfor %}

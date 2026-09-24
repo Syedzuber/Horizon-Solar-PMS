@@ -44,7 +44,7 @@ def _make_order(fixture, total=Decimal('60000'), project=None, po='PO-B'):
     tests do not depend on the raise page."""
     order = VendorOrder.objects.create(
         vendor=fixture.vendor, project_type='Residential', po_number=po,
-        created_by=fixture.scm, client_uuid=uuid.uuid4())
+        total_amount=total, created_by=fixture.scm, client_uuid=uuid.uuid4())
     VendorOrderSite.objects.create(order=order, project=project or fixture.project)
     VendorOrderLine.objects.create(order=order, item_description='Modules',
                                    quantity=Decimal('10'), amount=total)
@@ -377,7 +377,8 @@ class ConcurrentPaymentTests(TransactionTestCase):
                                        phone='9000000009')
         project = _project('Race Site', pm)
         order = VendorOrder.objects.create(vendor=vendor, project_type='Residential',
-                                           po_number='PO-RACE', created_by=scm)
+                                           po_number='PO-RACE', created_by=scm,
+                                           total_amount=Decimal('1000'))
         VendorOrderSite.objects.create(order=order, project=project)
         VendorOrderLine.objects.create(order=order, item_description='Modules',
                                        quantity=Decimal('1'), amount=Decimal('1000'))

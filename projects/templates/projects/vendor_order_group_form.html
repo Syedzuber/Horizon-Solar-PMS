@@ -1,30 +1,34 @@
 {% extends "base.html" %}
 {% comment %}
-O3 — SCM records one order sized against sites from several groups and several tenders.
+O3r — SCM raises a payment request against a PO / PI, optionally recorded against sites
+from several groups and several tenders.
 
-FOUR SECTIONS, ONE FORM, NO ROUND TRIP. Picking groups fills the site list and the line
-table in the browser. Every candidate line is rendered once by the server, each carrying
-its per-site quantities in data-contrib; the script below only shows, hides and re-sums
-them. It builds no markup except by cloning the prototype row, which is the same include
-as every other row.
+FOUR SECTIONS, ONE FORM, NO ROUND TRIP: 1 PO / PI, 2 Amounts, 3 Recorded against,
+4 Requirement. Every candidate site is rendered once as a search result and once as an
+added-site chip, and every candidate requirement row once with its per-site quantities in
+data-contrib; the script below only shows, hides and re-sums them. It builds no markup.
 
-THE SITES ARE THE SIZING BASIS, NOT A DESTINATION (O2d). Said at the top of section A and
-again on the detail page, because a list of sites under a purchase order reads as a
-delivery list and reading it that way is how someone comes to believe PMS allocates stock.
+THE SITES ARE THE SIZING BASIS, NOT A DESTINATION (O2d). Said in section 3 and again on
+the record page, because a list of sites under a purchase reads as a delivery list.
+
+THE REQUIREMENT IS READ-ONLY. Its quantities are not posted — the server works them out
+again from the sites submitted. Only an optional amount per item is posted.
+
+raised_with_unfrozen_quantities is still recorded, and shown on the record page only.
 
 Bootstrap only, matching vendor_order_form.html. The document slots and their client-side
 checks are the shared partial, so a file is held to the same standard on both raise pages.
 {% endcomment %}
 
-{% block title %}Raise Group Order — SolarPMS{% endblock %}
+{% block title %}Raise Payment Request — SolarPMS{% endblock %}
 
 {% block content %}
 
 <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
   <div>
-    <h4 class="mb-0">Raise Order</h4>
+    <h4 class="mb-0">Raise Payment Request</h4>
     <small class="text-muted">
-      Consolidated across procurement groups
+      Against a PO / PI from the vendor
       {% if entering_program %}· entered from {{ entering_program.name }}{% endif %}
     </small>
   </div>
@@ -43,225 +47,9 @@ checks are the shared partial, so a file is held to the same standard on both ra
   <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
   {% if entering_program %}<input type="hidden" name="entered_from" value="{{ entering_program.pk }}">{% endif %}
 
-  {# ── A. Sizing basis ──────────────────────────────────────────────────── #}
+  {# ── 1. PO / PI ───────────────────────────────────────────────────────── #}
   <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">
-      Size this order against
-      <div class="small text-muted fw-normal">
-        Material may be held centrally and issued to sites later. Naming a site here says
-        its requirement was added into these quantities — it allocates nothing to it.
-      </div>
-    </div>
-    <div class="card-body">
-
-      {% if not sources %}
-        <div class="text-muted small mb-3">
-          No procurement groups exist yet. You can still record an order with no sites —
-          add its lines by hand in the next section.
-        </div>
-      {% else %}
-      <div class="row g-3">
-        <div class="col-12 col-lg-5">
-          <div class="small fw-semibold mb-1">Groups and pools</div>
-          <div class="border rounded p-2" style="max-height:18rem; overflow:auto;">
-            {% for block in sources %}
-            <div class="mb-2">
-              <div class="text-uppercase text-muted" style="font-size:.7rem; letter-spacing:.04em;">
-                {{ block.program.name }}{% if block.program.short_tender_code %} · {{ block.program.short_tender_code }}{% endif %}
-              </div>
-              {% for entry in block.groups %}
-              <div class="form-check">
-                <input class="form-check-input js-vo-source" type="checkbox" name="source"
-                       value="{{ entry.key }}" id="voSrc{{ entry.key }}"{% if entry.checked %} checked{% endif %}>
-                <label class="form-check-label small" for="voSrc{{ entry.key }}">
-                  {{ entry.group.name }}
-                  <span class="badge {% if entry.group.status == 'locked' %}text-bg-primary{% else %}text-bg-warning{% endif %}">{{ entry.group.get_status_display }}</span>
-                  <span class="text-muted">· {{ entry.count }} site{{ entry.count|pluralize }}</span>
-                </label>
-              </div>
-              {% empty %}
-              <div class="text-muted small">No groups in this tender.</div>
-              {% endfor %}
-              <div class="form-check">
-                <input class="form-check-input js-vo-source" type="checkbox" name="source"
-                       value="{{ block.pool.key }}" id="voSrc{{ block.pool.key }}"{% if block.pool.checked %} checked{% endif %}>
-                <label class="form-check-label small" for="voSrc{{ block.pool.key }}">
-                  Post-QC pool <span class="text-muted">· {{ block.pool.count }} released, ungrouped</span>
-                </label>
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-
-        <div class="col-12 col-lg-7">
-          <div class="d-flex justify-content-between align-items-baseline mb-1">
-            <span class="small fw-semibold">Sites</span>
-            <span class="small text-muted"><span id="voSiteCount">0</span> selected</span>
-          </div>
-          <div class="border rounded" style="max-height:18rem; overflow:auto;">
-            <table class="table table-sm mb-0 small align-middle">
-              <tbody>
-                {% for row in site_rows %}
-                <tr class="js-vo-site-row{% if not row.checked %} d-none{% endif %}"
-                    data-source="{{ row.key }}" data-program="{{ row.program.pk }}">
-                  <td style="width:2.5rem;">
-                    <input class="form-check-input js-vo-site" type="checkbox" name="site"
-                           value="{{ row.project.pk }}"{% if row.checked %} checked{% endif %}
-                           aria-label="Include this site">
-                  </td>
-                  <td>
-                    <span class="fw-semibold">{{ row.project.project_id }}</span>
-                    <div class="text-muted" style="font-size:.7rem;">
-                      {% if row.group %}{{ row.group.name }}{% else %}Post-QC pool{% endif %}
-                      · {{ row.program.name }}
-                      {% if not row.group or row.group.status != 'locked' %}
-                        <span class="text-warning-emphasis">· quantities not frozen</span>
-                      {% endif %}
-                    </div>
-                    {% comment %}
-                      INSIDE THE CELL, not a sibling of the <tr>. An <input> directly in a
-                      <tbody> is invalid HTML and the parser foster-parents it out of the
-                      table; it would still be in the form today, but only by luck.
-                      Display only either way — the server drops a stale claim to NULL.
-                    {% endcomment %}
-                    {% if row.group %}
-                    <input type="hidden" name="via_group_{{ row.project.pk }}" value="{{ row.group.pk }}">
-                    {% endif %}
-                  </td>
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-            <div class="p-2 text-muted small js-vo-nosites">
-              Tick a group or a pool above to bring its sites in. An order with no sites is
-              valid — it is a central purchase, sized against its tenders.
-            </div>
-          </div>
-          <div class="alert alert-warning py-1 px-2 small mt-2 d-none" id="voUnfrozen">
-            Some selected sites are not in a locked group, so their BOQ quantities can still
-            move. The order will be recorded as raised against unfrozen quantities.
-          </div>
-        </div>
-      </div>
-      {% endif %}
-
-      <div class="mt-3">
-        <div class="small fw-semibold mb-1">Sized against these tenders</div>
-        <div class="d-flex flex-wrap gap-3">
-          {% for program in programs %}
-          <div class="form-check">
-            <input class="form-check-input js-vo-program" type="checkbox" name="program"
-                   value="{{ program.pk }}" id="voProg{{ program.pk }}"
-                   {% if program.pk|stringformat:"s" in ticked_programs %} checked{% endif %}>
-            <label class="form-check-label small" for="voProg{{ program.pk }}">{{ program.name }}</label>
-          </div>
-          {% empty %}
-          <span class="text-muted small">No tenders to name.</span>
-          {% endfor %}
-        </div>
-        <div class="form-text">Ticked automatically when one of a tender's sites is selected. Remove any that does not belong.</div>
-      </div>
-    </div>
-  </div>
-
-  {# ── B. Lines ─────────────────────────────────────────────────────────── #}
-  <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
-      <span>Items ordered <span class="text-danger">*</span></span>
-      <span class="small">Total ₹<span id="voTotal">0.00</span></span>
-    </div>
-    <div class="table-responsive">
-      <table class="table table-sm mb-0 small align-middle">
-        <thead class="table-light">
-          <tr>
-            <th style="width:2.5rem;"></th>
-            <th>Item</th>
-            <th style="width:4rem;">Unit</th>
-            <th style="width:8rem;" class="text-end">Consolidated</th>
-            <th style="width:8rem;">Quantity</th>
-            <th style="width:8rem;">Rate (₹)</th>
-            <th style="width:9rem;">Amount (₹)</th>
-          </tr>
-        </thead>
-        <tbody id="voLines">
-          {% for row in line_rows %}{% include 'projects/partials/vendor_order_group_line.html' %}{% endfor %}
-          {% for row in hand_rows %}{% include 'projects/partials/vendor_order_group_line.html' %}{% endfor %}
-        </tbody>
-      </table>
-    </div>
-    <div class="card-body border-top py-2 small text-muted" id="voNoLines">
-      No items yet. Select sites above, or add a line by hand below.
-    </div>
-
-    <div class="card-body border-top">
-      <div class="small fw-semibold mb-2">Add a line</div>
-      <div class="row g-2 align-items-end">
-        <div class="col-12 col-md-6">
-          <select class="form-select form-select-sm" id="voAddItem" aria-label="Catalogue item">
-            <option value="">— Catalogue item —</option>
-            {% for master in catalogue %}
-            <option value="{{ master.pk }}" data-type="{{ master.project_type }}"
-                    data-code="{{ master.code }}" data-desc="{{ master.description }}"
-                    data-unit="{{ master.unit }}">
-              {{ master.project_type }} · {{ master.code }} — {{ master.description }}
-            </option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="col-6 col-md-2">
-          <input type="number" step="0.01" min="0.01" inputmode="decimal"
-                 class="form-control form-control-sm" id="voAddQty" placeholder="Quantity"
-                 aria-label="Quantity">
-        </div>
-        <div class="col-6 col-md-2">
-          <input type="number" step="0.01" min="0.01" inputmode="decimal"
-                 class="form-control form-control-sm" id="voAddRate" placeholder="Rate"
-                 aria-label="Rate">
-        </div>
-        <div class="col-12 col-md-2">
-          <button type="button" class="btn btn-sm btn-outline-secondary w-100" id="voAddBtn">Add</button>
-        </div>
-      </div>
-      <div class="form-text">
-        Covers an order with no sites, and anything the BOQs did not predict. Every item on
-        one order must come from the same catalogue.
-      </div>
-    </div>
-  </div>
-
-  {# ── Not orderable ────────────────────────────────────────────────────── #}
-  {% comment %}
-  BOQ rows with no catalogue item cannot be summed across sites, so they are missing from
-  every consolidated quantity above. Shown read-only rather than dropped: a total that is
-  silently short is worse than one that says what it left out.
-  {% endcomment %}
-  {% if unlinked %}
-  <div class="card shadow-sm mb-3 border-warning" id="voUnlinkedCard">
-    <div class="card-header fw-semibold">
-      Not orderable — no catalogue item
-      <div class="small text-muted fw-normal">
-        These BOQ rows are not in any consolidated quantity above and cannot be ordered here.
-      </div>
-    </div>
-    <ul class="list-group list-group-flush" id="voUnlinked">
-      {% for item in unlinked %}
-      <li class="list-group-item small d-none js-vo-unlinked" data-owner="{{ item.boq.project_id }}">
-        <span class="fw-semibold">{{ item.boq.project.project_id }}</span>
-        · {{ item.description }}
-        <span class="text-muted">· {{ item.boq_quantity }} {{ item.uom }}</span>
-      </li>
-      {% endfor %}
-    </ul>
-    <div class="card-body py-2 small text-muted js-vo-unlinked-empty">
-      None among the selected sites.
-    </div>
-  </div>
-  {% endif %}
-
-  {# ── Order header ─────────────────────────────────────────────────────── #}
-  <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">Order</div>
+    <div class="card-header fw-semibold">1 · PO / PI</div>
     <div class="card-body">
       <div class="row g-3">
         <div class="col-12 col-md-6">
@@ -288,33 +76,31 @@ checks are the shared partial, so a file is held to the same standard on both ra
         </div>
       </div>
     </div>
-  </div>
-
-  {# ── C. Documents ─────────────────────────────────────────────────────── #}
-  <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">
-      Documents <span class="text-danger">*</span>
-      <div class="small text-muted fw-normal">Up to 5 files; at least one PO or PI. PDF, Word, Excel, JPG, PNG — max 20 MB each.</div>
+    <div class="card-body border-top pb-0">
+      <div class="fw-semibold small">Documents <span class="text-danger">*</span></div>
+      <div class="small text-muted">Up to 5 files; at least one PO or PI. PDF, Word, Excel, JPG, PNG — max 20 MB each.</div>
     </div>
     {% include 'projects/partials/vendor_order_doc_slots.html' %}
   </div>
 
-  {# ── C. Optional first payment ────────────────────────────────────────── #}
+  {# ── 2. Amounts ───────────────────────────────────────────────────────── #}
   <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">2 · Amounts</div>
     <div class="card-body">
-      <div class="form-check">
-        <input class="form-check-input" type="checkbox" name="request_payment" value="1"
-               id="voPay"{% if form.request_payment %} checked{% endif %}>
-        <label class="form-check-label fw-semibold" for="voPay">Request a payment now</label>
-      </div>
-      <div class="row g-2 mt-1 js-vo-pay{% if not form.request_payment %} d-none{% endif %}">
+      <div class="row g-3">
         <div class="col-12 col-md-4">
-          <label class="form-label small mb-0" for="voPayAmt">Amount (₹) — up to the order total</label>
-          <input type="number" step="0.01" min="0.01" inputmode="decimal" name="payment_amount"
-                 id="voPayAmt" class="form-control" value="{{ form.payment_amount }}">
+          <label class="form-label fw-semibold" for="voTotal">Order total from the PO (₹) <span class="text-danger">*</span></label>
+          <input type="number" step="0.01" min="0.01" inputmode="decimal" name="order_total"
+                 id="voTotal" class="form-control" required value="{{ form.order_total }}">
         </div>
-        <div class="col-12 col-md-8">
-          <label class="form-label small mb-0" for="voPayNote">Note (optional)</label>
+        <div class="col-12 col-md-4">
+          <label class="form-label fw-semibold" for="voPayAmt">Payment requested now (₹) <span class="text-danger">*</span></label>
+          <input type="number" step="0.01" min="0.01" inputmode="decimal" name="payment_amount"
+                 id="voPayAmt" class="form-control" required value="{{ form.payment_amount }}">
+          <div class="form-text">Up to the order total. Later payments: use <em>Request payment</em> on the record page.</div>
+        </div>
+        <div class="col-12 col-md-4">
+          <label class="form-label fw-semibold" for="voPayNote">Note (optional)</label>
           <input type="text" name="payment_note" id="voPayNote" class="form-control"
                  value="{{ form.payment_note }}">
         </div>
@@ -322,210 +108,372 @@ checks are the shared partial, so a file is held to the same standard on both ra
     </div>
   </div>
 
+  {# ── 3. Recorded against ──────────────────────────────────────────────── #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      3 · Recorded against <span class="text-muted fw-normal">(optional)</span>
+      <div class="small text-muted fw-normal">
+        Whose requirement this purchase answers. Material may be held centrally and issued
+        to sites later — naming a site here allocates nothing to it.
+      </div>
+    </div>
+    <div class="card-body">
+
+      <div class="small fw-semibold mb-1">Tenders</div>
+      <div class="d-flex flex-wrap gap-2 mb-3" id="voTenders">
+        {% for t in tenders %}
+          <input type="checkbox" class="btn-check js-vo-program" name="program" autocomplete="off"
+                 value="{{ t.program.pk }}" id="voProg{{ t.program.pk }}"{% if t.ticked %} checked{% endif %}>
+          <label class="btn btn-sm btn-outline-secondary rounded-pill" for="voProg{{ t.program.pk }}">{{ t.program.name }}</label>
+        {% empty %}
+          <span class="text-muted small">No tenders to name.</span>
+        {% endfor %}
+      </div>
+
+      <div class="row g-3">
+        <div class="col-12 col-lg-5">
+          <div class="small fw-semibold mb-1">Procurement groups</div>
+          <div class="border rounded p-2" style="max-height:16rem; overflow:auto;">
+            {% for t in tenders %}{% if t.groups %}
+            <div class="mb-2">
+              <div class="text-uppercase text-muted" style="font-size:.7rem; letter-spacing:.04em;">{{ t.program.name }}</div>
+              {% for g in t.groups %}
+              <div class="form-check">
+                <input class="form-check-input js-vo-group" type="checkbox" name="source"
+                       value="{{ g.key }}" id="voGrp{{ g.key }}" data-group="{{ g.group.pk }}"
+                       data-program="{{ t.program.pk }}" data-members="{{ g.members_json }}"{% if g.checked %} checked{% endif %}>
+                <label class="form-check-label small" for="voGrp{{ g.key }}">
+                  {{ g.group.name }}
+                  <span class="badge {% if g.group.status == 'locked' %}text-bg-primary{% else %}text-bg-warning{% endif %}">{{ g.group.get_status_display }}</span>
+                  <span class="text-muted">· {{ g.members|length }} site{{ g.members|length|pluralize }}</span>
+                </label>
+              </div>
+              {% endfor %}
+            </div>
+            {% endif %}{% endfor %}
+            {% if not group_rows %}<div class="text-muted small">No procurement groups yet. Add sites by search instead.</div>{% endif %}
+            <div class="form-text mt-0">Ticking a group adds its sites and ticks its tender.</div>
+          </div>
+        </div>
+
+        <div class="col-12 col-lg-7">
+          <div class="small fw-semibold mb-1">Find a site</div>
+          <div class="d-flex gap-2 mb-2">
+            <input type="search" class="form-control form-control-sm" id="voSearch"
+                   placeholder="Site code, customer or city" aria-label="Search sites">
+            <select class="form-select form-select-sm" id="voGroupFilter" aria-label="Filter by group" style="max-width:14rem;">
+              <option value="">Any group</option>
+              <option value="none">Not in a group</option>
+              {% for g in group_rows %}
+              <option value="{{ g.group.pk }}" data-program="{{ g.program.pk }}">{{ g.program.name }} · {{ g.group.name }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <ul class="list-group small" id="voResults" style="max-height:16rem; overflow:auto;">
+            {% for t in tenders %}{% for s in t.sites %}
+            <li class="list-group-item d-flex justify-content-between align-items-center py-1 js-vo-result d-none"
+                data-site="{{ s.project.pk }}" data-program="{{ t.program.pk }}"
+                data-group="{% if s.group %}{{ s.group.pk }}{% endif %}"
+                data-text="{{ s.project.project_id|lower }} {{ s.project.customer_name|lower }} {{ s.project.city|lower }}">
+              <span>
+                <span class="fw-semibold">{{ s.project.project_id }}</span>
+                <span class="text-muted">· {{ s.project.customer_name }}{% if s.project.city %}, {{ s.project.city }}{% endif %}</span>
+                <span class="text-muted" style="font-size:.7rem;">· {% if s.group %}{{ s.group.name }}{% else %}no group{% endif %}</span>
+              </span>
+              <button type="button" class="btn btn-sm btn-outline-secondary py-0 js-vo-add">Add</button>
+            </li>
+            {% endfor %}{% endfor %}
+          </ul>
+          <div class="small text-muted mt-1" id="voResultsHint">Tick a tender to search its sites.</div>
+        </div>
+      </div>
+
+      <div class="mt-3">
+        <div class="small fw-semibold mb-1">Added sites</div>
+        {% for t in tenders %}
+        <div class="mb-2 js-vo-added-block{% if not t.ticked %} d-none{% endif %}" data-program="{{ t.program.pk }}">
+          <div class="small text-muted mb-1">
+            {{ t.program.name }} · <span class="js-vo-n">0</span> of {{ t.site_count }} site{{ t.site_count|pluralize }}
+          </div>
+          <div class="d-flex flex-wrap gap-1">
+            {% for s in t.sites %}
+            <span class="badge rounded-pill text-bg-light border fw-normal js-vo-chip{% if not s.added %} d-none{% endif %}"
+                  data-site="{{ s.project.pk }}" data-program="{{ t.program.pk }}"
+                  data-group="{% if s.group %}{{ s.group.pk }}{% endif %}">
+              {{ s.project.project_id }}
+              <button type="button" class="btn-close ms-1 js-vo-remove" style="font-size:.5rem;"
+                      aria-label="Remove {{ s.project.project_id }}"></button>
+              <input type="hidden" name="site" value="{{ s.project.pk }}" class="js-vo-site-input"{% if not s.added %} disabled{% endif %}>
+              {% if s.group %}
+              <input type="hidden" name="via_group_{{ s.project.pk }}" value="{{ s.group.pk }}" class="js-vo-via"{% if not s.added or not s.via %} disabled{% endif %}>
+              {% endif %}
+            </span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endfor %}
+        <div class="small text-muted" id="voNoSites">
+          No sites added. A payment request with no sites is valid — it is recorded against its tenders.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {# ── 4. Requirement ───────────────────────────────────────────────────── #}
+  <details class="card shadow-sm mb-3" id="voRequirement"{% if requirement_open %} open{% endif %}>
+    <summary class="card-header fw-semibold" style="cursor:pointer;">
+      4 · Requirement <span class="text-muted fw-normal">(read-only)</span>
+      <span class="small text-muted fw-normal">· <span id="voReqSummary">no sites added</span></span>
+    </summary>
+    <div class="card-body py-2 small text-muted">
+      The consolidated BOQ quantities of the added sites. An amount per item is optional.
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0 small align-middle">
+        <thead class="table-light">
+          <tr>
+            <th>Item</th>
+            <th style="width:4rem;">Unit</th>
+            <th style="width:8rem;" class="text-end">Quantity</th>
+            <th style="width:6rem;" class="text-end">Sites</th>
+            <th style="width:10rem;">Amount (₹, optional)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in requirement %}
+          <tr class="js-vo-req d-none" data-master="{{ row.master_id }}" data-contrib="{{ row.contrib }}">
+            <td>
+              <div class="fw-semibold">{{ row.code }}</div>
+              <div class="text-muted" style="font-size:.75rem;">{{ row.description }}</div>
+            </td>
+            <td class="text-muted">{{ row.unit }}</td>
+            <td class="text-end js-vo-agg">—</td>
+            <td class="text-end text-muted js-vo-sites"></td>
+            <td>
+              <input type="number" step="0.01" min="0.01" inputmode="decimal"
+                     class="form-control form-control-sm js-vo-amount" name="amount_{{ row.master_id }}"
+                     value="{{ row.amount }}" aria-label="Amount for {{ row.code }}" disabled>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-body border-top py-2 small text-muted" id="voNoReq">No requirement — no sites added.</div>
+    <div class="alert alert-warning small py-2 mx-3 mt-2 d-none" id="voAmountNote" role="status"></div>
+    {% comment %}
+    BOQ rows with no catalogue item cannot be summed across sites, so they are missing from
+    every consolidated quantity above. Listed read-only rather than dropped: a requirement
+    that is silently short is worse than one that says what it left out.
+    {% endcomment %}
+    {% if unlinked %}
+    <div class="card-body border-top py-2 small" id="voUnlinkedCard">
+      <div class="fw-semibold">Not in the requirement — no catalogue item</div>
+      <ul class="list-unstyled mb-0">
+        {% for item in unlinked %}
+        <li class="d-none js-vo-unlinked" data-owner="{{ item.boq.project_id }}">
+          <span class="fw-semibold">{{ item.boq.project.project_id }}</span>
+          · {{ item.description }}
+          <span class="text-muted">· {{ item.boq_quantity }} {{ item.uom }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <div class="text-muted js-vo-unlinked-empty">None among the added sites.</div>
+    </div>
+    {% endif %}
+  </details>
+
   <div class="alert alert-danger small py-2 d-none" id="voProblems" role="alert"></div>
 
   <div class="d-grid d-md-flex justify-content-md-end mb-4">
-    <button type="submit" class="btn btn-brand" id="voSubmit">Record order</button>
+    <button type="submit" class="btn btn-brand" id="voSubmit">Submit payment request</button>
   </div>
 </form>
 
-{# The prototype row "Add a line" clones — the same include as every row above. #}
-<template id="voLineProto">
-  {% with row=proto_row %}{% include 'projects/partials/vendor_order_group_line.html' %}{% endwith %}
-</template>
-
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-  var form  = document.getElementById('voGroupForm');
-  var lines = document.getElementById('voLines');
+  var form = document.getElementById('voGroupForm');
+  var RESULT_LIMIT = 30;
 
-  function siteRows()  { return form.querySelectorAll('.js-vo-site-row'); }
-  function lineRows()  { return lines.querySelectorAll('.js-vo-line'); }
+  function all(sel) { return form.querySelectorAll(sel); }
+  function chipFor(pk) { return form.querySelector('.js-vo-chip[data-site="' + pk + '"]'); }
 
-  /* The pks of every site currently ticked AND visible. A hidden row's checkbox is
-     unticked by syncSources(), so this is also exactly what will be posted. */
-  function selectedSites() {
-    var chosen = {};
-    siteRows().forEach(function (tr) {
-      var box = tr.querySelector('.js-vo-site');
-      if (!tr.classList.contains('d-none') && box.checked) chosen[box.value] = true;
+  /* The pks of every added site — exactly the enabled `site` inputs, which is exactly
+     what will be posted. */
+  function addedSites() {
+    var added = {};
+    all('.js-vo-site-input').forEach(function (input) {
+      if (!input.disabled) added[input.value] = true;
     });
-    return chosen;
+    return added;
   }
 
-  /* A source checkbox reveals its sites and ticks them; unticking it removes them. */
-  function syncSources() {
+  function tickedTenders() {
     var on = {};
-    form.querySelectorAll('.js-vo-source').forEach(function (box) {
-      if (box.checked) on[box.value] = true;
-    });
-    siteRows().forEach(function (tr) {
-      var show = !!on[tr.dataset.source];
-      tr.classList.toggle('d-none', !show);
-      if (!show) tr.querySelector('.js-vo-site').checked = false;
-    });
+    all('.js-vo-program').forEach(function (box) { if (box.checked) on[box.value] = true; });
+    return on;
   }
 
-  function recalc() {
-    var total = 0;
-    lineRows().forEach(function (tr) {
+  /* Add or remove one site. `viaGroup` is true only when it came in by ticking its
+     group; a site found by search records no group. */
+  function setAdded(pk, on, viaGroup) {
+    var chip = chipFor(pk);
+    if (!chip) return;
+    chip.classList.toggle('d-none', !on);
+    chip.querySelector('.js-vo-site-input').disabled = !on;
+    var via = chip.querySelector('.js-vo-via');
+    if (via) {
+      if (!on) via.disabled = true;
+      else if (viaGroup) via.disabled = false;
+    }
+  }
+
+  function tickTender(pk) {
+    var box = form.querySelector('.js-vo-program[value="' + pk + '"]');
+    if (box) box.checked = true;
+  }
+
+  function renderResults() {
+    var tenders = tickedTenders(), added = addedSites();
+    var q = document.getElementById('voSearch').value.trim().toLowerCase();
+    var g = document.getElementById('voGroupFilter').value;
+    var shown = 0, more = 0, anyTender = false;
+    for (var k in tenders) { anyTender = true; }
+    all('.js-vo-result').forEach(function (li) {
+      var match = tenders[li.dataset.program] && !added[li.dataset.site]
+        && (!q || li.dataset.text.indexOf(q) >= 0)
+        && (!g || (g === 'none' ? !li.dataset.group : li.dataset.group === g));
+      if (match && shown >= RESULT_LIMIT) { more += 1; match = false; }
+      if (match) shown += 1;
+      li.classList.toggle('d-none', !match);
+    });
+    var hint = document.getElementById('voResultsHint');
+    if (!anyTender) hint.textContent = 'Tick a tender to search its sites.';
+    else if (more) hint.textContent = more + ' more — narrow the search.';
+    else if (!shown) hint.textContent = 'No matching sites that are not already added.';
+    else hint.textContent = '';
+  }
+
+  function money(v) { return Math.round(v * 100); }
+
+  function amountNote() {
+    var note = document.getElementById('voAmountNote');
+    var total = parseFloat(document.getElementById('voTotal').value);
+    var sum = 0, any = false;
+    all('.js-vo-req').forEach(function (tr) {
       if (tr.classList.contains('d-none')) return;
-      if (!tr.querySelector('.js-vo-check').checked) return;
       var v = parseFloat(tr.querySelector('.js-vo-amount').value);
-      if (!isNaN(v)) total += v;
+      if (!isNaN(v)) { sum += v; any = true; }
     });
-    document.getElementById('voTotal').textContent = total.toFixed(2);
-    return total;
+    var differ = any && !isNaN(total) && money(sum) !== money(total);
+    note.classList.toggle('d-none', !differ);
+    if (differ) {
+      note.textContent = 'Item amounts add up to ₹' + sum.toFixed(2) + '; the order total is ₹'
+        + total.toFixed(2) + '. A warning only — the request saves as entered.';
+    }
   }
 
-  /* Rebuild every derived number from the current site selection. Never overwrites a
-     quantity the user has typed (data-touched), because an edited quantity is a
-     deliberate departure from the aggregate and the whole point of it being editable. */
+  /* Rebuild everything derived from the added sites. */
   function sync() {
-    syncSources();
-    var chosen = selectedSites(), count = 0, anyUnfrozen = false;
-    for (var k in chosen) { count += 1; }
-    /* Section A's site half is not drawn at all when no procurement group exists — a
-       fresh deployment, or one where every group has been used up. The page is still
-       usable then (hand-entered lines, zero sites), so every element in that half is
-       looked up defensively rather than assumed. */
-    var siteCount = document.getElementById('voSiteCount');
-    if (siteCount) siteCount.textContent = count;
+    var added = addedSites(), tenders = tickedTenders(), count = 0;
+    for (var k in added) { count += 1; }
 
-    var byTender = {};
-    siteRows().forEach(function (tr) {
-      var box = tr.querySelector('.js-vo-site');
-      if (!tr.classList.contains('d-none') && box.checked) {
-        byTender[tr.dataset.program] = true;
-        if (tr.textContent.indexOf('quantities not frozen') >= 0) anyUnfrozen = true;
-      }
+    all('.js-vo-added-block').forEach(function (block) {
+      var n = 0;
+      block.querySelectorAll('.js-vo-site-input').forEach(function (input) {
+        if (!input.disabled) n += 1;
+      });
+      block.querySelector('.js-vo-n').textContent = n;
+      block.classList.toggle('d-none', !(n > 0 || tenders[block.dataset.program]));
     });
-    form.querySelectorAll('.js-vo-program').forEach(function (box) {
-      if (byTender[box.value]) box.checked = true;   /* additive: never unticks */
-    });
-    var unfrozen = document.getElementById('voUnfrozen');
-    if (unfrozen) unfrozen.classList.toggle('d-none', !anyUnfrozen);
+    document.getElementById('voNoSites').classList.toggle('d-none', count > 0);
 
-    var visible = 0;
-    lineRows().forEach(function (tr) {
-      if (tr.dataset.hand) { visible += 1; return; }
+    var items = 0;
+    all('.js-vo-req').forEach(function (tr) {
       var contrib = JSON.parse(tr.dataset.contrib || '{}');
       var sum = 0, sites = 0;
       for (var pk in contrib) {
-        if (chosen[pk]) { sum += parseFloat(contrib[pk]); sites += 1; }
+        if (added[pk]) { sum += parseFloat(contrib[pk]); sites += 1; }
       }
       var show = sites > 0;
       tr.classList.toggle('d-none', !show);
-      var box = tr.querySelector('.js-vo-check');
-      var qty = tr.querySelector('.js-vo-qty');
-      if (!show) { box.checked = false; return; }
-      visible += 1;
+      /* A hidden row's amount is not posted; the server ignores it anyway. */
+      tr.querySelector('.js-vo-amount').disabled = !show;
+      if (!show) return;
+      items += 1;
       tr.querySelector('.js-vo-agg').textContent = sum.toFixed(2);
-      tr.querySelector('.js-vo-sites').textContent = sites + ' site' + (sites === 1 ? '' : 's');
-      if (!tr.dataset.seen) { box.checked = true; tr.dataset.seen = '1'; }
-      if (!qty.dataset.touched) { qty.value = sum.toFixed(2); amountFromRate(tr); }
+      tr.querySelector('.js-vo-sites').textContent = sites;
     });
-    document.getElementById('voNoLines').classList.toggle('d-none', visible > 0);
+    document.getElementById('voNoReq').classList.toggle('d-none', items > 0);
+    document.getElementById('voReqSummary').textContent = count
+      ? items + ' item' + (items === 1 ? '' : 's') + ' from ' + count + ' site' + (count === 1 ? '' : 's')
+      : 'no sites added';
 
     var card = document.getElementById('voUnlinkedCard');
     if (card) {
       var shown = 0;
       card.querySelectorAll('.js-vo-unlinked').forEach(function (li) {
-        var show = !!chosen[li.dataset.owner];
+        var show = !!added[li.dataset.owner];
         li.classList.toggle('d-none', !show);
         if (show) shown += 1;
       });
       card.querySelector('.js-vo-unlinked-empty').classList.toggle('d-none', shown > 0);
     }
 
-    var none = form.querySelector('.js-vo-nosites');
-    if (none) none.classList.toggle('d-none', count > 0);
-    recalc();
+    renderResults();
+    amountNote();
   }
 
-  function amountFromRate(tr) {
-    var qty  = parseFloat(tr.querySelector('.js-vo-qty').value);
-    var rate = parseFloat(tr.querySelector('.js-vo-rate').value);
-    if (!isNaN(qty) && !isNaN(rate)) {
-      tr.querySelector('.js-vo-amount').value = (qty * rate).toFixed(2);
-    }
-  }
-
-  /* One delegated listener, so a row cloned in later needs no wiring of its own. */
-  lines.addEventListener('input', function (e) {
-    var tr = e.target.closest('.js-vo-line');
-    if (!tr) return;
-    if (e.target.classList.contains('js-vo-qty')) e.target.dataset.touched = '1';
-    if (e.target.classList.contains('js-vo-qty') ||
-        e.target.classList.contains('js-vo-rate')) amountFromRate(tr);
-    recalc();
-  });
-  lines.addEventListener('change', function (e) {
-    if (e.target.classList.contains('js-vo-check')) recalc();
+  /* A tender unticked takes its sites and its groups with it. */
+  all('.js-vo-program').forEach(function (box) {
+    box.addEventListener('change', function () {
+      if (!box.checked) {
+        all('.js-vo-chip[data-program="' + box.value + '"]').forEach(function (chip) {
+          setAdded(chip.dataset.site, false);
+        });
+        all('.js-vo-group[data-program="' + box.value + '"]').forEach(function (g) {
+          g.checked = false;
+        });
+      }
+      sync();
+    });
   });
 
-  form.querySelectorAll('.js-vo-source').forEach(function (box) {
-    box.addEventListener('change', sync);
-  });
-  form.addEventListener('change', function (e) {
-    if (e.target.classList.contains('js-vo-site')) sync();
-  });
-
-  /* Add a line: clone the prototype and substitute its four tokens. */
-  document.getElementById('voAddBtn').addEventListener('click', function () {
-    var select = document.getElementById('voAddItem');
-    var option = select.options[select.selectedIndex];
-    var box = document.getElementById('voProblems');
-    if (!option || !option.value) {
-      window.voShowProblems(box, ['Choose a catalogue item to add.']);
-      return;
-    }
-    if (lines.querySelector('[data-master="' + option.value + '"]:not(.d-none)')) {
-      window.voShowProblems(box, [option.dataset.code + ' is already on this order.']);
-      return;
-    }
-    window.voShowProblems(box, []);
-    var html = document.getElementById('voLineProto').innerHTML
-      .split('__PK__').join(option.value)
-      .split('__CODE__').join(option.dataset.code)
-      .split('__DESC__').join(option.dataset.desc)
-      .split('__UNIT__').join(option.dataset.unit);
-    var host = document.createElement('tbody');
-    host.innerHTML = html.trim();
-    var tr = host.querySelector('tr');
-    lines.appendChild(tr);
-    tr.querySelector('.js-vo-qty').value  = document.getElementById('voAddQty').value;
-    tr.querySelector('.js-vo-rate').value = document.getElementById('voAddRate').value;
-    tr.querySelector('.js-vo-qty').dataset.touched = '1';
-    amountFromRate(tr);
-    document.getElementById('voAddQty').value = '';
-    document.getElementById('voAddRate').value = '';
-    select.selectedIndex = 0;
-    document.getElementById('voNoLines').classList.add('d-none');
-    recalc();
+  /* A group ticked adds its sites and ticks its tender; unticked, removes its sites. */
+  all('.js-vo-group').forEach(function (box) {
+    box.addEventListener('change', function () {
+      var members = JSON.parse(box.dataset.members || '[]');
+      members.forEach(function (pk) { setAdded(pk, box.checked, true); });
+      if (box.checked) tickTender(box.dataset.program);
+      sync();
+    });
   });
 
-  var pay = document.getElementById('voPay');
-  pay.addEventListener('change', function () {
-    form.querySelector('.js-vo-pay').classList.toggle('d-none', !pay.checked);
+  form.addEventListener('click', function (e) {
+    var add = e.target.closest('.js-vo-add');
+    if (add) { setAdded(add.closest('.js-vo-result').dataset.site, true, false); sync(); return; }
+    var remove = e.target.closest('.js-vo-remove');
+    if (remove) { setAdded(remove.closest('.js-vo-chip').dataset.site, false); sync(); }
+  });
+
+  document.getElementById('voSearch').addEventListener('input', renderResults);
+  document.getElementById('voGroupFilter').addEventListener('change', renderResults);
+  document.getElementById('voTotal').addEventListener('input', amountNote);
+  form.addEventListener('input', function (e) {
+    if (e.target.classList.contains('js-vo-amount')) amountNote();
   });
 
   /* Checked before submit so a refusal does not reload the page and lose the chosen
      files. The server applies the same rules regardless. */
   form.addEventListener('submit', function (e) {
     var problems = window.voDocProblems(form, true);
-    var ticked = 0;
-    lineRows().forEach(function (tr) {
-      if (!tr.classList.contains('d-none') && tr.querySelector('.js-vo-check').checked) ticked += 1;
-    });
-    if (!ticked) problems.push('Choose at least one item to order.');
-    if (pay.checked) {
-      var amt = parseFloat(document.getElementById('voPayAmt').value);
-      if (isNaN(amt) || amt <= 0) {
-        problems.push('The payment amount must be more than 0.');
-      } else if (Math.round(amt * 100) > Math.round(recalc() * 100)) {
-        problems.push('The payment (₹' + amt.toFixed(2) + ') is more than the order total (₹' + recalc().toFixed(2) + ').');
-      }
+    var total = parseFloat(document.getElementById('voTotal').value);
+    var amt = parseFloat(document.getElementById('voPayAmt').value);
+    if (isNaN(total) || total <= 0) problems.push('Enter the order total from the PO — more than 0.');
+    if (isNaN(amt) || amt <= 0) {
+      problems.push('Enter the payment requested now — more than 0.');
+    } else if (!isNaN(total) && money(amt) > money(total)) {
+      problems.push('The payment (₹' + amt.toFixed(2) + ') is more than the order total (₹' + total.toFixed(2) + ').');
     }
     if (window.voShowProblems(document.getElementById('voProblems'), problems)) {
       e.preventDefault();
@@ -533,15 +481,9 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     var btn = document.getElementById('voSubmit');
     btn.disabled = true;
-    btn.textContent = 'Saving…';
+    btn.textContent = 'Submitting…';
   });
 
-  /* A refused submission comes back with its quantities already typed; they are the
-     user's, so mark them touched before the first sync can recompute them. */
-  lineRows().forEach(function (tr) {
-    var qty = tr.querySelector('.js-vo-qty');
-    if (qty.value !== '') { qty.dataset.touched = '1'; tr.dataset.seen = '1'; }
-  });
   sync();
 });
 </script>

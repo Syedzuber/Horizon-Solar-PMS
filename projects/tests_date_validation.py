@@ -489,7 +489,8 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
             amount=Decimal('1000.00'), requested_by=self.scm.user,
             status=PaymentRequest.APPROVED,
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm))
+                vendor=vendor, project_type='Residential', created_by=self.scm,
+                total_amount=Decimal('50000.00')))
         # O5: a payment date may not precede the day the request was raised. Raised on
         # the floor, so the battery's past dates still exercise the calendar range alone.
         PaymentRequest.objects.filter(pk=self.pr.pk).update(

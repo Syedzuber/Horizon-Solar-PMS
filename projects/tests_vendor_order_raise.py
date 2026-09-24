@@ -321,7 +321,8 @@ class DetailQueryCountTests(RaiseFixture):
 
     def _order_with(self, n_lines, n_docs):
         order = VendorOrder.objects.create(vendor=self.vendor, project_type='Residential',
-                                           po_number='PO-Q', created_by=self.scm)
+                                           po_number='PO-Q', created_by=self.scm,
+                                           total_amount=Decimal(10 * n_lines or 1))
         VendorOrderSite.objects.create(order=order, project=self.project)
         for i in range(n_lines):
             VendorOrderLine.objects.create(order=order, item_description=f'Item {i}',

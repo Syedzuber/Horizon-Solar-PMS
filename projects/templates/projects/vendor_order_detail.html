@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Order {{ order.po_number|default:order.pi_number }} — SolarPMS{% endblock %}
+{% block title %}PO / PI record {{ order.po_number|default:order.pi_number }} — SolarPMS{% endblock %}
 
 {% block content %}
 
 <div class="d-flex justify-content-between align-items-start gap-2 mb-3">
   <div>
-    <h4 class="mb-0">Order {{ order.po_number|default:order.pi_number }}</h4>
-    <small class="text-muted">{{ order.vendor.name }} · {{ order.project_type }}</small>
+    <h4 class="mb-0">PO / PI record</h4>
+    <small class="text-muted">{{ order.po_number|default:order.pi_number }} · {{ order.vendor.name }} · {{ order.project_type }}</small>
   </div>
   <div class="d-flex flex-wrap justify-content-end gap-2 flex-shrink-0">
     {% if can_request_payment %}
@@ -47,6 +47,16 @@
           <dd class="col-7 col-sm-8">{{ order.created_by.user.get_full_name|default:order.created_by.user.username }}</dd>
           <dt class="col-5 col-sm-4 text-muted fw-normal">Raised on</dt>
           <dd class="col-7 col-sm-8">{{ order.created_at|date:"d M Y, H:i" }}</dd>
+          {% comment %}
+            O3r: shown HERE and nowhere else — a historical fact about the moment of
+            raising, never recomputed. Drawn only when true: a Residential record always
+            stores False, which means "not applicable", not "frozen".
+          {% endcomment %}
+          {% if order.raised_with_unfrozen_quantities %}
+          <dt class="col-5 col-sm-4 text-muted fw-normal">Quantities</dt>
+          <dd class="col-7 col-sm-8"><span class="badge text-bg-warning">Raised against unfrozen quantities</span>
+            <div class="text-muted" style="font-size:.72rem;">At least one site was in no locked procurement group, so its BOQ could still move.</div></dd>
+          {% endif %}
           <dt class="col-5 col-sm-4 text-muted fw-normal">Tenders</dt>
           <dd class="col-7 col-sm-8">
             {% for program in programs %}<div>{{ program.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}
@@ -122,13 +132,16 @@
         <tr>
           <td>{% if line.item_code %}<span class="text-muted">{{ line.item_code }}</span> {% endif %}{{ line.item_description }}</td>
           <td class="text-muted">{{ line.item_category|default:"—" }}</td>
-          <td class="text-end text-nowrap">{{ line.quantity|floatformat:2 }} {{ line.item_unit }}</td>
-          <td class="text-end">{{ line.amount|floatformat:2 }}</td>
+          <td class="text-end text-nowrap">{% if line.quantity is not None %}{{ line.quantity|floatformat:2 }} {{ line.item_unit }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
+          <td class="text-end">{% if line.amount is not None %}{{ line.amount|floatformat:2 }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
         </tr>
+        {% empty %}
+        <tr><td colspan="4" class="text-muted">No lines recorded.</td></tr>
         {% endfor %}
       </tbody>
       <tfoot>
-        <tr><th colspan="3" class="text-end">Total</th><th class="text-end">{{ total|floatformat:2 }}</th></tr>
+        {# O3r: the order total is the PO figure; line amounts are optional and may not add up to it. #}
+        <tr><th colspan="3" class="text-end">Order total</th><th class="text-end">{{ total|floatformat:2 }}</th></tr>
       </tfoot>
     </table>
   </div>

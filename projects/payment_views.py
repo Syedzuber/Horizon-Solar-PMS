@@ -143,7 +143,7 @@ def _row(user, payment, today):
     order = payment.vendor_order
     payments = list(order.payments.all())
     documents = list(order.documents.all())
-    money = _order_money(order.lines.all(), documents, payments)
+    money = _order_money(order, documents, payments)
     holds = list(payment.holds.all())          # ordered '-held_at'; [0] is the latest
     # The O4 views answer 403 to anyone who cannot read the order BEFORE they ask the
     # approver predicate, so a flag holder outside the portfolio roles (a PM approver,
@@ -222,7 +222,6 @@ def payment_queue(request):
                 .select_related('vendor', 'vendor_order', 'requested_by',
                                 'approved_by__user', 'confirmed_by')
                 .prefetch_related(
-                    'vendor_order__lines',
                     Prefetch('vendor_order__documents',
                              queryset=VendorOrderDocument.objects.order_by('doc_type', 'pk')),
                     'vendor_order__payments',

@@ -42,7 +42,7 @@ from .tests_vendor_order_raise import RaiseFixture, _client, _profile
 def _order(fixture, total=Decimal('60000'), po='PO-O4'):
     order = VendorOrder.objects.create(
         vendor=fixture.vendor, project_type='Residential', po_number=po,
-        created_by=fixture.scm, client_uuid=uuid.uuid4())
+        total_amount=total, created_by=fixture.scm, client_uuid=uuid.uuid4())
     VendorOrderSite.objects.create(order=order, project=fixture.project)
     VendorOrderLine.objects.create(order=order, item_description='Modules',
                                    quantity=Decimal('10'), amount=total)

@@ -444,7 +444,8 @@ class RoleGateScopingTests(AccessIsolationBase):
             project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
             requested_by=self.pm_b.user,
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm),
+                vendor=vendor, project_type='Residential', created_by=self.scm,
+                total_amount=Decimal('50000.00')),
         )
         response = _client_for(self.pm_a).get(
             reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))
@@ -456,7 +457,8 @@ class RoleGateScopingTests(AccessIsolationBase):
             project=self.project_b, vendor=vendor, amount=Decimal('50000.00'),
             requested_by=self.pm_b.user,
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
-                vendor=vendor, project_type='Residential', created_by=self.scm),
+                vendor=vendor, project_type='Residential', created_by=self.scm,
+                total_amount=Decimal('50000.00')),
         )
         response = _client_for(self.pm_b).get(
             reverse('payment_request_detail', args=[self.project_b.project_id, pr.pk]))

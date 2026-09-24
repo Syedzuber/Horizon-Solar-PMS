@@ -5,8 +5,9 @@ What this file pins, and why each matters:
   * EVERY CHECK CONSTRAINT REFUSES A BAD ROW. They are the only enforcement O1 ships —
     there are no views yet — so a constraint that silently compiled to nothing would go
     unnoticed until O2 wrote the first real row.
-  * THE TOTALS ARE ARITHMETIC OVER CHILDREN. `paid` counts CONFIRMED only; a payment in
-    any other status is money not yet paid, and one test per status says so.
+  * PAID, BALANCE AND INVOICED ARE ARITHMETIC OVER CHILDREN. `paid` counts CONFIRMED
+    only; a payment in any other status is money not yet paid, and one test per status
+    says so. `total` is NOT (O3r): it is the stored PO figure, whatever the lines say.
   * PROTECT HOLDS. An order is a record of something that happened outside PMS; deleting
     the vendor or site it names must be refused, not cascaded.
   * THE URL HELPER ENCODES THE PATH. The legacy invoice URL is built from the raw
@@ -54,6 +55,7 @@ class VendorOrderFixture(TestCase):
             project_type='Residential', dc_capacity_kw=Decimal('5.00'))
 
     def make_order(self, **kwargs):
+        kwargs.setdefault('total_amount', Decimal('1000.00'))
         return VendorOrder.objects.create(vendor=self.vendor, project_type='Residential',
                                           created_by=self.scm, **kwargs)
 
@@ -119,6 +121,20 @@ class CheckConstraintTests(VendorOrderFixture):
         order = self.make_order()
         self.assertRefused(lambda: self.make_line(order, amount='0'))
 
+    def test_a_line_with_no_quantity_and_no_amount_is_accepted(self):
+        """O3r: a line is the requirement snapshot, so both figures are optional — and
+        each is still refused at zero when it IS given (the two tests above)."""
+        order = self.make_order()
+        line = VendorOrderLine.objects.create(order=order, item_description='Module',
+                                              quantity=None, amount=None)
+        self.assertIsNone(line.amount)
+
+    def test_an_order_total_of_zero_is_refused(self):
+        self.assertRefused(lambda: self.make_order(total_amount=Decimal('0')))
+
+    def test_an_order_without_a_total_is_refused(self):
+        self.assertRefused(lambda: self.make_order(total_amount=None))
+
     def test_a_rejected_payment_without_a_reason_is_refused(self):
         order = self.make_order()
         self.assertRefused(lambda: self.make_payment(order, '100', PaymentRequest.REJECTED))
@@ -166,16 +182,19 @@ class UniqueSiteTests(VendorOrderFixture):
 
 class ComputedTotalTests(VendorOrderFixture):
 
-    def test_an_empty_order_totals_zero_everywhere(self):
-        order = self.make_order()
+    def test_an_order_with_no_lines_or_payments_owes_its_whole_total(self):
+        order = self.make_order(total_amount=Decimal('1000.00'))
         self.assertEqual((order.total, order.paid, order.balance, order.invoiced),
-                         (Decimal('0'), Decimal('0'), Decimal('0'), Decimal('0')))
+                         (Decimal('1000.00'), Decimal('0'), Decimal('1000.00'), Decimal('0')))
 
-    def test_total_is_the_sum_of_line_amounts(self):
-        order = self.make_order()
+    def test_total_is_the_stored_po_figure_not_the_sum_of_line_amounts(self):
+        """O3r: the lines are the requirement, with optional amounts; the order's value
+        is what the PO says. Lines summing to 1,250.50 do not move a total of 1,000."""
+        order = self.make_order(total_amount=Decimal('1000.00'))
         self.make_line(order, amount='1000.00')
         self.make_line(order, amount='250.50')
-        self.assertEqual(order.total, Decimal('1250.50'))
+        self.assertEqual(order.total, Decimal('1000.00'))
+        self.assertEqual(order.available_to_request, Decimal('1000.00'))
 
     def test_paid_counts_confirmed_payments_only_and_balance_follows(self):
         order = self.make_order()

@@ -42,7 +42,7 @@ def _bare_order(fixture, total=Decimal('90000'), po='PO-CENTRAL'):
     raises one yet: O2d is the structure, and the screen that uses it is O3's."""
     order = VendorOrder.objects.create(
         vendor=fixture.vendor, project_type='OPEX', po_number=po,
-        created_by=fixture.scm, client_uuid=uuid.uuid4())
+        total_amount=total, created_by=fixture.scm, client_uuid=uuid.uuid4())
     VendorOrderLine.objects.create(order=order, item_description='Modules - stock',
                                    quantity=Decimal('100'), amount=total)
     return order
