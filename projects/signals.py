@@ -1,11 +1,33 @@
 import logging
+from django.db import transaction
 from django.db.models.signals import post_save
 from django.contrib.auth.signals import user_logged_in, user_logged_out
 from django.dispatch import receiver
 from django.contrib.auth.models import User
-from .models import UserProfile, ActivityLog
+from .models import UserProfile, ActivityLog, StatusTransition, SUBJECT_PAYMENT_REQUEST
 
 logger = logging.getLogger(__name__)
+
+
+@receiver(post_save, sender=StatusTransition)
+def payment_transition_notices(sender, instance, created, **kwargs):
+    """O5: every payment_request ledger row is a move someone may need to hear about.
+
+    HOOKED ON THE LEDGER, NOT ON THE VIEWS. A payment's status only moves where
+    record_transition() writes its row (execution-model.md §13 lists the six sites), so
+    this one receiver covers the raise, the hold, SCM's answer and mark-paid without a
+    line changed in the four O4 action views. payments.send_payment_notices() decides
+    who hears about which move.
+
+    AFTER COMMIT. The row is written inside the move's transaction; on_commit defers the
+    notice until that transaction commits, so a move that rolls back — a refusal inside
+    the lock, a lost race — tells nobody. An idempotent replay of record_transition()
+    returns the existing row without saving, so it notifies nobody twice.
+    """
+    if not created or instance.subject_type != SUBJECT_PAYMENT_REQUEST:
+        return
+    from .payments import send_payment_notices
+    transaction.on_commit(lambda: send_payment_notices(instance))
 
 
 @receiver(post_save, sender=User)

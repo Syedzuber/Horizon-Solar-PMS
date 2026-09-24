@@ -4,6 +4,7 @@ from . import views
 from . import design_views   # OPEX design workflow (Part 2) — separate module, no existing view changed
 from . import report_views   # Read-only management reports — separate module, same pattern
 from . import order_views    # O2 vendor orders — separate module, same pattern
+from . import payment_views  # O5 Finance payments queue — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -306,8 +307,8 @@ urlpatterns = [
          name='program_vendor_order_list'),
     # O4 — the approval gate on a payment request. POST only; each action its own
     # endpoint, because each has its own predicate and its own mandatory reason.
-    # Keyed on the PaymentRequest pk alone: a payment belongs to an order, and the order
-    # page is the only screen that draws these (the Finance queue is O5).
+    # Keyed on the PaymentRequest pk alone: a payment belongs to an order. The order page
+    # posts here directly; O5's queue reaches the same views via payment_queue_action.
     path('payments/<int:payment_pk>/approve/',        order_views.payment_approve,
          name='payment_approve'),
     path('payments/<int:payment_pk>/hold/',           order_views.payment_hold,
@@ -316,6 +317,15 @@ urlpatterns = [
          name='payment_reject'),
     path('payments/<int:payment_pk>/hold/respond/',   order_views.payment_hold_respond,
          name='payment_hold_respond'),
+    # O5 — the Finance payments queue. payment_views.py, a separate module. The queue's
+    # approve / hold / reject go through payment_queue_action, which calls the O4 view
+    # above unchanged and only swaps where it lands afterwards; mark-paid is Finance's.
+    path('payments/',                                 payment_views.payment_queue,
+         name='payment_queue'),
+    path('payments/<int:payment_pk>/queue/<slug:action>/',
+         payment_views.payment_queue_action, name='payment_queue_action'),
+    path('payments/<int:payment_pk>/mark-paid/',      payment_views.payment_mark_paid,
+         name='payment_mark_paid'),
 
     # ---------------------------------------------------------------------------
     # Webhooks — unauthenticated, no login required

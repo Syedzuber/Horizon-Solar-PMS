@@ -930,19 +930,31 @@ is one line to reverse. **Whoever wants it there adds the checkbox to
 unchecked box posts nothing, so a read without a rendered box clears the flag on every
 save. **Risk if left:** low; the Admin can already set it.
 
-**§O4-2. `confirm_payment_request` still writes `approved -> confirmed` with no ledger
+**§O4-2. CLOSED 24 Sep 2026 by O5.** Confirming now records `approved -> confirmed` —
+`payments.mark_payment_paid()` is the one writer, called by `confirm_payment_request` and by
+the queue's `payment_mark_paid`, and writes the ledger row in the same transaction and lock
+as the status (execution-model.md §13, site ⑥). The original entry follows, struck.
+
+~~**§O4-2. `confirm_payment_request` still writes `approved -> confirmed` with no ledger
 row.** O4 instrumented five of `PaymentRequest`'s six transitions (§13). The sixth is the
 confirm, which is O5's and was explicitly out of scope here. Until it lands, §13 says a
 missing row on a `confirmed` payment means "not instrumented". **O5 must** add the
-`record_transition()` call in the same transaction as the status write.
+`record_transition()` call in the same transaction as the status write.~~
 
-**§O4-3. Nobody is NOTIFIED of anything O4 does.** A held request tells SCM nothing; an
+**§O4-3. PARTLY CLOSED 24 Sep 2026 by O5 — in-app only.** A hold now tells the requester;
+SCM's answer and a new raise tell every active approver except the requester; mark-paid
+tells the requester. All four are `channels=['in_app']`, never to the actor, sent after
+commit from a `StatusTransition` receiver (execution-model.md §12, 24 Sep). **Still open:**
+approve and reject tell nobody, and nothing reaches WhatsApp or email — that is O7, with the
+templates. The original entry follows, struck.
+
+~~**§O4-3. Nobody is NOTIFIED of anything O4 does.** A held request tells SCM nothing; an
 approval tells nobody; a rejection tells nobody. The whole gate is discovered by opening
 the order page. The notification chokepoint exists (`send_notification`) and the design
 module's change requests are the worked precedent (3.1c-ii), so this is wiring, not
 design — but it is wiring nobody asked for in O4, and a gate people do not know they are
 standing in front of is how payments stall. **Risk if left:** medium, rising with the
-number of approvers. **Suggested owner:** O5, beside the Finance queue.
+number of approvers. **Suggested owner:** O5, beside the Finance queue.~~
 
 **§O4-4. The five approval predicates have no PROJECT scope, only a flag.** An approver
 may decide any payment on any order they can read, and `user_can_view_vendor_order()`
@@ -969,5 +981,72 @@ two-state shape and degrade the same way. All three are O5/O6 screens and O4 was
 from them. **Risk if left:** medium — it is a misleading label rather than an error, but
 it says the opposite of the truth. **O5/O6 must** switch all three to
 `get_status_display`.
+
+**Not fixed**: out of scope (R-12).
+
+## 27. O5 Finance payments queue, mark-paid and in-app notices — what was left
+
+Found 24 Sep 2026, building O5.
+
+**§O5-1. Card 4b's confirm modal still says the reference is "optional" and offers future
+dates.** `project_overview.html`'s confirm form labels the payment reference "(UTR / cheque
+no. — optional)", has no `required` on it, and caps the date at `typed_date_max` (today + 5
+years). Since O5 `confirm_payment_request` goes through `mark_payment_paid()`, which refuses
+a blank reference and a future date — so a Finance user following the label gets a refusal
+message instead of a save. Nothing is written wrongly; the form just misleads. Card 4b was
+forbidden to O5. **Risk if left:** low-to-medium — one refused click per confirm until
+someone learns the rule. **O6 must** mark the field required, drop "optional", and set the
+date's `max` to today and `min` to the request's raise date, as the queue's form does.
+
+**§O5-2. The three two-state badges are unchanged, as instructed.** Card 4b,
+`payment_request_detail.html` and `my_documents` still render `approved` as "Pending" and
+every other status as "Confirmed" (§26, last entry). O5 was forbidden to fix them. **O6
+owns this.**
+
+**§O5-3. `dashboard_finance` and the CEO dashboard still read payments through
+`project`.** O5 added a link from the Finance dashboard's payment tile to the queue and
+changed nothing else there. Its tiles still filter `project__status__in=['Active', 'In
+Progress']` and `status=APPROVED`, so a site-less payment, a payment on a Draft OPEX site
+and every pending/held payment are absent from its figures — the queue is now the place
+those appear. **Risk if left:** medium — the dashboard's "Payment Requests Pending" and the
+queue's "to pay" can disagree, and the dashboard is the smaller number. **Whoever owns the
+dashboards next** should read those tiles from the same grouped query the queue uses
+(`payment_views._grouped_counts`), or drop them in favour of the link.
+
+**§O5-4. A payment-approver flag holder outside the portfolio roles sees rows they cannot
+open.** `user_can_view_payment_queue()` admits any flag holder, and the queue is
+portfolio-wide by design. But `user_can_view_vendor_order()` admits a non-portfolio role
+(a PM holding the flag, say) only to orders on sites they can see, and the O4 action views
+403 on anything else. The queue therefore gates its Approve / Hold / Reject buttons on
+order readability as well as on the O4 predicate, so it never draws a button the view
+refuses — but the row itself, and the "Open order" link, are still shown, and the link
+403s. The raise and answer notices go to every active flag holder the same way. Today every
+flag holder is Finance or CEO, so nobody is affected. **Risk if left:** low. **Decide when
+the first non-portfolio approver is appointed** whether the flag should widen order
+visibility (a clause in `_user_reads_orders_on`) or the queue should narrow to readable
+orders; it must not be left to disagree silently.
+
+**§O5-5. `docs/RESIDENTIAL_BASELINE.md` still describes `invoice_paid` on confirm.** Its
+notification table (the "Vendor payment request confirmed" row) and the confirm section
+name the three-channel `invoice_paid` send to SCM, managers and CEO. That send is removed;
+`tests_residential_baseline` was updated to pin the replacement (the requester, in-app
+only). O5's doc scope was execution-model.md and this file, so the baseline document was
+left as written. **Risk if left:** low — a reader is misled about who hears of a payment.
+**Fix in O7**, when the templates return and the table is rewritten anyway.
+
+**§O5-6. The queue's collapse forms are not browser-verified.** Hold, reject and mark-paid
+open as Bootstrap collapse rows — the order page's markup, reused — and were verified by
+rendering the page and posting the forms from the test client, not in a browser. The
+server refuses every bad input again, so the worst case is a refusal after a reload.
+
+**§O5-7. The queue has no "mine" view and no ageing sort.** Rows are newest first; an
+approver sees every tab's pending work, not "requests only I can decide", and there is no
+oldest-first or overdue ordering. Age in days is printed on each row. **Risk if left:** low
+at today's volumes. Add a sort before the queue passes a few pages per tab.
+
+**§O5-8. A pre-O5 `confirmed` payment has no ledger row and never will.** execution-model.md
+§13 records this: from O5 onward a missing row means the change did not happen, except for
+a payment confirmed before O5. Production holds 2 `PaymentRequest` rows (§25), so this is at
+most two rows.
 
 **Not fixed**: out of scope (R-12).

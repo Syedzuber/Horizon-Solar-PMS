@@ -1,7 +1,9 @@
 from .decorators import get_user_dashboard
 from .forms import TYPED_DATE_FLOOR, typed_date_ceiling
 from .models import Notification
-from .permissions import user_can_manage_stock_locations, user_can_view_vendor_list
+from .permissions import (
+    user_can_manage_stock_locations, user_can_view_payment_queue, user_can_view_vendor_list,
+)
 
 
 def notifications(request):
@@ -54,6 +56,17 @@ def vendor_nav(request):
     if not request.user.is_authenticated:
         return {'can_view_vendor_list': False}
     return {'can_view_vendor_list': user_can_view_vendor_list(request.user)}
+
+
+def payment_queue_nav(request):
+    """Whether to show the Payments nav entry (O5).
+
+    The answer comes from permissions.user_can_view_payment_queue() (R-13), the same
+    helper payment_queue calls, so the link and the view cannot disagree. Visibility only.
+    """
+    if not request.user.is_authenticated:
+        return {'can_view_payment_queue': False}
+    return {'can_view_payment_queue': user_can_view_payment_queue(request.user)}
 
 
 def typed_date_bounds(request):

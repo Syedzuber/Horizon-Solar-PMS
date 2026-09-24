@@ -24,7 +24,7 @@ THAT message, which is asserted instead of acceptance.
 Run with:
     python manage.py test projects.tests_date_validation --settings=solarpms.test_settings
 """
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -490,11 +490,20 @@ class ConfirmPaymentDateTests(DateRuleCases, DateFixture):
             status=PaymentRequest.APPROVED,
             vendor_order=VendorOrder.objects.create(   # O2: NOT NULL; fixture only
                 vendor=vendor, project_type='Residential', created_by=self.scm))
+        # O5: a payment date may not precede the day the request was raised. Raised on
+        # the floor, so the battery's past dates still exercise the calendar range alone.
+        PaymentRequest.objects.filter(pk=self.pr.pk).update(
+            requested_date=timezone.make_aware(datetime(2020, 1, 1, 12, 0)))
 
     def submit(self, value):
         return _client(self.finance).post(
             reverse('confirm_payment_request', args=[self.project.project_id, self.pr.pk]),
             {'payment_date': value, 'payment_reference': 'UTR-1'})
+
+    def test_the_ceiling_itself_is_accepted(self):
+        """O5 NARROWS THIS ENTRY POINT: money cannot be paid in the future, so the
+        ceiling that passes the calendar check is refused by mark_payment_paid()."""
+        self._assert_refused(_ceiling(), 'cannot be in the future')
 
     def snapshot(self):
         pr = PaymentRequest.objects.get(pk=self.pr.pk)

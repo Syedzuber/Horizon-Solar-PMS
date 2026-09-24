@@ -75,6 +75,14 @@
         <i class="bi bi-clipboard-data me-1"></i>Daily Report
       </a>
     {% endif %}
+    {# Payments (O5, R-11) — the Finance payments queue. Gated by                      #}
+    {# permissions.user_can_view_payment_queue() via the payment_queue_nav context     #}
+    {# processor, the same helper the view calls, so link and view cannot disagree.    #}
+    {% if can_view_payment_queue %}
+      <a href="{% url 'payment_queue' %}" class="nav-link text-white small" title="Payments">
+        <i class="bi bi-cash-stack me-1"></i>Payments
+      </a>
+    {% endif %}
     {# Masters — reference-data screens. Each entry is gated by its own permissions.py  #}
     {# helper via a context processor: Vendors by user_can_view_vendor_list            #}
     {# (vendor_nav), Warehouses by user_can_manage_stock_locations (stock_location_nav). #}

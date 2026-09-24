@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+{% block title %}Payments — SolarPMS{% endblock %}
+
+{% block content %}
+
+{% comment %}
+── Payments queue (O5) ─────────────────────────────────────────────────────
+Every vendor payment, one tab per project type. The tab is the ORDER's project type,
+never the payment's display anchor, so a site-less payment is listed like any other.
+
+`rows` is a list of dicts from payment_views._row(), not PaymentRequest objects. Every
+button is drawn from the predicate its view re-checks under a row lock — drawing a button
+authorises nothing. Each form posts `next` = this exact URL, so an action returns here
+with the same tab, chip, search and page.
+
+The reason and mark-paid forms are Bootstrap collapse rows, as on the order page: markup
+only, no page script.
+
+A `comment` tag, not a hash comment, because it spans lines — a hash comment is
+single-line and the rest would render into the page.
+{% endcomment %}
+
+<div class="mb-3">
+  <h4 class="mb-0">Payments</h4>
+  <small class="text-muted">Every vendor payment across the company, by project type.</small>
+</div>
+
+<ul class="nav nav-tabs mb-3 flex-nowrap overflow-auto" role="tablist">
+  {% for t in tabs %}
+  <li class="nav-item">
+    <a class="nav-link text-nowrap{% if t.active %} active fw-semibold{% endif %}" href="{{ t.url }}"
+       {% if t.active %}aria-current="page"{% endif %}>
+      {{ t.label }} · {{ t.to_approve }} to approve · {{ t.to_pay }} to pay
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+
+{# ── Tiles for this tab ─────────────────────────────────────────────────── #}
+<div class="row g-2 mb-3">
+  <div class="col-6 col-md-3">
+    <div class="card shadow-sm border-0 h-100"><div class="card-body py-2 text-center">
+      <div class="fs-5 fw-bold">{{ tiles.awaiting.0 }}</div>
+      <div class="small text-muted">Awaiting approval · ₹{{ tiles.awaiting.1|floatformat:2 }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card shadow-sm border-0 h-100"><div class="card-body py-2 text-center">
+      <div class="fs-5 fw-bold">{{ tiles.to_pay.0 }}</div>
+      <div class="small text-muted">Approved to pay · ₹{{ tiles.to_pay.1|floatformat:2 }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card shadow-sm border-0 h-100"><div class="card-body py-2 text-center">
+      <div class="fs-5 fw-bold">{{ tiles.on_hold.0 }}</div>
+      <div class="small text-muted">On hold · ₹{{ tiles.on_hold.1|floatformat:2 }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card shadow-sm border-0 h-100"><div class="card-body py-2 text-center">
+      <div class="fs-5 fw-bold">{{ tiles.invoice_awaited_orders }}</div>
+      <div class="small text-muted">Orders with invoice awaited</div>
+    </div></div>
+  </div>
+</div>
+
+{# ── Status chips and search ────────────────────────────────────────────── #}
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+  {% for chip in chips %}
+  <a href="{{ chip.url }}"
+     class="btn btn-sm rounded-pill {% if chip.active %}btn-brand{% else %}btn-outline-secondary{% endif %}">{{ chip.label }}</a>
+  {% endfor %}
+  <form method="get" class="d-flex gap-2 ms-md-auto" role="search">
+    <input type="hidden" name="tab" value="{{ tab }}">
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    <input type="search" name="q" value="{{ q }}" class="form-control form-control-sm"
+           placeholder="Vendor, PO, PI, tender, site code" aria-label="Search payments" maxlength="100">
+    <button type="submit" class="btn btn-sm btn-outline-secondary">Search</button>
+  </form>
+</div>
+
+<div class="card shadow-sm mb-3">
+  {% if rows %}
+  <div class="table-responsive">
+    <table class="table table-sm mb-0 small align-middle">
+      <thead class="table-light">
+        <tr>
+          <th>Raised</th><th>Vendor · order</th><th>For</th>
+          <th class="text-end">Amount (₹)</th><th>Status</th><th class="text-end">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        {% with p=row.payment o=row.order m=row.money %}
+        <tr>
+          <td class="text-nowrap">
+            {{ p.requested_date|date:"d M Y" }}
+            <div class="text-muted">{{ row.age_days }} day{{ row.age_days|pluralize }} ago</div>
+            <div class="text-muted">{{ p.requested_by.get_full_name|default:p.requested_by.username }}</div>
+          </td>
+          <td>
+            <div class="fw-semibold">{{ p.vendor.name|default:"—" }}</div>
+            <div>{% if o.po_number %}PO {{ o.po_number }}{% endif %}{% if o.po_number and o.pi_number %} · {% endif %}{% if o.pi_number %}PI {{ o.pi_number }}{% endif %}</div>
+            <div class="text-muted">order ₹{{ m.total|floatformat:2 }} · paid ₹{{ m.paid|floatformat:2 }} · committed{% if row.counted %} incl. this{% endif %} ₹{{ m.committed|floatformat:2 }}</div>
+            {% if m.invoice_awaited %}<span class="badge bg-warning text-dark">Invoice awaited</span>{% endif %}
+            <div class="mt-1">
+              {% for d in row.documents %}
+              <a href="{{ d.url }}" target="_blank" rel="noopener" class="me-2" title="{{ d.name }}">{{ d.label }}{% if d.number %} {{ d.number }}{% endif %}</a>
+              {% endfor %}
+              <a href="{% url 'vendor_order_detail' o.pk %}">Open order</a>
+            </div>
+          </td>
+          <td>{{ p.scope_label }}</td>
+          <td class="text-end text-nowrap">{{ p.amount|floatformat:2 }}</td>
+          <td>
+            {{ p.get_status_display }}
+            {% if p.status == 'approved' and p.approved_by %}
+              <div class="text-muted">by {{ p.approved_by.user.get_full_name|default:p.approved_by.user.username }}</div>
+            {% endif %}
+            {% if row.hold %}
+              <div class="mt-1">
+                <span class="badge bg-warning text-dark">Hold</span>
+                {{ row.hold.held_by.user.get_full_name|default:row.hold.held_by.user.username }},
+                {{ row.hold.held_at|date:"d M Y" }}: {{ row.hold.reason }}
+              </div>
+              {% if row.hold.responded_at %}
+              <div class="text-muted">Response ({{ row.hold.responded_by.user.get_full_name|default:"—" }}, {{ row.hold.responded_at|date:"d M Y" }}): {{ row.hold.response }}</div>
+              {% else %}
+              <div class="text-muted">Awaiting a response from SCM.</div>
+              {% endif %}
+            {% endif %}
+            {% if p.status == 'rejected' and p.decision_reason %}
+              <div class="text-muted">{{ p.decision_reason }}</div>
+            {% endif %}
+            {% if p.status == 'confirmed' %}
+              <div class="text-muted">{{ p.payment_date|date:"d M Y" }}{% if p.payment_reference %} · Ref {{ p.payment_reference }}{% endif %}</div>
+            {% endif %}
+          </td>
+          <td class="text-end text-nowrap">
+            {% if row.can_approve %}
+            <form method="post" action="{% url 'payment_queue_action' p.pk 'approve' %}" class="d-inline">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ here }}">
+              <button type="submit" class="btn btn-brand btn-sm">Approve</button>
+            </form>
+            {% endif %}
+            {% if row.can_hold %}
+            <button class="btn btn-outline-warning btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#q-hold-{{ p.pk }}">Hold</button>
+            {% endif %}
+            {% if row.can_reject %}
+            <button class="btn btn-outline-danger btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#q-reject-{{ p.pk }}">Reject</button>
+            {% endif %}
+            {% if row.can_mark_paid %}
+            <button class="btn btn-outline-success btn-sm" type="button"
+                    data-bs-toggle="collapse" data-bs-target="#q-paid-{{ p.pk }}">Mark paid</button>
+            {% endif %}
+          </td>
+        </tr>
+
+        {% if row.can_hold %}
+        <tr class="collapse" id="q-hold-{{ p.pk }}">
+          <td colspan="6">
+            <form method="post" action="{% url 'payment_queue_action' p.pk 'hold' %}">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ here }}">
+              <label class="form-label small mb-1" for="q-hold-reason-{{ p.pk }}">
+                Why is this payment being held? SCM answers this.</label>
+              <textarea class="form-control form-control-sm mb-2" rows="2" required
+                        id="q-hold-reason-{{ p.pk }}" name="reason"></textarea>
+              <button type="submit" class="btn btn-warning btn-sm">Hold this request</button>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_reject %}
+        <tr class="collapse" id="q-reject-{{ p.pk }}">
+          <td colspan="6">
+            <form method="post" action="{% url 'payment_queue_action' p.pk 'reject' %}">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ here }}">
+              <label class="form-label small mb-1" for="q-reject-reason-{{ p.pk }}">
+                Why is this payment being rejected? This is final.</label>
+              <textarea class="form-control form-control-sm mb-2" rows="2" required
+                        id="q-reject-reason-{{ p.pk }}" name="reason"></textarea>
+              <button type="submit" class="btn btn-danger btn-sm">Reject this request</button>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+
+        {% if row.can_mark_paid %}
+        <tr class="collapse" id="q-paid-{{ p.pk }}">
+          <td colspan="6">
+            <form method="post" action="{% url 'payment_mark_paid' p.pk %}" class="row g-2 align-items-end">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ here }}">
+              <div class="col-12 col-sm-4">
+                <label class="form-label small mb-1" for="q-paid-date-{{ p.pk }}">Payment date</label>
+                <input type="date" class="form-control form-control-sm" required
+                       id="q-paid-date-{{ p.pk }}" name="payment_date"
+                       min="{{ p.requested_date|date:'Y-m-d' }}" max="{{ today|date:'Y-m-d' }}">
+              </div>
+              <div class="col-12 col-sm-5">
+                <label class="form-label small mb-1" for="q-paid-ref-{{ p.pk }}">Reference (UTR / cheque no.)</label>
+                <input type="text" class="form-control form-control-sm" required maxlength="100"
+                       id="q-paid-ref-{{ p.pk }}" name="payment_reference">
+              </div>
+              <div class="col-12 col-sm-3">
+                <button type="submit" class="btn btn-success btn-sm w-100">Mark paid</button>
+              </div>
+            </form>
+          </td>
+        </tr>
+        {% endif %}
+        {% endwith %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="card-body small text-muted">
+    {% if q %}No {{ tab_label }} payments match “{{ q }}”.{% else %}No {{ tab_label }} payments here.{% endif %}
+  </div>
+  {% endif %}
+</div>
+
+{% if page.paginator.num_pages > 1 %}
+<nav aria-label="Payments pages">
+  <ul class="pagination pagination-sm justify-content-center">
+    {% if page.has_previous %}
+    <li class="page-item"><a class="page-link" href="?{{ page_query }}&page={{ page.previous_page_number }}">Previous</a></li>
+    {% endif %}
+    <li class="page-item disabled"><span class="page-link">Page {{ page.number }} of {{ page.paginator.num_pages }}</span></li>
+    {% if page.has_next %}
+    <li class="page-item"><a class="page-link" href="?{{ page_query }}&page={{ page.next_page_number }}">Next</a></li>
+    {% endif %}
+  </ul>
+</nav>
+{% endif %}
+
+{% endblock %}

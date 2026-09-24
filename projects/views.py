@@ -55,6 +55,7 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .notifications import send_notification, send_raw_email
+from .payments import PaymentRefused, mark_payment_paid
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -8833,7 +8834,24 @@ def raise_payment_request(request, project_id):
 
 @login_required
 def confirm_payment_request(request, project_id, request_id):
-    """Finance confirms a vendor payment has been made. Finance role only. POST."""
+    """Finance confirms a vendor payment has been made, from the project page. POST.
+
+    SINCE O5 THIS IS A DOOR, NOT A WRITER. payments.mark_payment_paid() does the lock,
+    the checks (Finance, APPROVED, not the approver, not the requester, a reference, a
+    date that is neither in the future nor before the raise), the write, the ledger row
+    and the feed line — the same call the Finance queue's mark-paid form makes, so the
+    two can never disagree. What stays here is the project-scoped lookup the URL implies
+    and parsing the typed date.
+
+    THE STATUS IS NO LONGER IN THE LOOKUP. It used to be (`status=APPROVED`), which
+    answered 404 to a request that had just been held; the service now refuses it with a
+    message naming the status it is in, under the lock, where the answer is current.
+
+    THE invoice_paid SEND IS GONE, NOT DISABLED. It went on three channels to every SCM,
+    the project's managers and every CEO; O5's in-app notice to the requester replaces it
+    (payments.send_payment_notices), and O7 brings payment notices back on WhatsApp and
+    email with a template written for the order module.
+    """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
 
@@ -8844,13 +8862,10 @@ def confirm_payment_request(request, project_id, request_id):
 
     project = _active_project(project_id)
     pr = get_object_or_404(
-        PaymentRequest.objects.select_related('vendor', 'boq_item'),
-        pk=request_id, project=project, status=PaymentRequest.APPROVED,
+        PaymentRequest.objects.select_related('vendor'), pk=request_id, project=project,
     )
 
-    payment_date_str  = request.POST.get('payment_date', '').strip()
-    payment_reference = request.POST.get('payment_reference', '').strip()
-
+    payment_date_str = request.POST.get('payment_date', '').strip()
     if not payment_date_str:
         messages.error(request, 'Payment date is required.')
         return redirect('project_overview', project_id=project_id)
@@ -8860,51 +8875,12 @@ def confirm_payment_request(request, project_id, request_id):
         messages.error(request, payment_date_error)
         return redirect('project_overview', project_id=project_id)
 
-    pr.status            = PaymentRequest.CONFIRMED
-    pr.payment_date      = payment_date
-    pr.payment_reference = payment_reference
-    pr.confirmed_by      = request.user
-    pr.save(update_fields=['status', 'payment_date', 'payment_reference', 'confirmed_by'])
-
-    # Confirm actions are state-mutating — log them so they surface in the
-    # project's Recent Activity panel for audit trail.
-    log_activity(
-        project, profile,
-        f"Confirmed payment to {pr.vendor}: ₹{pr.amount} (Ref: {payment_reference or '—'})",
-        entity_type='PaymentRequest', entity_id=pr.pk,
-    )
-
-    boq_desc = pr.boq_item.description if pr.boq_item else '(item)'
-    seen_pks = set()
-    invoice_recipients = list(UserProfile.objects.filter(role='SCM', is_active=True))
-    invoice_recipients += project_managers(project)
-    invoice_recipients += list(UserProfile.objects.filter(role='CEO', is_active=True))
-    _ip_link = f'/projects/{project.project_id}/overview/'
-    _ip_message = (
-        f'Payment has been confirmed for project {project.customer_name}.\n\n'
-        f'Vendor: {pr.vendor.name}. Invoice: {pr.invoice_number}. '
-        f'Amount: Rs. {pr.amount}. Item: {boq_desc}.\n\n'
-        f'Records have been updated.'
-    )
-    _ip_email_message = (
-        f'{_ip_message}\n\nView in Horizon Solar PMS:\n'
-        f'https://horizon-solar-pms-production.up.railway.app{_ip_link}'
-    )
-    for recipient in invoice_recipients:
-        if recipient.pk in seen_pks:
-            continue
-        seen_pks.add(recipient.pk)
-        send_notification(
-            recipient=recipient,
-            message=_ip_email_message,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=_ip_link,
-            subject=f'Invoice Payment Confirmed — {project.customer_name}',
-            template='invoice_paid',
-            template_params=[project.customer_name, boq_desc, pr.invoice_number, str(pr.amount), pr.vendor.name],
-            related_project=project,
-            actor=profile,
-        )
+    try:
+        mark_payment_paid(pr, request.user, payment_date,
+                          request.POST.get('payment_reference', ''))
+    except PaymentRefused as exc:
+        messages.error(request, str(exc))
+        return redirect('project_overview', project_id=project_id)
 
     messages.success(request, f'Payment of ₹{pr.amount} to {pr.vendor} confirmed.')
     return redirect('project_overview', project_id=project_id)

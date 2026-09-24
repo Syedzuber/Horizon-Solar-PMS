@@ -912,12 +912,13 @@ class MilestoneAndPaymentWorkflowTests(ResidentialBaselineBase):
         self.assertEqual(pr.requested_by, self.scm.user)
         self.assertEqual(pr.vendor_order.documents.get().file_name, 'po-77.pdf')
 
-        # O4: somebody who did not raise it approves it. Finance is the natural holder
-        # of the flag here, and approving is not confirming — the same person may do
-        # both, because only the REQUESTER is refused.
-        self.finance.is_payment_approver = True
-        self.finance.save(update_fields=['is_payment_approver'])
-        response = _client_for(self.finance).post(
+        # O4: somebody who did not raise it approves it. O5: and somebody who did not
+        # APPROVE it pays it — the approver and the payer are different people on one
+        # request (permissions.user_can_mark_paid), so the CEO holds the flag here and
+        # Finance confirms.
+        self.ceo.is_payment_approver = True
+        self.ceo.save(update_fields=['is_payment_approver'])
+        response = _client_for(self.ceo).post(
             reverse('payment_approve', args=[pr.pk]), {'remark': ''})
         self.assertEqual(response.status_code, 302)
         pr.refresh_from_db()
@@ -1580,7 +1581,12 @@ class NotificationTests(ResidentialBaselineBase):
             )
         sender.assert_not_called()
 
-    def test_confirming_a_payment_request_notifies_scm_managers_and_ceo(self):
+    def test_confirming_a_payment_request_notifies_the_requester_in_app_only(self):
+        """O5 REPLACED THIS RELATIONSHIP, it did not lose it. Confirming used to send
+        `invoice_paid` on three channels to every SCM, the project's managers and every
+        CEO; O5 removed that send (O7 brings payment notices back on WhatsApp and email)
+        and the requester now hears, in-app, from payments.send_payment_notices(). What
+        stays pinned: a confirmation tells the person who asked for the money."""
         boq = self._seed_boq(self.project_a)
         vendor = Vendor.objects.create(name='Sunrise', contact_person='R',
                                        phone='9000000003')
@@ -1594,20 +1600,21 @@ class NotificationTests(ResidentialBaselineBase):
                 vendor=vendor, project_type='Residential', created_by=self.scm),
         )
 
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.finance).post(
-                reverse('confirm_payment_request',
-                        args=[self.project_a.project_id, pr.pk]),
-                {'payment_date': date.today().isoformat(),
-                 'payment_reference': 'UTR-1'},
-            )
+        with patch('projects.views.send_notification') as sender,              patch('projects.payments.send_notification') as notice:
+            with self.captureOnCommitCallbacks(execute=True):
+                _client_for(self.finance).post(
+                    reverse('confirm_payment_request',
+                            args=[self.project_a.project_id, pr.pk]),
+                    {'payment_date': date.today().isoformat(),
+                     'payment_reference': 'UTR-1'},
+                )
         pr.refresh_from_db()
         self.assertEqual(pr.status, PaymentRequest.CONFIRMED)
 
-        recipients = self._recipients(sender)
-        self.assertEqual(recipients, {self.scm, self.pm_a, self.coord_a, self.ceo})
-        for call in sender.call_args_list:
-            self.assertEqual(call.kwargs['template'], 'invoice_paid')
+        sender.assert_not_called()
+        self.assertEqual(self._recipients(notice), {self.scm})
+        for call in notice.call_args_list:
+            self.assertEqual(call.kwargs['channels'], ['in_app'])
 
     def test_grn_confirmation_notifies_nobody(self):
         """Recorded as current behaviour, not endorsed: a delivery arriving damaged

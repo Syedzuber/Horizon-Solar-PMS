@@ -73,6 +73,8 @@
           {{ total_payment_requests }}
         </div>
         <div class="small text-muted mt-1">Payment Requests Pending</div>
+        {# O5: link only — the queue lists every payment, incl. site-less ones this tile misses. #}
+        <a href="{% url 'payment_queue' %}" class="small">Open payments queue →</a>
       </div>
     </div>
   </div>

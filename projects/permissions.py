@@ -2012,3 +2012,62 @@ def user_can_respond_to_hold(user, payment_request):
     if payment_request.status != payment_request.ON_HOLD:
         return False
     return payment_request.open_hold is not None
+
+
+# ---------------------------------------------------------------------------
+# O5 — the Finance payments queue and mark-paid
+# ---------------------------------------------------------------------------
+
+# The roles that read the payments queue whatever flags they hold. PORTFOLIO-WIDE, per
+# D-4: Finance pays every site's vendors and there is nothing yet to scope it on, and the
+# three administrative roles read everything already. SCM is deliberately NOT here — it
+# raises payments and answers holds from the order page, and a screen of every vendor's
+# money across the company is not its remit.
+PAYMENT_QUEUE_ROLES = frozenset({'Finance', 'CEO', 'Admin', 'System Admin'})
+
+# The one role that marks a payment paid. A role, not a flag: paying is Finance's job
+# description, where approving is a trust someone is given (is_payment_approver).
+PAYMENT_MARK_PAID_ROLES = frozenset({'Finance'})
+
+
+def user_can_view_payment_queue(user):
+    """Return True if `user` may open the payments queue (O5).
+
+    Finance, CEO, Admin or System Admin by role, OR anyone holding the payment-approver
+    flag — an approver who is none of those four still needs the one screen that lists
+    what is waiting for them. PORTFOLIO-WIDE, per D-4: the queue carries no site or
+    tender scope, for the reason VENDOR_ORDER_PORTFOLIO_ROLES gives.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in PAYMENT_QUEUE_ROLES or user_is_payment_approver(user)
+
+
+def user_can_mark_paid(user, payment_request):
+    """Return True if `user` may record `payment_request` as PAID.
+
+    Finance, a status of APPROVED, and NEITHER the person who approved it NOR the person
+    who raised it.
+
+    THE APPROVER AND THE PAYER ARE DIFFERENT PEOPLE ON ONE REQUEST — the QC/Head
+    precedent (design_views._other_gate_actor_conflict), applied to the last step: one
+    person approving and then paying is one decision with two clicks. Per request, not
+    per user — a Finance user who holds the flag pays everybody else's approvals as
+    normal. With five Finance users this never deadlocks: somebody who did not approve
+    it is always there to pay it.
+
+    `approved_by` is a UserProfile and `requested_by` an auth.User (see the notes on
+    those fields), so the two comparisons are made against different objects. A request
+    approved before O4 has no `approved_by`, and that term then refuses nobody.
+    """
+    if payment_request is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in PAYMENT_MARK_PAID_ROLES:
+        return False
+    if payment_request.status != payment_request.APPROVED:
+        return False
+    if payment_request.approved_by_id is not None and payment_request.approved_by_id == profile.pk:
+        return False
+    return payment_request.requested_by_id != user.pk
