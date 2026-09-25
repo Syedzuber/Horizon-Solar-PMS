@@ -49,6 +49,7 @@ from .models import (
     DESIGN_IN_DESIGN, DESIGN_IN_QC, DESIGN_RELEASED, DESIGN_AWAITING_PM_APPROVAL,
     ARKA_APPROVED, QC_PASSED, ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
+    CHANGE_REQUEST_WITH_PM,
     DESIGN_FILE_CAD_ZIP, SITE_GROUP_DRAFT, SITE_GROUP_LOCKED, GROUP_TYPE_PROCUREMENT,
     SUBJECT_DESIGN_ASSIGNMENT,
 )
@@ -210,6 +211,23 @@ class ChangeWindowBase(TestCase):
         self.client.logout()
         return response
 
+    # Session B2a — an SCM request starts with the PM, who forwards or rejects it.
+    def _forward(self, change, profile=None, note='Quantities need the Head — forwarding.'):
+        self._login(profile or self.pm)
+        response = self.client.post(
+            reverse('design_change_request_forward', kwargs={'pk': change.pk}),
+            {'pm_note': note})
+        self.client.logout()
+        return response
+
+    def _pm_reject(self, change, profile=None, note='Not needed — the BOQ is right.'):
+        self._login(profile or self.pm)
+        response = self.client.post(
+            reverse('design_change_request_pm_reject', kwargs={'pk': change.pk}),
+            {'pm_note': note})
+        self.client.logout()
+        return response
+
     @staticmethod
     def _messages(response):
         return ' '.join(str(m) for m in get_messages(response.wsgi_request))
@@ -241,7 +259,10 @@ class RaiseOnReleasedSitesTests(ChangeWindowBase):
                 response = self._raise(raiser, site)
                 self.assertEqual(response.status_code, 302)
                 change = self._requests(assignment).get()
-                self.assertEqual(change.verdict, CHANGE_REQUEST_PENDING)
+                # B2a (D-1, D-6): SCM's request starts with the PM; the PM's and a
+                # coordinator's go to the Head as before.
+                self.assertEqual(change.verdict, CHANGE_REQUEST_WITH_PM
+                                 if raiser is self.scm else CHANGE_REQUEST_PENDING)
                 self.assertEqual(change.requested_by, raiser)
 
     def test_02_pm_coordinator_and_scm_each_raise_on_a_draft_group_site_which_stays(self):
@@ -252,12 +273,16 @@ class RaiseOnReleasedSitesTests(ChangeWindowBase):
             with self.subTest(raiser=raiser.user.username):
                 self._raise(raiser, site)
                 self.assertEqual(self._requests(assignment).get().verdict,
-                                 CHANGE_REQUEST_PENDING)
+                                 CHANGE_REQUEST_WITH_PM if raiser is self.scm
+                                 else CHANGE_REQUEST_PENDING)
                 # Q2: the raise does NOT pull the site out of its draft group.
                 self.assertEqual(self._live(site).get().group, group)
-                # Refusal: a second raise on the same attempt is refused while one is pending.
+                # Refusal: a second raise on the same attempt is refused while one is open,
+                # naming where the open one actually is (B2a).
                 response = self._raise(raiser, site, reason='and another thing')
-                self.assertIn('is already with the Design Head', self._messages(response))
+                self.assertIn("is already with the site's PM" if raiser is self.scm
+                              else 'is already with the Design Head',
+                              self._messages(response))
                 self.assertEqual(self._requests(assignment).count(), 1)
 
     def test_03_all_three_are_refused_on_a_locked_group_site_with_a_message(self):
@@ -330,7 +355,8 @@ class LockRefusalTests(ChangeWindowBase):
         self.assertIn('CW-K1', message)
         self.assertNotIn('CW-K2', message)
 
-        self._reject(self._requests(pending_assignment).get())
+        # B2a: the SCM request is with the PM, so the PM closes it; the Head cannot.
+        self._pm_reject(self._requests(pending_assignment).get())
         self._lock(group)
         self.assertEqual(group.status, SITE_GROUP_LOCKED)
 
@@ -378,6 +404,7 @@ class AcceptTests(ChangeWindowBase):
         self._raise(self.scm, site)
         change = self._requests(assignment).get()
         self.assertIsNotNone(assignment.released_by_id)
+        self._forward(change)                          # B2a: the PM sends it on first
 
         response = self._accept(change)
         self.assertIn('It left procurement group "Batch A2"', self._messages(response))
@@ -439,9 +466,13 @@ class ChangeRequestRateAttributionTests(ChangeWindowBase):
         site, assignment = self._released('CW-M1')
         self._released('CW-M2')                       # keeps a finished site for the PM
         orphan, orphan_assignment = self._released('CW-M3', pm=None)
+        # B2a: each SCM request is forwarded first — the orphan by its coordinator, who is
+        # the only one who can (it has no PM, so it is not a Q5 fallback site).
         self._raise(self.scm, site)
+        self._forward(self._requests(assignment).get())
         self._accept(self._requests(assignment).get())
         self._raise(self.scm, orphan)
+        self._forward(self._requests(orphan_assignment).get(), profile=self.coord)
         self._accept(self._requests(orphan_assignment).get())
 
         rows = {r['label']: r for r in self._panel()['rows']}

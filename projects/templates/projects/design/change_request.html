@@ -18,6 +18,15 @@ render from those two values and re-derive nothing:
 
 A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS the request
 (3.1c-i, Q2); `draft_group` names the group so the note can say so.
+
+SESSION B2a — THE SCM ROUTE. An SCM-raised request starts WITH THE PM (`raise_goes_to_pm`),
+unless the site has no PM and no active coordinator (`raise_skips_pm`, Q5), when it goes
+straight to the Head and the row says so (`cr.skipped_pm`, read off the raise line's
+action_code). On a `with_pm` row the PM and active coordinators get Forward / Reject
+(`can_pm_triage`) and SCM gets Withdraw (`can_withdraw`) — the predicates the POSTs
+enforce. EVERY VERDICT HAS ITS OWN BRANCH; the last `else` shows the stored label and
+nothing more, so no value can fall into "Awaiting the Design Head". Plain text: the final
+wording is B3's.
 {% endcomment %}
 
 {% block title %}Change request — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -68,6 +77,31 @@ A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS th
         <textarea name="reason" class="form-control form-control-sm mb-2" rows="3" required
                   placeholder="Describe the change (required). The designer sees this verbatim."></textarea>
         <button class="btn btn-sm btn-warning">Raise change request</button>
+        {% if raise_goes_to_pm %}
+        <div class="text-muted small mt-2">
+          This goes to the site's <strong>PM</strong> first. The PM forwards it to the
+          Design Head or rejects it, with a note either way; you can withdraw it while it
+          is with the PM. Nothing moves until the Design Head decides: no new attempt is
+          opened and the designer stays on what they are doing.
+          {% if draft_group %}
+            <strong>This site is in procurement group "{{ draft_group.name }}". It stays
+            in the group while the request is open, and the group cannot be locked until
+            it is closed. If the Design Head accepts it, the site leaves the group.</strong>
+          {% endif %}
+        </div>
+        {% elif raise_skips_pm %}
+        <div class="text-muted small mt-2">
+          <strong>This site has no PM stage: {{ no_pm_fallback_text }}, so a request goes
+          straight to the Design Head.</strong> He decides whether it becomes rework.
+          Nothing moves until he does: no new attempt is opened and the designer stays on
+          what they are doing.
+          {% if draft_group %}
+            <strong>This site is in procurement group "{{ draft_group.name }}". It stays
+            in the group while the Design Head decides, and the group cannot be locked
+            until he does. If he accepts the request, the site leaves the group.</strong>
+          {% endif %}
+        </div>
+        {% else %}
         <div class="text-muted small mt-2">
           This goes to the <strong>Design Head</strong>, who decides whether it becomes
           rework. Nothing moves until he does: no new attempt is opened and the designer
@@ -84,6 +118,7 @@ A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS th
             aggregated quantities drop it; if he rejects it, the site stays.</strong>
           {% endif %}
         </div>
+        {% endif %}
       </form>
 
     {% elif closed_reason == 'locked' %}
@@ -143,9 +178,24 @@ A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS th
           {% elif cr.verdict == 'rejected' %}
             <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
               Rejected</span>
-          {% else %}
+          {% elif cr.verdict == 'pending' %}
             <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
               Awaiting the Design Head</span>
+          {% elif cr.verdict == 'with_pm' %}
+            <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
+              With the PM</span>
+          {% elif cr.verdict == 'pm_rejected' %}
+            <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+              Rejected by the PM</span>
+          {% elif cr.verdict == 'withdrawn' %}
+            <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+              Withdrawn</span>
+          {% elif cr.verdict == 'corrected' %}
+            <span class="chip chip-green"><span class="chip-dot chip-dot-green"></span>
+              Corrected in the BOQ</span>
+          {% else %}
+            <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
+              {{ cr.get_verdict_display }}</span>
           {% endif %}
           {% if cr.decided_at %}
             <div class="text-muted" style="font-size:.7rem;">
@@ -170,6 +220,114 @@ A site in a DRAFT procurement group stays in it until the Design Head ACCEPTS th
           <div class="text-muted mt-1" style="font-size:.7rem;">
             Nothing was reopened. If the change is still needed, raise a new request.
           </div>
+        </div>
+      {% endif %}
+
+      {# Session B2a — the SCM route. Each state says who holds it and what happened. #}
+      {% if cr.skipped_pm %}
+        <div class="text-muted mt-1 small">
+          Raised by SCM with no PM stage: {{ no_pm_fallback_text }}, so it went straight
+          to the Design Head.
+        </div>
+      {% endif %}
+
+      {% if cr.pm_decided_at and cr.verdict != 'pm_rejected' %}
+        <div class="alert alert-light border py-2 px-2 mt-2 mb-0 small">
+          <strong>Forwarded to the Design Head</strong> by
+          {{ cr.pm_decided_by.user.get_full_name|default:cr.pm_decided_by.user.username }},
+          {{ cr.pm_decided_at|date:"d M Y H:i" }}.
+          <div>{{ cr.pm_note }}</div>
+        </div>
+      {% endif %}
+
+      {% if cr.verdict == 'with_pm' %}
+        <div class="alert alert-warning py-2 px-2 mt-2 mb-0 small">
+          <strong>With the site's PM.</strong> It reaches the Design Head only if the PM
+          forwards it. While it is open, no review verdict can be recorded on this attempt
+          and the site's procurement group cannot be locked.
+
+          {% if can_pm_triage %}
+            <form method="post" class="mt-2">
+              {% csrf_token %}
+              <label class="form-label small mb-1">Your note (required — SCM and the
+                Design Head read it)</label>
+              <textarea name="pm_note" class="form-control form-control-sm mb-2" rows="2"
+                        required></textarea>
+              <button class="btn btn-sm btn-brand"
+                      formaction="{% url 'design_change_request_forward' pk=cr.pk %}">
+                Forward to the Design Head</button>
+              <button class="btn btn-sm btn-outline-secondary"
+                      formaction="{% url 'design_change_request_pm_reject' pk=cr.pk %}">
+                Reject</button>
+            </form>
+          {% endif %}
+
+          {% if can_withdraw %}
+            <form method="post" class="mt-2"
+                  action="{% url 'design_change_request_withdraw' pk=cr.pk %}">
+              {% csrf_token %}
+              <label class="form-label small mb-1">Why withdraw it? (required)</label>
+              <textarea name="withdrawal_note" class="form-control form-control-sm mb-2"
+                        rows="2" required></textarea>
+              <button class="btn btn-sm btn-outline-secondary">Withdraw request</button>
+            </form>
+          {% endif %}
+        </div>
+
+      {% elif cr.verdict == 'pm_rejected' %}
+        <div class="alert alert-secondary py-2 px-2 mt-2 mb-0 small">
+          <strong>Rejected by the PM</strong> —
+          {{ cr.pm_decided_by.user.get_full_name|default:cr.pm_decided_by.user.username }},
+          {{ cr.pm_decided_at|date:"d M Y H:i" }}. It did not reach the Design Head.
+          <div>{{ cr.pm_note }}</div>
+          <div class="text-muted mt-1" style="font-size:.7rem;">
+            Nothing was reopened. If the change is still needed, raise a new request.
+          </div>
+        </div>
+
+      {% elif cr.verdict == 'withdrawn' %}
+        <div class="alert alert-secondary py-2 px-2 mt-2 mb-0 small">
+          <strong>Withdrawn</strong> —
+          {{ cr.withdrawn_by.user.get_full_name|default:cr.withdrawn_by.user.username }},
+          {{ cr.withdrawn_at|date:"d M Y H:i" }}. It did not reach the Design Head.
+          <div>{{ cr.withdrawal_note }}</div>
+        </div>
+
+      {% elif cr.verdict == 'corrected' %}
+        <div class="alert alert-success py-2 px-2 mt-2 mb-0 small">
+          <strong>Corrected in the BOQ</strong> —
+          {{ cr.corrected_by.user.get_full_name|default:cr.corrected_by.user.username }},
+          {{ cr.corrected_at|date:"d M Y H:i" }}. No new attempt was opened; the BOQ was
+          changed in place.
+          <div>{{ cr.correction_note }}</div>
+          {% with rows=cr.boq_corrections.all %}
+            {% if rows %}
+              <table class="table table-sm small mb-1 mt-2">
+                <thead><tr>
+                  <th>Item</th><th class="text-end">Before</th><th class="text-end">After</th>
+                  <th>By</th>
+                </tr></thead>
+                <tbody>
+                  {% for c in rows %}
+                  <tr>
+                    <td>{{ c.item_code|default:"(ad-hoc)" }} {{ c.item_description|truncatechars:60 }}
+                      <span class="text-muted">— {{ c.get_action_display|lower }}</span></td>
+                    <td class="text-end">{{ c.quantity_before|default_if_none:"—" }}</td>
+                    <td class="text-end">{{ c.quantity_after|default_if_none:"—" }}</td>
+                    <td>{% if c.corrected_by %}{{ c.corrected_by.user.get_full_name|default:c.corrected_by.user.username }}{% else %}not recorded{% endif %},
+                      {{ c.corrected_at|date:"d M Y H:i" }}</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              <div class="text-muted" style="font-size:.7rem;">
+                These are the BOQ corrections made on this site after the request was
+                raised, matched by time only. A correction made on this BOQ in that window
+                for another reason would be listed here too; the note above is what says
+                which change answers the request.
+              </div>
+            {% endif %}
+          {% endwith %}
         </div>
       {% endif %}
     </li>

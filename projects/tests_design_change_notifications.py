@@ -259,6 +259,7 @@ class ChannelAndLinkTests(ChangeNotificationBase):
         other, other_a = self._released('CN-D4B')
         mark = self._mark()
         self._raise(self.scm, pool)
+        self._forward(self._requests(pool_a).get())   # B2a: forwarding sends nothing yet
         self._accept(self._pending(pool_a))
         self._raise(self.pm, other)
         self._reject(self._pending(other_a), reason='See https://example.com — no.')
@@ -301,6 +302,7 @@ class TriageRecipientTests(ChangeNotificationBase):
     def test_v1_accept_tells_requester_pm_coordinators_and_designer_and_not_the_head(self):
         site, assignment = self._released('CN-V1')
         self._raise(self.scm, site)
+        self._forward(self._requests(assignment).get())   # B2a: the PM sends it on first
         change = self._pending(assignment)
         mark, sent = self._mark(), len(self.mail)
         self._accept(change)

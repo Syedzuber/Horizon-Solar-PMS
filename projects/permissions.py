@@ -998,6 +998,36 @@ def user_may_raise_design_change_as_scm(user):
     return user_can_manage_site_groups(user)
 
 
+# SESSION B2a (Zuber, 25 Sep 2026, D-2 and Q5). WHO TRIAGES AN SCM-RAISED REQUEST, and
+# WHETHER ANYBODY CAN. Both answers come from project_managers() — the assigned PM plus
+# every ACTIVE coordinator — so the raise view's "does this site have somebody to forward
+# it" and the forward view's "may this user forward it" read one list and cannot disagree.
+#
+# A NARROWING OF user_can_manage_project(), not a restatement of it: that predicate admits
+# a coordinator whatever their is_active, and D-2 says "active coordinators". Everything
+# else about PM authority (the raise, `origin`, the change-request form's 403) still goes
+# through user_can_manage_project() and is unchanged.
+def user_can_triage_scm_change_request(user, project):
+    """Return True if `user` may forward or reject an SCM-raised change request on
+    `project`: the site's assigned PM or one of its active coordinators (D-2)."""
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None:
+        return False
+    return any(person.pk == profile.pk for person in project_managers(project))
+
+
+def scm_change_request_has_triager(project):
+    """Return True if SOMEBODY may triage an SCM-raised request on `project`.
+
+    False means no assigned PM and no active coordinator: a request routed to the PM would
+    sit at `with_pm` with nobody able to forward it, so the raise view sends it straight to
+    the Design Head instead and says so (Q5). The same list as
+    user_can_triage_scm_change_request(), by construction."""
+    if project is None:
+        return False
+    return bool(project_managers(project))
+
+
 # D-a (Zuber, 16 Sep 2026, session 3.1c-i). ONE window for a RELEASED design, the same for
 # the PM, the site's coordinators and SCM: released, and not committed to a purchase. It
 # replaces "released AND in a draft group" — a released site in no group is now as

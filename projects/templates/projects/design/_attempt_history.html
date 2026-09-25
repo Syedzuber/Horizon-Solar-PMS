@@ -165,10 +165,22 @@ the Head and the PM all read the same history in the same shape.
                      but they need to know why nothing is coming back from QC.
           rejected   NO DESIGNER ACTION. Displayed for the record, deliberately in the
                      quietest styling on the page, so it does not read as a task.
+
+        SESSION B2a added four states, each with its own branch — none may fall into the
+        "Awaiting the Design Head" sentence, which tells the designer a verdict is suspended:
+
+          with_pm      an SCM request the site's PM has not yet forwarded or rejected.
+          pm_rejected  closed by the PM; it never reached the Head. No designer action.
+          withdrawn    closed by SCM while with the PM. No designer action.
+          corrected    the Head fixed the BOQ in place; no attempt opened. No designer action.
+
+        The last `else` shows the stored label and nothing more. The alert class is quiet
+        for every closed-without-rework state, not only `rejected`. The header names the
+        request's origin, so an SCM request is not called a PM one. Plain text; B3 words it.
         {% endcomment %}
         {% for cr in a.change_requests.all %}
-          <div class="alert {% if cr.verdict == 'rejected' %}alert-secondary{% else %}alert-warning{% endif %} py-2 px-2 my-2 small mb-0">
-            <strong>PM change request</strong>
+          <div class="alert {% if cr.verdict == 'rejected' or cr.verdict == 'pm_rejected' or cr.verdict == 'withdrawn' or cr.verdict == 'corrected' %}alert-secondary{% else %}alert-warning{% endif %} py-2 px-2 my-2 small mb-0">
+            <strong>{% if cr.origin == 'scm' %}SCM change request{% else %}PM change request{% endif %}</strong>
             — {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
             {{ cr.requested_at|date:"d M Y H:i" }}
             <div>{{ cr.reason }}</div>
@@ -186,10 +198,48 @@ the Head and the PM all read the same history in the same shape.
                 <em>No action needed.</em>
               </div>
               <div class="text-muted" style="font-size:.7rem;">{{ cr.rejection_reason }}</div>
-            {% else %}
+            {% elif cr.verdict == 'pending' %}
               <div class="fw-semibold" style="font-size:.7rem;">
                 Awaiting the Design Head — a verdict on this attempt is suspended until he
                 accepts or rejects it.
+              </div>
+            {% elif cr.verdict == 'with_pm' %}
+              <div class="fw-semibold" style="font-size:.7rem;">
+                With the site's PM — not yet with the Design Head. A verdict on this attempt
+                is suspended while it is open.
+              </div>
+            {% elif cr.verdict == 'pm_rejected' %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Rejected by the PM{% if cr.pm_decided_by %}
+                  ({{ cr.pm_decided_by.user.get_full_name|default:cr.pm_decided_by.user.username }}){% endif %}
+                — it never reached the Design Head and nothing was reopened.
+                <em>No action needed.</em>
+              </div>
+              <div class="text-muted" style="font-size:.7rem;">{{ cr.pm_note }}</div>
+            {% elif cr.verdict == 'withdrawn' %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Withdrawn by SCM{% if cr.withdrawn_by %}
+                  ({{ cr.withdrawn_by.user.get_full_name|default:cr.withdrawn_by.user.username }}){% endif %}
+                — it never reached the Design Head and nothing was reopened.
+                <em>No action needed.</em>
+              </div>
+              <div class="text-muted" style="font-size:.7rem;">{{ cr.withdrawal_note }}</div>
+            {% elif cr.verdict == 'corrected' %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Corrected in the BOQ{% if cr.corrected_by %}
+                  ({{ cr.corrected_by.user.get_full_name|default:cr.corrected_by.user.username }}){% endif %}
+                — the BOQ was changed in place and no new attempt was opened.
+                <em>No action needed.</em>
+              </div>
+              <div class="text-muted" style="font-size:.7rem;">{{ cr.correction_note }}</div>
+            {% else %}
+              <div class="text-muted" style="font-size:.7rem;">{{ cr.get_verdict_display }}</div>
+            {% endif %}
+            {% if cr.pm_decided_at and cr.verdict != 'pm_rejected' %}
+              <div class="text-muted" style="font-size:.7rem;">
+                Forwarded by the PM{% if cr.pm_decided_by %}
+                  ({{ cr.pm_decided_by.user.get_full_name|default:cr.pm_decided_by.user.username }}){% endif %}:
+                {{ cr.pm_note }}
               </div>
             {% endif %}
           </div>

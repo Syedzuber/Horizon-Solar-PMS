@@ -164,6 +164,12 @@ urlpatterns = [
     # than one over its life.
     path('design/change-request/<int:pk>/accept/', design_views.design_change_request_accept, name='design_change_request_accept'),
     path('design/change-request/<int:pk>/reject/', design_views.design_change_request_reject, name='design_change_request_reject'),
+    # Session B2a — the SCM route through the PM (forward / PM reject / withdraw), and the
+    # Head's third outcome. Same pk keying as accept and reject.
+    path('design/change-request/<int:pk>/forward/', design_views.design_change_request_forward, name='design_change_request_forward'),
+    path('design/change-request/<int:pk>/pm-reject/', design_views.design_change_request_pm_reject, name='design_change_request_pm_reject'),
+    path('design/change-request/<int:pk>/withdraw/', design_views.design_change_request_withdraw, name='design_change_request_withdraw'),
+    path('design/change-request/<int:pk>/corrected/', design_views.design_change_request_correct, name='design_change_request_correct'),
 
     # ---------------------------------------------------------------------------
     # OPEX site groups (Part 6) — grouped procurement, aggregated BOQ, BOQ lock.

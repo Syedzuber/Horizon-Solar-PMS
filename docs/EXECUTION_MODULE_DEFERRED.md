@@ -3168,11 +3168,9 @@ correction fields, the `boq_corrections` M2M and five CHECKs; it widened
 `uniq_pending_change_request_per_attempt` to `verdict IN ('with_pm', 'pending')` under the
 same name.
 
-> **HARD DEPENDENCY — B2 MUST NOT DEPLOY WITHOUT B3's FIX TO `change_request.html` AND
-> `_attempt_history.html`.** Both end their verdict branch in an `{% else %}` that reads
-> "Awaiting the Design Head". Once B2 writes a new value, a withdrawn, PM-rejected, corrected
-> or with-the-PM request renders as waiting for the Head, and `_attempt_history.html` also
-> tells the designer that a verdict on the attempt is suspended.
+*The hard dependency B1 recorded here — both templates' catch-all `{% else %}` rendering
+every new verdict as "Awaiting the Design Head" — was closed by session B2a, which gave all
+seven verdicts their own branch in both. See §D50.*
 
 - **The new values are unreachable until B2.** No product code writes a new verdict, a
   `pm_decided_*`, `withdrawn_*` or `corrected_*` field, or a `boq_corrections` link. The one
@@ -3231,6 +3229,88 @@ same name.
 - **The admin add form must choose `origin`.** It has no model default and
   `cr_origin_valid` refuses `''`. On the change form it is read-only, along with every new
   field.
+
+### D50 — what session B2a (SCM change-request routing behaviour) left open
+
+Recorded by session B2a, 25 Sep 2026. **Recorded, not fixed.** Every claim was checked by
+grep, AST or a test in that session. B2a wrote the new verdicts: the raise routes SCM to
+`with_pm` (or to `pending` on a site with nobody to triage it, Q5), and four endpoints —
+forward, PM reject, withdraw, corrected — move them. No migration. **NOT DEPLOYED: B1, B2a
+and B2b deploy together.**
+
+> **HARD DEPENDENCY — B2b MUST ADD THE "CORRECTED" BUTTON TO THE QC REVIEW BANNER.**
+> `design_change_request_correct` exists and is tested, but no screen posts to it: the Head
+> triages on `qc_review.html`'s `open_crs` banner, which B2a was not allowed to change, and
+> `change_request.html` is 403 to him. Until B2b it is reachable by POST only. The browser
+> walk of the whole route happens after B2b, not between B2a and B2b.
+
+- **Closed from §D49 by B2a.** The two catch-all templates (every verdict now has a branch);
+  "`with_pm` is outside every pending reader" (decided, A1 — see below); the
+  at-least-one-correction rule (enforced in the view, inside the transaction); the
+  "already been with the pm" refusal (a with-PM sentence); and `origin`'s double evaluation
+  (folded into one).
+- **The notification audiences are now wrong. B2a changed no send; B2b owes all of this.**
+  1. **An SCM raise that lands `with_pm`** still sends `GATE_CHANGE_RAISED`: the site's
+     managers AND every active Design Head, saying "a design change request is waiting for
+     the Design Head". The Heads should not hear yet, the sentence is false, and the Head's
+     link is `design_qc_review`, whose banner lists `pending` only, so he finds nothing
+     there. The PM is told, but not that the request is theirs to forward.
+  2. **Forward sends nothing.** The Head is never told that a request has arrived. His only
+     notice was the false one at raise.
+  3. **PM reject, withdraw and corrected send nothing.** SCM is not told the PM rejected
+     its request, the PM is not told SCM withdrew one, and nobody is told a request was
+     recorded as corrected. SCM, who raised it, most needs to know.
+  4. Correct as they stand: a Q5 fallback raise (it is with the Head), accept, and reject.
+- **B2b's screens.** The PM queue section and ageing counters for `with_pm`. On
+  `design_head_sites`, a released site whose request is with the PM reads "SCM" in Pending
+  at, because the `pending_change_request_rows` prefetch is pending-only by decision (A1).
+  It needs a "PM (change request)" label rather than a wider prefetch. `qc_queue` and the
+  `qc_review` banner still say "PM change request" of an SCM-origin request.
+- **B3's wording and metrics, unchanged from §D49:** `m_cr_rejection_rate` now really does
+  count `with_pm`, `pm_rejected`, `withdrawn` and `corrected` rows in its denominator;
+  `cr_by_stage`; `quality_analytics.html:382`. Plus: accept or reject of a `corrected`
+  request refuses with "has already been corrected in the boq" (`.lower()` on the display
+  label); B2a's own new refusals lower-case the first letter only.
+- **THE CORRECTED EVIDENCE IS MATCHED BY TIME, AND ONLY BY TIME.** The view links every
+  BOQCorrection on the site's BOQ with `corrected_at >= requested_at` that no other request
+  cites (through `DesignChangeRequest.boq_corrections.through`), by any reviewer. BOQCorrection
+  has no link to a request, an attempt or a reason, so a correction made on that BOQ in
+  that window for an unrelated reason is swept in and shown to SCM as part of the answer.
+  `change_request.html` says so under the list. The Head's note is the only statement of
+  which change answered the request. Precision would need a request FK on the correction
+  written by `boq_correct`, which B2a was forbidden to touch.
+- **A request with the PM is outstanding (A1).** `_open_change_requests()` feeds
+  `_blocking_change_request`, the raise pre-check and `pending_change_requests_for()`. The
+  QC-suspension half is unreachable through the product: SCM raises only on a released site,
+  and grep finds no writer that moves a site out of `released` other than accept, which
+  needs a `pending` request. `apply_design_status` has no transition table, so that is
+  a grep result, not a proof. The test fixtures the state directly.
+- **Q5 is decided at raise time only.** A PM assigned later does not pull a fallback
+  request back to `with_pm` (it is already with the Head; correct). The reverse is a gap:
+  if a site loses its PM and its last active coordinator while a request is `with_pm`,
+  nobody can forward or reject it. Only an SCM withdrawal closes it, and the page offers
+  that. Found, not fixed.
+- **Q5's row text reads the raise line's action_code, `design_change_requested_no_pm`**,
+  not the row: an SCM request that migration 0102 backfilled (`origin='scm'`, `pending`, no
+  `pm_decided_at`) looks identical to a fallback, and `ActivityLog.action` is never
+  string-matched. A reader counting raises by `action_code='design_change_requested'` now
+  misses fallback raises; use `action_code__startswith='design_change_requested'`.
+- **D-2's "active" narrows the triage predicate only.** `user_can_triage_scm_change_request`
+  reads `project_managers()`, which drops inactive coordinators, but does NOT check the
+  ASSIGNED PM's `is_active` (the list includes the assigned PM unconditionally). So an
+  inactive assigned PM still counts as a triager and Q5 does not fire for their site. The
+  raise, `origin` and the form's 403 still use `user_can_manage_project()`, which admits an
+  inactive coordinator: such a person may raise (as `pm`) but not forward.
+- **The forward's "no longer released" refusal is unreachable today**, for the grep reason
+  above. It is kept so a future writer out of `released` cannot forward a stale request.
+- **PROTECT now bites.** `pm_decided_by`, `withdrawn_by` and `corrected_by` are written from
+  B2a, so a profile named in one cannot be deleted (§D49's list of delete paths applies).
+  `teardown_order_demo`'s relation guard still lists no `DesignChangeRequest` relation.
+- **`projects/urls.py` was changed, outside the prompt's MODE**, for the four routes the
+  new endpoints need.
+- **`change_request.html` costs two more queries when the site has requests**: the Q5
+  ActivityLog lookup and the `boq_corrections` prefetch. `_attempt_history()`'s three new
+  prefetches cost nothing while those FKs are null.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 

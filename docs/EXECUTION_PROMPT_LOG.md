@@ -1118,3 +1118,83 @@ readers, the three metric defects, `with_pm` sitting outside every pending reade
 unenforceable at-least-one-correction rule, and the PROTECT deletion effects.
 `docs/MIGRATION_REHEARSAL.md` is new: the repo had no rehearsal procedure. It lists the
 migrations that can refuse on production data (0093, 0094, 0097, 0099, 0101).
+
+## B2a — SCM change-request routing: behaviour (25 Sep 2026)
+
+The second of three sessions. B1 landed the schema; B2a writes the new verdicts; B2b adds
+the PM queue, the ageing counters, the notification rerouting and the Head's "corrected"
+button; B3 does the wording and the metrics. **Not deployed: B1, B2a and B2b deploy
+together.** Part A was a read-only pre-flight ending in a hard stop; Part B was built after
+sign-off.
+
+### Corrections to the prompt, accepted at sign-off
+
+- **Seven verdict values, not six.** `pending`, `accepted`, `rejected`, `with_pm`,
+  `pm_rejected`, `withdrawn`, `corrected`. The render test covers all seven.
+- **"B2a may correct these two messages only" conflicted with the prompt's own test list.**
+  Six messages needed a with-PM or SCM branch: accept/reject "already been", the raise
+  IntegrityError, the raise pre-check, `_blocking_change_request`, the `site_group_lock`
+  refusal, and the SCM raise's success message and activity line. Approved, SCM-origin or
+  `with_pm` branches only; the PM path's wording is byte-identical and a test says so.
+- **No permitted screen can host the Head's "corrected" button.** He triages on the QC
+  review banner (out of scope) and is 403 on `change_request.html`. Endpoint and tests
+  built now; B2b must add the button (hard dependency, §D50).
+- **A PM-less site (Q5) was not covered by the decisions.** Signed off as option (a), not
+  silent: with no assigned PM and no active coordinator, an SCM request lands at `pending`,
+  and the raise message, the activity line and the request row say so.
+- **`projects/urls.py` was not in MODE**; the four new endpoints need routes there.
+
+### What was built
+
+- **`permissions.py`:** `user_can_triage_scm_change_request()` and
+  `scm_change_request_has_triager()`, both over `project_managers()` (assigned PM + active
+  coordinators), so "may forward" and "can anybody forward" read one list.
+- **`design_views.py`:**
+  - `_open_change_requests()` (verdict in `CHANGE_REQUEST_OPEN_VERDICTS`) now feeds
+    `_blocking_change_request`, the raise pre-check and `pending_change_requests_for()`
+    (A1). `_pending_change_requests()`, the head-sites prefetch and `design_metrics`'
+    `pending_crs` stay pending-only.
+  - The raise evaluates `user_can_manage_project()` once; SCM lands at `with_pm`, or at
+    `pending` under Q5 with action_code `design_change_requested_no_pm`.
+  - Four endpoints: `design_change_request_forward`, `_pm_reject`, `_withdraw`,
+    `_correct`. Each re-reads the verdict under `select_for_update`, each requires a note.
+    Only forward re-checks the window (`design_change_window_open()`, request → group →
+    assignment). Corrected links every uncited BOQCorrection on the site's BOQ since
+    `requested_at` and refuses with none.
+  - New action_codes: `design_change_request_forwarded`, `design_change_request_pm_rejected`,
+    `design_change_request_withdrawn`, `design_change_request_corrected`,
+    `design_change_requested_no_pm`.
+  - `_attempt_history()` and the change-request form fetch the three new deciders; the form
+    adds `can_pm_triage`, `can_withdraw`, the raise-note routing flags and each row's
+    `skipped_pm`.
+- **Templates:** `change_request.html` and `_attempt_history.html` give all seven verdicts a
+  branch; the last `else` prints the stored label only. The `with_pm` row carries
+  Forward/Reject for the PM and coordinators and Withdraw for SCM. A corrected row lists the
+  linked corrections (item, before, after, who, when) and states that the match is by time.
+- **No notification send changed** (AST: the three send blocks are byte-identical to HEAD).
+  No migration.
+
+### Tests
+
+`projects/tests_change_request_routing.py`, 27 tests. Seven existing tests changed because
+SCM now stops at the PM (and one also because of A1): `tests_design_change_window` test_01,
+test_02, test_06, test_08, test_10, and `tests_design_change_notifications` test_d4 and
+test_v1. `ChangeWindowBase` gained `_forward` and `_pm_reject`. Mutations, each turning a
+named test red: forward without the window re-check (test_12); forward without the note
+check (test_11, an IntegrityError from B1's CHECK); withdraw after forwarding (test_16);
+corrected with no evidence (test_21, test_22); a silent Q5 fallback (test_02).
+
+### Verification
+
+Before: **2771 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips, 1
+expected failure. After: **2798 tests, the same 1 failure**, 17 skips, 1 expected failure,
+no unexpected successes. `check` clean; `makemigrations --check --dry-run` "No changes
+detected".
+
+### Findings recorded
+
+`EXECUTION_MODULE_DEFERRED.md` **§D50**: the hard dependency on B2b's button, every
+notification audience that is now wrong, B2b's screens, B3's wording and metrics, the
+timestamp-only evidence match, Q5's raise-time evaluation and its stranded-request gap, the
+action_code split, D-2's "active" applying to coordinators but not to the assigned PM, and
+PROTECT now biting. B1's hard dependency is removed from §D49 and the §12 row.

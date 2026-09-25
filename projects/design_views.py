@@ -102,6 +102,9 @@ from .models import (
     # Part 4.6 — the Design Head's triage verdict on a PM change request.
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
     CHANGE_REQUEST_ORIGIN_PM, CHANGE_REQUEST_ORIGIN_SCM,
+    # Session B2a — the SCM route through the PM, and the Head's third outcome.
+    CHANGE_REQUEST_WITH_PM, CHANGE_REQUEST_PM_REJECTED, CHANGE_REQUEST_WITHDRAWN,
+    CHANGE_REQUEST_CORRECTED, CHANGE_REQUEST_OPEN_VERDICTS, BOQCorrection, ActivityLog,
     DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
     DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
@@ -138,6 +141,8 @@ from .permissions import (
     project_managers,
     # Session 3.1c-i — the design-change window (D-a) and its two audiences (D-b).
     design_change_window_open, user_can_manage_project, user_may_raise_design_change_as_scm,
+    # Session B2a — who triages an SCM-raised request, and whether anybody can (Q5).
+    user_can_triage_scm_change_request, scm_change_request_has_triager,
 )
 
 logger = logging.getLogger(__name__)
@@ -4003,6 +4008,23 @@ def _pending_change_requests(attempt):
     return attempt.change_requests.filter(verdict=CHANGE_REQUEST_PENDING)
 
 
+def _open_change_requests(attempt):
+    """Change requests on this attempt that are still OPEN: with the PM, or with the Head.
+
+    SESSION B2a (A1, confirmed). An SCM request with the PM exists because the quantities
+    may be wrong, which is exactly when a verdict must not be recorded and a purchase must
+    not be committed. So this, not _pending_change_requests(), feeds the QC suspension, the
+    raise pre-check and the group-lock blocker. The same set as the partial unique
+    constraint (CHANGE_REQUEST_OPEN_VERDICTS), so the pre-check and the database agree.
+
+    _pending_change_requests() stays pending-only ON PURPOSE: it also feeds the Head's
+    triage banner and the QC queue, and a request with the PM is not his to decide.
+    """
+    if attempt is None:
+        return DesignChangeRequest.objects.none()
+    return attempt.change_requests.filter(verdict__in=CHANGE_REQUEST_OPEN_VERDICTS)
+
+
 def _package_is_complete(attempt):
     """Whether an attempt actually has a reviewable package: approved current Arka, a
     current cad_zip, and a BOQ marked complete.
@@ -4128,11 +4150,19 @@ def _blocking_change_request(project, attempt):
     nobody has committed to. Applies identically at BOTH gates, which is why it is a
     function rather than four copies. An accepted or rejected request blocks nothing —
     acceptance moved the review to a new attempt, rejection settled that this one stands.
+
+    SESSION B2a: a request WITH THE PM blocks too (A1), with its own sentence. The pending
+    sentence is unchanged, word for word.
     """
-    if _pending_change_requests(attempt).exists():
+    open_verdicts = set(_open_change_requests(attempt).values_list('verdict', flat=True))
+    if CHANGE_REQUEST_PENDING in open_verdicts:
         return (f'{project.project_id}: a PM change request on this attempt is awaiting '
                 f'the Design Head\'s decision — the review is suspended until he accepts '
                 f'or rejects it.')
+    if CHANGE_REQUEST_WITH_PM in open_verdicts:
+        return (f'{project.project_id}: an SCM change request on this attempt is with the '
+                f'site\'s PM — the review is suspended until the PM rejects it, SCM '
+                f'withdraws it, or the Design Head decides it once forwarded.')
     return ''
 
 
@@ -5162,6 +5192,16 @@ def design_head_send_back(request, project_id):
 CHANGE_REQUEST_FORBIDDEN = ("Only the site's PM, one of its coordinators, or SCM may request "
                             "a design change.")
 
+# SESSION B2a (Q5) — why an SCM-raised request skipped the PM. One string, so the raise
+# message, the activity line and the request row on change_request.html say the same thing.
+NO_PM_FALLBACK_TEXT = 'no PM is assigned to this site and it has no active coordinator'
+
+# The action_code of the raise line when Q5's fallback routed it. A code of its own, not
+# `design_change_requested`, because the request row on change_request.html has to know
+# which requests went straight to the Head — and ActivityLog.action is never string-matched.
+# A reader that wants every raise filters `action_code__startswith='design_change_requested'`.
+CHANGE_REQUEST_NO_PM_ACTION_CODE = 'design_change_requested_no_pm'
+
 
 def _pre_release_window_open(assignment, attempt):
     """Part 4's window: QC has started on the current attempt, and the status is one of
@@ -5367,8 +5407,18 @@ def design_change_request(request, project_id):
     # PART 4.6 — one untriaged request at a time. The message is here; the partial unique
     # constraint underneath is what makes the rule true against a double submit or a
     # second PM posting concurrently, and its IntegrityError is caught below.
-    existing = _pending_change_requests(attempt).first()
+    #
+    # SESSION B2a: OPEN, not pending — a request with the PM counts, exactly as the
+    # constraint counts it. The pending sentence is unchanged; the with-PM one is new.
+    existing = _open_change_requests(attempt).first()
     if existing is not None:
+        existing_by = (existing.requested_by.user.get_full_name()
+                       or existing.requested_by.user.username)
+        if existing.verdict == CHANGE_REQUEST_WITH_PM:
+            return _back(f'{project.project_id}: a change request raised by {existing_by} '
+                         f'on {timezone.localtime(existing.requested_at):%d %b %Y} is '
+                         f'already with the site\'s PM. It must be forwarded or rejected by '
+                         f'the PM, or withdrawn by SCM, before another can be raised.')
         return _back(f'{project.project_id}: a change request raised by '
                      f'{existing.requested_by.user.get_full_name() or existing.requested_by.user.username} '
                      f'on {timezone.localtime(existing.requested_at):%d %b %Y} is already '
@@ -5379,30 +5429,55 @@ def design_change_request(request, project_id):
     # `awaiting_head_qc` has passed Design QC and is with the Head, so the request
     # suspends his review exactly as it suspends gate 1's — the message must say so.
     was_in_qc = assignment.status in (DESIGN_IN_QC, DESIGN_AWAITING_HEAD_QC)
+    # ONE evaluation of the PM predicate, shared by `origin`, the activity line and the
+    # routing below, so the three cannot disagree (B1 evaluated it twice; §D49 allowed
+    # B2 to fold them).
+    raised_by_manager = user_can_manage_project(request.user, project)
     # Who is raising it, for the activity feed only. An SCM request is still a
     # `pm_change_request` everywhere else — no new reason value (3.1c-i).
-    raised_as = ('PM change request raised' if user_can_manage_project(request.user, project)
+    raised_as = ('PM change request raised' if raised_by_manager
                  else 'Change request raised by SCM')
+    # SESSION B2a — WHERE IT GOES. A PM- or coordinator-raised request goes to the Head,
+    # unchanged (D-6). An SCM-raised one goes to the site's PM (D-1) — UNLESS NOBODY CAN
+    # TRIAGE IT (Q5): no assigned PM and no active coordinator. Then it goes straight to
+    # the Head, and the message, the log line and the request row all say so. The test is
+    # scm_change_request_has_triager(), the same list the forward view's predicate reads.
+    to_pm = not raised_by_manager and scm_change_request_has_triager(project)
+    no_pm_fallback = not raised_by_manager and not to_pm
     try:
         with transaction.atomic():
             # NO GROUP REMOVAL HERE ANY MORE (3.1c-i, Q2). A draft-group site stays in its
             # group until the Design Head accepts — see design_change_request_accept().
             change = DesignChangeRequest.objects.create(
                 attempt=attempt, requested_by=profile, reason=reason,
-                verdict=CHANGE_REQUEST_PENDING,
+                verdict=CHANGE_REQUEST_WITH_PM if to_pm else CHANGE_REQUEST_PENDING,
                 # B1: raised_as's own predicate, so the column and the log line agree.
-                origin=(CHANGE_REQUEST_ORIGIN_PM
-                        if user_can_manage_project(request.user, project)
+                origin=(CHANGE_REQUEST_ORIGIN_PM if raised_by_manager
                         else CHANGE_REQUEST_ORIGIN_SCM))
+            if to_pm:
+                where = ('with the site\'s PM, who forwards it to the Design Head or '
+                         'rejects it')
+            elif no_pm_fallback:
+                where = (f'{NO_PM_FALLBACK_TEXT}, so the request went straight to the '
+                         f'Design Head')
+            else:
+                where = 'awaiting the Design Head'
             log_activity(project, profile,
                          f'{raised_as} on attempt '
-                         f'{attempt.attempt_number} — awaiting the Design Head: {reason}'
+                         f'{attempt.attempt_number} — {where}: {reason}'
                          + (' (review in progress — suspended)' if was_in_qc else ''),
                          entity_type='DesignChangeRequest', entity_id=change.pk,
-                         action_code='design_change_requested')
+                         action_code=(CHANGE_REQUEST_NO_PM_ACTION_CODE if no_pm_fallback
+                                      else 'design_change_requested'))
     except IntegrityError:
         # The database refused it — two raises raced past the pre-check above. The
-        # constraint is the authority and this is the message that says so.
+        # constraint is the authority and this is the message that says so. The sentence
+        # names the Head only when neither side of the collision is with the PM.
+        if to_pm or _open_change_requests(attempt).filter(
+                verdict=CHANGE_REQUEST_WITH_PM).exists():
+            return _back(f'{project.project_id}: refused by the database — only one change '
+                         f'request at a time may be open on an attempt, whether it is with '
+                         f'the PM or with the Design Head.')
         return _back(f'{project.project_id}: refused by the database — only one change '
                      f'request at a time may await the Design Head on an attempt.')
 
@@ -5441,9 +5516,30 @@ def design_change_request(request, project_id):
 
     # NOTHING ELSE HAPPENED, and the message must not imply otherwise. No attempt was
     # opened and the site did not move; the designer is still on whatever they were on.
-    msg = (f'{project.project_id}: change request raised on attempt '
-           f'{attempt.attempt_number} and sent to the Design Head. No new attempt has '
-           f'been opened — he decides whether this becomes rework.')
+    #
+    # SESSION B2a — an SCM request with the PM gets its own message; the PM path's below is
+    # unchanged, byte for byte, and so is Q5's tail once it has said why it skipped the PM.
+    if to_pm:
+        msg = (f'{project.project_id}: change request raised on attempt '
+               f'{attempt.attempt_number} and sent to the site\'s PM, who forwards it to '
+               f'the Design Head or rejects it. No new attempt has been opened. You can '
+               f'withdraw it while it is with the PM.')
+        if membership is not None:
+            msg += (f' The site stays in procurement group "{membership.group.name}" while '
+                    f'the request is open, and the group cannot be locked until it is '
+                    f'closed. It leaves the group only if the Design Head accepts it.')
+        return _back(msg, ok=True)
+
+    if no_pm_fallback:
+        msg = (f'{project.project_id}: change request raised on attempt '
+               f'{attempt.attempt_number}. {NO_PM_FALLBACK_TEXT[0].upper()}'
+               f'{NO_PM_FALLBACK_TEXT[1:]}, so the request went straight to the Design '
+               f'Head. No new attempt has been opened — he decides whether this becomes '
+               f'rework.')
+    else:
+        msg = (f'{project.project_id}: change request raised on attempt '
+               f'{attempt.attempt_number} and sent to the Design Head. No new attempt has '
+               f'been opened — he decides whether this becomes rework.')
     if was_in_qc:
         msg += (' The review in progress is suspended: no verdict can be recorded until '
                 'he rules.')
@@ -5492,6 +5588,21 @@ def _triage_guard(request, change):
     if request.method != 'POST':
         return project, redirect('design_qc_review', project_id=project.project_id)
     return project, None
+
+
+def _not_pending_refusal(project, change):
+    """Why the Head may not decide `change`: it is not `pending`. Shared by accept, reject
+    and the corrected outcome, which all re-read the verdict under the row lock.
+
+    SESSION B2a: a request still WITH THE PM gets its own sentence, because "has already
+    been with the pm" is not one. Every other verdict keeps the Part 4.6 sentence, byte for
+    byte; its wording for the new values is B3's."""
+    if change.verdict == CHANGE_REQUEST_WITH_PM:
+        return (f'{project.project_id}: that change request is still with the site\'s PM — '
+                f'it reaches the Design Head only if the PM forwards it. Nothing was '
+                f'changed.')
+    return (f'{project.project_id}: that change request has already been '
+            f'{change.get_verdict_display().lower()}.')
 
 
 def _triage_redirect(request, project):
@@ -5558,8 +5669,7 @@ def design_change_request_accept(request, pk):
         change = (DesignChangeRequest.objects.select_for_update()
                   .select_related('attempt__assignment').get(pk=change.pk))
         if change.verdict != CHANGE_REQUEST_PENDING:
-            return _back(f'{project.project_id}: that change request has already been '
-                         f'{change.get_verdict_display().lower()}.')
+            return _back(_not_pending_refusal(project, change))
 
         membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
         if membership is not None:
@@ -5691,8 +5801,7 @@ def design_change_request_reject(request, pk):
         change = (DesignChangeRequest.objects.select_for_update()
                   .select_related('attempt__assignment').get(pk=change.pk))
         if change.verdict != CHANGE_REQUEST_PENDING:
-            return _back(f'{project.project_id}: that change request has already been '
-                         f'{change.get_verdict_display().lower()}.')
+            return _back(_not_pending_refusal(project, change))
 
         change.verdict          = CHANGE_REQUEST_REJECTED
         change.rejection_reason = reason
@@ -5741,6 +5850,309 @@ def design_change_request_reject(request, pk):
 
 
 # ---------------------------------------------------------------------------
+# 13c. The SCM route through the PM, and the Head's third outcome (session B2a)
+#
+# Decided by Zuber, 25 Sep 2026. An SCM-raised request is created at `with_pm` (unless the
+# site has nobody to triage it — Q5, see design_change_request). From there:
+#
+#   forward    the PM or an active coordinator (D-2), with a note (D-3)   -> pending
+#   PM reject  the same people, with a note (D-1, D-3)                     -> pm_rejected
+#   withdraw   any SCM user, with a note, only while with the PM (D-4)    -> withdrawn
+#
+# and the Head, on a `pending` request of either origin, gains a third outcome (D-7):
+#
+#   corrected  he fixed the BOQ in place with boq_correct, and links those corrections
+#                                                                          -> corrected
+#
+# NONE OF THE FOUR SENDS A NOTIFICATION. The three existing sends are unchanged; B2b
+# reroutes them and adds these (EXECUTION_MODULE_DEFERRED §D50).
+#
+# EVERY TRANSITION RE-READS THE VERDICT UNDER A ROW LOCK on the request, exactly as accept
+# and reject do, so a double submit or two people acting at once produce one decision.
+# Only FORWARD re-checks the window: it is the one that sends a request on towards
+# reopening the design. Rejecting, withdrawing and recording a correction only close one.
+# ---------------------------------------------------------------------------
+
+PM_TRIAGE_FORBIDDEN = ("Only the site's PM or one of its active coordinators may forward or "
+                       "reject an SCM change request.")
+WITHDRAW_FORBIDDEN = 'Only SCM may withdraw a design change request.'
+
+
+def _change_form_back(request, project, msg, ok=False):
+    """Flash and return to the site's change-request page, where the PM and SCM act."""
+    (messages.success if ok else messages.error)(request, msg)
+    return redirect('design_change_request_form', project_id=project.project_id)
+
+
+def _verdict_phrase(change):
+    """The verdict's display label, lower-cased at the first letter only, so "Rejected by
+    the PM" reads "rejected by the PM" and not "rejected by the pm"."""
+    label = change.get_verdict_display()
+    return label[:1].lower() + label[1:]
+
+
+def _pm_stage_refusal(project, change):
+    """Why the PM stage is over for `change` — forward, PM reject and withdraw all refuse
+    anything that is no longer `with_pm`, and must say where it went instead."""
+    pid = project.project_id
+    if change.verdict == CHANGE_REQUEST_PENDING:
+        if change.pm_decided_at is not None:
+            return (f'{pid}: that change request has already been forwarded to the Design '
+                    f'Head. It is no longer with the PM. Nothing was changed.')
+        return (f'{pid}: that change request is with the Design Head, not the PM. Nothing '
+                f'was changed.')
+    return (f'{pid}: that change request is no longer with the PM — it has been '
+            f'{_verdict_phrase(change)}. Nothing was changed.')
+
+
+@login_required
+def design_change_request_forward(request, pk):
+    """The PM (or an active coordinator) sends an SCM request on to the Design Head.
+
+    `with_pm` -> `pending`, which is the value a PM-raised request starts at: from here the
+    Head triages it exactly as he triages the PM's own. "The PM decided" is recorded in
+    `pm_decided_by` / `pm_decided_at` / `pm_note`, never in the verdict.
+
+    THE WINDOW IS RE-CHECKED, under A3's lock order — the request row, the group row if the
+    site has a live procurement membership (then the membership re-read), then the
+    assignment row. The window is design_change_window_open(), the SCM window the request
+    was raised in (released, not group-locked), NOT the PM's wider pre-release window: an
+    SCM request never had that one. Refused, the request stays with the PM, who can reject
+    it with a note. site_group_lock() takes no row lock of its own (§D43), so this narrows
+    the race with a concurrent lock rather than closing it, as accept's re-check does.
+    """
+    change = _change_request_or_404(pk)
+    project = change.attempt.assignment.project
+    if not user_can_triage_scm_change_request(request.user, project):
+        return HttpResponseForbidden(PM_TRIAGE_FORBIDDEN)
+    if request.method != 'POST':
+        return redirect('design_change_request_form', project_id=project.project_id)
+
+    pid = project.project_id
+    note = (request.POST.get('pm_note') or '').strip()
+    if not note:
+        return _change_form_back(request, project, f'{pid}: say why this should go to the '
+                                                    f'Design Head — a note is required.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt__assignment').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_WITH_PM:
+            return _change_form_back(request, project, _pm_stage_refusal(project, change))
+
+        membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+        if membership is not None:
+            SiteGroup.objects.select_for_update().get(pk=membership.group_id)
+            membership = active_group_membership(project, GROUP_TYPE_PROCUREMENT)
+        assignment = DesignAssignment.objects.select_for_update().get(
+            pk=change.attempt.assignment_id)
+
+        if not design_change_window_open(assignment):
+            if project_boq_is_group_locked(project):
+                name = membership.group.name if membership is not None else ''
+                return _change_form_back(request, project, (
+                    f'{pid}: not forwarded — the BOQ was locked in procurement group '
+                    f'"{name}" after this request was raised, so it can no longer reopen the '
+                    f'design. Nothing was changed. Reject it with a note to close it.'))
+            return _change_form_back(request, project, (
+                f'{pid}: not forwarded — the design is no longer released (status '
+                f'"{assignment.get_status_display()}"), so this request can no longer go to '
+                f'the Design Head. Nothing was changed. Reject it with a note to close it.'))
+
+        change.verdict       = CHANGE_REQUEST_PENDING
+        change.pm_decided_by = profile
+        change.pm_decided_at = timezone.now()
+        change.pm_note       = note
+        change.save(update_fields=['verdict', 'pm_decided_by', 'pm_decided_at', 'pm_note'])
+
+        log_activity(project, profile,
+                     f'SCM change request forwarded to the Design Head on attempt '
+                     f'{change.attempt.attempt_number}: {note}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_forwarded')
+
+    return _change_form_back(request, project, (
+        f'{pid}: change request forwarded to the Design Head. He accepts it, rejects it, or '
+        f'records it as corrected in the BOQ. No new attempt has been opened.'), ok=True)
+
+
+@login_required
+def design_change_request_pm_reject(request, pk):
+    """The PM (or an active coordinator) refuses an SCM request. It never reaches the Head.
+
+    `with_pm` -> `pm_rejected`, with the same three PM fields as a forward. NO WINDOW CHECK:
+    this only closes a request, and a PM must be able to close one on a site whose BOQ was
+    locked in the meantime — that is the way out a refused forward points to."""
+    change = _change_request_or_404(pk)
+    project = change.attempt.assignment.project
+    if not user_can_triage_scm_change_request(request.user, project):
+        return HttpResponseForbidden(PM_TRIAGE_FORBIDDEN)
+    if request.method != 'POST':
+        return redirect('design_change_request_form', project_id=project.project_id)
+
+    pid = project.project_id
+    note = (request.POST.get('pm_note') or '').strip()
+    if not note:
+        return _change_form_back(request, project, f'{pid}: say why this request is '
+                                                    f'rejected — a note is required.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_WITH_PM:
+            return _change_form_back(request, project, _pm_stage_refusal(project, change))
+
+        change.verdict       = CHANGE_REQUEST_PM_REJECTED
+        change.pm_decided_by = profile
+        change.pm_decided_at = timezone.now()
+        change.pm_note       = note
+        change.save(update_fields=['verdict', 'pm_decided_by', 'pm_decided_at', 'pm_note'])
+
+        log_activity(project, profile,
+                     f'SCM change request rejected by the PM on attempt '
+                     f'{change.attempt.attempt_number} — it did not reach the Design Head: '
+                     f'{note}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_pm_rejected')
+
+    return _change_form_back(request, project, (
+        f'{pid}: change request rejected. It did not reach the Design Head and nothing was '
+        f'reopened.'), ok=True)
+
+
+@login_required
+def design_change_request_withdraw(request, pk):
+    """Any SCM user takes an SCM request back while it is still with the PM (D-4).
+
+    `with_pm` -> `withdrawn`. Not after it has been forwarded: once it is with the Head it
+    is his to decide. Any SCM user, not only the raiser — SCM's remit is portfolio-wide
+    (D-b), the same reason any SCM user may raise."""
+    change = _change_request_or_404(pk)
+    project = change.attempt.assignment.project
+    if not user_may_raise_design_change_as_scm(request.user):
+        return HttpResponseForbidden(WITHDRAW_FORBIDDEN)
+    if request.method != 'POST':
+        return redirect('design_change_request_form', project_id=project.project_id)
+
+    pid = project.project_id
+    note = (request.POST.get('withdrawal_note') or '').strip()
+    if not note:
+        return _change_form_back(request, project, f'{pid}: say why this request is '
+                                                    f'withdrawn — a note is required.')
+
+    profile = request.user.profile
+    with transaction.atomic():
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_WITH_PM:
+            return _change_form_back(request, project, _pm_stage_refusal(project, change))
+
+        change.verdict         = CHANGE_REQUEST_WITHDRAWN
+        change.withdrawn_by    = profile
+        change.withdrawn_at    = timezone.now()
+        change.withdrawal_note = note
+        change.save(update_fields=['verdict', 'withdrawn_by', 'withdrawn_at',
+                                   'withdrawal_note'])
+
+        log_activity(project, profile,
+                     f'SCM change request withdrawn on attempt '
+                     f'{change.attempt.attempt_number}: {note}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_withdrawn')
+
+    return _change_form_back(request, project, (
+        f'{pid}: change request withdrawn. It did not reach the Design Head.'), ok=True)
+
+
+def _uncited_corrections_since(project, since):
+    """BOQ corrections on `project`'s BOQ made at or after `since` and not yet linked to any
+    change request — the evidence a `corrected` verdict may cite (A2).
+
+    MATCHED BY TIMESTAMP, AND ONLY BY TIMESTAMP. BOQCorrection has no link to a change
+    request, an attempt or a reason (by design — see its docstring), so a correction made
+    on this BOQ in this window for an unrelated reason is swept in too. The Head's note is
+    what says which change was the answer; this list is what changed, not why
+    (EXECUTION_MODULE_DEFERRED §D50)."""
+    cited = DesignChangeRequest.boq_corrections.through.objects.values('boqcorrection_id')
+    return list(BOQCorrection.objects
+                .filter(boq__project=project, corrected_at__gte=since)
+                .exclude(pk__in=cited)
+                .order_by('corrected_at', 'pk'))
+
+
+@login_required
+def design_change_request_correct(request, pk):
+    """The Head's third outcome (D-7): the BOQ has been corrected in place, so no rework.
+
+    `pending` -> `corrected`, for a request of EITHER origin. The evidence is the
+    BOQCorrection rows made on this site's BOQ since the request was raised and not already
+    cited by another request; every one of them is linked through `boq_corrections`, and
+    with none the verdict is refused and nothing is written. The Head makes the correction
+    first, on boq_correct, which is unchanged and has no change-request awareness.
+
+    It opens NO attempt, does NOT clear released_at / released_by, and does NOT take the
+    site out of its group: the design was not reopened, the BOQ was fixed. Head authority,
+    through _triage_guard(), exactly as accept and reject. NO WINDOW CHECK: this changes no
+    BOQ row — boq_correct refused its own writes under a group lock.
+
+    NO BUTTON YET. The Head triages on the QC review banner, which B2a may not change; B2b
+    adds it there (HARD DEPENDENCY, §D50). Until then this is reachable by POST only."""
+    change = _change_request_or_404(pk)
+    project, refusal = _triage_guard(request, change)
+    if refusal is not None:
+        return refusal
+
+    profile = request.user.profile
+    pid = project.project_id
+
+    def _back(msg, ok=False):
+        (messages.success if ok else messages.error)(request, msg)
+        return redirect(_triage_redirect(request, project))
+
+    note = (request.POST.get('correction_note') or '').strip()
+    if not note:
+        return _back(f'{pid}: say what was corrected — a note is required, and it is what '
+                     f'the requester reads.')
+
+    with transaction.atomic():
+        change = (DesignChangeRequest.objects.select_for_update()
+                  .select_related('attempt').get(pk=change.pk))
+        if change.verdict != CHANGE_REQUEST_PENDING:
+            return _back(_not_pending_refusal(project, change))
+
+        evidence = _uncited_corrections_since(project, change.requested_at)
+        if not evidence:
+            return _back(
+                f'{pid}: not recorded as corrected — no BOQ correction has been made on this '
+                f'site since the request was raised on '
+                f'{timezone.localtime(change.requested_at):%d %b %Y %H:%M}. Make the '
+                f'correction in the BOQ first (BOQ correction screen), then record it here. '
+                f'Nothing was changed.')
+
+        change.verdict         = CHANGE_REQUEST_CORRECTED
+        change.corrected_by    = profile
+        change.corrected_at    = timezone.now()
+        change.correction_note = note
+        change.save(update_fields=['verdict', 'corrected_by', 'corrected_at',
+                                   'correction_note'])
+        change.boq_corrections.add(*evidence)
+
+        log_activity(project, profile,
+                     f'Change request on attempt {change.attempt.attempt_number} recorded '
+                     f'as corrected in the BOQ ({len(evidence)} correction'
+                     f'{"" if len(evidence) == 1 else "s"} linked) — no new attempt: {note}',
+                     entity_type='DesignChangeRequest', entity_id=change.pk,
+                     action_code='design_change_request_corrected')
+
+    return _back(f'{pid}: change request recorded as corrected in the BOQ, citing '
+                 f'{len(evidence)} correction{"" if len(evidence) == 1 else "s"}. No new '
+                 f'attempt was opened and the design did not move. Any review suspended by '
+                 f'it can now resume.', ok=True)
+
+
+# ---------------------------------------------------------------------------
 # 14. Part 4 screens
 # ---------------------------------------------------------------------------
 
@@ -5757,6 +6169,12 @@ def _attempt_history(assignment):
                                   # queries per change request without this.
                                   'change_requests__decided_by__user',
                                   'change_requests__resulting_attempt',
+                                  # Session B2a — the partial names who forwarded,
+                                  # rejected, withdrew or corrected. A null FK costs no
+                                  # query, so screens with none of these pay nothing.
+                                  'change_requests__pm_decided_by__user',
+                                  'change_requests__withdrawn_by__user',
+                                  'change_requests__corrected_by__user',
                                   'arka_submissions')
                 .order_by('attempt_number'))
 
@@ -6528,6 +6946,27 @@ def design_change_request_form(request, project_id):
     draft_group = (membership.group if membership is not None
                    and membership.group.status == SITE_GROUP_DRAFT else None)
 
+    requests_ = list(DesignChangeRequest.objects
+                     .filter(attempt__assignment=assignment)
+                     .select_related('requested_by__user', 'attempt',
+                                     'resulting_attempt', 'decided_by__user',
+                                     # Session B2a — the three new deciders, on the row.
+                                     'pm_decided_by__user', 'withdrawn_by__user',
+                                     'corrected_by__user')
+                     # A2 — under a corrected request, SCM sees WHAT changed.
+                     .prefetch_related('boq_corrections__corrected_by__user')
+                     .order_by('-requested_at'))
+    # Q5 — which requests the raise sent straight to the Head for want of anybody to triage
+    # them. Read off the raise line's own action_code, the stored fact, because the row
+    # itself cannot tell such a request from an SCM request backfilled by migration 0102.
+    no_pm_ids = set(ActivityLog.objects
+                    .filter(action_code=CHANGE_REQUEST_NO_PM_ACTION_CODE,
+                            entity_type='DesignChangeRequest',
+                            entity_id__in=[cr.pk for cr in requests_])
+                    .values_list('entity_id', flat=True)) if requests_ else set()
+    for cr in requests_:
+        cr.skipped_pm = cr.pk in no_pm_ids
+
     return render(request, 'projects/design/change_request.html', {
         'project':     project,
         'assignment':  assignment,
@@ -6536,11 +6975,18 @@ def design_change_request_form(request, project_id):
         'window_open': window_open,
         'closed_reason': closed_reason,
         'draft_group':   draft_group,
-        'requests':    list(DesignChangeRequest.objects
-                            .filter(attempt__assignment=assignment)
-                            .select_related('requested_by__user', 'attempt',
-                                            'resulting_attempt', 'decided_by__user')
-                            .order_by('-requested_at')),
+        'requests':    requests_,
+        # Session B2a — who may act on a `with_pm` row here. The predicates the POSTs
+        # enforce, so the page cannot offer a button that refuses. Somebody holding both
+        # (a coordinator who is also SCM) gets both.
+        'can_pm_triage': user_can_triage_scm_change_request(request.user, project),
+        'can_withdraw':  user_may_raise_design_change_as_scm(request.user),
+        # The raise note says where THIS user's request would go (D-1, D-6, Q5).
+        'raise_goes_to_pm': (not user_can_manage_project(request.user, project)
+                             and scm_change_request_has_triager(project)),
+        'raise_skips_pm':   (not user_can_manage_project(request.user, project)
+                             and not scm_change_request_has_triager(project)),
+        'no_pm_fallback_text': NO_PM_FALLBACK_TEXT,
     })
 
 
@@ -6801,9 +7247,12 @@ def tender_release_completeness(program):
 
 
 def pending_change_requests_for(member_ids):
-    """Change requests on these sites still awaiting the Design Head's decision.
+    """Change requests on these sites that are still open: with the PM, or awaiting the
+    Design Head's decision.
 
-    Same definition as `_pending_change_requests()` (Part 4.6): `verdict='pending'`.
+    Same definition as `_open_change_requests()` (session B2a): `verdict` in
+    CHANGE_REQUEST_OPEN_VERDICTS. Before B2a it was `_pending_change_requests()`'s
+    `verdict='pending'`.
     Locking a group over one of these would freeze a BOQ that may be about to be
     reworked, and the Head has not yet said whether it will be.
 
@@ -6813,9 +7262,11 @@ def pending_change_requests_for(member_ids):
     an ordinary state that lasts as long as the Head takes to triage it. A REJECTED
     request no longer blocks anything — the current version stands, so its BOQ is settled.
     """
+    # SESSION B2a (A1): OPEN, not pending. An SCM request with the PM exists because the
+    # quantities may be wrong, which is exactly when they must not be committed.
     return list(DesignChangeRequest.objects
                 .filter(attempt__assignment__project_id__in=member_ids,
-                        verdict=CHANGE_REQUEST_PENDING)
+                        verdict__in=CHANGE_REQUEST_OPEN_VERDICTS)
                 .select_related('attempt__assignment__project', 'requested_by__user'))
 
 
@@ -7162,6 +7613,21 @@ def site_group_lock(request, pk):
         return _back(f'"{group.name}" has no sites — there is nothing to lock.')
 
     blockers = pending_change_requests_for(member_ids)
+    # SESSION B2a — a request with the PM blocks too (A1) and is named as such. When every
+    # blocker is with the Head, the Part 4.6 sentence below is unchanged, byte for byte.
+    with_pm = [b for b in blockers if b.verdict == CHANGE_REQUEST_WITH_PM]
+    if with_pm:
+        def _ids(rows):
+            return sorted({b.attempt.assignment.project.project_id for b in rows})
+        at_pm = _ids(with_pm)
+        at_head = _ids(b for b in blockers if b.verdict != CHANGE_REQUEST_WITH_PM)
+        parts = [f'{", ".join(at_pm)} {"has" if len(at_pm) == 1 else "have"} a change '
+                 f'request with the site\'s PM']
+        if at_head:
+            parts.append(f'{", ".join(at_head)} {"has" if len(at_head) == 1 else "have"} a '
+                         f'change request awaiting the Design Head')
+        return _back(f'"{group.name}" cannot be locked: {"; ".join(parts)}. Wait for each '
+                     f'to be decided or withdrawn, or remove the site from the group first.')
     if blockers:
         sites = ', '.join(sorted({b.attempt.assignment.project.project_id
                                   for b in blockers}))
