@@ -122,7 +122,7 @@ class RaiseRoutingTests(RoutingBase):
                          (CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM))
         # 1. the raise message
         message = self._messages(response)
-        self.assertIn('No PM is assigned to this site and it has no active coordinator, so '
+        self.assertIn('This site has no active PM and no active coordinator, so '
                       'the request went straight to the Design Head', message)
         # 2. the activity line, under its own code so the row can find it
         line = self._log(change, CHANGE_REQUEST_NO_PM_ACTION_CODE).get().action

@@ -12,7 +12,7 @@ LIVE FROM PROMPT 3.1b-2c: the Design Head's QC pass lands a package here, and so
 Head returning a PM rejection unchanged — that row carries the Head's remark (§D22).
 {% endcomment %}
 
-{% block title %}Design approvals — SolarPMS{% endblock %}
+{% block title %}Design &amp; BOQ approvals — SolarPMS{% endblock %}
 
 {% block extra_head %}{% include "projects/design/_design_chips.html" %}{% endblock %}
 
@@ -20,13 +20,74 @@ Head returning a PM rejection unchanged — that row carries the Head's remark (
 
 <div class="d-flex justify-content-between align-items-start mb-3">
   <div>
-    <h5 class="mb-0">Design approvals</h5>
+    <h5 class="mb-0">Design &amp; BOQ approvals</h5>
     <div class="text-muted small">
-      Designs that have passed Design QC and the Design Head and are waiting for you to
-      accept them. Nothing is released to SCM until you approve it.
+      SCM's change requests waiting for you to forward or reject, and designs waiting for
+      you to accept before release.
     </div>
   </div>
 </div>
+
+{% comment %}
+SESSION B2b (D-10) — SCM change requests at `with_pm` on the sites this user may triage:
+change_rows is the queryset form of permissions.scm_change_request_triagers() for this
+viewer, built in design_pm_approval_queue(). Oldest first; the age is time with the PM,
+from requested_at (D-11). The Forward / Reject forms stay on the per-site change-request
+page, where B2a put them, and each POST re-checks user_can_triage_scm_change_request().
+{% endcomment %}
+<h6 class="fw-semibold mb-2">
+  SCM change requests waiting for you
+  {% if change_rows %}<span class="badge bg-danger ms-1">{{ change_rows|length }}</span>{% endif %}
+</h6>
+{% if not change_rows %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body text-center text-muted small py-3">
+      No SCM change requests are waiting for you.
+    </div>
+  </div>
+{% else %}
+  <div class="card shadow-sm mb-3">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr class="small">
+            <th>Site</th>
+            <th>Raised by</th>
+            <th>Reason</th>
+            <th class="text-nowrap">With you</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in change_rows %}
+          <tr class="small">
+            <td>
+              <div class="fw-semibold">{{ row.site.project_id }}</div>
+              <div class="text-muted">{{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}</div>
+            </td>
+            <td>
+              {{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}
+              <div class="text-muted" style="font-size:.7rem;">{{ row.change_request.requested_at|date:"d M Y H:i" }}</div>
+            </td>
+            <td>{{ row.change_request.reason }}</td>
+            <td class="text-nowrap">
+              <span class="badge {% if row.age_days >= 3 %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+                {{ row.age_days }} day{{ row.age_days|pluralize }}
+              </span>
+            </td>
+            <td class="text-end">
+              <a href="{% url 'design_change_request_form' project_id=row.site.project_id %}"
+                 class="btn btn-sm btn-outline-secondary text-nowrap">Forward or reject</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endif %}
+
+<h6 class="fw-semibold mb-2">Designs waiting for your approval</h6>
 
 {% if not rows %}
   <div class="card shadow-sm">

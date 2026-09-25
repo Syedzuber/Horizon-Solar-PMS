@@ -94,12 +94,39 @@ has hit twice already.
               <button class="btn btn-sm btn-outline-secondary">Reject</button>
             </form>
           </div>
+          {% comment %}
+          SESSION B2b — the third outcome: the Head fixed the BOQ in place (boq_correct) and
+          records that as the answer. Same `has_head_authority` flag as Accept and Reject,
+          which is _triage_guard()'s predicate, so a QC reviewer without Head authority
+          sees no button here. The count is the view's read of what the endpoint would cite;
+          at zero the button still posts and the endpoint explains the refusal.
+          {% endcomment %}
+          <form method="post" class="d-flex flex-wrap gap-2 align-items-start mt-2"
+                action="{% url 'design_change_request_correct' pk=cr.pk %}">
+            {% csrf_token %}
+            <input type="text" name="correction_note" required
+                   class="form-control form-control-sm flex-grow-1" style="min-width:14rem;"
+                   placeholder="What was corrected in the BOQ (required)">
+            <button class="btn btn-sm btn-outline-primary">Record as corrected in the BOQ</button>
+          </form>
+          <div class="text-muted mt-1" style="font-size:.75rem;">
+            {% if cr.uncited_correction_count %}
+              {{ cr.uncited_correction_count }} BOQ correction{{ cr.uncited_correction_count|pluralize }}
+              made since this request was raised will be cited.
+            {% else %}
+              No BOQ correction has been made since this request was raised.
+              {% if can_correct_boq %}
+                <a href="{% url 'boq_correct' project.project_id %}">Correct the BOQ first</a>.
+              {% endif %}
+            {% endif %}
+          </div>
         {% endif %}
       </div>
     {% endfor %}
     <div class="text-muted small mt-2">
-      No verdict can be recorded at either gate until the Design Head accepts or rejects
-      it. Acceptance opens a new attempt; rejection lets this review resume on this one.
+      No verdict can be recorded at either gate until the Design Head accepts, rejects or
+      records it as corrected. Acceptance opens a new attempt; rejection or a correction in
+      the BOQ lets this review resume on this one.
     </div>
   </div>
 {% endif %}

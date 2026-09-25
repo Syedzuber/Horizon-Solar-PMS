@@ -414,7 +414,8 @@ rather than to the site's QC screen, because he is working a queue, not one site
               {{ row.age_days }} day{{ row.age_days|pluralize }} waiting
             </span>
             <div class="text-muted" style="font-size:.7rem;">
-              {{ row.requested_at|date:"d M Y H:i" }}
+              {# Session B2b (D-11): when it reached the Head — the instant the badge counts from. #}
+              {{ row.with_head_since|date:"d M Y H:i" }}
             </div>
           </div>
         </div>

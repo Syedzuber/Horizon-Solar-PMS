@@ -192,9 +192,11 @@ class CallSiteParseTests(GateNotificationBase):
                 'design_head_send_back'}
     # Session 3.1c-ii: the change-request sends, which name in_app AND email. Pinned in
     # tests_design_change_notifications; listed here so the gate pin above still counts
-    # every send in the module.
+    # every send in the module. Session B2b adds the four SCM-route views (D-12).
     CHANGE_REQUEST = {'design_change_request', 'design_change_request_accept',
-                      'design_change_request_reject'}
+                      'design_change_request_reject',
+                      'design_change_request_forward', 'design_change_request_pm_reject',
+                      'design_change_request_withdraw', 'design_change_request_correct'}
 
     @classmethod
     def setUpClass(cls):
@@ -245,7 +247,7 @@ class CallSiteParseTests(GateNotificationBase):
     def test_a2_every_send_names_in_app_as_a_literal_after_the_block_inside_a_try(self):
         sends = self.calls['send_notification']
         self.assertEqual({fn for fn, _, _ in sends}, self.INTENDED | self.CHANGE_REQUEST)
-        self.assertEqual(len(sends), 7, [fn for fn, _, _ in sends])
+        self.assertEqual(len(sends), 11, [fn for fn, _, _ in sends])
         for fn, node, ancestors in sends:
             with self.subTest(view=fn):
                 channels = next((k.value for k in node.keywords if k.arg == 'channels'), None)

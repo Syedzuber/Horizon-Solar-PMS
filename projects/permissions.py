@@ -999,33 +999,61 @@ def user_may_raise_design_change_as_scm(user):
 
 
 # SESSION B2a (Zuber, 25 Sep 2026, D-2 and Q5). WHO TRIAGES AN SCM-RAISED REQUEST, and
-# WHETHER ANYBODY CAN. Both answers come from project_managers() — the assigned PM plus
-# every ACTIVE coordinator — so the raise view's "does this site have somebody to forward
-# it" and the forward view's "may this user forward it" read one list and cannot disagree.
+# WHETHER ANYBODY CAN. Both answers come from scm_change_request_triagers(), so the raise
+# view's "does this site have somebody to forward it" and the forward view's "may this user
+# forward it" read one list and cannot disagree.
 #
 # A NARROWING OF user_can_manage_project(), not a restatement of it: that predicate admits
 # a coordinator whatever their is_active, and D-2 says "active coordinators". Everything
 # else about PM authority (the raise, `origin`, the change-request form's 403) still goes
 # through user_can_manage_project() and is unchanged.
+#
+# SESSION B2b (A7, signed off 25 Sep 2026). B2a read project_managers(), which counts the
+# assigned PM UNCONDITIONALLY and a coordinator on the profile flag alone. An inactive PM
+# therefore counted as a forwarder, so Q5 never fired for that site and an SCM request sat
+# at `with_pm` where nobody could act on it. The list is now its own helper, with BOTH
+# activity flags on BOTH people, and four readers share it: the two predicates below, the
+# PM queue's with-PM section, and the with-PM raise notification. project_managers() is
+# unchanged; every other notification still reads it.
+def scm_change_request_triagers(project):
+    """The UserProfiles who may forward or reject an SCM-raised change request on `project`:
+    the assigned PM and every coordinator, each ONLY when both the UserProfile and the
+    auth.User are active. PM first, deduplicated. One query for the coordinators, plus the
+    PM's profile and user if they are not already cached."""
+    if project is None:
+        return []
+    triagers, seen = [], set()
+    pm = project.assigned_pm
+    if pm is not None and pm.is_active and pm.user.is_active:
+        triagers.append(pm)
+        seen.add(pm.pk)
+    for coord in (project.coordinators.filter(is_active=True, user__is_active=True)
+                  .select_related('user').order_by('pk')):
+        if coord.pk not in seen:
+            seen.add(coord.pk)
+            triagers.append(coord)
+    return triagers
+
+
 def user_can_triage_scm_change_request(user, project):
     """Return True if `user` may forward or reject an SCM-raised change request on
-    `project`: the site's assigned PM or one of its active coordinators (D-2)."""
+    `project`: the site's active assigned PM or one of its active coordinators (D-2, A7)."""
     profile = getattr(user, 'profile', None)
     if profile is None or project is None:
         return False
-    return any(person.pk == profile.pk for person in project_managers(project))
+    return any(person.pk == profile.pk for person in scm_change_request_triagers(project))
 
 
 def scm_change_request_has_triager(project):
     """Return True if SOMEBODY may triage an SCM-raised request on `project`.
 
-    False means no assigned PM and no active coordinator: a request routed to the PM would
+    False means no active PM and no active coordinator: a request routed to the PM would
     sit at `with_pm` with nobody able to forward it, so the raise view sends it straight to
     the Design Head instead and says so (Q5). The same list as
     user_can_triage_scm_change_request(), by construction."""
     if project is None:
         return False
-    return bool(project_managers(project))
+    return bool(scm_change_request_triagers(project))
 
 
 # D-a (Zuber, 16 Sep 2026, session 3.1c-i). ONE window for a RELEASED design, the same for

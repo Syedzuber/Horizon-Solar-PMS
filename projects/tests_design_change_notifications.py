@@ -149,22 +149,26 @@ class RaiseRecipientTests(ChangeNotificationBase):
         self.assertEqual(self._mailed(), ['cn_head2', 'cw_coord', 'cw_head'])
         self.assertIn('(PM)', self._note_for(mark, head2).message)
 
-    def test_a2_raise_by_scm_tells_the_pm_coordinators_and_heads_and_not_scm(self):
+    def test_a2_raise_by_scm_tells_the_pm_and_coordinators_and_not_scm_or_the_heads(self):
+        # Session B2b (D-12): a request with the PM is not the Heads' until it is forwarded.
         site, assignment = self._released('CN-A2')
         mark = self._mark()
         self._raise(self.scm, site)
-        self.assertEqual(self._told(mark), ['cw_coord', 'cw_head', 'cw_pm'])
-        self.assertEqual(self._mailed(), ['cw_coord', 'cw_head', 'cw_pm'])
+        self.assertEqual(self._told(mark), ['cw_coord', 'cw_pm'])
+        self.assertEqual(self._mailed(), ['cw_coord', 'cw_pm'])
         self.assertIn('(SCM)', self._note_for(mark, self.pm).message)
 
     def test_a3_a_pm_who_is_also_a_design_head_is_told_once(self):
+        # Session B2b: raised by the COORDINATOR, so the PM is reached twice over — as the
+        # site's PM and as a Design Head — and the dedup is still what is asserted. An SCM
+        # raise no longer reaches the Heads, so it could not test this any more.
         self.pm.is_design_head = True
         self.pm.save(update_fields=['is_design_head'])
         site, assignment = self._released('CN-A3')
         mark = self._mark()
-        self._raise(self.scm, site)
-        self.assertEqual(self._told(mark), ['cw_coord', 'cw_head', 'cw_pm'])
-        self.assertEqual(self._mailed(), ['cw_coord', 'cw_head', 'cw_pm'])
+        self._raise(self.coord, site)
+        self.assertEqual(self._told(mark), ['cw_head', 'cw_pm'])
+        self.assertEqual(self._mailed(), ['cw_head', 'cw_pm'])
 
     def test_a4_an_inactive_coordinator_is_told_nothing(self):
         site, assignment = self._released('CN-A4')
@@ -259,14 +263,15 @@ class ChannelAndLinkTests(ChangeNotificationBase):
         other, other_a = self._released('CN-D4B')
         mark = self._mark()
         self._raise(self.scm, pool)
-        self._forward(self._requests(pool_a).get())   # B2a: forwarding sends nothing yet
+        self._forward(self._requests(pool_a).get())   # B2b: forwarding now notifies too
         self._accept(self._pending(pool_a))
         self._raise(self.pm, other)
         self._reject(self._pending(other_a), reason='See https://example.com — no.')
         notes = self._notes(mark)
-        # All three events happened, and nothing else notified.
+        # All five events happened, and nothing else notified.
         self.assertEqual(set(NotificationLog.objects.values_list('template_name', flat=True)),
-                         set(TEMPLATES))
+                         set(TEMPLATES) | {'design_change_request_raised_with_pm',
+                                           'design_change_request_forwarded'})
         self.assertTrue(notes)
         for note in notes:
             with self.subTest(recipient=note.recipient.user.username, link=note.link):
@@ -491,7 +496,10 @@ class CallSitePinTests(ChangeNotificationBase):
     GATE = {'design_head_qc_pass', 'design_pm_reject', 'design_head_return_to_pm',
             'design_head_send_back'}
     CHANGE_REQUEST = {'design_change_request', 'design_change_request_accept',
-                      'design_change_request_reject'}
+                      'design_change_request_reject',
+                      # Session B2b (D-12) — the four SCM-route views.
+                      'design_change_request_forward', 'design_change_request_pm_reject',
+                      'design_change_request_withdraw', 'design_change_request_correct'}
 
     def test_p1_channels_at_every_send(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'design_views.py')

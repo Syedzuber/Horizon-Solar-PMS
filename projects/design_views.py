@@ -143,6 +143,7 @@ from .permissions import (
     design_change_window_open, user_can_manage_project, user_may_raise_design_change_as_scm,
     # Session B2a — who triages an SCM-raised request, and whether anybody can (Q5).
     user_can_triage_scm_change_request, scm_change_request_has_triager,
+    scm_change_request_triagers,
 )
 
 logger = logging.getLogger(__name__)
@@ -1368,10 +1369,14 @@ def design_head_sites(request, pk):
                      # Part 4.6: a raised request writes NO status, so a pending one is
                      # invisible to anything that reads `status` alone. The Pending-at
                      # column is the first thing on this screen to say so.
+                     #
+                     # Session B2b: OPEN, not pending — a request with the PM too, which
+                     # the loop below tells apart for design_pending_at(). Still one
+                     # query; the filter widened, the count did not.
                      Prefetch('change_requests',
                               queryset=DesignChangeRequest.objects.filter(
-                                  verdict=CHANGE_REQUEST_PENDING),
-                              to_attr='pending_change_request_rows'))))
+                                  verdict__in=CHANGE_REQUEST_OPEN_VERDICTS),
+                              to_attr='open_change_request_rows'))))
              # PROMPT 3.1b-2b — the PM's latest rejection, read off the ledger IN THIS
              # QUERY: two correlated subqueries on the same SELECT, no query per row.
              .annotate(
@@ -1406,7 +1411,7 @@ def design_head_sites(request, pk):
         # site with no assignment, or one whose attempts have not been opened yet, answers
         # "Survey" rather than raising.
         current_arka = None
-        change_request_pending = False
+        change_request_pending = change_request_with_pm = False
         if assignment is not None:
             # The AGREED date, not the is_current row — a pending extension must not
             # change what this screen says the site is committed to (Part 8).
@@ -1419,11 +1424,13 @@ def design_head_sites(request, pk):
             gate1_decided = _gate1_verdict_recorded(attempt)
             if attempt is not None:
                 # Both lists come from the nested Prefetch above and are already filtered
-                # (is_current / verdict='pending'), so these are list reads and not
+                # (is_current / an open verdict), so these are list reads and not
                 # queries. Indexing would raise on the empty case; next() is the read that
                 # says "there may be none".
                 current_arka = next(iter(attempt.current_arka_rows), None)
-                change_request_pending = bool(attempt.pending_change_request_rows)
+                open_verdicts = {cr.verdict for cr in attempt.open_change_request_rows}
+                change_request_pending = CHANGE_REQUEST_PENDING in open_verdicts
+                change_request_with_pm = CHANGE_REQUEST_WITH_PM in open_verdicts
         rows.append({
             'site':          site,
             'assignment':    assignment,
@@ -1470,7 +1477,8 @@ def design_head_sites(request, pk):
             # assignment passes None and gets "Survey", matching the Status cell's own
             # hard-coded fallback on the same row.
             'pending_at':    design_pending_at(
-                assignment, current_arka, change_request_pending),
+                assignment, current_arka, change_request_pending,
+                change_request_with_pm=change_request_with_pm),
             # THE TWO SELECTORS EXCLUDE EACH OTHER'S CURRENT HOLDER, and the symmetry is
             # the point: one person cannot be both the designer and the gate-1 reviewer of
             # the same site, so whichever role is already filled removes that person from
@@ -4562,6 +4570,15 @@ GATE_CHANGE_RAISED   = 'change_request_raised'    # design_change_request
 GATE_CHANGE_ACCEPTED = 'change_request_accepted'  # design_change_request_accept
 GATE_CHANGE_REJECTED = 'change_request_rejected'  # design_change_request_reject
 
+# Session B2b (D-12) — the SCM route through the PM. Every one of these filters through
+# _change_request_audience() too: no actor, nobody inactive, and the shared tail dedups.
+GATE_CHANGE_RAISED_WITH_PM = 'change_request_raised_with_pm'  # design_change_request, SCM
+GATE_CHANGE_FORWARDED      = 'change_request_forwarded'       # design_change_request_forward
+GATE_CHANGE_PM_REJECTED    = 'change_request_pm_rejected'     # design_change_request_pm_reject
+GATE_CHANGE_WITHDRAWN      = 'change_request_withdrawn'       # design_change_request_withdraw
+GATE_CHANGE_REJECTED_SCM   = 'change_request_rejected_scm'    # design_change_request_reject
+GATE_CHANGE_CORRECTED      = 'change_request_corrected'       # design_change_request_correct
+
 
 def _change_request_audience(people, actor):
     """The change-request branches' filter: drop a missing person, anyone whose UserProfile
@@ -4605,7 +4622,21 @@ def design_gate_next_actors(assignment, transition, *, change=None, actor=None):
         _open_next_attempt() never writes `assigned_to`, so it names the designer of the
         attempt the acceptance just opened. The SCM owner of a group the site left is added
         by design_change_request_accept() itself, from the membership it removed (D6).
-    GATE_CHANGE_REJECTED -> change.requested_by only.
+    GATE_CHANGE_REJECTED -> change.requested_by only. Since B2b, a PM-origin rejection only;
+        design_change_request_reject() sends an SCM-origin one under the key below.
+
+    THE SCM-ROUTE KEYS (session B2b, D-12). "Triagers" is scm_change_request_triagers():
+    the active assigned PM and the active coordinators — the people who may forward or
+    reject, so whoever hears about a with-PM request can act on it.
+
+    GATE_CHANGE_RAISED_WITH_PM -> the triagers. NOT the Heads: the request is not theirs
+        until it is forwarded. (A Q5 fallback raise, which skips the PM, stays under
+        GATE_CHANGE_RAISED, whose project_managers() leg is empty of anyone active there.)
+    GATE_CHANGE_FORWARDED      -> every active is_design_head holder, then the requester.
+    GATE_CHANGE_PM_REJECTED    -> change.requested_by.
+    GATE_CHANGE_WITHDRAWN      -> the triagers.
+    GATE_CHANGE_REJECTED_SCM   -> change.requested_by, then the triagers.
+    GATE_CHANGE_CORRECTED      -> change.requested_by, then the triagers.
     """
     if transition in (GATE_HEAD_PASSED, GATE_HEAD_RETURNED):
         people = project_managers(assignment.project)
@@ -4655,6 +4686,18 @@ def design_gate_next_actors(assignment, transition, *, change=None, actor=None):
              assignment.assigned_to], actor)
     elif transition == GATE_CHANGE_REJECTED:
         people = _change_request_audience([change.requested_by], actor)
+    elif transition in (GATE_CHANGE_RAISED_WITH_PM, GATE_CHANGE_WITHDRAWN):
+        people = _change_request_audience(
+            scm_change_request_triagers(assignment.project), actor)
+    elif transition == GATE_CHANGE_FORWARDED:
+        heads = list(UserProfile.objects.filter(is_design_head=True, is_active=True)
+                     .select_related('user').order_by('pk'))
+        people = _change_request_audience(heads + [change.requested_by], actor)
+    elif transition == GATE_CHANGE_PM_REJECTED:
+        people = _change_request_audience([change.requested_by], actor)
+    elif transition in (GATE_CHANGE_REJECTED_SCM, GATE_CHANGE_CORRECTED):
+        people = _change_request_audience(
+            [change.requested_by, *scm_change_request_triagers(assignment.project)], actor)
     else:
         raise ValueError(f'design_gate_next_actors: unknown transition {transition!r}')
 
@@ -4753,7 +4796,37 @@ def design_pm_approval_queue(request):
             'head_returned_at':   assignment.arrived_at if returned else None,
         })
 
-    return render(request, 'projects/design/pm_approval_queue.html', {'rows': rows})
+    # SESSION B2b (D-10) — SCM change requests waiting for this PM or coordinator to forward
+    # or reject. THE QUERYSET FORM OF scm_change_request_triagers() FOR ONE VIEWER: the
+    # helper admits the assigned PM and the coordinators, each only when profile AND user
+    # are active, so for the person looking that is manageable_projects_q() (they are the PM
+    # or a coordinator) AND their own two flags. NOT the approvals query above, which is
+    # user_can_manage_project() and admits an inactive coordinator. One query; `.distinct()`
+    # for the same M2M reason as above. The forms stay on the per-site page, where B2a put
+    # them — this section links there.
+    today = timezone.localdate()
+    change_rows = []
+    if profile.is_active and request.user.is_active:
+        waiting = (DesignChangeRequest.objects
+                   .filter(verdict=CHANGE_REQUEST_WITH_PM)
+                   .filter(manageable_projects_q(profile, 'attempt__assignment__project__'),
+                           attempt__assignment__project__is_deleted=False,
+                           attempt__assignment__project__project_type='OPEX')
+                   .select_related('attempt__assignment__project__program',
+                                   'requested_by__user')
+                   .distinct()
+                   .order_by('requested_at', 'pk'))
+        for change in waiting:
+            change_rows.append({
+                'change_request': change,
+                'site':           change.attempt.assignment.project,
+                'requested_by':   change.requested_by,
+                # D-11: the PM's counter is time with the PM, which starts at the raise.
+                'age_days': (today - timezone.localtime(change.requested_at).date()).days,
+            })
+
+    return render(request, 'projects/design/pm_approval_queue.html',
+                  {'rows': rows, 'change_rows': change_rows})
 
 
 @login_required
@@ -5194,7 +5267,9 @@ CHANGE_REQUEST_FORBIDDEN = ("Only the site's PM, one of its coordinators, or SCM
 
 # SESSION B2a (Q5) — why an SCM-raised request skipped the PM. One string, so the raise
 # message, the activity line and the request row on change_request.html say the same thing.
-NO_PM_FALLBACK_TEXT = 'no PM is assigned to this site and it has no active coordinator'
+# SESSION B2b (A7): "active" on BOTH people — an assigned but inactive PM no longer counts,
+# so "no PM is assigned" would be false for exactly the site the helper now routes here.
+NO_PM_FALLBACK_TEXT = 'this site has no active PM and no active coordinator'
 
 # The action_code of the raise line when Q5's fallback routed it. A code of its own, not
 # `design_change_requested`, because the request row on change_request.html has to know
@@ -5483,19 +5558,34 @@ def design_change_request(request, project_id):
 
     # SESSION 3.1c-ii — the Design Heads, the site's PM and its coordinators hear about it,
     # in-app AND by email. After the atomic block, so no send can unwind the request.
+    #
+    # SESSION B2b (D-12) — AN SCM REQUEST WITH THE PM reaches the PM and the active
+    # coordinators ONLY, under GATE_CHANGE_RAISED_WITH_PM: it is not the Heads' until it is
+    # forwarded. A PM raise and a Q5 fallback stay on GATE_CHANGE_RAISED; the fallback's
+    # message adds why the PM stage was skipped.
     try:
         who = profile.user.get_full_name() or profile.user.username
         capacity = _change_request_raiser_label(request.user, project)
         subject = f'{project.project_id}: design change request raised'
-        body = (f'{project.project_id}: a design change request is waiting for the Design '
-                f'Head. {who} ({capacity}) raised it on attempt {attempt.attempt_number}.'
-                + (' The review in progress is suspended until it is decided.'
-                   if was_in_qc else ''))
-        for recipient in design_gate_next_actors(assignment, GATE_CHANGE_RAISED,
+        if to_pm:
+            transition = GATE_CHANGE_RAISED_WITH_PM
+            body = (f'{project.project_id}: a design change request is waiting for the '
+                    f'site\'s PM. {who} ({capacity}) raised it on attempt '
+                    f'{attempt.attempt_number}. Forward it to the Design Head or reject it.')
+        else:
+            transition = GATE_CHANGE_RAISED
+            body = (f'{project.project_id}: a design change request is waiting for the Design '
+                    f'Head. {who} ({capacity}) raised it on attempt {attempt.attempt_number}.'
+                    + (' The review in progress is suspended until it is decided.'
+                       if was_in_qc else ''))
+            if no_pm_fallback:
+                body += (f' It skipped the PM stage: {NO_PM_FALLBACK_TEXT}.')
+        for recipient in design_gate_next_actors(assignment, transition,
                                                  change=change, actor=profile):
             # The triage buttons are on the QC review screen, which the PM, a coordinator
-            # and SCM cannot open; they get the change-request screen instead.
-            if user_has_design_head_authority(recipient.user):
+            # and SCM cannot open; they get the change-request screen instead. A request
+            # with the PM is on the change-request screen for everyone, Heads included.
+            if not to_pm and user_has_design_head_authority(recipient.user):
                 link = reverse('design_qc_review', kwargs={'project_id': project.project_id})
             else:
                 link = reverse('design_change_request_form',
@@ -5508,7 +5598,9 @@ def design_change_request(request, project_id):
                 subject=subject,
                 html_message=_change_request_email(request, subject, body, 'Reason',
                                                    reason, link),
-                template='design_change_request_raised',  # a NotificationLog label
+                # a NotificationLog label
+                template=('design_change_request_raised_with_pm' if to_pm
+                          else 'design_change_request_raised'),
                 related_project=project, actor=profile)
     except Exception:
         logger.exception('design_change_request: the notification for %s failed; the '
@@ -5819,17 +5911,26 @@ def design_change_request_reject(request, pk):
 
     # SESSION 3.1c-ii — the requester alone, with the Head's reason. In-app AND email,
     # after the atomic block.
+    #
+    # SESSION B2b (D-12) — an SCM-origin request also tells the site's active PM and
+    # coordinators, who forwarded it (or would have). The requester's wording is unchanged;
+    # everyone else reads whose request it was.
     try:
         who = profile.user.get_full_name() or profile.user.username
         label = _change_request_decider_label(request.user)
         subject = f'{project.project_id}: design change request rejected'
-        body = (f'{project.project_id}: {who} ({label}) rejected your design change request '
-                f'on attempt {change.attempt.attempt_number}. The current design stands and '
-                f'no new attempt was opened.')
+        requester = change.requested_by
+        requester_name = requester.user.get_full_name() or requester.user.username
         link = reverse('design_change_request_form', kwargs={'project_id': project.project_id})
-        for recipient in design_gate_next_actors(change.attempt.assignment,
-                                                 GATE_CHANGE_REJECTED,
+        transition = (GATE_CHANGE_REJECTED_SCM if change.origin == CHANGE_REQUEST_ORIGIN_SCM
+                      else GATE_CHANGE_REJECTED)
+        for recipient in design_gate_next_actors(change.attempt.assignment, transition,
                                                  change=change, actor=profile):
+            whose = ('your design change request' if recipient.pk == requester.pk
+                     else f'the design change request {requester_name} raised')
+            body = (f'{project.project_id}: {who} ({label}) rejected {whose} '
+                    f'on attempt {change.attempt.attempt_number}. The current design stands and '
+                    f'no new attempt was opened.')
             send_notification(
                 recipient=recipient,
                 message=f'{body} Reason: "{reason}"',
@@ -5864,8 +5965,10 @@ def design_change_request_reject(request, pk):
 #   corrected  he fixed the BOQ in place with boq_correct, and links those corrections
 #                                                                          -> corrected
 #
-# NONE OF THE FOUR SENDS A NOTIFICATION. The three existing sends are unchanged; B2b
-# reroutes them and adds these (EXECUTION_MODULE_DEFERRED §D50).
+# SESSION B2b (D-12): EACH OF THE FOUR NOW NOTIFIES, in-app AND email, after its atomic
+# block, under its own design_gate_next_actors() key — forward the Heads and the requester,
+# PM reject the requester, withdraw the PM and coordinators, corrected the requester, PM
+# and coordinators. The SCM raise now reaches the PM and coordinators, not the Heads.
 #
 # EVERY TRANSITION RE-READS THE VERDICT UNDER A ROW LOCK on the request, exactly as accept
 # and reject do, so a double submit or two people acting at once produce one decision.
@@ -5972,6 +6075,43 @@ def design_change_request_forward(request, pk):
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_forwarded')
 
+    # SESSION B2b (D-12) — the Design Heads, who now owe the decision, and the SCM
+    # requester. In-app AND email, after the atomic block, so no send unwinds the forward.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        capacity = _change_request_raiser_label(request.user, project)
+        requester = change.requested_by
+        requester_name = requester.user.get_full_name() or requester.user.username
+        subject = f'{pid}: design change request forwarded to the Design Head'
+        form_link = reverse('design_change_request_form', kwargs={'project_id': pid})
+        for recipient in design_gate_next_actors(assignment, GATE_CHANGE_FORWARDED,
+                                                 change=change, actor=profile):
+            if recipient.pk == requester.pk:
+                body = (f'{pid}: {who} ({capacity}) forwarded your design change request on '
+                        f'attempt {change.attempt.attempt_number} to the Design Head. No new '
+                        f'attempt has been opened.')
+                quote_label, quote, link = 'PM note', note, form_link
+            else:
+                body = (f'{pid}: a design change request is waiting for the Design Head. '
+                        f'{requester_name} (SCM) raised it on attempt '
+                        f'{change.attempt.attempt_number} and {who} ({capacity}) forwarded it.')
+                quote_label, quote = 'Request', change.reason
+                link = (reverse('design_qc_review', kwargs={'project_id': pid})
+                        if user_has_design_head_authority(recipient.user) else form_link)
+            send_notification(
+                recipient=recipient,
+                message=f'{body} {quote_label}: "{quote}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, quote_label,
+                                                   quote, link),
+                template='design_change_request_forwarded',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_forward: the notification for %s failed; '
+                         'the forward stands.', pid)
+
     return _change_form_back(request, project, (
         f'{pid}: change request forwarded to the Design Head. He accepts it, rejects it, or '
         f'records it as corrected in the BOQ. No new attempt has been opened.'), ok=True)
@@ -6016,6 +6156,33 @@ def design_change_request_pm_reject(request, pk):
                      f'{note}',
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_pm_rejected')
+
+    # SESSION B2b (D-12) — the SCM requester, with the PM's note. In-app AND email, after
+    # the atomic block.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        capacity = _change_request_raiser_label(request.user, project)
+        subject = f'{pid}: design change request rejected by the PM'
+        body = (f'{pid}: {who} ({capacity}) rejected your design change request on attempt '
+                f'{change.attempt.attempt_number}. It did not reach the Design Head and '
+                f'nothing was reopened.')
+        link = reverse('design_change_request_form', kwargs={'project_id': pid})
+        for recipient in design_gate_next_actors(change.attempt.assignment,
+                                                 GATE_CHANGE_PM_REJECTED,
+                                                 change=change, actor=profile):
+            send_notification(
+                recipient=recipient,
+                message=f'{body} PM note: "{note}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, 'PM note',
+                                                   note, link),
+                template='design_change_request_pm_rejected',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_pm_reject: the notification for %s failed; '
+                         'the rejection stands.', pid)
 
     return _change_form_back(request, project, (
         f'{pid}: change request rejected. It did not reach the Design Head and nothing was '
@@ -6062,6 +6229,35 @@ def design_change_request_withdraw(request, pk):
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_withdrawn')
 
+    # SESSION B2b (D-12) — the site's active PM and coordinators: it was waiting for them
+    # and no longer is. In-app AND email, after the atomic block.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        requester = change.requested_by
+        whose = ('the design change request they raised' if requester.pk == profile.pk
+                 else f'the design change request '
+                      f'{requester.user.get_full_name() or requester.user.username} raised')
+        subject = f'{pid}: design change request withdrawn'
+        body = (f'{pid}: {who} (SCM) withdrew {whose} on attempt '
+                f'{change.attempt.attempt_number}. It is no longer waiting for you.')
+        link = reverse('design_change_request_form', kwargs={'project_id': pid})
+        for recipient in design_gate_next_actors(change.attempt.assignment,
+                                                 GATE_CHANGE_WITHDRAWN,
+                                                 change=change, actor=profile):
+            send_notification(
+                recipient=recipient,
+                message=f'{body} Withdrawal note: "{note}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body,
+                                                   'Withdrawal note', note, link),
+                template='design_change_request_withdrawn',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_withdraw: the notification for %s failed; '
+                         'the withdrawal stands.', pid)
+
     return _change_form_back(request, project, (
         f'{pid}: change request withdrawn. It did not reach the Design Head.'), ok=True)
 
@@ -6082,6 +6278,29 @@ def _uncited_corrections_since(project, since):
                 .order_by('corrected_at', 'pk'))
 
 
+def _quantity_text(value):
+    """A BOQ quantity as a person writes it: 12.00 -> '12', 12.50 -> '12.5'."""
+    return format(value.normalize(), 'f')
+
+
+def _correction_summary(corrections, limit=3):
+    """What a `corrected` request changed, for its notification (D-12): up to `limit`
+    corrections as "CODE before → after", then "and N more". A line added has no before;
+    a line added without a quantity has no after either."""
+    parts = []
+    for correction in corrections[:limit]:
+        code = correction.item_code or correction.item_description or 'an ad-hoc line'
+        before = ('new line' if correction.quantity_before is None
+                  else _quantity_text(correction.quantity_before))
+        after = ('no quantity' if correction.quantity_after is None
+                 else _quantity_text(correction.quantity_after))
+        parts.append(f'{code} {before} → {after}')
+    text = '; '.join(parts)
+    if len(corrections) > limit:
+        text += f', and {len(corrections) - limit} more'
+    return text
+
+
 @login_required
 def design_change_request_correct(request, pk):
     """The Head's third outcome (D-7): the BOQ has been corrected in place, so no rework.
@@ -6097,8 +6316,9 @@ def design_change_request_correct(request, pk):
     through _triage_guard(), exactly as accept and reject. NO WINDOW CHECK: this changes no
     BOQ row — boq_correct refused its own writes under a group lock.
 
-    NO BUTTON YET. The Head triages on the QC review banner, which B2a may not change; B2b
-    adds it there (HARD DEPENDENCY, §D50). Until then this is reachable by POST only."""
+    THE BUTTON is on the QC review banner (session B2b), beside Accept and Reject, behind the
+    same `has_head_authority` flag as they are. Not yet on the tender dashboard's queue —
+    one triage surface at a time (EXECUTION_MODULE_DEFERRED §D51)."""
     change = _change_request_or_404(pk)
     project, refusal = _triage_guard(request, change)
     if refusal is not None:
@@ -6145,6 +6365,39 @@ def design_change_request_correct(request, pk):
                      f'{"" if len(evidence) == 1 else "s"} linked) — no new attempt: {note}',
                      entity_type='DesignChangeRequest', entity_id=change.pk,
                      action_code='design_change_request_corrected')
+
+    # SESSION B2b (D-12) — the requester, and the site's active PM and coordinators, told
+    # WHAT changed: the corrections just linked, read from `evidence` (already in hand, so
+    # no query). In-app AND email, after the atomic block.
+    try:
+        who = profile.user.get_full_name() or profile.user.username
+        label = _change_request_decider_label(request.user)
+        requester = change.requested_by
+        requester_name = requester.user.get_full_name() or requester.user.username
+        subject = f'{pid}: design change request recorded as corrected in the BOQ'
+        changed = _correction_summary(evidence)
+        link = reverse('design_change_request_form', kwargs={'project_id': pid})
+        for recipient in design_gate_next_actors(change.attempt.assignment,
+                                                 GATE_CHANGE_CORRECTED,
+                                                 change=change, actor=profile):
+            whose = ('your design change request' if recipient.pk == requester.pk
+                     else f'the design change request {requester_name} raised')
+            body = (f'{pid}: {who} ({label}) recorded {whose} on attempt '
+                    f'{change.attempt.attempt_number} as corrected in the BOQ. No new attempt '
+                    f'was opened and the design did not move. Changed: {changed}.')
+            send_notification(
+                recipient=recipient,
+                message=f'{body} Note: "{note}"',
+                channels=['in_app', 'email'],
+                link=link,
+                subject=subject,
+                html_message=_change_request_email(request, subject, body, 'Note', note,
+                                                   link),
+                template='design_change_request_corrected',  # a NotificationLog label
+                related_project=project, actor=profile)
+    except Exception:
+        logger.exception('design_change_request_correct: the notification for %s failed; '
+                         'the correction stands.', pid)
 
     return _back(f'{pid}: change request recorded as corrected in the BOQ, citing '
                  f'{len(evidence)} correction{"" if len(evidence) == 1 else "s"}. No new '
@@ -6385,6 +6638,16 @@ def design_qc_review(request, project_id):
     attempt  = ctx['attempt']
     open_crs = list(_pending_change_requests(attempt))
     profile  = getattr(request.user, 'profile', None)
+    has_head_authority = user_has_design_head_authority(request.user)
+    # SESSION B2b — beside the "corrected" button, how many BOQ corrections it would cite:
+    # the same read the endpoint makes under its row lock. A courtesy, not the gate: the
+    # button stays pressable at zero and the endpoint says why it refuses. Only for the
+    # people who get the button, and the partial unique constraint allows one open request
+    # per attempt, so this is at most one query.
+    if has_head_authority:
+        for cr in open_crs:
+            cr.uncited_correction_count = len(
+                _uncited_corrections_since(project, cr.requested_at))
 
     can_qc_gate   = user_can_qc_gate_design(request.user, assignment)
     can_head_gate = user_can_head_gate_design(request.user, assignment)
@@ -6426,7 +6689,8 @@ def design_qc_review(request, project_id):
         # Part 4.6 — drives the triage buttons on the pending-change-request banner.
         # Head authority, NOT gate-2 authority: triaging a change request is not a review
         # of the package, so the self-QC and one-person-two-verdicts rules do not apply.
-        'has_head_authority': user_has_design_head_authority(request.user),
+        # Session B2b: the "corrected" button reads it too — _triage_guard()'s predicate.
+        'has_head_authority': has_head_authority,
         'is_deputy':     user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'released':      assignment.status == DESIGN_RELEASED,
         'error_categories': DESIGN_ERROR_CATEGORY_CHOICES,

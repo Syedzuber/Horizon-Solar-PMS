@@ -1198,3 +1198,114 @@ notification audience that is now wrong, B2b's screens, B3's wording and metrics
 timestamp-only evidence match, Q5's raise-time evaluation and its stranded-request gap, the
 action_code split, D-2's "active" applying to coordinators but not to the assigned PM, and
 PROTECT now biting. B1's hard dependency is removed from §D49 and the §12 row.
+
+## B2b — SCM change-request routing: screens and notifications (25 Sep 2026)
+
+The third of four sessions (B1 schema, B2a behaviour, B2b screens and sends, B3 wording and
+metrics). **Not deployed: B1, B2a and B2b deploy together, and the browser walk follows
+this session.** Part A was a read-only pre-flight ending in a hard stop; Part B was built
+after sign-off.
+
+### Corrections to the prompt, accepted at sign-off
+
+- **`design_gate_next_actors()` had six branches, not four.** Three gate branches carry four
+  keys, and 3.1c-ii added three change-request branches. All six, the `ValueError` else
+  and the shared tail are AST-identical to HEAD.
+- **The nav entry lives in `base.html` only.** `subadmin_base.html` has no design link, and
+  its audience (System Admin, Admin, CEO, and SCM on the stock-locations page) never
+  includes a PM.
+- **The PM queue has no role gate, by design.** A Finance user gets a 200 with no rows, not
+  a 403.
+- **`head_sites.html` needed no edit.** It prints `row.pending_at`; the label comes from
+  `design_pending_at()` in `models.py`.
+- **The banner's reject input is a text input**, not a textarea.
+- **Two tests are named `test_7`** in `tests_design_gate_notifications`. The structural one
+  is `CallSiteParseTests.test_7_the_recipient_helper_...`.
+- **The Head triages on TWO screens.** `tender_dashboard.html` also carries Accept and
+  Reject.
+- **`tests_design_change_notifications` test_a2, test_a3 and test_d4 pinned B2a's audiences**
+  and were rewritten as part of D-12.
+
+### Decisions at sign-off
+
+- **A7 part 1 approved:** `scm_change_request_triagers()`, with `NO_PM_FALLBACK_TEXT`
+  corrected. **A7 part 2 deferred:** the Head's pull of a stranded request (§D51).
+- **Q2:** `tender_dashboard.html` gets one change only, `with_head_since` under the age
+  badge. The corrected button stays off that screen (§D51).
+- **Q3:** Finance keeps the empty state.
+- **Q4:** `models.py` is in scope for the label, and the three test rewrites are approved.
+
+### What was built
+
+- **`permissions.py`:** `scm_change_request_triagers(project)` returns the assigned PM and
+  the coordinators, each only when both the profile and the user are active.
+  `user_can_triage_scm_change_request()` and `scm_change_request_has_triager()` read it.
+  `project_managers()` is unchanged.
+- **`design_views.py`:**
+  - **Six new keys**, in four branches appended before the `ValueError`:
+    `GATE_CHANGE_RAISED_WITH_PM`, `GATE_CHANGE_FORWARDED`, `GATE_CHANGE_PM_REJECTED`,
+    `GATE_CHANGE_WITHDRAWN`, `GATE_CHANGE_REJECTED_SCM` and `GATE_CHANGE_CORRECTED`.
+  - **The sends:** the raise picks its key by route, and the Head reject picks its key by
+    `origin`. Forward, PM reject, withdraw and corrected each gained one send block, after
+    the atomic block and inside `try`/`except Exception` with `logger.exception`.
+  - **NotificationLog labels:** `design_change_request_raised_with_pm`, `_forwarded`,
+    `_pm_rejected`, `_withdrawn` and `_corrected`. The email template is reused, so there
+    is no new template file.
+  - `_correction_summary()` and `_quantity_text()` build the corrected message.
+  - `design_qc_review` computes `uncited_correction_count` for Head-authority viewers.
+  - `design_pm_approval_queue` adds `change_rows`.
+  - The `design_head_sites` prefetch widens to open verdicts under the new `to_attr`
+    `open_change_request_rows`.
+- **`design_metrics.py`:** `_head_clock_start()` (`pm_decided_at or requested_at`) feeds the
+  queue's `age_days`, its sort, the new `with_head_since` key and the attention band.
+- **`models.py`:** adds `PENDING_AT_CHANGE_REQUEST_WITH_PM` and the
+  `design_pending_at(change_request_with_pm=)` keyword.
+- **Templates:**
+  - `qc_review.html` gets the corrected form and its count line.
+  - `pm_approval_queue.html` gets the new section and the "Design & BOQ approvals" title.
+  - `base.html` renames the nav label.
+  - `tender_dashboard.html` shows `with_head_since`.
+- **No migration.** No B2a transition logic changed beyond the helper.
+
+### Tests
+
+`projects/tests_change_request_screens.py` has 41 tests. Existing tests changed:
+
+- **`tests_design_gate_notifications`**
+  - `CHANGE_REQUEST` gains the four views, which widens `test_a2` and `test_7`.
+  - `test_a2`'s count goes from 7 to 11.
+- **`tests_design_change_notifications`**
+  - `CallSitePinTests.CHANGE_REQUEST` gains the four views (`test_p1`).
+  - `test_a2`'s audience goes from `[coord, head, pm]` to `[coord, pm]`.
+  - `test_a3` raises as the coordinator, which keeps its dedup assertion.
+  - `test_d4`'s template set gains `raised_with_pm` and `forwarded`.
+- **`tests_change_request_routing`:** one literal in `test_02` changes.
+
+**Mutations**, each turning named tests red:
+
+- **The actor is notified of their own forward:** `test_n5` fails.
+- **The forward send's `try`/`except` is removed:** `test_f1` errors and the parse test
+  `test_a2` fails.
+- **The Head's counter reads `requested_at`:** `test_h1`, `test_h2` and `test_h3` fail.
+
+### Verification
+
+Before: **2798 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips, 1
+expected failure. After: **2839 tests, the same 1 failure**, 17 skips, 1 expected failure,
+and no unexpected successes. `check` is clean, and `makemigrations --check --dry-run`
+reports "No changes detected".
+
+### Findings recorded
+
+`EXECUTION_MODULE_DEFERRED.md` **§D51** records:
+
+- the deferred Head pull, with the field question and today's withdraw-and-re-raise escape;
+- the corrected button's absence from the tender dashboard;
+- the wording and metrics B3 still owes;
+- two scopes on one PM queue page;
+- an inactive coordinator can still raise;
+- a later-assigned PM is told how a Q5 request ended;
+- forward does not reach deputies;
+- no query budget is pinned for the new sends.
+
+§D50 carries a closure note.

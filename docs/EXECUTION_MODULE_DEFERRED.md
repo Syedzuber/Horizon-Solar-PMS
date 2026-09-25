@@ -3312,6 +3312,80 @@ and B2b deploy together.**
   ActivityLog lookup and the `boq_corrections` prefetch. `_attempt_history()`'s three new
   prefetches cost nothing while those FKs are null.
 
+> **B2b status (25 Sep 2026):** the hard dependency above is CLOSED — the button is on the
+> QC review banner. The notification items 1–3, "B2b's screens" and "D-2's active" are
+> closed too. See §D51.
+
+### D51 — what session B2b (SCM change-request screens and notifications) left open
+
+Recorded by session B2b, 25 Sep 2026. **Recorded, not fixed.** Every claim was checked by
+grep, AST or a test in that session. No migration. **NOT DEPLOYED: B1, B2a and B2b deploy
+together; the browser walk follows this session.**
+
+- **Closed from §D50 by B2b.**
+  - The "corrected" button is on `qc_review.html`'s banner. It is gated on
+    `has_head_authority`, which is `_triage_guard()`'s predicate, and has its own
+    mandatory `correction_note`. It also shows the number of uncited corrections it
+    would cite.
+  - Every send is rerouted per D-12. Each new send is `['in_app', 'email']`, runs
+    after the atomic block, and sits inside a try.
+  - The PM queue has its with-PM section, with the nav entry renamed "Design & BOQ
+    approvals" in `base.html`, the only shell with that link.
+  - The Head's ageing is time with the Head (D-11).
+  - `head_sites` reads "PM (change request)" for a with-PM request.
+  - "An inactive assigned PM still counts as a triager" is closed:
+    `scm_change_request_triagers()` requires profile AND user active on the PM and on
+    every coordinator. The raise fallback, the forward and PM-reject predicate, the
+    queue section and the with-PM raise audience all read it.
+- **THE HEAD'S PULL OF A STRANDED REQUEST IS DEFERRED (A7, part 2).** A request can still
+  be stranded at `with_pm`. If the site loses its PM and its last active coordinator after
+  the raise, nobody can forward or reject it. The Head cannot move it either, and without
+  a migration there is no honest record for that move:
+  - **(a)** Writing the Head into `pm_decided_by` / `pm_decided_at` / `pm_note` makes every
+    reader say the PM forwarded it. That covers `change_request.html`'s forwarded line,
+    `_pm_stage_refusal`'s "already forwarded" and B3's metrics.
+  - **(b)** Writing only an activity line keeps the record honest but loses the Head's
+    clock start: D-11 would charge him the stranded days. The history would also live in
+    `ActivityLog` alone.
+  - A real pull needs `pulled_by` / `pulled_at` columns (a migration). It also needs a
+    Head surface that lists stranded requests; none exists. `head_sites` shows "PM (change
+    request)" but not that nobody can act on it.
+  - **The escape that exists today:** any SCM user withdraws the request, and raising it
+    again falls through Q5 straight to the Head. The helper now treats an inactive PM as
+    nobody, so the new raise takes the Q5 path.
+- **The "corrected" button is NOT on the tender dashboard's queue** (`tender_dashboard.html`
+  still offers Accept and Reject only). Signed off: one triage surface at a time, and B3
+  adds the second after the walk proves the first.
+- **B3 still owes (unchanged from §D50):**
+  - **The wording sweep.** `qc_review.html`'s banner heading and `qc_queue` say "PM change
+    request" of an SCM-origin request. So do `tender_dashboard.html`'s panel header ("PM
+    change requests awaiting your decision"), the attention band's reason text ("PM change
+    request awaiting your decision") and the accept and reject log lines ("PM change
+    request accepted/rejected").
+  - `site_workspace.html` still calls the queue the "Design approvals" screen, twice.
+  - A corrected request refuses a later accept or reject with "has already been corrected
+    in the boq".
+  - **The metrics.** `m_cr_rejection_rate`'s denominator, `m_cr_by_stage`'s buckets, and
+    `quality_analytics.html`.
+- **Found, not fixed.**
+  - **Two scopes on the PM queue page.** Its approvals section is `manageable_projects_q()`
+    (`user_can_manage_project()`, which admits an inactive coordinator); the new change-
+    request section is the triager list. By design (A2), but a single page answers "whose
+    sites" two ways.
+  - **An inactive coordinator may still RAISE, as `origin='pm'`**, through
+    `user_can_manage_project()` (unchanged from §D50). The helper narrows triage only.
+  - **A PM assigned after a Q5 fallback raise hears about the Head's decision.** The
+    request is `origin='scm'`, and a Head reject or corrected reads the triagers at send
+    time, so a PM who never saw the request is told how it ended.
+  - **The corrected message lists the time-matched evidence** (§D50). An unrelated
+    correction made in the window is shown to SCM as part of what changed.
+  - **Forward does not reach the Heads' deputies**, only `is_design_head` holders. That is
+    the same choice as the raise (3.1c-ii D4); a deputy covering for the Head is not told a
+    request has arrived.
+  - **No query budget is pinned for the new sends.** Each runs after its block: the forward
+    reads the Heads (one query), and corrected, withdraw and SCM reject read the triagers
+    (one or two queries).
+
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
 _No entries yet._

@@ -802,6 +802,16 @@ def qc_review_queue_age(sites, today=None):
     return _queue_age(sites, 'arka_submitted', 'artifacts_uploaded', today)
 
 
+def _head_clock_start(change):
+    """SESSION B2b (D-11) — when a pending change request reached the Design Head: the PM's
+    forward (`pm_decided_at`) for an SCM request that went through the PM, else the raise
+    (`requested_at`) for a PM-raised request or a Q5 fallback, which went straight to him.
+    The Head's counter measures time WITH THE HEAD, so the days an SCM request spent with
+    the PM are not charged to him. A pending request's pm_decided_at is only ever written
+    by the forward, so it is null exactly when the request never had a PM stage."""
+    return change.pm_decided_at or change.requested_at
+
+
 def change_request_queue(sites, today=None):
     """PART 4.6 — every PM change request awaiting the Design Head, oldest first.
 
@@ -812,11 +822,17 @@ def change_request_queue(sites, today=None):
 
     `age_days` is from `requested_at`, which is when the suspension started — not from
     `assignment.updated_at`, which moves on any save and would understate the wait.
+
+    SESSION B2b (D-11): `age_days`, and the order, are from _head_clock_start() — when the
+    request reached the Head. That is `requested_at` for a PM-raised request, as before,
+    and the PM's forward for an SCM one. `with_head_since` carries the same instant for the
+    timestamp under the badge, so the two agree.
     """
     today = today or timezone.localdate()
     rows = []
     for s in sites:
         for cr in s['pending_crs']:
+            since = _head_clock_start(cr)
             rows.append({
                 'change_request': cr,
                 'project':        s['project'],
@@ -825,10 +841,11 @@ def change_request_queue(sites, today=None):
                 'reason':         cr.reason,
                 'attempt_number': cr.attempt.attempt_number,
                 'requested_at':   cr.requested_at,
-                'age_days':       (today - timezone.localtime(cr.requested_at).date()).days,
+                'with_head_since': since,
+                'age_days':       (today - timezone.localtime(since).date()).days,
                 'stage':          STAGE_LABELS.get(s['stage'], s['stage']),
             })
-    rows.sort(key=lambda r: r['requested_at'])
+    rows.sort(key=lambda r: r['with_head_since'])
     return rows
 
 
@@ -898,10 +915,11 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
         # visible, and while it sits there a review is suspended and a designer is
         # waiting on a verdict nobody may record. Excluded from the `own_only` list on
         # purpose: triage is the Head's, and Design QC cannot clear this row.
+        # SESSION B2b (D-11): days with the Head — _head_clock_start(), as the queue.
         for s in sorted((x for x in sites if x['pending_crs']),
-                        key=lambda x: x['pending_crs'][0].requested_at):
+                        key=lambda x: _head_clock_start(x['pending_crs'][0])):
             cr = s['pending_crs'][0]
-            days = (today - timezone.localtime(cr.requested_at).date()).days
+            days = (today - timezone.localtime(_head_clock_start(cr)).date()).days
             _add(s, _SEV_CHANGE, days,
                  f'PM change request awaiting your decision — {days} day(s), '
                  f'attempt {cr.attempt.attempt_number}', 'danger')

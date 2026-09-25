@@ -4170,6 +4170,10 @@ PENDING_AT_SCM            = 'With SCM'
 # it and the Head owes a triage verdict. Without this label the column would name a
 # reviewer who is, in fact, blocked.
 PENDING_AT_CHANGE_REQUEST = 'Design Head (change request)'
+# SESSION B2b — the same reasoning for an SCM request still WITH THE PM (`with_pm`). SCM
+# raises only on a released site and the raise writes no status, so without this the
+# column read "With SCM" while the site's PM owed the forward-or-reject.
+PENDING_AT_CHANGE_REQUEST_WITH_PM = 'PM (change request)'
 
 #: Statuses where a Design QC reviewer owes the verdict. `arka_submitted` is NOT a member
 #: and cannot be: it is the one status whose bottleneck depends on a row rather than on
@@ -4213,7 +4217,8 @@ DESIGN_PENDING_AT = {
 }
 
 
-def design_pending_at(assignment, current_arka=None, change_request_pending=False):
+def design_pending_at(assignment, current_arka=None, change_request_pending=False,
+                      change_request_with_pm=False):
     """The party that owes the next move on `assignment`, as a short label for display.
 
     PURE. It reads only what it is handed and issues no query of its own — it is called
@@ -4226,6 +4231,11 @@ def design_pending_at(assignment, current_arka=None, change_request_pending=Fals
                                     Prefetch that batches it
         change_request_pending      whether that attempt carries a DesignChangeRequest
                                     with verdict='pending'
+        change_request_with_pm      whether it carries one with verdict='with_pm'
+                                    (session B2b). Checked straight after the pending
+                                    rule, with the same precedence over the status; the
+                                    partial unique constraint means the two never
+                                    coexist on one attempt.
 
     `assignment` may be None. A site with no DesignAssignment row is awaiting its survey,
     which is what the site list's own fallback badge already says.
@@ -4258,6 +4268,8 @@ def design_pending_at(assignment, current_arka=None, change_request_pending=Fals
 
     if change_request_pending:
         return PENDING_AT_CHANGE_REQUEST
+    if change_request_with_pm:
+        return PENDING_AT_CHANGE_REQUEST_WITH_PM
 
     status = assignment.status
 
