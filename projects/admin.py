@@ -562,6 +562,19 @@ class DesignChangeRequestAdmin(admin.ModelAdmin):
     raw_id_fields = ['attempt', 'resulting_attempt', 'decided_by']
     readonly_fields = ['requested_at']
 
+    # Session B1: the PM-stage, withdrawal and correction fields are written by B2's views
+    # only, never typed here. `origin` has no model default and `cr_origin_valid` refuses
+    # '', so the add form must offer it; once the row exists, who raised it is history.
+    B1_READONLY = ['pm_decided_by', 'pm_decided_at', 'pm_note',
+                   'withdrawn_by', 'withdrawn_at', 'withdrawal_note',
+                   'corrected_by', 'corrected_at', 'correction_note', 'boq_corrections']
+
+    def get_readonly_fields(self, request, obj=None):
+        fields = list(self.readonly_fields) + self.B1_READONLY
+        if obj is not None:
+            fields.append('origin')
+        return fields
+
 
 # ---------------------------------------------------------------------------
 # Versioned task templates (R-7)

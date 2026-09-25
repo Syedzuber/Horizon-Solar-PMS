@@ -1050,3 +1050,71 @@ moving ceiling; the three production rows are not corrected. **G8** dead
 `project_detail.html`. **G9** query-parameter dates keep their own handling. **G10**
 `create_delivery_challan` has no project scope; this is currently deliberate, and it is
 re-raised as finding 16 in `ACCESS_ISOLATION_AUDIT.md`.
+
+## B1 — SCM change-request routing: schema only (25 Sep 2026)
+
+The first of three sessions. B1 lands the schema, B2 builds the routing behaviour, and B3
+does the wording and the metrics. After B1 no new verdict value is written by the product.
+
+### Corrections to the prompt, accepted at sign-off
+
+- **"A row that forgets `origin` raises IntegrityError" was false.** A CharField with no
+  default stores `''` and does not raise. `cr_origin_valid` (`origin IN ('pm','scm')`) makes
+  it raise. That in turn made the raise view refuse every request, because it created rows
+  without `origin`. Sign-off option (a): the create call sets `origin`, and the six fixture
+  creates in `tests_design_part10`, `tests_design_part46` and `tests_design_pending_at` pass
+  `origin='pm'`.
+- **"Two label-only changes" named one.** There is one: `opened_reason`'s
+  `pm_change_request` is labelled "Change request".
+- **B5 needed `projects/admin.py`**, which was not in MODE. Added at sign-off.
+
+### What was built
+
+- **Migration `0102_change_request_scm_routing_schema`.** One migration, generated then
+  annotated:
+  - `verdict` 10 → 20, choices extended with `with_pm`, `pm_rejected`, `withdrawn`,
+    `corrected`.
+  - `origin` added with a one-off `'pm'` and `preserve_default=False`.
+  - `pm_decided_by` / `_at` / `pm_note`, `withdrawn_by` / `_at` / `withdrawal_note`,
+    `corrected_by` / `_at` / `correction_note`. The three people are PROTECT.
+  - `boq_corrections` M2M to BOQCorrection, `related_name='+'`.
+  - Five CHECKs, and the unique constraint re-created under the same name over
+    `('with_pm','pending')`.
+  - The origin backfill runs LAST, from the `design_change_requested` log line's
+    `'Change request raised by SCM'` prefix. Locally it set 1 row (pk 4) to `scm`; on an
+    empty database it prints `0 … 0`.
+  - The `opened_reason` AlterField is `-- (no-op)` in `sqlmigrate`.
+- **`design_change_request`:** the create call only, plus the two constants' import.
+  `origin` is chosen by `user_can_manage_project()`, the predicate `raised_as` uses.
+- **`DesignChangeRequestAdmin.get_readonly_fields()`:** every new field is read-only, and
+  `origin` is read-only once the row exists. What was editable before is unchanged,
+  including `verdict`.
+
+### Tests
+
+`projects/tests_change_request_schema.py`, 28 tests, ORM-only except two that go through
+the raise view (origin agrees with the log line for a PM and an SCM raise) and three on
+the admin. On SQLite the uniqueness tests assert the exception type, and the constraint
+name on PostgreSQL only; the CHECK tests assert the name, which SQLite reports. Mutations:
+narrowing the unique condition back to `pending` turned 3 red, and replacing
+`cr_origin_valid` with a constraint that accepts `''` turned 2 red.
+
+### Verification
+
+Before: **2743 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips,
+1 expected failure. After: **2771 tests, the same 1 failure** (same SQLite message), 17
+skips, 1 expected failure, no unexpected successes. `check` clean. `makemigrations --check
+--dry-run` "No changes detected". `migrate` → `migrate projects 0101` (columns, CHECKs and
+the partial index back to their pre-B1 form) → `migrate projects`, all OK.
+`tests_migration_chain` 2/2. An AST comparison against HEAD of every change-request
+function in `design_views`, `design_analytics` and `design_metrics` changed only
+`design_change_request`. The four change-request templates are unchanged.
+
+### Findings recorded
+
+`EXECUTION_MODULE_DEFERRED.md` **§D49**. It records the hard dependency (B2 must not deploy
+without B3's fix to `change_request.html` and `_attempt_history.html`), the four catch-all
+readers, the three metric defects, `with_pm` sitting outside every pending reader, the
+unenforceable at-least-one-correction rule, and the PROTECT deletion effects.
+`docs/MIGRATION_REHEARSAL.md` is new: the repo had no rehearsal procedure. It lists the
+migrations that can refuse on production data (0093, 0094, 0097, 0099, 0101).

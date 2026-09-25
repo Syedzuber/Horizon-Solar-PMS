@@ -3159,6 +3159,79 @@ session removed.
 second `assigned_design` selector. It was left alone because §G8 records that template as
 dead. If it is ever revived, it needs this same gate.
 
+### D49 — what session B1 (SCM change-request routing, schema only) left open
+
+Recorded by session B1, 25 Sep 2026. **Recorded, not fixed.** Every claim below was checked
+by grep, AST or a local query in that session. Migration `0102` added four verdict values
+(`with_pm`, `pm_rejected`, `withdrawn`, `corrected`), `origin`, the PM-stage, withdrawal and
+correction fields, the `boq_corrections` M2M and five CHECKs; it widened
+`uniq_pending_change_request_per_attempt` to `verdict IN ('with_pm', 'pending')` under the
+same name.
+
+> **HARD DEPENDENCY — B2 MUST NOT DEPLOY WITHOUT B3's FIX TO `change_request.html` AND
+> `_attempt_history.html`.** Both end their verdict branch in an `{% else %}` that reads
+> "Awaiting the Design Head". Once B2 writes a new value, a withdrawn, PM-rejected, corrected
+> or with-the-PM request renders as waiting for the Head, and `_attempt_history.html` also
+> tells the designer that a verdict on the attempt is suspended.
+
+- **The new values are unreachable until B2.** No product code writes a new verdict, a
+  `pm_decided_*`, `withdrawn_*` or `corrected_*` field, or a `boq_corrections` link. The one
+  new column B1 writes is `origin`, in `design_change_request`'s create call. **Django admin
+  can still set them**: `verdict` stays editable there (unchanged by decision), so an admin
+  user can choose `with_pm` today. The CHECKs hold the row's shape; nothing holds its meaning.
+- **B3 owns the wording and the metrics.** The four catch-all readers, found by B1's A3:
+  1. `design_analytics.m_cr_rejection_rate`: its denominator is `len(crs)` over an unfiltered
+     list, so every new-value row enters it.
+  2. `design_analytics.m_cr_by_stage` reads no verdict at all and counts every row.
+  3. `change_request.html`: the `{% else %}` after `accepted` / `rejected` (see the hard
+     dependency).
+  4. `_attempt_history.html`: the same, plus its `alert-secondary` / `alert-warning` class
+     test, which is `== 'rejected'` / else.
+- **Three metric defects the audit found, none caused by B1:**
+  - **The rejection-rate denominator** counts every request, pending included, by design
+    (its docstring says so). After B2 it will also count requests that never reached the
+    Head: with the PM, rejected by the PM, withdrawn.
+  - **`cr_by_stage` puts every post-release request in "Raised while with the Head".** A
+    released attempt has `qc_reviewed_at` set, so `head_at` is not null and any later
+    `requested_at` passes `>= head_at`. There is no "after release" bucket, and every
+    SCM-raised request is post-release (SCM's window is `design_change_window_open()` only).
+  - **`quality_analytics.html:382` contradicts the code.** It says "Counted against the PM
+    who raised the request", but `m_change_request_rate` buckets by the SITE's
+    `project.assigned_pm`, never by `requested_by`. Now that SCM raises, it is wrong twice.
+- **`corrected` needs at least one linked correction, and the database cannot say so.** A
+  CHECK cannot count M2M rows. B2's view must refuse a `corrected` verdict with no
+  `boq_corrections` link inside the same transaction that sets it. `related_name='+'`, so
+  BOQCorrection has no reverse accessor: "is this correction already evidence?" is a query
+  on `DesignChangeRequest.boq_corrections.through`.
+- **`with_pm` is outside every "pending" reader**, which all name `pending` explicitly:
+  `_pending_change_requests()` (QC suspension, the raise pre-check, `open_crs`),
+  `pending_change_requests_for()` (the group-lock blocker), the `pending_change_request_rows`
+  prefetch behind `design_pending_at()`, and `design_metrics`' `pending_crs` (the Head's
+  queue). So in B2 a request with the PM suspends no review and blocks no lock. The raise
+  pre-check does not see it either; the DB constraint does, and the view's `except
+  IntegrityError` then says "only one change request at a time may await the Design Head",
+  which is wrong for a request that is with the PM. Each of these is a B2 decision.
+- **Accept and reject refuse the new values with odd wording.** Both re-read under the lock
+  and refuse `verdict != 'pending'` with "that change request has already been
+  {get_verdict_display|lower}", which would read "already been with the pm". The refusal is
+  right; the sentence is B3's.
+- **`origin` is set from `user_can_manage_project()`, the predicate `raised_as` uses**, so
+  an Admin or coordinator who also holds SCM authority is `pm`, matching the log line.
+  The create call evaluates the predicate a second time instead of sharing `raised_as`'s
+  evaluation, because B1 might touch the create call only. The result is the same, since
+  nothing between the two calls changes the user or the site. B2 may fold them into one.
+- **PROTECT on `pm_decided_by`, `withdrawn_by` and `corrected_by`** (decision 3). No
+  deletion is blocked today, because nothing writes them. From B2, a profile named in any
+  of them cannot be deleted. The paths that delete a profile are Django admin's User delete
+  (`UserProfile.user` is CASCADE) and UserProfile delete, and `teardown_order_demo` for its
+  manifest's profiles. No product view deletes a user. `requested_by` was already PROTECT,
+  so a raiser was already undeletable. `teardown_order_demo`'s relation guard lists
+  **no** `DesignChangeRequest` relation, neither the old one nor the three new ones, so a
+  demo profile named on a request surfaces as a ProtectedError, not the guard's message.
+- **The admin add form must choose `origin`.** It has no model default and
+  `cr_origin_valid` refuses `''`. On the change form it is read-only, along with every new
+  field.
+
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 
 _No entries yet._

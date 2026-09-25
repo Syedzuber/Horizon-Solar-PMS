@@ -251,13 +251,13 @@ class Part10Base(TestCase):
         self.cr_accepted = DesignChangeRequest.objects.create(
             attempt=t7a, requested_by=self.pm2, reason='client changed the roof',
             verdict=CHANGE_REQUEST_ACCEPTED, decided_by=self.head,
-            decided_at=self.now - timedelta(days=9), resulting_attempt=t7b)
+            decided_at=self.now - timedelta(days=9), resulting_attempt=t7b, origin='pm')
         # And a rejected one, so the rejection rate has something to report.
         self.cr_rejected = DesignChangeRequest.objects.create(
             attempt=t7b, requested_by=self.pm2, reason='and again',
             verdict=CHANGE_REQUEST_REJECTED, decided_by=self.head,
             decided_at=self.now - timedelta(days=2),
-            rejection_reason='out of scope for this tender')
+            rejection_reason='out of scope for this tender', origin='pm')
 
         # ---- three MORE Group A failures, across two further categories --------
         # VERIFICATION 6 needs three DISTINCT Group A categories present. ERR_LAYOUT

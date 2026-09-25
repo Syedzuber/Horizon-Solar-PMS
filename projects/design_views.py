@@ -101,6 +101,7 @@ from .models import (
     ATTEMPT_REASON_INITIAL, ATTEMPT_REASON_QC_FAILED, ATTEMPT_REASON_PM_CHANGE_REQUEST,
     # Part 4.6 — the Design Head's triage verdict on a PM change request.
     CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED,
+    CHANGE_REQUEST_ORIGIN_PM, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_FILE_CAD_ZIP, DESIGN_FILE_CAD_PDF, DESIGN_FILE_CAD_DWG,
     DESIGN_FILE_BOQ_EXCEL, DESIGN_FILE_BOQ_PDF, DESIGN_FILE_KIND_CHOICES,
     DESIGN_FILE_CAD_KINDS, DESIGN_FILE_LEGACY_KINDS,
@@ -5388,7 +5389,11 @@ def design_change_request(request, project_id):
             # group until the Design Head accepts — see design_change_request_accept().
             change = DesignChangeRequest.objects.create(
                 attempt=attempt, requested_by=profile, reason=reason,
-                verdict=CHANGE_REQUEST_PENDING)
+                verdict=CHANGE_REQUEST_PENDING,
+                # B1: raised_as's own predicate, so the column and the log line agree.
+                origin=(CHANGE_REQUEST_ORIGIN_PM
+                        if user_can_manage_project(request.user, project)
+                        else CHANGE_REQUEST_ORIGIN_SCM))
             log_activity(project, profile,
                          f'{raised_as} on attempt '
                          f'{attempt.attempt_number} — awaiting the Design Head: {reason}'

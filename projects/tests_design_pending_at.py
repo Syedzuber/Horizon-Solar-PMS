@@ -367,7 +367,7 @@ class PendingAtChangeRequestTests(PendingAtBase):
                                 (CHANGE_REQUEST_REJECTED, 'The current version stands.')):
             DesignChangeRequest.objects.create(
                 attempt=attempt, requested_by=self.head, reason='Panel count changed',
-                verdict=verdict, rejection_reason=reason)
+                verdict=verdict, rejection_reason=reason, origin='pm')
         _, rows = self._site_rows()
         row = next(r for r in rows if r['site'].project_id == 'PA-CR-DONE')
         self.assertEqual(row['pending_at'], PENDING_AT_QC)
@@ -383,7 +383,7 @@ class PendingAtChangeRequestTests(PendingAtBase):
 
         DesignChangeRequest.objects.create(
             attempt=attempt, requested_by=self.head, reason='Inverter rating changed',
-            verdict=CHANGE_REQUEST_PENDING)
+            verdict=CHANGE_REQUEST_PENDING, origin='pm')
         _, rows = self._site_rows()
         row = next(r for r in rows if r['site'].project_id == 'PA-CR-LIVE')
         self.assertEqual(row['pending_at'], PENDING_AT_CHANGE_REQUEST)

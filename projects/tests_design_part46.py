@@ -203,7 +203,8 @@ class RaisingTests(Part46Base):
             with transaction.atomic():
                 DesignChangeRequest.objects.create(
                     attempt=self.attempt, requested_by=self.pm,
-                    reason='and another thing', verdict=CHANGE_REQUEST_PENDING)
+                    reason='and another thing', verdict=CHANGE_REQUEST_PENDING,
+                    origin='pm')
         self.assertIn('uniq_pending_change_request_per_attempt', str(caught.exception))
 
         # And the view refuses it with a message rather than a 500.
@@ -609,7 +610,7 @@ class GroupLockTests(Part46Base):
         change = DesignChangeRequest.objects.create(
             attempt=self.attempt2, requested_by=self.pm,
             reason='the client wants a different inverter',
-            verdict=CHANGE_REQUEST_PENDING)
+            verdict=CHANGE_REQUEST_PENDING, origin='pm')
 
         self._login(self.scm)
         self.client.post(reverse('site_group_lock', kwargs={'pk': self.group.pk}))

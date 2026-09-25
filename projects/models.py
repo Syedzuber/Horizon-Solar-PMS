@@ -4350,7 +4350,9 @@ ATTEMPT_REASON_PM_REJECTED       = 'pm_rejected'
 DESIGN_ATTEMPT_REASON_CHOICES = [
     (ATTEMPT_REASON_INITIAL,           'Initial'),
     (ATTEMPT_REASON_QC_FAILED,         'QC failed'),
-    (ATTEMPT_REASON_PM_CHANGE_REQUEST, 'PM change request'),
+    # Label only (session B1, 25 Sep 2026): SCM raises change requests too, so the label
+    # no longer names the PM. The stored value stays `pm_change_request`.
+    (ATTEMPT_REASON_PM_CHANGE_REQUEST, 'Change request'),
     (ATTEMPT_REASON_PM_REJECTED,       'PM rejected'),
 ]
 
@@ -5277,11 +5279,51 @@ CHANGE_REQUEST_PENDING  = 'pending'
 CHANGE_REQUEST_ACCEPTED = 'accepted'
 CHANGE_REQUEST_REJECTED = 'rejected'
 
+# SESSION B1 (25 Sep 2026) — SCHEMA ONLY. An SCM-raised request goes to the site's PM
+# before the Head (D-1..D-4), and the Head gains a third outcome (D-7). These four values
+# are NEW VERDICTS, not a separate stage field (D-9), and NOTHING WRITES THEM until B2:
+#
+#   with_pm      raised by SCM, waiting for the PM to forward or reject it. Counts as open
+#                for the one-open-request rule below, exactly like `pending`.
+#   pm_rejected  the PM refused it; it never reached the Head. SCM-origin only.
+#   withdrawn    SCM took it back while it was with the PM. SCM-origin only.
+#   corrected    the Head fixed the BOQ in place (boq_correct) instead of opening an
+#                attempt. Either origin. Evidenced by `boq_corrections`, not claimed.
+#
+# A forwarded request becomes `pending` — the same value a PM-raised one starts at — so
+# "the PM decided" is `pm_decided_at`, never the verdict.
+CHANGE_REQUEST_WITH_PM     = 'with_pm'
+CHANGE_REQUEST_PM_REJECTED = 'pm_rejected'
+CHANGE_REQUEST_WITHDRAWN   = 'withdrawn'
+CHANGE_REQUEST_CORRECTED   = 'corrected'
+
 CHANGE_REQUEST_VERDICT_CHOICES = [
-    (CHANGE_REQUEST_PENDING,  'Pending'),
-    (CHANGE_REQUEST_ACCEPTED, 'Accepted'),
-    (CHANGE_REQUEST_REJECTED, 'Rejected'),
+    (CHANGE_REQUEST_PENDING,     'Pending'),
+    (CHANGE_REQUEST_ACCEPTED,    'Accepted'),
+    (CHANGE_REQUEST_REJECTED,    'Rejected'),
+    (CHANGE_REQUEST_WITH_PM,     'With the PM'),
+    (CHANGE_REQUEST_PM_REJECTED, 'Rejected by the PM'),
+    (CHANGE_REQUEST_WITHDRAWN,   'Withdrawn'),
+    (CHANGE_REQUEST_CORRECTED,   'Corrected in the BOQ'),
 ]
+
+# Who raised it. Set at creation from the SAME predicate the raise view's activity line
+# uses (`user_can_manage_project`), so the column and the log can never disagree.
+CHANGE_REQUEST_ORIGIN_PM  = 'pm'
+CHANGE_REQUEST_ORIGIN_SCM = 'scm'
+
+CHANGE_REQUEST_ORIGIN_CHOICES = [
+    (CHANGE_REQUEST_ORIGIN_PM,  'PM'),
+    (CHANGE_REQUEST_ORIGIN_SCM, 'SCM'),
+]
+
+# The verdicts only an SCM-raised request can reach — the PM stage does not exist for a
+# request the PM raised himself (D-6).
+CHANGE_REQUEST_SCM_ONLY_VERDICTS = [
+    CHANGE_REQUEST_WITH_PM, CHANGE_REQUEST_PM_REJECTED, CHANGE_REQUEST_WITHDRAWN,
+]
+# The verdicts that are still OPEN — one per attempt, at most.
+CHANGE_REQUEST_OPEN_VERDICTS = [CHANGE_REQUEST_WITH_PM, CHANGE_REQUEST_PENDING]
 
 
 class DesignChangeRequest(models.Model):
@@ -5310,9 +5352,12 @@ class DesignChangeRequest(models.Model):
 
     # ── Part 4.6 — the Design Head's triage ──────────────────────────────────
     verdict = models.CharField(
-        max_length=10, choices=CHANGE_REQUEST_VERDICT_CHOICES,
+        max_length=20, choices=CHANGE_REQUEST_VERDICT_CHOICES,
         default=CHANGE_REQUEST_PENDING,
     )
+    # NO DEFAULT, on purpose. A CharField without one stores '' rather than raising, so
+    # `cr_origin_valid` below is what refuses a row that forgot to say who raised it.
+    origin = models.CharField(max_length=3, choices=CHANGE_REQUEST_ORIGIN_CHOICES)
     # SET_NULL, not PROTECT: the verdict is a fact about the request and must survive
     # the triager's profile being removed. Left null on rows migrated from Part 4, where
     # nobody triaged anything.
@@ -5326,6 +5371,39 @@ class DesignChangeRequest(models.Model):
     # putting a person in front of this queue is that it is not one.
     rejection_reason = models.TextField(blank=True, default='')
 
+    # ── Session B1 — the PM stage, withdrawal and in-place correction ────────
+    # PROTECT on all three people, unlike decided_by: each names someone whose decision
+    # this row records, and a CHECK below requires two of them. SET_NULL would either
+    # null a recorded decision silently or collide with that CHECK at delete time.
+    pm_decided_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='pm_triaged_design_change_requests',
+    )
+    pm_decided_at = models.DateTimeField(null=True, blank=True)
+    pm_note       = models.TextField(blank=True, default='')
+
+    withdrawn_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='withdrawn_design_change_requests',
+    )
+    withdrawn_at    = models.DateTimeField(null=True, blank=True)
+    withdrawal_note = models.TextField(blank=True, default='')
+
+    corrected_by = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='corrected_design_change_requests',
+    )
+    corrected_at    = models.DateTimeField(null=True, blank=True)
+    correction_note = models.TextField(blank=True, default='')
+    # The EVIDENCE for `corrected`: the BOQCorrection rows the Head made for this request.
+    # An M2M here rather than an FK on BOQCorrection, so neither that model nor
+    # boq_correct changes. related_name='+' — BOQCorrection gains no accessor either.
+    # A CHECK cannot count join rows, so "corrected needs at least one" is B2's view's
+    # job, inside its transaction (EXECUTION_MODULE_DEFERRED §D49).
+    boq_corrections = models.ManyToManyField(
+        'BOQCorrection', blank=True, related_name='+',
+    )
+
     class Meta:
         ordering = ['-requested_at']
         constraints = [
@@ -5337,15 +5415,51 @@ class DesignChangeRequest(models.Model):
                            | ~models.Q(rejection_reason='')),
                 name='cr_rejection_reason_required_when_rejected',
             ),
-            # At most one UNTRIAGED request per attempt. Partial (condition=) so any
+            # At most one OPEN request per attempt. Partial (condition=) so any
             # number of decided rows may coexist with it — a PM whose request was
             # rejected may raise another, and the history of both is kept. Enforced
             # here rather than only in the view because two pending requests would give
-            # the Head two verdicts to record against one suspension.
+            # the Head two verdicts to record against one suspension. Session B1 widened
+            # it to `with_pm` too, KEEPING THE NAME — tests_design_part46 test_02 asserts it.
             models.UniqueConstraint(
                 fields=['attempt'],
-                condition=models.Q(verdict=CHANGE_REQUEST_PENDING),
+                condition=models.Q(verdict__in=CHANGE_REQUEST_OPEN_VERDICTS),
                 name='uniq_pending_change_request_per_attempt',
+            ),
+            # ── Session B1 ──────────────────────────────────────────────────
+            # Refuses the '' a CharField with no default stores when origin is forgotten.
+            models.CheckConstraint(
+                condition=models.Q(origin__in=[CHANGE_REQUEST_ORIGIN_PM,
+                                               CHANGE_REQUEST_ORIGIN_SCM]),
+                name='cr_origin_valid',
+            ),
+            # On pm_decided_at, NOT on verdict: a forwarded request is `pending`, which a
+            # PM-raised one also is, so the verdict cannot say whether the PM decided.
+            models.CheckConstraint(
+                condition=(models.Q(pm_decided_at__isnull=True)
+                           | ~models.Q(pm_note='')),
+                name='cr_pm_note_required_when_pm_decided',
+            ),
+            models.CheckConstraint(
+                condition=(~models.Q(verdict=CHANGE_REQUEST_WITHDRAWN)
+                           | (models.Q(withdrawn_by__isnull=False)
+                              & models.Q(withdrawn_at__isnull=False)
+                              & ~models.Q(withdrawal_note=''))),
+                name='cr_withdrawal_fields_required_when_withdrawn',
+            ),
+            models.CheckConstraint(
+                condition=(~models.Q(verdict=CHANGE_REQUEST_CORRECTED)
+                           | (models.Q(corrected_by__isnull=False)
+                              & models.Q(corrected_at__isnull=False)
+                              & ~models.Q(correction_note=''))),
+                name='cr_correction_fields_required_when_corrected',
+            ),
+            # D-6: the PM-raised path has no PM stage. `corrected` is NOT listed — a
+            # PM-raised request may end corrected too.
+            models.CheckConstraint(
+                condition=(~models.Q(origin=CHANGE_REQUEST_ORIGIN_PM)
+                           | ~models.Q(verdict__in=CHANGE_REQUEST_SCM_ONLY_VERDICTS)),
+                name='cr_pm_origin_excludes_scm_stages',
             ),
         ]
 
