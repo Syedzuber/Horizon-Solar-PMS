@@ -1309,3 +1309,63 @@ reports "No changes detected".
 - no query budget is pinned for the new sends.
 
 §D50 carries a closure note.
+
+## Walkthrough seed — fresh starting points (26 Sep 2026)
+
+This adds the `fresh` area to `seed_walkthrough`: untouched sites sitting at the start of
+each flow, for building a new feature. It follows the walkthrough seed itself (`6c66477`),
+which landed without an entry in this log.
+
+There was no Part A; `WALKTHROUGH_SEED_AUDIT.md` stands. The map is the "Fresh starting
+points" section of `docs/WALKTHROUGH_DATA.md`.
+
+### Corrections to the prompt
+
+- **`--rebuild` does not exist.** It was proposed in Part A and dropped at the Part B
+  sign-off, which made DROP DATABASE the reset. Idempotency works for `fresh` as for every
+  other area: a second run writes nothing.
+- **"No history beyond what creation writes" holds only for the two untouched sites.**
+  Every other starting point needs the real actions that reach it: a survey link is one
+  design ledger row, allocation another. Each site's count is stated in the doc and pinned
+  by a test.
+- **Creation alone writes history.** `create_opex_site` and `project_create` each record a
+  Draft StatusTransition, so the area is refused by the teardown even without allocation.
+- **Two requested states are unreachable, confirmed by grep:**
+  - `allocated`: `_allocate_one` goes straight to `in_design`.
+  - `due_date_proposed`: it has no writer. Its nearest real state, a pending extension
+    request, is seeded as WALKFRESHEXT.
+- **"There are no untouched sites today" was not strictly true.** WALKD01 (no assignment)
+  and the Residential Draft project already existed, but both are backdated and sit in
+  acted-upon tenders.
+
+### What was built
+
+The `fresh` area covers tender WALKFRESH with seven sites (WALKFRESHSURVEY, ALLOC, DESIGN,
+EXT, ARKA, REL, ACT), plus:
+
+- the empty tender WALKFRESHEMPTY;
+- a Residential project that is created but not activated;
+- a vendor with no orders.
+
+It uses the real clock throughout; nothing is backdated. It uses the same views, the four
+checks, the manifest and the stubs as the other areas, with no new direct write.
+
+`AREAS` puts `fresh` last. `_program` and `_site` gained an optional real-clock mode, and
+their defaults are unchanged.
+
+### Tests
+
+Nine new tests, 39 in `tests_walkthrough_seed.py` in total. The full-seed class now seeds
+the eight existing areas, snapshots them, then seeds `fresh`, and proves those areas'
+manifest sections and rows are unchanged.
+
+### Verification
+
+Before: **2869 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips, 1
+expected failure. After: **2878 tests, the same 1 failure**, 17 skips, 1 expected failure.
+`check` is clean, and `makemigrations --check --dry-run` reports "No changes detected".
+
+A full seed at HEAD and after, each on a newly created database, gives identical
+per-area, per-model counts for all eight existing areas (105 lines). `--only fresh` run
+twice gives identical counts (863 rows in 28 tables). The teardown dry run refuses `fresh`:
+26 StatusTransition rows.

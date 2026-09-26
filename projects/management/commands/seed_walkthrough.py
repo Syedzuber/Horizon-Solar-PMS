@@ -53,6 +53,10 @@ Histories are driven under `SimClock`: the product writes every timestamp itself
 simulated past instant, so ages and pools look real. Nothing is backdated afterwards,
 and the clock never runs backwards within a history.
 
+THE `fresh` AREA IS THE EXCEPTION: untouched starting points for building a new feature,
+each reached by the fewest real actions its state needs, on the REAL clock — nothing in
+it is backdated, so its sites age from the seed run. See `_area_fresh`.
+
 IDEMPOTENT BY AREA
 ------------------
 Each area is recorded in the manifest (`~/.horizon-pms-walkthrough/<db>.json`, bound to
@@ -65,6 +69,7 @@ NEVER PRINTS A PASSWORD. The walkthrough password is in docs/WALKTHROUGH_DATA.md
 import io
 import uuid
 import zipfile
+from contextlib import nullcontext
 from decimal import Decimal
 
 from django.contrib.auth.models import User
@@ -112,8 +117,10 @@ USERS = [
 #: The one account whose address is NOT .invalid — see permitted_real_email().
 REAL_ADDRESS_USERNAME = 'walk.finassignee'
 
+#: `fresh` is LAST on purpose: every other area runs exactly as it did before it existed,
+#: so their rows, and the Residential generator's numbers, are unchanged by it.
 AREAS = ['users', 'reference', 'design', 'changes', 'procurement', 'delivery',
-         'execution', 'residential']
+         'execution', 'residential', 'fresh']
 DEPENDS = {'users': [], 'reference': ['users']}
 for _area in AREAS[2:]:
     DEPENDS[_area] = ['users', 'reference']
@@ -124,8 +131,14 @@ TENDERS = {
     'procurement': ('WALKPRC', 'WALK Procurement and Payments'),
     'delivery':    ('WALKDLV', 'WALK Deliveries'),
     'execution':   ('WALKEXE', 'WALK Site Execution'),
+    'fresh':       ('WALKFRESH', 'WALK FRESH Starting Points'),
 }
 CLIENT_NAME = 'WALK Client (synthetic)'
+
+#: The `fresh` area's second tender: created, and nothing else — for walking site creation.
+FRESH_EMPTY_TENDER = ('WALKFRESHEMPTY', 'WALK FRESH Empty Tender (no sites)')
+FRESH_RESIDENTIAL  = 'WALK FRESH Residential Not Activated'
+FRESH_VENDOR       = 'WALKFRESH Vendor - no orders'
 
 WAREHOUSES = [
     ('WALK-WH-DEL',  'WALK Delhi Central Warehouse', 'walk.scm'),
@@ -428,20 +441,28 @@ class Command(BaseCommand):
             call_command('seed_opex_installation_checklists', stdout=io.StringIO())
 
     # ================================================================ helpers
-    def _program(self, area):
+    def _at(self, days_ago, history):
+        """The simulated clock — or, for `days_ago=None`, the real one. The `fresh` area
+        passes None: its rows are created NOW and age from the seed run."""
+        if days_ago is None:
+            return nullcontext()
+        return self.clock.at(days_ago, history=history)
+
+    def _program(self, area, days_ago=60, tender=None, planned=8):
         from projects.models import Program
-        code, name = TENDERS[area]
-        with self.clock.at(60, history=f'program:{code}'):
+        code, name = tender or TENDERS[area]
+        with self._at(days_ago, f'program:{code}'):
             self._post('walk.pm', 'program_create', data={
                 'program_type': 'OPEX', 'name': name, 'client_name': CLIENT_NAME,
-                'status': 'Active', 'short_tender_code': code, 'planned_site_count': 8,
+                'status': 'Active', 'short_tender_code': code,
+                'planned_site_count': planned,
             }, check=lambda: Program.objects.filter(short_tender_code=code).exists(),
                 what=f'tender {code}')
         return Program.objects.get(short_tender_code=code)
 
     def _site(self, program, code, days_ago, city='Walk City', capacity='150.00'):
         from projects.models import Project
-        with self.clock.at(days_ago, history=code):
+        with self._at(days_ago, code):
             self._post('walk.pm', 'opex_site_create', {'pk': program.pk}, {
                 'site_code': code, 'site_address': f'{code}, synthetic address',
                 'city': city, 'state': 'Walk State', 'dc_capacity_kw': capacity,
@@ -1389,6 +1410,94 @@ class Command(BaseCommand):
                                {'status': 'Done'},
                                check=lambda t=t: m.Task.objects.get(pk=t.pk).status
                                == m.Task.DONE, what=f'finish {t.task_name}')
+
+    # ================================================================== fresh
+    def _area_fresh(self):
+        """Untouched STARTING POINTS, for building and walking a new feature.
+
+        Every other area drives sites to an acted-upon state and backdates them. This
+        one does neither: each site sits at the EARLIEST state of a flow, reached by the
+        fewest real actions that state requires, created NOW (no SimClock), so it ages
+        from the seed run. Codes carry FRESH so a walker cannot mistake one for an
+        acted-upon site.
+
+        Two requested starting states are NOT here, because nothing in the product
+        reaches them (docs/WALKTHROUGH_DATA.md, "Fresh starting points"):
+          * `allocated` — `_allocate_one` commits a due date as it allocates and goes
+            awaiting_allocation -> in_design directly;
+          * `due_date_proposed` — no writer. The designer's extension request leaves the
+            status alone; that pending request IS seeded, on WALKFRESHEXT.
+        """
+        from projects import models as m
+        from projects.design_views import _pending_extension
+
+        program = self._program('fresh', days_ago=None, planned=7)
+
+        def fresh_site(code):
+            return self._site(program, code, None)
+
+        # Created, nothing else: no DesignAssignment row exists until the Head's first
+        # survey action creates it — this is where every real design walk begins.
+        fresh_site('WALKFRESHSURVEY')
+
+        # Survey link recorded, waiting for the Head to allocate.
+        site = fresh_site('WALKFRESHALLOC')
+        self._d(site, 'survey')
+
+        # Allocated: in_design with an agreed due date, the designer has submitted nothing.
+        site = fresh_site('WALKFRESHDESIGN')
+        for step in ('survey', 'allocate'):
+            self._d(site, step)
+
+        # In design, with the designer's due-date EXTENSION request pending the Head.
+        site = fresh_site('WALKFRESHEXT')
+        for step in ('survey', 'allocate'):
+            self._d(site, step)
+        self._post('walk.design', 'design_due_date_propose', {'project_id': site.project_id},
+                   {'change_reason': 'Structural drawings from the client are delayed.',
+                    'proposed_date': self._plus_days(14)},
+                   check=lambda: _pending_extension(
+                       m.DesignAssignment.objects.get(project=site)) is not None,
+                   what='WALKFRESHEXT extension request')
+
+        # Arka submitted, no gate-1 verdict yet.
+        site = fresh_site('WALKFRESHARKA')
+        for step in ('survey', 'allocate', 'arka'):
+            self._d(site, step)
+
+        # Released TODAY and in no procurement group — the head of the post-QC pool.
+        # A released status implies the whole package, so the whole route is driven.
+        site = fresh_site('WALKFRESHREL')
+        for step in DESIGN_ROUTE:
+            self._d(site, step)
+
+        # Created and not activated, no design work: the starting point for ACTIVATION,
+        # kept apart from WALKFRESHSURVEY so walking one never consumes the other.
+        fresh_site('WALKFRESHACT')
+
+        # A second tender with no sites at all — for walking site creation.
+        self._program('fresh', days_ago=None, tender=FRESH_EMPTY_TENDER, planned=5)
+
+        # A Residential project created and NOT activated.
+        self._post('walk.pm', 'project_create', data={
+            'customer_name': FRESH_RESIDENTIAL, 'customer_phone': '9300000001',
+            'customer_email': f'fresh.residential@{WALK_EMAIL_DOMAIN}',
+            'site_address': 'Synthetic residential address', 'city': 'Nagpur',
+            'state': 'Maharashtra', 'project_type': 'Residential',
+            'dc_capacity_kw': '6.00', 'contract_value': '360000.00',
+            'target_commissioning_date': self._plus_days(60),
+        }, check=lambda: m.Project.objects.filter(customer_name=FRESH_RESIDENTIAL).exists(),
+            what='fresh Residential project')
+
+        # A vendor with no orders.
+        categories = {c.name: c.pk for c in m.VendorCategory.objects.all()}
+        self._post('walk.scm', 'vendor_add', data={
+            'name': FRESH_VENDOR, 'contact_person': 'Walk Fresh Sales',
+            'phone': '9800000099', 'email': f'fresh.vendor@{WALK_EMAIL_DOMAIN}',
+            'address': 'Synthetic address (walkthrough only)',
+            'categories': [categories['Solar Modules'], categories['Inverter']],
+        }, check=lambda: m.Vendor.objects.filter(name=FRESH_VENDOR).exists(),
+            what='fresh vendor')
 
     # ================================================================= report
     def _report(self, manifest, areas):

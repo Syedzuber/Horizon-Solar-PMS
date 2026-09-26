@@ -21,6 +21,7 @@ both task templates — is built here by calling those migrations' own RunPython
 functions, so the seed meets the same rows it meets on a real walkthrough database.
 """
 import io
+import json
 import shutil
 import tempfile
 from collections import Counter
@@ -164,9 +165,30 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        from projects.management.commands.seed_walkthrough import AREAS
         _build_migrated_reference_data()
         cls.manifest = cls._temp_manifest()
-        cls.first_output = _run('seed_walkthrough', manifest=cls.manifest)
+        # Every area but `fresh` first, snapshotted — then `fresh` on top, so the suite
+        # itself proves the fresh area leaves every other area exactly as it was (R4).
+        cls.existing_areas = [a for a in AREAS if a != 'fresh']
+        cls.first_output = _run('seed_walkthrough', only=cls.existing_areas,
+                                manifest=cls.manifest)
+        cls.before_fresh = json.loads(cls.manifest.read_text(encoding='utf-8'))['areas']
+        cls.before_fresh_counts = _row_counts()
+        _run('seed_walkthrough', only=['fresh'], manifest=cls.manifest)
+
+    # ---- the fresh area leaves the others untouched (R4) --------------------
+    def test_seeding_fresh_changes_no_other_area(self):
+        manifest = support.AreaManifest.load(self.manifest)
+        for area in self.existing_areas:
+            with self.subTest(area=area):
+                self.assertEqual(manifest.areas[area], self.before_fresh[area])
+                self.assertEqual(manifest.missing_rows(area), [])
+        # Every row the fresh run added is recorded under `fresh`, and nothing else moved.
+        added = sum(_row_counts().values()) - sum(self.before_fresh_counts.values())
+        self.assertEqual(added, len(manifest.entries('fresh')))
+        for label, count in self.before_fresh_counts.items():
+            self.assertGreaterEqual(_row_counts()[label], count, label)
 
     # ---- idempotency --------------------------------------------------------
     def test_a_second_run_changes_no_row_count(self):
@@ -343,7 +365,7 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         before = _row_counts()
         dry = _run('teardown_walkthrough', manifest=self.manifest, dry_run=True)
         for area in ('design', 'changes', 'procurement', 'delivery', 'execution',
-                     'residential'):
+                     'residential', 'fresh'):
             self.assertRegex(dry, rf'{area}\s+REFUSED')
         self.assertIn('StatusTransition', dry)
         with self.assertRaises(CommandError) as ctx:
@@ -351,6 +373,132 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         self.assertIn('DROP DATABASE', str(ctx.exception))
         self.assertEqual(_row_counts(), before)
         self.assertTrue(self.manifest.exists())
+
+
+# ===========================================================================
+# The fresh area, alone, on an empty database
+# ===========================================================================
+#: code -> (design status, or None for "no DesignAssignment row").
+FRESH_STATUS = {
+    'WALKFRESHSURVEY': None,
+    'WALKFRESHALLOC':  m.DESIGN_AWAITING_ALLOCATION,
+    'WALKFRESHDESIGN': m.DESIGN_IN_DESIGN,
+    'WALKFRESHEXT':    m.DESIGN_IN_DESIGN,
+    'WALKFRESHARKA':   m.DESIGN_ARKA_SUBMITTED,
+    'WALKFRESHREL':    m.DESIGN_RELEASED,
+    'WALKFRESHACT':    None,
+}
+#: code -> (project ledger rows, design ledger rows). The project row is the one creation
+#: writes (Draft, REASON_CREATED); the design rows are exactly the hops that reaching the
+#: site's starting state takes — survey 1, allocate +1, Arka +1, the full route to
+#: released 10. An extension request writes no ledger row.
+FRESH_LEDGER = {
+    'WALKFRESHSURVEY': (1, 0), 'WALKFRESHALLOC': (1, 1), 'WALKFRESHDESIGN': (1, 2),
+    'WALKFRESHEXT': (1, 2), 'WALKFRESHARKA': (1, 3), 'WALKFRESHREL': (1, 10),
+    'WALKFRESHACT': (1, 0),
+}
+
+
+class FreshOnlyTests(_TempManifestMixin, TestCase):
+    """`--only fresh` on an empty database: starting points, created now, nothing else."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from django.utils import timezone
+        from projects.management.commands.seed_walkthrough import FRESH_RESIDENTIAL
+        _build_migrated_reference_data()
+        cls.manifest = cls._temp_manifest()
+        cls.started = timezone.now()
+        _run('seed_walkthrough', only=['fresh'], manifest=cls.manifest)
+        cls.residential = m.Project.objects.get(customer_name=FRESH_RESIDENTIAL)
+
+    def _ledger(self, subject_type, subject_id):
+        return m.StatusTransition.objects.filter(subject_type=subject_type,
+                                                 subject_id=subject_id).count()
+
+    def test_only_fresh_and_its_dependencies_were_seeded(self):
+        self.assertEqual(set(support.AreaManifest.load(self.manifest).areas),
+                         {'users', 'reference', 'fresh'})
+        self.assertEqual(set(m.Program.objects.values_list('short_tender_code', flat=True)),
+                         {'WALKFRESH', 'WALKFRESHEMPTY'})
+
+    def test_every_fresh_site_is_at_its_claimed_state(self):
+        from projects.design_views import _pending_extension
+        for code, status in FRESH_STATUS.items():
+            with self.subTest(code=code):
+                site = m.Project.objects.get(project_id=code)
+                self.assertEqual(site.status, 'Draft')        # none is activated
+                self.assertFalse(site.phases.exists())
+                a = m.DesignAssignment.objects.filter(project=site).first()
+                self.assertEqual(a.status if a else None, status)
+                self.assertEqual(bool(a and _pending_extension(a)), code == 'WALKFRESHEXT')
+                self.assertFalse(m.SiteGroupMembership.objects.filter(project=site).exists())
+                self.assertEqual(m.BOQ.objects.filter(project=site).exists(),
+                                 code == 'WALKFRESHREL')
+        arka = m.ArkaSubmission.objects.get(
+            attempt__assignment__project__project_id='WALKFRESHARKA', is_current=True)
+        self.assertEqual((arka.verdict, arka.head_verdict), (m.ARKA_PENDING, m.ARKA_PENDING))
+
+    def test_no_fresh_site_has_history_beyond_what_reaching_its_state_writes(self):
+        for code, (project_rows, design_rows) in FRESH_LEDGER.items():
+            with self.subTest(code=code):
+                site = m.Project.objects.get(project_id=code)
+                a = m.DesignAssignment.objects.filter(project=site).first()
+                self.assertEqual(self._ledger(m.SUBJECT_PROJECT, site.pk), project_rows)
+                self.assertEqual(self._ledger(m.SUBJECT_DESIGN_ASSIGNMENT, a.pk)
+                                 if a else 0, design_rows)
+                self.assertEqual(m.StatusTransition.objects.filter(project=site).count(),
+                                 project_rows + design_rows)
+        self.assertEqual(self._ledger(m.SUBJECT_PROJECT, self.residential.pk), 1)
+        self.assertEqual(m.StatusTransition.objects.filter(
+            project=self.residential).count(), 1)
+
+    def test_fresh_rows_are_created_now_not_backdated(self):
+        codes = list(FRESH_STATUS) + [self.residential.project_id]
+        sites = m.Project.objects.filter(project_id__in=codes)
+        self.assertEqual(sites.count(), len(codes))
+        for site in sites:
+            self.assertGreaterEqual(site.created_at, self.started, site.project_id)
+        self.assertFalse(m.StatusTransition.objects.filter(
+            project__in=sites, occurred_at__lt=self.started).exists())
+        released = m.DesignAssignment.objects.get(project__project_id='WALKFRESHREL')
+        self.assertGreaterEqual(released.released_at, self.started)
+
+    def test_the_released_fresh_site_carries_its_package(self):
+        a = m.DesignAssignment.objects.get(project__project_id='WALKFRESHREL')
+        self.assertEqual(a.pm_approved_by.user.username, 'walk.pm')
+        attempt = a.attempts.get(attempt_number=1)
+        self.assertEqual((attempt.qc_verdict, attempt.head_verdict), (m.QC_PASSED, m.QC_PASSED))
+        self.assertTrue(m.DesignFile.objects.filter(
+            attempt=attempt, kind=m.DESIGN_FILE_CAD_ZIP, bucket=support.STUB_BUCKET).exists())
+        self.assertTrue(m.BOQItem.objects.filter(boq__project=a.project,
+                                                 boq_quantity__gt=0).exists())
+
+    def test_the_empty_tender_the_residential_project_and_the_vendor(self):
+        from projects.management.commands.seed_walkthrough import FRESH_VENDOR
+        empty = m.Program.objects.get(short_tender_code='WALKFRESHEMPTY')
+        self.assertFalse(m.Project.objects.filter(program=empty).exists())
+        self.assertEqual(self.residential.status, 'Draft')
+        self.assertFalse(self.residential.phases.exists())
+        self.assertFalse(m.BOQ.objects.filter(project=self.residential).exists())
+        self.assertFalse(m.PaymentMilestone.objects.filter(project=self.residential).exists())
+        vendor = m.Vendor.objects.get(name=FRESH_VENDOR)
+        self.assertFalse(m.VendorOrder.objects.filter(vendor=vendor).exists())
+        self.assertTrue(m.BOQItemMaster.objects.filter(project_type='OPEX').exists())
+
+    def test_seeding_fresh_twice_changes_nothing(self):
+        before = _row_counts()
+        output = _run('seed_walkthrough', only=['fresh'], manifest=self.manifest)
+        self.assertEqual(_row_counts(), before)
+        self.assertIn('already present and complete', output)
+
+    def test_teardown_refuses_the_fresh_area_because_creation_writes_history(self):
+        before = _row_counts()
+        dry = _run('teardown_walkthrough', only=['fresh'], manifest=self.manifest,
+                   dry_run=True)
+        self.assertRegex(dry, r'fresh\s+REFUSED')
+        self.assertIn('StatusTransition', dry)
+        self.assertEqual(_row_counts(), before)
 
 
 # ===========================================================================

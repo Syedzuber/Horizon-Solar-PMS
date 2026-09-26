@@ -17,6 +17,69 @@ oid, not just its name), moves it aside as `*.stale.json`, and starts a new one.
 
 ---
 
+## Fresh starting points — read this first when BUILDING something
+
+Every other area drives its sites to an acted-upon state and backdates them, which is
+right for checking what screens SHOW. A new feature needs sites sitting at the START of a
+flow. That is the `fresh` area: `python manage.py seed_walkthrough --only fresh` (it
+seeds `users` and `reference` first if they are absent; a full seed includes it).
+
+**Fresh sites age from the seed run.** Nothing in this area is backdated: every row is
+created at the moment the seed runs, so a fresh site is "0 days old" on the day it was
+seeded and ages normally from there. Re-seed (drop and re-seed) when you need them new
+again. Every code and name carries `FRESH`, so none can be mistaken for an acted-upon site.
+
+Each site is reached by the FEWEST real actions its state requires, through the same views
+and checks as every other area — nothing is written directly. So "fresh" means *no history
+beyond what reaching the starting state writes*; the ledger rows each one carries are
+listed, and a test pins them.
+
+### Tender WALKFRESH — "WALK FRESH Starting Points" (OPEX / RESCO)
+
+| Site | Sits at | Ledger rows (project + design) | Start here to walk… |
+|---|---|---|---|
+| WALKFRESHSURVEY | created; **no DesignAssignment row** (the "awaiting survey" start — the product creates the row on the Head's first survey action) | 1 + 0 | a design from the very beginning: record the survey link as `walk.designhead` |
+| WALKFRESHALLOC | **awaiting_allocation** (survey link recorded) | 1 + 1 | allocation: allocate as `walk.designhead` |
+| WALKFRESHDESIGN | **in_design**, due date agreed, the designer has submitted nothing | 1 + 2 | the designer's work: Arka submission as `walk.design`; or re-allocation, QC-reviewer assignment, a Head due-date change |
+| WALKFRESHEXT | **in_design** with the designer's **due-date extension request pending** | 1 + 2 | the Head's extension verdict: approve or reject as `walk.designhead` |
+| WALKFRESHARKA | **arka_submitted**, no gate-1 verdict | 1 + 3 | Arka review: gate 1 as `walk.designqc`, then gate 2 |
+| WALKFRESHREL | **released today**, in NO procurement group | 1 + 10 | procurement from the top of the post-QC pool: group, lock, order as `walk.scm`; or a change request on a released site |
+| WALKFRESHACT | created, **not activated**, no design work | 1 + 0 | activation as `walk.pm` (kept apart from WALKFRESHSURVEY so walking one never consumes the other) |
+
+`WALKFRESHREL` is released, so it carries the whole package a release implies: survey
+link, allocation, an Arka approved at both gates by two different people, a CAD archive,
+a BOQ, the QC and Head passes, and the PM's approval. That is 10 design ledger rows,
+all written today.
+
+### Also in the fresh area
+
+| What | State | Start here to walk… |
+|---|---|---|
+| Tender **WALKFRESHEMPTY** — "WALK FRESH Empty Tender (no sites)" | created, **no sites at all** | site creation — single add or bulk upload, as `walk.pm` |
+| **WALK FRESH Residential Not Activated** (`HRP-RES-<year>-NNN`: 005 after a full seed, 001 on a fresh-only seed) | created, **Draft, not activated** — no tasks, no milestones, no BOQ; 1 ledger row | Residential activation as `walk.pm` (it assigns the designer and attaches the template) |
+| Vendor **WALKFRESH Vendor - no orders** | active, Solar Modules + Inverter, **no orders** | raising a first order against a vendor with nothing on it |
+| The BOQ catalogue | the migrations' 37 Residential + 207 OPEX items; **no site BOQ started** on any fresh site except WALKFRESHREL, which its release requires | BOQ authoring from nothing, on a fresh site once it is allocated |
+
+### Requested, and NOT here, because the product cannot reach them
+
+* **`allocated`, with no date proposed.** `_allocate_one()` commits a due date as it
+  allocates, so the status goes from `awaiting_allocation` straight to `in_design`. The
+  only code that yields `allocated` is a legacy branch of `_status_after_unblock()`, for
+  a site with no approved commitment, which allocation no longer leaves behind.
+  WALKFRESHDESIGN is the state an allocation actually produces.
+* **`due_date_proposed`, awaiting approval.** No code writes this status. The designer's
+  extension request (`design_due_date_propose`) deliberately leaves the status alone and
+  adds a pending DueDateCommitment row. WALKFRESHEXT is that real state.
+
+### Tearing the fresh area down
+
+It is refused like the other acted-upon areas, and no bypass is added. **Creation itself
+writes history**: `create_opex_site` and `project_create` each record the Draft
+StatusTransition. So even the untouched sites carry one ledger row, and exact removal
+would need the append-only guard bypassed. Reset with DROP DATABASE and re-seed.
+
+---
+
 ## Read this first
 
 * **What it is.** `seed_walkthrough` builds a complete, synthetic database by DRIVING THE
@@ -196,7 +259,8 @@ Issues on WALKE01: one Open, one In Progress, one Resolved, one Closed, one Reop
 
 ### Residential (area `residential`)
 
-IDs come from the real generator (`HRP-RES-<year>-NNN`); on a fresh database 001–004.
+IDs come from the real generator (`HRP-RES-<year>-NNN`); on a newly created database
+001–004 (005 is the `fresh` area's un-activated project).
 Find them by customer name.
 
 | Customer | State |
@@ -227,7 +291,8 @@ archive was a real, valid zip when it was validated; only the upload was skipped
 
 ## Time: what is backdated, and how
 
-Histories are driven under a simulated clock (`SimClock`): while a step runs,
+(The `fresh` area is the exception: it runs on the real clock and is not backdated at all.)
+Every other area's histories are driven under a simulated clock (`SimClock`): while a step runs,
 `django.utils.timezone.now()` returns a past instant, so **the product itself writes every
 timestamp it stamps with `timezone.now()`** — `StatusTransition.occurred_at`,
 `ActivityLog` times, `created_at`/`requested_at`/`submitted_at`/`approved_at`/
@@ -254,7 +319,7 @@ a PROTECT.
 |---|---|
 | `users` | Yes — but only together with `reference`, and only when no other area exists (every other area's rows point at these users) |
 | `reference` | Yes — with `users`, when no other area exists (orders and challans point at the vendors and warehouses) |
-| `design`, `changes`, `procurement`, `delivery`, `execution`, `residential` | **No** — every one writes StatusTransition rows. Drop the database. |
+| `design`, `changes`, `procurement`, `delivery`, `execution`, `residential`, `fresh` | **No** — every one writes StatusTransition rows (for `fresh`, site creation alone writes one). Drop the database. |
 
 ---
 
@@ -280,8 +345,9 @@ not exist.
 * **Design `allocated`** — reachable only through the legacy branch of
   `_status_after_unblock()` (no approved due-date commitment); allocation always
   commits one now.
-* **The design due-date proposal / approval / change screens** and the Head's
-  due-date extension request — reachable, not yet seeded.
+* **A due-date extension already approved or rejected, and a Head's direct due-date
+  change** — reachable, not seeded. A PENDING extension request is seeded, on
+  WALKFRESHEXT (see *Fresh starting points*), so both verdicts can be walked from there.
 * **The deputy acting as Head** — `walk.designdeputy` holds the authority; no verdict
   was recorded as deputy.
 * **`is_hse`** — the flag has no reader and no writer in the product; nothing to show.
