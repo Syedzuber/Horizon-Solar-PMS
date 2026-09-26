@@ -35,7 +35,7 @@ from django.utils import timezone
 
 from .models import (
     ArkaSubmission, DesignAssignment, DesignAttempt, DesignChangeRequest,
-    DueDateCommitment, CHANGE_REQUEST_PENDING,
+    DueDateCommitment, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_AWAITING_SURVEY, DESIGN_AWAITING_ALLOCATION, DESIGN_ALLOCATED,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARKA_REJECTED, DESIGN_ARTIFACTS_UPLOADED, DESIGN_IN_QC, DESIGN_QC_FAILED,
@@ -384,7 +384,7 @@ def tender_metrics(program, today=None):
             # it IS finished, so it stays in every attempt-figure denominator rather than
             # dropping out of one while its attempts stay in the numerator.
             'finished':      a.status in DESIGN_WORK_FINISHED_STATUSES,
-            # PART 4.6 — the oldest untriaged PM change request on this site, or None.
+            # PART 4.6 — the oldest untriaged change request on this site, or None.
             # A list is carried rather than a bool because the queue panel needs the row
             # itself and the attention band needs its age.
             'pending_crs':   pending_cr_by_assignment.get(a.pk, []),
@@ -447,7 +447,7 @@ def stage_counts(sites):
 # THE CAUSE OF ATTEMPT N+1 IS RECORDED ON ATTEMPT N, and that is the one thing to
 # understand before reading the rework numbers.
 #
-# `opened_reason` says WHICH LOOP opened an attempt (a QC failure, or a PM change
+# `opened_reason` says WHICH LOOP opened an attempt (a QC failure, or a change
 # request). It does not say whose fault the loop was — that lives in the failure category
 # on the attempt that FAILED, one row earlier. So classifying attempt N+1 means reading
 # attempt N's category and asking error_category_group() which group it falls in.
@@ -465,7 +465,7 @@ def classify_attempt_causes(attempts):
     Cause is one of:
         None                  the initial attempt — not rework at all
         'A' / 'B' / 'C'       opened by a failure in that error group
-        CAUSE_PM_CHANGE       opened by a PM change request
+        CAUSE_PM_CHANGE       opened by an accepted change request (either kind)
         CAUSE_UNCATEGORISED   opened by a QC failure that recorded no category
 
     CAUSE_UNCATEGORISED IS REPORTED, NOT DISCARDED. Every attempt opened by a QC failure
@@ -527,7 +527,7 @@ def attempt_cause_split(attempts):
         group_a        opened by a Group A failure — the design was wrong
         uncategorised  opened by a QC failure that recorded no category (pre-Part-9)
         input          opened by a Group B or C failure — bad survey, or moved brief
-        pm_change      opened by an accepted PM change request
+        pm_change      opened by an accepted change request (either kind)
 
     `designer` = group_a + uncategorised. UNCATEGORISED COUNTS AGAINST THE DESIGNER, for
     two reasons decided with the product owner on the B-06 prompt: an uncategorised QC
@@ -569,10 +569,10 @@ def rework_contribution(site, split=None):
 
     WHAT COUNTS
       * rework numerator = the `designer` bucket only. The initial attempt is not rework
-        (B-06, B1b), and an attempt opened by a PM change request is not the designer's
-        (B-06, answered by the product owner; DESIGN_APPROVAL_AUDIT.md finding 3). A PM
-        change request is the only way an SCM-originated change can arrive, so the same
-        exclusion covers it.
+        (B-06, B1b), and an attempt opened by a change request is not the designer's
+        (B-06, answered by the product owner; DESIGN_APPROVAL_AUDIT.md finding 3). An
+        accepted BOQ change request (SCM's) opens the same `pm_change_request` attempt as
+        a design change request (the PM's), so the same exclusion covers both.
       * input numerator = the Group B / C bucket; PM-change numerator = its own bucket.
         THREE FIGURES, NEVER SUMMED — they point at coaching, survey quality and customer
         discipline respectively.
@@ -619,7 +619,7 @@ def designer_workload(sites, today=None):
         input_quality         attempts opened by a Group B or C failure ÷ finished sites —
                               a bad survey or a moved brief. NOT the designer's error
                               (settled decision 8).
-        pm_change_multiplier  attempts opened by an accepted PM change request ÷ finished
+        pm_change_multiplier  attempts opened by an accepted change request ÷ finished
                               sites. Not the designer's error either (B-06; audit
                               finding 3).
 
@@ -802,6 +802,17 @@ def qc_review_queue_age(sites, today=None):
     return _queue_age(sites, 'arka_submitted', 'artifacts_uploaded', today)
 
 
+def change_request_noun(origin, capital=False):
+    """What ONE change request is called, by who raised it (session B3b, D-18): SCM raises
+    a request about the bill of quantities, a PM or coordinator one about the design. Text
+    about a list, or about either kind, says "change request" and does not call this.
+    `capital` is for the start of a sentence — str.capitalize() would write "Boq".
+    design_views imports it, so the screens and the messages share one spelling."""
+    if origin == CHANGE_REQUEST_ORIGIN_SCM:
+        return 'BOQ change request'
+    return 'Design change request' if capital else 'design change request'
+
+
 def _head_clock_start(change):
     """SESSION B2b (D-11) — when a pending change request reached the Design Head: the PM's
     forward (`pm_decided_at`) for an SCM request that went through the PM, else the raise
@@ -813,7 +824,8 @@ def _head_clock_start(change):
 
 
 def change_request_queue(sites, today=None):
-    """PART 4.6 — every PM change request awaiting the Design Head, oldest first.
+    """PART 4.6 — every change request awaiting the Design Head, oldest first: a design
+    change request a PM raised, or a BOQ change request once the site's PM forwarded it.
 
     OLDEST FIRST AND NOT CAPPED. This is not a "top ten worst" panel like the attention
     list; it is a queue the Head must empty. Every row in it is a suspended review and a
@@ -968,7 +980,8 @@ def attention_list(sites, today=None, limit=ATTENTION_LIMIT,
             cr = s['pending_crs'][0]
             days = (today - timezone.localtime(_head_clock_start(cr)).date()).days
             _add(s, _SEV_CHANGE, days,
-                 f'PM change request awaiting your decision — {days} day(s), '
+                 f'{change_request_noun(cr.origin, capital=True)} awaiting your '
+                 f'decision — {days} day(s), '
                  f'attempt {cr.attempt.attempt_number}', 'danger')
 
         for s in sites:

@@ -72,7 +72,7 @@
     {# authority is permissions.can_approve_design_release(), per site, applied by the     #}
     {# views and by the queue's own queryset. A PM with nothing parked sees the link and   #}
     {# the queue's empty-state sentence, which is correct.                                 #}
-    {# Session B2b (D-10): renamed — the same page now also lists SCM change requests.  #}
+    {# Session B2b (D-10): renamed — the same page now also lists BOQ change requests.  #}
     {% if user.profile.role == 'PM' or user.profile.role == 'Project Coordinator' %}
       <a href="{% url 'design_pm_approval_queue' %}" class="nav-link text-white small" title="Design &amp; BOQ approvals">
         <i class="bi bi-clipboard-check me-1"></i>Design &amp; BOQ approvals

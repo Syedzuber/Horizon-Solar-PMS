@@ -89,7 +89,7 @@ builder reads. No forms: the site link leads to the qc_review banner, which has 
             <td>
               {{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}
               <div class="text-muted" style="font-size:.7rem;">
-                {% if row.change_request.origin == 'scm' %}SCM{% elif row.change_request.origin == 'pm' %}PM{% else %}{{ row.change_request.origin }}{% endif %}
+                {% if row.change_request.origin == 'scm' %}SCM · BOQ change request{% elif row.change_request.origin == 'pm' %}PM · design change request{% else %}{{ row.change_request.origin }}{% endif %}
                 · raised {{ row.change_request.requested_at|date:"d M Y H:i" }}
               </div>
               {% if row.forwarded_by %}
@@ -255,9 +255,9 @@ their verdict with nowhere to click.
 
     {% if row.open_crs %}
       <div class="alert alert-warning py-2 small mt-2 mb-0">
-        {{ row.open_crs|length }} PM change request{{ row.open_crs|length|pluralize }}
+        {{ row.open_crs|length }} change request{{ row.open_crs|length|pluralize }}
         on this attempt awaiting the Design Head — a verdict at either gate is blocked
-        until he accepts or rejects it.
+        until he accepts it, rejects it or records it as corrected in the BOQ.
       </div>
     {% endif %}
 

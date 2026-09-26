@@ -282,7 +282,8 @@ class RaiseViewOriginTests(SchemaBase):
         self._raise()
         change = self._the_request()
         self.assertEqual(change.origin, CHANGE_REQUEST_ORIGIN_PM)
-        self.assertTrue(self._raise_log(change).startswith('PM change request raised'))
+        # B3b (D-18): was 'PM change request raised'.
+        self.assertTrue(self._raise_log(change).startswith('Design change request raised'))
 
     def test_02_an_scm_raise_is_origin_scm_and_says_so_in_the_log(self):
         self.a.status = DESIGN_RELEASED
@@ -291,7 +292,10 @@ class RaiseViewOriginTests(SchemaBase):
         self._raise()
         change = self._the_request()
         self.assertEqual(change.origin, CHANGE_REQUEST_ORIGIN_SCM)
-        self.assertTrue(self._raise_log(change).startswith('Change request raised by SCM'))
+        # B3b (D-18): was 'Change request raised by SCM'. Migration 0102's backfill still
+        # matches the OLD prefix, which is right: it reads only rows written before it ran,
+        # and B1–B3b deploy together, so no row in the new wording predates it.
+        self.assertTrue(self._raise_log(change).startswith('BOQ change request raised by SCM'))
 
 
 # ===========================================================================

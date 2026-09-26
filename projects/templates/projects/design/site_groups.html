@@ -12,7 +12,7 @@ WRITE controls render only for SCM (`can_manage`). Admin and the Design Head see
 page with no forms — the view refuses their POSTs regardless, this only stops the page
 offering a button that will 403.
 
-"Request design change" (session 3.1c-i) renders on a pool row only when the row's project
+"Request BOQ change" (session 3.1c-i; renamed B3b, D-18 — only SCM raises here) renders on a pool row only when the row's project
 pk is in `change_request_project_ids`, which the view builds from the same predicate the
 change-request POST enforces. This template tests membership and decides nothing.
 
@@ -162,7 +162,7 @@ oldest site, which is the one that matters.
             <td class="text-end">
               {% if a.project.pk in change_request_project_ids %}
               <a href="{% url 'design_change_request_form' project_id=a.project.project_id %}"
-                 class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+                 class="btn btn-sm btn-outline-warning py-0">Request BOQ change</a>
               {% endif %}
             </td>
             {% endif %}

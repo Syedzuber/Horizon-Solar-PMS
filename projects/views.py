@@ -7881,7 +7881,7 @@ def opex_boq_upload(request, project_id):
         ctx.update({'stage': 'locked', 'lock_reason': (
             'This BOQ is marked complete and is with design review, so it cannot be '
             'changed right now. It reopens — with the full catalogue and this upload — if '
-            'a reviewer sends it back, or if the PM raises a change request that opens a '
+            'a reviewer sends it back, or if a change request is accepted and opens a '
             'new attempt.')})
         return render(request, 'projects/opex_boq_upload.html', ctx)
 

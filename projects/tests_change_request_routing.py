@@ -166,7 +166,10 @@ class RaiseRoutingTests(RoutingBase):
 # ===========================================================================
 
 class PmPathWordingTests(RoutingBase):
-    """Each expected string is copied from HEAD e6da79f, character for character."""
+    """Each expected string is copied from HEAD e6da79f, character for character — except
+    where session B3b (D-18) named the kind: the raise message and log line now say
+    "design change request", and the suspension sentence names no origin and adds the
+    corrected outcome. Those are marked B3b below, with the e6da79f text beside them."""
 
     REASON = 'Client moved the array to the north shed.'
 
@@ -174,15 +177,18 @@ class PmPathWordingTests(RoutingBase):
         site, assignment = self._released('CR-W1')
         self._group('Batch W1', [site])
         response = self._raise(self.pm, site)
+        # B3b: was 'CR-W1: change request raised on attempt 1 …' (e6da79f).
         self.assertEqual(
             self._messages(response),
-            'CR-W1: change request raised on attempt 1 and sent to the Design Head. No new '
+            'CR-W1: design change request raised on attempt 1 and sent to the Design Head. '
+            'No new '
             'attempt has been opened — he decides whether this becomes rework. The site '
             'stays in procurement group "Batch W1" while he decides, and the group cannot be '
             'locked until he does. It leaves the group only if he accepts.')
         change = self._one(assignment)
+        # B3b: was 'PM change request raised on attempt 1 — …' (e6da79f).
         self.assertEqual(self._log(change, 'design_change_requested').get().action,
-                         f'PM change request raised on attempt 1 — awaiting the Design '
+                         f'Design change request raised on attempt 1 — awaiting the Design '
                          f'Head: {self.REASON}')
         second = self._messages(self._raise(self.pm, site, reason='again'))
         self.assertEqual(
@@ -227,10 +233,13 @@ class PmPathWordingTests(RoutingBase):
         self._login(self.qc)
         response = self.client.post(reverse('design_qc_pass',
                                             kwargs={'project_id': 'CR-W5'}))
+        # B3b: was "CR-W5: a PM change request on this attempt is awaiting the Design
+        # Head's decision — the review is suspended until he accepts or rejects it."
         self.assertEqual(
             self._messages(response),
-            "CR-W5: a PM change request on this attempt is awaiting the Design Head's "
-            "decision — the review is suspended until he accepts or rejects it.")
+            "CR-W5: a change request on this attempt is awaiting the Design Head's "
+            "decision — the review is suspended until he accepts it, rejects it or records "
+            "it as corrected in the BOQ.")
 
 
 # ===========================================================================
@@ -513,7 +522,8 @@ class OutstandingTests(RoutingBase):
         response = self.client.post(reverse('design_qc_pass',
                                             kwargs={'project_id': 'CR-O3'}))
         self.client.logout()
-        self.assertIn("an SCM change request on this attempt is with the site's PM",
+        # B3b: was "an SCM change request on this attempt is with the site's PM".
+        self.assertIn("a BOQ change request on this attempt is with the site's PM",
                       self._messages(response))
         attempt.refresh_from_db()
         self.assertEqual(attempt.qc_verdict, QC_PENDING)

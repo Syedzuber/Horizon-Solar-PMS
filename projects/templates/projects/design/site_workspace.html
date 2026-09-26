@@ -29,7 +29,7 @@ Arka is approved is a convenience; design_artifact_upload() refuses the POST reg
     </div>
   </div>
   {% if pm_reviewing %}<a href="{% url 'design_pm_approval_queue' %}" class="btn btn-sm btn-outline-secondary">
-    <i class="bi bi-arrow-left me-1"></i>Design approvals
+    <i class="bi bi-arrow-left me-1"></i>Design &amp; BOQ approvals
   </a>{% else %}<a href="{% url 'design_my_sites' %}" class="btn btn-sm btn-outline-secondary">
     <i class="bi bi-arrow-left me-1"></i>My sites
   </a>{% endif %}
@@ -48,7 +48,7 @@ Arka is approved is a convenience; design_artifact_upload() refuses the POST reg
     the allocated designer{% if assignment.assigned_to %}
     ({{ assignment.assigned_to.user.get_full_name|default:assignment.assigned_to.user.username }}){% endif %};
     approve or reject the design on your
-    <a href="{% url 'design_pm_approval_queue' %}">Design approvals</a> screen.
+    <a href="{% url 'design_pm_approval_queue' %}">Design &amp; BOQ approvals</a> screen.
   </div>{% else %}
   <div class="alert alert-secondary py-2 small">
     You are viewing this as Design Head. The actions below belong to the allocated
@@ -335,7 +335,7 @@ The Head branch is tested FIRST: if he ruled, his is the verdict that stands.
 
 {% comment %}
 Part 4. The designer's window onto QC: the verdict and remarks on a failed attempt, the
-new attempt that opened for the rework, and any PM change request with its reason. Same
+new attempt that opened for the rework, and any change request with its reason. Same
 partial the Head reads on the QC screen, so neither side sees a version of the history
 the other does not.
 {% endcomment %}

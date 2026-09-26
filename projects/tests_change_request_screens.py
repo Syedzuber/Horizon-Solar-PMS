@@ -358,7 +358,8 @@ class AudienceTests(ScreensBase):
         self.assertEqual(self._note_for(mark, head2).link,
                          reverse('design_qc_review', kwargs={'project_id': 'CS-N4'}))
         self.assertEqual(self._note_for(mark, self.scm).link, self._form(site))
-        self.assertIn('forwarded your design change request',
+        # B3b (D-18): was 'forwarded your design change request'.
+        self.assertIn('forwarded your BOQ change request',
                       self._note_for(mark, self.scm).message)
 
     def test_n5_the_actor_is_never_told_and_a_person_in_two_roles_is_told_once(self):
@@ -391,7 +392,8 @@ class AudienceTests(ScreensBase):
         mark = self._mark()
         self._withdraw(change, profile=self.scm2)
         self.assertEqual(self._told(mark), ['cw_coord', 'cw_pm'])
-        self.assertIn('the design change request cw_scm raised',
+        # B3b (D-18): was 'the design change request cw_scm raised'.
+        self.assertIn('the BOQ change request cw_scm raised',
                       self._note_for(mark, self.pm).message)
 
     def test_n8_withdraw_by_the_requester_is_not_told_back(self):
@@ -399,7 +401,8 @@ class AudienceTests(ScreensBase):
         mark = self._mark()
         self._withdraw(change)
         self.assertEqual(self._told(mark), ['cw_coord', 'cw_pm'])
-        self.assertIn('the design change request they raised',
+        # B3b (D-18): was 'the design change request they raised'.
+        self.assertIn('the BOQ change request they raised',
                       self._note_for(mark, self.pm).message)
 
     def test_n9_head_reject_of_an_scm_request_also_tells_the_pm_and_coordinators(self):
@@ -407,9 +410,11 @@ class AudienceTests(ScreensBase):
         mark = self._mark()
         self._reject(change, reason='The tender fixes it.')
         self.assertEqual(self._told(mark), ['cw_coord', 'cw_pm', 'cw_scm'])
-        self.assertIn('rejected your design change request',
+        # B3b (D-18): was 'rejected your design change request' / 'rejected the design
+        # change request cw_scm raised'.
+        self.assertIn('rejected your BOQ change request',
                       self._note_for(mark, self.scm).message)
-        self.assertIn('rejected the design change request cw_scm raised',
+        self.assertIn('rejected the BOQ change request cw_scm raised',
                       self._note_for(mark, self.pm).message)
 
     def test_n10_head_reject_of_a_pm_request_still_tells_the_requester_alone(self):
@@ -439,7 +444,8 @@ class AudienceTests(ScreensBase):
                 message = self._note_for(mark, person).message
                 self.assertIn('Changed: CW-001 10 → 12.', message)
         self.assertIn('Changed: CW-001 10 → 12.', self._mail_for(self.scm, sent)['html'])
-        self.assertIn('recorded your design change request',
+        # B3b (D-18): was 'recorded your design change request'.
+        self.assertIn('recorded your BOQ change request',
                       self._note_for(mark, self.scm).message)
 
     def test_n13_a_pm_requester_who_is_also_a_triager_is_told_once(self):

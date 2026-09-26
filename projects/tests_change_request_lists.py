@@ -151,9 +151,11 @@ class PMListTests(ListsBase):
         page = response.content.decode()
         # The waiting table renders above the history table, and every act is named.
         self.assertLess(page.index('CL-WP'), page.index('what happened'))
-        for label in ('Forwarded to the Design Head', 'Accepted by the Head — new attempt',
-                      'Rejected by the Head', 'Rejected by the PM', 'Withdrawn by SCM',
-                      'Corrected in the BOQ by the Head'):
+        # B3b (§D52 #6): the Head's three labels name no actor — was 'Accepted by the Head
+        # — new attempt', 'Rejected by the Head', 'Corrected in the BOQ by the Head'.
+        for label in ('Forwarded to the Design Head', 'Accepted — new attempt',
+                      'Rejected — current version stands', 'Rejected by the PM',
+                      'Withdrawn by SCM', 'Corrected in the BOQ'):
             with self.subTest(label=label):
                 self.assertIn(label, page)
         self.assertNotIn('SESSION B3a', page)

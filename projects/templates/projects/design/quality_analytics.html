@@ -223,7 +223,7 @@ A group with nothing selected produces no heading at all.
             <th class="small text-muted">Designer</th>
             <th class="small text-muted">Designer-caused attempts per finished site</th>
             <th class="small text-muted text-end">Uncategorised</th>
-            <th class="small text-muted text-end">Excluded (B / C / PM change)</th>
+            <th class="small text-muted text-end">Excluded (B / C / change request)</th>
           </tr></thead>
           <tbody>
           {% for r in panel.data.rows %}
@@ -379,8 +379,8 @@ A group with nothing selected produces no heading at all.
           </tbody>
         </table>
         <div class="text-muted small mt-2">
-          Counted against the PM who raised the request, never against the designer who
-          had to redo the work.
+          Counted against the site's PM (the PM assigned to the site, whoever raised the
+          request), never against the designer who had to redo the work.
         </div>
 
       {% elif panel.metric.key == 'cr_rejection_rate' %}
@@ -388,9 +388,18 @@ A group with nothing selected produces no heading at all.
           {% include "projects/design/_qa_figure.html" with f=panel.data.figure %}
           <span class="text-muted small">
             {{ panel.data.rejected }} rejected · {{ panel.data.accepted }} accepted ·
-            {{ panel.data.pending }} still untriaged, of {{ panel.data.total }} raised.
+            {{ panel.data.corrected }} corrected in the BOQ ·
+            {{ panel.data.pending }} still untriaged, of {{ panel.data.reached }} that
+            reached the Head.
           </span>
         </div>
+        {% if panel.data.not_reached %}
+          <div class="text-muted small mt-1">
+            {{ panel.data.not_reached }} more never reached the Head (a BOQ change request
+            still with the PM, rejected by the PM, or withdrawn) and
+            {{ panel.data.not_reached|pluralize:"is,are" }} not counted.
+          </div>
+        {% endif %}
         <div class="text-muted small mt-2">
           A rate near zero means the Head's triage refuses nothing. An untriaged backlog
           depresses it for a different reason, which is why the pending count sits beside it.

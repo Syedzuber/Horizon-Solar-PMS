@@ -3357,7 +3357,8 @@ together; the browser walk follows this session.**
   still offers Accept and Reject only). Signed off: one triage surface at a time, and B3
   adds the second after the walk proves the first. **— CLOSED by B3a (26 Sep 2026); see
   §D52.**
-- **B3 still owes (unchanged from §D50):**
+- **B3 still owes (unchanged from §D50):** **— ALL CLOSED by B3b (26 Sep 2026): the wording
+  sweep, both metrics and `quality_analytics.html`. See §D53.**
   - **The wording sweep.** `qc_review.html`'s banner heading and `qc_queue` say "PM change
     request" of an SCM-origin request. So do `tender_dashboard.html`'s panel header ("PM
     change requests awaiting your decision"), the attention band's reason text ("PM change
@@ -3419,7 +3420,8 @@ notification change. **NOT DEPLOYED: B1, B2a, B2b and B3a deploy together.**
 - **The review queue's per-package `open_crs` alert is one query per package row**
   (`list(_pending_change_requests(attempt))` in `design_qc_queue`). This was already the
   case before B3a, and B3a does not change it.
-- **LABELS LEFT WRONG ON PURPOSE, for B3b's wording sweep.** This is the complete list
+- **LABELS LEFT WRONG ON PURPOSE, for B3b's wording sweep. — ALL NINE CLOSED by B3b (26 Sep
+  2026); see §D53, which also lists what this list missed.** This is the complete list
   B3a knows of. Everything B3a wrote is accurate, but not final.
   1. `tender_dashboard.html` panel header: "PM change requests awaiting your decision".
      The panel holds SCM-origin, PM-forwarded requests too.
@@ -3452,6 +3454,83 @@ notification change. **NOT DEPLOYED: B1, B2a, B2b and B3a deploy together.**
   - **Head list shows "no tender" for an OPEX site with no `program`.** Such a request is
     on no tender dashboard at all, so the review queue is its only surface. Whether
     such sites exist in production was not checked.
+
+### D53 — what session B3b (change-request wording and the two metric defects) left open
+
+Recorded by session B3b, 26 Sep 2026. **Recorded, not fixed.** Every claim was checked by
+grep, AST, a query or a test in that session. No migration, and no stored value, action
+code, audience, channel, predicate or other figure changed. **NOT DEPLOYED: B1, B2a, B2b,
+B3a and B3b deploy together.**
+
+- **Closed from §D51 and §D52 by B3b.**
+  - **The names (D-18).** A request SCM raised is a *BOQ change request*; one a PM or
+    coordinator raised is a *design change request*; a screen about both says *change
+    request*. Text about one request takes its kind from the stored `origin` through
+    `design_metrics.change_request_noun()`, which `design_views` imports. Covered: §D52's
+    nine items; §D51's banner, `qc_queue`, attention band, the accept and reject log lines,
+    `site_workspace.html`'s "Design approvals" (twice) and "has already been corrected in
+    the boq". **Also closed, missed by both lists:** `change_request.html`'s title, raise
+    button and SCM refusal, plus a kind label on every request row; `_attempt_history.html`'s
+    row header and "Rework: PM change request" chip; the "Request design change" buttons on
+    both SCM group screens; `site_group_detail.html`'s removal note and lock paragraph; the
+    PM queue's "SCM change requests" section; `qc_review.html`'s QC-start hint and
+    verdict-blocked line; the tender dashboard's workload chip and footer ("PM change");
+    `quality_analytics.html`'s "Excluded (B / C / PM change)"; every change-request
+    notification subject and body; the raise, forward, PM-reject, withdraw and corrected log
+    lines; the four 403 texts; both `_blocking_change_request` sentences; the SCM
+    pre-release refusal; `design_qc_start`'s flash; `views.opex_boq_upload`'s lock text; the
+    `first_pass_rate` and `rework_multiplier` catalogue text.
+  - **`_not_pending_refusal`** reads the label through `_verdict_phrase()` ("corrected in
+    the BOQ", "rejected by the PM"), and a `pm_rejected` or `withdrawn` request adds "It
+    never reached the Design Head." Accepted and rejected read as before.
+  - **`m_cr_rejection_rate` (D-20):** Head rejections over requests that reached the Head
+    (`CR_REACHED_HEAD_VERDICTS`: pending, accepted, rejected, corrected). The panel shows
+    corrected and the not-reached count. Walkthrough DB: **14.3% (1/7) became "not enough
+    data" (1/4, under MIN_DENOMINATOR 5).**
+  - **`m_cr_by_stage` (D-21):** "Raised after release", checked first: `origin == 'scm'`, or
+    `head_verdict == 'passed'` and `requested_at >= head_reviewed_at`. Walkthrough DB: with
+    the Head 7 → 0, after release 0 → 7; the ledger (`StatusTransition`, subject
+    `design_assignment`) says all seven were raised at `released`. `solarpms_local`:
+    ORDDEMOB03, a fixtured SCM request with no Head pass and no ledger row, moves by the
+    origin clause alone.
+  - **`quality_analytics.html` (D-22)** says the change request rate is counted against the
+    site's PM, whoever raised it.
+  - **Docstrings:** `design_change_request_correct` (both surfaces now), `change_request_queue`
+    (both kinds), `_blocking_change_request`, the raise view, the 13b banner.
+- **Found, not fixed.**
+  - **D-21's caveat.** A PM's post-release request on an attempt released before Part 9
+    (no Head verdict) still reads "with the Head". Production was not checked for such
+    rows. The catalogue caveat and `m_cr_by_stage`'s docstring say so.
+  - **Migration 0102's backfill matches the OLD log prefix** `'Change request raised by
+    SCM'`. That is correct because it reads only rows written before it runs and B1–B3b
+    deploy together. It must not be re-run against a database where rows in the new
+    wording (`'BOQ change request raised by SCM'`) exist, though those rows carry `origin`
+    anyway.
+  - **Activity-log text is stored.** Old rows keep "PM change request …"/"SCM change request
+    …" (D-17). The audit log's keyword search (`action__icontains`) finds one wording or the
+    other, not both.
+  - **Three places cannot name the kind without a query**, so they say "change request":
+    the rework chip (an attempt carries no origin), `_blocking_change_request`'s pending
+    sentence (it reads verdicts only), and the tender dashboard's workload chip (a count
+    over both kinds).
+  - **Identifiers still say "design change"** and are not labels: `user_can_request_design_change`,
+    `user_may_raise_design_change_as_scm`, `design_change_window_open`, the
+    `design_change_request*` URL names, the `design_change_request.html` email template and
+    the `design_change_request_*` NotificationLog labels. `permissions.py`'s docstrings for
+    SCM's authority still say "design change request"; `permissions.py` was outside MODE.
+  - **`seed_scm_handoff_data`** prints `"PM change request" departure chip`, quoting the
+    stored reason; the chip itself reads "Change request". That seed is superseded.
+  - **The test suite asserts the attention band by substring** ("change request awaiting
+    your decision", `tests_design_part46` test_10/10b), which passed through the rename
+    silently; `tests_change_request_wording` now pins both kinds exactly.
+- **Prompt facts that proved false.**
+  - B1's sweep, B3's "transition views byte-identical" and verification 5 contradicted each
+    other: the strings live inside the transition views. The masked-AST proof replaced it.
+  - Both figures live in `design_analytics.py`; `design_metrics.py` holds neither.
+  - A fixture with one request per verdict gives 4 that reached the Head, below
+    MIN_DENOMINATOR, so "assert the figure" needed two more rows (2/6 = 33.3%, 2/9 before).
+  - The walkthrough DB has no pre-release request, so D-21's "leaves a pre-release one where
+    it was" is shown by test, not by query.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 

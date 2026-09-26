@@ -11,7 +11,7 @@ dropped. A total that is silently short is worse than no total.
 WRITE controls render only for SCM (`can_manage`); Admin and the Design Head read the
 same page. The view refuses their POSTs either way.
 
-"Request design change" (session 3.1c-i) renders on a member row or a pool row only when
+"Request BOQ change" (session 3.1c-i; renamed B3b, D-18 — only SCM raises here) renders on a member row or a pool row only when
 that project pk is in `change_request_project_ids`, built in the view from the predicate
 the change-request POST enforces. A locked group's members are never in it.
 
@@ -170,7 +170,7 @@ Bootstrap only, matching dashboard/scm.html and the Part 5 tender dashboard.
           <td class="text-end">
             {% if m.project.pk in change_request_project_ids %}
             <a href="{% url 'design_change_request_form' project_id=m.project.project_id %}"
-               class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+               class="btn btn-sm btn-outline-warning py-0">Request BOQ change</a>
             {% endif %}
           </td>
           {% endif %}
@@ -228,7 +228,7 @@ departure from raise to acceptance), and they need to see why.
           <td class="small">
             {% if m.removal_reason == change_request_reason %}
               <span class="chip chip-red"><span class="chip-dot chip-dot-red"></span>Change request</span>
-              <span class="text-muted">— the site left the group because of a design change request. Since 16 Sep 2026 that happens only when the Design Head accepts one, which sends the site back to design.</span>
+              <span class="text-muted">— the site left the group because of a change request. Since 16 Sep 2026 that happens only when the Design Head accepts one, which sends the site back to design.</span>
             {% else %}
               {{ m.removal_reason|default:"—" }}
             {% endif %}
@@ -275,7 +275,7 @@ departure from raise to acceptance), and they need to see why.
             <td class="text-end">
               {% if a.project.pk in change_request_project_ids %}
               <a href="{% url 'design_change_request_form' project_id=a.project.project_id %}"
-                 class="btn btn-sm btn-outline-warning py-0">Request design change</a>
+                 class="btn btn-sm btn-outline-warning py-0">Request BOQ change</a>
               {% endif %}
             </td>
             {% endif %}
@@ -305,7 +305,7 @@ departure from raise to acceptance), and they need to see why.
     {% endif %}
     <p class="small text-muted mb-3">
       Locking freezes the BOQ of every site in this group. Designers can no longer change
-      quantities, and a design change request on a member site will be refused.
+      quantities, and a change request on a member site — design or BOQ — will be refused.
       <strong>There is no unlock</strong> — once quantities are committed to a purchase, a
       correction is a variance against the order, which this system does not handle yet.
     </p>

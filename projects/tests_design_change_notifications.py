@@ -315,9 +315,11 @@ class TriageRecipientTests(ChangeNotificationBase):
         self.assertEqual(self._told(mark), ['cw_coord', 'cw_des', 'cw_pm', 'cw_scm'])
         self.assertEqual(self._mailed(sent), ['cw_coord', 'cw_des', 'cw_pm', 'cw_scm'])
 
-        self.assertIn('accepted your design change request',
+        # B3b (D-18): an SCM-origin request is a BOQ change request — was 'accepted your
+        # design change request' / 'accepted the design change request cw_scm raised'.
+        self.assertIn('accepted your BOQ change request',
                       self._note_for(mark, self.scm).message)
-        self.assertIn('accepted the design change request cw_scm raised',
+        self.assertIn('accepted the BOQ change request cw_scm raised',
                       self._note_for(mark, self.pm).message)
         self.assertIn('(Design Head)', self._note_for(mark, self.pm).message)
         self.assertEqual(self._note_for(mark, self.designer).link,

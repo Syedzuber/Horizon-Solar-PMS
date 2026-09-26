@@ -22,27 +22,28 @@ Head returning a PM rejection unchanged — that row carries the Head's remark (
   <div>
     <h5 class="mb-0">Design &amp; BOQ approvals</h5>
     <div class="text-muted small">
-      SCM's change requests waiting for you to forward or reject, and designs waiting for
-      you to accept before release.
+      BOQ change requests from SCM waiting for you to forward or reject, what became of
+      every change request on your sites, and designs waiting for you to accept before
+      release.
     </div>
   </div>
 </div>
 
 {% comment %}
-SESSION B2b (D-10) — SCM change requests at `with_pm` on the sites this user may triage:
+SESSION B2b (D-10) — BOQ change requests (SCM-raised) at `with_pm` on the sites this user may triage:
 change_rows is the queryset form of permissions.scm_change_request_triagers() for this
 viewer, built in design_pm_approval_queue(). Oldest first; the age is time with the PM,
 from requested_at (D-11). The Forward / Reject forms stay on the per-site change-request
 page, where B2a put them, and each POST re-checks user_can_triage_scm_change_request().
 {% endcomment %}
 <h6 class="fw-semibold mb-2">
-  SCM change requests waiting for you
+  BOQ change requests waiting for you
   {% if change_rows %}<span class="badge bg-danger ms-1">{{ change_rows|length }}</span>{% endif %}
 </h6>
 {% if not change_rows %}
   <div class="card shadow-sm mb-3">
     <div class="card-body text-center text-muted small py-3">
-      No SCM change requests are waiting for you.
+      No BOQ change requests are waiting for you.
     </div>
   </div>
 {% else %}
@@ -95,6 +96,10 @@ with_pm never reaches this table (it is the table above), and a verdict this tem
 not know prints its raw code rather than borrowing another state's words. Person and time
 come from design_views._change_request_last_act(). Read-only: the forms are on the per-site
 page.
+
+SESSION B3b (§D52 #6) — the Head's three states name no actor: his named deputy may have
+acted, and the Last acted column already names whoever did. The Raised-by line names the
+kind (D-18): SCM raises a BOQ change request, a PM a design change request.
 {% endcomment %}
 <h6 class="fw-semibold mb-2">Change requests on your sites — what happened</h6>
 {% if not history_rows %}
@@ -127,7 +132,7 @@ page.
             <td>
               {{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}
               <div class="text-muted" style="font-size:.7rem;">
-                {% if row.change_request.origin == 'scm' %}SCM{% elif row.change_request.origin == 'pm' %}PM{% else %}{{ row.change_request.origin }}{% endif %}
+                {% if row.change_request.origin == 'scm' %}SCM · BOQ change request{% elif row.change_request.origin == 'pm' %}PM · design change request{% else %}{{ row.change_request.origin }}{% endif %}
                 · {{ row.change_request.requested_at|date:"d M Y H:i" }}
               </div>
             </td>
@@ -139,15 +144,15 @@ page.
               {% elif v == 'pending' %}
                 <span class="badge bg-warning text-dark">Raised · with the Design Head</span>
               {% elif v == 'accepted' %}
-                <span class="badge bg-success">Accepted by the Head — new attempt</span>
+                <span class="badge bg-success">Accepted — new attempt</span>
               {% elif v == 'rejected' %}
-                <span class="badge bg-secondary">Rejected by the Head</span>
+                <span class="badge bg-secondary">Rejected — current version stands</span>
               {% elif v == 'pm_rejected' %}
                 <span class="badge bg-secondary">Rejected by the PM</span>
               {% elif v == 'withdrawn' %}
                 <span class="badge bg-light text-dark border">Withdrawn by SCM</span>
               {% elif v == 'corrected' %}
-                <span class="badge bg-info text-dark">Corrected in the BOQ by the Head</span>
+                <span class="badge bg-info text-dark">Corrected in the BOQ</span>
               {% elif v == 'with_pm' %}
                 <span class="badge bg-danger">Raised · with you</span>
               {% else %}

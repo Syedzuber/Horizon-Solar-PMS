@@ -61,7 +61,9 @@ Four metrics in the catalogue are reduced rather than dropped, and each says so 
   cr_by_stage     DesignChangeRequest does not store the status at the moment it was
                   raised. The stage is DERIVED by comparing requested_at against that
                   attempt's own gate stamps, which is honest but approximate; the
-                  attempt-number distribution beside it is exact.
+                  attempt-number distribution beside it is exact. Session B3b added
+                  "after release", which is exact for every request the product can
+                  make (see m_cr_by_stage).
   hold_duration   DesignAssignment carries ONE survey_returned_at triple, overwritten on
                   each hold, so the model alone gives the latest interval only. The full
                   history is recoverable from paired ActivityLog action codes, which is
@@ -81,11 +83,12 @@ from .models import (
     DesignChangeRequest, DueDateCommitment,
     ARKA_APPROVED, ARKA_PENDING,
     CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_REJECTED,
+    CHANGE_REQUEST_CORRECTED, CHANGE_REQUEST_ORIGIN_SCM,
     DESIGN_RELEASED, DESIGN_SURVEY_RETURNED, DESIGN_WORK_FINISHED_STATUSES,
     ATTEMPT_REASON_QC_FAILED,
     ERROR_GROUP_A, ERROR_GROUP_B, ERROR_GROUP_C,
     DESIGN_ERROR_CATEGORY_LABELS, error_category_group,
-    QC_FAILED, QC_PENDING,
+    QC_FAILED, QC_PASSED, QC_PENDING,
 )
 from .design_metrics import (
     CAUSE_PM_CHANGE, CAUSE_UNCATEGORISED, classify_attempt_causes,
@@ -207,7 +210,7 @@ METRIC_CATALOGUE = [
     # ── A — designer execution ───────────────────────────────────────────────
     Metric('first_pass_rate', GROUP_A, 'First-pass rate',
            'Finished sites (released, or awaiting PM approval) that no QC failure sent '
-           'round again, per designer and team-wide. A reopen for a PM change request '
+           'round again, per designer and team-wide. A reopen for a change request '
            'does not cost first-pass.',
            core=True,
            why='Locked: it is the one designer metric that measures work getting through '
@@ -217,7 +220,8 @@ METRIC_CATALOGUE = [
            'Designer-caused attempts per finished site (released, or awaiting PM '
            'approval): attempts a Group A QC failure or Group A PM rejection opened, '
            'plus uncategorised pre-Part-9 QC failures. The initial attempt, and Group B, '
-           'Group C and PM-change attempts, are not counted, so a clean record reads 0.',
+           'Group C and change-request attempts, are not counted, so a clean record '
+           'reads 0.',
            caveat='The same figure as the Rework column on the tender dashboard, computed '
                   'by the same code, so over the same sites the two agree. The dashboard '
                   'rounds to one decimal and shows any sample size; this panel rounds to '
@@ -267,8 +271,11 @@ METRIC_CATALOGUE = [
                "Counting it against the site's PM is what stops it being counted against "
                'the designer by default.'),
     Metric('cr_rejection_rate', GROUP_C, 'Change request rejection rate',
-           'Rejected change requests over all requests raised. A rate near zero means '
-           'the Head\'s triage is a rubber stamp, not a gate.'),
+           'Change requests the Head rejected, over requests that reached the Head — '
+           'pending, accepted, rejected, or corrected in the BOQ. A BOQ change request '
+           'still with the PM, rejected by the PM or withdrawn never reached the Head '
+           'and is not counted. A rate near zero means the Head\'s triage is a rubber '
+           'stamp, not a gate.'),
     Metric('group_c_failures', GROUP_C, 'Group C failure count',
            'Failures categorised as a brief change — the requirement changed, or the '
            'scope was revised after design started.'),
@@ -276,7 +283,12 @@ METRIC_CATALOGUE = [
            'How late in the process the brief moved.',
            caveat='The status at the moment a request was raised is not stored. The stage '
                   'is derived by comparing the request time against that attempt\'s own '
-                  'gate stamps; the attempt-number split beside it is exact.'),
+                  'gate stamps; the attempt-number split beside it is exact. "After '
+                  'release" is a request SCM raised (SCM may raise only on a released '
+                  'site) or one raised after the Head passed that attempt\'s package, '
+                  'after which release is the only stage a request can be raised at. A '
+                  'PM\'s request on a site released before the two-gate review (Part 9) '
+                  'has no Head pass to compare against and still reads "with the Head".'),
 
     # ── D — process and reviewer consistency ─────────────────────────────────
     Metric('overturn_rate', GROUP_D, 'Overturn rate',
@@ -956,20 +968,38 @@ def m_change_request_rate(data):
     }
 
 
-def m_cr_rejection_rate(data):
-    """Rejected over ALL requests raised — does the Head's triage actually refuse anything.
+#: SESSION B3b (D-20) — the verdicts of a request that REACHED the Head: waiting for him,
+#: or decided by him. `with_pm`, `pm_rejected` and `withdrawn` are a BOQ change request
+#: that never left the PM stage, so the Head's triage had nothing to say about it.
+CR_REACHED_HEAD_VERDICTS = (CHANGE_REQUEST_PENDING, CHANGE_REQUEST_ACCEPTED,
+                            CHANGE_REQUEST_REJECTED, CHANGE_REQUEST_CORRECTED)
 
-    The denominator is every request, pending included, exactly as the catalogue words it.
-    The pending count is reported beside the figure so a low rate caused by an untriaged
-    backlog is not mistaken for a low rate caused by a rubber stamp.
+
+def m_cr_rejection_rate(data):
+    """Rejected over requests that REACHED THE HEAD — does his triage refuse anything.
+
+    SESSION B3b (D-20): the denominator was every request raised. Since B2a an SCM request
+    starts with the PM, and one the PM rejects or SCM withdraws never reaches the Head, so
+    counting it diluted a figure that measures HIS triage. The denominator is now
+    CR_REACHED_HEAD_VERDICTS; the numerator is unchanged (`rejected` is the Head's verdict
+    — a PM rejection is `pm_rejected`). `total` stays every request raised, and
+    `not_reached` is the difference, so the panel can say what was left out.
+
+    Pending stays IN the denominator, and its count is reported beside the figure, so a
+    low rate caused by an untriaged backlog is not mistaken for one caused by a rubber
+    stamp.
     """
     crs = data['change_requests']
-    rejected = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_REJECTED)
-    accepted = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_ACCEPTED)
-    pending  = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_PENDING)
+    rejected  = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_REJECTED)
+    accepted  = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_ACCEPTED)
+    pending   = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_PENDING)
+    corrected = sum(1 for cr in crs if cr.verdict == CHANGE_REQUEST_CORRECTED)
+    reached   = sum(1 for cr in crs if cr.verdict in CR_REACHED_HEAD_VERDICTS)
     return {
-        'figure': rate(rejected, len(crs)),
+        'figure': rate(rejected, reached),
         'rejected': rejected, 'accepted': accepted, 'pending': pending,
+        'corrected': corrected, 'reached': reached,
+        'not_reached': len(crs) - reached,
         'total': len(crs),
     }
 
@@ -988,19 +1018,41 @@ def m_cr_by_stage(data):
         In design         the request predates QC starting on that attempt
         With Design QC    QC had started, the Head had not yet received it
         With the Head     the package had reached the Head gate
+        After release     SCM raised it, or it was raised after the Head PASSED that
+                          attempt's package (session B3b, D-21)
 
-    That inference is sound for the ordering of stamps it reads and no more. The attempt
-    number beside it needs no inference at all — a request on attempt 3 is late by
-    definition — so both are shown and the exact one is not hidden behind the derived one.
+    AFTER RELEASE IS CHECKED FIRST, because every released attempt also has
+    `head_started_at` — before B3b the whole post-release path, SCM's included, landed in
+    "with the Head". The test is by field and value, and exact for anything the product
+    can write:
+      * `origin == 'scm'` — SCM may raise only on a released site
+        (permissions.design_change_window_open), so this is post-release by definition,
+        whatever the attempt's stamps say;
+      * `head_verdict == 'passed'` and `requested_at >= head_reviewed_at` — after the
+        Head's pass the site is `awaiting_pm_approval`, then maybe `pm_rejected`, then
+        `released`; the first two are in neither raise window (CHANGE_REQUEST_STATUSES,
+        design_change_window_open), so release is the only stage a request can arrive at.
+    NOT CAUGHT: a PM's request on an attempt released before Part 9, which carries no Head
+    verdict. It still reads "with the Head". Production was not checked for such rows.
+
+    The other three buckets are inferences, sound for the ordering of stamps they read and
+    no more. The attempt number beside them needs no inference at all — a request on
+    attempt 3 is late by definition — so both are shown and the exact one is not hidden
+    behind the derived one.
     """
-    buckets = {'in_design': 0, 'in_qc': 0, 'with_head': 0}
+    buckets = {'in_design': 0, 'in_qc': 0, 'with_head': 0, 'after_release': 0}
     by_attempt = {}
     for cr in data['change_requests']:
         attempt = data['attempt_by_id'].get(cr.attempt_id)
         if attempt is None:
             continue
         head_at = attempt.head_started_at or attempt.qc_reviewed_at
-        if head_at is not None and cr.requested_at >= head_at:
+        if (cr.origin == CHANGE_REQUEST_ORIGIN_SCM
+                or (attempt.head_verdict == QC_PASSED
+                    and attempt.head_reviewed_at is not None
+                    and cr.requested_at >= attempt.head_reviewed_at)):
+            buckets['after_release'] += 1
+        elif head_at is not None and cr.requested_at >= head_at:
             buckets['with_head'] += 1
         elif attempt.qc_started_at is not None and cr.requested_at >= attempt.qc_started_at:
             buckets['in_qc'] += 1
@@ -1014,6 +1066,7 @@ def m_cr_by_stage(data):
             {'label': 'Raised while in design',      'count': buckets['in_design']},
             {'label': 'Raised while with Design QC', 'count': buckets['in_qc']},
             {'label': 'Raised while with the Head',  'count': buckets['with_head']},
+            {'label': 'Raised after release',        'count': buckets['after_release']},
         ],
         'by_attempt': [{'attempt': n, 'count': c}
                        for n, c in sorted(by_attempt.items())],

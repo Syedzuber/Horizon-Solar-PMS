@@ -4,7 +4,7 @@ Design Head — operational dashboard for ONE tender (Part 5).
 
 READ ONLY EXCEPT FOR ONE PANEL. Part 5 had not a single button here that changed anything,
 deliberately: an inline approve button would duplicate a permission gate that already lives
-in the QC and Arka views. PART 4.6 ADDS THE ONE EXCEPTION — the PM change-request triage
+in the QC and Arka views. PART 4.6 ADDS THE ONE EXCEPTION — the change-request triage
 queue — and it is an exception because there is nowhere else for it to live. Accepting or
 rejecting a change request is not a review of a package, so it does not belong on the QC
 screens; and every hour it sits untriaged is a suspended review and a stalled designer.
@@ -263,7 +263,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
           {% comment %}
           PART 9 — THREE FIGURES, THREE COLUMNS, NEVER ADDED TOGETHER. "Rework" is the
           designer's own; "Input" is bad surveys and moved briefs, which are explicitly
-          not their error (settled decision 8); "PM change" keeps its own count exactly as
+          not their error (settled decision 8); "change request" keeps its own count exactly as
           in Part 5. A single merged multiplier would charge a designer for all three.
           {% endcomment %}
           <th role="button" data-sort="5" class="text-end">Rework</th>
@@ -330,7 +330,7 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
             <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
               {{ w.input_problem_attempts }} input/brief</span>
             <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
-              {{ w.pm_change_request }} PM change</span>
+              {{ w.pm_change_request }} change request</span>
             {% if w.uncategorised_attempts %}
               {% comment %}
               Pre-Part-9 QC failures, which carry no category because the field did not
@@ -358,13 +358,14 @@ HEAD can clear himself are marked, because those are the ones he can act on toda
     The first attempt is not rework, so a clean record reads 0.0&times;.
     <strong>Input</strong> = attempts opened by a bad survey or a changed brief (Groups B and
     C) &divide; finished sites — <em>not</em> the designer's error, and excluded from Rework.
-    <strong>PM change</strong> is counted separately again. The three are never added
+    <strong>Change request</strong> (attempts an accepted design or BOQ change request
+    opened) is counted separately again. The three are never added
     together: they call for coaching, better surveys, and a pinned-down customer
     respectively. A dash means the designer has no finished site yet.
   </div>
 </div>
 
-{# ── 4. PM change requests awaiting triage (Part 4.6) ─────────────────────── #}
+{# ── 4. Change requests awaiting triage (Part 4.6; both kinds since B2a) ──────── #}
 {% comment %}
 THE ONLY PANEL ON THIS PAGE THAT ACTS. Oldest first and uncapped — see
 change_request_queue(). Each row is a review that cannot record a verdict and a designer
@@ -377,7 +378,7 @@ rather than to the site's QC screen, because he is working a queue, not one site
 <div class="card shadow-sm border-0 mt-3">
   <div class="card-header bg-white py-2 d-flex justify-content-between align-items-baseline">
     <span class="fw-semibold small">
-      PM change requests awaiting your decision
+      Change requests awaiting your decision
       {% if m.change_requests %}
         <span class="badge bg-danger ms-1">{{ m.change_requests|length }}</span>
       {% endif %}
@@ -388,8 +389,9 @@ rather than to the site's QC screen, because he is working a queue, not one site
   </div>
   {% if not m.change_requests %}
     <div class="card-body py-3 text-muted small">
-      Nothing awaiting triage. A PM change request lands here and opens no attempt until
-      you accept it.
+      Nothing awaiting triage. A change request lands here once it reaches you: a design
+      change request as soon as a PM raises it, a BOQ change request once the site's PM
+      forwards it. It opens no attempt until you accept it.
     </div>
   {% else %}
     <ul class="list-group list-group-flush">
@@ -401,7 +403,9 @@ rather than to the site's QC screen, because he is working a queue, not one site
                class="fw-semibold">{{ row.project.project_id }}</a>
             <span class="text-muted">· attempt {{ row.attempt_number }} · {{ row.stage }}</span>
             <div class="mt-1">
-              Raised by
+              {# Session B3b (D-18): which kind, from the stored origin — no query. #}
+              {% if row.change_request.origin == 'scm' %}BOQ change request{% else %}Design change request{% endif %}
+              · raised by
               <strong>{{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}</strong>
               {% if row.designer %}
                 · designer {{ row.designer.user.get_full_name|default:row.designer.user.username }}
@@ -475,7 +479,9 @@ rather than to the site's QC screen, because he is working a queue, not one site
     <div class="card-footer bg-white small text-muted py-2">
       Accepting opens attempt N+1 and sends the site back to the designer. Rejecting opens
       nothing — the current version stands and any suspended review resumes on the same
-      attempt. Neither marks the current attempt failed: it was interrupted, not judged.
+      attempt. Recording it as corrected in the BOQ opens nothing either: the BOQ was fixed
+      in place, and any suspended review resumes. None of the three marks the current
+      attempt failed: it was interrupted, not judged.
     </div>
   {% endif %}
 </div>

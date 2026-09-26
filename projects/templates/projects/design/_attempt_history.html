@@ -45,7 +45,7 @@ the Head and the PM all read the same history in the same shape.
                 Rework: QC failed</span>
             {% elif a.opened_reason == 'pm_change_request' %}
               <span class="chip chip-amber"><span class="chip-dot chip-dot-amber"></span>
-                Rework: PM change request</span>
+                Rework: change request</span>
             {% else %}
               <span class="chip chip-grey"><span class="chip-dot chip-dot-grey"></span>
                 Initial</span>
@@ -180,7 +180,7 @@ the Head and the PM all read the same history in the same shape.
         {% endcomment %}
         {% for cr in a.change_requests.all %}
           <div class="alert {% if cr.verdict == 'rejected' or cr.verdict == 'pm_rejected' or cr.verdict == 'withdrawn' or cr.verdict == 'corrected' %}alert-secondary{% else %}alert-warning{% endif %} py-2 px-2 my-2 small mb-0">
-            <strong>{% if cr.origin == 'scm' %}SCM change request{% else %}PM change request{% endif %}</strong>
+            <strong>{% if cr.origin == 'scm' %}BOQ change request{% else %}Design change request{% endif %}</strong>
             — {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
             {{ cr.requested_at|date:"d M Y H:i" }}
             <div>{{ cr.reason }}</div>

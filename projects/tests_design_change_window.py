@@ -56,7 +56,8 @@ from .models import (
 from .permissions import design_change_window_open
 
 LOCKED_REFUSAL = 'change request refused — the BOQ is locked'
-SCM_PRE_RELEASE_REFUSAL = 'SCM may raise a design change request only once the design is released'
+# B3b (D-18): was 'SCM may raise a design change request only once …'.
+SCM_PRE_RELEASE_REFUSAL = 'SCM may raise a BOQ change request only once the design is released'
 ACCEPT_REFUSAL = 'change request not accepted — the BOQ was locked'
 
 

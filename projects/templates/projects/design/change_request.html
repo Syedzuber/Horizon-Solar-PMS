@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% comment %}
-Raise a design change request — the site's PM, one of its coordinators, or SCM.
+Raise a change request — a design change request from the site's PM or one of its
+coordinators, a BOQ change request from SCM (session B3b, D-18).
 
 Reachable by whoever permissions.user_can_request_design_change() admits: the assigned PM
 and the site's Project Coordinators through user_can_manage_project(), and any SCM user
@@ -25,8 +26,13 @@ straight to the Head and the row says so (`cr.skipped_pm`, read off the raise li
 action_code). On a `with_pm` row the PM and active coordinators get Forward / Reject
 (`can_pm_triage`) and SCM gets Withdraw (`can_withdraw`) — the predicates the POSTs
 enforce. EVERY VERDICT HAS ITS OWN BRANCH; the last `else` shows the stored label and
-nothing more, so no value can fall into "Awaiting the Design Head". Plain text: the final
-wording is B3's.
+nothing more, so no value can fall into "Awaiting the Design Head".
+
+SESSION B3b — THE KIND. `raise_goes_to_pm or raise_skips_pm` is exactly "not
+user_can_manage_project" for this viewer (design_change_request_form), and only a manager
+or SCM can open this page, so it means "this viewer raises as SCM": the button reads BOQ.
+Each listed request names its kind from its stored `origin`; the page title, which covers
+both, says "Change request".
 {% endcomment %}
 
 {% block title %}Change request — {{ project.project_id }} — SolarPMS{% endblock %}
@@ -37,7 +43,7 @@ wording is B3's.
 
 <div class="d-flex justify-content-between align-items-start mb-3">
   <div>
-    <h5 class="mb-0">Design change request — {{ project.project_id }}</h5>
+    <h5 class="mb-0">Change request — {{ project.project_id }}</h5>
     <div class="text-muted small">
       {{ project.city }}{% if project.program %} · {{ project.program.name }}{% endif %}
       {% if assignment.assigned_to %}
@@ -76,7 +82,7 @@ wording is B3's.
         <label class="form-label small mb-1">What needs to change?</label>
         <textarea name="reason" class="form-control form-control-sm mb-2" rows="3" required
                   placeholder="Describe the change (required). The designer sees this verbatim."></textarea>
-        <button class="btn btn-sm btn-warning">Raise change request</button>
+        <button class="btn btn-sm btn-warning">{% if raise_goes_to_pm or raise_skips_pm %}Raise BOQ change request{% else %}Raise design change request{% endif %}</button>
         {% if raise_goes_to_pm %}
         <div class="text-muted small mt-2">
           This goes to the site's <strong>PM</strong> first. The PM forwards it to the
@@ -105,8 +111,9 @@ wording is B3's.
         <div class="text-muted small mt-2">
           This goes to the <strong>Design Head</strong>, who decides whether it becomes
           rework. Nothing moves until he does: no new attempt is opened and the designer
-          stays on what they are doing. If he rejects it he must say why the current
-          version stands, and you will see that reason here.
+          stays on what they are doing. He accepts it, rejects it — and must then say why
+          the current version stands, which you will see here — or records it as corrected
+          in the BOQ with a note.
           {% if assignment.status == 'in_qc' %}
             <strong>QC is in progress on this package — raising a change suspends the
             review, and no verdict can be recorded until he rules.</strong>
@@ -130,7 +137,7 @@ wording is B3's.
 
     {% elif closed_reason == 'scm_before_release' %}
       <div class="alert alert-secondary py-2 small mb-0">
-        SCM can raise a design change request once the design for this site is
+        SCM can raise a BOQ change request once the design for this site is
         <strong>released</strong>. It is currently at "{{ assignment.get_status_display }}".
       </div>
 
@@ -161,7 +168,8 @@ wording is B3's.
     <li class="list-group-item py-2">
       <div class="d-flex flex-wrap justify-content-between gap-2">
         <div class="small">
-          <strong>{{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }}</strong>
+          <strong>{% if cr.origin == 'scm' %}BOQ change request{% else %}Design change request{% endif %}</strong>
+          · {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }}
           on attempt {{ cr.attempt.attempt_number }}
           <div>{{ cr.reason }}</div>
         </div>

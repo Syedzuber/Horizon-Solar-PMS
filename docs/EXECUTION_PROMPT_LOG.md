@@ -1458,3 +1458,81 @@ expected failure. After: **2898 tests, the same 1 failure**, 17 skips, 1 expecte
 - the "no tender" row.
 
 §D51 carries a closure note.
+
+## B3b — change requests: the wording sweep and the two metric defects (26 Sep 2026)
+
+The last session of the SCM change-request series. **Not deployed: B1, B2a, B2b, B3a and
+B3b deploy together.** Part A was a read-only audit ending in a hard stop; Part B was built
+after sign-off. No migration.
+
+### Corrections to the prompt, accepted at sign-off
+
+- **B1's sweep, B3's "transition views byte-identical" and verification 5 contradicted
+  each other.** The log lines, flashes and notification text live inside the seven
+  transition views. Replaced by a masked-AST proof: every string literal and f-string is
+  masked, every function in `design_views`, `design_metrics`, `design_analytics` and
+  `views` is compared, and only `_not_pending_refusal`, `m_cr_rejection_rate` and
+  `m_cr_by_stage` may differ with the mask on. Every `send_notification` call node must be
+  byte-identical by `ast.dump`.
+- **Both figures are in `design_analytics.py`;** `design_metrics.py` holds neither. Text in
+  both files was in scope; no other figure could move.
+- **"Assert the figure on a fixture with all seven verdicts":** one per verdict gives 4
+  that reached the Head, below MIN_DENOMINATOR. Two more rows: 2/6 = 33.3%, and the old
+  formula's 2/9 = 22.2% is asserted beside it.
+- **The walkthrough DB has no pre-release request,** so D-21's "leaves a pre-release one
+  where it was" is shown by test.
+- **B3a's log counts 27 `send_notification` call sites;** HEAD has 28 call nodes across
+  the product's modules by this session's count. All 28 are unchanged.
+
+### Decided at sign-off
+
+- (a) The masked-AST proof, listing every function whose literals changed.
+- (b) `design_metrics.py` text and the other metrics' catalogue text are in scope.
+- (c) D-21 keeps its `origin == 'scm'` clause: SCM can raise only after release, so it is
+  post-release by definition. The pre-Part-9 caveat is recorded; production not checked.
+- (d) A message about ONE request names its kind; `test_06`'s byte-pin is updated.
+
+### What was built
+
+- `design_metrics.change_request_noun(origin, capital=False)` — "BOQ change request" for
+  `origin='scm'`, else "design change request". `design_views` imports it. It is called
+  only inside f-strings: 17 in `design_views`, 1 in `attention_list`.
+- The sweep over 12 templates, every change-request flash, activity line, 403 and
+  notification subject and body (the table is in the session report; what the earlier
+  lists missed is in §D53).
+- `_not_pending_refusal` uses `_verdict_phrase()` and says a `pm_rejected` or `withdrawn`
+  request never reached the Head.
+- `m_cr_rejection_rate` over `CR_REACHED_HEAD_VERDICTS`; `m_cr_by_stage`'s "Raised after
+  release"; both catalogue entries; `quality_analytics.html`'s panel and the D-22 line.
+
+### Tests
+
+`projects/tests_change_request_wording.py` has 16 tests: the six A5 items first; the kind on
+an SCM-raised request's screens and messages, on a PM-raised one's, on shared screens and
+on the SCM group screens; every SCM transition's log and notice; no screen or message says
+a `with_pm` request waits for the Head; D-20 on all seven verdicts plus two, and every
+verdict classified; D-21 through the product and by field and value, including the
+pre-Part-9 caveat. Updated with before and after in comments: `tests_change_request_routing`
+test_06, test_08, test_25; `tests_change_request_schema` test_01, test_02;
+`tests_change_request_lists` test_p1; `tests_design_change_notifications` test_v1;
+`tests_change_request_screens` test_n4, n7, n8, n9, n12; `tests_design_change_window`'s
+`SCM_PRE_RELEASE_REFUSAL`.
+
+### Verification
+
+Before: **2898 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips, 1
+expected failure. After: **2914 tests, the same 1 failure**, 17 skips, 1 expected failure (+16, all in `tests_change_request_wording`). `check` is clean, and
+`makemigrations --check --dry-run` reports "No changes detected".
+
+- Masked AST: PASS. With the mask on, only the three allowed functions differ.
+- `send_notification`: 28 call nodes, byte-identical.
+- No identifier-like string literal (codes, verdicts, URL names, template labels) was
+  removed or changed in the four modules.
+- `design_figure_snapshot` before and after, on `solarpms_local` and `solarpms_walk`: only
+  `cr_rejection_rate` and `cr_by_stage` move. The attention band's reason text changes
+  ("PM change request …" → the kind), with the same magnitude, severity and order.
+
+### Findings recorded
+
+`EXECUTION_MODULE_DEFERRED.md` **§D53**. §D51's "B3 still owes" and §D52's label list
+carry closure notes.

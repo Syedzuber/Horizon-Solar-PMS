@@ -70,12 +70,13 @@ has hit twice already.
 {% if open_crs %}
   <div class="alert alert-warning py-2">
     <div class="fw-semibold small mb-1">
-      {{ open_crs|length }} PM change request{{ open_crs|length|pluralize }} awaiting the
+      {{ open_crs|length }} change request{{ open_crs|length|pluralize }} awaiting the
       Design Head
     </div>
     {% for cr in open_crs %}
       <div class="small border-top pt-2 mt-2">
-        {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
+        {% if cr.origin == 'scm' %}BOQ change request{% else %}Design change request{% endif %}
+        · {{ cr.requested_by.user.get_full_name|default:cr.requested_by.user.username }},
         {{ cr.requested_at|date:"d M Y H:i" }} — {{ cr.reason }}
 
         {% if has_head_authority %}
@@ -315,7 +316,7 @@ this screen must not allow.
         {% csrf_token %}
         <button class="btn btn-sm text-white" style="background-color:#1a7a4a;">Start Design QC</button>
         <div class="text-muted small mt-1">
-          Starting QC opens the PM change request window on this package.
+          Starting QC lets the PM raise a design change request against this package.
         </div>
       </form>
 
@@ -491,7 +492,7 @@ this screen must not allow.
       either gate. Kept above the awaiting-Head branch so the real cause is named.
       {% endcomment %}
       <div class="small text-muted">
-        A verdict is blocked while a PM change request on this attempt is awaiting the
+        A verdict is blocked while a change request on this attempt is awaiting the
         Design Head's decision.
       </div>
     {% elif awaiting_head %}
