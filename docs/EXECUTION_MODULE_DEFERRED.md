@@ -4130,3 +4130,140 @@ parser a PM with no claim on the site
 (`tests_vendor_order_group.test_a_site_the_user_cannot_see_is_refused`) rather than by an
 end-to-end one, which cannot exist yet. The deleted-site half of the same guard IS reachable
 and is tested through the view.
+
+---
+
+## H. Open product decisions — for Zuber / Sudhir, not for a session
+
+Recorded 26 Sep 2026 by a doc-only session. **Nothing here is a session's to decide or fix.**
+Each item needs something only the product owner or Sudhir can supply: a list from an
+external console, a people change, or a rule. Production figures are from the product
+owner's production check on 18 Sep 2026. This repository cannot read production, so those
+figures are quoted, not re-measured. Every claim about CODE was checked by grep or `git log`
+in this session. Where the code or an existing document contradicts a claim, the entry says
+so.
+
+### H1 — WhatsApp is failing silently, and nothing can be fixed without the Interakt template list
+
+**Production, 18 Sep 2026:** 378 failed WhatsApp sends against 104 sent. By template:
+
+| Template | Failed | Window / error (production) | What the code shows (this session) |
+|---|---|---|---|
+| `payment_notification` | 297 | 30 Jun – 18 Sep, **never once succeeded**; "missing variable values, expected 3" | Sends `[customer, task_name, customer]` = header 1 + body 2 ([views.py:5292-5293](projects/views.py#L5292)). **Unchanged since before 22 Jun** (identical in `1c0a8be`, `5493b72`, `d94f2b0`, `c6816f1`). So the 30 Jun break is **not a code change**. The registered template appears to have changed in the Interakt console after 22 Jun. |
+| `assign_tasks_bulk` | 32 | "no approved template found" | The name was **invented in code** by the assignment chokepoint `bb0f905` (17 Aug) ([utils.py:137](projects/utils.py#L137)) and was never registered. It is also always "2 tasks" (§G14). |
+| `assign_task` | 27 | **Stopped failing 13 Aug** | **Not fixed in code.** Parameters are identical in every revision (`907486f`, `36cd889`, `bb0f905^`, today's `utils._notify_assignment`), and **no commit is dated 13 Aug** (`2792f2c` 6 Aug is followed by `018c598` 14 Aug). So the fix was made outside the repo: an Interakt console edit, or the failures were recipient-specific (see the note on phone numbers below). Read these 27 rows' `error_detail` in production to tell which. |
+| `assign_project` | 19 | Still failing | Sends header 1 + body 2 at both call sites ([views.py:9838](projects/views.py#L9838) Zoho webhook, [views.py:12803](projects/views.py#L12803) `admin_assign_pm`). `DESIGN_MODULE_NOTIFICATIONS_SPEC.md` §1 showed on 28 Jun that Interakt wants body **3**. Last touched by `3ceffd9`/`5753a0c` (27–28 Jun). |
+| `boq_acknowledged` | 2 | — | Sends header 1 + body 1 ([views.py:6652](projects/views.py#L6652)). The spec inferred body 2. Unchanged since `3ceffd9`. |
+| `issue_created` | 1 | — | Not diagnosed. It has one failure against a template the spec found working, so this may be a missing phone number rather than a template fault. |
+
+**Blocked on:** the list of **approved Interakt templates, with their exact names and how many
+header and body values each takes.** Nothing in the repo holds it. `template` is a free-text
+string and `template_params` an unvalidated list ([notifications.py:114](projects/notifications.py#L114)).
+A wrong name or count only shows up afterwards, as Interakt's HTTP 400. Every fix above is a
+guess until that list exists.
+
+**Failures surface nowhere a human is TOLD. Qualified: they are visible to someone who goes
+and looks.** Two Admin-only pull screens count them. `admin_send_records`
+([views.py:12529](projects/views.py#L12529), linked from the admin panel sidebar,
+`admin/admin_base.html:139`) and `admin_whatsapp_log` ([views.py:11449](projects/views.py#L11449),
+`/portal/whatsapp-log/`, **linked from no template**). Both default to the **last 7 days**, so
+older failures drop out of the default view. Nothing pushes a failure to anyone. There is no
+email, no bell notice, no dashboard count and no digest line. `send_notification()` never
+raises by design ([notifications.py:8](projects/notifications.py#L8)), so the triggering action
+always succeeds and the actor is never told.
+
+**The 378 are not all template faults.** `_send_whatsapp` also logs `failed` for "Recipient has
+no phone number" and "INTERAKT_API_KEY not configured"
+([notifications.py:121](projects/notifications.py#L121), [135](projects/notifications.py#L135)).
+Group the production rows by `error_detail` before sizing the fix.
+
+**Two existing documents are now wrong on this. They are NOT edited here, because they are outside
+this session's named file:**
+- `DESIGN_MODULE_NOTIFICATIONS_SPEC.md` §2.3 lists `payment_notification` as **WORKING**. That
+  was true of the local dump up to 22 Jun. It is false in production from 30 Jun.
+- `DEPLOY_PLAN.md` ("Notifications") speaks of "three call-site fixes" for `issue_resolved`,
+  `boq_acknowledged` and `assign_project`. The only change to those call sites is `3ceffd9`,
+  which the spec showed **broke** them. No later commit corrected them, and production confirms
+  `assign_project` still fails.
+
+### H2 — email reaches almost nobody, so the change-request emails are inert
+
+**Already recorded as a local-dump finding in §D44** ("Email will rarely deliver without a
+people change"). This entry adds only the **production confirmation** and the decision it
+needs. It does not repeat §D44.
+
+Production, 18 Sep 2026: `praveen`, the only active Design Head, has `email_notifications`
+off. So does the PM on most MPUVNL sites. The preference is read at one place,
+[notifications.py:94](projects/notifications.py#L94), and a recipient with it off is logged
+`skipped: User preference off`, not `failed`, so it does not show as a fault on either log
+screen. The change-request sends are built and name `channels=['in_app', 'email']` at seven
+call sites in `design_views.py` (5668, 5926, 6020, 6188, 6260, 6334, 6504). Until the
+preferences change, they deliver in-app only.
+
+**Decision:** whether these people turn email on, or email is accepted as not the channel for
+this team. If it is not the channel, the change-request emails are dead weight, and so is
+§D44's asymmetry note.
+
+### H3 — the Design Head and the PM are the same person on UKRU001
+
+On UKRU001, `praveen` is both the Design Head and the site's PM. He passes the design at the
+Head gate, then approves it again at the PM gate. **Is that acceptable, or does it need a
+rule?**
+
+**What the code has — verified.** There is **one** separation rule, and it does not reach the PM
+gate:
+- **Settled decision 2**, `_other_gate_actor_conflict()`
+  ([design_views.py:2748](projects/design_views.py#L2748)). It stops one person recording
+  **both** the Design QC and the Design Head verdicts on the same artifact. It compares only
+  `qc_reviewed_by` / `reviewed_by` against `head_reviewed_by`.
+- **Decision 3.** The assigned designer cannot review their own package at either gate.
+- **The PM gate checks neither.** `design_pm_approve`
+  ([design_views.py:4901](projects/design_views.py#L4901)) → `_pm_gate_guard()`
+  ([:4717](projects/design_views.py#L4717)) → `can_approve_design_release()`
+  ([permissions.py:811](projects/permissions.py#L811)) → `user_can_manage_project()`. None of
+  them reads `head_reviewed_by` or `qc_reviewed_by`. **There is no Head-versus-PM separation
+  rule in the codebase.**
+- The principle is already written down, and applied to one case only. The
+  `can_approve_design_release()` docstring refuses the Head's **deputy** because "a Design
+  deputy accepting on the PM's behalf would be Design approving its own work — the one thing
+  a second gate exists to prevent". A Head who is also the PM does exactly that, and the check
+  does not see it, because he qualifies as the PM by identity.
+- **Adjacent, same shape:** no comparison of `requested_by` against the decider exists anywhere
+  on the change-request path. A PM who is also the Head can raise a design change request and
+  then accept it. By contrast, payment requests refuse the requester
+  (`user_can_approve_payment()` / `user_can_reject_payment()`, O4). The only
+  `requested_by_id != user.pk` checks in the repo are those two.
+
+**Decision:** allow it, and say so in `execution-model.md` §12; or refuse a PM approval
+whose actor recorded the Head verdict on the same attempt, with a Project Coordinator as the
+cover (the rule the deputy docstring already implies). The second option needs a coordinator on
+every site where the Head is PM. See §D8: one PM holds 86 of 93 design sites, with no
+coordinator.
+
+### H4 — programme status is not written down anywhere current
+
+Planning has twice been done from documents that predate 3 Sep. **Verified:** the newest
+programme-level status document is `docs/PHASE_1_OUTCOME.md`, "Last updated: 03 Sep 2026"
+(production then at migration `0075`). `PHASE_0_COMPLETION.md` closes 29 Aug. **There is no
+Phase 2 or Phase 3 outcome document.** Section C of this file (Phase 2) reads "_No entries
+yet._", although 2.1, 2.3a and the installation checklists shipped. The status summaries in
+`EXECUTION_PROMPT_LOG.md` stop at "Where phase 1 stands after 1.3c — 31 Aug 2026". Since then
+the log records sessions one by one, with no summary. `execution-model.md` is current as a
+rulebook, not as a status.
+
+**Needed before the execution module resumes:** a **read-only audit of what is actually built
+across Phases 1–3**, and what is committed versus pushed versus on Railway. Many recent commits
+are unpushed. `MIGRATION_REHEARSAL.md` records that `0093` refuses while any payment raised
+before O1 has no `vendor_order`, and that `0101` refuses while a legacy column holds a value. So
+"built" and "deployable" are not the same list. The audit's output replaces
+`PHASE_1_OUTCOME.md` as the planning baseline.
+
+### H5 — already filed: pointers only
+
+- **Admin date bypass** → **§G6** (Zoho webhook, Django admin, seed command: typed dates with
+  no range check). Sibling: **§G7** (the ceiling moves; the three production rows are not
+  corrected).
+- **The overdue clock during a Design Hold** → **§D47**, first bullet (`is_overdue()` does not
+  exclude `survey_returned`; `design_mark_blocked`'s docstring says the clock stops). The
+  product question there is already addressed to Sudhir. See also §D13's note on why
+  `is_overdue()` keeps counting the review statuses.
