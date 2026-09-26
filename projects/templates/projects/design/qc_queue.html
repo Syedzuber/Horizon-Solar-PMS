@@ -4,7 +4,8 @@ Design QC / Design Head / deputy — the package review worklist.
 
 THIS IS NOT THE DESIGN HEAD DASHBOARD. No metrics, no workload, no capacity rollup, no
 overdue logic — those are Part 5 and are explicitly out of scope here. This is a worklist
-of three statuses and nothing else.
+of the reviewable statuses, plus (session B3a) a Head-authority-only list of change requests
+waiting for his triage.
 
 PART 9 — ONE QUEUE, TWO AUDIENCES. Design QC and the Head see the SAME rows, because
 knowing what is stacked up at the other gate is exactly what a reviewer needs in order to
@@ -43,6 +44,81 @@ this module.
     </div>
   </div>
 </div>
+
+{% comment %}
+SESSION B3a (D-15) — change requests waiting for the Design Head, across every tender.
+HEAD AUTHORITY ONLY: triage is his alone, as design_metrics.attention_list(own_only=True)
+already decides for Design QC's dashboard. Oldest by time WITH THE HEAD
+(design_metrics._head_clock_start), capped at design_metrics.HEAD_CHANGE_REQUEST_LIST_LIMIT
+with the remainder counted, never dropped. Every row here is `pending`, the only verdict the
+builder reads. No forms: the site link leads to the qc_review banner, which has all three.
+{% endcomment %}
+{% if has_head_authority %}
+<h6 class="text-muted small text-uppercase mb-2" style="letter-spacing:.03em;">
+  Change requests waiting for the Design Head
+  {% if head_change_rows %}— {{ head_change_rows|length|add:head_change_more }}{% endif %}
+</h6>
+{% if not head_change_rows %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body text-center text-muted small py-3">
+      No change requests are waiting for the Design Head.
+    </div>
+  </div>
+{% else %}
+  <div class="card shadow-sm mb-3">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr class="small">
+            <th>Site</th>
+            <th>Tender</th>
+            <th>Raised by</th>
+            <th>Reason</th>
+            <th class="text-nowrap">With the Head</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in head_change_rows %}
+          <tr class="small">
+            <td>
+              <a href="{% url 'design_qc_review' project_id=row.project.project_id %}"
+                 class="fw-semibold">{{ row.project.project_id }}</a>
+              <div class="text-muted">{{ row.project.city }} · attempt {{ row.attempt_number }}</div>
+            </td>
+            <td>{% if row.program %}{{ row.program.name }}{% else %}<span class="text-muted">no tender</span>{% endif %}</td>
+            <td>
+              {{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}
+              <div class="text-muted" style="font-size:.7rem;">
+                {% if row.change_request.origin == 'scm' %}SCM{% elif row.change_request.origin == 'pm' %}PM{% else %}{{ row.change_request.origin }}{% endif %}
+                · raised {{ row.change_request.requested_at|date:"d M Y H:i" }}
+              </div>
+              {% if row.forwarded_by %}
+                <div class="text-muted" style="font-size:.7rem;">
+                  forwarded by {{ row.forwarded_by.user.get_full_name|default:row.forwarded_by.user.username }}
+                  · {{ row.change_request.pm_decided_at|date:"d M Y H:i" }}
+                </div>
+              {% endif %}
+            </td>
+            <td>{{ row.change_request.reason }}</td>
+            <td class="text-nowrap">
+              <span class="badge {% if row.age_days >= 3 %}bg-danger{% else %}bg-warning text-dark{% endif %}">
+                {{ row.age_days }} day{{ row.age_days|pluralize }}
+              </span>
+              <div class="text-muted" style="font-size:.7rem;">since {{ row.with_head_since|date:"d M Y H:i" }}</div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if head_change_more %}
+      <div class="card-footer bg-white small text-muted py-2">
+        {{ head_change_more }} more {{ head_change_more|pluralize:"is,are" }} waiting — open a tender's design dashboard to see them all.
+      </div>
+    {% endif %}
+  </div>
+{% endif %}
+{% endif %}
 
 {% comment %}
 ARKA SECTION FIRST, because it is the first thing either reviewer sees. Until Part 9 the

@@ -87,6 +87,92 @@ page, where B2a put them, and each POST re-checks user_can_triage_scm_change_req
   </div>
 {% endif %}
 
+{% comment %}
+SESSION B3a (D-14) — every other change request on the same sites, from the same query:
+what happened after a request left the table above, and every PM-raised one. Newest act
+first. The State column NAMES the act its date belongs to, one explicit branch per verdict;
+with_pm never reaches this table (it is the table above), and a verdict this template does
+not know prints its raw code rather than borrowing another state's words. Person and time
+come from design_views._change_request_last_act(). Read-only: the forms are on the per-site
+page.
+{% endcomment %}
+<h6 class="fw-semibold mb-2">Change requests on your sites — what happened</h6>
+{% if not history_rows %}
+  <div class="card shadow-sm mb-3">
+    <div class="card-body text-center text-muted small py-3">
+      No other change requests on your sites.
+    </div>
+  </div>
+{% else %}
+  <div class="card shadow-sm mb-3">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead class="table-light">
+          <tr class="small">
+            <th>Site</th>
+            <th>Raised by</th>
+            <th>Reason</th>
+            <th>State</th>
+            <th>Last acted</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in history_rows %}
+          <tr class="small">
+            <td>
+              <div class="fw-semibold">{{ row.site.project_id }}</div>
+              <div class="text-muted">{{ row.site.city }}{% if row.site.program %} · {{ row.site.program.name }}{% endif %}</div>
+            </td>
+            <td>
+              {{ row.requested_by.user.get_full_name|default:row.requested_by.user.username }}
+              <div class="text-muted" style="font-size:.7rem;">
+                {% if row.change_request.origin == 'scm' %}SCM{% elif row.change_request.origin == 'pm' %}PM{% else %}{{ row.change_request.origin }}{% endif %}
+                · {{ row.change_request.requested_at|date:"d M Y H:i" }}
+              </div>
+            </td>
+            <td>{{ row.change_request.reason }}</td>
+            <td class="text-nowrap">
+              {% with v=row.change_request.verdict %}
+              {% if v == 'pending' and row.forwarded %}
+                <span class="badge bg-warning text-dark">Forwarded to the Design Head</span>
+              {% elif v == 'pending' %}
+                <span class="badge bg-warning text-dark">Raised · with the Design Head</span>
+              {% elif v == 'accepted' %}
+                <span class="badge bg-success">Accepted by the Head — new attempt</span>
+              {% elif v == 'rejected' %}
+                <span class="badge bg-secondary">Rejected by the Head</span>
+              {% elif v == 'pm_rejected' %}
+                <span class="badge bg-secondary">Rejected by the PM</span>
+              {% elif v == 'withdrawn' %}
+                <span class="badge bg-light text-dark border">Withdrawn by SCM</span>
+              {% elif v == 'corrected' %}
+                <span class="badge bg-info text-dark">Corrected in the BOQ by the Head</span>
+              {% elif v == 'with_pm' %}
+                <span class="badge bg-danger">Raised · with you</span>
+              {% else %}
+                <span class="badge bg-dark">{{ v }}</span>
+              {% endif %}
+              {% endwith %}
+            </td>
+            <td class="text-nowrap">
+              {% if row.last_by %}{{ row.last_by.user.get_full_name|default:row.last_by.user.username }}{% else %}<span class="text-muted">not recorded</span>{% endif %}
+              <div class="text-muted" style="font-size:.7rem;">
+                {% if row.last_at %}{{ row.last_at|date:"d M Y H:i" }}{% else %}date not recorded{% endif %}
+              </div>
+            </td>
+            <td class="text-end">
+              <a href="{% url 'design_change_request_form' project_id=row.site.project_id %}"
+                 class="btn btn-sm btn-outline-secondary text-nowrap">Open</a>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endif %}
+
 <h6 class="fw-semibold mb-2">Designs waiting for your approval</h6>
 
 {% if not rows %}

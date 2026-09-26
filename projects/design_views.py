@@ -39,7 +39,8 @@ from .design_analytics import (
     compute as compute_analytics, selected_metric_keys,
 )
 from .design_metrics import (
-    STAGE_LABELS, effective_commitment, pending_extension, tender_metrics,
+    STAGE_LABELS, effective_commitment, head_change_request_list, pending_extension,
+    tender_metrics,
 )
 from .utils import design_due_date, record_transition
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
@@ -4804,29 +4805,92 @@ def design_pm_approval_queue(request):
     # user_can_manage_project() and admits an inactive coordinator. One query; `.distinct()`
     # for the same M2M reason as above. The forms stay on the per-site page, where B2a put
     # them — this section links there.
+    #
+    # SESSION B3a (D-14) — THE SAME QUERY, EVERY VERDICT. A request the PM forwarded or
+    # rejected used to leave this screen, so the PM could not see how it ended without
+    # opening each site. The verdict filter is the only thing removed: same Q, same active
+    # flags, same `.distinct()` (D-16). PM-raised requests come too — "every change request
+    # on their sites". The with_pm rows still fill the "waiting for you" table, oldest
+    # first; everything else is `history_rows`, newest act first (_change_request_last_act).
+    # Still ONE query: every person a row can name is select_related, and a null FK costs
+    # no query.
     today = timezone.localdate()
     change_rows = []
+    history_rows = []
     if profile.is_active and request.user.is_active:
-        waiting = (DesignChangeRequest.objects
-                   .filter(verdict=CHANGE_REQUEST_WITH_PM)
+        changes = (DesignChangeRequest.objects
                    .filter(manageable_projects_q(profile, 'attempt__assignment__project__'),
                            attempt__assignment__project__is_deleted=False,
                            attempt__assignment__project__project_type='OPEX')
                    .select_related('attempt__assignment__project__program',
-                                   'requested_by__user')
+                                   'requested_by__user', 'decided_by__user',
+                                   'pm_decided_by__user', 'withdrawn_by__user',
+                                   'corrected_by__user')
                    .distinct()
                    .order_by('requested_at', 'pk'))
-        for change in waiting:
-            change_rows.append({
-                'change_request': change,
-                'site':           change.attempt.assignment.project,
-                'requested_by':   change.requested_by,
-                # D-11: the PM's counter is time with the PM, which starts at the raise.
-                'age_days': (today - timezone.localtime(change.requested_at).date()).days,
-            })
+        for change in changes:
+            site = change.attempt.assignment.project
+            if change.verdict == CHANGE_REQUEST_WITH_PM:
+                change_rows.append({
+                    'change_request': change,
+                    'site':           site,
+                    'requested_by':   change.requested_by,
+                    # D-11: the PM's counter is time with the PM, which starts at the raise.
+                    'age_days': (today - timezone.localtime(change.requested_at).date()).days,
+                })
+            else:
+                history_rows.append({
+                    'change_request': change,
+                    'site':           site,
+                    'requested_by':   change.requested_by,
+                    **_change_request_last_act(change),
+                })
+        history_rows.sort(key=lambda r: (r['sort_at'], r['change_request'].pk),
+                          reverse=True)
 
     return render(request, 'projects/design/pm_approval_queue.html',
-                  {'rows': rows, 'change_rows': change_rows})
+                  {'rows': rows, 'change_rows': change_rows,
+                   'history_rows': history_rows})
+
+
+def _change_request_last_act(change):
+    """SESSION B3a (D-14) — who last acted on `change`, and when, read off the columns that
+    act writes. One branch per verdict, no catch-all that borrows another state's columns:
+
+        with_pm       the raise            requested_by / requested_at
+        pending       the forward if the PM decided (pm_decided_at), else the raise
+        accepted      the Head's verdict   decided_by / decided_at
+        rejected      the Head's verdict   decided_by / decided_at
+        pm_rejected   the PM's verdict     pm_decided_by / pm_decided_at
+        withdrawn     the withdrawal       withdrawn_by / withdrawn_at
+        corrected     the correction       corrected_by / corrected_at
+
+    `last_at` is None where the act has no recorded time — decided_by and decided_at are
+    null on rows migrated from Part 4, where nobody triaged anything — and `sort_at` then
+    falls back to the raise, so such a row sorts by the one time it has. The template NAMES
+    the act from the verdict (and `forwarded`); this only supplies the person and the time.
+    An unknown verdict returns the raise, and the template prints its raw code."""
+    verdict = change.verdict
+    if verdict == CHANGE_REQUEST_PENDING and change.pm_decided_at is not None:
+        by, at = change.pm_decided_by, change.pm_decided_at
+    elif verdict in (CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_REJECTED):
+        by, at = change.decided_by, change.decided_at
+    elif verdict == CHANGE_REQUEST_PM_REJECTED:
+        by, at = change.pm_decided_by, change.pm_decided_at
+    elif verdict == CHANGE_REQUEST_WITHDRAWN:
+        by, at = change.withdrawn_by, change.withdrawn_at
+    elif verdict == CHANGE_REQUEST_CORRECTED:
+        by, at = change.corrected_by, change.corrected_at
+    else:
+        # with_pm, a pending request with no PM stage, or a value this code does not know:
+        # nobody has acted since the raise.
+        by, at = change.requested_by, change.requested_at
+    return {
+        'forwarded': verdict == CHANGE_REQUEST_PENDING and change.pm_decided_at is not None,
+        'last_by':   by,
+        'last_at':   at,
+        'sort_at':   at or change.requested_at,
+    }
 
 
 @login_required
@@ -6278,6 +6342,32 @@ def _uncited_corrections_since(project, since):
                 .order_by('corrected_at', 'pk'))
 
 
+def _uncited_correction_counts(pairs):
+    """SESSION B3a (D-13) — len(_uncited_corrections_since(site, cr.requested_at)) for every
+    (change request, site) in `pairs`, in ONE query instead of one per request: the tender
+    dashboard's queue can be long, the qc_review banner's is at most one row. The site is
+    passed in rather than read off `cr.attempt.assignment`, which the caller's rows have
+    not loaded.
+
+    THE SAME PREDICATE, batched: the same site, corrected_at at or after that request's
+    raise, and not cited by any request. One read over the union — every site in the list,
+    since the earliest raise — then counted per request in Python. Returns {cr.pk: count};
+    no query at all for an empty list. tests_change_request_lists pins it equal to the
+    banner's count."""
+    pairs = [(cr, project.pk) for cr, project in pairs]
+    if not pairs:
+        return {}
+    cited = DesignChangeRequest.boq_corrections.through.objects.values('boqcorrection_id')
+    found = list(BOQCorrection.objects
+                 .filter(boq__project_id__in={project_id for _, project_id in pairs},
+                         corrected_at__gte=min(cr.requested_at for cr, _ in pairs))
+                 .exclude(pk__in=cited)
+                 .values_list('boq__project_id', 'corrected_at'))
+    return {cr.pk: sum(1 for found_project_id, at in found
+                       if found_project_id == project_id and at >= cr.requested_at)
+            for cr, project_id in pairs}
+
+
 def _quantity_text(value):
     """A BOQ quantity as a person writes it: 12.00 -> '12', 12.50 -> '12.5'."""
     return format(value.normalize(), 'f')
@@ -6475,8 +6565,9 @@ def design_qc_queue(request):
     """The review worklist for BOTH artifacts and BOTH gates.
 
     Deliberately NOT the Design Head dashboard — no metrics, no workload, no capacity, no
-    overdue logic. It is a worklist of the five reviewable statuses and nothing else; the
-    dashboards are Part 5 and Part 9 §6.
+    overdue logic. It is a worklist of the five reviewable statuses and, since session B3a,
+    one more list for Head authority only: change requests waiting for the Head's triage
+    (see the section at the end of this view). The dashboards are Part 5 and Part 9 §6.
 
     PART 9 — ONE QUEUE, TWO AUDIENCES, TWO ARTIFACTS.
 
@@ -6592,12 +6683,27 @@ def design_qc_queue(request):
                                 profile, attempt.qc_reviewed_by_id)),
         })
 
+    # ── SESSION B3a (D-15) — change requests waiting for the Design Head ──────
+    # HEAD AUTHORITY ONLY, unlike the two sections above. Those are review gates both
+    # audiences share; triage is the Head's alone, and a QC reviewer shown it would hold a
+    # list of things he cannot act on. Same call as design_metrics.attention_list(
+    # own_only=True), which leaves the change-request band off Design QC's dashboard because
+    # "Design QC cannot clear this row". A QC reviewer still sees a suspension where it
+    # touches him: the package row's open_crs alert above, and the qc_review banner.
+    # No forms here — the tender dashboard and the qc_review banner keep them.
+    has_head_authority = user_has_design_head_authority(request.user)
+    head_change_rows, head_change_more = ([], 0)
+    if has_head_authority:
+        head_change_rows, head_change_more = head_change_request_list()
+
     return render(request, 'projects/design/qc_queue.html', {
         'arka_rows': arka_rows,
         'rows':      rows,
         'is_deputy': user_is_design_head_deputy(request.user) and not user_is_design_head(request.user),
         'is_design_qc': user_is_design_qc(request.user),
-        'has_head_authority': user_has_design_head_authority(request.user),
+        'has_head_authority': has_head_authority,
+        'head_change_rows': head_change_rows,
+        'head_change_more': head_change_more,
     })
 
 
@@ -7080,12 +7186,23 @@ def design_tender_dashboard(request, pk):
     DRILL-DOWN, NOT A LANDING TABLE. `?stage=` and `?designer=` filter a compact list
     rendered beneath the panels, from the rows already in memory — neither adds a query.
     """
-    if not user_has_design_head_authority(request.user):
+    has_head_authority = user_has_design_head_authority(request.user)
+    if not has_head_authority:
         return HttpResponseForbidden(
             'The tender design dashboard is for the Design Head or his named deputy.')
 
     program = get_object_or_404(Program, pk=pk, is_deleted=False, program_type='OPEX')
     metrics = tender_metrics(program)
+
+    # SESSION B3a (D-13) — the "corrected" form on the queue panel, beside Accept and
+    # Reject, with the count of BOQ corrections it would cite: the qc_review banner's
+    # number, batched (_uncited_correction_counts) so a long queue costs one query and an
+    # empty one none. The form is gated on `has_head_authority` in the template, the same
+    # flag as the banner's; the 403 above means it is always True here today.
+    counts = _uncited_correction_counts((r['change_request'], r['project'])
+                                        for r in metrics['change_requests'])
+    for row in metrics['change_requests']:
+        row['uncited_correction_count'] = counts[row['change_request'].pk]
 
     # Drill-down is filtered in Python over `metrics['sites']`, which is already loaded.
     stage    = (request.GET.get('stage') or '').strip()
@@ -7110,6 +7227,7 @@ def design_tender_dashboard(request, pk):
         'drill_designer': designer if designer.isdigit() else '',
         'is_deputy':    user_is_design_head_deputy(request.user)
                         and not user_is_design_head(request.user),
+        'has_head_authority': has_head_authority,
     })
 
 

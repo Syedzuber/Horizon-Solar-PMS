@@ -1369,3 +1369,92 @@ A full seed at HEAD and after, each on a newly created database, gives identical
 per-area, per-model counts for all eight existing areas (105 lines). `--only fresh` run
 twice gives identical counts (863 rows in 28 tables). The teardown dry run refuses `fresh`:
 26 StatusTransition rows.
+
+## B3a — change requests made findable (26 Sep 2026)
+
+The first half of B3. B3a builds the two lists and the second corrected button; B3b does
+the wording sweep and the three metric defects. **Not deployed: B1, B2a, B2b and B3a
+deploy together.** The browser walk of B1 to B2b on the seeded walkthrough database found
+both problems this session fixes. Part A was a read-only pre-flight ending in a hard stop;
+Part B was built after sign-off.
+
+### Corrections to the prompt, accepted at sign-off
+
+- **"The design review queue does not mention change requests at all" was false as
+  worded.** `design_qc_queue` already puts an `open_crs` alert on each package row
+  (pending-only). An SCM request can never appear there, though: SCM may raise only on a
+  released site (`design_change_window_open()`), and the package section lists only
+  `artifacts_uploaded`, `in_qc` and `awaiting_head_qc`.
+- **The tender dashboard returns 403 to anyone without Head authority,** so the "QC
+  reviewer does not see the corrected button there" test asserts the 403. The template
+  had no `has_head_authority` before this session.
+- **Head authority has no per-tender scope.** `_qc_scope()` gives the Head `Q()`, and the
+  tender dashboard admits any OPEX tender, so "every tender he can see" means every
+  tender.
+- **The ageing helper is `design_metrics._head_clock_start`,** as the prompt guessed.
+
+### Decided at sign-off
+
+- The PM history sorts by the last act, newest first. The State column names the act
+  ("Forwarded to the Design Head", "Rejected by the Head", "Withdrawn by SCM", …), and a
+  request never acted on after its raise falls back to the raise time, labelled "Raised".
+- The Head's list is for Head authority only, and is the first section on the review
+  queue. It follows `attention_list(own_only=True)`'s precedent.
+- The tender dashboard's count is batched: one query, zero when the queue is empty. It
+  has no "Correct the BOQ first" link.
+- The Head's list is capped at 25, and the rest are counted: "N more are waiting — open a
+  tender's design dashboard to see them all."
+
+### What was built
+
+- `design_pm_approval_queue` reads every verdict in its one change-request query, with
+  the same Q, active flags and `distinct()` as before. `with_pm` rows fill the existing
+  "waiting for you" table. Everything else is `history_rows`, built with
+  `_change_request_last_act()`, which has one branch per verdict.
+- `design_metrics.head_change_request_list()` makes one query across tenders and returns
+  `(rows, more)`. `design_qc_queue` calls it for Head authority only, and `qc_queue.html`
+  renders it above the Arka section.
+- `design_tender_dashboard` passes `has_head_authority` and a per-row
+  `uncited_correction_count` from `_uncited_correction_counts()`. `tender_dashboard.html`
+  adds the corrected form, with its own note, its `next` and the count.
+- The `design_qc_queue` docstring and the `qc_queue.html` header comment each said the
+  queue held "nothing else". Both now name the new section.
+
+### Tests
+
+`projects/tests_change_request_lists.py` has 20 tests:
+
+- **PM list:** all seven verdicts with `with_pm` first; history newest act first, with the
+  act's own time; the raise fallback; another PM's site is not shown; the coordinator sees
+  the same list; Finance gets 200 with no rows and no nav entry.
+- **Head list:** two tenders in one view; the head-clock sort (raised 20 days ago,
+  forwarded today, sorts as new); every non-pending verdict is excluded; the cap at 26
+  rows and at exactly 25; the empty state; not shown to a QC reviewer; shown to the
+  deputy.
+- **Dashboard:** the button renders for the Head; the QC reviewer gets 403; the count
+  equals the banner's and `_uncited_corrections_since()`; the helper costs 1 query, and 0
+  when empty; the form posts back to the dashboard.
+- **Query counts:** both lists are flat from 1 row to 20.
+
+### Verification
+
+Before: **2878 tests, 1 failure** (the standing `tests_design_part46` test_02), 17 skips, 1
+expected failure. After: **2898 tests, the same 1 failure**, 17 skips, 1 expected failure.
+`check` is clean, and `makemigrations --check --dry-run` reports "No changes detected".
+
+- Every change-request transition view and its helpers are byte-identical to HEAD.
+- The 27 `send_notification` call sites are AST-identical to HEAD.
+- Query counts for a whole page GET are the same at 1 row and at 20: the PM queue takes
+  6, and the review queue as the Head takes 8.
+
+### Findings recorded
+
+`EXECUTION_MODULE_DEFERRED.md` **§D52** records:
+
+- the tender dashboard's ungated Accept and Reject;
+- the per-row `open_crs` query on the review queue;
+- the complete list of labels left wrong for B3b;
+- no tender filter on the Head's list;
+- the "no tender" row.
+
+§D51 carries a closure note.

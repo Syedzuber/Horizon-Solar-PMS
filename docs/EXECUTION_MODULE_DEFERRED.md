@@ -3355,7 +3355,8 @@ together; the browser walk follows this session.**
     nobody, so the new raise takes the Q5 path.
 - **The "corrected" button is NOT on the tender dashboard's queue** (`tender_dashboard.html`
   still offers Accept and Reject only). Signed off: one triage surface at a time, and B3
-  adds the second after the walk proves the first.
+  adds the second after the walk proves the first. **— CLOSED by B3a (26 Sep 2026); see
+  §D52.**
 - **B3 still owes (unchanged from §D50):**
   - **The wording sweep.** `qc_review.html`'s banner heading and `qc_queue` say "PM change
     request" of an SCM-origin request. So do `tender_dashboard.html`'s panel header ("PM
@@ -3385,6 +3386,72 @@ together; the browser walk follows this session.**
   - **No query budget is pinned for the new sends.** Each runs after its block: the forward
     reads the Heads (one query), and corrected, withdraw and SCM reject read the triagers
     (one or two queries).
+
+### D52 — what session B3a (change requests made findable) left open
+
+Recorded by session B3a, 26 Sep 2026. **Recorded, not fixed.** Every claim was checked by
+grep, AST or a test in that session. No migration, no transition, permission or
+notification change. **NOT DEPLOYED: B1, B2a, B2b and B3a deploy together.**
+
+- **Closed from §D51 by B3a.**
+  - **The "corrected" button is on the tender dashboard's queue** (D-13). It is gated on
+    `has_head_authority`, which the view now passes, with its own mandatory
+    `correction_note`, a `next` back to the dashboard, and the banner's count of uncited
+    corrections. The count is batched by `design_views._uncited_correction_counts()`: one
+    query for a non-empty queue, none for an empty one. A test pins it equal to
+    `_uncited_corrections_since()`. There is no "Correct the BOQ first" link, because
+    `user_can_correct_boq` is per site.
+  - **A PM sees what happened after the forward** (D-14). `design_pm_approval_queue` reads
+    every verdict in one query. `with_pm` rows keep the "waiting for you" table. Everything
+    else, PM-raised requests included, is "what happened", newest act first. Its State
+    column names the act, and Last acted gives the person and time
+    (`_change_request_last_act()`).
+  - **The Head finds forwarded requests from the review queue** (D-15).
+    `design_metrics.head_change_request_list()` returns every `pending` request across
+    tenders, oldest by `_head_clock_start()`, in one query. The list is capped at
+    `HEAD_CHANGE_REQUEST_LIST_LIMIT` (25) and counts the rest. It is shown to Head
+    authority only, the same call as `attention_list(own_only=True)`.
+- **Tender dashboard: Accept and Reject are not gated on `has_head_authority`; the new
+  corrected form is** (sign-off 5). This is harmless today, because
+  `design_tender_dashboard` returns 403 to anyone without Head authority. If that gate
+  ever widens, Accept and Reject would render for people whose POST `_triage_guard()`
+  refuses. Not changed.
+- **The review queue's per-package `open_crs` alert is one query per package row**
+  (`list(_pending_change_requests(attempt))` in `design_qc_queue`). This was already the
+  case before B3a, and B3a does not change it.
+- **LABELS LEFT WRONG ON PURPOSE, for B3b's wording sweep.** This is the complete list
+  B3a knows of. Everything B3a wrote is accurate, but not final.
+  1. `tender_dashboard.html` panel header: "PM change requests awaiting your decision".
+     The panel holds SCM-origin, PM-forwarded requests too.
+  2. `tender_dashboard.html` panel empty state: "A PM change request lands here and opens
+     no attempt until you accept it".
+  3. `tender_dashboard.html` panel footer: it describes Accept and Reject only. It does
+     not mention the corrected outcome the panel now offers.
+  4. `qc_queue.html` package-row alert: "N PM change request(s) on this attempt awaiting
+     the Design Head … until he accepts or rejects it". It says "PM" of any origin and
+     leaves out "corrected".
+  5. `pm_approval_queue.html` subtitle: "SCM's change requests waiting for you to forward
+     or reject, and designs waiting for you to accept before release". It does not
+     mention the new history table.
+  6. `pm_approval_queue.html` history State labels that B3a wrote: "Accepted by the Head
+     — new attempt", "Rejected by the Head" and "Corrected in the BOQ by the Head". The
+     actor may be the named deputy; the Last acted column names the actual person.
+  7. `design_views.design_change_request_correct`'s docstring still says "Not yet on the
+     tender dashboard's queue — one triage surface at a time (§D51)". This is now false.
+     B3a could not edit it: the transition views had to stay byte-identical.
+  8. `design_metrics.change_request_queue`'s docstring: "every PM change request awaiting
+     the Design Head".
+  9. Unchanged from §D51: the `qc_review.html` banner heading, `qc_queue`, the attention
+     band's reason text, the accept and reject log lines, `site_workspace.html`'s "Design
+     approvals" (twice), and "has already been corrected in the boq".
+- **Found, not fixed.**
+  - **Head list has no tender filter and no per-tender scope.** This follows D-16: Head
+    authority is unscoped. With many tenders it is a flat list of 25 plus a count. The
+    overflow line points to each tender's dashboard, which lists all of that tender's
+    requests.
+  - **Head list shows "no tender" for an OPEX site with no `program`.** Such a request is
+    on no tender dashboard at all, so the review queue is its only surface. Whether
+    such sites exist in production was not checked.
 
 ## E. Phase 4 — material movement verification (prompts 4.1 – 4.4)
 

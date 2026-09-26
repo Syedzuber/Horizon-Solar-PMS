@@ -849,6 +849,53 @@ def change_request_queue(sites, today=None):
     return rows
 
 
+# SESSION B3a (sign-off 4) — the review queue shows at most this many; the rest are counted
+# and named on the page, never dropped silently. Each tender's dashboard lists all of its own.
+HEAD_CHANGE_REQUEST_LIST_LIMIT = 25
+
+
+def head_change_request_list(today=None, limit=HEAD_CHANGE_REQUEST_LIST_LIMIT):
+    """SESSION B3a (D-15) — every change request waiting for the Design Head, across every
+    tender, for the design review queue. Returns (rows, more): the oldest `limit` by time
+    WITH THE HEAD, and how many more are waiting beyond them.
+
+    THE SAME ROWS AS change_request_queue(), ACROSS TENDERS. Verdict `pending`, the same
+    set every tender dashboard's queue reads; `_head_clock_start()` orders and ages them,
+    so a request raised long ago and forwarded today sorts as new, exactly as it does on
+    the tender dashboard.
+
+    UNSCOPED BY TENDER, because Head authority is: design_qc_queue()'s _qc_scope() gives
+    him Q() and design_tender_dashboard() admits any OPEX tender (D-16). The only filter
+    is the soft delete. The caller shows this to Head authority and nobody else.
+
+    ONE QUERY, whatever the count. Everything a row names is select_related, and the sort
+    and the cap are applied in Python so the clock has one definition. A pending request is
+    at most one per attempt (uniq_pending_change_request_per_attempt), so the whole set is
+    bounded by the sites in flight.
+    """
+    today = today or timezone.localdate()
+    pending = (DesignChangeRequest.objects
+               .filter(verdict=CHANGE_REQUEST_PENDING,
+                       attempt__assignment__project__is_deleted=False)
+               .select_related('attempt__assignment__project__program',
+                               'requested_by__user', 'pm_decided_by__user'))
+    rows = []
+    for cr in pending:
+        since = _head_clock_start(cr)
+        rows.append({
+            'change_request': cr,
+            'project':        cr.attempt.assignment.project,
+            'program':        cr.attempt.assignment.project.program,
+            'requested_by':   cr.requested_by,
+            'forwarded_by':   cr.pm_decided_by if cr.pm_decided_at is not None else None,
+            'attempt_number': cr.attempt.attempt_number,
+            'with_head_since': since,
+            'age_days':       (today - timezone.localtime(since).date()).days,
+        })
+    rows.sort(key=lambda r: (r['with_head_since'], r['change_request'].pk))
+    return rows[:limit], max(len(rows) - limit, 0)
+
+
 # Severity bands for the attention list. Lower sorts first.
 #
 # PART 4.6 INSERTED A BAND at position 1 rather than appending one. An untriaged change

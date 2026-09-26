@@ -440,6 +440,35 @@ rather than to the site's QC screen, because he is working a queue, not one site
             <button class="btn btn-sm btn-outline-secondary">Reject</button>
           </form>
         </div>
+
+        {% comment %}
+        SESSION B3a (D-13) — the third outcome, as on the qc_review banner: the Head fixed the
+        BOQ in place and records that as the answer. Gated on `has_head_authority`, the
+        banner's flag and _triage_guard()'s predicate, with its own mandatory note. The count
+        is the banner's number, batched in the view (_uncited_correction_counts); at zero
+        the form still posts and the endpoint explains the refusal. `next` keeps the Head on
+        this queue, as Accept and Reject do.
+        {% endcomment %}
+        {% if has_head_authority %}
+          <form method="post" class="d-flex flex-wrap gap-2 align-items-start mt-2"
+                action="{% url 'design_change_request_correct' pk=row.change_request.pk %}">
+            {% csrf_token %}
+            <input type="hidden" name="next"
+                   value="{% url 'design_tender_dashboard' pk=program.pk %}">
+            <input type="text" name="correction_note" required
+                   class="form-control form-control-sm flex-grow-1" style="min-width:14rem;"
+                   placeholder="What was corrected in the BOQ (required)">
+            <button class="btn btn-sm btn-outline-primary">Record as corrected in the BOQ</button>
+          </form>
+          <div class="text-muted mt-1" style="font-size:.75rem;">
+            {% if row.uncited_correction_count %}
+              {{ row.uncited_correction_count }} BOQ correction{{ row.uncited_correction_count|pluralize }}
+              made since this request was raised will be cited.
+            {% else %}
+              No BOQ correction has been made since this request was raised.
+            {% endif %}
+          </div>
+        {% endif %}
       </li>
       {% endfor %}
     </ul>
