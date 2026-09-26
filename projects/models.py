@@ -1965,6 +1965,10 @@ SUBJECT_DESIGN_ASSIGNMENT = 'design_assignment'
 # approval views (O4) and the confirm rewrite (O5). Until then §13 lists PaymentRequest
 # as instrumented-pending, and a missing row still means "not instrumented".
 SUBJECT_PAYMENT_REQUEST   = 'payment_request'
+# The ninth, added by Approvals S1 (migration 0103). approvals.py is its only writer, and
+# every request status move writes one row there. ApprovalStep is NOT a subject: a step's
+# timestamps live on its own row and are never cleared, so its history needs no ledger.
+SUBJECT_APPROVAL_REQUEST  = 'approval_request'
 
 SUBJECT_TYPE_CHOICES = [
     (SUBJECT_PROJECT,           'Project'),
@@ -1975,6 +1979,7 @@ SUBJECT_TYPE_CHOICES = [
     (SUBJECT_PAYMENT_MILESTONE, 'Payment Milestone'),
     (SUBJECT_DESIGN_ASSIGNMENT, 'Design Assignment'),
     (SUBJECT_PAYMENT_REQUEST,   'Payment Request'),
+    (SUBJECT_APPROVAL_REQUEST,  'Approval Request'),
 ]
 
 # Reason vocabulary — module-level constants per R-10, NOT a lookup table and
@@ -5952,3 +5957,374 @@ class PunchPoint(models.Model):
     @property
     def is_open(self):
         return self.status == self.OPEN
+
+
+# ---------------------------------------------------------------------------
+# Approvals S1 — the shared approval primitive (26 Sep 2026, D-A1)
+#
+# ONE mechanism for three flows: a material approval before an order, a material
+# approval before dispatch, and a contractor bill. Not a bespoke model per flow and not
+# a generic workflow engine. SCM raises an ApprovalRequest; each party asked to decide
+# gets an ApprovalStep; a "change this" answer closes the round and SCM resubmits as
+# round N+1. Earlier rounds are never overwritten — the named anti-pattern is task
+# approval, which clears submitted_at on reject and loses the history.
+#
+# approvals.py IS THE ONLY WRITER of ApprovalRequest.status and ApprovalStep.verdict.
+# Every other field on a step is written there too, by filter().update(); nothing here
+# overrides save(), because the writer is a function and not a model method (the
+# payments.py precedent).
+#
+# THE STEP ROW IS THE ACCOUNTABILITY RECORD. Turnaround is decided_at − activated_at
+# per step; the aging list is pending steps with activated_at set, oldest first, grouped
+# by assignee. Nothing is soft-deleted: an accountability record is withdrawn or
+# superseded, never removed.
+# ---------------------------------------------------------------------------
+
+APPROVAL_KIND_MATERIAL_PRE_ORDER    = 'material_pre_order'
+APPROVAL_KIND_MATERIAL_PRE_DISPATCH = 'material_pre_dispatch'
+# The constant exists from S1 so the step sequencing (SE first, then PM) is built and
+# tested once. Its detail model, ContractorBillDetail, arrives in Session 4.
+APPROVAL_KIND_CONTRACTOR_BILL       = 'contractor_bill'
+
+APPROVAL_KIND_CHOICES = [
+    (APPROVAL_KIND_MATERIAL_PRE_ORDER,    'Material — before order'),
+    (APPROVAL_KIND_MATERIAL_PRE_DISPATCH, 'Material — before dispatch'),
+    (APPROVAL_KIND_CONTRACTOR_BILL,       'Contractor bill'),
+]
+APPROVAL_MATERIAL_KINDS = frozenset({
+    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+})
+
+APPROVAL_OPEN              = 'open'
+APPROVAL_CHANGES_REQUESTED = 'changes_requested'
+APPROVAL_APPROVED          = 'approved'
+APPROVAL_REJECTED          = 'rejected'
+APPROVAL_WITHDRAWN         = 'withdrawn'
+
+APPROVAL_STATUS_CHOICES = [
+    (APPROVAL_OPEN,              'Open'),
+    (APPROVAL_CHANGES_REQUESTED, 'Changes requested'),
+    (APPROVAL_APPROVED,          'Approved'),
+    (APPROVAL_REJECTED,          'Rejected'),
+    (APPROVAL_WITHDRAWN,         'Withdrawn'),
+]
+# closed_at is set exactly when a request is in one of these. Terminal means terminal:
+# nothing resubmits a rejected or withdrawn request; SCM raises a fresh one.
+APPROVAL_TERMINAL_STATUSES = frozenset({
+    APPROVAL_APPROVED, APPROVAL_REJECTED, APPROVAL_WITHDRAWN,
+})
+
+# "design" is Design Head AUTHORITY — the Head or his deputy — never the assigned
+# designer (D-A9).
+APPROVAL_PARTY_PM            = 'pm'
+APPROVAL_PARTY_DESIGN        = 'design'
+APPROVAL_PARTY_SITE_ENGINEER = 'site_engineer'
+
+APPROVAL_PARTY_CHOICES = [
+    (APPROVAL_PARTY_PM,            'PM'),
+    (APPROVAL_PARTY_DESIGN,        'Design Head'),
+    (APPROVAL_PARTY_SITE_ENGINEER, 'Site Engineer'),
+]
+
+APPROVAL_STEP_PENDING           = 'pending'
+APPROVAL_STEP_APPROVED          = 'approved'
+APPROVAL_STEP_CHANGES_REQUESTED = 'changes_requested'
+APPROVAL_STEP_REJECTED          = 'rejected'
+# Not a decision. The step stopped being asked: its round closed on someone else's
+# non-approval (fail-fast), the request was withdrawn, or SCM reassigned it.
+APPROVAL_STEP_SUPERSEDED        = 'superseded'
+
+APPROVAL_STEP_VERDICT_CHOICES = [
+    (APPROVAL_STEP_PENDING,           'Pending'),
+    (APPROVAL_STEP_APPROVED,          'Approved'),
+    (APPROVAL_STEP_CHANGES_REQUESTED, 'Changes requested'),
+    (APPROVAL_STEP_REJECTED,          'Rejected'),
+    (APPROVAL_STEP_SUPERSEDED,        'Superseded'),
+]
+# The three verdicts a person gives. A non-approval must say why.
+APPROVAL_STEP_DECISIONS = frozenset({
+    APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
+})
+APPROVAL_STEP_NOTE_REQUIRED = frozenset({
+    APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
+})
+
+# How a decision made outside PMS reached SCM, who records it on the decider's behalf.
+APPROVAL_PROXY_WHATSAPP  = 'whatsapp'
+APPROVAL_PROXY_PHONE     = 'phone'
+APPROVAL_PROXY_EMAIL     = 'email'
+APPROVAL_PROXY_IN_PERSON = 'in_person'
+
+APPROVAL_PROXY_CHANNEL_CHOICES = [
+    (APPROVAL_PROXY_WHATSAPP,  'WhatsApp'),
+    (APPROVAL_PROXY_PHONE,     'Phone'),
+    (APPROVAL_PROXY_EMAIL,     'Email'),
+    (APPROVAL_PROXY_IN_PERSON, 'In person'),
+]
+
+
+class ApprovalRequest(models.Model):
+    """One thing SCM asked to have approved, across every round of asking.
+
+    `status` is the request's position now; the rounds' decisions are the steps. Both
+    are written by approvals.py only, and every status move writes a StatusTransition
+    row (subject type `approval_request`).
+
+    SCOPE IS FOR RECORD ONLY (D-A2). `programs`, `projects` and `site_groups` say what
+    the request was about; nothing derives authority, visibility or money from them.
+    Plain M2Ms rather than VendorOrder's through-models: no scope row carries anything
+    but the link. A reader filters `projects__is_deleted=False` on display.
+    """
+
+    kind   = models.CharField(max_length=30, choices=APPROVAL_KIND_CHOICES)
+    status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES,
+                              default=APPROVAL_OPEN)
+
+    title       = models.CharField(max_length=200)
+    description = models.TextField()
+
+    # PROTECT: Vendor has no hard-delete path, and a request must not lose the party it
+    # was about. Required for pre-dispatch and the contractor bill (CHECK below).
+    vendor = models.ForeignKey(
+        Vendor, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='approval_requests',
+    )
+
+    # SCM ticks it; a Design Head step is then asked in parallel with the PM (D-A7).
+    design_signoff_required = models.BooleanField(default=False)
+
+    current_round = models.PositiveSmallIntegerField(default=1)
+
+    raised_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='raised_approval_requests',
+    )
+    raised_at = models.DateTimeField(auto_now_add=True)
+    # Set when the request reaches APPROVAL_TERMINAL_STATUSES, and only then (CHECK).
+    closed_at = models.DateTimeField(null=True, blank=True)
+
+    withdrawal_note = models.TextField(blank=True, default='')
+
+    programs    = models.ManyToManyField('Program', blank=True,
+                                         related_name='approval_requests')
+    projects    = models.ManyToManyField(Project, blank=True,
+                                         related_name='approval_requests')
+    site_groups = models.ManyToManyField('SiteGroup', blank=True,
+                                         related_name='approval_requests')
+
+    # R-14 idempotency key — the VendorOrder.client_uuid declaration, exactly.
+    client_uuid = models.UUIDField(null=True, blank=True, unique=True)
+
+    class Meta:
+        ordering = ['-raised_at']
+        constraints = [
+            models.CheckConstraint(
+                condition=(~models.Q(status=APPROVAL_WITHDRAWN)
+                           | ~models.Q(withdrawal_note='')),
+                name='approval_request_withdrawal_note_required'),
+            models.CheckConstraint(
+                condition=(~models.Q(kind=APPROVAL_KIND_CONTRACTOR_BILL)
+                           | models.Q(design_signoff_required=False)),
+                name='approval_request_no_design_signoff_on_bill'),
+            # Same-row, so the database can hold it as well as create_approval_request().
+            models.CheckConstraint(
+                condition=(~models.Q(kind__in=[APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                                               APPROVAL_KIND_CONTRACTOR_BILL])
+                           | models.Q(vendor__isnull=False)),
+                name='approval_request_vendor_required_for_kind'),
+            models.CheckConstraint(
+                condition=((models.Q(status__in=sorted(APPROVAL_TERMINAL_STATUSES))
+                            & models.Q(closed_at__isnull=False))
+                           | (~models.Q(status__in=sorted(APPROVAL_TERMINAL_STATUSES))
+                              & models.Q(closed_at__isnull=True))),
+                name='approval_request_closed_at_iff_terminal'),
+        ]
+
+    def __str__(self):
+        return f"Approval #{self.pk} — {self.title}"
+
+
+class ApprovalStep(models.Model):
+    """One party asked to decide one round of one request. THE ACCOUNTABILITY CORE.
+
+    A round's steps are created together. `sequence` orders them: every material step
+    is 1 (parallel); a contractor bill's Site Engineer is 1 and its PM is 2. A step's
+    `activated_at` stays null until every step of a lower sequence in its round is
+    approved, so a PM is never charged for the Site Engineer's time.
+
+    `assignee` is who was asked, and who the aging list names. `decided_by` is who
+    decided — a deputy Design Head decides the Head's step. `recorded_by` is who typed
+    it into PMS: the decider, or SCM recording a WhatsApp answer on their behalf, in
+    which case `is_proxy` is set and the channel and evidence are mandatory.
+
+    A reassignment supersedes this row and creates a new one for the same party in the
+    same round, which is why the uniqueness below excludes superseded rows. `note` on a
+    superseded row is the reason SCM gave for reassigning it (blank when a round closed
+    under it); `superseded_by` is who caused it.
+    """
+
+    request  = models.ForeignKey(ApprovalRequest, on_delete=models.PROTECT,
+                                 related_name='steps')
+    round    = models.PositiveSmallIntegerField()
+    party    = models.CharField(max_length=20, choices=APPROVAL_PARTY_CHOICES)
+    sequence = models.PositiveSmallIntegerField()
+
+    assignee = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='assigned_approval_steps',
+    )
+    activated_at = models.DateTimeField(null=True, blank=True)
+
+    verdict = models.CharField(max_length=20, choices=APPROVAL_STEP_VERDICT_CHOICES,
+                               default=APPROVAL_STEP_PENDING)
+    note    = models.TextField(blank=True, default='')
+
+    decided_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='decided_approval_steps',
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+    recorded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='recorded_approval_steps',
+    )
+
+    is_proxy       = models.BooleanField(default=False)
+    proxy_channel  = models.CharField(max_length=20, blank=True, default='',
+                                      choices=APPROVAL_PROXY_CHANNEL_CHOICES)
+    proxy_evidence = models.TextField(blank=True, default='')
+
+    superseded_at = models.DateTimeField(null=True, blank=True)
+    superseded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='superseded_approval_steps',
+    )
+
+    class Meta:
+        ordering = ['request', 'round', 'sequence', 'pk']
+        constraints = [
+            # 1. A non-approval says why.
+            models.CheckConstraint(
+                condition=(~models.Q(verdict__in=sorted(APPROVAL_STEP_NOTE_REQUIRED))
+                           | ~models.Q(note='')),
+                name='approval_step_note_required'),
+            # 2. A decided step names who, when and who typed it; an undecided one none.
+            models.CheckConstraint(
+                condition=((models.Q(verdict__in=sorted(APPROVAL_STEP_DECISIONS))
+                            & models.Q(decided_by__isnull=False)
+                            & models.Q(decided_at__isnull=False)
+                            & models.Q(recorded_by__isnull=False))
+                           | (models.Q(verdict__in=[APPROVAL_STEP_PENDING,
+                                                    APPROVAL_STEP_SUPERSEDED])
+                              & models.Q(decided_by__isnull=True)
+                              & models.Q(decided_at__isnull=True)
+                              & models.Q(recorded_by__isnull=True))),
+                name='approval_step_decision_fields'),
+            # 3. superseded_at if and only if superseded.
+            models.CheckConstraint(
+                condition=((models.Q(verdict=APPROVAL_STEP_SUPERSEDED)
+                            & models.Q(superseded_at__isnull=False))
+                           | (~models.Q(verdict=APPROVAL_STEP_SUPERSEDED)
+                              & models.Q(superseded_at__isnull=True))),
+                name='approval_step_superseded_at_iff_superseded'),
+            # 4. A proxy record carries its channel and its evidence.
+            models.CheckConstraint(
+                condition=(models.Q(is_proxy=False)
+                           | (~models.Q(proxy_channel='') & ~models.Q(proxy_evidence=''))),
+                name='approval_step_proxy_evidence'),
+            # 5. Not a proxy -> the decider typed it. On a pending row both columns are
+            # NULL, NULL = NULL is NULL, and a CHECK passes on NULL; CHECK 2 is what
+            # holds both columns null there.
+            models.CheckConstraint(
+                condition=(models.Q(is_proxy=True)
+                           | models.Q(recorded_by=models.F('decided_by'))),
+                name='approval_step_self_recorded_unless_proxy'),
+            # 6. One live step per party per round. Superseded rows are excluded so a
+            # reassignment can add the replacement in the same round.
+            models.UniqueConstraint(
+                fields=['request', 'round', 'party'],
+                condition=~models.Q(verdict=APPROVAL_STEP_SUPERSEDED),
+                name='uniq_approval_step_live_party'),
+            # 7. Who superseded it, if and only if it was superseded.
+            models.CheckConstraint(
+                condition=((models.Q(verdict=APPROVAL_STEP_SUPERSEDED)
+                            & models.Q(superseded_by__isnull=False))
+                           | (~models.Q(verdict=APPROVAL_STEP_SUPERSEDED)
+                              & models.Q(superseded_by__isnull=True))),
+                name='approval_step_superseded_by_iff_superseded'),
+        ]
+
+    def __str__(self):
+        return f"{self.request} — R{self.round} {self.party}: {self.verdict}"
+
+
+class ApprovalAttachment(models.Model):
+    """A file attached to one round of a request. APPEND-ONLY.
+
+    A new round adds files; it never removes the previous round's, so an approver can
+    always see what the earlier answer was given against. The storage fields mirror
+    VendorOrderDocument's (bucket + path, signed URL built at request time).
+    """
+
+    request = models.ForeignKey(ApprovalRequest, on_delete=models.PROTECT,
+                                related_name='attachments')
+    round   = models.PositiveSmallIntegerField()
+    label   = models.CharField(max_length=200, blank=True, default='')
+
+    file_name    = models.CharField(max_length=255)   # Original filename, as uploaded
+    bucket       = models.CharField(max_length=100)
+    path         = models.CharField(max_length=500)   # Path within `bucket`
+    file_type    = models.CharField(max_length=100, blank=True, default='')
+    file_size_kb = models.PositiveIntegerField(default=0)
+
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='approval_attachments',
+    )
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['round', 'uploaded_at', 'pk']
+
+    def __str__(self):
+        return f"{self.request} — R{self.round}: {self.file_name}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'ApprovalAttachment is append-only — a new round adds files, it never '
+                'edits an earlier one.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            "ApprovalAttachment is append-only — an earlier round's files stay.")
+
+
+class MaterialApprovalDetail(models.Model):
+    """What a material request proposes. 1:1 with a request of a material kind.
+
+    `vendor_order` is required for pre-dispatch — the order whose goods are about to
+    ship. `pre_order_request` optionally links a pre-dispatch request to the pre-order
+    approval behind that order; older orders have none (D-A13). Both are enforced by
+    create_approval_request(), because each depends on the request's kind.
+    """
+
+    request = models.OneToOneField(ApprovalRequest, on_delete=models.PROTECT,
+                                   related_name='material_detail')
+
+    proposed_make = models.CharField(max_length=200, blank=True, default='')
+    specification = models.TextField(blank=True, default='')
+    quantity_note = models.TextField(blank=True, default='')
+
+    boq_items = models.ManyToManyField('BOQItemMaster', blank=True,
+                                       related_name='material_approvals')
+
+    vendor_order = models.ForeignKey(
+        'VendorOrder', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='material_approvals',
+    )
+    pre_order_request = models.ForeignKey(
+        ApprovalRequest, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='pre_dispatch_details',
+    )
+
+    def __str__(self):
+        return f"{self.request} — {self.proposed_make or 'material'}"

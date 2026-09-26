@@ -8,6 +8,7 @@ from .models import (
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
+    ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
 )
 from .utils import assign_task_to
 
@@ -648,3 +649,58 @@ class TaskTemplateTaskAdmin(_DraftOnlyContentAdmin):
 
     def _template_of(self, obj):
         return obj.phase.template
+
+
+# ---------------------------------------------------------------------------
+# Approvals S1 — READ-ONLY, every field, no add, no change, no delete
+#
+# The approval audit found design verdicts and reasons editable in this admin; these
+# four must not repeat it. approvals.py is the only writer of a request's status and a
+# step's verdict, and a ModelAdmin form writes straight to the row with no ledger row and
+# no same-person check. So every field is read-only — listed explicitly, because
+# get_form() still builds a form from anything not in readonly_fields even when
+# has_change_permission() says no, and tests_status_transition's registry guard asks
+# get_form() whether `status` is editable.
+# ---------------------------------------------------------------------------
+
+
+class _ApprovalRecordAdmin(admin.ModelAdmin):
+    """View-only. Every concrete and many-to-many field is read-only."""
+
+    def get_readonly_fields(self, request, obj=None):
+        meta = self.model._meta
+        return [f.name for f in meta.fields] + [f.name for f in meta.many_to_many]
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ApprovalRequest)
+class ApprovalRequestAdmin(_ApprovalRecordAdmin):
+    list_display  = ['pk', 'kind', 'status', 'title', 'current_round', 'raised_by',
+                     'raised_at', 'closed_at']
+    list_filter   = ['kind', 'status']
+    search_fields = ['title']
+
+
+@admin.register(ApprovalStep)
+class ApprovalStepAdmin(_ApprovalRecordAdmin):
+    list_display  = ['request', 'round', 'party', 'sequence', 'assignee', 'verdict',
+                     'activated_at', 'decided_by', 'decided_at', 'is_proxy']
+    list_filter   = ['party', 'verdict', 'is_proxy']
+
+
+@admin.register(ApprovalAttachment)
+class ApprovalAttachmentAdmin(_ApprovalRecordAdmin):
+    list_display  = ['request', 'round', 'label', 'file_name', 'uploaded_by', 'uploaded_at']
+
+
+@admin.register(MaterialApprovalDetail)
+class MaterialApprovalDetailAdmin(_ApprovalRecordAdmin):
+    list_display  = ['request', 'proposed_make', 'vendor_order', 'pre_order_request']

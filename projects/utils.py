@@ -487,10 +487,11 @@ def _subject_type_registry():
     if _SUBJECT_TYPE_REGISTRY is None:
         from .models import (
             Project, Task, BOQ, DeliveryChallan, Issue, PaymentMilestone,
-            DesignAssignment, PaymentRequest,
+            DesignAssignment, PaymentRequest, ApprovalRequest,
             SUBJECT_PROJECT, SUBJECT_TASK, SUBJECT_BOQ,
             SUBJECT_DELIVERY_CHALLAN, SUBJECT_ISSUE, SUBJECT_PAYMENT_MILESTONE,
             SUBJECT_DESIGN_ASSIGNMENT, SUBJECT_PAYMENT_REQUEST,
+            SUBJECT_APPROVAL_REQUEST,
         )
         _SUBJECT_TYPE_REGISTRY = {
             Project:          SUBJECT_PROJECT,
@@ -501,6 +502,9 @@ def _subject_type_registry():
             PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
             DesignAssignment: SUBJECT_DESIGN_ASSIGNMENT,
             PaymentRequest:   SUBJECT_PAYMENT_REQUEST,
+            # Approvals S1. No _SUBJECT_PROJECT_RESOLVERS entry: a request's scope is a
+            # record-only M2M, not an owning project, so its rows carry project=None.
+            ApprovalRequest:  SUBJECT_APPROVAL_REQUEST,
         }
     return _SUBJECT_TYPE_REGISTRY
 

@@ -2167,3 +2167,134 @@ def user_can_mark_paid(user, payment_request):
     if payment_request.approved_by_id is not None and payment_request.approved_by_id == profile.pk:
         return False
     return payment_request.requested_by_id != user.pk
+
+
+# ---------------------------------------------------------------------------
+# Approvals S1 — who may raise, decide, record, withdraw and reassign
+#
+# AUTHORITY AND STATE ONLY. These say whether a person holds the right to act on a step
+# in the state it is in now. The SAME-PERSON rules — the raiser never decides, one
+# person never decides for two parties on one request — are NOT here: they live in one
+# helper in approvals.py (approvals._same_person_refusal), which the chokepoint applies
+# after these, so there is exactly one copy of them.
+#
+# Party and status values are spelled as literals ('pm', 'design', 'pending', 'open'),
+# as `'procurement'` is in project_boq_is_group_locked(): this module imports no models,
+# deliberately. They are the values of the APPROVAL_* constants in models.py.
+# ---------------------------------------------------------------------------
+
+# Who raises, and who records a decision on someone else's behalf (D-A4, D-A5). SCM is
+# the data-entry proxy for vendors and contractors, so both rights are SCM's. Its own set
+# rather than VENDOR_ORDER_RAISE_ROLES, so widening who may raise an order never silently
+# widens who may ask for an approval.
+APPROVAL_RAISE_ROLES = frozenset({'SCM'})
+
+# Who may be NAMED as the approving party, by party. The design party is not a role: it
+# is the is_design_head flag (see profile_can_be_approval_assignee below).
+APPROVAL_ASSIGNEE_ROLES = {
+    'pm':            frozenset({'PM'}),
+    'site_engineer': frozenset({'Site Engineer'}),
+}
+
+
+def _approval_step_is_live(step):
+    """A step anyone may act on now: pending, its turn has come, its request is open,
+    and it belongs to the request's current round."""
+    request = step.request
+    return (step.verdict == 'pending'
+            and step.activated_at is not None
+            and request.status == 'open'
+            and step.round == request.current_round)
+
+
+def profile_can_be_approval_assignee(profile, party):
+    """Return True if `profile` may be NAMED as the approver for `party`.
+
+    PM: an active PM-role profile (D-A8 — SCM chooses from the PMs). Site Engineer: an
+    active Site Engineer. Design: an active profile holding is_design_head — the Head,
+    not a deputy, because the aging list attributes the step to the person named, and
+    that is the Head (a deputy may still DECIDE it; see user_can_decide_approval_step).
+
+    Takes a profile, not a user, because the person named is not the person asking.
+    """
+    if profile is None or not profile.is_active:
+        return False
+    if party == 'design':
+        return bool(profile.is_design_head)
+    roles = APPROVAL_ASSIGNEE_ROLES.get(party)
+    return roles is not None and profile.role in roles
+
+
+def user_can_raise_approval_request(user):
+    """Return True if `user` may raise an approval request. SCM, by role."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in APPROVAL_RAISE_ROLES
+
+
+def user_can_decide_approval_step(user, step):
+    """Return True if `user` holds the authority to decide `step` now.
+
+    A design step: anyone with Design Head authority — the Head or his named deputy
+    (D-A9); `decided_by` records which. A PM or Site Engineer step: its assignee, and
+    nobody else — a PM who has left is replaced by reassigning the step, never by a
+    colleague deciding it under the absent PM's name.
+
+    The step must be live (_approval_step_is_live). The same-person rules are the
+    chokepoint's, not this function's — see the section note.
+    """
+    if step is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if not _approval_step_is_live(step):
+        return False
+    if step.party == 'design':
+        return user_has_design_head_authority(user)
+    return step.assignee_id == profile.pk
+
+
+def user_can_record_proxy_decision(user, step):
+    """Return True if `user` may record a decision on `step` on the decider's behalf.
+
+    SCM only (D-A5), on a live step. A step already decided in PMS is not live, so a
+    proxy record arriving after the real decision is refused here. Whether the person
+    named as decider may decide the step is asked separately, of them, by the chokepoint.
+    """
+    if step is None:
+        return False
+    if not user_can_raise_approval_request(user):
+        return False
+    return _approval_step_is_live(step)
+
+
+def user_can_withdraw_approval_request(user, request):
+    """Return True if `user` may withdraw `request`.
+
+    Any SCM user (the B2a precedent: SCM withdraws, not only the raiser), while the
+    request is open or waiting for SCM's changes. Terminal states stay terminal.
+    """
+    if request is None:
+        return False
+    if not user_can_raise_approval_request(user):
+        return False
+    return request.status in ('open', 'changes_requested')
+
+
+def user_can_reassign_approval_step(user, step):
+    """Return True if `user` may hand `step` to a different assignee.
+
+    SCM, on a pending step of an open request's current round. A step whose turn has
+    not come (a contractor bill's PM while the Site Engineer is still deciding) may be
+    reassigned too: the PM can leave before the bill reaches them.
+    """
+    if step is None:
+        return False
+    if not user_can_raise_approval_request(user):
+        return False
+    request = step.request
+    return (step.verdict == 'pending'
+            and request.status == 'open'
+            and step.round == request.current_round)
