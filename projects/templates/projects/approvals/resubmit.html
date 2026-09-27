@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% comment %}
+Approvals S2a — SCM resubmits after changes were requested (approval_views.approval_resubmit).
+
+WHAT A RESUBMIT CAN CARRY: a note, new attachments, and optionally a different approver
+for a party. approvals.resubmit_approval_request() takes nothing else, so the request's
+title, description and material are NOT editable here, and the page says so above the
+note (ruling B5). A changed approver is recorded in the ledger before the note.
+{% endcomment %}
+{% block title %}Resubmit approval #{{ approval.pk }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="mb-3">
+  <a href="{% url 'approval_detail' approval.pk %}" class="small text-decoration-none">← Back to the request</a>
+  <h4 class="mb-0 mt-1 text-break">Resubmit #{{ approval.pk }} · {{ approval.title }}</h4>
+  <small class="text-muted">This opens round {{ approval.current_round|add:1 }}</small>
+</div>
+
+<div class="card shadow-sm mb-3">
+  <div class="card-header fw-semibold">The request</div>
+  <div class="card-body small">
+    <p class="mb-2 text-break" style="white-space:pre-line;">{{ approval.description }}</p>
+    {% if approval.material_detail %}
+    <dl class="row mb-0">
+      <dt class="col-5 col-sm-3 text-muted fw-normal">Proposed make</dt>
+      <dd class="col-7 col-sm-9 text-break">{{ approval.material_detail.proposed_make|default:"—" }}</dd>
+      <dt class="col-5 col-sm-3 text-muted fw-normal">Specification</dt>
+      <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ approval.material_detail.specification|default:"—" }}</dd>
+      <dt class="col-5 col-sm-3 text-muted fw-normal">Quantity</dt>
+      <dd class="col-7 col-sm-9 mb-0 text-break" style="white-space:pre-line;">{{ approval.material_detail.quantity_note|default:"—" }}</dd>
+    </dl>
+    {% endif %}
+  </div>
+</div>
+
+<form method="post" enctype="multipart/form-data">
+  {% csrf_token %}
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">What changed</div>
+    <div class="card-body">
+      <div class="alert alert-warning py-2 small mb-2">Describe what you changed. The request details above are not edited.</div>
+      <label for="apResubmitNote" class="form-label small mb-1">Note</label>
+      <textarea name="note" id="apResubmitNote" class="form-control w-100" rows="4" required>{{ post.note|default:'' }}</textarea>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">Approvers for the next round</div>
+    <div class="card-body">
+      {% for p in parties %}
+      <div class="{% if not forloop.last %}mb-3{% endif %}">
+        <label for="apAssignee{{ p.party }}" class="form-label small mb-1">{{ p.label }}</label>
+        <select name="assignee_{{ p.party }}" id="apAssignee{{ p.party }}" class="form-select">
+          {% for c in p.choices %}
+          <option value="{{ c.pk }}"{% if c.pk == p.holder.pk %} selected{% endif %}>{{ c.user.get_full_name|default:c.user.username }}{% if c.pk == p.holder.pk %} (as before){% endif %}</option>
+          {% endfor %}
+          {% if p.holder not in p.choices %}
+          <option value="{{ p.holder.pk }}" selected>{{ p.holder.user.get_full_name|default:p.holder.user.username }} (as before — no longer eligible)</option>
+          {% endif %}
+        </select>
+      </div>
+      {% endfor %}
+      <div class="form-text">Leave each as before unless someone else should decide. A change is recorded with your note.</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">New attachments <span class="text-muted fw-normal">(optional)</span></div>
+    <div class="card-body">
+      <input type="file" name="attachments" class="form-control" multiple
+             accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
+      <div class="form-text">Earlier rounds' files stay on the request. Up to {{ attachment_limit }} files, 20 MB each.</div>
+    </div>
+  </div>
+
+  <div class="d-grid d-sm-flex justify-content-sm-end gap-2 mb-4">
+    <a href="{% url 'approval_detail' approval.pk %}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-brand">Resubmit</button>
+  </div>
+</form>
+
+{% endblock %}

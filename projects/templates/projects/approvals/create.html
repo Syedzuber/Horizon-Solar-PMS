@@ -1,0 +1,163 @@
+{% extends "base.html" %}
+{% comment %}
+Approvals S2a — SCM raises a material approval before an order (approval_views.approval_create).
+Every rule the request is held to is approvals.create_approval_request()'s; a refusal comes
+back as a message above this form with what was typed still in it (files must be chosen
+again — a browser never re-fills a file input).
+
+The Design Head picker is drawn inside #apDesignHead and hidden until "Design sign-off
+required" is ticked. Without script it simply stays visible; the view ignores it unless
+the box is ticked.
+{% endcomment %}
+{% block title %}Raise approval — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Raise approval</h4>
+    <small class="text-muted">Material — before order</small>
+  </div>
+  <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary btn-sm">← Approvals</a>
+</div>
+
+<form method="post" enctype="multipart/form-data" id="apCreateForm">
+  {% csrf_token %}
+  <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">1 · What needs approving</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="apTitle" class="form-label">Title</label>
+        <input type="text" name="title" id="apTitle" class="form-control" maxlength="200" required
+               value="{{ post.title|default:'' }}" placeholder="e.g. Module make for Tender 3">
+      </div>
+      <div class="mb-0">
+        <label for="apDescription" class="form-label">Description</label>
+        <textarea name="description" id="apDescription" class="form-control" rows="3" required>{{ post.description|default:'' }}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">2 · The material</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="apMake" class="form-label">Proposed make</label>
+        <input type="text" name="proposed_make" id="apMake" class="form-control" maxlength="200"
+               value="{{ post.proposed_make|default:'' }}">
+      </div>
+      <div class="mb-3">
+        <label for="apSpec" class="form-label">Specification</label>
+        <textarea name="specification" id="apSpec" class="form-control" rows="2">{{ post.specification|default:'' }}</textarea>
+      </div>
+      <div class="mb-3">
+        <label for="apQty" class="form-label">Quantity</label>
+        <textarea name="quantity_note" id="apQty" class="form-control" rows="2">{{ post.quantity_note|default:'' }}</textarea>
+      </div>
+      <div class="mb-0">
+        <label for="apVendor" class="form-label">Vendor <span class="text-muted small">(optional)</span></label>
+        <select name="vendor" id="apVendor" class="form-select">
+          <option value="">— Not decided yet —</option>
+          {% for v in vendors %}
+          <option value="{{ v.pk }}"{% if post and v.pk|stringformat:"s" == post.vendor %} selected{% endif %}>{{ v.name }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">3 · Who approves</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="apPm" class="form-label">PM</label>
+        <select name="pm_assignee" id="apPm" class="form-select" required>
+          <option value="">— Choose a PM —</option>
+          {% for p in pms %}
+          <option value="{{ p.pk }}"{% if post and p.pk|stringformat:"s" == post.pm_assignee %} selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="checkbox" name="design_signoff_required" id="apDesignRequired"
+               {% if post.design_signoff_required %}checked{% endif %}>
+        <label class="form-check-label" for="apDesignRequired">Design sign-off required</label>
+        <div class="form-text mt-0">The Design Head is then asked at the same time as the PM.</div>
+      </div>
+      <div id="apDesignHead" class="mb-0">
+        <label for="apHead" class="form-label">Design Head</label>
+        <select name="design_assignee" id="apHead" class="form-select">
+          <option value="">— Choose the Design Head —</option>
+          {% for h in heads %}
+          <option value="{{ h.pk }}"{% if post %}{% if h.pk|stringformat:"s" == post.design_assignee %} selected{% endif %}{% elif h.pk == default_head_pk %} selected{% endif %}>{{ h.user.get_full_name|default:h.user.username }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      4 · What it is about <span class="text-muted fw-normal">(optional)</span>
+      <div class="small text-muted fw-normal">For the record only. Naming a site here gives nobody access to it.</div>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-md-4">
+          <label for="apPrograms" class="form-label">Tenders</label>
+          <select name="program" id="apPrograms" class="form-select" multiple size="6">
+            {% for pr in programs %}
+            <option value="{{ pr.pk }}"{% if pr.pk|stringformat:"s" in picked.program %} selected{% endif %}>{{ pr.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-4">
+          <label for="apProjects" class="form-label">Sites</label>
+          <select name="project" id="apProjects" class="form-select" multiple size="6">
+            {% for pj in projects %}
+            <option value="{{ pj.pk }}"{% if pj.pk|stringformat:"s" in picked.project %} selected{% endif %}>{{ pj.project_id }} — {{ pj.customer_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-4">
+          <label for="apGroups" class="form-label">Site groups</label>
+          <select name="site_group" id="apGroups" class="form-select" multiple size="6">
+            {% for g in site_groups %}
+            <option value="{{ g.pk }}"{% if g.pk|stringformat:"s" in picked.site_group %} selected{% endif %}>{{ g.program.name }} · {{ g.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="form-text">Hold Ctrl (⌘ on a Mac) to choose more than one. On a phone, tap each one.</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">5 · Attachments</div>
+    <div class="card-body">
+      <input type="file" name="attachments" class="form-control" multiple
+             accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
+      <div class="form-text">Datasheets, drawings, photos. Up to {{ attachment_limit }} files, 20 MB each.</div>
+    </div>
+  </div>
+
+  <div class="d-grid d-sm-flex justify-content-sm-end gap-2 mb-4">
+    <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-brand">Raise approval</button>
+  </div>
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var box = document.getElementById('apDesignRequired');
+  var head = document.getElementById('apDesignHead');
+  if (!box || !head) return;
+  function sync() { head.classList.toggle('d-none', !box.checked); }
+  box.addEventListener('change', sync);
+  sync();
+});
+</script>
+
+{% endblock %}

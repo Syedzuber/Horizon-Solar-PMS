@@ -81,6 +81,19 @@ def purchases_nav(request):
     return {'can_view_purchases_workspace': user_can_view_purchases_workspace(request.user)}
 
 
+def approvals_nav(request):
+    """Whether to show the Approvals nav entry (Approvals S2a).
+
+    The answer comes from permissions.user_can_view_approval_list(), the same helper
+    approval_list calls, so the link and the view cannot disagree. Imported here rather
+    than in the block above so this session adds one function and edits nothing else.
+    """
+    from .permissions import user_can_view_approval_list
+    if not request.user.is_authenticated:
+        return {'can_view_approvals': False}
+    return {'can_view_approvals': user_can_view_approval_list(request.user)}
+
+
 def typed_date_bounds(request):
     """min/max for every <input type="date"> that stores a typed date.
 

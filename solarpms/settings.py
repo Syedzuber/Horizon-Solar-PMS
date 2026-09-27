@@ -94,6 +94,7 @@ TEMPLATES = [
                 'projects.context_processors.vendor_nav',  # can_view_vendor_list, for the Vendors entry in the Masters menu
                 'projects.context_processors.payment_queue_nav',  # can_view_payment_queue, for the Payments nav entry (O5)
                 'projects.context_processors.purchases_nav',  # can_view_purchases_workspace, for the Purchases & payments nav entry (O8a)
+                'projects.context_processors.approvals_nav',  # can_view_approvals, for the Approvals nav entry (Approvals S2a)
                 'projects.context_processors.typed_date_bounds',  # typed_date_min / typed_date_max for date inputs
             ],
         },

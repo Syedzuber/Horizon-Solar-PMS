@@ -2298,3 +2298,129 @@ def user_can_reassign_approval_step(user, step):
     return (step.verdict == 'pending'
             and request.status == 'open'
             and step.round == request.current_round)
+
+
+# ---------------------------------------------------------------------------
+# Approvals S2a — who may SEE a request, open the list, and answer a step
+#
+# The S1 predicates above say who may ACT on a step in the state it is in NOW. These say
+# who may READ a request, and who is the RIGHT PERSON to answer a step whatever its state.
+# The screens need both, for the payment_mark_paid split: who is asking is a fact about
+# the caller, and a caller with no business on a request gets a 403; what changed while
+# the page was open (the step closed, the request was withdrawn) is the chokepoint's
+# ApprovalRefused, which a view shows as a message.
+#
+# Like the S1 section, spelled with literals and reached through relations; no models.
+# ---------------------------------------------------------------------------
+
+# Read EVERY request, whoever is named on it (Approvals spec v2, D-A15). SCM raises and
+# records them all; CEO, Admin and System Admin read the portfolio. Finance is NOT here,
+# unlike VENDOR_ORDER_PORTFOLIO_ROLES: its own set, so widening who reads every order
+# never silently widens who reads every approval.
+APPROVAL_PORTFOLIO_ROLES = frozenset({'SCM', 'CEO', 'Admin', 'System Admin'})
+
+# Who may open the approvals list and sees its nav entry. PMs, for the steps they are
+# named on. Design Head authority is added by user_can_view_approval_list(), because it
+# is a flag and a deputy relation, not a role.
+APPROVAL_LIST_ROLES = APPROVAL_PORTFOLIO_ROLES | frozenset({'PM'})
+
+
+def user_can_view_approval_list(user):
+    """Return True if `user` may open the approvals list — and so see the nav entry.
+
+    SCM, PM, CEO, Admin and System Admin by role, and anyone with Design Head authority
+    (the Head or a named deputy). What the list then SHOWS is narrower for everyone
+    outside APPROVAL_PORTFOLIO_ROLES: approval_request_visibility_q(), the queryset form
+    of user_can_view_approval_request().
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if profile.role in APPROVAL_LIST_ROLES:
+        return True
+    return user_has_design_head_authority(user)
+
+
+def user_can_view_approval_request(user, request):
+    """Return True if `user` may read `request` — its details, attachments and every
+    round's steps, decided or not.
+
+    Admitted:
+      * APPROVAL_PORTFOLIO_ROLES — SCM, CEO, Admin, System Admin — every request;
+      * its raiser;
+      * anyone who is, or was, the ASSIGNEE of any step in any round, a superseded one
+        included: a PM whose step was reassigned away can still read what they were
+        asked (D-A15);
+      * anyone who DECIDED any step — a deputy who decided the Head's step;
+      * anyone with Design Head authority, on a request that has a design step (D-A16).
+
+    SCOPE GRANTS NOTHING (D-A2): a PM who can see a site named in the scope, but who is
+    named on no step, is not admitted. Reads `request.steps.all()`, so a caller that
+    prefetched the steps pays no query for the walk.
+    """
+    if request is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if profile.role in APPROVAL_PORTFOLIO_ROLES:
+        return True
+    if request.raised_by_id == profile.pk:
+        return True
+    steps = list(request.steps.all())
+    if any(step.assignee_id == profile.pk or step.decided_by_id == profile.pk
+           for step in steps):
+        return True
+    return (any(step.party == 'design' for step in steps)
+            and user_has_design_head_authority(user))
+
+
+def approval_request_visibility_q(user):
+    """The queryset form of user_can_view_approval_request(): a Q over ApprovalRequest.
+
+    Q() — everything — for APPROVAL_PORTFOLIO_ROLES; Q(pk__in=[]) — nothing — for a user
+    with no profile. Joins `steps`, so the caller adds .distinct(). Keep the two in step:
+    the list must never show a request its detail page would refuse, nor hide one it
+    would admit.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return Q(pk__in=[])
+    if profile.role in APPROVAL_PORTFOLIO_ROLES:
+        return Q()
+    q = (Q(raised_by=profile)
+         | Q(steps__assignee=profile)
+         | Q(steps__decided_by=profile))
+    if user_has_design_head_authority(user):
+        q |= Q(steps__party='design')
+    return q
+
+
+def user_may_answer_approval_step(user, step):
+    """Return True if `user` is the person who answers `step`, WHATEVER STATE IT IS IN.
+
+    user_can_decide_approval_step() without the liveness term: a design step is answered
+    by anyone with Design Head authority, any other step by its assignee. A view asks this
+    to tell "not yours" (403) from "no longer open" — the latter is left to the
+    chokepoint, whose refusal is a message, so a decision posted from a page that went
+    stale is refused cleanly rather than denied.
+    """
+    if step is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if step.party == 'design':
+        return user_has_design_head_authority(user)
+    return step.assignee_id == profile.pk
+
+
+def user_can_resubmit_approval_request(user, request):
+    """Return True if `user` may resubmit `request` now: SCM, while the request waits for
+    SCM's changes. The same two terms resubmit_approval_request() refuses on; a screen
+    asks this to decide whether to draw the Resubmit door."""
+    if request is None:
+        return False
+    if not user_can_raise_approval_request(user):
+        return False
+    return request.status == 'changes_requested'

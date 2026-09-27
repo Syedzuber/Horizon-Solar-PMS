@@ -6,6 +6,7 @@ from . import report_views   # Read-only management reports — separate module,
 from . import order_views    # O2 vendor orders — separate module, same pattern
 from . import payment_views  # O5 Finance payments queue — separate module, same pattern
 from . import purchases_views  # O8a purchases & payments workspace — separate module, same pattern
+from . import approval_views  # Approvals S2a material approval screens — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -510,4 +511,26 @@ urlpatterns = [
     # Raise issue against a specific DC — all roles with project access
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/issues/create/',
          views.create_delivery_issue, name='create_delivery_issue'),
+
+    # ---------------------------------------------------------------------------
+    # Approvals S2a — material approval before an order (approval_views.py)
+    # ---------------------------------------------------------------------------
+    # Every write goes through approvals.py; each POST view calls one entry point.
+    # '/approvals/', never '/admin/': Django's admin URLconf would intercept it.
+    path('approvals/',                               approval_views.approval_list,
+         name='approval_list'),
+    path('approvals/new/',                           approval_views.approval_create,
+         name='approval_create'),
+    path('approvals/<int:approval_pk>/',             approval_views.approval_detail,
+         name='approval_detail'),
+    path('approvals/<int:approval_pk>/resubmit/',    approval_views.approval_resubmit,
+         name='approval_resubmit'),
+    path('approvals/<int:approval_pk>/withdraw/',    approval_views.approval_withdraw,
+         name='approval_withdraw'),
+    path('approvals/steps/<int:step_pk>/decide/',    approval_views.approval_decide,
+         name='approval_decide'),
+    path('approvals/steps/<int:step_pk>/proxy/',     approval_views.approval_record_proxy,
+         name='approval_record_proxy'),
+    path('approvals/steps/<int:step_pk>/reassign/',  approval_views.approval_reassign,
+         name='approval_reassign'),
 ]
