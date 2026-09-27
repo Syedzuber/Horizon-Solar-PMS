@@ -21,14 +21,23 @@ actually changed), its "keep an approval" boxes (parse_carry — the one FORM ru
 kept approval: a reason of at least KEEP_REASON_MIN non-space characters, and no keep for
 a party whose approver is being changed), and the proxy form's evidence files
 (parse_evidence_files).
+
+Approvals 3a adds the pre-dispatch kind. Its request names one PO/PI record (a
+VendorOrder — "PO/PI record" in every label, never "order") and, optionally, the approved
+pre-order approval behind it. THE VENDOR IS DERIVED FROM THE RECORD, never posted: the
+raise page has no vendor field for this kind, and parse_revision ignores a posted vendor
+on a pre-dispatch request.
 """
 import re
 import uuid as _uuid
 
 from django.db.models import Q
+from django.utils import timezone
+from django.utils.dateformat import format as date_format
 
 from .models import (
-    Program, Project, SiteGroup, UserProfile, Vendor,
+    ApprovalRequest, Program, Project, SiteGroup, UserProfile, Vendor, VendorOrder,
+    APPROVAL_APPROVED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH, APPROVAL_KIND_MATERIAL_PRE_ORDER,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_STEP_APPROVED,
     GROUP_TYPE_PROCUREMENT,
 )
@@ -97,6 +106,61 @@ def scope_choices():
 def vendor_choices():
     """Active vendors. A pre-order approval may name one; it need not."""
     return list(Vendor.objects.filter(is_active=True).order_by('name'))
+
+
+def _day(moment):
+    return date_format(timezone.localtime(moment), 'd M Y')
+
+
+def po_pi_record_label(order):
+    """One PO/PI record as the picker names it: vendor, PO and PI numbers, the date it was
+    RECORDED in PMS (there is no PO date field — created_at is when SCM entered it), and
+    what it was sized against. VendorOrder.scope_label's last form, "Order #<pk>", says
+    "order", so a record naming no site or tender reads "PO/PI record #<pk>" instead."""
+    scope = order.scope_label
+    if scope == f'Order #{order.pk}':
+        scope = f'PO/PI record #{order.pk}'
+    return (f'{order.vendor.name} · PO {order.po_number or "—"} · '
+            f'PI {order.pi_number or "—"} · recorded {_day(order.created_at)} · {scope}')
+
+
+def _by_vendor(rows, label):
+    """[{vendor, options: [{pk, vendor_pk, label}]}] — one <optgroup> per vendor, vendors
+    by name, `rows`' own order kept within each."""
+    groups = {}
+    for row in rows:
+        groups.setdefault(row.vendor_id, {'vendor': row.vendor, 'options': []})
+        groups[row.vendor_id]['options'].append(
+            {'pk': row.pk, 'vendor_pk': row.vendor_id, 'label': label(row)})
+    return sorted(groups.values(), key=lambda g: (g['vendor'].name.lower(), g['vendor'].pk))
+
+
+def po_pi_record_choices():
+    """Every PO/PI record, grouped by vendor, newest first within each vendor. A
+    VendorOrder has no soft delete, status or active flag, so nothing is filtered out —
+    and a deactivated vendor's record stays offered: goods already ordered can still ship.
+    Three queries (records with vendor, sites with projects, programs)."""
+    rows = (VendorOrder.objects.select_related('vendor')
+            .prefetch_related('sites__project', 'programs__program')
+            .order_by('-created_at', '-pk'))
+    return _by_vendor(rows, po_pi_record_label)
+
+
+def pre_order_label(approval):
+    return (f'{approval.title} · {approval.vendor.name} · '
+            f'approved {_day(approval.closed_at)}')
+
+
+def pre_order_choices():
+    """Approved pre-order approvals that name a vendor, grouped by vendor, most recently
+    approved first. One without a vendor is not offered: create_approval_request() refuses
+    a link whose vendor differs from the PO/PI record's, and none never matches. One query.
+    """
+    rows = (ApprovalRequest.objects
+            .filter(kind=APPROVAL_KIND_MATERIAL_PRE_ORDER, status=APPROVAL_APPROVED,
+                    vendor__isnull=False)
+            .select_related('vendor').order_by('-closed_at', '-pk'))
+    return _by_vendor(rows, pre_order_label)
 
 
 def assignee_choices(party):
@@ -194,17 +258,58 @@ def _vendor(post, errors, current=None):
     return vendor
 
 
-def parse_create(request):
+def _vendor_order(post, errors):
+    """The posted PO/PI record, with its vendor. Required: a pre-dispatch request ships
+    against exactly one."""
+    raw = (post.get('vendor_order') or '').strip()
+    if not raw:
+        errors.append('Choose the PO/PI record this dispatch is against.')
+        return None
+    order = (VendorOrder.objects.select_related('vendor').filter(pk=int(raw)).first()
+             if raw.isdigit() else None)
+    if order is None:
+        errors.append('The PO/PI record you chose no longer exists. Choose again.')
+    return order
+
+
+def _pre_order(post, errors, vendor):
+    """The posted pre-order approval, or None when none is chosen (the link is optional).
+    Whether it may be linked — its kind, that it is approved, its vendor — is the
+    chokepoint's rule. The vendor is also compared here, only so the message names the
+    PO/PI record the person just chose."""
+    raw = (post.get('pre_order_request') or '').strip()
+    if not raw:
+        return None
+    pre_order = (ApprovalRequest.objects.filter(pk=int(raw)).first()
+                 if raw.isdigit() else None)
+    if pre_order is None:
+        errors.append('The pre-order approval you chose no longer exists. Choose again.')
+    elif vendor is not None and pre_order.vendor_id != vendor.pk:
+        errors.append('The pre-order approval you chose is for a different vendor from '
+                      'the PO/PI record.')
+    return pre_order
+
+
+def parse_create(request, kind=APPROVAL_KIND_MATERIAL_PRE_ORDER):
     """The raise page's POST. Returns (cleaned, errors).
 
     `cleaned` holds create_approval_request()'s keyword arguments, less kind, raised_by
     and attachments, plus `files` (the validated uploads) and `client_uuid`. Missing
     people, a missing title and the like are NOT errors here: the chokepoint refuses
     them, in its own words.
+
+    Pre-dispatch (Approvals 3a): the PO/PI record is required and the vendor is the
+    record's — a posted `vendor` is ignored. The pre-order link is optional.
     """
     post, errors = request.POST, []
 
-    vendor = _vendor(post, errors)
+    order = pre_order = None
+    if kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
+        order = _vendor_order(post, errors)
+        vendor = order.vendor if order is not None else None
+        pre_order = _pre_order(post, errors, vendor)
+    else:
+        vendor = _vendor(post, errors)
 
     design = post.get('design_signoff_required') == 'on'
     programs, projects, site_groups = parse_scope(post, errors)
@@ -230,6 +335,8 @@ def parse_create(request):
         'files':       files,
         'client_uuid': parse_client_uuid(post),
     }
+    if kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
+        cleaned['material'].update(vendor_order=order, pre_order_request=pre_order)
     return cleaned, errors
 
 
@@ -297,6 +404,9 @@ def parse_revision(post, approval, material, errors):
     can show. When SCM does change a scope list, the posted list replaces that whole set,
     so a since-deleted site in it is dropped; the chokepoint refuses a deleted one
     anyway. BOQ items and design sign-off are read-only on the page and never sent.
+
+    A pre-dispatch request's vendor is the PO/PI record's (Approvals 3a): the page draws
+    it read-only, and a posted `vendor` is ignored here, never sent.
     """
     if post.get('revise') != '1':
         return {}
@@ -304,7 +414,7 @@ def parse_revision(post, approval, material, errors):
     for key in ('title', 'description'):
         if key in post and _text(post[key]) != _text(getattr(approval, key)):
             revision[key] = post[key]
-    if 'vendor' in post:
+    if 'vendor' in post and approval.kind != APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
         vendor = _vendor(post, errors, current=approval.vendor)
         if (vendor.pk if vendor else None) != approval.vendor_id:
             revision['vendor'] = vendor

@@ -973,7 +973,12 @@ class CreateTests(ApprovalFixture):
         self.assertEqual(approval.material_detail.vendor_order, self.order)
 
     def test_the_pre_order_link_is_optional_and_must_be_a_pre_order(self):
-        pre_order = self.raise_material()
+        pre_order = self.raise_material(vendor=self.vendor)
+        apply_approval_decision(self.step(pre_order, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        apply_approval_decision(self.step(pre_order, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        pre_order.refresh_from_db()
         base = dict(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH, vendor=self.vendor)
         linked = self.raise_material(**base, material={'vendor_order': self.order,
                                                        'pre_order_request': pre_order})
@@ -1730,3 +1735,122 @@ class AttributionTests(RevisionFixture):
         evidence = row.evidence_files.get()
         self.assertEqual(evidence.uploaded_by, self.scm_b)
         self.assertIsNotNone(evidence.uploaded_at)
+
+
+class PreDispatchLinkTests(ApprovalFixture):
+    """Approvals 3a — T1: what create_approval_request() refuses on the two material
+    kinds' links, and that a refusal writes nothing. A pre-dispatch request names one
+    PO/PI record (VendorOrder) of its own vendor; its optional pre-order link must be an
+    APPROVED pre-order request for the SAME vendor; a pre-order request links neither."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.other_vendor = Vendor.objects.create(name='Other Vendor', contact_person='O',
+                                                 phone='9000000009')
+        cls.order = VendorOrder.objects.create(
+            vendor=cls.vendor, project_type='Residential', total_amount=Decimal('1000'),
+            created_by=cls.scm, po_number='PO-3A', pi_number='PI-3A')
+
+    def approved_pre_order(self, vendor):
+        pre_order = self.raise_material(vendor=vendor)
+        apply_approval_decision(self.step(pre_order, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        apply_approval_decision(self.step(pre_order, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        pre_order.refresh_from_db()
+        self.assertEqual(pre_order.status, APPROVAL_APPROVED)
+        return pre_order
+
+    def raise_dispatch(self, **material):
+        return self.raise_material(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                                   vendor=self.vendor,
+                                   material=dict({'vendor_order': self.order}, **material))
+
+    def counts(self):
+        return [model.objects.count() for model in (
+            ApprovalRequest, MaterialApprovalDetail, ApprovalStep, ApprovalAttachment,
+            ApprovalRoundSnapshot, StatusTransition)]
+
+    def assert_refused_writing_nothing(self, message, call):
+        before = self.counts()
+        with self.assertRaisesMessage(ApprovalRefused, message):
+            call()
+        self.assertEqual(self.counts(), before)
+
+    def test_an_unapproved_pre_order_link_is_refused(self):
+        open_pre_order = self.raise_material(vendor=self.vendor)
+        self.assert_refused_writing_nothing(
+            'The linked pre-order approval has not been approved.',
+            lambda: self.raise_dispatch(pre_order_request=open_pre_order))
+        apply_approval_decision(self.step(open_pre_order, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Redo.')
+        open_pre_order.refresh_from_db()
+        self.assert_refused_writing_nothing(
+            'The linked pre-order approval has not been approved.',
+            lambda: self.raise_dispatch(pre_order_request=open_pre_order))
+
+    def test_a_pre_order_link_for_another_vendor_is_refused(self):
+        theirs = self.approved_pre_order(self.other_vendor)
+        self.assert_refused_writing_nothing(
+            'The linked pre-order approval names a different vendor.',
+            lambda: self.raise_dispatch(pre_order_request=theirs))
+
+    def test_an_approved_pre_order_with_no_vendor_is_refused(self):
+        vendorless = self.raise_material()
+        apply_approval_decision(self.step(vendorless, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        apply_approval_decision(self.step(vendorless, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        vendorless.refresh_from_db()
+        self.assert_refused_writing_nothing(
+            'The linked pre-order approval names a different vendor.',
+            lambda: self.raise_dispatch(pre_order_request=vendorless))
+
+    def test_a_pre_order_request_refuses_a_po_pi_record(self):
+        self.assert_refused_writing_nothing(
+            'A pre-order approval comes before the order, so it names no PO/PI record.',
+            lambda: self.raise_material(vendor=self.vendor,
+                                        material={'vendor_order': self.order}))
+
+    def test_a_pre_order_request_refuses_a_pre_order_link(self):
+        pre_order = self.approved_pre_order(self.vendor)
+        self.assert_refused_writing_nothing(
+            'Only a pre-dispatch approval links a pre-order approval.',
+            lambda: self.raise_material(vendor=self.vendor,
+                                        material={'pre_order_request': pre_order}))
+
+    def test_the_create_side_messages_say_po_pi_record(self):
+        self.assert_refused_writing_nothing(
+            'A pre-dispatch approval names the PO/PI record it ships against.',
+            lambda: self.raise_material(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                                        vendor=self.vendor, material={}))
+        self.assert_refused_writing_nothing(
+            'The PO/PI record was placed with a different vendor.',
+            lambda: self.raise_material(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                                        vendor=self.other_vendor,
+                                        material={'vendor_order': self.order}))
+
+    def test_pre_dispatch_without_a_pre_order_link(self):
+        approval = self.raise_dispatch()
+        detail = approval.material_detail
+        self.assertEqual((approval.kind, approval.vendor, detail.vendor_order,
+                          detail.pre_order_request),
+                         (APPROVAL_KIND_MATERIAL_PRE_DISPATCH, self.vendor, self.order, None))
+
+    def test_pre_dispatch_with_an_approved_same_vendor_pre_order_link(self):
+        pre_order = self.approved_pre_order(self.vendor)
+        approval = self.raise_dispatch(pre_order_request=pre_order)
+        self.assertEqual(approval.material_detail.pre_order_request, pre_order)
+        snap = round_snapshot(approval, 1)['material']
+        self.assertEqual(snap['vendor_order'],
+                         {'id': self.order.pk, 'po_number': 'PO-3A', 'pi_number': 'PI-3A'})
+        self.assertEqual(snap['pre_order_request'],
+                         {'id': pre_order.pk, 'title': pre_order.title})
+
+    def test_several_pre_dispatch_requests_may_name_one_record(self):
+        pre_order = self.approved_pre_order(self.vendor)
+        first = self.raise_dispatch(pre_order_request=pre_order)
+        second = self.raise_dispatch(pre_order_request=pre_order)
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(self.order.material_approvals.count(), 2)

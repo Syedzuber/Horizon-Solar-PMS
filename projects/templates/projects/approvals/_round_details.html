@@ -5,6 +5,10 @@ Approvals 2a-2 — one round's request details (included by detail.html).
 snapshot, approval_views._current_details() — the same shape, so one drawing serves
 both. The caller says which it is in the label above this block. Display names come from
 the dict itself, never from a live row: a snapshot says what that round saw.
+
+`dispatch` (Approvals 3a, pre-dispatch only) is that round's "Dispatch against" block from
+approval_views._dispatch_against(): numbers from the snapshot, the recorded date from the
+live PO/PI record (which is never edited), links only where the viewer may open them.
 {% endcomment %}
 <p class="mb-2 fw-semibold text-break">{{ d.title }}</p>
 <p class="mb-2 text-break" style="white-space:pre-line;">{{ d.description }}</p>
@@ -23,6 +27,15 @@ the dict itself, never from a live row: a snapshot says what that round saw.
   {% endif %}
   <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
   <dd class="col-7 col-sm-9 text-break">{% if d.vendor %}{{ d.vendor.name }}{% else %}—{% endif %}</dd>
+  {% if dispatch %}
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Dispatch against</dt>
+  <dd class="col-7 col-sm-9 text-break">
+    <div>PO/PI record · PO {{ dispatch.po_number }} · PI {{ dispatch.pi_number }}</div>
+    <div class="text-muted">{{ dispatch.vendor_name }}{% if dispatch.recorded_at %} · recorded {{ dispatch.recorded_at|date:"d M Y" }}{% endif %}</div>
+    {% if dispatch.order_url %}<div><a href="{{ dispatch.order_url }}">Open the PO/PI record</a></div>{% endif %}
+    {% if dispatch.pre_order %}<div class="mt-1">Pre-order approval: {% if dispatch.pre_order.url %}<a href="{{ dispatch.pre_order.url }}">{{ dispatch.pre_order.title }}</a>{% else %}{{ dispatch.pre_order.title }}{% endif %}</div>{% endif %}
+  </dd>
+  {% endif %}
   <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
   <dd class="col-7 col-sm-9">{% if d.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
   <dt class="col-5 col-sm-3 text-muted fw-normal">Tenders</dt>

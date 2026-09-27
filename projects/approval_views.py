@@ -43,6 +43,11 @@ APPROVALS 2a-2 — THE REVISION SCREENS (27 Sep 2026) put S1.1 on the page:
 APPROVALS 2c adds approval_aging, the read-only aging list for SCM, CEO, Admin and
 System Admin. Its figures, and the dashboards' pending-approvals cards, come from
 approval_queries.py.
+
+APPROVALS 3a adds the pre-dispatch kind to the raise page (?kind=, one of the two
+material kinds), a "Dispatch against" block on the detail page (the PO/PI record and any
+linked pre-order approval, per round), and a read-only vendor on its resubmit form. A
+VendorOrder is "PO/PI record" in every label.
 """
 import logging
 import uuid as _uuid
@@ -60,8 +65,8 @@ from .approval_forms import (
     ATTACHMENT_LIMIT, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN, assignee_choices,
     current_scope_pks, design_authority_choices, keepable_steps, parse_assignee_overrides,
     parse_attachments, parse_carry, parse_client_uuid, parse_create, parse_evidence_files,
-    parse_new_assignee, parse_proxy, parse_revision, person_name, scope_choices,
-    vendor_choices,
+    parse_new_assignee, parse_proxy, parse_revision, person_name, po_pi_record_choices,
+    pre_order_choices, scope_choices, vendor_choices,
 )
 from .approval_queries import AGING_WINDOW_DAYS, aging_rows
 from .approvals import (
@@ -71,9 +76,10 @@ from .approvals import (
 )
 from .decorators import _forbidden, login_required
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalStep, StatusTransition,
+    ApprovalAttachment, ApprovalRequest, ApprovalStep, StatusTransition, VendorOrder,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
-    APPROVAL_KIND_CHOICES, APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
+    APPROVAL_KIND_CHOICES, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_PROXY_CHANNEL_CHOICES,
     APPROVAL_STATUS_CHOICES, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
     APPROVAL_STEP_PENDING, APPROVAL_STEP_REJECTED, APPROVAL_STEP_SUPERSEDED,
@@ -85,7 +91,7 @@ from .permissions import (
     user_can_raise_approval_request, user_can_reassign_approval_step,
     user_can_record_proxy_decision, user_can_resubmit_approval_request,
     user_can_view_approval_aging, user_can_view_approval_list,
-    user_can_view_approval_request,
+    user_can_view_approval_request, user_can_view_vendor_order,
     user_can_withdraw_approval_request, user_may_answer_approval_step,
 )
 from .supabase_storage import get_supabase_client, vendor_order_document_url
@@ -99,6 +105,10 @@ PAGE_SIZE = 50
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
 _STATUS_LABELS = dict(APPROVAL_STATUS_CHOICES)
 _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
+
+#: The kinds the raise page takes as ?kind= (Approvals 3a). No ?kind= at all is a
+#: pre-order request, so every link and bookmark from before 3a still works.
+_RAISE_KINDS = (APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_KIND_MATERIAL_PRE_DISPATCH)
 
 # The decision buttons, in the order drawn. Plain English, never the stored value.
 _DECISIONS = [
@@ -307,6 +317,75 @@ def _current_details(approval, material, boq_items, programs, projects, site_gro
     }
 
 
+def _dispatch_against(user, approval, material, snapshots):
+    """The "Dispatch against" block of a pre-dispatch request (Approvals 3a), for the
+    request as it stands and for each round. Returns (current, {round: block}); (None, {})
+    for any other kind. A round with a snapshot is drawn from it; one without gets the
+    current block, as its other details do.
+
+    PO and PI numbers and the vendor come from the snapshot — what that round saw. The
+    RECORDED date comes from the live record, because the snapshot schema does not hold
+    it and a VendorOrder has no edit path, so its created_at never changes.
+
+    WHO SEES WHAT: numbers, vendor and date go to anyone who may read the request. The
+    link to the record page only where user_can_view_vendor_order() passes; the pre-order
+    approval's title always, its link only where user_can_view_approval_request() passes
+    for the pre-order itself — so no link leads to a 403 (SECONDARY_FINDINGS, 3a).
+
+    Two queries for the rows, two for the order's sites and their projects, one for the
+    pre-orders' steps, whatever the number of rounds."""
+    if approval.kind != APPROVAL_KIND_MATERIAL_PRE_DISPATCH or material is None:
+        return None, {}
+    seen = [(snapshot or {}).get('material') or {} for snapshot in snapshots.values()]
+    order_ids = {material.vendor_order_id} | {
+        (m.get('vendor_order') or {}).get('id') for m in seen}
+    pre_ids = {material.pre_order_request_id} | {
+        (m.get('pre_order_request') or {}).get('id') for m in seen}
+    orders = {o.pk: o for o in VendorOrder.objects.filter(pk__in=order_ids - {None})
+              .prefetch_related('sites__project')}
+    pre_orders = {p.pk: p for p in ApprovalRequest.objects.filter(pk__in=pre_ids - {None})
+                  .prefetch_related('steps')}
+    may_open_order = {pk: user_can_view_vendor_order(user, o) for pk, o in orders.items()}
+    may_open_pre = {pk: user_can_view_approval_request(user, p)
+                    for pk, p in pre_orders.items()}
+
+    def block(vendor, order_ref, pre_ref):
+        if order_ref is None:
+            return None
+        live = orders.get(order_ref['id'])
+        return {
+            'vendor_name': (vendor or {}).get('name') or '—',
+            'po_number':   order_ref.get('po_number') or '—',
+            'pi_number':   order_ref.get('pi_number') or '—',
+            'recorded_at': live.created_at if live is not None else None,
+            'order_url':   (reverse('vendor_order_detail', args=[live.pk])
+                            if live is not None and may_open_order[live.pk] else None),
+            'pre_order':   None if pre_ref is None else {
+                'title': pre_ref['title'],
+                'url':   (reverse('approval_detail', args=[pre_ref['id']])
+                          if may_open_pre.get(pre_ref['id']) else None),
+            },
+        }
+
+    order = orders.get(material.vendor_order_id)
+    pre_order = pre_orders.get(material.pre_order_request_id)
+    current = block(
+        {'name': approval.vendor.name} if approval.vendor is not None else None,
+        ({'id': order.pk, 'po_number': order.po_number, 'pi_number': order.pi_number}
+         if order is not None else None),
+        {'id': pre_order.pk, 'title': pre_order.title} if pre_order is not None else None)
+    by_round = {}
+    for round_no, snapshot in snapshots.items():
+        if snapshot is None:
+            by_round[round_no] = current
+            continue
+        seen_material = snapshot.get('material') or {}
+        by_round[round_no] = block(snapshot.get('vendor'),
+                                   seen_material.get('vendor_order'),
+                                   seen_material.get('pre_order_request'))
+    return current, by_round
+
+
 # The change list's fields, in the order the page draws a request's details.
 _CHANGE_REQUEST_TEXT  = (('title', 'Title'), ('description', 'Description'))
 _CHANGE_MATERIAL_TEXT = (('proposed_make', 'Proposed make'),
@@ -464,15 +543,22 @@ def approval_aging(request):
 # Raise
 # ---------------------------------------------------------------------------
 
-def _create_context(post=None, client_uuid=None, already=None):
+def _create_context(kind, post=None, client_uuid=None, already=None):
     heads = assignee_choices(APPROVAL_PARTY_DESIGN)
+    is_pre_dispatch = kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH
     context = {
+        'kind':             kind,
+        'kind_label':       _KIND_LABELS[kind],
+        'is_pre_dispatch':  is_pre_dispatch,
         'post':             post,
         'client_uuid':      client_uuid,
         # The request this form's key already raised, if any: the page then says so
         # and offers it, instead of a second Raise button.
         'already':          already,
-        'vendors':          vendor_choices(),
+        # Pre-dispatch names a PO/PI record and takes its vendor from it: no vendor list.
+        'vendors':          [] if is_pre_dispatch else vendor_choices(),
+        'po_pi_records':    po_pi_record_choices() if is_pre_dispatch else [],
+        'pre_orders':       pre_order_choices() if is_pre_dispatch else [],
         'pms':              assignee_choices('pm'),
         'heads':            heads,
         # Pre-selected only when there is exactly one to choose (spec T1).
@@ -488,20 +574,27 @@ def _create_context(post=None, client_uuid=None, already=None):
     return context
 
 
-def _refuse_create(request, errors, client_uuid):
+def _refuse_create(request, errors, client_uuid, kind):
     for error in errors:
         messages.error(request, error)
     return render(request, 'projects/approvals/create.html',
-                  _create_context(request.POST, client_uuid), status=400)
+                  _create_context(kind, request.POST, client_uuid), status=400)
 
 
 @login_required
 def approval_create(request):
-    """Raise a material approval before an order (material_pre_order — the only kind
-    this session). GET draws the form; POST validates, uploads, and calls
-    create_approval_request().
+    """Raise a material approval — before an order (material_pre_order) or before
+    dispatch (material_pre_dispatch). GET draws the form; POST validates, uploads, and
+    calls create_approval_request().
 
     Access: user_can_raise_approval_request — SCM.
+
+    THE KIND IS ?kind= IN THE URL (Approvals 3a), read on GET and POST alike, the way the
+    key is: the form has no action, so it posts back to its own URL. Only the two
+    material kinds are taken; anything else goes back to the list with a message. No
+    ?kind= is a pre-order request, and its redirect is exactly ?key=<uuid> as before.
+    A pre-dispatch request names one PO/PI record and takes its vendor from it
+    (approval_forms.parse_create).
 
     DOUBLE-SUBMIT SAFE ON client_uuid (R-14), INCLUDING THE BACK BUTTON. The key lives in
     the URL (?key=), not only in a hidden field: a GET without one redirects to a fresh
@@ -516,15 +609,22 @@ def approval_create(request):
     """
     if not user_can_raise_approval_request(request.user):
         return _forbidden(request)
+    kind = request.GET.get('kind')
+    if kind is not None and kind not in _RAISE_KINDS:
+        messages.error(request, 'Choose "Raise — before order" or "Raise — before '
+                                'dispatch".')
+        return redirect('approval_list')
+    kind_query = f'kind={kind}&' if kind is not None else ''
+    kind = kind or APPROVAL_KIND_MATERIAL_PRE_ORDER
     key = parse_client_uuid(request.GET, 'key')
     if request.method != 'POST':
         if key is None:
-            return redirect(f"{reverse('approval_create')}?key={_uuid.uuid4()}")
+            return redirect(f"{reverse('approval_create')}?{kind_query}key={_uuid.uuid4()}")
         already = ApprovalRequest.objects.filter(client_uuid=key).first()
         return render(request, 'projects/approvals/create.html',
-                      _create_context(client_uuid=key, already=already))
+                      _create_context(kind, client_uuid=key, already=already))
 
-    cleaned, errors = parse_create(request)
+    cleaned, errors = parse_create(request, kind)
     client_uuid = cleaned.pop('client_uuid') or key
     files = cleaned.pop('files')
     if client_uuid is not None:
@@ -536,20 +636,20 @@ def approval_create(request):
     else:
         client_uuid = _uuid.uuid4()   # a page without its key still gets one folder
     if errors:
-        return _refuse_create(request, errors, client_uuid)
+        return _refuse_create(request, errors, client_uuid, kind)
 
     try:
         stored, cleanup = _upload_attachments(files, client_uuid)
     except _AttachmentUploadFailed as exc:
-        return _refuse_create(request, [str(exc)], client_uuid)
+        return _refuse_create(request, [str(exc)], client_uuid, kind)
 
     try:
         approval = create_approval_request(
-            kind=APPROVAL_KIND_MATERIAL_PRE_ORDER, raised_by=request.user.profile,
+            kind=kind, raised_by=request.user.profile,
             attachments=stored, client_uuid=client_uuid, **cleaned)
     except ApprovalRefused as exc:
         cleanup()
-        return _refuse_create(request, [str(exc)], client_uuid)
+        return _refuse_create(request, [str(exc)], client_uuid, kind)
     except Exception:
         cleanup()
         # A racing twin wrote the same client_uuid between the read above and this
@@ -760,6 +860,7 @@ def approval_detail(request, approval_pk):
                    for a in approval.attachments.all()]
     snapshots = {n: round_snapshot(approval, n)
                  for n in range(1, approval.current_round + 1)}
+    dispatch, round_dispatch = _dispatch_against(user, approval, material, snapshots)
     rounds = []
     for round_no in range(approval.current_round, 0, -1):     # newest first
         snapshot = snapshots[round_no]
@@ -773,6 +874,7 @@ def approval_detail(request, approval_pk):
             'attachments':  [a for a in attachments
                              if a['file'].round == round_no and a['file'].step_id is None],
             'details':      snapshot if snapshot is not None else current,
+            'dispatch':     round_dispatch.get(round_no),
             'has_snapshot': snapshot is not None,
             'changes':      (round_changes(snapshots[round_no - 1], snapshot)
                              if round_no > 1 else None),
@@ -782,6 +884,7 @@ def approval_detail(request, approval_pk):
         'approval':       approval,
         'status_badge':   _STATUS_BADGES.get(approval.status, 'text-bg-secondary'),
         'material':       material,
+        'dispatch':       dispatch,
         'boq_items':      boq_items,
         'programs':       programs,
         'projects':       projects,
@@ -924,6 +1027,8 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post):
     context = {
         'approval':         approval,
         'material':         material,
+        # The vendor is the PO/PI record's (Approvals 3a): drawn read-only, never posted.
+        'is_pre_dispatch':  approval.kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
         'boq_items':        list(material.boq_items.all()) if material else [],
         'parties':          parties,
         'values':           values,

@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% comment %}
-Approvals S2a — SCM raises a material approval before an order (approval_views.approval_create).
+Approvals S2a — SCM raises a material approval (approval_views.approval_create): before an
+order, or (Approvals 3a) before dispatch — the kind is ?kind= in the page's URL.
 Every rule the request is held to is approvals.create_approval_request()'s; a refusal comes
 back as a message above this form with what was typed still in it (files must be chosen
 again — a browser never re-fills a file input).
@@ -8,6 +9,11 @@ again — a browser never re-fills a file input).
 The Design Head picker is drawn inside #apDesignHead and hidden until "Design sign-off
 required" is ticked. Without script it simply stays visible; the view ignores it unless
 the box is ticked.
+
+Before dispatch: the PO/PI record picker (required) replaces the vendor list — the vendor
+is taken from the record on the server. The optional pre-order approval picker is grouped
+by vendor; a small script disables the groups whose vendor is not the chosen record's.
+The server checks the vendor again whatever the page sent.
 {% endcomment %}
 {% block title %}Raise approval — SolarPMS{% endblock %}
 
@@ -16,7 +22,7 @@ the box is ticked.
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h4 class="mb-0">Raise approval</h4>
-    <small class="text-muted">Material — before order</small>
+    <small class="text-muted">{{ kind_label }}</small>
   </div>
   <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary btn-sm">← Approvals</a>
 </div>
@@ -26,7 +32,7 @@ the box is ticked.
   <div class="mb-2">This form has already raised <strong>request #{{ already.pk }} · {{ already.title }}</strong>. Submitting it again raises nothing new.</div>
   <div class="d-grid d-sm-flex gap-2">
     <a href="{% url 'approval_detail' already.pk %}" class="btn btn-brand btn-sm">Open request #{{ already.pk }}</a>
-    <a href="{% url 'approval_create' %}" class="btn btn-outline-secondary btn-sm">Start a new request</a>
+    <a href="{% url 'approval_create' %}{% if is_pre_dispatch %}?kind={{ kind }}{% endif %}" class="btn btn-outline-secondary btn-sm">Start a new request</a>
   </div>
 </div>
 {% endif %}
@@ -41,7 +47,8 @@ the box is ticked.
       <div class="mb-3">
         <label for="apTitle" class="form-label">Title</label>
         <input type="text" name="title" id="apTitle" class="form-control" maxlength="200" required
-               value="{{ post.title|default:'' }}" placeholder="e.g. Module make for Tender 3">
+               value="{{ post.title|default:'' }}" placeholder="{% if is_pre_dispatch %}e.g. Modules, lot 2 of 3{% else %}e.g. Module make for Tender 3{% endif %}">
+        {% if is_pre_dispatch %}<div class="form-text">One request per shipment lot. Say which lot in the title.</div>{% endif %}
       </div>
       <div class="mb-0">
         <label for="apDescription" class="form-label">Description</label>
@@ -66,6 +73,36 @@ the box is ticked.
         <label for="apQty" class="form-label">Quantity</label>
         <textarea name="quantity_note" id="apQty" class="form-control" rows="2">{{ post.quantity_note|default:'' }}</textarea>
       </div>
+      {% if is_pre_dispatch %}
+      <div class="mb-3">
+        <label for="apOrder" class="form-label">PO/PI record</label>
+        <select name="vendor_order" id="apOrder" class="form-select" required>
+          <option value="">— Choose the PO/PI record —</option>
+          {% for group in po_pi_records %}
+          <optgroup label="{{ group.vendor.name }}">
+            {% for o in group.options %}
+            <option value="{{ o.pk }}" data-vendor="{{ o.vendor_pk }}"{% if post and o.pk|stringformat:"s" == post.vendor_order %} selected{% endif %}>{{ o.label }}</option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+        <div class="form-text">{% if po_pi_records %}The vendor is taken from the PO/PI record.{% else %}No PO/PI records yet. Add the PO/PI record first.{% endif %}</div>
+      </div>
+      <div class="mb-0">
+        <label for="apPreOrder" class="form-label">Pre-order approval <span class="text-muted small">(optional)</span></label>
+        <select name="pre_order_request" id="apPreOrder" class="form-select">
+          <option value="">— None —</option>
+          {% for group in pre_orders %}
+          <optgroup label="{{ group.vendor.name }}" data-vendor="{{ group.vendor.pk }}">
+            {% for p in group.options %}
+            <option value="{{ p.pk }}"{% if post and p.pk|stringformat:"s" == post.pre_order_request %} selected{% endif %}>{{ p.label }}</option>
+            {% endfor %}
+          </optgroup>
+          {% endfor %}
+        </select>
+        <div class="form-text">An approved pre-order approval for the same vendor as the PO/PI record.</div>
+      </div>
+      {% else %}
       <div class="mb-0">
         <label for="apVendor" class="form-label">Vendor <span class="text-muted small">(optional)</span></label>
         <select name="vendor" id="apVendor" class="form-select">
@@ -75,6 +112,7 @@ the box is ticked.
           {% endfor %}
         </select>
       </div>
+      {% endif %}
     </div>
   </div>
 
@@ -168,6 +206,28 @@ document.addEventListener('DOMContentLoaded', function () {
   box.addEventListener('change', sync);
   sync();
 });
+{% if is_pre_dispatch %}
+// Pre-order approvals: only the chosen PO/PI record's vendor. A convenience — the server
+// checks the vendor again. A choice left in a disabled group is cleared.
+document.addEventListener('DOMContentLoaded', function () {
+  var order = document.getElementById('apOrder');
+  var pre = document.getElementById('apPreOrder');
+  if (!order || !pre) return;
+  function narrow() {
+    var chosen = order.options[order.selectedIndex];
+    var vendor = chosen ? chosen.getAttribute('data-vendor') : null;
+    Array.prototype.forEach.call(pre.querySelectorAll('optgroup'), function (group) {
+      var other = !!vendor && group.getAttribute('data-vendor') !== vendor;
+      group.disabled = other;
+      group.hidden = other;
+    });
+    var picked = pre.options[pre.selectedIndex];
+    if (picked && picked.parentNode.disabled) pre.value = '';
+  }
+  order.addEventListener('change', narrow);
+  narrow();
+});
+{% endif %}
 </script>
 
 {% endblock %}

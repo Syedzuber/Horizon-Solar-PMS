@@ -40,14 +40,16 @@ from .approvals import (
 )
 from .utils import record_transition
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalStep, Program, Project, SiteGroup,
-    StatusTransition, Vendor,
-    APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_KIND_MATERIAL_PRE_ORDER,
+    ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep, Program,
+    Project, SiteGroup, StatusTransition, Vendor, VendorOrder, VendorOrderSite,
+    APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+    APPROVAL_KIND_MATERIAL_PRE_ORDER,
     APPROVAL_OPEN, APPROVAL_WITHDRAWN,
     APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_PM,
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_PENDING,
     APPROVAL_STEP_SUPERSEDED, GROUP_TYPE_PROCUREMENT, SUBJECT_APPROVAL_REQUEST,
 )
+from .permissions import user_can_view_vendor_order
 
 
 def _profile(username, role, **flags):
@@ -1111,3 +1113,345 @@ class HistoryTests(ApprovalViewFixture):
         _, history = self.history(approval)
         self.assertEqual([(h['what'], h['actor']) for h in history],
                          [('Raised', 'Av Scm'), ('Withdrawn', 'Av Scm')])
+
+
+# ===========================================================================
+# Approvals 3a — material pre-dispatch requests
+# ===========================================================================
+
+class PreDispatchFixture(ApprovalViewFixture):
+    """Two PO/PI records of AV Vendor — one sized against a site the PM runs (the PM may
+    open it), one naming no site (only the portfolio roles may) — one of another vendor,
+    and an approved pre-order approval for each vendor."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.other_vendor = Vendor.objects.create(name='AV Other', contact_person='O',
+                                                 phone='9000000008')
+        cls.site = Project.objects.create(
+            customer_name='AV Dispatch Site', status='Active', customer_phone='9876543210',
+            site_address='2 Sun Road', city='Lucknow', state='Uttar Pradesh',
+            project_type='Residential', dc_capacity_kw=Decimal('5.00'), assigned_pm=cls.pm)
+        cls.order = VendorOrder.objects.create(
+            vendor=cls.vendor, project_type='Residential', total_amount=Decimal('1000'),
+            created_by=cls.scm, po_number='PO-SITE', pi_number='PI-SITE')
+        VendorOrderSite.objects.create(order=cls.order, project=cls.site)
+        cls.central = VendorOrder.objects.create(
+            vendor=cls.vendor, project_type='Residential', total_amount=Decimal('2000'),
+            created_by=cls.scm, po_number='PO-CENTRAL', pi_number='')
+        cls.other_order = VendorOrder.objects.create(
+            vendor=cls.other_vendor, project_type='Residential',
+            total_amount=Decimal('3000'), created_by=cls.scm, po_number='PO-OTHER')
+
+    def setUp(self):
+        self.pre_order = self.approved_pre_order('Modules pre-order', self.vendor)
+        self.other_pre_order = self.approved_pre_order('Other pre-order', self.other_vendor)
+
+    def approved_pre_order(self, title, vendor, pm=None):
+        approval = self.raise_material(title=title, vendor=vendor, pm_assignee=pm or self.pm)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, pm or self.pm)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        approval.refresh_from_db()
+        return approval
+
+    def raise_dispatch(self, order=None, pre_order=None, **overrides):
+        order = order or self.order
+        kwargs = dict(
+            kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH, title='Modules, lot 1 of 2',
+            vendor=order.vendor,
+            material={'proposed_make': 'Waaree', 'vendor_order': order,
+                      'pre_order_request': pre_order})
+        kwargs.update(overrides)
+        return self.raise_material(**kwargs)
+
+    def create_url(self, client):
+        opened = client.get(reverse('approval_create'),
+                            {'kind': APPROVAL_KIND_MATERIAL_PRE_DISPATCH})
+        self.assertEqual(opened.status_code, 302)
+        return opened['Location']
+
+    def form(self, **overrides):
+        data = {'client_uuid': str(uuid.uuid4()), 'title': 'Modules, lot 2 of 3',
+                'description': 'First truck of modules.', 'proposed_make': 'Waaree',
+                'specification': '545 Wp', 'quantity_note': '120 modules',
+                'pm_assignee': self.pm.pk, 'vendor_order': self.order.pk}
+        data.update(overrides)
+        return data
+
+    def detail(self, approval, profile=None):
+        return self.client_for(profile or self.scm).get(
+            reverse('approval_detail', args=[approval.pk]))
+
+
+class PreDispatchRaiseTests(PreDispatchFixture):
+
+    def test_the_list_offers_both_raise_actions(self):
+        response = self.client_for(self.scm).get(reverse('approval_list'))
+        create = reverse('approval_create')
+        self.assertContains(response, f'href="{create}?kind=material_pre_order"')
+        self.assertContains(response, f'href="{create}?kind=material_pre_dispatch"')
+        self.assertContains(response, 'Raise — before order')
+        self.assertContains(response, 'Raise — before dispatch')
+        self.assertNotContains(self.client_for(self.pm).get(reverse('approval_list')),
+                               'Raise — before dispatch')
+
+    def test_the_kind_is_kept_through_the_key_redirect(self):
+        client = self.client_for(self.scm)
+        url = self.create_url(client)
+        self.assertRegex(url,
+                         r'^/approvals/new/\?kind=material_pre_dispatch&key=[0-9a-f-]{36}$')
+        page = client.get(url)
+        self.assertContains(page, 'Material — before dispatch')
+        self.assertContains(page, 'name="vendor_order"')
+        self.assertContains(page, 'name="pre_order_request"')
+        self.assertNotContains(page, 'name="vendor"')
+
+    def test_no_kind_keeps_the_pre_order_redirect_exactly(self):
+        client = self.client_for(self.scm)
+        location = client.get(reverse('approval_create'))['Location']
+        self.assertRegex(location, r'^/approvals/new/\?key=[0-9a-f-]{36}$')
+        explicit = client.get(reverse('approval_create'),
+                              {'kind': APPROVAL_KIND_MATERIAL_PRE_ORDER})
+        self.assertRegex(explicit['Location'],
+                         r'^/approvals/new/\?kind=material_pre_order&key=[0-9a-f-]{36}$')
+        page = client.get(location)
+        self.assertContains(page, 'Material — before order')
+        self.assertContains(page, 'name="vendor"')
+        self.assertNotContains(page, 'name="vendor_order"')
+
+    def test_any_other_kind_goes_back_to_the_list(self):
+        for kind in ('contractor_bill', 'nonsense', ''):
+            with self.subTest(kind=kind):
+                response = self.client_for(self.scm).get(reverse('approval_create'),
+                                                         {'kind': kind})
+                self.assertEqual(response['Location'], reverse('approval_list'))
+                response = self.client_for(self.scm).post(
+                    reverse('approval_create') + f'?kind={kind}', self.form())
+                self.assertEqual(response['Location'], reverse('approval_list'))
+        self.assertFalse(ApprovalRequest.objects.filter(
+            kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH).exists())
+
+    def test_the_pickers_group_by_vendor_newest_first_and_offer_approved_pre_orders(self):
+        vendorless = self.raise_material(title='Vendorless pre-order', design=False)
+        apply_approval_decision(self.step(vendorless, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        self.raise_material(title='Still open pre-order', vendor=self.vendor)
+        client = self.client_for(self.scm)
+        content = client.get(self.create_url(client)).content.decode()
+        recorded = timezone.localtime(self.order.created_at).strftime('%d %b %Y')
+        # AV Other sorts before AV Vendor; within AV Vendor the newer record comes first.
+        self.assertLess(content.index('<optgroup label="AV Other">'),
+                        content.index('<optgroup label="AV Vendor">'))
+        self.assertLess(content.index('PO PO-CENTRAL'), content.index('PO PO-SITE'))
+        self.assertIn('AV Vendor · PO PO-CENTRAL · PI — · recorded', content)
+        self.assertIn(f'PI PI-SITE · recorded {recorded} · {self.site.project_id}', content)
+        self.assertIn(f'PO/PI record #{self.central.pk}', content)   # no site, no tender
+        self.assertIn(f'data-vendor="{self.vendor.pk}"', content)
+        self.assertIn('Modules pre-order · AV Vendor · approved', content)
+        self.assertIn('Other pre-order', content)
+        self.assertNotIn('Vendorless pre-order', content)
+        self.assertNotIn('Still open pre-order', content)
+
+    def test_pre_dispatch_without_a_pre_order_link(self):
+        client = self.client_for(self.scm)
+        response = client.post(self.create_url(client), self.form())
+        approval = ApprovalRequest.objects.get(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH)
+        self.assert_to_detail(response, approval)
+        self.assertEqual((approval.vendor, approval.material_detail.vendor_order,
+                          approval.material_detail.pre_order_request),
+                         (self.vendor, self.order, None))
+
+    def test_pre_dispatch_with_a_pre_order_link(self):
+        client = self.client_for(self.scm)
+        client.post(self.create_url(client),
+                    self.form(pre_order_request=self.pre_order.pk))
+        approval = ApprovalRequest.objects.get(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH)
+        self.assertEqual(approval.material_detail.pre_order_request, self.pre_order)
+
+    def test_the_vendor_is_the_records_whatever_is_posted(self):
+        client = self.client_for(self.scm)
+        client.post(self.create_url(client), self.form(vendor=self.other_vendor.pk))
+        approval = ApprovalRequest.objects.get(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH)
+        self.assertEqual(approval.vendor, self.vendor)
+
+    def test_a_missing_record_is_refused_before_anything_is_written(self):
+        client = self.client_for(self.scm)
+        url = self.create_url(client)
+        for missing in ('999999', 'x'):
+            response = client.post(url, self.form(vendor_order=missing))
+            self.assertContains(response, 'The PO/PI record you chose no longer exists.',
+                                status_code=400)
+        response = client.post(url, self.form(vendor_order=''))
+        self.assertContains(response, 'Choose the PO/PI record this dispatch is against.',
+                            status_code=400)
+        self.assertContains(response, 'First truck of modules.', status_code=400)  # kept
+        self.assertFalse(ApprovalRequest.objects.filter(
+            kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH).exists())
+
+    def test_a_pre_order_of_another_vendor_is_refused_before_anything_is_written(self):
+        client = self.client_for(self.scm)
+        response = client.post(self.create_url(client),
+                               self.form(pre_order_request=self.other_pre_order.pk))
+        self.assertContains(response, 'is for a different vendor from the PO/PI record',
+                            status_code=400)
+        self.assertFalse(ApprovalRequest.objects.filter(
+            kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH).exists())
+
+    def test_an_unapproved_pre_order_is_the_chokepoints_refusal(self):
+        still_open = self.raise_material(title='Open one', vendor=self.vendor)
+        client = self.client_for(self.scm)
+        response = client.post(self.create_url(client),
+                               self.form(pre_order_request=still_open.pk))
+        self.assertContains(response,
+                            'The linked pre-order approval has not been approved.',
+                            status_code=400)
+        self.assertFalse(ApprovalRequest.objects.filter(
+            kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH).exists())
+
+    def test_a_pre_order_raise_ignores_the_dispatch_fields(self):
+        before = ApprovalRequest.objects.count()
+        response = self.client_for(self.scm).post(
+            reverse('approval_create'),
+            self.form(vendor=self.vendor.pk, pre_order_request=self.pre_order.pk,
+                      design_signoff_required='on', design_assignee=self.head.pk))
+        approval = ApprovalRequest.objects.order_by('-pk').first()
+        self.assertEqual(ApprovalRequest.objects.count(), before + 1)
+        self.assert_to_detail(response, approval)
+        self.assertEqual(approval.kind, APPROVAL_KIND_MATERIAL_PRE_ORDER)
+        self.assertEqual((approval.material_detail.vendor_order,
+                          approval.material_detail.pre_order_request), (None, None))
+
+
+class PreDispatchDetailTests(PreDispatchFixture):
+
+    def recorded(self, order):
+        return timezone.localtime(order.created_at).strftime('%d %b %Y')
+
+    def test_the_block_shows_the_record_and_the_pre_order(self):
+        approval = self.raise_dispatch(pre_order=self.pre_order)
+        response = self.detail(approval)
+        content = response.content.decode()
+        self.assertEqual(content.count('Dispatch against'), 2)   # request card + round 1
+        self.assertContains(response, 'PO/PI record · PO PO-SITE · PI PI-SITE')
+        self.assertContains(response, f'AV Vendor · recorded {self.recorded(self.order)}')
+        order_link = f'href="{reverse("vendor_order_detail", args=[self.order.pk])}"'
+        pre_link = f'href="{reverse("approval_detail", args=[self.pre_order.pk])}"'
+        self.assertEqual(content.count(order_link), 2)
+        self.assertEqual(content.count(pre_link), 2)
+        self.assertContains(response, 'Modules pre-order')
+
+    def test_no_pre_order_line_when_none_is_linked(self):
+        response = self.detail(self.raise_dispatch())
+        self.assertContains(response, 'Dispatch against')
+        self.assertNotContains(response, 'Pre-order approval:')
+
+    def test_a_pre_order_request_has_no_block(self):
+        self.assertNotContains(self.detail(self.pre_order), 'Dispatch against')
+
+    def test_the_record_link_follows_user_can_view_vendor_order(self):
+        on_site = self.raise_dispatch()
+        central = self.raise_dispatch(order=self.central)
+        self.assertTrue(user_can_view_vendor_order(self.pm.user, self.order))
+        self.assertFalse(user_can_view_vendor_order(self.pm.user, self.central))
+
+        seen = self.detail(on_site, self.pm)
+        self.assertContains(seen, reverse('vendor_order_detail', args=[self.order.pk]))
+        hidden = self.detail(central, self.pm)
+        self.assertEqual(hidden.status_code, 200)
+        self.assertContains(hidden, 'PO/PI record · PO PO-CENTRAL · PI —')   # still shown
+        self.assertContains(hidden, f'recorded {self.recorded(self.central)}')
+        self.assertNotContains(hidden, reverse('vendor_order_detail', args=[self.central.pk]))
+        self.assertNotContains(hidden, 'Open the PO/PI record')
+        # SCM, a portfolio role, gets the link on the same request.
+        self.assertContains(self.detail(central),
+                            reverse('vendor_order_detail', args=[self.central.pk]))
+
+    def test_the_pre_order_link_follows_who_may_read_the_pre_order(self):
+        theirs = self.approved_pre_order('Pm B pre-order', self.vendor, pm=self.pm_b)
+        approval = self.raise_dispatch(pre_order=theirs)
+        response = self.detail(approval, self.pm)
+        self.assertContains(response, 'Pre-order approval: Pm B pre-order')
+        self.assertNotContains(response, reverse('approval_detail', args=[theirs.pk]))
+        # The Design Head reads both requests (each has a design step): the link is drawn.
+        self.assertContains(self.detail(approval, self.head),
+                            reverse('approval_detail', args=[theirs.pk]))
+
+    def test_a_round_is_drawn_from_its_snapshot(self):
+        approval = self.raise_dispatch()
+        snapshot = round_snapshot(approval, 1)
+        snapshot['material']['vendor_order']['po_number'] = 'PO-AS-SEEN'
+        # Imitate a round whose approvers saw a number that differs from today's row.
+        # QuerySet.update() goes around the append-only save() (SECONDARY_FINDINGS, S1.1).
+        ApprovalRoundSnapshot.objects.filter(request=approval, round=1).update(
+            snapshot=snapshot)
+        content = self.detail(approval).content.decode()
+        self.assertIn('PO PO-SITE', content)        # the request card: the live record
+        self.assertIn('PO PO-AS-SEEN', content)     # round 1: its snapshot
+        self.assertEqual(content.count(f'recorded {self.recorded(self.order)}'), 2)
+
+    def test_a_round_without_a_snapshot_shows_the_current_block(self):
+        approval = self.raise_dispatch()
+        ApprovalRoundSnapshot.objects.filter(request=approval).delete()
+        response = self.detail(approval)
+        self.assertEqual(response.content.decode().count('PO/PI record · PO PO-SITE'), 2)
+
+
+class PreDispatchResubmitTests(PreDispatchFixture):
+
+    def setUp(self):
+        super().setUp()
+        self.approval = self.raise_dispatch(pre_order=self.pre_order)
+        apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Redo.')
+        self.url = reverse('approval_resubmit', args=[self.approval.pk])
+
+    def test_the_vendor_is_read_only(self):
+        response = self.client_for(self.scm).get(self.url)
+        self.assertContains(response, 'Taken from the PO/PI record')
+        self.assertContains(response, 'AV Vendor')
+        self.assertNotContains(response, 'name="vendor"')
+
+    def test_a_posted_vendor_does_not_change_it(self):
+        response = self.client_for(self.scm).post(self.url, {
+            'revise': '1', 'note': 'Changed the make.', 'title': self.approval.title,
+            'description': self.approval.description, 'vendor': self.other_vendor.pk,
+            'proposed_make': 'Adani'})
+        self.assert_to_detail(response, self.approval)
+        self.approval.refresh_from_db()
+        self.assertEqual((self.approval.current_round, self.approval.vendor),
+                         (2, self.vendor))
+        snapshot = round_snapshot(self.approval, 2)
+        self.assertEqual((snapshot['vendor']['id'], snapshot['material']['proposed_make']),
+                         (self.vendor.pk, 'Adani'))
+
+    def test_a_pre_order_request_still_edits_its_vendor(self):
+        pre = self.raise_material(title='Editable', vendor=self.vendor, design=False)
+        apply_approval_decision(self.step(pre, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Redo.')
+        url = reverse('approval_resubmit', args=[pre.pk])
+        self.assertContains(self.client_for(self.scm).get(url), 'name="vendor"')
+        self.client_for(self.scm).post(url, {
+            'revise': '1', 'note': 'Other vendor.', 'title': pre.title,
+            'description': pre.description, 'vendor': self.other_vendor.pk})
+        pre.refresh_from_db()
+        self.assertEqual(pre.vendor, self.other_vendor)
+
+
+class PreDispatchCardAndAgingTests(PreDispatchFixture):
+
+    def test_a_pre_dispatch_request_is_on_the_pm_card_and_the_aging_page(self):
+        approval = self.raise_dispatch(title='Lot 1 dispatch', design_signoff_required=False,
+                                       design_assignee=None)
+        response = self.client_for(self.pm).get(reverse('dashboard_pm'))
+        rows = response.context['approvals_waiting']['rows']
+        self.assertEqual([(r['approval'].pk, r['kind_label'], r['vendor_name'])
+                          for r in rows],
+                         [(approval.pk, 'Material — before dispatch', 'AV Vendor')])
+        self.assertContains(response, 'Lot 1 dispatch')
+
+        aging = self.client_for(self.scm).get(reverse('approval_aging'))
+        self.assertContains(aging, 'Lot 1 dispatch')
+        self.assertContains(aging, 'Material — before dispatch · AV Vendor')

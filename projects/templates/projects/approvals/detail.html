@@ -19,6 +19,11 @@ the round's snapshot, or the current values under a label saying there is none) 
 round 2, what changed since the round before. A kept step says whose approval it keeps,
 from which round, who kept it and why. A proxy's evidence files sit under its step.
 History lists every action with who and when, in IST (settings.TIME_ZONE).
+
+Approvals 3a: a pre-dispatch request shows "Dispatch against" — its PO/PI record (PO and
+PI numbers, vendor, recorded date) and any linked pre-order approval, from
+approval_views._dispatch_against(). The record-page link and the pre-order link are drawn
+only where the viewer may open them; the numbers and title are shown to every reader.
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -80,6 +85,15 @@ History lists every action with who and when, in IST (settings.TIME_ZONE).
       {% endif %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
       <dd class="col-7 col-sm-9">{% if approval.vendor %}{{ approval.vendor.name }}{% else %}—{% endif %}</dd>
+      {% if dispatch %}
+      <dt class="col-5 col-sm-3 text-muted fw-normal">Dispatch against</dt>
+      <dd class="col-7 col-sm-9 text-break">
+        <div>PO/PI record · PO {{ dispatch.po_number }} · PI {{ dispatch.pi_number }}</div>
+        <div class="text-muted">{{ dispatch.vendor_name }}{% if dispatch.recorded_at %} · recorded {{ dispatch.recorded_at|date:"d M Y" }}{% endif %}</div>
+        {% if dispatch.order_url %}<div><a href="{{ dispatch.order_url }}">Open the PO/PI record</a></div>{% endif %}
+        {% if dispatch.pre_order %}<div class="mt-1">Pre-order approval: {% if dispatch.pre_order.url %}<a href="{{ dispatch.pre_order.url }}">{{ dispatch.pre_order.title }}</a>{% else %}{{ dispatch.pre_order.title }}{% endif %}</div>{% endif %}
+      </dd>
+      {% endif %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
       <dd class="col-7 col-sm-9">{% if approval.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
       <dt class="col-5 col-sm-3 text-muted fw-normal">Raised by</dt>
@@ -137,7 +151,7 @@ History lists every action with who and when, in IST (settings.TIME_ZONE).
   <div class="card-body border-bottom small py-1">
     <details>
       <summary class="fw-semibold ap-round-summary">{% if round.has_snapshot %}Details approvers saw in round {{ round.number }}{% else %}Details as currently recorded (no snapshot for this round){% endif %}</summary>
-      <div class="pb-2">{% include "projects/approvals/_round_details.html" with d=round.details %}</div>
+      <div class="pb-2">{% include "projects/approvals/_round_details.html" with d=round.details dispatch=round.dispatch %}</div>
     </details>
   </div>
 

@@ -431,8 +431,10 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
     contractor bill. Kind-specific rules enforced here:
 
       * a vendor for pre-dispatch and the contractor bill (a CHECK holds it as well);
-      * a vendor order for pre-dispatch, placed with that same vendor;
-      * a linked pre-order approval only on pre-dispatch, and only of the pre-order kind;
+      * a vendor order (PO/PI record) for pre-dispatch, placed with that same vendor, and
+        none on a pre-order request;
+      * a linked pre-order approval only on pre-dispatch, only of the pre-order kind, only
+        once APPROVED, and only for the same vendor as the request (Approvals 3a);
       * no design sign-off on a contractor bill (a CHECK holds it as well);
       * a Design Head named exactly when design sign-off is ticked, a Site Engineer
         exactly for a contractor bill.
@@ -479,14 +481,21 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         pre_order = detail.get('pre_order_request')
         if kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
             if vendor_order is None:
-                raise ApprovalRefused('A pre-dispatch approval names the vendor order it ships against.')
+                raise ApprovalRefused('A pre-dispatch approval names the PO/PI record it ships against.')
             if vendor_order.vendor_id != vendor.pk:
-                raise ApprovalRefused('The vendor order was placed with a different vendor.')
+                raise ApprovalRefused('The PO/PI record was placed with a different vendor.')
+        elif vendor_order is not None:
+            raise ApprovalRefused('A pre-order approval comes before the order, so it names '
+                                  'no PO/PI record.')
         if pre_order is not None:
             if kind != APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
                 raise ApprovalRefused('Only a pre-dispatch approval links a pre-order approval.')
             if pre_order.kind != APPROVAL_KIND_MATERIAL_PRE_ORDER:
                 raise ApprovalRefused('The linked approval is not a pre-order approval.')
+            if pre_order.status != APPROVAL_APPROVED:
+                raise ApprovalRefused('The linked pre-order approval has not been approved.')
+            if pre_order.vendor_id != vendor.pk:
+                raise ApprovalRefused('The linked pre-order approval names a different vendor.')
     elif material:
         raise ApprovalRefused('A contractor bill carries no material detail.')
 

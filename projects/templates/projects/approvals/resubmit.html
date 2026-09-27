@@ -16,6 +16,9 @@ never re-fills a file input).
 
 BUILT FOR 380 px: every card is one column, every input full-width, the keep box and its
 reason stacked under the approver select, long text breaks rather than scrolling sideways.
+
+Approvals 3a: a pre-dispatch request's vendor is its PO/PI record's, so it is drawn as
+text with no input — approval_forms.parse_revision also ignores a posted vendor for it.
 {% endcomment %}
 {% block title %}Resubmit approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -72,6 +75,13 @@ reason stacked under the approver select, long text breaks rather than scrolling
         <textarea name="quantity_note" id="apQty" class="form-control w-100" rows="2">{{ values.quantity_note }}</textarea>
       </div>
       {% endif %}
+      {% if is_pre_dispatch %}
+      <div class="mb-3">
+        <div class="form-label mb-1">Vendor</div>
+        <div class="text-break">{{ approval.vendor.name|default:"—" }}</div>
+        <div class="form-text mt-0">Taken from the PO/PI record</div>
+      </div>
+      {% else %}
       <div class="mb-3">
         <label for="apVendor" class="form-label">Vendor <span class="text-muted small">(optional)</span></label>
         <select name="vendor" id="apVendor" class="form-select w-100">
@@ -84,6 +94,7 @@ reason stacked under the approver select, long text breaks rather than scrolling
           {% endfor %}
         </select>
       </div>
+      {% endif %}
       <dl class="row small mb-0">
         {% if material %}
         <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
