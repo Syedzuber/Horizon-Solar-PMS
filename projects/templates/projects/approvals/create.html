@@ -21,6 +21,16 @@ the box is ticked.
   <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary btn-sm">← Approvals</a>
 </div>
 
+{% if already %}
+<div class="alert alert-info">
+  <div class="mb-2">This form has already raised <strong>request #{{ already.pk }} · {{ already.title }}</strong>. Submitting it again raises nothing new.</div>
+  <div class="d-grid d-sm-flex gap-2">
+    <a href="{% url 'approval_detail' already.pk %}" class="btn btn-brand btn-sm">Open request #{{ already.pk }}</a>
+    <a href="{% url 'approval_create' %}" class="btn btn-outline-secondary btn-sm">Start a new request</a>
+  </div>
+</div>
+{% endif %}
+
 <form method="post" enctype="multipart/form-data" id="apCreateForm">
   {% csrf_token %}
   <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
@@ -145,7 +155,7 @@ the box is ticked.
 
   <div class="d-grid d-sm-flex justify-content-sm-end gap-2 mb-4">
     <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary">Cancel</a>
-    <button type="submit" class="btn btn-brand">Raise approval</button>
+    {% if not already %}<button type="submit" class="btn btn-brand">Raise approval</button>{% endif %}
   </div>
 </form>
 

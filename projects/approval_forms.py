@@ -110,10 +110,11 @@ def design_authority_choices():
 # Parsing
 # ---------------------------------------------------------------------------
 
-def parse_client_uuid(post):
-    """The raise page's idempotency key, or None when absent or malformed."""
+def parse_client_uuid(data, name='client_uuid'):
+    """The raise page's idempotency key — the hidden field, or the ?key= in the page's
+    URL — or None when absent or malformed."""
     try:
-        return _uuid.UUID((post.get('client_uuid') or '').strip())
+        return _uuid.UUID((data.get(name) or '').strip())
     except ValueError:
         return None
 

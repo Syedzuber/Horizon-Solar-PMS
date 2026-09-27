@@ -155,7 +155,8 @@ class AccessTests(ApprovalViewFixture):
 
     def test_create(self):
         url = reverse('approval_create')
-        self.assertEqual(self.client_for(self.scm).get(url).status_code, 200)
+        self.assertEqual(self.client_for(self.scm).get(url).status_code, 302)   # to ?key=
+        self.assertEqual(self.client_for(self.scm).get(url, follow=True).status_code, 200)
         for profile in (self.pm, self.head, self.ceo, self.admin, self.finance):
             self.assert_forbidden(self.client_for(profile).get(url))
             self.assert_forbidden(self.client_for(profile).post(url, {'title': 'x'}))
@@ -385,6 +386,42 @@ class CreateTests(ApprovalViewFixture):
         self.assertEqual(ApprovalRequest.objects.count(), 1)
         self.assertEqual(ApprovalStep.objects.count(), 2)
 
+    def test_back_button_then_submit_again_raises_nothing_new(self):
+        """The walkthrough failure (27 Sep): Raise, press Back, Raise again. The browser
+        re-fetched the form, the old page minted a new key per GET, and a second request
+        was written. The key now lives in the URL, so the re-fetch carries it."""
+        client = self.client_for(self.scm)
+        opened = client.get(reverse('approval_create'))
+        self.assertEqual(opened.status_code, 302)
+        form_url = opened['Location']
+        self.assertIn('?key=', form_url)
+        key = form_url.split('?key=', 1)[1]
+        self.assertContains(client.get(form_url), f'value="{key}"')
+
+        data = self.form()
+        del data['client_uuid']          # rely on the URL's key alone
+        first = client.post(form_url, data)
+        approval = ApprovalRequest.objects.get()
+        self.assert_to_detail(first, approval)
+
+        back = client.get(form_url)      # Back: the browser fetches the page again
+        self.assertContains(back, f'This form has already raised')
+        self.assertContains(back, f'request #{approval.pk}')
+        self.assertNotContains(back, '>Raise approval</button>')
+
+        again = client.post(form_url, data)
+        self.assert_to_detail(again, approval)
+        self.assertEqual(ApprovalRequest.objects.count(), 1)
+
+    def test_a_fresh_open_gets_a_fresh_key(self):
+        client = self.client_for(self.scm)
+        first = client.get(reverse('approval_create'))['Location']
+        second = client.get(reverse('approval_create'))['Location']
+        self.assertNotEqual(first, second)
+        malformed = client.get(reverse('approval_create') + '?key=nonsense')
+        self.assertEqual(malformed.status_code, 302)
+        self.assertIn('?key=', malformed['Location'])
+
     def test_design_head_is_ignored_unless_signoff_is_ticked(self):
         data = self.form()
         del data['design_signoff_required']
@@ -411,7 +448,7 @@ class CreateTests(ApprovalViewFixture):
         self.assertFalse(ApprovalRequest.objects.exists())
 
     def test_the_form_offers_live_scope_only_and_preselects_the_only_head(self):
-        response = self.client_for(self.scm).get(reverse('approval_create'))
+        response = self.client_for(self.scm).get(reverse('approval_create'), follow=True)
         self.assertContains(response, 'AV Tender')
         self.assertNotContains(response, 'AV Gone')
         self.assertContains(response, f'<option value="{self.head.pk}" selected>')

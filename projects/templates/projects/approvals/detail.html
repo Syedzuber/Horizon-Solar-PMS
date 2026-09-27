@@ -19,8 +19,16 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
 <style>
   .ap-step { border-left: 3px solid #dee2e6; }
   .ap-step.ap-live { border-left-color: #f0a829; }
-  .ap-step .ap-actions summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; }
   .ap-attachment { min-height: 44px; }
+  /* The SCM actions sit behind <details>. Their <summary> is drawn as an outline button
+     (walkthrough, 27 Sep: plain bold text read as a label and was missed). Full width on
+     a phone, natural width from 576px; the chevron turns when open. */
+  .ap-toggle { list-style: none; width: 100%; min-height: 44px; display: flex;
+               align-items: center; gap: .5rem; text-align: left; }
+  .ap-toggle::-webkit-details-marker { display: none; }
+  .ap-toggle .ap-chevron { margin-left: auto; transition: transform .15s; }
+  details[open] > .ap-toggle .ap-chevron { transform: rotate(180deg); }
+  @media (min-width: 576px) { .ap-toggle { width: auto; display: inline-flex; } }
 </style>
 {% endblock %}
 
@@ -165,7 +173,7 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
       {# ── SCM: a decision made outside PMS ─────────────────────────────── #}
       {% if row.can_proxy %}
       <details class="ap-actions mt-2">
-        <summary class="small fw-semibold">Record a decision made outside PMS</summary>
+        <summary class="btn btn-sm btn-outline-primary ap-toggle"><i class="bi bi-chat-square-text"></i>Record a decision made outside PMS<i class="bi bi-chevron-down ap-chevron"></i></summary>
         <form method="post" action="{% url 'approval_record_proxy' s.pk %}" class="mt-2">
           {% csrf_token %}
           <label for="apBy{{ s.pk }}" class="form-label small mb-1">Whose decision</label>
@@ -194,7 +202,7 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
       {# ── SCM: hand the step to someone else ───────────────────────────── #}
       {% if row.can_reassign %}
       <details class="ap-actions mt-2">
-        <summary class="small fw-semibold">Reassign this step</summary>
+        <summary class="btn btn-sm btn-outline-secondary ap-toggle"><i class="bi bi-person-gear"></i>Reassign this step<i class="bi bi-chevron-down ap-chevron"></i></summary>
         <form method="post" action="{% url 'approval_reassign' s.pk %}" class="mt-2">
           {% csrf_token %}
           <label for="apNew{{ s.pk }}" class="form-label small mb-1">New {{ row.party }}</label>
@@ -219,9 +227,9 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
 
 {# ── Withdraw ────────────────────────────────────────────────────────── #}
 {% if can_withdraw %}
-<details class="card shadow-sm mb-3">
-  <summary class="card-header fw-semibold" style="cursor:pointer; min-height:44px;">Withdraw this request</summary>
-  <form method="post" action="{% url 'approval_withdraw' approval.pk %}" class="card-body">
+<details class="mb-3">
+  <summary class="btn btn-sm btn-outline-danger ap-toggle"><i class="bi bi-x-circle"></i>Withdraw this request<i class="bi bi-chevron-down ap-chevron"></i></summary>
+  <form method="post" action="{% url 'approval_withdraw' approval.pk %}" class="card card-body shadow-sm mt-2">
     {% csrf_token %}
     <label for="apWithdrawNote" class="form-label small mb-1">Why it is being withdrawn</label>
     <textarea name="note" id="apWithdrawNote" class="form-control w-100 mb-2" rows="2" required></textarea>

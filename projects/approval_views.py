@@ -36,11 +36,12 @@ from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 
 from .approval_forms import (
     ATTACHMENT_LIMIT, assignee_choices, design_authority_choices, parse_assignee_overrides,
-    parse_attachments, parse_create, parse_new_assignee, parse_proxy, person_name,
-    scope_choices, vendor_choices,
+    parse_attachments, parse_client_uuid, parse_create, parse_new_assignee, parse_proxy,
+    person_name, scope_choices, vendor_choices,
 )
 from .approvals import (
     ApprovalRefused, ProxyDecision, apply_approval_decision, create_approval_request,
@@ -280,11 +281,14 @@ def approval_list(request):
 # Raise
 # ---------------------------------------------------------------------------
 
-def _create_context(post=None, client_uuid=None):
+def _create_context(post=None, client_uuid=None, already=None):
     heads = assignee_choices(APPROVAL_PARTY_DESIGN)
     context = {
         'post':             post,
         'client_uuid':      client_uuid,
+        # The request this form's key already raised, if any: the page then says so
+        # and offers it, instead of a second Raise button.
+        'already':          already,
         'vendors':          vendor_choices(),
         'pms':              assignee_choices('pm'),
         'heads':            heads,
@@ -316,24 +320,35 @@ def approval_create(request):
 
     Access: user_can_raise_approval_request — SCM.
 
-    DOUBLE-SUBMIT SAFE ON client_uuid (R-14). A request already written under the posted
-    key is returned to before anything is uploaded; and if two submits race past that
-    read, the chokepoint returns the first one's request and the second's files — which
-    it did not attach — are removed again.
+    DOUBLE-SUBMIT SAFE ON client_uuid (R-14), INCLUDING THE BACK BUTTON. The key lives in
+    the URL (?key=), not only in a hidden field: a GET without one redirects to a fresh
+    one, so the key is part of the browser's history entry. Going Back after raising
+    returns to the SAME key even when the browser fetches the page again — a key minted
+    per GET was replaced on every re-fetch, which is how two requests got raised from one
+    form (walkthrough, 27 Sep). A GET whose key has already raised a request says so and
+    offers that request instead of a Raise button; a POST under it returns that request
+    before anything is uploaded; and if two submits race past that read, the chokepoint
+    returns the first one's request and the second's files — which it did not attach —
+    are removed again.
     """
     if not user_can_raise_approval_request(request.user):
         return _forbidden(request)
+    key = parse_client_uuid(request.GET, 'key')
     if request.method != 'POST':
+        if key is None:
+            return redirect(f"{reverse('approval_create')}?key={_uuid.uuid4()}")
+        already = ApprovalRequest.objects.filter(client_uuid=key).first()
         return render(request, 'projects/approvals/create.html',
-                      _create_context(client_uuid=_uuid.uuid4()))
+                      _create_context(client_uuid=key, already=already))
 
     cleaned, errors = parse_create(request)
-    client_uuid = cleaned.pop('client_uuid')
+    client_uuid = cleaned.pop('client_uuid') or key
     files = cleaned.pop('files')
     if client_uuid is not None:
         existing = ApprovalRequest.objects.filter(client_uuid=client_uuid).first()
         if existing is not None:
-            messages.info(request, 'That request was already raised — here it is.')
+            messages.info(request, f'This form already raised request #{existing.pk} — '
+                                   f'here it is. Nothing new was raised.')
             return _detail(existing.pk)
     else:
         client_uuid = _uuid.uuid4()   # a page without its key still gets one folder
