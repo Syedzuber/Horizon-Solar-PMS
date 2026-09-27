@@ -27,6 +27,17 @@ reach Approved.
 ROUNDS ARE NEVER REWRITTEN (Layer 5 #2). A resubmit creates new step rows; no previous
 round's row is ever updated again once its round has closed.
 
+EVERY ROUND IS SNAPSHOTTED (S1.1, D-A19). create and resubmit write one
+ApprovalRoundSnapshot for the round they open, in the same transaction, after any
+revision is applied: what that round's approvers were asked about, with display names
+beside ids. A resubmit may revise the request's own fields (D-A18), so the live row is
+the request NOW and the snapshot is the request AS ROUND N SAW IT. round_snapshot()
+returns None for a round raised before S1.1.
+
+A CARRIED STEP IS NOT A DECISION (D-A20). A resubmit may keep a party's approval from
+the previous round; the new round's step is created approved with `carried_from` set.
+Turnaround and aging figures must read steps through exclude_carried_steps().
+
 NO NOTIFICATIONS HERE. Session 2 adds them. record_transition() is called with its
 default notify=True: the only StatusTransition receiver (signals.payment_transition_
 notices) returns at once for any subject other than payment_request, so for this
@@ -41,7 +52,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalStep, MaterialApprovalDetail,
+    ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep,
+    MaterialApprovalDetail,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_MATERIAL_KINDS,
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED, APPROVAL_REJECTED,
@@ -68,10 +80,24 @@ class ApprovalRefused(Exception):
 
 #: A decision made outside PMS, recorded by SCM on the decider's behalf (D-A5).
 #: `decided_by` is the UserProfile who decided; `channel` one of
-#: APPROVAL_PROXY_CHANNEL_CHOICES; `evidence` what was said, and when.
-ProxyDecision = namedtuple('ProxyDecision', 'decided_by channel evidence')
+#: APPROVAL_PROXY_CHANNEL_CHOICES; `evidence` what was said, and when. `files` (S1.1,
+#: D-A21, optional) are evidence files the caller has ALREADY uploaded, each a dict of
+#: file_name, bucket, path and optionally file_type, file_size_kb, label; the chokepoint
+#: writes their ApprovalAttachment rows linked to the step. The text evidence stays
+#: mandatory with or without files.
+ProxyDecision = namedtuple('ProxyDecision', 'decided_by channel evidence files',
+                           defaults=((),))
 
 _KINDS = {value for value, _ in APPROVAL_KIND_CHOICES}
+_KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
+
+#: The keys resubmit_approval_request(revision=...) accepts (D-A18). The request's own
+#: fields, its scope, and the material detail's proposal. Not the kind, not design
+#: sign-off (that changes who is asked), not the vendor order or pre-order link.
+_REVISABLE_REQUEST = ('title', 'description', 'vendor')
+_REVISABLE_SCOPE = ('programs', 'projects', 'site_groups')
+_REVISABLE_MATERIAL = ('proposed_make', 'specification', 'quantity_note', 'boq_items')
+_REVISABLE = _REVISABLE_REQUEST + _REVISABLE_SCOPE + _REVISABLE_MATERIAL
 _PROXY_CHANNELS = {value for value, _ in APPROVAL_PROXY_CHANNEL_CHOICES}
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
 
@@ -86,6 +112,12 @@ def _name(profile):
 
 def _party_label(party):
     return _PARTY_LABELS.get(party, party)
+
+
+def _sentence(text):
+    """`text` ending in exactly one full stop — "kept" and "kept." both read "kept."
+    in a ledger remark, never "kept..". A ? or ! already ends it."""
+    return text if text[-1:] in ('.', '?', '!') else f'{text}.'
 
 
 # ---------------------------------------------------------------------------
@@ -173,28 +205,177 @@ def _check_assignees(raised_by_id, assignees, others=()):
             raise ApprovalRefused(message)
 
 
-def _open_round(approval, round_no, plan, assignees, now):
-    """Write one round's steps. The lowest sequence is activated now; the rest wait."""
-    first = min(sequence for _, sequence in plan)
+def _open_round(approval, round_no, plan, assignees, now, carries=None, carried_by=None):
+    """Write one round's steps. The lowest sequence with a step still to decide is
+    activated now; the rest wait.
+
+    `carries` ({party: (previous_step, reason)}, S1.1) are written already approved: the
+    previous round's decider as `decided_by`, `carried_by` (the SCM user resubmitting)
+    as `recorded_by`, activated and decided now. A carried step never holds up a later
+    sequence — a contractor bill whose Site Engineer approval is kept goes straight to
+    the PM."""
+    carries = carries or {}
+    first = min(sequence for party, sequence in plan if party not in carries)
     for party, sequence in plan:
+        if party in carries:
+            previous, reason = carries[party]
+            ApprovalStep.objects.create(
+                request=approval, round=round_no, party=party, sequence=sequence,
+                assignee=assignees[party], activated_at=now,
+                verdict=APPROVAL_STEP_APPROVED, decided_by_id=previous.decided_by_id,
+                decided_at=now, recorded_by=carried_by,
+                carried_from=previous, carry_reason=reason)
+            continue
         ApprovalStep.objects.create(
             request=approval, round=round_no, party=party, sequence=sequence,
             assignee=assignees[party],
             activated_at=now if sequence == first else None)
 
 
-def _add_attachments(approval, round_no, attachments, uploaded_by):
+def _add_attachments(approval, round_no, attachments, uploaded_by, step=None):
     """Append each file to `round_no`. `attachments` is an iterable of dicts carrying
     file_name, bucket, path and optionally file_type, file_size_kb, label — the upload
-    itself is the caller's, done before this is called."""
+    itself is the caller's, done before this is called.
+
+    With `step` (S1.1, D-A21) the files are evidence for that step's PROXY decision and
+    are linked to it. Refused unless the step, as the database holds it now, is a proxy
+    record of this request and round — evidence never attaches to a decision the decider
+    typed themselves."""
+    attachments = list(attachments)
+    if step is not None and attachments:
+        is_proxy_step = ApprovalStep.objects.filter(
+            pk=step.pk, request=approval, round=round_no, is_proxy=True).exists()
+        if not is_proxy_step:
+            raise ApprovalRefused(
+                'Evidence files are attached only to a decision recorded on someone '
+                'else\'s behalf.')
     for item in attachments:
         ApprovalAttachment.objects.create(
-            request=approval, round=round_no,
+            request=approval, round=round_no, step=step,
             label=_clean(item.get('label')),
             file_name=item['file_name'], bucket=item['bucket'], path=item['path'],
             file_type=item.get('file_type', ''),
             file_size_kb=item.get('file_size_kb', 0),
             uploaded_by=uploaded_by)
+
+
+# ---------------------------------------------------------------------------
+# Round snapshots and carried steps (S1.1)
+# ---------------------------------------------------------------------------
+
+def _origin_round(step):
+    """The round in which a (possibly carried) approval was actually decided."""
+    while step.carried_from_id is not None:
+        step = step.carried_from
+    return step.round
+
+
+def _round_snapshot_payload(approval, round_no):
+    """What round `round_no`'s approvers are asked about, read from the database as this
+    transaction holds it. JSON-safe; display names stored beside ids (D-A19).
+
+    Schema 1:
+      schema, round, kind, kind_label, title, description, design_signoff_required,
+      vendor {id, name} | null,
+      programs [{id, name, short_tender_code}],
+      projects [{id, project_id, customer_name, is_deleted}],
+      site_groups [{id, name, program_id, program_name}],
+      material null | {proposed_make, specification, quantity_note,
+                       boq_items [{id, code, description, unit}],
+                       vendor_order {id, po_number, pi_number} | null,
+                       pre_order_request {id, title} | null},
+      steps [{party, party_label, sequence, assignee_id, assignee_name, carried,
+              carried_from_step, carried_from_round, decided_in_round,
+              carried_decider_name}]
+    Lists are in pk order; steps in (sequence, party) order, live rows only.
+    """
+    request = (ApprovalRequest.objects.select_related('vendor')
+               .get(pk=approval.pk))
+    material = (MaterialApprovalDetail.objects
+                .select_related('vendor_order', 'pre_order_request')
+                .filter(request=request).first())
+    payload = {
+        'schema': 1,
+        'round': round_no,
+        'kind': request.kind,
+        'kind_label': _KIND_LABELS.get(request.kind, request.kind),
+        'title': request.title,
+        'description': request.description,
+        'design_signoff_required': request.design_signoff_required,
+        'vendor': ({'id': request.vendor.pk, 'name': request.vendor.name}
+                   if request.vendor is not None else None),
+        'programs': [{'id': p.pk, 'name': p.name, 'short_tender_code': p.short_tender_code}
+                     for p in request.programs.order_by('pk')],
+        'projects': [{'id': p.pk, 'project_id': p.project_id,
+                      'customer_name': p.customer_name, 'is_deleted': p.is_deleted}
+                     for p in request.projects.order_by('pk')],
+        'site_groups': [{'id': g.pk, 'name': g.name, 'program_id': g.program_id,
+                         'program_name': g.program.name if g.program_id else None}
+                        for g in request.site_groups.select_related('program')
+                        .order_by('pk')],
+        'material': None,
+        'steps': [],
+    }
+    if material is not None:
+        order, pre_order = material.vendor_order, material.pre_order_request
+        payload['material'] = {
+            'proposed_make': material.proposed_make,
+            'specification': material.specification,
+            'quantity_note': material.quantity_note,
+            'boq_items': [{'id': i.pk, 'code': i.code, 'description': i.description,
+                           'unit': i.unit} for i in material.boq_items.order_by('pk')],
+            'vendor_order': ({'id': order.pk, 'po_number': order.po_number,
+                              'pi_number': order.pi_number}
+                             if order is not None else None),
+            'pre_order_request': ({'id': pre_order.pk, 'title': pre_order.title}
+                                  if pre_order is not None else None),
+        }
+    steps = (ApprovalStep.objects.filter(request=request, round=round_no)
+             .exclude(verdict=APPROVAL_STEP_SUPERSEDED)
+             .select_related('assignee__user', 'decided_by__user', 'carried_from')
+             .order_by('sequence', 'party', 'pk'))
+    for row in steps:
+        carried = row.carried_from_id is not None
+        payload['steps'].append({
+            'party': row.party,
+            'party_label': _party_label(row.party),
+            'sequence': row.sequence,
+            'assignee_id': row.assignee_id,
+            'assignee_name': _name(row.assignee),
+            'carried': carried,
+            'carried_from_step': row.carried_from_id,
+            'carried_from_round': row.carried_from.round if carried else None,
+            'decided_in_round': _origin_round(row) if carried else None,
+            'carried_decider_name': _name(row.decided_by) if carried else None,
+        })
+    return payload
+
+
+def _write_round_snapshot(approval, round_no, created_by):
+    """The one writer of ApprovalRoundSnapshot. Called inside the caller's transaction,
+    after the round's steps and any revision are written."""
+    ApprovalRoundSnapshot.objects.create(
+        request=approval, round=round_no, created_by=created_by,
+        snapshot=_round_snapshot_payload(approval, round_no))
+
+
+def round_snapshot(approval, round_no):
+    """The snapshot dict of `approval`'s round `round_no`, or None when that round has
+    none (a request raised before S1.1). Never raises for a missing round."""
+    row = (ApprovalRoundSnapshot.objects.filter(request=approval, round=round_no)
+           .only('snapshot').first())
+    return row.snapshot if row is not None else None
+
+
+def exclude_carried_steps(steps=None):
+    """`steps` (an ApprovalStep queryset; all steps when omitted) without carried steps.
+
+    A carried step is activated and decided at the same instant by nobody's fresh act,
+    so it would read as a zero-second turnaround. Every turnaround and aging figure reads
+    steps through this."""
+    if steps is None:
+        steps = ApprovalStep.objects.all()
+    return steps.filter(carried_from__isnull=True)
 
 
 def _lock(request_pk):
@@ -337,6 +518,7 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         now = timezone.now()
         _open_round(approval, 1, plan, assignees, now)
         _add_attachments(approval, 1, attachments, raised_by)
+        _write_round_snapshot(approval, 1, raised_by)
         record_transition(approval, to_status=APPROVAL_OPEN, actor=raised_by,
                           reason_code=REASON_CREATED)
     return approval
@@ -352,6 +534,9 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
     `actor` is who is typing it into PMS (`recorded_by`). Without `proxy` the actor is
     also the decider. With `proxy` (a ProxyDecision) the actor must be SCM, and
     `proxy.decided_by` is who decided, over `proxy.channel`, with `proxy.evidence`.
+    `proxy.files` (already uploaded by the caller) become ApprovalAttachment rows linked
+    to the step, uploaded_by the actor, written after the step inside this transaction —
+    so a refused decision leaves no attachment row.
 
     Under the request lock, in this order: re-read the step; refuse a step that is not
     live; refuse a recorder or decider without the authority; apply the same-person
@@ -378,6 +563,10 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
             raise ApprovalRefused('Say how the decision reached you.')
         if not _clean(proxy.evidence):
             raise ApprovalRefused('Record what was said, and when, as evidence.')
+        for item in proxy.files or ():
+            if not all(_clean(item.get(key)) for key in ('file_name', 'bucket', 'path')):
+                raise ApprovalRefused('An evidence file is missing its name or where it '
+                                      'was stored.')
     decider = proxy.decided_by if proxy is not None else actor
 
     with transaction.atomic():
@@ -408,6 +597,8 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
             proxy_evidence=_clean(proxy.evidence) if proxy is not None else '')
         if written != 1:   # impossible under the lock; never silently carry on
             raise ApprovalRefused('The step changed while you were deciding it.')
+        if proxy is not None:
+            _add_attachments(approval, step.round, proxy.files or (), actor, step=step)
 
         round_filter = dict(request=approval, round=approval.current_round)
         if verdict in APPROVAL_STEP_NOTE_REQUIRED:
@@ -450,7 +641,57 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
 # 3. Resubmit
 # ---------------------------------------------------------------------------
 
-def resubmit_approval_request(approval, actor, note, attachments=(), assignees=None):
+def _revision_writes(approval, revision):
+    """Validate `revision` against `approval` (locked) and return what to write:
+    (request_fields, scope, material_fields, boq_items). The kind's rules are re-checked
+    against the request AS REVISED. Refuses an unknown key, a material key on a request
+    with no material detail, a blank title or description, a missing or mismatched
+    vendor, or a deleted project in the scope. Writes nothing."""
+    revision = dict(revision or {})
+    for key in revision:
+        if key not in _REVISABLE:
+            raise ApprovalRefused(f'"{key}" cannot be changed on a resubmit.')
+    material = (MaterialApprovalDetail.objects.select_related('vendor_order')
+                .filter(request=approval).first())
+    if material is None and any(key in revision for key in _REVISABLE_MATERIAL):
+        raise ApprovalRefused('A contractor bill carries no material detail.')
+
+    request_fields = {}
+    for key in ('title', 'description'):
+        if key in revision:
+            request_fields[key] = _clean(revision[key])
+    if 'vendor' in revision:
+        request_fields['vendor'] = revision['vendor']
+    title = request_fields.get('title', approval.title)
+    description = request_fields.get('description', approval.description)
+    vendor = request_fields.get('vendor', approval.vendor)
+    if not title or not description:
+        raise ApprovalRefused('A title and a description are required.')
+    if len(title) > 200:
+        raise ApprovalRefused('The title must be 200 characters or fewer.')
+    if approval.kind in (APPROVAL_KIND_MATERIAL_PRE_DISPATCH, APPROVAL_KIND_CONTRACTOR_BILL) \
+            and vendor is None:
+        raise ApprovalRefused('Choose the vendor this request is about.')
+    if approval.kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH and material is not None \
+            and material.vendor_order is not None \
+            and material.vendor_order.vendor_id != vendor.pk:
+        raise ApprovalRefused('The vendor order was placed with a different vendor.')
+
+    scope = {key: list(revision[key]) for key in _REVISABLE_SCOPE if key in revision}
+    if any(project.is_deleted for project in scope.get('projects', ())):
+        raise ApprovalRefused('A deleted project cannot be named in the scope.')
+
+    material_fields = {key: _clean(revision[key])
+                       for key in ('proposed_make', 'specification', 'quantity_note')
+                       if key in revision}
+    if len(material_fields.get('proposed_make', '')) > 200:
+        raise ApprovalRefused('The proposed make must be 200 characters or fewer.')
+    boq_items = list(revision['boq_items']) if 'boq_items' in revision else None
+    return request_fields, scope, material_fields, boq_items
+
+
+def resubmit_approval_request(approval, actor, note, attachments=(), assignees=None,
+                              revision=None, carry=None):
     """SCM's revision after changes were requested: open round N+1. Returns the request.
 
     New step rows for the same parties, same sequences; the previous round's rows are
@@ -460,7 +701,8 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
     be reassigned.
 
     Only from changes_requested. Open is still being decided; approved, rejected and
-    withdrawn are terminal (SCM raises a fresh request).
+    withdrawn are terminal (SCM raises a fresh request). Any SCM user may resubmit any
+    request (D-A22); the ledger row and the round snapshot name who did.
 
     AN OVERRIDE THAT CHANGES AN APPROVER IS A REASSIGNMENT, and is held to that bar:
 
@@ -475,12 +717,43 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
         this transaction, so a refusal rolls the whole resubmit back.
 
     Naming the same person again is not a change: no segment, no reassign check.
+
+    REVISION (S1.1, D-A18). `revision` is a dict of any of title, description, vendor,
+    programs, projects, site_groups, proposed_make, specification, quantity_note,
+    boq_items. Omitted keys stay as they are; a scope or boq_items key replaces that
+    whole set. The kind's rules are re-checked against the revised request
+    (_revision_writes). Kind, design sign-off, vendor order and pre-order link are not
+    revisable.
+
+    CARRY-FORWARD (S1.1, D-A20). `carry` is {party: reason}: keep that party's APPROVAL
+    from the previous round instead of asking again. Refused without a reason; refused
+    if it would leave nobody to decide the new round (a resubmit never opens a round
+    that is already approved); refused unless the party's step in the immediately
+    previous round is approved — superseded, changes-requested and rejected steps are
+    not approvals; refused for a party whose approver this resubmit changes. Any SCM
+    user may carry (D-A22) — the same user_can_raise_approval_request() check as the
+    resubmit itself. The new round's step is created approved: decided_by the original
+    decider, recorded_by the actor, activated and decided now, carried_from the previous
+    round's step. The ledger remark states each carry after any approver change and
+    before the note, in round order:
+    "Approval kept — pm: <decider> (round N). Reason: <reason>. " — N being the round the
+    approval was actually decided in, which is earlier than the previous round when a
+    carried approval is carried again. A reason that already ends in a full stop is not
+    given a second one (_sentence).
+
+    Every write, including the new round's snapshot, is inside one transaction: a
+    refusal leaves nothing behind.
     """
     note = _clean(note)
     if not note:
         raise ApprovalRefused('Say what changed in this revision.')
     if not user_can_raise_approval_request(actor.user):
         raise ApprovalRefused('Only SCM can resubmit an approval request.')
+    carry_reasons = {party: _clean(reason) for party, reason in (carry or {}).items()}
+    for party, reason in carry_reasons.items():
+        if not reason:
+            raise ApprovalRefused(
+                f'Say why the {_party_label(party)} approval is being kept.')
 
     with transaction.atomic():
         approval = _lock(approval.pk)
@@ -491,10 +764,14 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                     f'final. Raise a new request instead.')
             raise ApprovalRefused('This request is still being decided; nothing to resubmit.')
 
+        request_fields, scope, material_fields, boq_items = _revision_writes(
+            approval, revision)
+
         previous = approval.current_round
         latest = {}
         for row in (ApprovalStep.objects.filter(request=approval, round=previous)
-                    .select_related('assignee__user').order_by('pk')):
+                    .select_related('assignee__user', 'decided_by__user', 'carried_from')
+                    .order_by('pk')):
             latest[row.party] = row      # the last row per party wins
         plan = sorted({(row.party, row.sequence) for row in latest.values()},
                       key=lambda pair: (pair[1], pair[0]))
@@ -508,6 +785,29 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                    if chosen[party] is not None
                    and chosen[party].pk != latest[party].assignee_id]
 
+        # Carries: the whole-round guard first, so "keep everything" is always answered
+        # by it, then each party on its own.
+        if carry_reasons and all(party in carry_reasons for party, _ in plan):
+            raise ApprovalRefused(
+                'At least one approver must decide the new round — a resubmit cannot '
+                'keep every approval.')
+        carries = {}
+        for party, reason in carry_reasons.items():
+            if party not in latest:
+                raise ApprovalRefused(
+                    f'This request has no {_party_label(party)} step to keep.')
+            kept = latest[party]
+            if kept.verdict != APPROVAL_STEP_APPROVED:
+                raise ApprovalRefused(
+                    f'The {_party_label(party)} step in round {previous} was '
+                    f'{kept.get_verdict_display().lower()}, not approved; only an '
+                    f'approval can be kept.')
+            if party in changed:
+                raise ApprovalRefused(
+                    f'The {_party_label(party)} approval cannot be kept while its '
+                    f'approver is being changed.')
+            carries[party] = (kept, reason)
+
         # Every decider in every earlier round, by party. The new round has no rows yet,
         # so there are no live assignees to add; the planned ones are _check_assignees'.
         deciders = set(ApprovalStep.objects.filter(
@@ -519,10 +819,20 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
         now = timezone.now()
         ApprovalRequest.objects.filter(
             pk=approval.pk, status=APPROVAL_CHANGES_REQUESTED,
-        ).update(status=APPROVAL_OPEN, current_round=new_round)
-        _open_round(approval, new_round, plan, chosen, now)
+        ).update(status=APPROVAL_OPEN, current_round=new_round, **request_fields)
+        for key, rows in scope.items():
+            getattr(approval, key).set(rows)
+        if material_fields or boq_items is not None:
+            material = MaterialApprovalDetail.objects.get(request=approval)
+            if material_fields:
+                MaterialApprovalDetail.objects.filter(pk=material.pk).update(
+                    **material_fields)
+            if boq_items is not None:
+                material.boq_items.set(boq_items)
+        _open_round(approval, new_round, plan, chosen, now,
+                    carries=carries, carried_by=actor)
 
-        remark = note
+        changed_segments = kept_segments = ''
         if changed:
             reopened = _lock(approval.pk)     # already held; re-read for the new state
             for party in changed:
@@ -533,11 +843,19 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                     raise ApprovalRefused(
                         f'Only someone who may reassign approval steps can change the '
                         f'{_party_label(party)} approver.')
-            remark = ''.join(
+            changed_segments = ''.join(
                 f'Approver changed — {party}: {_name(latest[party].assignee)} → '
-                f'{_name(chosen[party])}. ' for party in changed) + note
+                f'{_name(chosen[party])}. ' for party in changed)
+        if carries:
+            kept_segments = ''.join(
+                f'Approval kept — {party}: {_name(carries[party][0].decided_by)} '
+                f'(round {_origin_round(carries[party][0])}). '
+                f'Reason: {_sentence(carries[party][1])} '
+                for party, _ in plan if party in carries)
+        remark = changed_segments + kept_segments + note
 
         _add_attachments(approval, new_round, attachments, actor)
+        _write_round_snapshot(approval, new_round, actor)
         record_transition(approval, to_status=APPROVAL_OPEN,
                           from_status=APPROVAL_CHANGES_REQUESTED, actor=actor,
                           reason_code=REASON_RESUBMITTED, remark=remark)

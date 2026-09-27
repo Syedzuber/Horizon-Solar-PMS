@@ -36,13 +36,14 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from .approvals import (
-    ApprovalRefused, ProxyDecision, apply_approval_decision, create_approval_request,
-    reassign_approval_step, resubmit_approval_request, withdraw_approval_request,
+    ApprovalRefused, ProxyDecision, _add_attachments, apply_approval_decision,
+    create_approval_request, exclude_carried_steps, reassign_approval_step,
+    resubmit_approval_request, round_snapshot, withdraw_approval_request,
 )
 from .models import (
-    AppendOnlyViolation, ApprovalAttachment, ApprovalRequest, ApprovalStep,
-    BOQItemMaster, MaterialApprovalDetail, Program, Project, StatusTransition, Vendor,
-    VendorOrder,
+    AppendOnlyViolation, ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot,
+    ApprovalStep, BOQItemMaster, MaterialApprovalDetail, Program, Project, SiteGroup,
+    StatusTransition, Vendor, VendorOrder,
     APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER,
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED, APPROVAL_REJECTED,
@@ -1076,3 +1077,647 @@ class AdminLockdownTests(TestCase):
                 self.assertFalse(model_admin.has_add_permission(self.request))
                 self.assertFalse(model_admin.has_change_permission(self.request))
                 self.assertFalse(model_admin.has_delete_permission(self.request))
+
+    def test_the_round_snapshot_admin_is_read_only_too(self):
+        """S1.1 T6 — the same lockdown as S1's four registrations."""
+        model_admin = django_admin.site._registry[ApprovalRoundSnapshot]
+        form = model_admin.get_form(self.request, None)
+        self.assertEqual(list(form.base_fields), [])
+        self.assertFalse(model_admin.has_add_permission(self.request))
+        self.assertFalse(model_admin.has_change_permission(self.request))
+        self.assertFalse(model_admin.has_delete_permission(self.request))
+
+
+# ===========================================================================
+# S1.1 — resubmit revision: round snapshots, revisable fields, carry-forward,
+# proxy evidence, attribution (D-A18 .. D-A22)
+# ===========================================================================
+
+EVIDENCE = {'file_name': 'whatsapp.png', 'bucket': 'approvals',
+            'path': 'r1/whatsapp.png', 'file_type': 'image/png', 'file_size_kb': 40}
+
+
+class RevisionFixture(ApprovalFixture):
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.head_b = _profile('ap_head_b', 'Design', is_design_head=True)
+        cls.vendor_b = Vendor.objects.create(name='Second Vendor', contact_person='S',
+                                             phone='9000000002')
+        cls.program = Program.objects.create(
+            name='Revision Tender', program_type='OPEX', client_name='Client',
+            status='Active', short_tender_code='RVT')
+        cls.group = SiteGroup.objects.create(program=cls.program, name='Cluster A',
+                                             created_by=cls.scm)
+        cls.site = Project.objects.create(
+            customer_name='Revision Site', status='Active', customer_phone='9876543210',
+            site_address='2 Sun Road', city='Lucknow', state='Uttar Pradesh',
+            project_type='Residential', dc_capacity_kw=Decimal('5.00'),
+            assigned_pm=cls.pm)
+        cls.item = BOQItemMaster.objects.create(code='APRV-001', description='Module',
+                                                unit='Nos')
+        cls.item_b = BOQItemMaster.objects.create(code='APRV-002', description='Inverter',
+                                                  unit='Nos')
+        cls.order = VendorOrder.objects.create(
+            vendor=cls.vendor, project_type='Residential', total_amount=Decimal('1000'),
+            created_by=cls.scm)
+
+    def design_approved_pm_changes(self, **raise_overrides):
+        """Round 1 closed with the Design Head's APPROVAL on record and the PM asking
+        for changes — the one shape in which a carry is possible."""
+        approval = self.raise_material(**raise_overrides)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm,
+                                note='Quote the 550 Wp variant too.')
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, APPROVAL_CHANGES_REQUESTED)
+        return approval
+
+    def pm_changes_first(self, **raise_overrides):
+        """Round 1 closed by the PM's changes while Design was pending: Design superseded."""
+        approval = self.raise_material(**raise_overrides)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Redo.')
+        approval.refresh_from_db()
+        return approval
+
+    def untouched(self, approval):
+        """Everything a refused resubmit must leave exactly as it was."""
+        approval.refresh_from_db()
+        detail = MaterialApprovalDetail.objects.filter(request=approval).values().first()
+        return (ApprovalRequest.objects.filter(pk=approval.pk).values().get(),
+                sorted(approval.programs.values_list('pk', flat=True)),
+                sorted(approval.projects.values_list('pk', flat=True)),
+                sorted(approval.site_groups.values_list('pk', flat=True)),
+                detail,
+                list(ApprovalStep.objects.filter(request=approval).order_by('pk').values()),
+                list(ApprovalAttachment.objects.filter(request=approval)
+                     .order_by('pk').values()),
+                list(ApprovalRoundSnapshot.objects.filter(request=approval)
+                     .order_by('pk').values()),
+                len(self.ledger(approval)))
+
+
+class RoundSnapshotTests(RevisionFixture):
+
+    def test_create_writes_the_round_one_snapshot_with_names_beside_ids(self):
+        approval = self.raise_material(
+            programs=[self.program], projects=[self.site], site_groups=[self.group],
+            material={'proposed_make': 'Waaree', 'specification': '545 Wp',
+                      'quantity_note': '120 modules', 'boq_items': [self.item]})
+        row = ApprovalRoundSnapshot.objects.get(request=approval)
+        self.assertEqual((row.round, row.created_by), (1, self.scm))
+        snap = row.snapshot
+        self.assertEqual(snap['schema'], 1)
+        self.assertEqual(snap['round'], 1)
+        self.assertEqual(snap['title'], 'Module make')
+        self.assertIsNone(snap['vendor'])
+        self.assertEqual(snap['programs'], [{'id': self.program.pk, 'name': 'Revision Tender',
+                                             'short_tender_code': 'RVT'}])
+        self.assertEqual(snap['projects'][0]['customer_name'], 'Revision Site')
+        self.assertEqual(snap['site_groups'][0]['program_name'], 'Revision Tender')
+        self.assertEqual(snap['material']['boq_items'],
+                         [{'id': self.item.pk, 'code': 'APRV-001', 'description': 'Module',
+                           'unit': 'Nos'}])
+        self.assertEqual([(s['party'], s['assignee_id'], s['carried'])
+                          for s in snap['steps']],
+                         [(APPROVAL_PARTY_DESIGN, self.head.pk, False),
+                          (APPROVAL_PARTY_PM, self.pm.pk, False)])
+        self.assertEqual(snap['steps'][1]['assignee_name'], 'Ap_Pm')
+        self.assertEqual(round_snapshot(approval, 1), snap)
+
+    def test_each_resubmit_writes_its_own_rounds_snapshot(self):
+        approval = self.pm_changes_first()
+        resubmit_approval_request(approval, self.scm, note='Round two.',
+                                  revision={'title': 'Module make v2'})
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Again.')
+        resubmit_approval_request(approval, self.scm_b, note='Round three.',
+                                  revision={'title': 'Module make v3'})
+        rows = list(ApprovalRoundSnapshot.objects.filter(request=approval)
+                    .order_by('round'))
+        self.assertEqual([(r.round, r.snapshot['title'], r.created_by) for r in rows],
+                         [(1, 'Module make', self.scm), (2, 'Module make v2', self.scm),
+                          (3, 'Module make v3', self.scm_b)])
+
+    def test_a_past_rounds_snapshot_survives_a_later_revision_and_a_rename(self):
+        approval = self.pm_changes_first(vendor=self.vendor, programs=[self.program])
+        round_one = list(ApprovalRoundSnapshot.objects.filter(request=approval, round=1)
+                         .values())
+        resubmit_approval_request(
+            approval, self.scm, note='New vendor.',
+            revision={'vendor': self.vendor_b, 'programs': [],
+                      'specification': '550 Wp'})
+        Vendor.objects.filter(pk=self.vendor.pk).update(name='Renamed Vendor')
+        Program.objects.filter(pk=self.program.pk).update(name='Renamed Tender')
+        self.assertEqual(list(ApprovalRoundSnapshot.objects.filter(request=approval,
+                                                                   round=1).values()),
+                         round_one)
+        self.assertEqual(round_snapshot(approval, 1)['vendor']['name'], 'Approval Vendor')
+        self.assertEqual(round_snapshot(approval, 1)['programs'][0]['name'],
+                         'Revision Tender')
+        self.assertEqual(round_snapshot(approval, 2)['vendor'],
+                         {'id': self.vendor_b.pk, 'name': 'Second Vendor'})
+        self.assertEqual(round_snapshot(approval, 2)['programs'], [])
+
+    def test_a_round_without_a_snapshot_reads_none_and_does_not_stop_a_resubmit(self):
+        """A request raised before S1.1 has no snapshot. The queryset delete bypasses the
+        model's delete() guard on purpose, to stand in for that request."""
+        approval = self.pm_changes_first()
+        ApprovalRoundSnapshot.objects.filter(request=approval).delete()
+        self.assertIsNone(round_snapshot(approval, 1))
+        self.assertIsNone(round_snapshot(approval, 9))
+        resubmit_approval_request(approval, self.scm, note='Round two.')
+        self.assertIsNone(round_snapshot(approval, 1))
+        self.assertEqual(round_snapshot(approval, 2)['round'], 2)
+
+    def test_a_snapshot_cannot_be_edited_or_deleted(self):
+        row = ApprovalRoundSnapshot.objects.get(request=self.raise_material())
+        row.snapshot = {'schema': 1, 'title': 'rewritten'}
+        with self.assertRaises(AppendOnlyViolation):
+            row.save()
+        with self.assertRaises(AppendOnlyViolation):
+            row.delete()
+        self.assertEqual(ApprovalRoundSnapshot.objects.get(pk=row.pk).snapshot['title'],
+                         'Module make')
+
+    def test_uniq_approval_round_snapshot(self):
+        approval = self.raise_material()
+        with self.assertRaises(IntegrityError) as caught:
+            with transaction.atomic():
+                ApprovalRoundSnapshot.objects.create(request=approval, round=1,
+                                                     snapshot={}, created_by=self.scm)
+        if ON_POSTGRES:
+            self.assertIn('uniq_approval_round_snapshot', str(caught.exception))
+
+
+class RevisionTests(RevisionFixture):
+
+    def test_a_revision_writes_every_revisable_field(self):
+        approval = self.pm_changes_first(
+            programs=[self.program], material={'proposed_make': 'Waaree',
+                                               'boq_items': [self.item]})
+        resubmit_approval_request(
+            approval, self.scm, note='Switched to Adani.',
+            revision={'title': ' Module make v2 ', 'description': 'Adani 550 Wp.',
+                      'vendor': self.vendor_b, 'programs': [], 'projects': [self.site],
+                      'site_groups': [self.group], 'proposed_make': 'Adani',
+                      'specification': '550 Wp', 'quantity_note': '110 modules',
+                      'boq_items': [self.item_b]})
+        approval.refresh_from_db()
+        detail = MaterialApprovalDetail.objects.get(request=approval)
+        self.assertEqual((approval.title, approval.description, approval.vendor),
+                         ('Module make v2', 'Adani 550 Wp.', self.vendor_b))
+        self.assertEqual(list(approval.programs.all()), [])
+        self.assertEqual(list(approval.projects.all()), [self.site])
+        self.assertEqual(list(approval.site_groups.all()), [self.group])
+        self.assertEqual((detail.proposed_make, detail.specification, detail.quantity_note),
+                         ('Adani', '550 Wp', '110 modules'))
+        self.assertEqual(list(detail.boq_items.all()), [self.item_b])
+        snap = round_snapshot(approval, 2)
+        self.assertEqual(snap['title'], 'Module make v2')
+        self.assertEqual(snap['material']['proposed_make'], 'Adani')
+        self.assertEqual([i['code'] for i in snap['material']['boq_items']], ['APRV-002'])
+
+    def test_omitted_keys_stay_as_they_were(self):
+        approval = self.pm_changes_first(
+            vendor=self.vendor, programs=[self.program],
+            material={'proposed_make': 'Waaree', 'specification': '545 Wp',
+                      'boq_items': [self.item]})
+        resubmit_approval_request(approval, self.scm, note='Only the spec.',
+                                  revision={'specification': '550 Wp'})
+        approval.refresh_from_db()
+        detail = MaterialApprovalDetail.objects.get(request=approval)
+        self.assertEqual((approval.title, approval.vendor), ('Module make', self.vendor))
+        self.assertEqual(list(approval.programs.all()), [self.program])
+        self.assertEqual((detail.proposed_make, detail.specification), ('Waaree', '550 Wp'))
+        self.assertEqual(list(detail.boq_items.all()), [self.item])
+
+    def test_a_revision_refused_by_the_kind_rules_writes_nothing(self):
+        deleted = Project.objects.create(
+            customer_name='Gone', status='Active', customer_phone='9876543210',
+            site_address='x', city='Lucknow', state='Uttar Pradesh',
+            project_type='Residential', dc_capacity_kw=Decimal('5.00'), is_deleted=True)
+        dispatch = self.pm_changes_first(kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                                         vendor=self.vendor,
+                                         material={'vendor_order': self.order})
+        bill = self.raise_bill()
+        apply_approval_decision(self.step(bill, APPROVAL_PARTY_SITE_ENGINEER),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.se, note='Redo.')
+        cases = [
+            (dispatch, {'vendor': self.vendor_b}, 'different vendor'),   # order mismatch
+            (dispatch, {'vendor': None}, 'Choose the vendor'),
+            (bill, {'vendor': None}, 'Choose the vendor'),
+            (bill, {'proposed_make': 'X'}, 'no material detail'),
+            (dispatch, {'title': '   '}, 'title and a description'),
+            (dispatch, {'title': 'x' * 201}, '200 characters'),
+            (dispatch, {'projects': [deleted]}, 'deleted project'),
+            (dispatch, {'kind': APPROVAL_KIND_MATERIAL_PRE_ORDER}, 'cannot be changed'),
+            (dispatch, {'design_signoff_required': True}, 'cannot be changed'),
+        ]
+        for approval, revision, message in cases:
+            with self.subTest(revision=list(revision), kind=approval.kind):
+                before = self.untouched(approval)
+                with self.assertRaises(ApprovalRefused) as caught:
+                    resubmit_approval_request(
+                        approval, self.scm, note='Revised.', revision=revision,
+                        attachments=[{'file_name': 'x.pdf', 'bucket': 'approvals',
+                                      'path': 'r2/x.pdf'}])
+                self.assertIn(message, str(caught.exception))
+                self.assertEqual(self.untouched(approval), before)
+                self.assertIsNone(round_snapshot(approval, 2))
+
+    def test_a_late_refusal_rolls_the_revision_and_the_snapshot_back(self):
+        """The approver-override permission is checked AFTER the revision and the new
+        steps are written; its refusal must take all of it back."""
+        approval = self.pm_changes_first()
+        before = self.untouched(approval)
+        with mock.patch('projects.approvals.user_can_reassign_approval_step',
+                        return_value=False):
+            with self.assertRaises(ApprovalRefused):
+                resubmit_approval_request(
+                    approval, self.scm, note='New PM and title.',
+                    assignees={APPROVAL_PARTY_PM: self.pm_b},
+                    revision={'title': 'Changed', 'proposed_make': 'Adani'})
+        self.assertEqual(self.untouched(approval), before)
+
+
+class CarryForwardTests(RevisionFixture):
+
+    def test_an_approved_step_is_carried_and_labelled(self):
+        approval = self.design_approved_pm_changes()
+        round_one_design = ApprovalStep.objects.get(request=approval, round=1,
+                                                    party=APPROVAL_PARTY_DESIGN)
+        before = timezone.now()
+        resubmit_approval_request(approval, self.scm_b, note='Added the 550 Wp quote.',
+                                  carry={APPROVAL_PARTY_DESIGN: ' Make unchanged. '})
+        after = timezone.now()
+        approval.refresh_from_db()
+        self.assertEqual((approval.status, approval.current_round), (APPROVAL_OPEN, 2))
+
+        kept = self.step(approval, APPROVAL_PARTY_DESIGN)
+        self.assertEqual(kept.verdict, APPROVAL_STEP_APPROVED)
+        self.assertEqual((kept.decided_by, kept.recorded_by), (self.head, self.scm_b))
+        self.assertEqual(kept.carried_from, round_one_design)
+        self.assertEqual(kept.carry_reason, 'Make unchanged.')
+        self.assertFalse(kept.is_proxy)
+        self.assertEqual(kept.activated_at, kept.decided_at)
+        self.assertTrue(before <= kept.decided_at <= after)
+        self.assertEqual(kept.assignee, self.head)
+
+        pm = self.step(approval, APPROVAL_PARTY_PM)
+        self.assertEqual((pm.verdict, pm.activated_at), (APPROVAL_STEP_PENDING,
+                                                         kept.activated_at))
+
+        self.assertEqual(self.ledger(approval)[-1].remark,
+                         'Approval kept — design: Ap_Head (round 1). '
+                         'Reason: Make unchanged. Added the 550 Wp quote.')
+        design_row = [s for s in round_snapshot(approval, 2)['steps']
+                      if s['party'] == APPROVAL_PARTY_DESIGN][0]
+        self.assertEqual((design_row['carried'], design_row['carried_from_step'],
+                          design_row['carried_from_round'], design_row['decided_in_round'],
+                          design_row['carried_decider_name']),
+                         (True, round_one_design.pk, 1, 1, 'Ap_Head'))
+
+        apply_approval_decision(pm, APPROVAL_STEP_APPROVED, self.pm)
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, APPROVAL_APPROVED)
+
+    def test_a_superseded_step_cannot_be_carried(self):
+        approval = self.pm_changes_first()
+        before = self.untouched(approval)
+        with self.assertRaises(ApprovalRefused) as caught:
+            resubmit_approval_request(approval, self.scm, note='Revised.',
+                                      carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        self.assertIn('superseded', str(caught.exception))
+        self.assertEqual(self.untouched(approval), before)
+
+    def test_a_changes_requested_step_cannot_be_carried(self):
+        approval = self.raise_material()
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.head, note='Spec.')
+        before = self.untouched(approval)
+        with self.assertRaises(ApprovalRefused) as caught:
+            resubmit_approval_request(approval, self.scm, note='Revised.',
+                                      carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        self.assertIn('changes requested', str(caught.exception))
+        self.assertEqual(self.untouched(approval), before)
+        # The PM's approval in the same round IS carriable.
+        resubmit_approval_request(approval, self.scm, note='Revised.',
+                                  carry={APPROVAL_PARTY_PM: 'PM saw the same make.'})
+        self.assertEqual(self.step(approval, APPROVAL_PARTY_PM).verdict,
+                         APPROVAL_STEP_APPROVED)
+
+    def test_carry_and_an_approver_change_for_the_same_party_are_refused(self):
+        approval = self.design_approved_pm_changes()
+        before = self.untouched(approval)
+        with self.assertRaises(ApprovalRefused) as caught:
+            resubmit_approval_request(approval, self.scm, note='Revised.',
+                                      assignees={APPROVAL_PARTY_DESIGN: self.head_b},
+                                      carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        self.assertIn('approver is being changed', str(caught.exception))
+        self.assertEqual(self.untouched(approval), before)
+
+    def test_naming_the_same_approver_again_is_not_a_change(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm, note='Revised.',
+                                  assignees={APPROVAL_PARTY_DESIGN: self.head},
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        self.assertIsNotNone(self.step(approval, APPROVAL_PARTY_DESIGN).carried_from_id)
+
+    def test_a_carry_needs_a_reason(self):
+        approval = self.design_approved_pm_changes()
+        before = self.untouched(approval)
+        for reason in ('', '   ', None):
+            with self.subTest(reason=reason):
+                with self.assertRaises(ApprovalRefused):
+                    resubmit_approval_request(approval, self.scm, note='Revised.',
+                                              carry={APPROVAL_PARTY_DESIGN: reason})
+        self.assertEqual(self.untouched(approval), before)
+
+    def test_a_resubmit_cannot_carry_every_party(self):
+        """R6: the invariant has its own guard — a resubmit never opens a round that is
+        already approved — answered before any per-party check."""
+        for approval in (self.design_approved_pm_changes(), self.pm_changes_first()):
+            before = self.untouched(approval)
+            with self.assertRaises(ApprovalRefused) as caught:
+                resubmit_approval_request(
+                    approval, self.scm, note='Revised.',
+                    carry={APPROVAL_PARTY_PM: 'kept', APPROVAL_PARTY_DESIGN: 'kept'})
+            self.assertIn('cannot keep every approval', str(caught.exception))
+            self.assertEqual(self.untouched(approval), before)
+
+    def test_a_carry_never_leaves_the_new_round_approved(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm, note='Revised.',
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        approval.refresh_from_db()
+        self.assertEqual(approval.status, APPROVAL_OPEN)
+        self.assertTrue(ApprovalStep.objects.filter(
+            request=approval, round=2, verdict=APPROVAL_STEP_PENDING).exists())
+
+    def test_a_bill_with_the_site_engineer_carried_activates_the_pm_at_resubmit(self):
+        """R4: _open_round activates the lowest sequence with a step still to decide."""
+        bill = self.raise_bill()
+        apply_approval_decision(self.step(bill, APPROVAL_PARTY_SITE_ENGINEER),
+                                APPROVAL_STEP_APPROVED, self.se)
+        apply_approval_decision(self.step(bill, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Rate?')
+        before = timezone.now()
+        resubmit_approval_request(bill, self.scm, note='Rate corrected.',
+                                  carry={APPROVAL_PARTY_SITE_ENGINEER: 'Work unchanged.'})
+        after = timezone.now()
+        se = self.step(bill, APPROVAL_PARTY_SITE_ENGINEER)
+        pm = self.step(bill, APPROVAL_PARTY_PM)
+        self.assertEqual((se.verdict, se.decided_by, se.sequence),
+                         (APPROVAL_STEP_APPROVED, self.se, 1))
+        self.assertEqual((pm.verdict, pm.sequence), (APPROVAL_STEP_PENDING, 2))
+        self.assertIsNotNone(pm.activated_at)
+        self.assertEqual(pm.activated_at, se.decided_at)        # the resubmit time
+        self.assertTrue(before <= pm.activated_at <= after)
+        apply_approval_decision(pm, APPROVAL_STEP_APPROVED, self.pm)
+        bill.refresh_from_db()
+        self.assertEqual(bill.status, APPROVAL_APPROVED)
+
+    def test_a_carried_approval_carried_again_names_the_round_it_was_decided_in(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm, note='Round two.',
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept once'})
+        round_two_design = self.step(approval, APPROVAL_PARTY_DESIGN)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Again.')
+        resubmit_approval_request(approval, self.scm, note='Round three.',
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept twice'})
+        round_three_design = self.step(approval, APPROVAL_PARTY_DESIGN)
+        self.assertEqual(round_three_design.carried_from, round_two_design)
+        self.assertEqual(round_three_design.decided_by, self.head)
+        self.assertEqual(self.ledger(approval)[-1].remark,
+                         'Approval kept — design: Ap_Head (round 1). '
+                         'Reason: kept twice. Round three.')
+        row = [s for s in round_snapshot(approval, 3)['steps']
+               if s['party'] == APPROVAL_PARTY_DESIGN][0]
+        self.assertEqual((row['carried_from_round'], row['decided_in_round']), (2, 1))
+
+    def test_an_approver_change_and_a_carry_are_both_stated_in_order(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm, note='Revised.',
+                                  assignees={APPROVAL_PARTY_PM: self.pm_b},
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        self.assertEqual(self.ledger(approval)[-1].remark,
+                         'Approver changed — pm: Ap_Pm → Ap_Pm_B. '
+                         'Approval kept — design: Ap_Head (round 1). Reason: kept. Revised.')
+
+    def test_the_exclusion_helper_drops_carried_steps(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm, note='Revised.',
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        kept = self.step(approval, APPROVAL_PARTY_DESIGN)
+        mine = ApprovalStep.objects.filter(request=approval)
+        self.assertIn(kept.pk, mine.values_list('pk', flat=True))
+        self.assertNotIn(kept.pk, exclude_carried_steps(mine).values_list('pk', flat=True))
+        self.assertNotIn(kept.pk, exclude_carried_steps().values_list('pk', flat=True))
+        self.assertEqual(exclude_carried_steps(mine).count(), mine.count() - 1)
+        # The round-1 design approval it came from is a real decision and stays.
+        self.assertIn(kept.carried_from_id,
+                      exclude_carried_steps(mine).values_list('pk', flat=True))
+
+    def test_round_one_is_byte_identical_after_a_resubmit_with_revision_and_carry(self):
+        approval = self.design_approved_pm_changes(programs=[self.program])
+        round_one = (self.snapshot(approval, 1),
+                     list(ApprovalRoundSnapshot.objects.filter(request=approval, round=1)
+                          .values()))
+        resubmit_approval_request(
+            approval, self.scm_b, note='Revised.',
+            attachments=[{'file_name': 'q.pdf', 'bucket': 'approvals', 'path': 'r2/q.pdf'}],
+            revision={'title': 'Module make v2', 'programs': [], 'proposed_make': 'Adani'},
+            carry={APPROVAL_PARTY_DESIGN: 'Design unaffected by the make.'})
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        self.assertEqual((self.snapshot(approval, 1),
+                          list(ApprovalRoundSnapshot.objects.filter(request=approval,
+                                                                    round=1).values())),
+                         round_one)
+
+
+class CarryConstraintTests(ConstraintTests):
+    """The S1.1 CHECKs, each proven by a raw write the database must refuse. Inherits
+    ConstraintTests' fixture (a pending PM step) and helpers; its own tests run again,
+    unchanged, as part of this class."""
+
+    def carried(self, **extra):
+        other = self.step(self.approval, APPROVAL_PARTY_DESIGN)
+        fields = dict(verdict=APPROVAL_STEP_APPROVED, decided_by=self.pm,
+                      decided_at=self.now, recorded_by=self.scm, carried_from=other,
+                      carry_reason='kept')
+        fields.update(extra)
+        return fields
+
+    def test_check_5_admits_a_carried_step_typed_by_scm(self):
+        with transaction.atomic():
+            ApprovalStep.objects.filter(pk=self.pending.pk).update(**self.carried())
+        row = ApprovalStep.objects.get(pk=self.pending.pk)
+        self.assertEqual((row.decided_by, row.recorded_by), (self.pm, self.scm))
+
+    def test_check_5_still_refuses_scm_typing_an_uncarried_non_proxy_decision(self):
+        self.assertViolates('approval_step_self_recorded_unless_proxy',
+                            self.update_step(**self.carried(carried_from=None,
+                                                            carry_reason='')))
+
+    def test_check_8_carry_reason_iff_carried(self):
+        self.assertViolates('approval_step_carry_reason_iff_carried',
+                            self.update_step(**self.carried(carry_reason='')))
+        self.assertViolates('approval_step_carry_reason_iff_carried',
+                            self.update_step(carry_reason='kept'))
+
+    def test_check_9_only_an_approval_is_carried(self):
+        self.assertViolates('approval_step_carried_is_approved',
+                            self.update_step(
+                                carried_from=self.step(self.approval,
+                                                       APPROVAL_PARTY_DESIGN),
+                                carry_reason='kept'))       # still pending
+
+    def test_check_10_a_carried_step_is_not_a_proxy(self):
+        self.assertViolates('approval_step_carried_not_proxy',
+                            self.update_step(**self.carried(
+                                is_proxy=True, proxy_channel=APPROVAL_PROXY_WHATSAPP,
+                                proxy_evidence='said yes')))
+
+    @skipUnless(ON_POSTGRES, 'the migrated constraint of real Postgres')
+    def test_check_5_as_migrated_names_carried_from(self):
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'approval_step_self_recorded_unless_proxy'")
+            definition = cursor.fetchone()[0]
+        self.assertIn('carried_from_id IS NOT NULL', definition)
+        self.assertIn('is_proxy', definition)
+
+
+class ProxyEvidenceTests(RevisionFixture):
+
+    def proxy(self, files=()):
+        return ProxyDecision(self.pm, APPROVAL_PROXY_WHATSAPP,
+                             'PM said "go ahead" on WhatsApp, 27 Sep 10:05.', files)
+
+    def test_evidence_files_are_linked_to_the_proxy_step(self):
+        approval = self.raise_material(design=False)
+        pm_step = self.step(approval, APPROVAL_PARTY_PM)
+        apply_approval_decision(pm_step, APPROVAL_STEP_APPROVED, self.scm_b,
+                                proxy=self.proxy(files=[dict(EVIDENCE, label='Chat')]))
+        evidence = ApprovalAttachment.objects.get(request=approval, step__isnull=False)
+        self.assertEqual((evidence.step_id, evidence.round, evidence.uploaded_by,
+                          evidence.label, evidence.file_type, evidence.file_size_kb),
+                         (pm_step.pk, 1, self.scm_b, 'Chat', 'image/png', 40))
+        # The round's own file is not linked to any step.
+        self.assertIsNone(ApprovalAttachment.objects.get(
+            request=approval, file_name='datasheet.pdf').step_id)
+        self.assertEqual(list(pm_step.evidence_files.all()), [evidence])
+
+    def test_a_proxy_without_files_still_works_with_three_fields(self):
+        approval = self.raise_material(design=False)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.scm,
+                                proxy=ProxyDecision(self.pm, APPROVAL_PROXY_WHATSAPP,
+                                                    'said yes'))
+        self.assertFalse(ApprovalAttachment.objects.filter(step__isnull=False).exists())
+
+    def test_step_linked_files_are_refused_on_a_step_that_is_not_a_proxy(self):
+        approval = self.raise_material()
+        pm_step = self.step(approval, APPROVAL_PARTY_PM)
+        design_step = self.step(approval, APPROVAL_PARTY_DESIGN)      # still pending
+        apply_approval_decision(pm_step, APPROVAL_STEP_APPROVED, self.pm)   # self-typed
+        for step in (pm_step, design_step):
+            with self.subTest(verdict=step.verdict):
+                with self.assertRaises(ApprovalRefused):
+                    with transaction.atomic():
+                        _add_attachments(approval, 1, [EVIDENCE], self.scm, step=step)
+        self.assertFalse(ApprovalAttachment.objects.filter(step__isnull=False).exists())
+
+    def test_a_refused_proxy_decision_writes_no_attachment(self):
+        approval = self.raise_material(design=False)
+        pm_step = self.step(approval, APPROVAL_PARTY_PM)
+        before = ApprovalAttachment.objects.count()
+        refusals = [
+            (self.pm_b, self.proxy(files=[EVIDENCE])),             # not SCM
+            (self.scm, self.proxy(files=[dict(EVIDENCE, path='')])),   # bad file
+            (self.scm, ProxyDecision(self.pm, APPROVAL_PROXY_WHATSAPP, '  ', [EVIDENCE])),
+            (self.scm, ProxyDecision(self.designer, APPROVAL_PROXY_WHATSAPP, 'yes',
+                                     [EVIDENCE])),                   # no authority
+        ]
+        for actor, proxy in refusals:
+            with self.subTest(actor=actor.user.username):
+                with self.assertRaises(ApprovalRefused):
+                    apply_approval_decision(pm_step, APPROVAL_STEP_APPROVED, actor,
+                                            proxy=proxy)
+        self.assertEqual(ApprovalAttachment.objects.count(), before)
+        self.assertEqual(self.step(approval, APPROVAL_PARTY_PM).verdict,
+                         APPROVAL_STEP_PENDING)
+
+
+class AttributionTests(RevisionFixture):
+    """T5 / D-A22: any SCM user acts on any request, and each action records who and when
+    somewhere a screen can read. Every action here is by scm_b on scm's request."""
+
+    def test_resubmit_records_the_actor_on_the_ledger_and_the_snapshot(self):
+        approval = self.pm_changes_first()
+        resubmit_approval_request(approval, self.scm_b, note='Revised.')
+        row = self.ledger(approval)[-1]
+        snap = ApprovalRoundSnapshot.objects.get(request=approval, round=2)
+        self.assertEqual((row.actor, snap.created_by), (self.scm_b, self.scm_b))
+        self.assertIsNotNone(row.occurred_at)
+        self.assertIsNotNone(snap.created_at)
+
+    def test_withdraw_from_open_records_the_actor_on_the_steps_and_the_ledger(self):
+        approval = self.raise_material()
+        withdraw_approval_request(approval, self.scm_b, note='Not needed.')
+        steps = ApprovalStep.objects.filter(request=approval)
+        self.assertTrue(all(s.superseded_by == self.scm_b and s.superseded_at
+                            for s in steps))
+        self.assertEqual(self.ledger(approval)[-1].actor, self.scm_b)
+
+    def test_withdraw_from_changes_requested_records_the_actor_on_the_ledger_only(self):
+        """R8, accepted as is: no step is pending, so only the ledger names the SCM user;
+        the request row holds the time (closed_at) and the note, not the person."""
+        approval = self.pm_changes_first()
+        withdraw_approval_request(approval, self.scm_b, note='Not needed.')
+        approval.refresh_from_db()
+        self.assertIsNotNone(approval.closed_at)
+        self.assertFalse(ApprovalStep.objects.filter(superseded_by=self.scm_b).exists())
+        row = self.ledger(approval)[-1]
+        self.assertEqual((row.actor, row.to_status), (self.scm_b, APPROVAL_WITHDRAWN))
+        self.assertIsNotNone(row.occurred_at)
+
+    def test_reassign_records_the_actor_on_the_superseded_step(self):
+        approval = self.raise_material()
+        old = self.step(approval, APPROVAL_PARTY_PM)
+        ledger_before = len(self.ledger(approval))
+        reassign_approval_step(old, self.pm_b, self.scm_b, note='PM on leave.')
+        old.refresh_from_db()
+        self.assertEqual(old.superseded_by, self.scm_b)
+        self.assertIsNotNone(old.superseded_at)
+        self.assertEqual(len(self.ledger(approval)), ledger_before)   # status unmoved
+
+    def test_carry_records_the_actor_as_recorded_by_with_the_time(self):
+        approval = self.design_approved_pm_changes()
+        resubmit_approval_request(approval, self.scm_b, note='Revised.',
+                                  carry={APPROVAL_PARTY_DESIGN: 'kept'})
+        kept = self.step(approval, APPROVAL_PARTY_DESIGN)
+        self.assertEqual(kept.recorded_by, self.scm_b)
+        self.assertIsNotNone(kept.decided_at)
+
+    def test_proxy_records_the_actor_as_recorded_by_and_uploader(self):
+        approval = self.raise_material(design=False)
+        apply_approval_decision(
+            self.step(approval, APPROVAL_PARTY_PM), APPROVAL_STEP_APPROVED, self.scm_b,
+            proxy=ProxyDecision(self.pm, APPROVAL_PROXY_WHATSAPP, 'said yes', [EVIDENCE]))
+        row = ApprovalStep.objects.get(request=approval, party=APPROVAL_PARTY_PM)
+        self.assertEqual((row.recorded_by, row.decided_by), (self.scm_b, self.pm))
+        self.assertIsNotNone(row.decided_at)
+        evidence = row.evidence_files.get()
+        self.assertEqual(evidence.uploaded_by, self.scm_b)
+        self.assertIsNotNone(evidence.uploaded_at)

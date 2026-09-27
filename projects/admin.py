@@ -9,6 +9,7 @@ from .models import (
     DesignFile, DesignChangeRequest,
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
     ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
+    ApprovalRoundSnapshot,
 )
 from .utils import assign_task_to
 
@@ -704,3 +705,8 @@ class ApprovalAttachmentAdmin(_ApprovalRecordAdmin):
 @admin.register(MaterialApprovalDetail)
 class MaterialApprovalDetailAdmin(_ApprovalRecordAdmin):
     list_display  = ['request', 'proposed_make', 'vendor_order', 'pre_order_request']
+
+
+@admin.register(ApprovalRoundSnapshot)
+class ApprovalRoundSnapshotAdmin(_ApprovalRecordAdmin):
+    list_display  = ['request', 'round', 'created_by', 'created_at']

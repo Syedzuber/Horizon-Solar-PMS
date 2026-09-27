@@ -6198,6 +6198,17 @@ class ApprovalStep(models.Model):
         related_name='superseded_approval_steps',
     )
 
+    # S1.1 carry-forward (D-A20). On resubmit SCM may keep a party's APPROVAL from the
+    # round that asked for changes: this row is then created approved, `decided_by` is
+    # the original decider, `recorded_by` the SCM user who kept it, and `carried_from`
+    # the previous round's step. It is not a fresh decision — turnaround and aging
+    # figures exclude it (approvals.exclude_carried_steps).
+    carried_from = models.ForeignKey(
+        'self', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='carried_into',
+    )
+    carry_reason = models.TextField(blank=True, default='')
+
     class Meta:
         ordering = ['request', 'round', 'sequence', 'pk']
         constraints = [
@@ -6230,11 +6241,13 @@ class ApprovalStep(models.Model):
                 condition=(models.Q(is_proxy=False)
                            | (~models.Q(proxy_channel='') & ~models.Q(proxy_evidence=''))),
                 name='approval_step_proxy_evidence'),
-            # 5. Not a proxy -> the decider typed it. On a pending row both columns are
-            # NULL, NULL = NULL is NULL, and a CHECK passes on NULL; CHECK 2 is what
-            # holds both columns null there.
+            # 5. Not a proxy and not carried -> the decider typed it. On a pending row
+            # both columns are NULL, NULL = NULL is NULL, and a CHECK passes on NULL;
+            # CHECK 2 is what holds both columns null there. A carried step is typed by
+            # the SCM user who kept it, and names the original decider (S1.1).
             models.CheckConstraint(
                 condition=(models.Q(is_proxy=True)
+                           | models.Q(carried_from__isnull=False)
                            | models.Q(recorded_by=models.F('decided_by'))),
                 name='approval_step_self_recorded_unless_proxy'),
             # 6. One live step per party per round. Superseded rows are excluded so a
@@ -6250,6 +6263,23 @@ class ApprovalStep(models.Model):
                            | (~models.Q(verdict=APPROVAL_STEP_SUPERSEDED)
                               & models.Q(superseded_by__isnull=True))),
                 name='approval_step_superseded_by_iff_superseded'),
+            # 8. A carried step says why it was kept; only a carried step has a reason.
+            models.CheckConstraint(
+                condition=((models.Q(carried_from__isnull=True) & models.Q(carry_reason=''))
+                           | (models.Q(carried_from__isnull=False)
+                              & ~models.Q(carry_reason=''))),
+                name='approval_step_carry_reason_iff_carried'),
+            # 9. Only an approval is ever carried.
+            models.CheckConstraint(
+                condition=(models.Q(carried_from__isnull=True)
+                           | models.Q(verdict=APPROVAL_STEP_APPROVED)),
+                name='approval_step_carried_is_approved'),
+            # 10. CHECK 5's two exemptions never meet on one row: a carried step is not a
+            # proxy record (the original's proxy details stay on `carried_from`).
+            models.CheckConstraint(
+                condition=(models.Q(carried_from__isnull=True)
+                           | models.Q(is_proxy=False)),
+                name='approval_step_carried_not_proxy'),
         ]
 
     def __str__(self):
@@ -6279,6 +6309,14 @@ class ApprovalAttachment(models.Model):
         'UserProfile', on_delete=models.PROTECT, related_name='approval_attachments',
     )
     uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    # S1.1 (D-A21): evidence for a PROXY decision, linked to the step it evidences.
+    # Null for an ordinary round file. Written only by apply_approval_decision(), which
+    # refuses it on a step that is not a proxy record.
+    step = models.ForeignKey(
+        ApprovalStep, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='evidence_files',
+    )
 
     class Meta:
         ordering = ['round', 'uploaded_at', 'pk']
@@ -6328,3 +6366,50 @@ class MaterialApprovalDetail(models.Model):
 
     def __str__(self):
         return f"{self.request} — {self.proposed_make or 'material'}"
+
+
+class ApprovalRoundSnapshot(models.Model):
+    """What one round's approvers were asked about, frozen (D-A19). APPEND-ONLY.
+
+    A resubmit may revise the request's own fields (D-A18), so the live row says what
+    the request is NOW; this row says what it was when round N was put to its approvers.
+    Written by create_approval_request() (round 1) and resubmit_approval_request() (the
+    new round) in the same transaction, after the revision is applied. There is no
+    update path: save() on an existing row and delete() both raise.
+
+    `snapshot` stores display names beside ids (vendor, scope, BOQ items, assignees), so
+    a later rename does not change what a past round shows. Schema: approvals.
+    _round_snapshot_payload(), "schema": 1. Requests raised before S1.1 have no
+    snapshot; readers use approvals.round_snapshot(), which returns None for them.
+    """
+
+    request = models.ForeignKey(ApprovalRequest, on_delete=models.PROTECT,
+                                related_name='round_snapshots')
+    round   = models.PositiveSmallIntegerField()
+    snapshot = models.JSONField()
+
+    created_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='approval_round_snapshots',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['request', 'round']
+        constraints = [
+            models.UniqueConstraint(fields=['request', 'round'],
+                                    name='uniq_approval_round_snapshot'),
+        ]
+
+    def __str__(self):
+        return f"{self.request} — R{self.round} snapshot"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'ApprovalRoundSnapshot is append-only — a round records what its '
+                'approvers were asked about, and that never changes.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            "ApprovalRoundSnapshot is append-only — a past round's record stays.")
