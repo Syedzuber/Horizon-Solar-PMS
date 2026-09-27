@@ -68,6 +68,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 
+from .approval_forms import pre_order_coverage
 from .decorators import login_required
 from .design_views import aggregate_group_boq
 from .models import (
@@ -759,6 +760,7 @@ def vendor_order_detail(request, order_pk):
         'can_request_payment': (money['available'] > 0
                                 and user_can_request_order_payment(request.user, order)),
         'can_add_documents':   user_can_append_order_documents(request.user, order),
+        'pre_order_coverage':  pre_order_coverage(request.user, order),
     })
 
 

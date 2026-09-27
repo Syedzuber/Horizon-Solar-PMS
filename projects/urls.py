@@ -536,4 +536,9 @@ urlpatterns = [
          name='approval_record_proxy'),
     path('approvals/steps/<int:step_pk>/reassign/',  approval_views.approval_reassign,
          name='approval_reassign'),
+    # Approvals 3b — PO/PI records covered by an approved pre-order request. POST only.
+    path('approvals/<int:approval_pk>/links/',       approval_views.approval_link_order,
+         name='approval_link_order'),
+    path('approvals/links/<int:link_pk>/remove/',    approval_views.approval_unlink_order,
+         name='approval_unlink_order'),
 ]

@@ -1,0 +1,14 @@
+{% comment %}
+Approvals 3b — "Covered by pre-order approval" on a PO/PI record's page
+(approval_forms.pre_order_coverage, as `pre_order_coverage`). Read-only. Active links
+only; each approval's title links to it only where the viewer may open that approval.
+Linking is optional, so a record with no link draws NOTHING — no heading, no empty card.
+{% endcomment %}{% if pre_order_coverage %}<div class="card shadow-sm mb-3">
+  <div class="card-header fw-semibold">Covered by pre-order approval</div>
+  <ul class="list-group list-group-flush small">
+    {% for item in pre_order_coverage %}
+    <li class="list-group-item text-break">{% if item.url %}<a href="{{ item.url }}">{{ item.title }}</a>{% else %}{{ item.title }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}

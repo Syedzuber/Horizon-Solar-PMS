@@ -27,21 +27,29 @@ VendorOrder — "PO/PI record" in every label, never "order") and, optionally, t
 pre-order approval behind it. THE VENDOR IS DERIVED FROM THE RECORD, never posted: the
 raise page has no vendor field for this kind, and parse_revision ignores a posted vendor
 on a pre-dispatch request.
+
+Approvals 3b adds which PO/PI records an approved pre-order approval covers: the link
+form's picker (order_link_choices, parse_linked_order) and the read-only block on a PO/PI
+record's page (pre_order_coverage). Linking is optional; approvals.py writes the links.
 """
 import re
 import uuid as _uuid
 
 from django.db.models import Q
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateformat import format as date_format
 
 from .models import (
-    ApprovalRequest, Program, Project, SiteGroup, UserProfile, Vendor, VendorOrder,
+    ApprovalOrderLink, ApprovalRequest, Program, Project, SiteGroup, UserProfile, Vendor, VendorOrder,
     APPROVAL_APPROVED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH, APPROVAL_KIND_MATERIAL_PRE_ORDER,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_STEP_APPROVED,
     GROUP_TYPE_PROCUREMENT,
 )
-from .permissions import profile_can_be_approval_assignee, user_has_design_head_authority
+from .permissions import (
+    profile_can_be_approval_assignee, user_can_view_approval_request,
+    user_has_design_head_authority,
+)
 from .views import _validate_upload_file
 
 #: Files one submission may carry — the vendor-order raise's DOC_SLOTS number. The page
@@ -161,6 +169,53 @@ def pre_order_choices():
                     vendor__isnull=False)
             .select_related('vendor').order_by('-closed_at', '-pk'))
     return _by_vendor(rows, pre_order_label)
+
+
+def _active_links(approval):
+    return ApprovalOrderLink.objects.filter(approval=approval, removed_at__isnull=True)
+
+
+def order_link_choices(approval):
+    """The PO/PI records SCM may link to the approved pre-order `approval` (Approvals
+    3b): every record not already actively linked to it, grouped by vendor, newest first
+    within each, labelled as 3a's picker labels them. Only the approval's vendor's records
+    when it names one; records of every vendor when it names none. Five queries whatever
+    the number of records: the records with their vendor (the exclusion is a subquery),
+    then sites, their projects, programs and their tenders for the labels."""
+    rows = (VendorOrder.objects
+            .exclude(pk__in=_active_links(approval).values('vendor_order_id'))
+            .select_related('vendor')
+            .prefetch_related('sites__project', 'programs__program')
+            .order_by('-created_at', '-pk'))
+    if approval.vendor_id is not None:
+        rows = rows.filter(vendor_id=approval.vendor_id)
+    return _by_vendor(rows, po_pi_record_label)
+
+
+def parse_linked_order(post):
+    """The PO/PI record the link form names, or None when missing or unknown. Whether it
+    may be linked is the chokepoint's decision (approvals.link_order_to_approval)."""
+    pk = (post.get('vendor_order') or '').strip()
+    if not pk.isdigit():
+        return None
+    return VendorOrder.objects.filter(pk=int(pk)).first()
+
+
+def pre_order_coverage(user, order):
+    """The "Covered by pre-order approval" block on `order`'s PO/PI record page (Approvals
+    3b): [{title, url}] for each ACTIVE link, most recently linked first. `url` only where
+    user_can_view_approval_request() admits `user` to that approval, so no link leads to a
+    403; the title is shown either way. [] when there are none, and the page then draws
+    nothing. One query when there are none, two when there are some (the approvals'
+    steps, for the predicate)."""
+    links = list(ApprovalOrderLink.objects.filter(vendor_order=order, removed_at__isnull=True)
+                 .select_related('approval')
+                 .prefetch_related('approval__steps')
+                 .order_by('-linked_at', '-pk'))
+    return [{'title': link.approval.title,
+             'url': (reverse('approval_detail', args=[link.approval_id])
+                     if user_can_view_approval_request(user, link.approval) else None)}
+            for link in links]
 
 
 def assignee_choices(party):

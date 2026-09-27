@@ -9,7 +9,7 @@ from .models import (
     DesignFile, DesignChangeRequest,
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
     ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
-    ApprovalRoundSnapshot,
+    ApprovalRoundSnapshot, ApprovalOrderLink,
 )
 from .utils import assign_task_to
 
@@ -710,3 +710,11 @@ class MaterialApprovalDetailAdmin(_ApprovalRecordAdmin):
 @admin.register(ApprovalRoundSnapshot)
 class ApprovalRoundSnapshotAdmin(_ApprovalRecordAdmin):
     list_display  = ['request', 'round', 'created_by', 'created_at']
+
+
+# Approvals 3b. Read-only like the approval records above: approvals.link_order_to_approval() and
+# unlink_order_from_approval() are its only writers.
+@admin.register(ApprovalOrderLink)
+class ApprovalOrderLinkAdmin(_ApprovalRecordAdmin):
+    list_display  = ['approval', 'vendor_order', 'linked_by', 'linked_at', 'removed_by',
+                     'removed_at']

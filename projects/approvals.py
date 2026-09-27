@@ -56,8 +56,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep,
-    MaterialApprovalDetail,
+    ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalRoundSnapshot,
+    ApprovalStep, MaterialApprovalDetail,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_MATERIAL_KINDS,
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED, APPROVAL_REJECTED,
@@ -979,3 +979,72 @@ def reassign_approval_step(step, new_assignee, actor, note):
             lambda: approval_notices.after_reassign(step.pk, replacement.pk, actor.pk),
             robust=True)
     return replacement
+
+
+# ---------------------------------------------------------------------------
+# 6. PO/PI records covered by a pre-order approval (Approvals 3b)
+# ---------------------------------------------------------------------------
+#
+# The only writers of ApprovalOrderLink. Linking is OPTIONAL: nothing warns about,
+# blocks or counts a record without a link. The request's status does not move, so no
+# ledger row is written — History reads the link rows themselves, as it reads a
+# reassignment's superseded step. No notifications.
+
+def link_order_to_approval(approval, vendor_order, actor):
+    """SCM links `vendor_order` (a PO/PI record) to the approved pre-order `approval`.
+    Returns the new ApprovalOrderLink.
+
+    Refused unless the actor is SCM, the request is a pre-order request and approved,
+    and — when the request names a vendor — the record was placed with that vendor. A
+    request naming no vendor may cover a record of any vendor. Refused while the same
+    record is already actively linked; a removed link does not count, so a record can
+    be linked again. Under the request lock, so two links of one pair run one after the
+    other; the partial UNIQUE holds it as well.
+    """
+    if vendor_order is None:
+        raise ApprovalRefused('Choose the PO/PI record to link.')
+
+    with transaction.atomic():
+        approval = _lock(approval.pk)
+        if not user_can_raise_approval_request(actor.user):
+            raise ApprovalRefused('Only SCM can link a PO/PI record to an approval.')
+        if approval.kind != APPROVAL_KIND_MATERIAL_PRE_ORDER:
+            raise ApprovalRefused('Only a pre-order approval covers PO/PI records.')
+        if approval.status != APPROVAL_APPROVED:
+            raise ApprovalRefused('This pre-order approval has not been approved.')
+        if approval.vendor_id is not None and vendor_order.vendor_id != approval.vendor_id:
+            raise ApprovalRefused('The PO/PI record was placed with a different vendor.')
+        if ApprovalOrderLink.objects.filter(
+                approval=approval, vendor_order=vendor_order,
+                removed_at__isnull=True).exists():
+            raise ApprovalRefused('That PO/PI record is already linked to this approval.')
+        return ApprovalOrderLink.objects.create(
+            approval=approval, vendor_order=vendor_order, linked_by=actor)
+
+
+def unlink_order_from_approval(link, actor, note):
+    """SCM removes `link`, with a reason. Returns the link, re-read.
+
+    The link is never deleted: removed_by, removed_at and removal_note are stamped once,
+    here — ApprovalOrderLink's only update path. Refused without a reason, unless the
+    actor is SCM, and when the link was already removed.
+    """
+    note = _clean(note)
+    if not note:
+        raise ApprovalRefused('Say why this link is being removed.')
+
+    with transaction.atomic():
+        approval = _lock(link.approval_id)
+        link = ApprovalOrderLink.objects.select_for_update().get(pk=link.pk)
+        if not user_can_raise_approval_request(actor.user):
+            raise ApprovalRefused('Only SCM can remove a PO/PI record link.')
+        if link.removed_at is not None:
+            raise ApprovalRefused('That link was already removed.')
+        written = ApprovalOrderLink.objects.filter(
+            pk=link.pk, approval=approval, removed_at__isnull=True,
+        ).update(removed_by=actor, removed_at=timezone.now(), removal_note=note)
+        if written != 1:   # impossible under the lock; never silently carry on
+            raise ApprovalRefused('The link changed while you were removing it.')
+
+    link.refresh_from_db()
+    return link

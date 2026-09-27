@@ -2441,3 +2441,21 @@ def user_can_view_approval_aging(user):
     if profile is None:
         return False
     return profile.role in APPROVAL_AGING_ROLES
+
+
+# Approvals 3b — which PO/PI records an approved pre-order approval covers. Linking is
+# optional: nothing warns about, blocks or counts a record without a link.
+
+
+def user_can_link_approval_order(user, request):
+    """Return True if `user` may link a PO/PI record to `request`, or remove a link.
+
+    Any SCM user (D-A22), on an APPROVED material pre-order request. The vendor rule —
+    the record's vendor must be the request's when the request names one — is about the
+    record, not the caller, and is the chokepoint's (approvals.link_order_to_approval).
+    """
+    if request is None:
+        return False
+    if not user_can_raise_approval_request(user):
+        return False
+    return request.kind == 'material_pre_order' and request.status == 'approved'

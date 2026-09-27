@@ -24,6 +24,10 @@ Approvals 3a: a pre-dispatch request shows "Dispatch against" — its PO/PI reco
 PI numbers, vendor, recorded date) and any linked pre-order approval, from
 approval_views._dispatch_against(). The record-page link and the pre-order link are drawn
 only where the viewer may open them; the numbers and title are shown to every reader.
+
+Approvals 3b: an approved pre-order request shows "PO/PI records covered"
+(_order_links.html) — its linked records, SCM's link form and remove action, and the
+removed links struck through. History lists each link and each removal.
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -115,6 +119,9 @@ only where the viewer may open them; the numbers and title are shown to every re
     </dl>
   </div>
 </div>
+
+{# ── PO/PI records covered (Approvals 3b; approved pre-order requests only) ── #}
+{% if order_links %}{% include "projects/approvals/_order_links.html" %}{% endif %}
 
 {# ── Rounds, newest first ────────────────────────────────────────────── #}
 {% for round in rounds %}

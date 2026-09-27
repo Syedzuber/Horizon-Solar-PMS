@@ -48,6 +48,12 @@ APPROVALS 3a adds the pre-dispatch kind to the raise page (?kind=, one of the tw
 material kinds), a "Dispatch against" block on the detail page (the PO/PI record and any
 linked pre-order approval, per round), and a read-only vendor on its resubmit form. A
 VendorOrder is "PO/PI record" in every label.
+
+APPROVALS 3b adds "PO/PI records covered" to an approved pre-order request: the records
+it is linked to, a link form and a remove-with-reason action for SCM
+(approval_link_order, approval_unlink_order — one approvals.py entry point each), and
+the removed links, struck through, with who, when and why. Linking is optional. History
+draws each link and each removal from the link rows (_history).
 """
 import logging
 import uuid as _uuid
@@ -65,18 +71,20 @@ from .approval_forms import (
     ATTACHMENT_LIMIT, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN, assignee_choices,
     current_scope_pks, design_authority_choices, keepable_steps, parse_assignee_overrides,
     parse_attachments, parse_carry, parse_client_uuid, parse_create, parse_evidence_files,
-    parse_new_assignee, parse_proxy, parse_revision, person_name, po_pi_record_choices,
-    pre_order_choices, scope_choices, vendor_choices,
+    parse_linked_order, parse_new_assignee, parse_proxy, parse_revision, person_name,
+    order_link_choices, po_pi_record_choices, po_pi_record_label, pre_order_choices,
+    scope_choices, vendor_choices,
 )
 from .approval_queries import AGING_WINDOW_DAYS, aging_rows
 from .approvals import (
     ApprovalRefused, ProxyDecision, apply_approval_decision, create_approval_request,
-    reassign_approval_step, resubmit_approval_request, round_snapshot,
-    withdraw_approval_request,
+    link_order_to_approval, reassign_approval_step, resubmit_approval_request,
+    round_snapshot, unlink_order_from_approval, withdraw_approval_request,
 )
 from .decorators import _forbidden, login_required
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalStep, StatusTransition, VendorOrder,
+    ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalStep, StatusTransition,
+    VendorOrder,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
@@ -88,8 +96,9 @@ from .models import (
 from .order_views import _remove_uploaded
 from .permissions import (
     approval_request_visibility_q, user_can_decide_approval_step,
-    user_can_raise_approval_request, user_can_reassign_approval_step,
-    user_can_record_proxy_decision, user_can_resubmit_approval_request,
+    user_can_link_approval_order, user_can_raise_approval_request,
+    user_can_reassign_approval_step, user_can_record_proxy_decision,
+    user_can_resubmit_approval_request,
     user_can_view_approval_aging, user_can_view_approval_list,
     user_can_view_approval_request, user_can_view_vendor_order,
     user_can_withdraw_approval_request, user_may_answer_approval_step,
@@ -384,6 +393,62 @@ def _dispatch_against(user, approval, material, snapshots):
                                    seen_material.get('vendor_order'),
                                    seen_material.get('pre_order_request'))
     return current, by_round
+
+
+def _record_short(order):
+    """A PO/PI record in one History line: vendor, PO and PI numbers."""
+    return (f'{order.vendor.name} · PO {order.po_number or "—"} · '
+            f'PI {order.pi_number or "—"}')
+
+
+def _order_links(approval):
+    """Every link of `approval`, removed ones included, oldest first, with what the
+    section and History draw prefetched: the record's vendor, its sites with their
+    projects and tenders (its label, and user_can_view_vendor_order), and the two people.
+    Five queries whatever the number of links; none for a request of another kind, which
+    cannot have links."""
+    if approval.kind != APPROVAL_KIND_MATERIAL_PRE_ORDER:
+        return []
+    return list(ApprovalOrderLink.objects.filter(approval=approval)
+                .select_related('vendor_order__vendor', 'linked_by__user',
+                                'removed_by__user')
+                .prefetch_related('vendor_order__sites__project',
+                                  'vendor_order__programs__program')
+                .order_by('linked_at', 'pk'))
+
+
+def _order_links_section(user, approval, links):
+    """The "PO/PI records covered" section of an APPROVED pre-order request (Approvals
+    3b), or None for any other request. Active links, then removed ones (drawn struck
+    through, with who, when and why), each oldest first. The record-page link only where
+    user_can_view_vendor_order() passes. The link form and the remove actions only where
+    user_can_link_approval_order() passes — SCM; the picker's queries are paid only then.
+    """
+    if (approval.kind != APPROVAL_KIND_MATERIAL_PRE_ORDER
+            or approval.status != APPROVAL_APPROVED):
+        return None
+    can_link = user_can_link_approval_order(user, approval)
+
+    def row(link):
+        order = link.vendor_order
+        return {
+            'link':       link,
+            'label':      po_pi_record_label(order),
+            'url':        (reverse('vendor_order_detail', args=[order.pk])
+                           if user_can_view_vendor_order(user, order) else None),
+            'linked_by':  person_name(link.linked_by),
+            'removed_by': person_name(link.removed_by) if link.removed_by else None,
+        }
+
+    return {
+        'active':   [row(link) for link in links if link.removed_at is None],
+        'removed':  [row(link) for link in links if link.removed_at is not None],
+        'can_link': can_link,
+        # Grouped by vendor only when the approval names none: it may then cover any
+        # vendor's record. Otherwise its one vendor's records, as a flat list.
+        'grouped':  approval.vendor_id is None,
+        'choices':  order_link_choices(approval) if can_link else [],
+    }
 
 
 # The change list's fields, in the order the page draws a request's details.
@@ -689,7 +754,7 @@ def _event(at, rank, what, actor, lines=(), remark='', remark_label=''):
             'remark': remark, 'remark_label': remark_label, 'outcome': ''}
 
 
-def _history(approval, steps):
+def _history(approval, steps, links=()):
     """Everything done on the request, oldest first, each naming who and when (D-A22).
 
     No one table holds it all, so three sources are merged:
@@ -707,6 +772,10 @@ def _history(approval, steps):
         new row for the same round and party — and only a reassignment leaves a
         superseded step with a LATER row for its own round and party (a closed round or
         a withdrawal supersedes the last row of each). One entry per such step.
+      * PO/PI RECORD LINKS (Approvals 3b, `links`): linking and removing a link write no
+        ledger row either — the request's status does not move. Each link row gives
+        "Linked PO/PI record …" by linked_by at linked_at, and a removed one also
+        "Removed link to PO/PI record …" by removed_by at removed_at, with the reason.
 
     FOLDING. A decision that moved the request also wrote a ledger row, with the decider
     as actor. That row is matched to its decision — the latest decided step, not yet
@@ -744,6 +813,16 @@ def _history(approval, steps):
             person_name(step.superseded_by) if step.superseded_by else 'System',
             lines=[f'{person_name(step.assignee)} → {person_name(successor.assignee)}'],
             remark=step.note, remark_label='Reason:'))
+
+    for link in links:
+        record = _record_short(link.vendor_order)
+        events.append(_event(link.linked_at, (3, link.pk), f'Linked PO/PI record {record}',
+                             person_name(link.linked_by)))
+        if link.removed_at is not None:
+            events.append(_event(
+                link.removed_at, (4, link.pk), f'Removed link to PO/PI record {record}',
+                person_name(link.removed_by) if link.removed_by else 'System',
+                remark=link.removal_note, remark_label='Reason:'))
 
     rows = (StatusTransition.objects
             .filter(subject_type=SUBJECT_APPROVAL_REQUEST, subject_id=approval.pk)
@@ -861,6 +940,7 @@ def approval_detail(request, approval_pk):
     snapshots = {n: round_snapshot(approval, n)
                  for n in range(1, approval.current_round + 1)}
     dispatch, round_dispatch = _dispatch_against(user, approval, material, snapshots)
+    links = _order_links(approval)
     rounds = []
     for round_no in range(approval.current_round, 0, -1):     # newest first
         snapshot = snapshots[round_no]
@@ -890,7 +970,8 @@ def approval_detail(request, approval_pk):
         'projects':       projects,
         'site_groups':    site_groups,
         'rounds':         rounds,
-        'history':        _history(approval, steps),
+        'order_links':    _order_links_section(user, approval, links),
+        'history':        _history(approval, steps, links),
         'evidence_accept': ','.join(f'.{ext}' for ext in EVIDENCE_EXTENSIONS),
         'decisions':      _DECISIONS,
         'channels':       APPROVAL_PROXY_CHANNEL_CHOICES,
@@ -1183,4 +1264,63 @@ def approval_reassign(request, step_pk):
         return _detail(approval.pk)
     messages.success(request, f'The {_PARTY_LABELS.get(step.party, step.party)} step is '
                               f'now with {person_name(replacement.assignee)}.')
+    return _detail(approval.pk)
+
+
+# ---------------------------------------------------------------------------
+# Approvals 3b — PO/PI records covered by an approved pre-order request
+# ---------------------------------------------------------------------------
+
+@login_required
+def approval_link_order(request, approval_pk):
+    """POST: SCM links a PO/PI record to an approved pre-order request.
+
+    Access: user_can_view_approval_request AND user_can_raise_approval_request — SCM.
+    Anyone else: 403. Everything about the request and the record — its kind, its status,
+    the vendor, an existing link — is the chokepoint's refusal, as a message. Calls
+    link_order_to_approval().
+    """
+    approval = get_object_or_404(ApprovalRequest.objects.prefetch_related('steps'),
+                                 pk=approval_pk)
+    if not (user_can_view_approval_request(request.user, approval)
+            and user_can_raise_approval_request(request.user)):
+        return _forbidden(request)
+    if request.method != 'POST':
+        return _detail(approval.pk)
+    order = parse_linked_order(request.POST)
+    try:
+        link_order_to_approval(approval, order, request.user.profile)
+    except ApprovalRefused as exc:
+        messages.error(request, str(exc))
+        return _detail(approval.pk)
+    messages.success(request, f'Linked PO/PI record {_record_short(order)}.')
+    return _detail(approval.pk)
+
+
+@login_required
+def approval_unlink_order(request, link_pk):
+    """POST: SCM removes a PO/PI record link, with a reason. The link is kept, marked
+    removed, and stays in History.
+
+    Access: user_can_view_approval_request (on the link's request) AND
+    user_can_raise_approval_request — SCM. Anyone else: 403. A missing reason or a link
+    already removed: the chokepoint's refusal, as a message. Calls
+    unlink_order_from_approval().
+    """
+    link = get_object_or_404(
+        ApprovalOrderLink.objects.select_related('vendor_order__vendor'), pk=link_pk)
+    approval = get_object_or_404(ApprovalRequest.objects.prefetch_related('steps'),
+                                 pk=link.approval_id)
+    if not (user_can_view_approval_request(request.user, approval)
+            and user_can_raise_approval_request(request.user)):
+        return _forbidden(request)
+    if request.method != 'POST':
+        return _detail(approval.pk)
+    try:
+        unlink_order_from_approval(link, request.user.profile, request.POST.get('note', ''))
+    except ApprovalRefused as exc:
+        messages.error(request, str(exc))
+        return _detail(approval.pk)
+    messages.success(request, f'Removed the link to PO/PI record '
+                              f'{_record_short(link.vendor_order)}.')
     return _detail(approval.pk)

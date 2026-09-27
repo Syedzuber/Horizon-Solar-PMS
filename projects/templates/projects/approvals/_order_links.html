@@ -1,0 +1,65 @@
+{% comment %}
+Approvals 3b — "PO/PI records covered" on an APPROVED pre-order request
+(approval_views._order_links_section, as `order_links`). Linking is optional: an approval
+with no link says so plainly and nothing more.
+
+Active links first, then removed ones, struck through, with who, when and why — a link
+is never deleted. The record-page link is drawn only where the viewer may open it. The
+link form and each "Remove link" form only for SCM (order_links.can_link); their views
+ask again on POST. Records are grouped by vendor only when the approval names no vendor.
+{% endcomment %}
+<div class="card shadow-sm mb-3" id="ap-order-links">
+  <div class="card-header fw-semibold">PO/PI records covered</div>
+  <ul class="list-group list-group-flush small">
+    {% for row in order_links.active %}
+    <li class="list-group-item text-break">
+      <div>{% if row.url %}<a href="{{ row.url }}">{{ row.label }}</a>{% else %}{{ row.label }}{% endif %}</div>
+      <div class="text-muted">Linked by {{ row.linked_by }}, {{ row.link.linked_at|date:"d M Y, H:i" }} IST</div>
+      {% if order_links.can_link %}
+      <details class="mt-2">
+        <summary class="btn btn-sm btn-outline-danger ap-toggle"><i class="bi bi-link-45deg"></i>Remove link<i class="bi bi-chevron-down ap-chevron"></i></summary>
+        <form method="post" action="{% url 'approval_unlink_order' row.link.pk %}" class="card card-body shadow-sm mt-2">
+          {% csrf_token %}
+          <label for="apUnlinkNote{{ row.link.pk }}" class="form-label small mb-1">Why the link is being removed</label>
+          <textarea name="note" id="apUnlinkNote{{ row.link.pk }}" class="form-control w-100 mb-2" rows="2" required></textarea>
+          <div class="d-grid"><button type="submit" class="btn btn-outline-danger">Remove link</button></div>
+        </form>
+      </details>
+      {% endif %}
+    </li>
+    {% empty %}
+    <li class="list-group-item text-muted">No PO/PI record is linked to this approval.</li>
+    {% endfor %}
+    {% for row in order_links.removed %}
+    <li class="list-group-item text-break text-muted">
+      <div><s>{% if row.url %}<a href="{{ row.url }}" class="text-muted">{{ row.label }}</a>{% else %}{{ row.label }}{% endif %}</s></div>
+      <div>Linked by {{ row.linked_by }}, {{ row.link.linked_at|date:"d M Y, H:i" }} IST</div>
+      <div>Removed by {{ row.removed_by|default:"System" }}, {{ row.link.removed_at|date:"d M Y, H:i" }} IST</div>
+      <div style="white-space:pre-line;">Reason: {{ row.link.removal_note }}</div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if order_links.can_link %}
+  <div class="card-body border-top">
+    {% if order_links.choices %}
+    <form method="post" action="{% url 'approval_link_order' approval.pk %}">
+      {% csrf_token %}
+      <label for="apLinkOrder" class="form-label small mb-1">Link a PO/PI record</label>
+      <select name="vendor_order" id="apLinkOrder" class="form-select w-100 mb-2" required>
+        <option value="">Choose a PO/PI record…</option>
+        {% for group in order_links.choices %}
+          {% if order_links.grouped %}<optgroup label="{{ group.vendor.name }}">{% endif %}
+          {% for option in group.options %}
+          <option value="{{ option.pk }}">{{ option.label }}</option>
+          {% endfor %}
+          {% if order_links.grouped %}</optgroup>{% endif %}
+        {% endfor %}
+      </select>
+      <div class="d-grid d-sm-block"><button type="submit" class="btn btn-brand">Link PO/PI record</button></div>
+    </form>
+    {% else %}
+    <div class="small text-muted">No PO/PI record is left to link{% if approval.vendor %} for {{ approval.vendor.name }}{% endif %}.</div>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

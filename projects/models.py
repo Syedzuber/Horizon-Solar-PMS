@@ -6413,3 +6413,74 @@ class ApprovalRoundSnapshot(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             "ApprovalRoundSnapshot is append-only — a past round's record stays.")
+
+
+class ApprovalOrderLink(models.Model):
+    """An approved pre-order approval covering one PO/PI record (Approvals 3b).
+
+    OPTIONAL, AND MANY-TO-MANY. One approval may cover several records and one record may
+    be covered by several approvals; nothing warns about, blocks or counts a record with
+    no link. A pre-dispatch request's `pre_order_request` (3a) is a separate relationship
+    and creates no row here.
+
+    Written by approvals.link_order_to_approval() and unlink_order_from_approval() only.
+    The rules that depend on other rows — the approval is a pre-order approval, it is
+    APPROVED, and the record's vendor is the approval's when the approval names one —
+    are theirs; the database holds the two below.
+
+    APPEND-ONLY APART FROM ONE UPDATE. A link is never deleted: removing it stamps
+    removed_by, removed_at and removal_note, once, through
+    unlink_order_from_approval()'s filter().update() — the only update path. save() on
+    an existing row and delete() both raise. A removed link stays in History, and the
+    same record can be linked again: the uniqueness below counts active links only.
+    """
+
+    approval = models.ForeignKey(ApprovalRequest, on_delete=models.PROTECT,
+                                 related_name='order_links')
+    vendor_order = models.ForeignKey('VendorOrder', on_delete=models.PROTECT,
+                                     related_name='approval_links')
+
+    linked_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='approval_order_links_made',
+    )
+    linked_at = models.DateTimeField(auto_now_add=True)
+
+    removed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='approval_order_links_removed',
+    )
+    removed_at   = models.DateTimeField(null=True, blank=True)
+    removal_note = models.TextField(blank=True, default='')
+
+    class Meta:
+        ordering = ['approval', 'linked_at', 'pk']
+        constraints = [
+            # One ACTIVE link per approval and record; removed links are history.
+            models.UniqueConstraint(
+                fields=['approval', 'vendor_order'],
+                condition=models.Q(removed_at__isnull=True),
+                name='uniq_approval_order_link_active'),
+            # Removal is who, when and why together, or none of them.
+            models.CheckConstraint(
+                condition=((models.Q(removed_by__isnull=True)
+                            & models.Q(removed_at__isnull=True)
+                            & models.Q(removal_note=''))
+                           | (models.Q(removed_by__isnull=False)
+                              & models.Q(removed_at__isnull=False)
+                              & ~models.Q(removal_note=''))),
+                name='approval_order_link_removal_fields'),
+        ]
+
+    def __str__(self):
+        return f"{self.approval} — PO/PI record #{self.vendor_order_id}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'ApprovalOrderLink is append-only — a link is removed through '
+                'approvals.unlink_order_from_approval(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'ApprovalOrderLink is append-only — a removed link stays in history.')
