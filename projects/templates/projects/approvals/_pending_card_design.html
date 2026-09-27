@@ -1,0 +1,61 @@
+{% comment %}
+Approvals 2c — "Approvals waiting on you", the Design dashboard's copy
+(dashboard/design.html). Context: `approvals_waiting`, from
+approval_queries.pending_approvals_card(). None — a designer without Design Head
+authority and with nothing waiting — draws nothing.
+
+ALPINE, like the project cards on this dashboard, whose page loads it: x-data starts
+`open: false`, so the card is collapsed on every render and a tap on the header opens it.
+No hover style (the project cards' .design-card-header:hover is deliberately not reused).
+With nothing waiting the header is a plain line with a green check and nothing opens.
+
+A deputy's rows say whose step it is: "as deputy for <Head>".
+The PM dashboard draws the same rows with Bootstrap collapse: _pending_card_pm.html.
+{% endcomment %}
+{% if approvals_waiting %}
+{% if approvals_waiting.count %}
+<div x-data="{ open: false }" class="card shadow-sm border-0 mb-4">
+  <div @click="open = !open" role="button" :aria-expanded="open.toString()" aria-expanded="false"
+       class="card-header bg-white d-flex align-items-center gap-2 py-2 px-3"
+       style="cursor:pointer; border-radius: inherit; border-bottom-color: transparent;">
+    <div class="design-urgency-circle flex-shrink-0" style="background:#f0a829; color:#fff;">{{ approvals_waiting.count }}</div>
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold">Approval{{ approvals_waiting.count|pluralize }} waiting on you</div>
+      <div class="small text-muted">Oldest: {{ approvals_waiting.oldest_text }}</div>
+    </div>
+    <svg class="design-chevron" :style="open ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </div>
+  <div x-show="open" x-cloak class="list-group list-group-flush border-top">
+    {% for row in approvals_waiting.rows %}
+    <a href="{% url 'approval_detail' row.approval.pk %}" class="list-group-item text-decoration-none text-reset px-3 py-2">
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <span class="fw-semibold text-break" style="min-width:0;">{{ row.title }}</span>
+        <span class="small flex-shrink-0 {% if row.days >= 3 %}text-danger fw-semibold{% else %}text-muted{% endif %}">{{ row.days_text }}</span>
+      </div>
+      <div class="small text-muted text-break">{{ row.kind_label }} · {{ row.vendor_name }}</div>
+      {% if row.as_deputy_for %}<div class="small text-muted fst-italic">as deputy for {{ row.as_deputy_for }}</div>{% endif %}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+    <div class="design-urgency-circle clear flex-shrink-0">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </div>
+    <span class="fw-semibold">Approvals</span>
+    <span class="text-muted small">Nothing waiting</span>
+  </div>
+</div>
+{% endif %}
+{% endif %}

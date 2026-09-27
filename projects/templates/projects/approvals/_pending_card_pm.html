@@ -1,0 +1,53 @@
+{% comment %}
+Approvals 2c — "Approvals waiting on you", the PM dashboard's copy (dashboard/pm.html).
+Context: `approvals_waiting`, from approval_queries.pending_approvals_card(). None draws
+nothing, so the dashboard carries one include and no condition of its own.
+
+BOOTSTRAP COLLAPSE, like every other card on this dashboard: collapsed by default, a tap
+on the header opens it, nothing reacts to hover. The chevron turn is pm.html's own
+`.card-collapse-btn .collapse-icon` rule. With nothing waiting the header is a plain
+line with a green check and there is nothing to open.
+
+The Design dashboard draws the same rows with Alpine: _pending_card_design.html.
+{% endcomment %}
+{% if approvals_waiting %}
+<div class="card mb-4 shadow-sm border-0">
+  {% if approvals_waiting.count %}
+  <div class="card-header bg-white border-bottom-0 p-0">
+    <button class="card-collapse-btn btn btn-link w-100 text-start text-decoration-none text-dark py-2 px-3 d-flex align-items-center gap-2"
+            type="button"
+            data-bs-toggle="collapse"
+            data-bs-target="#approvals-waiting-card"
+            aria-expanded="false"
+            aria-controls="approvals-waiting-card">
+      <span class="urgency-badge text-white flex-shrink-0 fw-bold px-2" style="background:#f0a829;">{{ approvals_waiting.count }}</span>
+      <span class="flex-grow-1" style="min-width:0;">
+        <span class="fw-semibold d-block">Approval{{ approvals_waiting.count|pluralize }} waiting on you</span>
+        <span class="small text-muted d-block">Oldest: {{ approvals_waiting.oldest_text }}</span>
+      </span>
+      <i class="bi bi-chevron-down text-muted collapse-icon flex-shrink-0 ms-1"></i>
+    </button>
+  </div>
+  <div class="collapse" id="approvals-waiting-card">
+    <div class="list-group list-group-flush border-top">
+      {% for row in approvals_waiting.rows %}
+      <a href="{% url 'approval_detail' row.approval.pk %}" class="list-group-item text-decoration-none text-reset px-3 py-2">
+        <div class="d-flex justify-content-between align-items-start gap-2">
+          <span class="fw-semibold text-break" style="min-width:0;">{{ row.title }}</span>
+          <span class="small flex-shrink-0 {% if row.days >= 3 %}text-danger fw-semibold{% else %}text-muted{% endif %}">{{ row.days_text }}</span>
+        </div>
+        <div class="small text-muted text-break">{{ row.kind_label }} · {{ row.vendor_name }}</div>
+        {% if row.as_deputy_for %}<div class="small text-muted fst-italic">as deputy for {{ row.as_deputy_for }}</div>{% endif %}
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% else %}
+  <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+    <i class="bi bi-check-circle-fill text-success flex-shrink-0" style="font-size:1.25rem; line-height:1;"></i>
+    <span class="fw-semibold">Approvals</span>
+    <span class="text-muted small">Nothing waiting</span>
+  </div>
+  {% endif %}
+</div>
+{% endif %}

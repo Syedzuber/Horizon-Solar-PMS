@@ -521,6 +521,9 @@ urlpatterns = [
          name='approval_list'),
     path('approvals/new/',                           approval_views.approval_create,
          name='approval_create'),
+    # Approvals 2c — the aging list (SCM, CEO, Admin, System Admin). Read-only.
+    path('approvals/aging/',                         approval_views.approval_aging,
+         name='approval_aging'),
     path('approvals/<int:approval_pk>/',             approval_views.approval_detail,
          name='approval_detail'),
     path('approvals/<int:approval_pk>/resubmit/',    approval_views.approval_resubmit,

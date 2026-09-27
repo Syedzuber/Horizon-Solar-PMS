@@ -2424,3 +2424,20 @@ def user_can_resubmit_approval_request(user, request):
     if not user_can_raise_approval_request(user):
         return False
     return request.status == 'changes_requested'
+
+
+# Approvals 2c — who reads the aging list: every approver's waiting steps, turnaround
+# and proxy share (D-A16). The same people as APPROVAL_PORTFOLIO_ROLES today, but its own
+# set, so widening who reads every request never silently widens who reads everyone's
+# figures.
+APPROVAL_AGING_ROLES = frozenset({'SCM', 'CEO', 'Admin', 'System Admin'})
+
+
+def user_can_view_approval_aging(user):
+    """Return True if `user` may open the approval aging list. SCM, CEO, Admin and System
+    Admin, by role. PMs and the Design Head see their own waiting steps on their
+    dashboards, not each other's figures."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in APPROVAL_AGING_ROLES

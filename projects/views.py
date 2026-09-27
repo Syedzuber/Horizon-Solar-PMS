@@ -59,6 +59,7 @@ from .models import (
 )
 from .notifications import send_notification, send_raw_email
 from .payments import payment_counts
+from .approval_queries import pending_approvals_card
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -973,6 +974,8 @@ def dashboard_pm(request):
         'design_candidates':      UserProfile.objects.filter(role='Design', is_active=True).select_related('user'),
         'user_role':              user_role,
         'role_label':             role_label,
+        # Approvals 2c — the steps waiting on this user; None for a non-approver.
+        'approvals_waiting':      pending_approvals_card(request.user),
     })
 
 
@@ -1329,6 +1332,9 @@ def dashboard_design(request):
         # screen is the Head's alone, so gating its link on `head_counts` would offer a
         # deputy a button that then refuses them. One key, read only by that one link.
         'is_design_head':       user_is_design_head(request.user),
+        # Approvals 2c — the steps waiting on this user, a deputy's labelled as such;
+        # None for a designer without Design Head authority and nothing waiting.
+        'approvals_waiting':    pending_approvals_card(request.user),
     })
 
 

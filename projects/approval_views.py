@@ -39,9 +39,14 @@ APPROVALS 2a-2 — THE REVISION SCREENS (27 Sep 2026) put S1.1 on the page:
   * History names who did every action and when (D-A22), merged from three sources —
     the ledger, the decided step rows, and the superseded rows a reassignment leaves
     (it writes no ledger row). See _history().
+
+APPROVALS 2c adds approval_aging, the read-only aging list for SCM, CEO, Admin and
+System Admin. Its figures, and the dashboards' pending-approvals cards, come from
+approval_queries.py.
 """
 import logging
 import uuid as _uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib import messages
@@ -49,6 +54,7 @@ from django.core.paginator import Paginator
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 
 from .approval_forms import (
     ATTACHMENT_LIMIT, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN, assignee_choices,
@@ -57,6 +63,7 @@ from .approval_forms import (
     parse_new_assignee, parse_proxy, parse_revision, person_name, scope_choices,
     vendor_choices,
 )
+from .approval_queries import AGING_WINDOW_DAYS, aging_rows
 from .approvals import (
     ApprovalRefused, ProxyDecision, apply_approval_decision, create_approval_request,
     reassign_approval_step, resubmit_approval_request, round_snapshot,
@@ -77,7 +84,8 @@ from .permissions import (
     approval_request_visibility_q, user_can_decide_approval_step,
     user_can_raise_approval_request, user_can_reassign_approval_step,
     user_can_record_proxy_decision, user_can_resubmit_approval_request,
-    user_can_view_approval_list, user_can_view_approval_request,
+    user_can_view_approval_aging, user_can_view_approval_list,
+    user_can_view_approval_request,
     user_can_withdraw_approval_request, user_may_answer_approval_step,
 )
 from .supabase_storage import get_supabase_client, vendor_order_document_url
@@ -423,6 +431,32 @@ def approval_list(request):
         'status_choices': APPROVAL_STATUS_CHOICES,
         'kind_choices':   APPROVAL_KIND_CHOICES,
         'can_raise':      user_can_raise_approval_request(request.user),
+        'can_view_aging': user_can_view_approval_aging(request.user),
+    })
+
+
+@login_required
+def approval_aging(request):
+    """Approvals 2c — what is waiting on whom, and how each approver has answered over the
+    last AGING_WINDOW_DAYS days. Read-only.
+
+    Access: user_can_view_approval_aging — SCM, CEO, Admin, System Admin. Figures:
+    approval_queries.aging_rows(), three queries whatever the size of the data, read from
+    step rows with carried steps excluded (never the ledger).
+    """
+    if not user_can_view_approval_aging(request.user):
+        return _forbidden(request)
+
+    now = timezone.now()
+    aging = aging_rows(now - timedelta(days=AGING_WINDOW_DAYS), now=now)
+    return render(request, 'projects/approvals/aging.html', {
+        'assignees':      aging['assignees'],
+        'carried':        aging['carried'],
+        'fresh_approved': aging['fresh_approved'],
+        'carry_rate':     aging['carry_rate'],
+        'carry_denominator': aging['carried'] + aging['fresh_approved'],
+        'window_days':    AGING_WINDOW_DAYS,
+        'total_pending':  sum(a['pending_count'] for a in aging['assignees']),
     })
 
 
