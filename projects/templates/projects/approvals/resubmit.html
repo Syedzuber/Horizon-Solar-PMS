@@ -1,13 +1,31 @@
 {% extends "base.html" %}
 {% comment %}
-Approvals S2a — SCM resubmits after changes were requested (approval_views.approval_resubmit).
+Approvals 2a-2 — SCM resubmits after changes were requested (approval_views.approval_resubmit).
 
-WHAT A RESUBMIT CAN CARRY: a note, new attachments, and optionally a different approver
-for a party. approvals.resubmit_approval_request() takes nothing else, so the request's
-title, description and material are NOT editable here, and the page says so above the
-note (ruling B5). A changed approver is recorded in the ledger before the note.
+WHAT A RESUBMIT CAN CARRY (D-A18, D-A20): the request's revisable details, pre-filled —
+title, description, vendor, the three scope lists, proposed make, specification, quantity
+note — of which the view sends ONLY the changed ones; BOQ items and design sign-off shown
+read-only. For each party whose step in the round that asked for changes is approved, a
+"Keep <name>'s approval" box: ticking it reveals the reason box (CSS only, no script —
+.ap-keep:checked ~ .ap-keep-reason), so a box ticked before a refusal is open again when
+the page is redrawn. An approver per party, as before. The note, and new attachments.
+
+The hidden revise=1 tells the view these fields were drawn: without it nothing is revised.
+A refusal redraws this page with what was typed; files must be chosen again (a browser
+never re-fills a file input).
+
+BUILT FOR 380 px: every card is one column, every input full-width, the keep box and its
+reason stacked under the approver select, long text breaks rather than scrolling sideways.
 {% endcomment %}
 {% block title %}Resubmit approval #{{ approval.pk }} — SolarPMS{% endblock %}
+
+{% block extra_head %}
+<style>
+  .ap-keep:not(:checked) ~ .ap-keep-reason { display: none; }
+  .ap-keep-block { min-height: 44px; }
+  .ap-keep-block .form-check-input { float: none; margin-top: .2rem; }
+</style>
+{% endblock %}
 
 {% block content %}
 
@@ -17,32 +35,100 @@ note (ruling B5). A changed approver is recorded in the ledger before the note.
   <small class="text-muted">This opens round {{ approval.current_round|add:1 }}</small>
 </div>
 
-<div class="card shadow-sm mb-3">
-  <div class="card-header fw-semibold">The request</div>
-  <div class="card-body small">
-    <p class="mb-2 text-break" style="white-space:pre-line;">{{ approval.description }}</p>
-    {% if approval.material_detail %}
-    <dl class="row mb-0">
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Proposed make</dt>
-      <dd class="col-7 col-sm-9 text-break">{{ approval.material_detail.proposed_make|default:"—" }}</dd>
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Specification</dt>
-      <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ approval.material_detail.specification|default:"—" }}</dd>
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Quantity</dt>
-      <dd class="col-7 col-sm-9 mb-0 text-break" style="white-space:pre-line;">{{ approval.material_detail.quantity_note|default:"—" }}</dd>
-    </dl>
-    {% endif %}
-  </div>
-</div>
-
 <form method="post" enctype="multipart/form-data">
   {% csrf_token %}
+  <input type="hidden" name="revise" value="1">
 
   <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">What changed</div>
+    <div class="card-header fw-semibold">The request</div>
     <div class="card-body">
-      <div class="alert alert-warning py-2 small mb-2">Describe what you changed. The request details above are not edited.</div>
-      <label for="apResubmitNote" class="form-label small mb-1">Note</label>
-      <textarea name="note" id="apResubmitNote" class="form-control w-100" rows="4" required>{{ post.note|default:'' }}</textarea>
+      <div class="mb-3">
+        <label for="apTitle" class="form-label">Title</label>
+        <input type="text" name="title" id="apTitle" class="form-control w-100" maxlength="200" required
+               value="{{ values.title }}">
+      </div>
+      <div class="mb-0">
+        <label for="apDescription" class="form-label">Description</label>
+        <textarea name="description" id="apDescription" class="form-control w-100" rows="3" required>{{ values.description }}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">The material</div>
+    <div class="card-body">
+      {% if material %}
+      <div class="mb-3">
+        <label for="apMake" class="form-label">Proposed make</label>
+        <input type="text" name="proposed_make" id="apMake" class="form-control w-100" maxlength="200"
+               value="{{ values.proposed_make }}">
+      </div>
+      <div class="mb-3">
+        <label for="apSpec" class="form-label">Specification</label>
+        <textarea name="specification" id="apSpec" class="form-control w-100" rows="2">{{ values.specification }}</textarea>
+      </div>
+      <div class="mb-3">
+        <label for="apQty" class="form-label">Quantity</label>
+        <textarea name="quantity_note" id="apQty" class="form-control w-100" rows="2">{{ values.quantity_note }}</textarea>
+      </div>
+      {% endif %}
+      <div class="mb-3">
+        <label for="apVendor" class="form-label">Vendor <span class="text-muted small">(optional)</span></label>
+        <select name="vendor" id="apVendor" class="form-select w-100">
+          <option value="">— Not decided yet —</option>
+          {% if inactive_vendor %}
+          <option value="{{ inactive_vendor.pk }}"{% if values.vendor == inactive_vendor.pk|stringformat:"s" %} selected{% endif %}>{{ inactive_vendor.name }} (as before — inactive)</option>
+          {% endif %}
+          {% for v in vendors %}
+          <option value="{{ v.pk }}"{% if v.pk|stringformat:"s" == values.vendor %} selected{% endif %}>{{ v.name }}{% if v.pk == approval.vendor_id %} (as before){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <dl class="row small mb-0">
+        {% if material %}
+        <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
+        <dd class="col-7 col-sm-9 text-break">{% for item in boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
+        {% endif %}
+        <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
+        <dd class="col-7 col-sm-9 mb-0">{% if approval.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
+      </dl>
+      <div class="form-text">BOQ items and design sign-off cannot be changed on a resubmit.</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">
+      What it is about <span class="text-muted fw-normal">(optional)</span>
+      <div class="small text-muted fw-normal">For the record only. Naming a site here gives nobody access to it.</div>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-12 col-md-4">
+          <label for="apPrograms" class="form-label">Tenders</label>
+          <select name="program" id="apPrograms" class="form-select w-100" multiple size="6">
+            {% for pr in programs %}
+            <option value="{{ pr.pk }}"{% if pr.pk|stringformat:"s" in picked.program %} selected{% endif %}>{{ pr.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-4">
+          <label for="apProjects" class="form-label">Sites</label>
+          <select name="project" id="apProjects" class="form-select w-100" multiple size="6">
+            {% for pj in projects %}
+            <option value="{{ pj.pk }}"{% if pj.pk|stringformat:"s" in picked.project %} selected{% endif %}>{{ pj.project_id }} — {{ pj.customer_name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-4">
+          <label for="apGroups" class="form-label">Site groups</label>
+          <select name="site_group" id="apGroups" class="form-select w-100" multiple size="6">
+            {% for g in site_groups %}
+            <option value="{{ g.pk }}"{% if g.pk|stringformat:"s" in picked.site_group %} selected{% endif %}>{{ g.program.name }} · {{ g.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="form-text">Hold Ctrl (⌘ on a Mac) to choose more than one. On a phone, tap each one. Only live tenders and sites are listed.</div>
     </div>
   </div>
 
@@ -50,26 +136,45 @@ note (ruling B5). A changed approver is recorded in the ledger before the note.
     <div class="card-header fw-semibold">Approvers for the next round</div>
     <div class="card-body">
       {% for p in parties %}
-      <div class="{% if not forloop.last %}mb-3{% endif %}">
+      <div class="{% if not forloop.last %}mb-4{% endif %}">
         <label for="apAssignee{{ p.party }}" class="form-label small mb-1">{{ p.label }}</label>
-        <select name="assignee_{{ p.party }}" id="apAssignee{{ p.party }}" class="form-select">
+        <select name="assignee_{{ p.party }}" id="apAssignee{{ p.party }}" class="form-select w-100">
           {% for c in p.choices %}
-          <option value="{{ c.pk }}"{% if c.pk == p.holder.pk %} selected{% endif %}>{{ c.user.get_full_name|default:c.user.username }}{% if c.pk == p.holder.pk %} (as before){% endif %}</option>
+          <option value="{{ c.pk }}"{% if c.pk|stringformat:"s" == p.selected %} selected{% endif %}>{{ c.user.get_full_name|default:c.user.username }}{% if c.pk == p.holder.pk %} (as before){% endif %}</option>
           {% endfor %}
           {% if p.holder not in p.choices %}
-          <option value="{{ p.holder.pk }}" selected>{{ p.holder.user.get_full_name|default:p.holder.user.username }} (as before — no longer eligible)</option>
+          <option value="{{ p.holder.pk }}"{% if p.holder.pk|stringformat:"s" == p.selected %} selected{% endif %}>{{ p.holder.user.get_full_name|default:p.holder.user.username }} (as before — no longer eligible)</option>
           {% endif %}
         </select>
+        {% if p.keep %}
+        <div class="ap-keep-block border rounded p-2 mt-2">
+          <input class="form-check-input ap-keep me-1" type="checkbox" name="keep_{{ p.party }}" id="apKeep{{ p.party }}"{% if p.keep_checked %} checked{% endif %}>
+          <label class="form-check-label" for="apKeep{{ p.party }}">Keep {{ p.keep.decider }}'s approval from round {{ p.keep.round }}</label>
+          <div class="ap-keep-reason mt-2">
+            <div class="alert alert-warning py-2 px-2 small mb-2">{{ p.keep.decider }} will not be asked to review this revision. Keep it only if your changes do not affect what they approved.</div>
+            <label for="apKeepReason{{ p.party }}" class="form-label small mb-1">Why it can be kept <span class="text-muted">(at least {{ keep_reason_min }} characters)</span></label>
+            <textarea name="keep_reason_{{ p.party }}" id="apKeepReason{{ p.party }}" class="form-control w-100" rows="2">{{ p.keep_reason }}</textarea>
+          </div>
+        </div>
+        {% endif %}
       </div>
       {% endfor %}
-      <div class="form-text">Leave each as before unless someone else should decide. A change is recorded with your note.</div>
+      <div class="form-text">Leave each approver as before unless someone else should decide. A change is recorded with your note. An approval cannot be kept for an approver you change.</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">What changed</div>
+    <div class="card-body">
+      <label for="apResubmitNote" class="form-label small mb-1">Describe what you changed</label>
+      <textarea name="note" id="apResubmitNote" class="form-control w-100" rows="4" required>{{ values.note }}</textarea>
     </div>
   </div>
 
   <div class="card shadow-sm mb-3">
     <div class="card-header fw-semibold">New attachments <span class="text-muted fw-normal">(optional)</span></div>
     <div class="card-body">
-      <input type="file" name="attachments" class="form-control" multiple
+      <input type="file" name="attachments" class="form-control w-100" multiple
              accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
       <div class="form-text">Earlier rounds' files stay on the request. Up to {{ attachment_limit }} files, 20 MB each.</div>
     </div>

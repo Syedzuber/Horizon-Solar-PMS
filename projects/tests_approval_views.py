@@ -1,4 +1,7 @@
-"""Approvals S2a — the material pre-order screens (approval_views.py).
+"""Approvals S2a — the material pre-order screens (approval_views.py). Approvals 2a-2 adds
+the revision screens: editable resubmit, kept approvals, round snapshots and the change
+list, proxy evidence files, and a History that names who did every action (the last four
+classes).
 
 What this file pins, and why each matters:
 
@@ -33,8 +36,9 @@ from django.utils import timezone
 from .approval_views import step_turnaround
 from .approvals import (
     ProxyDecision, apply_approval_decision, create_approval_request,
-    withdraw_approval_request,
+    resubmit_approval_request, round_snapshot, withdraw_approval_request,
 )
+from .utils import record_transition
 from .models import (
     ApprovalAttachment, ApprovalRequest, ApprovalStep, Program, Project, SiteGroup,
     StatusTransition, Vendor,
@@ -611,8 +615,7 @@ class ResubmitTests(ApprovalViewFixture):
 
     def test_the_form_says_the_details_are_not_edited(self):
         response = self.client_for(self.scm).get(self.url)
-        self.assertContains(response,
-                            'Describe what you changed. The request details above are not edited.')
+        self.assertContains(response, 'Describe what you changed')
 
     def test_resubmit_opens_the_next_round_with_the_same_approver(self):
         response = self.client_for(self.scm).post(
@@ -638,10 +641,23 @@ class ResubmitTests(ApprovalViewFixture):
 
     def test_an_empty_note_is_the_chokepoints_refusal_as_a_message(self):
         response = self.client_for(self.scm).post(self.url, {'note': ''})
-        self.assert_to_detail(response, self.approval)
-        self.assertIn('Say what changed in this revision.', self.messages_of(response))
+        self.assertContains(response, 'Say what changed in this revision.', status_code=400)
         self.approval.refresh_from_db()
         self.assertEqual(self.approval.status, APPROVAL_CHANGES_REQUESTED)
+
+    def test_a_refusal_after_the_request_moved_on_goes_back_to_the_request(self):
+        """The same refusal once the request is no longer awaiting changes (another SCM
+        user withdrew it while this form was open): the message goes to the request —
+        there is no form left to fill."""
+        page = self.client_for(self.scm)
+        page.get(self.url)
+        with mock.patch('projects.approval_views.user_can_resubmit_approval_request',
+                        return_value=True):
+            withdraw_approval_request(self.approval, self.scm_b, 'Dropped.')
+            response = page.post(self.url, {'note': 'Now 550 Wp.'})
+        self.assert_to_detail(response, self.approval)
+        self.assertIn('This request is withdrawn, which is final. Raise a new request '
+                      'instead.', self.messages_of(response))
 
     def test_a_request_not_waiting_for_changes_sends_scm_back(self):
         fresh = self.raise_material(design=False)
@@ -742,3 +758,356 @@ class ListTests(ApprovalViewFixture):
         for profile in (self.finance, self.se, self.designer):
             response = self.client_for(profile).get(reverse('notifications'))
             self.assertNotContains(response, link, msg_prefix=profile.user.username)
+
+
+# ===========================================================================
+# Approvals 2a-2 — resubmit revision and kept approvals
+# ===========================================================================
+
+KEEP_REASON = 'The make change does not touch the layout.'
+
+
+class RevisionFixture(ApprovalViewFixture):
+    """A design-signoff request whose Design Head APPROVED and whose PM then asked for
+    changes: the Head's approval is the one that may be kept."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.tender_a = Program.objects.create(
+            name='AV Tender A', program_type='OPEX', client_name='Client', status='Active',
+            short_tender_code='AVA')
+        cls.tender_b = Program.objects.create(
+            name='AV Tender B', program_type='OPEX', client_name='Client', status='Active',
+            short_tender_code='AVB')
+        cls.site = Project.objects.create(
+            customer_name='AV Site', status='Active', customer_phone='9876543210',
+            site_address='1 Sun Road', city='Lucknow', state='Uttar Pradesh',
+            project_type='Residential', dc_capacity_kw=Decimal('5.00'), assigned_pm=cls.pm)
+
+    def setUp(self):
+        self.approval = self.raise_material(design=True, programs=[self.tender_a],
+                                            projects=[self.site])
+        apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.head)
+        apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Use Adani.')
+        self.url = reverse('approval_resubmit', args=[self.approval.pk])
+
+    def form(self, **overrides):
+        """The resubmit page's POST with every drawn field as it was pre-filled."""
+        data = {'revise': '1', 'title': 'Module make', 'description': 'Propose Waaree 545 Wp.',
+                'proposed_make': 'Waaree', 'specification': '545 Wp mono PERC',
+                'quantity_note': '', 'vendor': '', 'program': [self.tender_a.pk],
+                'project': [self.site.pk], 'note': 'Changed the make.',
+                f'assignee_{APPROVAL_PARTY_PM}': self.pm.pk,
+                f'assignee_{APPROVAL_PARTY_DESIGN}': self.head.pk}
+        data.update(overrides)
+        return data
+
+    def detail(self, profile=None):
+        return self.client_for(profile or self.scm).get(
+            reverse('approval_detail', args=[self.approval.pk]))
+
+
+class ResubmitRevisionTests(RevisionFixture):
+
+    def test_a_revision_changes_the_fields_and_round_2_shows_them(self):
+        response = self.client_for(self.scm).post(
+            self.url, self.form(title='Module make v2', proposed_make='Adani'))
+        self.assert_to_detail(response, self.approval)
+        self.approval.refresh_from_db()
+        self.assertEqual((self.approval.current_round, self.approval.title),
+                         (2, 'Module make v2'))
+        self.assertEqual(self.approval.material_detail.proposed_make, 'Adani')
+        self.assertEqual(round_snapshot(self.approval, 2)['material']['proposed_make'],
+                         'Adani')
+        page = self.detail()
+        self.assertContains(page, 'Details approvers saw in round 2')
+        self.assertContains(page, 'Changed since round 1')
+        self.assertContains(page, 'Module make v2')
+
+    def test_only_the_fields_that_changed_are_sent_as_the_revision(self):
+        with mock.patch('projects.approval_views.resubmit_approval_request',
+                        wraps=resubmit_approval_request) as resubmit:
+            self.client_for(self.scm).post(self.url, self.form(proposed_make='Adani'))
+        self.assertEqual(resubmit.call_args.kwargs['revision'], {'proposed_make': 'Adani'})
+
+    def test_an_untouched_form_sends_no_revision(self):
+        with mock.patch('projects.approval_views.resubmit_approval_request',
+                        wraps=resubmit_approval_request) as resubmit:
+            self.client_for(self.scm).post(self.url, self.form())
+        self.assertIsNone(resubmit.call_args.kwargs['revision'])
+
+    def test_the_form_is_prefilled_with_the_request_as_it_stands(self):
+        response = self.client_for(self.scm).get(self.url)
+        self.assertContains(response, 'name="revise" value="1"')
+        self.assertContains(response, 'value="Module make"')
+        self.assertContains(response, f'<option value="{self.tender_a.pk}" selected>AV Tender A')
+        self.assertContains(response, 'BOQ items and design sign-off cannot be changed')
+        self.assertNotContains(response, 'NOT editable here')
+
+    def test_an_inactive_vendor_stays_offered_as_before(self):
+        ApprovalRequest.objects.filter(pk=self.approval.pk).update(vendor=self.vendor)
+        Vendor.objects.filter(pk=self.vendor.pk).update(is_active=False)
+        response = self.client_for(self.scm).get(self.url)
+        self.assertContains(response, 'AV Vendor (as before — inactive)')
+        with mock.patch('projects.approval_views.resubmit_approval_request',
+                        wraps=resubmit_approval_request) as resubmit:
+            self.client_for(self.scm).post(self.url, self.form(vendor=self.vendor.pk))
+        self.assertIsNone(resubmit.call_args.kwargs['revision'])
+
+
+class KeepApprovalTests(RevisionFixture):
+
+    def test_keep_is_offered_only_for_an_approved_previous_round_step(self):
+        response = self.client_for(self.scm).get(self.url)
+        self.assertContains(response, "Keep Av Head's approval from round 1")
+        self.assertContains(response, f'name="keep_{APPROVAL_PARTY_DESIGN}"')
+        self.assertNotContains(response, f'name="keep_{APPROVAL_PARTY_PM}"')
+        self.assertContains(response, 'Av Head will not be asked to review this revision. '
+                                      'Keep it only if your changes do not affect what they '
+                                      'approved.')
+
+    def test_a_superseded_step_is_offered_no_keep(self):
+        other = self.raise_material(design=True)
+        apply_approval_decision(self.step(other, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='No.')
+        response = self.client_for(self.scm).get(
+            reverse('approval_resubmit', args=[other.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'name="keep_')
+
+    def test_keep_without_a_reason_is_refused_by_the_form_with_values_kept(self):
+        for reason in ('', 'short reason x', 'a b c d e f g h i j k l m n'):   # 0, 12, 14
+            response = self.client_for(self.scm).post(self.url, self.form(
+                title='Typed title survives', **{f'keep_{APPROVAL_PARTY_DESIGN}': 'on',
+                                                  f'keep_reason_{APPROVAL_PARTY_DESIGN}': reason}))
+            self.assertContains(response, 'at least 15 characters, not counting spaces',
+                                status_code=400, msg_prefix=repr(reason))
+            self.assertContains(response, 'value="Typed title survives"', status_code=400)
+            self.assertContains(response, f'id="apKeep{APPROVAL_PARTY_DESIGN}" checked',
+                                status_code=400)
+            if reason:
+                self.assertContains(response, reason, status_code=400)
+        self.approval.refresh_from_db()
+        self.assertEqual((self.approval.status, self.approval.current_round),
+                         (APPROVAL_CHANGES_REQUESTED, 1))
+
+    def test_keep_plus_an_approver_change_for_the_same_party_is_refused(self):
+        head_b = _profile('av_head_b', 'Design', is_design_head=True)
+        response = self.client_for(self.scm).post(self.url, self.form(**{
+            f'keep_{APPROVAL_PARTY_DESIGN}': 'on',
+            f'keep_reason_{APPROVAL_PARTY_DESIGN}': KEEP_REASON,
+            f'assignee_{APPROVAL_PARTY_DESIGN}': head_b.pk}))
+        self.assertContains(response, 'Av Head&#x27;s approval cannot be kept while you '
+                                      'change the Design Head approver.', status_code=400)
+        self.assertContains(response, f'<option value="{head_b.pk}" selected>',
+                            status_code=400)
+        self.approval.refresh_from_db()
+        self.assertEqual(self.approval.current_round, 1)
+
+    def test_a_kept_step_renders_as_kept_and_is_not_timed(self):
+        self.client_for(self.scm).post(self.url, self.form(**{
+            f'keep_{APPROVAL_PARTY_DESIGN}': 'on',
+            f'keep_reason_{APPROVAL_PARTY_DESIGN}': KEEP_REASON}))
+        kept = self.step(self.approval, APPROVAL_PARTY_DESIGN)
+        self.assertIsNotNone(kept.carried_from_id)
+        page = self.detail()
+        self.assertContains(page, 'Kept from round 1 · decided by Av Head on ')
+        self.assertContains(page, ' · kept by Av Scm on ')
+        self.assertContains(page, f'IST · Reason: {KEEP_REASON}')
+        self.assertContains(page, '<dd class="col-7">Not timed (kept)</dd>', html=False)
+        self.assertNotContains(page, 'originally recorded by')
+
+    def test_a_kept_proxy_step_says_who_originally_recorded_it(self):
+        other = self.raise_material(design=True)
+        apply_approval_decision(self.step(other, APPROVAL_PARTY_DESIGN),
+                                APPROVAL_STEP_APPROVED, self.scm_b,
+                                proxy=ProxyDecision(self.head, 'whatsapp', 'WA 10:02 "ok"'))
+        apply_approval_decision(self.step(other, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='No.')
+        self.client_for(self.scm).post(
+            reverse('approval_resubmit', args=[other.pk]),
+            {'note': 'Changed.', f'keep_{APPROVAL_PARTY_DESIGN}': 'on',
+             f'keep_reason_{APPROVAL_PARTY_DESIGN}': KEEP_REASON})
+        page = self.client_for(self.scm).get(reverse('approval_detail', args=[other.pk]))
+        self.assertContains(page, 'Kept from round 1 · decided by Av Head on ')
+        self.assertContains(page, '(originally recorded by Av Scm B from WhatsApp)')
+
+
+# ===========================================================================
+# Approvals 2a-2 — round snapshots and the change list
+# ===========================================================================
+
+class RoundChangeTests(RevisionFixture):
+
+    def test_the_change_list_shows_old_and_new_values_and_scope_added_and_removed(self):
+        self.client_for(self.scm).post(self.url, self.form(
+            proposed_make='Adani', program=[self.tender_b.pk]))
+        page = self.detail()
+        self.assertContains(page, 'Changed since round 1')
+        self.assertContains(page, '<span class="text-muted">Waaree</span> → Adani', html=False)
+        self.assertContains(page, '+ Added: AV Tender B')
+        self.assertContains(page, '− Removed: AV Tender A')
+        self.assertNotContains(page, 'Change list unavailable')
+
+    def test_a_round_with_nothing_changed_says_so(self):
+        self.client_for(self.scm).post(self.url, self.form())
+        self.assertContains(self.detail(), 'No details changed in this round.')
+
+    def test_a_round_without_a_snapshot_shows_the_fallback_not_an_error(self):
+        self.client_for(self.scm).post(self.url, self.form(title='Module make v2'))
+        real = round_snapshot
+        with mock.patch('projects.approval_views.round_snapshot',
+                        side_effect=lambda approval, n: None if n == 1 else real(approval, n)):
+            page = self.detail()
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, 'Details as currently recorded (no snapshot for this round)')
+        self.assertContains(page, 'Change list unavailable for this round')
+
+
+# ===========================================================================
+# Approvals 2a-2 — proxy evidence files
+# ===========================================================================
+
+class ProxyEvidenceTests(ApprovalViewFixture):
+
+    def setUp(self):
+        self.approval = self.raise_material(design=False)
+        self.pm_step = self.step(self.approval, APPROVAL_PARTY_PM)
+        self.url = reverse('approval_record_proxy', args=[self.pm_step.pk])
+
+    def proxy(self, **overrides):
+        data = {'verdict': APPROVAL_STEP_APPROVED, 'decided_by': self.pm.pk,
+                'channel': 'whatsapp', 'evidence': 'WhatsApp 26 Sep 10:02: "go ahead"',
+                'evidence_files': [SimpleUploadedFile('whatsapp.png', b'\x89PNG x',
+                                                      content_type='image/png')]}
+        data.update(overrides)
+        return data
+
+    @mock.patch('projects.approval_views.get_supabase_client')
+    def test_an_evidence_file_is_listed_under_its_step(self, get_client):
+        response = self.client_for(self.scm).post(self.url, self.proxy())
+        self.assert_to_detail(response, self.approval)
+        attachment = ApprovalAttachment.objects.get(request=self.approval)
+        self.assertEqual((attachment.step_id, attachment.file_name, attachment.uploaded_by),
+                         (self.pm_step.pk, 'whatsapp.png', self.scm))
+        page = self.client_for(self.pm).get(reverse('approval_detail', args=[self.approval.pk]))
+        # Once — under the step, not again in the round's own file list.
+        self.assertEqual(page.content.count(b'>whatsapp.png</span>'), 1)
+
+    @mock.patch('projects.approval_views.get_supabase_client')
+    def test_a_refused_proxy_leaves_no_attachment_and_removes_the_file(self, get_client):
+        response = self.client_for(self.scm).post(self.url, self.proxy(decided_by=self.finance.pk))
+        self.assert_to_detail(response, self.approval)
+        self.assertTrue(any('cannot decide the PM step' in m for m in self.messages_of(response)))
+        self.assertFalse(ApprovalAttachment.objects.exists())
+        bucket = get_client.return_value.storage.from_.return_value
+        bucket.remove.assert_called_once_with([bucket.upload.call_args.kwargs['path']])
+
+    @mock.patch('projects.approval_views.get_supabase_client')
+    def test_evidence_takes_pdf_and_photos_only(self, get_client):
+        heic = SimpleUploadedFile('photo.heic', b'x', content_type='image/heic')
+        sheet = SimpleUploadedFile('notes.xlsx', b'x', content_type='application/vnd.'
+                                   'openxmlformats-officedocument.spreadsheetml.sheet')
+        response = self.client_for(self.scm).post(
+            self.url, self.proxy(evidence_files=[heic, sheet]))
+        messages_ = self.messages_of(response)
+        self.assertIn('photo.heic: unsupported type (.heic).', messages_)
+        self.assertIn('notes.xlsx: unsupported type (.xlsx).', messages_)
+        get_client.assert_not_called()
+        self.assertEqual(self.step(self.approval, APPROVAL_PARTY_PM).verdict,
+                         APPROVAL_STEP_PENDING)
+
+
+# ===========================================================================
+# Approvals 2a-2 — History: every action, who and when (D-A22)
+# ===========================================================================
+
+class HistoryTests(ApprovalViewFixture):
+
+    def history(self, approval, profile=None):
+        response = self.client_for(profile or self.scm).get(
+            reverse('approval_detail', args=[approval.pk]))
+        return response, response.context['history']
+
+    def test_a_reassignment_appears_with_the_scm_users_name_and_time(self):
+        approval = self.raise_material(design=False)
+        at = datetime(2026, 9, 1, 4, 30, tzinfo=dt_timezone.utc)          # 10:00 IST
+        with mock.patch.object(timezone, 'now', return_value=at):
+            self.client_for(self.scm_b).post(
+                reverse('approval_reassign', args=[self.step(approval, APPROVAL_PARTY_PM).pk]),
+                {'new_assignee': self.pm_b.pk, 'note': 'On leave.'})
+        response, history = self.history(approval)
+        entry = next(h for h in history if h['what'] == 'Reassigned the PM step (round 1)')
+        self.assertEqual((entry['actor'], entry['at'], entry['lines'], entry['remark']),
+                         ('Av Scm B', at, ['Av Pm → Av Pm B'], 'On leave.'))
+        self.assertContains(response, '<strong>Reassigned the PM step (round 1)</strong> · '
+                                      'Av Scm B · <span class="text-muted">01 Sep 2026, '
+                                      '10:00 IST</span>', html=False)
+
+    def test_every_scm_action_names_its_actor(self):
+        """Raised by one SCM user; a proxy, the resubmit (keeping the Head's approval)
+        by a SECOND SCM user on the first one's request; a reassignment and the
+        withdrawal by the first again."""
+        approval = self.raise_material(design=True)
+        self.client_for(self.scm_b).post(
+            reverse('approval_record_proxy',
+                    args=[self.step(approval, APPROVAL_PARTY_DESIGN).pk]),
+            {'verdict': APPROVAL_STEP_APPROVED, 'decided_by': self.head.pk,
+             'channel': 'whatsapp', 'evidence': 'WA "fine"'})
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Use Adani.')
+        self.client_for(self.scm_b).post(
+            reverse('approval_resubmit', args=[approval.pk]),
+            {'note': 'Now Adani.', f'keep_{APPROVAL_PARTY_DESIGN}': 'on',
+             f'keep_reason_{APPROVAL_PARTY_DESIGN}': KEEP_REASON})
+        self.client_for(self.scm).post(
+            reverse('approval_reassign', args=[self.step(approval, APPROVAL_PARTY_PM).pk]),
+            {'new_assignee': self.pm_b.pk, 'note': 'On leave.'})
+        self.client_for(self.scm).post(reverse('approval_withdraw', args=[approval.pk]),
+                                       {'note': 'Dropped.'})
+
+        _, history = self.history(approval)
+        self.assertEqual([(h['what'], h['actor']) for h in history], [
+            ('Raised', 'Av Scm'),
+            ('Design Head approved (round 1)', 'Av Head'),
+            ('PM requested changes (round 1)', 'Av Pm'),
+            ('Resubmitted as round 2', 'Av Scm B'),
+            ('Reassigned the PM step (round 2)', 'Av Scm'),
+            ('Withdrawn', 'Av Scm'),
+        ])
+        by_what = {h['what']: h for h in history}
+        self.assertEqual(by_what['Design Head approved (round 1)']['lines'],
+                         ['Recorded by Av Scm B from WhatsApp'])
+        self.assertIn('Approval kept — design: Av Head (round 1).',
+                      by_what['Resubmitted as round 2']['remark'])
+        self.assertTrue(all(h['at'] is not None for h in history))
+
+    def test_a_decision_that_moved_the_request_is_one_line_not_two(self):
+        approval = self.raise_material(design=False)
+        apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
+                                APPROVAL_STEP_APPROVED, self.pm)
+        _, history = self.history(approval)
+        self.assertEqual([h['what'] for h in history], ['Raised', 'PM approved (round 1)'])
+        self.assertEqual(history[1]['outcome'], 'Request now approved')
+
+    def test_an_unmatched_ledger_row_is_never_dropped(self):
+        approval = self.raise_material(design=False)
+        record_transition(approval, to_status=APPROVAL_APPROVED, from_status=APPROVAL_OPEN,
+                          actor=self.ceo, remark='Set by hand.')
+        response, history = self.history(approval)
+        entry = history[-1]
+        self.assertEqual((entry['what'], entry['actor'], entry['remark']),
+                         ('Approved', 'Av Ceo', 'Set by hand.'))
+        self.assertContains(response, '<strong>Approved</strong> · Av Ceo · ', html=False)
+
+    def test_a_withdrawal_from_an_open_round_appears_once(self):
+        approval = self.raise_material(design=True)       # two pending steps
+        withdraw_approval_request(approval, self.scm, 'Dropped.')
+        self.assertEqual(ApprovalStep.objects.filter(
+            request=approval, verdict=APPROVAL_STEP_SUPERSEDED).count(), 2)
+        _, history = self.history(approval)
+        self.assertEqual([(h['what'], h['actor']) for h in history],
+                         [('Raised', 'Av Scm'), ('Withdrawn', 'Av Scm')])

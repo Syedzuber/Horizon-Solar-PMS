@@ -15,14 +15,22 @@ SCOPE PICKERS are three plain multi-selects (tenders, sites, site groups), filte
 way order_views._raise_candidates() filters its candidates: live tenders, live sites, and
 procurement groups of live tenders. SiteGroup has no soft-delete of its own. The
 vendor-order picker is not reused: its wording is about purchases.
+
+Approvals 2a-2 adds the resubmit page's revision (parse_revision — only the fields that
+actually changed), its "keep an approval" boxes (parse_carry — the one FORM rule on a
+kept approval: a reason of at least KEEP_REASON_MIN non-space characters, and no keep for
+a party whose approver is being changed), and the proxy form's evidence files
+(parse_evidence_files).
 """
+import re
 import uuid as _uuid
 
 from django.db.models import Q
 
 from .models import (
     Program, Project, SiteGroup, UserProfile, Vendor,
-    APPROVAL_PARTY_DESIGN, GROUP_TYPE_PROCUREMENT,
+    APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_STEP_APPROVED,
+    GROUP_TYPE_PROCUREMENT,
 )
 from .permissions import profile_can_be_approval_assignee, user_has_design_head_authority
 from .views import _validate_upload_file
@@ -30,6 +38,16 @@ from .views import _validate_upload_file
 #: Files one submission may carry — the vendor-order raise's DOC_SLOTS number. The page
 #: may be used again (a resubmit adds more), so this caps a request, not a round.
 ATTACHMENT_LIMIT = 5
+
+#: What a proxy decision's evidence may be: a PDF, or a photo or screenshot (a WhatsApp
+#: screenshot is PNG or JPEG). Not HEIC or WebP — views._validate_upload_file's MIME map
+#: has neither (SECONDARY_FINDINGS, Approvals 2a-2).
+EVIDENCE_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png']
+
+#: The shortest reason, in non-space characters, for keeping an earlier approval (D-A20).
+KEEP_REASON_MIN = 15
+
+_PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
 
 
 def person_name(profile):
@@ -135,18 +153,45 @@ def parse_scope(post, errors):
     return tuple(picked)
 
 
-def parse_attachments(request, errors):
-    """The files posted under `attachments`, each validated the way every upload is
+def _validated_files(request, name, errors, allowed_extensions=None):
+    """The files posted under `name`, each validated the way every upload is
     (views._validate_upload_file: type, 20 MB, MIME). Touches no storage."""
-    files = request.FILES.getlist('attachments')
+    files = request.FILES.getlist(name)
     if len(files) > ATTACHMENT_LIMIT:
         errors.append(f'Attach at most {ATTACHMENT_LIMIT} files at a time.')
     for upload in files:
         try:
-            _validate_upload_file(upload)
+            _validate_upload_file(upload, allowed_extensions)
         except ValueError as exc:
             errors.append(f'{upload.name}: {exc}.')
     return files
+
+
+def parse_attachments(request, errors):
+    """The files posted under `attachments`. Touches no storage."""
+    return _validated_files(request, 'attachments', errors)
+
+
+def parse_evidence_files(request, errors):
+    """The proxy form's evidence files, under `evidence_files`: PDF and photos only
+    (EVIDENCE_EXTENSIONS). Touches no storage."""
+    return _validated_files(request, 'evidence_files', errors, EVIDENCE_EXTENSIONS)
+
+
+def _vendor(post, errors, current=None):
+    """The posted vendor: an active one, or `current` — the vendor the request already
+    names, still offered "(as before — inactive)" after it was deactivated, so an
+    untouched select never reads as a change. None when none is chosen."""
+    raw = (post.get('vendor') or '').strip()
+    if not raw:
+        return None
+    if current is not None and raw == str(current.pk):
+        return current
+    vendor = (Vendor.objects.filter(pk=int(raw), is_active=True).first()
+              if raw.isdigit() else None)
+    if vendor is None:
+        errors.append('The vendor you chose is no longer available. Choose again.')
+    return vendor
 
 
 def parse_create(request):
@@ -159,13 +204,7 @@ def parse_create(request):
     """
     post, errors = request.POST, []
 
-    vendor = None
-    vendor_raw = (post.get('vendor') or '').strip()
-    if vendor_raw:
-        vendor = (Vendor.objects.filter(pk=int(vendor_raw), is_active=True).first()
-                  if vendor_raw.isdigit() else None)
-        if vendor is None:
-            errors.append('The vendor you chose is no longer available. Choose again.')
+    vendor = _vendor(post, errors)
 
     design = post.get('design_signoff_required') == 'on'
     programs, projects, site_groups = parse_scope(post, errors)
@@ -220,3 +259,109 @@ def parse_assignee_overrides(post, holders, errors):
             continue
         changed[party] = profile
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Resubmit revision and kept approvals (Approvals 2a-2)
+# ---------------------------------------------------------------------------
+
+def _text(value):
+    """A text as the chokepoint stores it — stripped — with a browser's CRLF read as LF,
+    so a textarea posted back untouched is not a change."""
+    return (value or '').replace('\r\n', '\n').strip()
+
+
+def current_scope_pks(approval):
+    """The request's scope as the resubmit pickers can show it: LIVE rows only, by the
+    same three definitions the pickers use. {revision key: {pk}}. Three queries."""
+    return {
+        'programs':    set(_live_programs().filter(pk__in=approval.programs.all())
+                           .values_list('pk', flat=True)),
+        'projects':    set(_live_projects().filter(pk__in=approval.projects.all())
+                           .values_list('pk', flat=True)),
+        'site_groups': set(_live_groups().filter(pk__in=approval.site_groups.all())
+                           .values_list('pk', flat=True)),
+    }
+
+
+def parse_revision(post, approval, material, errors):
+    """The resubmit page's edited details. Returns the `revision` dict for
+    resubmit_approval_request() holding ONLY the keys whose posted value differs from
+    what the request holds now — an untouched field is never sent, so the round's change
+    list shows exactly what SCM changed.
+
+    Nothing at all unless the page drew the editable fields (hidden revise=1): a POST
+    from a page opened before they existed must never read as "every field blanked".
+
+    Scope is compared with the LIVE scope (current_scope_pks), which is all the pickers
+    can show. When SCM does change a scope list, the posted list replaces that whole set,
+    so a since-deleted site in it is dropped; the chokepoint refuses a deleted one
+    anyway. BOQ items and design sign-off are read-only on the page and never sent.
+    """
+    if post.get('revise') != '1':
+        return {}
+    revision = {}
+    for key in ('title', 'description'):
+        if key in post and _text(post[key]) != _text(getattr(approval, key)):
+            revision[key] = post[key]
+    if 'vendor' in post:
+        vendor = _vendor(post, errors, current=approval.vendor)
+        if (vendor.pk if vendor else None) != approval.vendor_id:
+            revision['vendor'] = vendor
+
+    picked = dict(zip(('programs', 'projects', 'site_groups'), parse_scope(post, errors)))
+    current = current_scope_pks(approval)
+    for key, rows in picked.items():
+        if {row.pk for row in rows} != current[key]:
+            revision[key] = rows
+
+    if material is not None:
+        for key in ('proposed_make', 'specification', 'quantity_note'):
+            if key in post and _text(post[key]) != _text(getattr(material, key)):
+                revision[key] = post[key]
+    return revision
+
+
+def keepable_steps(latest):
+    """{party: step} for the parties whose approval may be kept (D-A20). `latest` is the
+    last row per party of the round that asked for changes — the chokepoint's own rule.
+    Only an APPROVED step qualifies: a party that asked for changes, or whose step was
+    superseded when the round closed, is offered no keep."""
+    return {party: step for party, step in latest.items()
+            if step.verdict == APPROVAL_STEP_APPROVED}
+
+
+def parse_carry(post, keepable, overrides, errors):
+    """The ticked "Keep <name>'s approval" boxes. Returns {party: reason}, the `carry`
+    argument of resubmit_approval_request().
+
+    FORM RULES, refused here with everything typed kept on the page:
+      * a reason of at least KEEP_REASON_MIN non-space characters — the chokepoint only
+        refuses an empty one;
+      * no keep for a party whose approver this resubmit also changes (`overrides`) —
+        the chokepoint refuses it too, but in words about the ledger, not the form.
+    Whether an approval can be kept at all is re-decided by the chokepoint under its lock.
+    """
+    carry = {}
+    for party, label in _PARTY_LABELS.items():
+        if post.get(f'keep_{party}') != 'on':
+            continue
+        step = keepable.get(party)
+        if step is None:
+            errors.append(f'The {label} step was not approved, so there is no approval '
+                          f'to keep.')
+            continue
+        name = person_name(step.decided_by)
+        reason = (post.get(f'keep_reason_{party}') or '').strip()
+        refused = False
+        if party in overrides:
+            errors.append(f'{name}\'s approval cannot be kept while you change the {label} '
+                          f'approver. Untick "Keep", or leave the approver as before.')
+            refused = True
+        if len(re.sub(r'\s', '', reason)) < KEEP_REASON_MIN:
+            errors.append(f'Say why {name}\'s approval is being kept — at least '
+                          f'{KEEP_REASON_MIN} characters, not counting spaces.')
+            refused = True
+        if not refused:
+            carry[party] = reason
+    return carry

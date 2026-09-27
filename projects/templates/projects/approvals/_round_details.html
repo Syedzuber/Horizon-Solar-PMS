@@ -1,0 +1,34 @@
+{% comment %}
+Approvals 2a-2 — one round's request details (included by detail.html).
+
+`d` is a round snapshot (approvals.round_snapshot(), schema 1) or, for a round with no
+snapshot, approval_views._current_details() — the same shape, so one drawing serves
+both. The caller says which it is in the label above this block. Display names come from
+the dict itself, never from a live row: a snapshot says what that round saw.
+{% endcomment %}
+<p class="mb-2 fw-semibold text-break">{{ d.title }}</p>
+<p class="mb-2 text-break" style="white-space:pre-line;">{{ d.description }}</p>
+<dl class="row mb-0">
+  {% if d.material %}
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Proposed make</dt>
+  <dd class="col-7 col-sm-9 text-break">{{ d.material.proposed_make|default:"—" }}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Specification</dt>
+  <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ d.material.specification|default:"—" }}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Quantity</dt>
+  <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ d.material.quantity_note|default:"—" }}</dd>
+  {% if d.material.boq_items %}
+  <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
+  <dd class="col-7 col-sm-9 text-break">{% for item in d.material.boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% endfor %}</dd>
+  {% endif %}
+  {% endif %}
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
+  <dd class="col-7 col-sm-9 text-break">{% if d.vendor %}{{ d.vendor.name }}{% else %}—{% endif %}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
+  <dd class="col-7 col-sm-9">{% if d.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Tenders</dt>
+  <dd class="col-7 col-sm-9 text-break">{% for p in d.programs %}<div>{{ p.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Sites</dt>
+  <dd class="col-7 col-sm-9 text-break">{% for p in d.projects %}<div>{{ p.project_id }} <span class="text-muted">— {{ p.customer_name }}{% if p.is_deleted %} (deleted){% endif %}</span></div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Site groups</dt>
+  <dd class="col-7 col-sm-9 mb-0 text-break">{% for g in d.site_groups %}<div>{{ g.program_name|default:"—" }} · {{ g.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
+</dl>

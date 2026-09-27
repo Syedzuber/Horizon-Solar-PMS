@@ -12,6 +12,13 @@ the request. Each form is drawn only where its predicate passed in the view; its
 asks again on POST. A proxy step always says so: "Recorded by <name> from <channel>".
 
 Turnaround is the view's step_turnaround(): decided_at − activated_at from the STEP ROW.
+A kept (carried) step is never timed: it reads "Not timed (kept)".
+
+Approvals 2a-2: each round draws the details its approvers saw (_round_details.html, from
+the round's snapshot, or the current values under a label saying there is none) and, from
+round 2, what changed since the round before. A kept step says whose approval it keeps,
+from which round, who kept it and why. A proxy's evidence files sit under its step.
+History lists every action with who and when, in IST (settings.TIME_ZONE).
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -29,6 +36,7 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
   .ap-toggle .ap-chevron { margin-left: auto; transition: transform .15s; }
   details[open] > .ap-toggle .ap-chevron { transform: rotate(180deg); }
   @media (min-width: 576px) { .ap-toggle { width: auto; display: inline-flex; } }
+  .ap-round-summary { min-height: 44px; display: flex; align-items: center; cursor: pointer; }
 </style>
 {% endblock %}
 
@@ -101,6 +109,38 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
     Round {{ round.number }}{% if round.is_current %} <span class="text-muted fw-normal">· current</span>{% endif %}
   </div>
 
+  {% if round.number > 1 %}
+  <div class="card-body border-bottom small">
+    <div class="fw-semibold mb-1">Changed since round {{ round.number|add:"-1" }}</div>
+    {% if round.changes is None %}
+    <div class="text-muted">Change list unavailable for this round</div>
+    {% elif not round.changes %}
+    <div class="text-muted">No details changed in this round.</div>
+    {% else %}
+    <ul class="list-unstyled mb-0">
+      {% for c in round.changes %}
+      <li class="text-break{% if not forloop.last %} mb-2{% endif %}">
+        <div class="text-muted">{{ c.label }}</div>
+        {% if 'old' in c %}
+        <div style="white-space:pre-line;"><span class="text-muted">{{ c.old }}</span> → {{ c.new }}</div>
+        {% else %}
+        {% for item in c.added %}<div class="text-success">+ Added: {{ item }}</div>{% endfor %}
+        {% for item in c.removed %}<div class="text-danger">− Removed: {{ item }}</div>{% endfor %}
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="card-body border-bottom small py-1">
+    <details>
+      <summary class="fw-semibold ap-round-summary">{% if round.has_snapshot %}Details approvers saw in round {{ round.number }}{% else %}Details as currently recorded (no snapshot for this round){% endif %}</summary>
+      <div class="pb-2">{% include "projects/approvals/_round_details.html" with d=round.details %}</div>
+    </details>
+  </div>
+
   {% if round.attachments %}
   <div class="list-group list-group-flush">
     {% for a in round.attachments %}
@@ -122,9 +162,20 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
           <div class="fw-semibold">{{ row.party }}</div>
           <div class="small">{{ s.assignee.user.get_full_name|default:s.assignee.user.username }}</div>
         </div>
-        <span class="badge {{ row.badge }} flex-shrink-0">{{ s.get_verdict_display }}</span>
+        <span class="flex-shrink-0 text-end">
+          <span class="badge {{ row.badge }}">{{ s.get_verdict_display }}</span>{% if row.kept %}<span class="badge text-bg-light border ms-1">Kept</span>{% endif %}
+        </span>
       </div>
 
+      {% if row.kept %}
+      {% with k=row.kept %}
+      <dl class="row small mb-0 mt-2">
+        <dt class="col-5 text-muted fw-normal">Turnaround</dt>
+        <dd class="col-7">{{ row.turnaround }}</dd>
+      </dl>
+      <div class="alert alert-light border py-2 px-2 small mt-2 mb-0 text-break">Kept from round {{ k.round }} · decided by {{ k.decider }} on {{ k.decided_at|date:"d M Y, H:i" }} IST{% if k.originally %} ({{ k.originally }}){% endif %} · kept by {{ k.kept_by }} on {{ k.kept_at|date:"d M Y, H:i" }} IST · Reason: {{ k.reason }}</div>
+      {% endwith %}
+      {% else %}
       <dl class="row small mb-0 mt-2">
         <dt class="col-5 text-muted fw-normal">Asked</dt>
         <dd class="col-7">{% if s.activated_at %}{{ s.activated_at|date:"d M Y, H:i" }}{% else %}Not yet — waits for an earlier step{% endif %}</dd>
@@ -141,11 +192,23 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
         <dd class="col-7">{{ s.superseded_at|date:"d M Y, H:i" }} by {{ s.superseded_by.user.get_full_name|default:s.superseded_by.user.username }}</dd>
         {% endif %}
       </dl>
+      {% endif %}
 
       {% if row.proxy_line %}
       <div class="alert alert-secondary py-2 px-2 small mt-2 mb-0">
         <span class="badge text-bg-dark me-1">Proxy</span>{{ row.proxy_line }}
         <div class="mt-1 text-break" style="white-space:pre-line;"><span class="text-muted">Evidence:</span> {{ s.proxy_evidence }}</div>
+      </div>
+      {% endif %}
+      {% if row.evidence %}
+      <div class="list-group small mt-2">
+        {% for a in row.evidence %}
+        <a href="{{ a.url }}" target="_blank" rel="noopener" class="list-group-item list-group-item-action d-flex align-items-center gap-2 ap-attachment">
+          <i class="bi bi-paperclip"></i>
+          <span class="text-break">{{ a.file.label|default:a.file.file_name }}</span>
+          <span class="ms-auto text-muted flex-shrink-0">{{ a.file.file_size_kb }} KB</span>
+        </a>
+        {% endfor %}
       </div>
       {% endif %}
 
@@ -174,7 +237,7 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
       {% if row.can_proxy %}
       <details class="ap-actions mt-2">
         <summary class="btn btn-sm btn-outline-primary ap-toggle"><i class="bi bi-chat-square-text"></i>Record a decision made outside PMS<i class="bi bi-chevron-down ap-chevron"></i></summary>
-        <form method="post" action="{% url 'approval_record_proxy' s.pk %}" class="mt-2">
+        <form method="post" action="{% url 'approval_record_proxy' s.pk %}" enctype="multipart/form-data" class="mt-2">
           {% csrf_token %}
           <label for="apBy{{ s.pk }}" class="form-label small mb-1">Whose decision</label>
           <select name="decided_by" id="apBy{{ s.pk }}" class="form-select mb-2" required>
@@ -194,6 +257,8 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
           <textarea name="evidence" id="apEvidence{{ s.pk }}" class="form-control w-100 mb-2" rows="3" required></textarea>
           <label for="apProxyNote{{ s.pk }}" class="form-label small mb-1">Their note <span class="text-muted">(required to request changes or reject)</span></label>
           <textarea name="note" id="apProxyNote{{ s.pk }}" class="form-control w-100 mb-2" rows="2"></textarea>
+          <label for="apEvidenceFiles{{ s.pk }}" class="form-label small mb-1">Evidence files <span class="text-muted">(optional — screenshots, photos, PDF)</span></label>
+          <input type="file" name="evidence_files" id="apEvidenceFiles{{ s.pk }}" class="form-control w-100 mb-2" multiple accept="{{ evidence_accept }}">
           <div class="d-grid"><button type="submit" class="btn btn-outline-primary">Record decision</button></div>
         </form>
       </details>
@@ -244,9 +309,11 @@ Turnaround is the view's step_turnaround(): decided_at − activated_at from the
   <div class="card-header fw-semibold">History</div>
   <ul class="list-group list-group-flush small">
     {% for h in history %}
-    <li class="list-group-item">
-      <div><strong>{{ h.what }}</strong> · {{ h.actor }} · <span class="text-muted">{{ h.row.occurred_at|date:"d M Y, H:i" }}</span></div>
-      {% if h.row.remark %}<div class="text-break" style="white-space:pre-line;">{{ h.row.remark }}</div>{% endif %}
+    <li class="list-group-item text-break">
+      <div><strong>{{ h.what }}</strong> · {{ h.actor }} · <span class="text-muted">{{ h.at|date:"d M Y, H:i" }} IST</span></div>
+      {% for line in h.lines %}<div class="text-muted">{{ line }}</div>{% endfor %}
+      {% if h.outcome %}<div class="text-muted">{{ h.outcome }}</div>{% endif %}
+      {% if h.remark %}<div style="white-space:pre-line;">{% if h.remark_label %}<span class="text-muted">{{ h.remark_label }}</span> {% endif %}{{ h.remark }}</div>{% endif %}
     </li>
     {% endfor %}
   </ul>
