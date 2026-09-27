@@ -1468,6 +1468,8 @@ class CarryForwardTests(RevisionFixture):
                                 APPROVAL_STEP_APPROVED, self.se)
         apply_approval_decision(self.step(bill, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Rate?')
+        round_one_se = ApprovalStep.objects.get(request=bill, round=1,
+                                                party=APPROVAL_PARTY_SITE_ENGINEER)
         before = timezone.now()
         resubmit_approval_request(bill, self.scm, note='Rate corrected.',
                                   carry={APPROVAL_PARTY_SITE_ENGINEER: 'Work unchanged.'})
@@ -1476,6 +1478,13 @@ class CarryForwardTests(RevisionFixture):
         pm = self.step(bill, APPROVAL_PARTY_PM)
         self.assertEqual((se.verdict, se.decided_by, se.sequence),
                          (APPROVAL_STEP_APPROVED, self.se, 1))
+        self.assertEqual(se.round, 2)
+        self.assertEqual(se.carried_from, round_one_se)
+        self.assertEqual(se.carry_reason, 'Work unchanged.')
+        self.assertEqual(se.recorded_by, self.scm)
+        self.assertFalse(se.is_proxy)
+        self.assertEqual(se.activated_at, se.decided_at)
+        self.assertTrue(before <= se.activated_at <= after)
         self.assertEqual((pm.verdict, pm.sequence), (APPROVAL_STEP_PENDING, 2))
         self.assertIsNotNone(pm.activated_at)
         self.assertEqual(pm.activated_at, se.decided_at)        # the resubmit time
