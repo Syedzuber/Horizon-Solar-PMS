@@ -38,10 +38,14 @@ A CARRIED STEP IS NOT A DECISION (D-A20). A resubmit may keep a party's approval
 the previous round; the new round's step is created approved with `carried_from` set.
 Turnaround and aging figures must read steps through exclude_carried_steps().
 
-NO NOTIFICATIONS HERE. Session 2 adds them. record_transition() is called with its
-default notify=True: the only StatusTransition receiver (signals.payment_transition_
-notices) returns at once for any subject other than payment_request, so for this
-subject it sends and queues nothing.
+NOTIFICATIONS (Approvals 2b) ARE REGISTERED HERE AND BUILT ELSEWHERE. Each entry point
+registers exactly one transaction.on_commit(..., robust=True) callback from
+approval_notices.py, inside its own atomic block, passing ids: a refused or rolled-back
+action sends nothing, and a notice that fails after commit never undoes the action.
+Who hears what, and the wording, live in approval_notices.py. record_transition() is
+still called with its default notify=True: the only StatusTransition receiver
+(signals.payment_transition_notices) returns at once for any subject other than
+payment_request, so for this subject it sends and queues nothing.
 
 Refusals raise ApprovalRefused with a message for the person who asked. Nothing is
 written when a refusal is raised.
@@ -71,6 +75,7 @@ from .permissions import (
     user_can_record_proxy_decision, user_can_withdraw_approval_request,
 )
 from .utils import record_transition
+from . import approval_notices
 
 
 class ApprovalRefused(Exception):
@@ -521,6 +526,9 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         _write_round_snapshot(approval, 1, raised_by)
         record_transition(approval, to_status=APPROVAL_OPEN, actor=raised_by,
                           reason_code=REASON_CREATED)
+        transaction.on_commit(
+            lambda: approval_notices.after_create(approval.pk, raised_by.pk),
+            robust=True)
     return approval
 
 
@@ -588,6 +596,7 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
             raise ApprovalRefused(message)
 
         now = timezone.now()
+        # approval_notices matches on this timestamp equality; stamp both from the same `now`.
         written = ApprovalStep.objects.filter(
             pk=step.pk, verdict=APPROVAL_STEP_PENDING,
         ).update(
@@ -602,6 +611,7 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
 
         round_filter = dict(request=approval, round=approval.current_round)
         if verdict in APPROVAL_STEP_NOTE_REQUIRED:
+            # approval_notices matches on this timestamp equality; stamp both from the same `now`.
             ApprovalStep.objects.filter(
                 verdict=APPROVAL_STEP_PENDING, **round_filter,
             ).update(verdict=APPROVAL_STEP_SUPERSEDED, superseded_at=now,
@@ -621,6 +631,7 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
                            for s, v in live if s == step.sequence)
                 later = [s for s, _ in live if s > step.sequence]
                 if done and later:
+                    # approval_notices matches on this timestamp equality; stamp both from the same `now`.
                     ApprovalStep.objects.filter(
                         sequence=min(later), verdict=APPROVAL_STEP_PENDING,
                         activated_at__isnull=True, **round_filter,
@@ -632,6 +643,10 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
                 closed_at=now if new_status in APPROVAL_TERMINAL_STATUSES else None)
             record_transition(approval, to_status=new_status, from_status=APPROVAL_OPEN,
                               actor=decider, remark=note)
+        transaction.on_commit(
+            lambda: approval_notices.after_decision(
+                step.pk, actor.pk, new_status if new_status != APPROVAL_OPEN else None),
+            robust=True)
 
     approval.refresh_from_db()
     return approval
@@ -859,6 +874,10 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
         record_transition(approval, to_status=APPROVAL_OPEN,
                           from_status=APPROVAL_CHANGES_REQUESTED, actor=actor,
                           reason_code=REASON_RESUBMITTED, remark=remark)
+        transaction.on_commit(
+            lambda: approval_notices.after_resubmit(
+                approval.pk, new_round, actor.pk, [latest[party].pk for party in changed]),
+            robust=True)
 
     approval.refresh_from_db()
     return approval
@@ -891,14 +910,19 @@ def withdraw_approval_request(approval, actor, note):
 
         now = timezone.now()
         from_status = approval.status
+        # approval_notices matches on this timestamp equality; stamp both from the same `now`.
         ApprovalStep.objects.filter(
             request=approval, round=approval.current_round,
             verdict=APPROVAL_STEP_PENDING,
         ).update(verdict=APPROVAL_STEP_SUPERSEDED, superseded_at=now, superseded_by=actor)
+        # approval_notices matches on this timestamp equality; stamp both from the same `now`.
         ApprovalRequest.objects.filter(pk=approval.pk, status=from_status).update(
             status=APPROVAL_WITHDRAWN, closed_at=now, withdrawal_note=note)
         record_transition(approval, to_status=APPROVAL_WITHDRAWN, from_status=from_status,
                           actor=actor, remark=note)
+        transaction.on_commit(
+            lambda: approval_notices.after_withdraw(approval.pk, actor.pk),
+            robust=True)
 
     approval.refresh_from_db()
     return approval
@@ -942,4 +966,7 @@ def reassign_approval_step(step, new_assignee, actor, note):
             request=approval, round=step.round, party=step.party, sequence=step.sequence,
             assignee=new_assignee,
             activated_at=now if step.activated_at is not None else None)
+        transaction.on_commit(
+            lambda: approval_notices.after_reassign(step.pk, replacement.pk, actor.pk),
+            robust=True)
     return replacement
