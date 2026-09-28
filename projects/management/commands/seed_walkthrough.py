@@ -57,6 +57,12 @@ THE `fresh` AREA IS THE EXCEPTION: untouched starting points for building a new 
 each reached by the fewest real actions its state needs, on the REAL clock — nothing in
 it is backdated, so its sites age from the seed run. See `_area_fresh`.
 
+THE `approvals` AREA (D-A26) seeds every material-approval state, WALK-01 .. WALK-14, and
+prints a walk script — scenario, login, URL, what the page should show — with the aging
+page's expected figures, computed from the step rows without approval_queries
+(independent_aging_figures). It runs last, so every other area is unchanged by it. See
+`_area_approvals`.
+
 IDEMPOTENT BY AREA
 ------------------
 Each area is recorded in the manifest (`~/.horizon-pms-walkthrough/<db>.json`, bound to
@@ -70,7 +76,9 @@ import io
 import uuid
 import zipfile
 from contextlib import nullcontext
+from datetime import timedelta
 from decimal import Decimal
+from statistics import median
 
 from django.contrib.auth.models import User
 from django.contrib.messages import get_messages
@@ -81,7 +89,7 @@ from django.test import Client
 from django.urls import reverse
 
 from projects.management.commands._walkthrough_support import (
-    AreaManifest, SimClock, WALK_EMAIL_DOMAIN, database_fingerprint,
+    AreaManifest, STUB_BUCKET, SimClock, WALK_EMAIL_DOMAIN, database_fingerprint,
     default_manifest_path, permitted_real_email, print_db_banner,
     require_walkthrough_database, rows_since, seed_sandbox, stub_file_name, take_marks,
 )
@@ -117,10 +125,11 @@ USERS = [
 #: The one account whose address is NOT .invalid — see permitted_real_email().
 REAL_ADDRESS_USERNAME = 'walk.finassignee'
 
-#: `fresh` is LAST on purpose: every other area runs exactly as it did before it existed,
-#: so their rows, and the Residential generator's numbers, are unchanged by it.
+#: `fresh` came last on purpose: every area before it runs exactly as it did before it
+#: existed, so their rows, and the Residential generator's numbers, are unchanged by it.
+#: `approvals` goes after `fresh` for the same reason.
 AREAS = ['users', 'reference', 'design', 'changes', 'procurement', 'delivery',
-         'execution', 'residential', 'fresh']
+         'execution', 'residential', 'fresh', 'approvals']
 DEPENDS = {'users': [], 'reference': ['users']}
 for _area in AREAS[2:]:
     DEPENDS[_area] = ['users', 'reference']
@@ -154,6 +163,195 @@ VENDORS = [
 #: The OPEX catalogue rows a designer's BOQ uses — the first N active OPEX masters by
 #: sort order, quantities scaled per site so aggregates are worth reading.
 OPEX_BOQ_ROWS = 6
+
+# ---------------------------------------------------------------------------
+# The approvals area
+# ---------------------------------------------------------------------------
+#: The two accounts only this area needs: a second SCM user (any SCM user may act on any
+#: request) and a second PM (someone to reassign a PM step to). username, first, last,
+#: role — last names letters only, as USERS. Created here, not in USERS: a database
+#: whose `users` area is already recorded would otherwise never get them.
+APPROVAL_USERS = [
+    ('walk.scm2', 'Walk', 'Scmtwo', 'SCM', '9100000016'),
+    ('walk.pm2',  'Walk', 'Pmtwo',  'PM',  '9100000017'),
+]
+
+#: Every approval this area raises has a title starting with this; it is the area's
+#: marker (_area_marker_exists) and the walk script's key.
+APPROVAL_TITLE_PREFIX = 'WALK-'
+
+#: (name, vendor categories).
+APPROVAL_VENDORS = [
+    ('WALK Modules Co',    ['Solar Modules']),
+    ('WALK Structures Co', ['Structure']),
+]
+
+#: PO/PI records, recorded through purchases_new: (vendor, PO number, total, days ago).
+#: Distinct numbers AND distinct totals, so submission_guard's content match can never
+#: fire and no record needs "Create anyway".
+APPROVAL_RECORDS = [
+    ('WALK Modules Co',    'WALK-APO-M1', '850000', 25),
+    ('WALK Modules Co',    'WALK-APO-M2', '620000', 24),
+    ('WALK Structures Co', 'WALK-APO-S1', '430000', 23),
+    ('WALK Structures Co', 'WALK-APO-S2', '275000', 22),
+]
+
+#: WALK-01 is raised this many hours before the seed runs — "today", but in the past, so
+#: SimClock's millisecond steps never write a timestamp after the real now. The walk
+#: script reads the seed date back from it.
+S1_HOURS_BEFORE_SEED = 1
+
+#: The aging page's look-back, approval_queries.AGING_WINDOW_DAYS. RESTATED, NOT
+#: IMPORTED, so independent_aging_figures() shares nothing with the code it checks; a
+#: test pins the two equal.
+WALK_AGING_WINDOW_DAYS = 90
+
+#: (scenario, log in as, what the page should show). The URL is read from the database.
+#: Each line names the status, whose turn it is, and any kept, proxy, deputy or
+#: removed-link marker the detail page draws.
+WALK_SCRIPT = [
+    ('WALK-01', 'walk.pm',
+     'Open, round 1, pre-order. PM step Pending: Walk Pm\'s turn, asked today. Also on '
+     'walk.pm\'s dashboard "Pending approvals" card.'),
+    ('WALK-02', 'walk.designhead',
+     'Open, round 1, design sign-off. PM step Approved (Walk Pm, after 2 days); Design '
+     'step Pending: Walk Designhead\'s turn. walk.designdeputy sees it on their card as '
+     'deputy for Walk Designhead. Raised by Walk Scmtwo.'),
+    ('WALK-03', 'walk.scm',
+     'Approved. PM Approved after 1 day, Design Approved by Walk Designhead after 3 days; '
+     'nobody\'s turn. Vendor WALK Modules Co. "PO/PI records covered" section, empty '
+     '(link form shown to SCM).'),
+    ('WALK-04', 'walk.pm',
+     'Rejected. PM step Rejected by Walk Pm with the note "not on the approved list"; '
+     'nobody\'s turn.'),
+    ('WALK-05', 'walk.scm',
+     'Approved. PM step Approved with the "Proxy" badge: "Recorded by Walk Scm from a '
+     'phone call", the evidence text, and one evidence file "Call note (seeded: no file '
+     'behind it)" whose link opens "bucket not found" (deliberate).'),
+    ('WALK-06', 'walk.pm',
+     'Open, round 2. PM step Pending: Walk Pm\'s turn. Round 1: PM Changes requested. '
+     'Round 2 "what changed": line 1 quantity 40.00 -> 48.00 (Meter). History: resubmitted '
+     'by Walk Scmtwo.'),
+    ('WALK-07', 'walk.designhead',
+     'Open, round 2. PM step Approved with the "Kept" badge: "Kept from round 1 - decided '
+     'by Walk Pm ... kept by Walk Scm ... Reason: Only the galvanising changed ..."; '
+     'Design step Pending: Walk Designhead\'s turn. Round 1: Design Changes requested; '
+     'round 2 "what changed": line 2 specification.'),
+    ('WALK-08', 'walk.scm',
+     'Withdrawn, with the note "The client dropped lot 4". PM step Superseded ("Closed ... '
+     'by Walk Scm"); nobody\'s turn.'),
+    ('WALK-09', 'walk.pm2',
+     'Open, round 1. First PM row Superseded, closed by Walk Scmtwo with "Walk Pm is on '
+     'leave"; second PM row Pending: Walk Pmtwo\'s turn (their dashboard card too).'),
+    ('WALK-10', 'walk.designdeputy',
+     'Approved. Design step assigned to Walk Designhead, "Decided by" Walk Designdeputy '
+     '(the deputy marker on the aging page: Decided by deputy = 1 for Walk Designhead); '
+     'PM Approved by Walk Pm.'),
+    ('WALK-11', 'walk.pm',
+     'Open, round 1, PRE-DISPATCH. PM step Pending: Walk Pm\'s turn. "Dispatch against": '
+     'PO/PI record WALK-APO-M1 (WALK Modules Co) and pre-order approval WALK-03.'),
+    ('WALK-12', 'walk.scm',
+     'Approved. "PO/PI records covered": WALK-APO-S1 active; WALK-APO-S2 struck through, '
+     'removed by Walk Scm with "belongs to the next batch". Nobody\'s turn.'),
+    ('WALK-13', 'walk.pm',
+     'Open, round 1. PM step Pending: Walk Pm\'s turn for 20 days - the oldest item on the '
+     'aging page.'),
+    ('WALK-14', 'walk.scm',
+     'Approved; PM decided 99 days ago, outside the 90-day window: in no aging figure.'),
+]
+
+
+def independent_aging_figures(now):
+    """The aging page's figures, computed from the step rows WITHOUT approval_queries —
+    the walk script prints them so the page can be checked against them, and the tests
+    compare them with approval_queries.aging_rows().
+
+    The rules restated, from the page's own definitions (approval_queries module note):
+      * pending: verdict pending, its turn has come, request open, in the request's
+        current round, not carried; days are whole 24-hour periods since activation;
+      * a decision: approved, changes requested or rejected, decided within the window,
+        not carried; it belongs to the ASSIGNEE; turnaround = decided - activated;
+      * proxy: the step was recorded on the decider's behalf; by deputy: decided by
+        someone other than the assignee;
+      * carry rate: carried steps in the window / (those + fresh approvals in round 2+).
+    Rows are ordered as the page orders them: longest wait first, then by name.
+    """
+    # Imported here, not at module level — not a circular import: the command module
+    # loads no product module until the guards have run.
+    from projects.models import ApprovalStep
+
+    since = now - timedelta(days=WALK_AGING_WINDOW_DAYS)
+    day = timedelta(days=1)
+    # Every step with the request fields the rules read — one query; the whole table is
+    # a few dozen rows on a walkthrough database.
+    rows = list(ApprovalStep.objects.values(
+        'round', 'verdict', 'assignee_id', 'decided_by_id', 'activated_at', 'decided_at',
+        'is_proxy', 'carried_from_id', 'request__status', 'request__current_round',
+        'assignee__user__username', 'assignee__user__first_name',
+        'assignee__user__last_name'))
+    people, carried, fresh_approved = {}, 0, 0
+
+    def person(row):
+        entry = people.get(row['assignee_id'])
+        if entry is None:
+            full = f'{row["assignee__user__first_name"]} {row["assignee__user__last_name"]}'
+            entry = people[row['assignee_id']] = {
+                'username': row['assignee__user__username'],
+                'name': full.strip() or row['assignee__user__username'],
+                'waiting_since': [], 'turnarounds': [], 'decisions': 0, 'proxies': 0,
+                'deputy': 0}
+        return entry
+
+    for row in rows:
+        if row['carried_from_id'] is not None:
+            if row['decided_at'] is not None and row['decided_at'] >= since:
+                carried += 1
+            continue
+        if (row['verdict'] == 'pending' and row['activated_at'] is not None
+                and row['request__status'] == 'open'
+                and row['round'] == row['request__current_round']):
+            person(row)['waiting_since'].append(row['activated_at'])
+        elif (row['verdict'] in ('approved', 'changes_requested', 'rejected')
+                and row['decided_at'] >= since):
+            entry = person(row)
+            entry['decisions'] += 1
+            entry['proxies'] += int(row['is_proxy'])
+            entry['deputy'] += int(row['decided_by_id'] != row['assignee_id'])
+            if row['activated_at'] is not None:
+                entry['turnarounds'].append((row['decided_at'] - row['activated_at']) / day)
+            if row['verdict'] == 'approved' and row['round'] >= 2:
+                fresh_approved += 1
+
+    assignees = []
+    for entry in people.values():
+        waiting = sorted(entry.pop('waiting_since'))
+        turnarounds = entry.pop('turnarounds')
+        deputy = entry.pop('deputy')
+        oldest = max((now - waiting[0]) // day, 0) if waiting else None
+        decided = entry['decisions']
+        entry.update({
+            'pending_count': len(waiting),
+            'oldest_days': oldest,
+            'oldest_text': ('—' if oldest is None else 'today' if oldest < 1
+                            else '1 day' if oldest == 1 else f'{oldest} days'),
+            'median_days': round(median(turnarounds), 1) if turnarounds else None,
+            'proxy_share': entry['proxies'] / decided if decided else None,
+            'by_deputy': deputy if decided else None,
+            '_first': waiting[0] if waiting else None,
+        })
+        assignees.append(entry)
+    assignees.sort(key=lambda e: (e['_first'] is None, e['_first'] or now, e['name']))
+    for entry in assignees:
+        del entry['_first']
+    denominator = carried + fresh_approved
+    return {
+        'assignees': assignees,
+        'total_pending': sum(e['pending_count'] for e in assignees),
+        'carried': carried,
+        'fresh_approved': fresh_approved,
+        'carry_rate': carried / denominator if denominator else None,
+    }
+
 
 #: The design route, in order. `upto` names the last step taken.
 DESIGN_ROUTE = ['survey', 'allocate', 'arka', 'arka_qc', 'arka_head', 'cad', 'boq',
@@ -277,6 +475,15 @@ class Command(BaseCommand):
                     or Vendor.objects.filter(name__startswith='WALK ').exists())
         if area == 'residential':
             return Project.objects.filter(customer_name__startswith='WALK Residential').exists()
+        if area == 'approvals':
+            # The area has no tender. Its approvals are the marker — and its first
+            # account too, so a run that stopped after creating walk.scm2 but before the
+            # first approval is still caught, not re-run into a refused user_create.
+            # Imported here as the method's other models are — not a circular import.
+            from projects.models import ApprovalRequest
+            return (ApprovalRequest.objects
+                    .filter(title__startswith=APPROVAL_TITLE_PREFIX).exists()
+                    or User.objects.filter(username=APPROVAL_USERS[0][0]).exists())
         return Program.objects.filter(short_tender_code=TENDERS[area][0]).exists()
 
     def _load_people(self):
@@ -295,14 +502,16 @@ class Command(BaseCommand):
         return client
 
     def _post(self, who, name, kwargs=None, data=None, *, check=None, what='',
-              hx=False, json=None, ok=(200, 302)):
+              hx=False, json=None, ok=(200, 302), query=''):
         """POST as `who` (a username), then re-read the database with `check`.
 
         `check` is a no-argument callable returning truthy when the step did what it
         was for. A failed check stops the run and quotes the product's own messages.
+        `query` is appended to the URL, for a view that reads its mode from it
+        (approval_create's ?kind=).
         """
         profile = self.p[who]
-        url = reverse(name, kwargs=kwargs or {})
+        url = reverse(name, kwargs=kwargs or {}) + (f'?{query}' if query else '')
         extra = {'HTTP_HX_REQUEST': 'true'} if hx else {}
         client = self._client(profile)
         if json is not None:
@@ -1499,6 +1708,384 @@ class Command(BaseCommand):
         }, check=lambda: m.Vendor.objects.filter(name=FRESH_VENDOR).exists(),
             what='fresh vendor')
 
+    # ============================================================== approvals
+    def _area_approvals(self):
+        """Every material-approval state (D-A26): WALK-01 .. WALK-14, pre-order and
+        pre-dispatch, on two new vendors and four PO/PI records. Contractor bills are not
+        here; Session 4a adds them to this area.
+
+        EVERY STATE GOES THROUGH THE REAL APPROVAL VIEWS, as the person the product
+        requires — bar one decision. WALK-05's proxy approval carries an evidence FILE,
+        and approval_views binds get_supabase_client when it is imported, so the
+        sandbox's stub (which patches supabase_storage) never reaches it: an upload
+        through the view fails closed. That one decision is made through the chokepoint,
+        apply_approval_decision(proxy=...), whose `files` are rows for files the caller
+        has already stored — here, stub rows in STUB_BUCKET that no download resolves.
+        Nothing writes an approval table except approvals.py.
+
+        NO TRANSACTION WRAPS THE AREA. Each view request and each chokepoint call commits
+        inside its own SimClock step, so the notices its on_commit callbacks write carry
+        the simulated time.
+
+        Times are (days ago, hours) from the seed. They are chosen so the aging page's
+        figures are worth reading — walk.pm's eight decisions take 0.25 to 3 days, not
+        all one day — and every decision except WALK-14's is inside its 90-day window.
+        """
+        # Imported here as every area imports its models — not a circular import: it
+        # keeps the command module free of product imports until the guards have run.
+        from django.utils import timezone
+        from projects import models as m
+        from projects.approvals import ApprovalRefused, ProxyDecision, apply_approval_decision
+        from projects.units import format_quantity
+
+        # --- two more accounts, through the Admin's own screen ------------------------
+        for username, first, last, role, phone in APPROVAL_USERS:
+            self._post('walk.admin', 'user_create', data={
+                'first_name': first, 'last_name': last, 'username': username,
+                'email': f'{username}@{WALK_EMAIL_DOMAIN}', 'password': WALK_PASSWORD,
+                'role': role, 'phone_number': phone, 'is_active': 'on',
+            }, check=lambda u=username, r=role: User.objects.filter(
+                username=u, profile__role=r).exists(), what=f'create {username}')
+        self._load_people()
+        for username, *_rest in APPROVAL_USERS:
+            profile = self.p[username]
+            self._post('walk.admin', 'admin_notification_prefs',
+                       data={'profile_id': profile.pk},   # both boxes absent = both off
+                       check=lambda pk=profile.pk: m.UserProfile.objects.filter(
+                           pk=pk, email_notifications=False,
+                           whatsapp_notifications=False).exists(),
+                       what=f'preferences off for {username}')
+
+        # --- vendors and PO/PI records --------------------------------------------------
+        categories = {c.name: c.pk for c in m.VendorCategory.objects.all()}
+        for index, (name, cats) in enumerate(APPROVAL_VENDORS, start=1):
+            self._post('walk.scm', 'vendor_add', data={
+                'name': name, 'contact_person': f'Walk Approvals Sales {index}',
+                'phone': f'98000001{index:02d}',
+                'email': f'approvals.vendor{index}@{WALK_EMAIL_DOMAIN}',
+                'address': 'Synthetic address (walkthrough only)',
+                'categories': [categories[c] for c in cats],
+            }, check=lambda n=name: m.Vendor.objects.filter(name=n).exists(),
+                what=f'vendor {name}')
+        vendors = {name: m.Vendor.objects.get(name=name) for name, _cats in APPROVAL_VENDORS}
+
+        # purchases_new, recorded against nothing (so the kind is asked: OPEX), with no
+        # payment — no Finance notices. The key is the POSTed client_uuid; ?key= is
+        # read on GET only.
+        for vendor_name, po_number, total, days in APPROVAL_RECORDS:
+            with self.clock.at(days, history='approvals:records'):
+                self._post('walk.scm', 'purchases_new', data={
+                    'client_uuid': str(uuid.uuid4()),
+                    'vendor_id': str(vendors[vendor_name].pk),
+                    'po_number': po_number, 'order_total': total,
+                    'site': [], 'program': [], 'project_type': 'OPEX',
+                    'doc_type_0': m.VENDOR_ORDER_DOC_PO, 'doc_file_0': self._pdf('po'),
+                }, check=lambda n=po_number: m.VendorOrder.objects.filter(
+                    po_number=n).exists(), what=f'PO/PI record {po_number}')
+        records = {po: m.VendorOrder.objects.get(po_number=po)
+                   for _v, po, _t, _d in APPROVAL_RECORDS}
+
+        # --- helpers ---------------------------------------------------------------------
+        def at(code, days, hours=0):
+            return self.clock.at(days, history=f'approval:{code}', hours=hours)
+
+        def lines_post(lines):
+            """The lines table as the raise and resubmit pages post it: line-<i>-<field>."""
+            data = {}
+            for index, line in enumerate(lines):
+                for field, value in line.items():
+                    if value not in (None, ''):
+                        data[f'line-{index}-{field}'] = str(value)
+            return data
+
+        def live_lines(approval):
+            return [{'id': line.pk, 'description': line.description, 'make': line.make,
+                     'specification': line.specification,
+                     'quantity': format_quantity(line.quantity, line.unit),
+                     'unit': line.unit}
+                    for line in m.MaterialApprovalLine.objects
+                    .filter(detail__request=approval).order_by('position')]
+
+        def raise_request(code, title, description, lines, *, days, hours=0,
+                          who='walk.scm', vendor=None, design=False, order=None,
+                          pre_order=None):
+            full_title = f'{code} {title}'
+            data = {'client_uuid': str(uuid.uuid4()), 'title': full_title,
+                    'description': description, 'pm_assignee': self.p['walk.pm'].pk}
+            if vendor:
+                data['vendor'] = vendors[vendor].pk
+            if design:
+                data['design_signoff_required'] = 'on'
+                data['design_assignee'] = self.p['walk.designhead'].pk
+            query = ''
+            if order is not None:
+                # Pre-dispatch: the kind is the URL's, and the vendor is the record's.
+                query = f'kind={m.APPROVAL_KIND_MATERIAL_PRE_DISPATCH}'
+                data['vendor_order'] = order.pk
+                if pre_order is not None:
+                    data['pre_order_request'] = pre_order.pk
+            data.update(lines_post(lines))
+            with at(code, days, hours):
+                self._post(who, 'approval_create', data=data, query=query,
+                           check=lambda: m.ApprovalRequest.objects.filter(
+                               title=full_title, status=m.APPROVAL_OPEN).exists(),
+                           what=f'raise {code}')
+            return m.ApprovalRequest.objects.get(title=full_title)
+
+        def live_step(approval, party):
+            approval.refresh_from_db()
+            return m.ApprovalStep.objects.get(
+                request=approval, round=approval.current_round, party=party,
+                verdict=m.APPROVAL_STEP_PENDING)
+
+        def decide(approval, party, who, verdict, *, days, hours=0, note=''):
+            step = live_step(approval, party)
+            code = approval.title.split()[0]
+            with at(code, days, hours):
+                self._post(who, 'approval_decide', {'step_pk': step.pk},
+                           {'verdict': verdict, 'note': note},
+                           check=lambda: m.ApprovalStep.objects.filter(
+                               pk=step.pk, verdict=verdict,
+                               decided_by=self.p[who]).exists(),
+                           what=f'{code} {party} {verdict} by {who}')
+
+        def status_is(approval, status, current_round=None):
+            def check():
+                row = m.ApprovalRequest.objects.get(pk=approval.pk)
+                return row.status == status and (current_round is None
+                                                 or row.current_round == current_round)
+            return check
+
+        approve, changes, reject = (m.APPROVAL_STEP_APPROVED,
+                                    m.APPROVAL_STEP_CHANGES_REQUESTED,
+                                    m.APPROVAL_STEP_REJECTED)
+        pm, design = m.APPROVAL_PARTY_PM, m.APPROVAL_PARTY_DESIGN
+
+        module = {'description': 'Solar PV module 550 Wp', 'make': 'Walk Solar',
+                  'specification': 'Mono PERC bifacial, 144 half-cut cells',
+                  'quantity': '120', 'unit': 'Nos'}
+        cable = {'description': 'DC solar cable 4 sq mm', 'make': 'Walk Cables',
+                 'specification': 'EN 50618, red and black', 'quantity': '850.50',
+                 'unit': 'Meter'}
+        structure = {'description': 'Module mounting structure', 'make': 'Walk Structures',
+                     'specification': 'Pre-galvanised, fixed tilt 15 degrees',
+                     'quantity': '12', 'unit': 'Set'}
+        inverter = {'description': 'String inverter 50 kW', 'make': 'Walk Power',
+                    'specification': '4 MPPT, IP66', 'quantity': '2', 'unit': 'Nos'}
+        earthing = {'description': 'Earthing kit', 'make': 'Walk Earthing',
+                    'specification': 'Chemical earthing, 3 m electrode',
+                    'quantity': '4', 'unit': 'Lot'}
+        fasteners = {'description': 'SS fasteners M8', 'make': '', 'specification': '',
+                     'quantity': '25.5', 'unit': 'Kg'}
+
+        # --- WALK-01: raised today, pending the PM -----------------------------------------
+        raise_request('WALK-01', 'Modules for the next batch',
+                      'Modules for the sites released this week.', [module],
+                      days=0, hours=-S1_HOURS_BEFORE_SEED, vendor='WALK Modules Co')
+
+        # --- WALK-02: design sign-off; the PM approved, the Design Head has not ---------
+        s2 = raise_request('WALK-02', 'Structures with design sign-off',
+                           'Mounting structure for the rooftop sites; Design to confirm '
+                           'the tilt.', [structure, fasteners], days=6, who='walk.scm2',
+                           vendor='WALK Structures Co', design=True)
+        decide(s2, pm, 'walk.pm', approve, days=4)
+
+        # --- WALK-03: approved by the PM after 1 day and the Head after 3 ----------------
+        s3 = raise_request('WALK-03', 'Modules and cable, approved',
+                           'Modules and DC cable for Batch C.', [module, cable],
+                           days=10, vendor='WALK Modules Co', design=True)
+        decide(s3, pm, 'walk.pm', approve, days=9)
+        decide(s3, design, 'walk.designhead', approve, days=7)
+
+        # --- WALK-04: rejected by the PM ------------------------------------------------
+        s4 = raise_request('WALK-04', 'Inverters from an unlisted make',
+                           'String inverters, quoted by a new supplier.', [inverter],
+                           days=5, vendor='WALK Modules Co')
+        decide(s4, pm, 'walk.pm', reject, days=5, hours=12,
+               note='This make is not on the approved list for the tender.')
+
+        # --- WALK-05: SCM records the PM's approval, given by phone ------------------------
+        s5 = raise_request('WALK-05', 'Earthing kits, approved by phone',
+                           'Earthing kits for four sites.', [earthing], days=4,
+                           vendor='WALK Structures Co')
+        step = live_step(s5, pm)
+        file_name = stub_file_name('proxy-evidence', 'pdf')
+        with at('WALK-05', 3, 12):
+            said = timezone.localtime().strftime('%d %b %Y, %H:%M')
+            try:
+                # THROUGH THE CHOKEPOINT, NOT THE VIEW — see the docstring: the view
+                # cannot store an evidence file inside the sandbox. The row names a file
+                # in STUB_BUCKET that does not exist, on purpose.
+                apply_approval_decision(step, approve, self.p['walk.scm'], proxy=ProxyDecision(
+                    self.p['walk.pm'], m.APPROVAL_PROXY_PHONE,
+                    f'Walk Pm approved on a phone call at {said}: "Go ahead with the '
+                    f'Walk Earthing kits."',
+                    files=[{'file_name': file_name, 'bucket': STUB_BUCKET,
+                            'path': f'approvals/{s5.pk}/round-1/proxy-{step.pk}/{file_name}',
+                            'file_type': 'application/pdf', 'file_size_kb': 1,
+                            'label': 'Call note (seeded: no file behind it)'}]))
+            except ApprovalRefused as exc:
+                raise CommandError(f'WALK-05 proxy approval refused: {exc}')
+        if not status_is(s5, m.APPROVAL_APPROVED)():
+            raise CommandError('WALK-05 proxy approval did not approve the request.')
+
+        # --- WALK-06: the PM asks for changes; walk.scm2 resubmits one quantity -----------
+        s6 = raise_request('WALK-06', 'DC cable, recounted',
+                           'DC cable for the Batch B strings.',
+                           [dict(cable, quantity='40'), structure], days=8)
+        decide(s6, pm, 'walk.pm', changes, days=7, hours=6,
+               note='Quantity is short by one string; recount against the revised layout.')
+        revised = live_lines(s6)
+        revised[0]['quantity'] = '48'
+        with at('WALK-06', 6, 3):
+            self._post('walk.scm2', 'approval_resubmit', {'approval_pk': s6.pk},
+                       dict(lines_post(revised), revise='1',
+                            note='Line 1 recounted against the revised string layout.'),
+                       check=status_is(s6, m.APPROVAL_OPEN, 2), what='WALK-06 resubmit')
+
+        # --- WALK-07: PM approves, Head asks for changes; resubmit keeps the PM -----------
+        s7 = raise_request('WALK-07', 'Structures, galvanising revised',
+                           'Structures for the coastal sites.', [module, structure],
+                           days=9, vendor='WALK Structures Co', design=True)
+        decide(s7, pm, 'walk.pm', approve, days=9, hours=6)
+        decide(s7, design, 'walk.designhead', changes, days=7,
+               note='Coastal sites need hot-dip galvanising, 80 micron minimum.')
+        revised = live_lines(s7)
+        revised[1]['specification'] = 'Hot-dip galvanised, 80 micron, fixed tilt 15 degrees'
+        with at('WALK-07', 6, 4):
+            self._post('walk.scm', 'approval_resubmit', {'approval_pk': s7.pk},
+                       dict(lines_post(revised), revise='1', keep_pm='on',
+                            keep_reason_pm='Only the galvanising changed; the PM approved '
+                                           'the same makes and quantities.',
+                            note='Structure specification changed to hot-dip galvanised.'),
+                       check=lambda: m.ApprovalStep.objects.filter(
+                           request=s7, round=2, party=pm,
+                           carried_from__isnull=False).exists(),
+                       what='WALK-07 resubmit keeping the PM')
+
+        # --- WALK-08: withdrawn by walk.scm ------------------------------------------------
+        s8 = raise_request('WALK-08', 'Inverters for a dropped lot',
+                           'Inverters for tender lot 4.', [inverter], days=3)
+        with at('WALK-08', 2):
+            self._post('walk.scm', 'approval_withdraw', {'approval_pk': s8.pk},
+                       {'note': 'The client dropped lot 4; nothing is needed for it.'},
+                       check=status_is(s8, m.APPROVAL_WITHDRAWN), what='WALK-08 withdraw')
+
+        # --- WALK-09: the PM step handed from walk.pm to walk.pm2 ----------------------------
+        s9 = raise_request('WALK-09', 'Fasteners, PM reassigned',
+                           'Fasteners for the structure top-up.', [fasteners], days=7)
+        step = live_step(s9, pm)
+        with at('WALK-09', 6, 2):
+            self._post('walk.scm2', 'approval_reassign', {'step_pk': step.pk},
+                       {'new_assignee': self.p['walk.pm2'].pk,
+                        'note': 'Walk Pm is on leave this week; Walk Pmtwo covers.'},
+                       check=lambda: m.ApprovalStep.objects.filter(
+                           request=s9, verdict=m.APPROVAL_STEP_PENDING,
+                           assignee=self.p['walk.pm2']).exists(),
+                       what='WALK-09 reassign')
+
+        # --- WALK-10: the design step decided by the Head's deputy -------------------------
+        s10 = raise_request('WALK-10', 'Modules, signed off by the deputy',
+                            'Modules for the Batch D rooftops.', [module], days=12,
+                            vendor='WALK Modules Co', design=True)
+        decide(s10, pm, 'walk.pm', approve, days=11)
+        decide(s10, design, 'walk.designdeputy', approve, days=10)
+
+        # --- WALK-11: pre-dispatch against WALK-APO-M1, linked to WALK-03 -------------------
+        raise_request('WALK-11', 'Dispatch of the Batch C modules',
+                      'Dispatch against WALK-APO-M1, as approved in WALK-03.',
+                      [dict(module, quantity='60')], days=2,
+                      order=records['WALK-APO-M1'], pre_order=s3)
+
+        # --- WALK-12: approved, two PO/PI records linked, one link removed -----------------
+        s12 = raise_request('WALK-12', 'Structures for two POs',
+                            'Structures for the Batch E sites.', [structure], days=15,
+                            vendor='WALK Structures Co')
+        decide(s12, pm, 'walk.pm', approve, days=12)
+        for hours, po_number in ((0, 'WALK-APO-S1'), (1, 'WALK-APO-S2')):
+            order = records[po_number]
+            with at('WALK-12', 11, hours):
+                self._post('walk.scm', 'approval_link_order', {'approval_pk': s12.pk},
+                           {'vendor_order': order.pk},
+                           check=lambda o=order: m.ApprovalOrderLink.objects.filter(
+                               approval=s12, vendor_order=o,
+                               removed_at__isnull=True).exists(),
+                           what=f'WALK-12 link {po_number}')
+        link = m.ApprovalOrderLink.objects.get(approval=s12,
+                                               vendor_order=records['WALK-APO-S2'])
+        with at('WALK-12', 10):
+            self._post('walk.scm', 'approval_unlink_order', {'link_pk': link.pk},
+                       {'note': 'WALK-APO-S2 belongs to the next batch, not this approval.'},
+                       check=lambda: m.ApprovalOrderLink.objects.filter(
+                           pk=link.pk, removed_at__isnull=False).exists(),
+                       what='WALK-12 remove the WALK-APO-S2 link')
+
+        # --- WALK-13: pending the PM for 20 days — the oldest open item ---------------------
+        raise_request('WALK-13', 'Cable, waiting on the PM',
+                      'Cable top-up for Batch A.', [cable], days=20)
+
+        # --- WALK-14: approved 99 days ago — outside the aging window -----------------------
+        s14 = raise_request('WALK-14', 'Modules, approved last quarter',
+                            'Modules for the pilot sites.', [module], days=100,
+                            vendor='WALK Modules Co')
+        decide(s14, pm, 'walk.pm', approve, days=99)
+
+    def _walk_script(self):
+        """The walk script and the aging page's expected figures, read from the database
+        so a second run prints the same thing. Never prints a password."""
+        # Imported here as every area imports — not a circular import: the command
+        # module loads no product module until the guards have run.
+        from django.utils import timezone as tz
+        from projects.models import ApprovalRequest
+
+        by_code = {a.title.split()[0]: a for a in ApprovalRequest.objects.filter(
+            title__startswith=APPROVAL_TITLE_PREFIX)}
+        if not by_code:
+            return
+        write = self.stdout.write
+        now = tz.now()
+        first = by_code.get('WALK-01')
+        seeded = (tz.localtime(first.raised_at + timedelta(hours=S1_HOURS_BEFORE_SEED))
+                  if first else tz.localtime(now))
+        write('')
+        write('WALK SCRIPT - approvals area')
+        write(f'Seed date: {seeded:%d %b %Y}. Logins: see docs/WALKTHROUGH_DATA.md.')
+        write('"Days waiting" counts against the real clock, so every waiting figure grows '
+              'by one for each day after the seed date that you walk this.')
+        write('')
+        write('scenario | log in as | URL | what I should see')
+        for code, login, text in WALK_SCRIPT:
+            approval = by_code.get(code)
+            url = reverse('approval_detail', args=[approval.pk]) if approval else '(missing)'
+            write(f'{code} | {login} | {url} | {text}')
+
+        figures = independent_aging_figures(now)
+        # ASCII placeholders: a Windows console prints the page's em dash as mojibake,
+        # which is why the rest of this command's output is ASCII too.
+        none = '-'
+        write('')
+        write(f'AGING PAGE - {reverse("approval_aging")} as walk.scm (or walk.ceo). '
+              f'Expected figures, computed from the step rows without approval_queries:')
+        rate = figures['carry_rate']
+        write(f'  Total pending: {figures["total_pending"]}   '
+              f'Carry rate, last {WALK_AGING_WINDOW_DAYS} days: '
+              f'{none if rate is None else f"{round(rate * 100)}%"} '
+              f'({figures["carried"]} of {figures["carried"] + figures["fresh_approved"]})')
+        write('  approver | pending | oldest | decisions | median days | proxy share '
+              '| decided by deputy')
+        for row in figures['assignees']:
+            decisions, proxies = row['decisions'], row['proxies']
+            median_text = (none if row['median_days'] is None
+                           else f'{row["median_days"]} days')
+            # The page draws the share with {% widthratio %}, which rounds half to even
+            # (Python's round); round() here reads the same.
+            share = (f'{round(proxies * 100 / decisions)}% ({proxies} of {decisions})'
+                     if decisions else none)
+            deputy = none if row['by_deputy'] is None else row['by_deputy']
+            oldest = none if row['oldest_days'] is None else row['oldest_text']
+            write(f'  {row["name"]} ({row["username"]}) | {row["pending_count"]} | '
+                  f'{oldest} | {decisions} | {median_text} | {share} | {deputy}')
+
     # ================================================================= report
     def _report(self, manifest, areas):
         self.stdout.write('')
@@ -1512,3 +2099,5 @@ class Command(BaseCommand):
         self.stdout.write('')
         self.stdout.write('Logins: see docs/WALKTHROUGH_DATA.md (the password is not '
                           'printed here).')
+        if 'approvals' in areas:
+            self._walk_script()

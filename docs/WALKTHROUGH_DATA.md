@@ -131,13 +131,15 @@ file and `seed_walkthrough.py` are the only places it appears.
 | `walk.design` | Design | — | `/dashboard/design/` | The designer on every design site and the Residential BOQs |
 | `walk.designqc` | Design | `is_design_qc` | `/dashboard/design/` | Gate 1: Arka review and package QC; recorded the BOQ correction on WALKC07; named QC reviewer on WALKD03 |
 | `walk.designhead` | Design | `is_design_head` | `/dashboard/design/` | Gate 2, allocation, survey links, change-request verdicts, send-back / return-to-PM |
-| `walk.designdeputy` | Design | named as the Head's deputy | `/dashboard/design/` | Has Head authority as deputy; no action seeded as deputy |
+| `walk.designdeputy` | Design | named as the Head's deputy | `/dashboard/design/` | Has Head authority as deputy; decided WALK-10's design step as deputy, and sees WALK-02 and WALK-07 on its approvals card "as deputy for Walk Designhead" (area `approvals`) |
 | `walk.scm` | SCM | `is_warehouse_keeper` | `/landing/` → `/dashboard/scm/` | Groups, locks, orders, payments raised, holds answered, challans, GRN on-behalf, SCM change requests; keeper of two warehouses |
 | `walk.finance` | Finance | `is_payment_approver` | `/landing/` → `/dashboard/finance/` | Approved / partly approved / held / rejected the payments |
 | `walk.finpay` | Finance | — | `/landing/` → `/dashboard/finance/` | Marked the payment paid (the approver may not); invoiced and received the Residential milestones |
 | `walk.finassignee` | Finance | — | `/landing/` → `/dashboard/finance/` | **The one real address** — see below |
 | `walk.ceo` | CEO | — | `/landing/` → `/dashboard/ceo/` | CEO dashboard, daily report, payment queue |
 | `walk.bd` | BD | — | `/dashboard/bd/` | BD dashboard |
+| `walk.scm2` | SCM | — | `/landing/` → `/dashboard/scm/` | Area `approvals` only: the second SCM user — raised WALK-02, resubmitted WALK-06, reassigned WALK-09 (any SCM user acts on any request) |
+| `walk.pm2` | PM | — | `/dashboard/pm/` | Area `approvals` only: WALK-09's PM step was reassigned to them; it is waiting on them |
 
 Every account has email **and** WhatsApp notifications OFF, set through the Admin's own
 `admin_notification_prefs` screen, and the master switches (`email_enabled`,
@@ -276,6 +278,76 @@ Warehouses `WALK-WH-DEL` and `WALK-WH-MUM` (keeper `walk.scm`), `WALK-WH-SITE` (
 keeper); three `WALK …` vendors; the seven OPEX installation checklists
 (`seed_opex_installation_checklists`, reused as is).
 
+### Approvals (area `approvals`) — material approvals, WALK-01 … WALK-14
+
+`python manage.py seed_walkthrough --only approvals` (it seeds `users` and `reference`
+first if they are absent; a full seed includes it, last). Material approvals only —
+pre-order and pre-dispatch. Contractor bills are not here yet; Session 4a adds them to
+this area.
+
+**People.** The area reuses `walk.scm`, `walk.pm`, `walk.designhead`, `walk.designdeputy`
+(the deputy link the `users` area sets) and `walk.se` (not used until Session 4a), and
+adds `walk.scm2` (SCM) and `walk.pm2` (PM) through the Admin's `user_create`, with both
+notification preferences off. Every request is raised by an SCM user and names `walk.pm`
+as its PM; a design sign-off names `walk.designhead`.
+
+**Vendors and PO/PI records.** `WALK Modules Co` and `WALK Structures Co`, each with two
+PO/PI records recorded through Add PO / PI (`purchases_new`), against nothing, with no
+payment requested, 25–22 days before the seed: `WALK-APO-M1` ₹8,50,000 and
+`WALK-APO-M2` ₹6,20,000 (Modules); `WALK-APO-S1` ₹4,30,000 and `WALK-APO-S2` ₹2,75,000
+(Structures).
+
+**How it is driven.** Through the real approval views, as the person each step needs —
+except WALK-05's proxy decision, which carries an evidence file. `approval_views` binds
+its storage client when it is imported, so the seed's storage stub never reaches it and
+an upload through the view fails. That one decision goes through the chokepoint itself
+(`apply_approval_decision(proxy=...)`), with a stub file row.
+
+**The walk script.** Every run that includes this area prints one at the end: the seed
+date, then scenario | log in as | URL | what the page should show, then the aging page's
+expected figures. Those figures are computed from the step rows without
+`approval_queries`, so you can check the page against them. A second run prints it
+again and writes nothing. Log in by the usernames below (the password is under
+*Logins*).
+
+| Scenario | Status | Whose turn | Log in as | What to look for |
+|---|---|---|---|---|
+| WALK-01 | Open, round 1 | PM (`walk.pm`), raised today | `walk.pm` | on the PM's "Pending approvals" card |
+| WALK-02 | Open, round 1 | Design (`walk.designhead`) | `walk.designhead` | PM approved after 2 days; raised by `walk.scm2`; on `walk.designdeputy`'s card "as deputy for Walk Designhead" |
+| WALK-03 | Approved | nobody | `walk.scm` | PM after 1 day, Head after 3; "PO/PI records covered", empty; the pre-order WALK-11 dispatches against |
+| WALK-04 | Rejected | nobody | `walk.pm` | the PM's rejection note |
+| WALK-05 | Approved | nobody | `walk.scm` | **Proxy** badge, "Recorded by Walk Scm from a phone call", evidence text, and one evidence file (see below) |
+| WALK-06 | Open, round 2 | PM (`walk.pm`) | `walk.pm` | round 1 changes requested; "what changed": line 1 quantity 40.00 → 48.00 Meter; resubmitted by `walk.scm2` |
+| WALK-07 | Open, round 2 | Design (`walk.designhead`) | `walk.designhead` | PM step **Kept** from round 1, with the reason; round 1 design changes requested; line 2 specification changed |
+| WALK-08 | Withdrawn | nobody | `walk.scm` | the withdrawal note; the PM step closed (superseded) by `walk.scm` |
+| WALK-09 | Open, round 1 | PM (`walk.pm2`) | `walk.pm2` | the first PM row superseded by `walk.scm2` with a note; the new row waits on `walk.pm2` |
+| WALK-10 | Approved | nobody | `walk.designdeputy` | the design step assigned to the Head, **decided by the deputy** |
+| WALK-11 | Open, round 1, **pre-dispatch** | PM (`walk.pm`) | `walk.pm` | "Dispatch against": `WALK-APO-M1` and the approved pre-order WALK-03 |
+| WALK-12 | Approved | nobody | `walk.scm` | "PO/PI records covered": `WALK-APO-S1` active, `WALK-APO-S2` **struck through**, removed with a reason |
+| WALK-13 | Open, round 1 | PM (`walk.pm`), 20 days | `walk.pm` | the oldest item on the aging page |
+| WALK-14 | Approved | nobody | `walk.scm` | decided 99 days ago: outside the 90-day window, in no aging figure |
+
+**The aging page** (`/approvals/aging/`, as `walk.scm` or `walk.ceo`), on the day of the
+seed. **"Days waiting" counts against the real clock**, so each waiting figure grows by
+one for every day after the seed date that you walk it. The other figures do not move.
+
+| Approver | Pending | Oldest | Decisions (90 days) | Median turnaround | Proxy share | Decided by deputy |
+|---|---|---|---|---|---|---|
+| Walk Pm | 4 | 20 days | 8 | 1.1 days | 12% (1 of 8) | 0 |
+| Walk Designhead | 2 | 6 days | 3 | 2.0 days | 0% (0 of 3) | 1 |
+| Walk Pmtwo | 1 | 5 days | 0 | — | — | — |
+
+7 steps waiting in all; carry rate 100% (1 of 1: WALK-07's kept PM approval). Walk Pm's
+eight turnarounds are 2, 1, ½, 1½, 1¼, ¼, 1 and 3 days, chosen so the median (1.125,
+shown 1.1) is worth reading.
+
+**Attachment links open "bucket not found", deliberately.** WALK-05's evidence file
+"Call note (seeded: no file behind it)" is a row naming a file in the bucket
+`walkthrough-stub`, which exists nowhere. The detail page builds its link from
+`SUPABASE_URL`, so clicking it asks the Supabase project in your `.env` for that bucket,
+and Supabase answers "bucket not found". The four PO/PI documents behave the same way.
+Nothing is wrong with the page.
+
 ---
 
 ## Files: why a download does nothing
@@ -288,6 +360,8 @@ is named `SEEDED-NO-FILE-<kind>` — `SEEDED-NO-FILE-cad_zip.zip`, `SEEDED-NO-FI
 `walkthrough-stub`, which exists nowhere. The rows are real; the objects are not. A
 download link on any of them does nothing, and the name on screen says why. (The CAD
 archive was a real, valid zip when it was validated; only the upload was skipped.)
+Links built as public Supabase URLs (PO/PI documents, approval attachments) open the
+Supabase project in your `.env` and get "bucket not found" — see *Approvals*.
 
 ## Time: what is backdated, and how
 

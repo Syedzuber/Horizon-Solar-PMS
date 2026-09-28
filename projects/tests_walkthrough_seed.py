@@ -37,6 +37,9 @@ from django.test import TestCase
 
 from projects import models as m
 from projects.management.commands import _walkthrough_support as support
+from projects.management.commands.seed_walkthrough import (
+    APPROVAL_RECORDS, APPROVAL_USERS, USERS,
+)
 from projects.utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL
 
 WALK_NAME = 'solarpms_walk_test'
@@ -214,13 +217,14 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
     def test_every_seeded_email_is_invalid_except_the_one_permitted_address(self):
         emails = list(User.objects.filter(username__startswith='walk.')
                       .values_list('email', flat=True))
-        self.assertEqual(len(emails), 16)
+        # The `users` area's accounts plus the two only the `approvals` area creates.
+        self.assertEqual(len(emails), len(USERS) + len(APPROVAL_USERS))
         real = [e for e in emails if not e.endswith('.invalid')]
         self.assertEqual(real, [RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL])
 
     def test_both_preferences_are_off_for_every_seeded_user(self):
         profiles = m.UserProfile.objects.filter(user__username__startswith='walk.')
-        self.assertEqual(profiles.count(), 16)
+        self.assertEqual(profiles.count(), len(USERS) + len(APPROVAL_USERS))
         self.assertFalse(profiles.filter(email_notifications=True).exists())
         self.assertFalse(profiles.filter(whatsapp_notifications=True).exists())
 
@@ -318,8 +322,10 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         self.assertEqual(set(m.SiteGroup.objects.values_list('status', flat=True)),
                          {m.SITE_GROUP_DRAFT, m.SITE_GROUP_LOCKED})
         self.assertTrue(m.SiteGroupMembership.objects.exclude(removed_at=None).exists())
+        # Procurement's two OPEX orders and Residential's one, plus the `approvals`
+        # area's PO/PI records (recorded against nothing, as OPEX).
         self.assertEqual(Counter(m.VendorOrder.objects.values_list('project_type', flat=True)),
-                         Counter({'OPEX': 2, 'Residential': 1}))
+                         Counter({'OPEX': 2 + len(APPROVAL_RECORDS), 'Residential': 1}))
         for doc in m.VendorOrderDocument.objects.all():
             self.assertEqual(doc.bucket, support.STUB_BUCKET)
             self.assertTrue(doc.file_name.startswith(support.STUB_FILE_PREFIX))
@@ -365,7 +371,7 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         before = _row_counts()
         dry = _run('teardown_walkthrough', manifest=self.manifest, dry_run=True)
         for area in ('design', 'changes', 'procurement', 'delivery', 'execution',
-                     'residential', 'fresh'):
+                     'residential', 'fresh', 'approvals'):
             self.assertRegex(dry, rf'{area}\s+REFUSED')
         self.assertIn('StatusTransition', dry)
         with self.assertRaises(CommandError) as ctx:
