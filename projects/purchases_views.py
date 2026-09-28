@@ -54,6 +54,9 @@ from .permissions import (
     user_can_raise_vendor_order, user_can_request_order_payment,
     user_can_use_purchases_workspace, user_can_view_purchases_workspace,
 )
+from .submission_guard import (
+    already_submitted, confirmed, keyed_redirect, order_duplicate, url_key,
+)
 
 #: Records per page on the workspace list.
 PAGE_SIZE = 50
@@ -371,24 +374,44 @@ def purchases_new(request):
     template = 'projects/purchases_new.html'
 
     if request.method != 'POST':
-        return render(request, template, _new_record_context(request))
+        # The key lives in the URL (submission_guard); ?program= and ?project= are kept
+        # beside it, so the prefill survives the redirect.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = VendorOrder.objects.filter(client_uuid=key).first()
+        if existing is not None:
+            return already_submitted(request, existing)
+        return render(request, template, _new_record_context(request, client_uuid=key))
 
-    def refuse(errors, client_uuid):
+    def refuse(errors, client_uuid, status=400, duplicate=None):
         for error in errors:
             messages.error(request, error)
         context = _new_record_context(request, post=request.POST, client_uuid=client_uuid)
         context['refused'] = True
-        return render(request, template, context, status=400)
+        # The duplicate warning (status 200) is this same page with its warning drawn.
+        context['duplicate'] = duplicate
+        return render(request, template, context, status=status)
 
+    # R-14: a repeated key goes to the record it already made, says so (D2), and creates
+    # nothing.
     posted_uuid, existing = _posted_order_uuid(request)
     if existing is not None:
-        return redirect('vendor_order_detail', order_pk=existing.pk)
+        return already_submitted(request, existing)
 
     cleaned, errors = _parse_record_submission(request)
     if errors:
         return refuse(errors, posted_uuid)
 
     client_uuid, payment = cleaned['client_uuid'], cleaned['payment']
+
+    # The content match (D3), before any upload. A payment asked for here is on the new
+    # record, so the order rule is the only one that can match.
+    if not confirmed(request):
+        duplicate = order_duplicate(profile, cleaned['vendor'], cleaned['order_total'],
+                                    cleaned['po_number'], cleaned['pi_number'])
+        if duplicate is not None:
+            return refuse([], client_uuid, status=200, duplicate=duplicate)
     projects = [site['project'] for site in cleaned['sites']]
     anchor = _write_anchor(projects)
 
@@ -408,7 +431,7 @@ def purchases_new(request):
         return order, (order, pr)
 
     saved, refusal = _save_order_submission(
-        cleaned['documents'], client_uuid, profile, write, refuse,
+        request, cleaned['documents'], client_uuid, profile, write, refuse,
         'The PO / PI could not be saved. Nothing was recorded; try again.')
     if refusal is not None:
         return refusal
@@ -494,18 +517,27 @@ def purchases_pay(request):
     template = 'projects/purchases_pay.html'
 
     if request.method != 'POST':
+        # The key lives in the URL (submission_guard); ?order= is kept beside it.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = (PaymentRequest.objects.filter(client_uuid=key)
+                    .select_related('vendor_order').first())
+        if existing is not None:
+            return already_submitted(request, existing.vendor_order)
         return render(request, template,
-                      _pay_context(request, _int_param(request.GET.get('order'))))
+                      _pay_context(request, _int_param(request.GET.get('order')),
+                                   client_uuid=key))
 
     order_pk = _int_param(request.POST.get('order'))
 
-    def refuse(errors, _available, client_uuid):
+    def refuse(errors, _available, client_uuid, status=400, duplicate=None):
         for error in errors:
             messages.error(request, error)
-        return render(request, template,
-                      _pay_context(request, order_pk, request.POST, client_uuid,
-                                   refused=True),
-                      status=400)
+        context = _pay_context(request, order_pk, request.POST, client_uuid, refused=True)
+        # The duplicate warning (status 200) is this same page with its warning drawn.
+        context['duplicate'] = duplicate
+        return render(request, template, context, status=status)
 
     if order_pk is None:
         return refuse(['Choose the PO / PI record to request payment against.'],

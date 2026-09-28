@@ -47,7 +47,9 @@ from .models import (
     SITE_GROUP_DRAFT, SITE_GROUP_LOCKED, VENDOR_ORDER_DOC_PO,
 )
 from .order_views import _parse_group_sites
-from .tests_vendor_order_raise import RaiseFixture, _client, _pdf, _profile
+from .tests_vendor_order_raise import (
+    RaiseFixture, _assert_keyed_redirect, _client, _pdf, _profile,
+)
 
 
 class GroupRaiseFixture(RaiseFixture):
@@ -489,7 +491,8 @@ class GroupRefusalTests(GroupRaiseFixture):
 class GroupRaisePageTests(GroupRaiseFixture):
 
     def test_the_page_is_a_payment_request_in_four_sections_in_order(self):
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         self.assertEqual(response.status_code, 200)
         html = response.content.decode()
         self.assertIn('<h4 class="mb-0">Raise Payment Request</h4>', html)
@@ -507,7 +510,8 @@ class GroupRaisePageTests(GroupRaiseFixture):
         self.assertNotIn('name="line"', html)
 
     def test_the_page_offers_every_group_and_every_tender(self):
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         for group in (self.locked_a, self.locked_b, self.draft_a, self.locked_c):
             with self.subTest(group=group.name):
                 self.assertContains(response, f'value="g{group.pk}"')
@@ -515,18 +519,21 @@ class GroupRaisePageTests(GroupRaiseFixture):
                                       f'                 value="{self.tender_b.pk}"')
 
     def test_the_entering_tender_is_pre_ticked(self):
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         ticked = [t['program'] for t in response.context['tenders'] if t['ticked']]
         self.assertEqual(ticked, [self.tender])
         self.assertEqual(response.context['entering_program'], self.tender)
 
     def test_no_entering_tender_pre_ticks_nothing(self):
-        response = _client(self.scm).get(reverse('vendor_order_create_group'))
+        response = _client(self.scm).get(reverse('vendor_order_create_group'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         self.assertFalse([t for t in response.context['tenders'] if t['ticked']])
         self.assertIsNone(response.context['entering_program'])
 
     def test_the_page_starts_with_no_sites_added(self):
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         html = response.content.decode()
         self.assertEqual(html.count('class="js-vo-site-input">'), 0)
         self.assertEqual(html.count('class="js-vo-site-input" disabled>'), 6)
@@ -537,7 +544,9 @@ class GroupRaisePageTests(GroupRaiseFixture):
         named by its data-program; this pins that the markup carries the right members,
         the right tender, and a chip and a tender box for each to act on. The behaviour
         itself is driven in a real browser at verification time."""
-        html = _client(self.scm).get(self.url()).content.decode()
+        response = _client(self.scm).get(self.url(), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
+        html = response.content.decode()
 
         for group, members, tender in (
                 (self.locked_a, {self.a1, self.a2}, self.tender),
@@ -562,7 +571,8 @@ class GroupRaisePageTests(GroupRaiseFixture):
         self.assertIn('if (box.checked) tickTender(box.dataset.program)', html)
 
     def test_every_site_of_every_tender_is_searchable(self):
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         html = response.content.decode()
         results = re.findall(r'class="[^"]*js-vo-result[^"]*"\s+data-site="(\d+)"', html)
         self.assertEqual(set(results), {str(p.pk) for p in
@@ -573,7 +583,8 @@ class GroupRaisePageTests(GroupRaiseFixture):
         self.assertIn('Bravo Tender · <span class="js-vo-n">0</span> of 1 site', html)
 
     def test_the_unfrozen_flag_is_shown_on_the_record_page_only(self):
-        page = _client(self.scm).get(self.url(self.tender))
+        page = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, page, reverse('vendor_order_create_group'))
         self.assertNotContains(page, 'unfrozen')
         self.post(sites=[self.a5], programs=[self.tender])
         order = VendorOrder.objects.get()
@@ -588,7 +599,8 @@ class GroupRaisePageTests(GroupRaiseFixture):
     def test_the_page_renders_with_no_procurement_groups_at_all(self):
         SiteGroupMembership.objects.all().delete()
         SiteGroup.objects.all().delete()
-        response = _client(self.scm).get(reverse('vendor_order_create_group'))
+        response = _client(self.scm).get(reverse('vendor_order_create_group'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context['group_rows'], [])
         self.assertContains(response, 'No procurement groups yet')
@@ -599,7 +611,8 @@ class GroupRaisePageTests(GroupRaiseFixture):
     def test_unlinked_rows_render_read_only_and_are_not_on_the_order(self):
         site = self.site('A6', self.tender, modules=5, inverters=1,
                          group=self.locked_a, unlinked='Site-specific civil work')
-        response = _client(self.scm).get(self.url(self.tender))
+        response = _client(self.scm).get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
         self.assertContains(response, 'no catalogue item')
         fragment = re.search(r'<li class="d-none js-vo-unlinked"[^>]*>.*?</li>',
                              response.content.decode(), re.S).group(0)
@@ -624,13 +637,19 @@ class GroupRaisePageTests(GroupRaiseFixture):
         filters them, so the cost is fixed. Measured at three sites in one group and
         again at thirty."""
         client = _client(self.scm)
-        client.get(self.url(self.tender))        # warm the session lookup
+        # Open the form once, as a person does, to get its keyed URL (this also warms
+        # the session lookup). Every count below is of that keyed URL alone: the keyless
+        # redirect hop (session, user, profile, entering tender) is deliberately
+        # excluded, so this measures the page and not the way to it.
+        opened = client.get(self.url(self.tender), follow=True)
+        _assert_keyed_redirect(self, opened, reverse('vendor_order_create_group'))
+        keyed = opened.redirect_chain[0][0]
 
         self.site('Y00', self.tender, modules=10, inverters=1, group=self.locked_a)
         self.assertEqual(self.locked_a.memberships.filter(
             removed_at__isnull=True).count(), 3)
         with _Capture(self) as small:
-            client.get(self.url(self.tender))
+            client.get(keyed)
 
         for index in range(27):
             self.site(f'X{index:02d}', self.tender, modules=10, inverters=1,
@@ -639,15 +658,16 @@ class GroupRaisePageTests(GroupRaiseFixture):
             removed_at__isnull=True).count(), 30)
 
         with self.assertNumQueries(small.count):
-            response = client.get(self.url(self.tender))
+            response = client.get(keyed)
         self.assertEqual(response.status_code, 200)
         # PINNED, AND MEASURED RATHER THAN DERIVED: session, user and profile, the
         # entering tender, the tenders, the sites, the groups, their memberships,
-        # aggregate_group_boq()'s three, the navbar's unread-notification count and the
-        # vendors. It no longer grows with the number of tenders either (O3r dropped
-        # post_qc_pool() per tender). If this number moves, a query was added — say
-        # which.
-        self.assertEqual(small.count, 13,
+        # aggregate_group_boq()'s three, the navbar's unread-notification count, the
+        # vendors, and the check for whether the URL's key has already made a record
+        # (the +1 from 13, added 28 Sep by the duplicate-submission fix). It no longer
+        # grows with the number of tenders either (O3r dropped post_qc_pool() per
+        # tender). If this number moves, a query was added — say which.
+        self.assertEqual(small.count, 14,
                          'the raise page cost changed — say so in the report')
 
 

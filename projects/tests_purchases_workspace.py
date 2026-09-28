@@ -36,7 +36,7 @@ from .models import (
     SUBJECT_PAYMENT_REQUEST, VENDOR_ORDER_DOC_INVOICE, VENDOR_ORDER_DOC_PO,
 )
 from .tests_vendor_order_group import GroupRaiseFixture, _Capture
-from .tests_vendor_order_raise import _client, _pdf, _profile
+from .tests_vendor_order_raise import _assert_keyed_redirect, _client, _pdf, _profile
 
 
 class WorkspaceFixture(GroupRaiseFixture):
@@ -171,7 +171,7 @@ class AddRecordTests(WorkspaceFixture):
             amounts={self.opex_module: '600000'})
         self.post(**recorded)                           # the group raise
         group_order = VendorOrder.objects.get()
-        self.post_new(pay='200000', **recorded)         # Add PO / PI
+        self.post_new(pay='200000', confirm_duplicate='1', **recorded)         # Add PO / PI
         new_order = VendorOrder.objects.exclude(pk=group_order.pk).get()
 
         self.assertEqual(_rows(new_order), _rows(group_order))
@@ -282,7 +282,9 @@ class AddRecordTests(WorkspaceFixture):
 class AddRecordPageTests(WorkspaceFixture):
 
     def test_the_page_is_in_its_sections_in_order_with_the_payment_optional(self):
-        html = _client(self.scm).get(reverse('purchases_new')).content.decode()
+        response = _client(self.scm).get(reverse('purchases_new'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_new'))
+        html = response.content.decode()
         positions = [html.index(marker) for marker in
                      ('1 · PO / PI', '2 · Order total', '3 · Recorded against',
                       'Nothing is recorded against — is this PO / PI',
@@ -293,7 +295,9 @@ class AddRecordPageTests(WorkspaceFixture):
         self.assertRegex(html, r'<details class="card[^"]*" id="voRequirement">')
 
     def test_the_picker_offers_resco_sites_and_residential_projects_labelled(self):
-        html = _client(self.scm).get(reverse('purchases_new')).content.decode()
+        response = _client(self.scm).get(reverse('purchases_new'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_new'))
+        html = response.content.decode()
         results = re.findall(r'class="[^"]*js-vo-result[^"]*"\s+data-site="(\d+)"'
                              r'[^>]*?data-kind="res"', html)
         self.assertEqual(set(results), {str(self.project.pk), str(self.other_project.pk)})
@@ -307,12 +311,16 @@ class AddRecordPageTests(WorkspaceFixture):
         self.assertIn('Residential projects · <span class="js-vo-n">0</span>', html)
 
     def test_program_prefill_ticks_that_tender(self):
-        response = _client(self.scm).get(f"{reverse('purchases_new')}?program={self.tender.pk}")
+        response = _client(self.scm).get(f"{reverse('purchases_new')}?program={self.tender.pk}",
+                                         follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_new'))
         self.assertEqual([t['program'] for t in response.context['tenders'] if t['ticked']],
                          [self.tender])
 
     def test_project_prefill_adds_a_resco_site_and_ticks_its_tender(self):
-        response = _client(self.scm).get(f"{reverse('purchases_new')}?project={self.b1.pk}")
+        response = _client(self.scm).get(f"{reverse('purchases_new')}?project={self.b1.pk}",
+                                         follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_new'))
         self.assertEqual([t['program'] for t in response.context['tenders'] if t['ticked']],
                          [self.tender_b])
         self.assertContains(response, f'name="site" value="{self.b1.pk}" '
@@ -320,7 +328,8 @@ class AddRecordPageTests(WorkspaceFixture):
 
     def test_project_prefill_adds_a_residential_project(self):
         response = _client(self.scm).get(
-            f"{reverse('purchases_new')}?project={self.project.pk}")
+            f"{reverse('purchases_new')}?project={self.project.pk}", follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_new'))
         self.assertFalse([t for t in response.context['tenders'] if t['ticked']])
         added = [r['project'] for r in response.context['residential_rows'] if r['added']]
         self.assertEqual(added, [self.project])
@@ -328,7 +337,9 @@ class AddRecordPageTests(WorkspaceFixture):
                                       'class="js-vo-site-input">')
 
     def test_the_group_page_still_draws_no_residential_row(self):
-        html = _client(self.scm).get(reverse('vendor_order_create_group')).content.decode()
+        response = _client(self.scm).get(reverse('vendor_order_create_group'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('vendor_order_create_group'))
+        html = response.content.decode()
         self.assertNotRegex(html, r'<(li|span)[^>]*data-kind="res"')
         self.assertNotIn('Residential projects ·', html)
         self.assertIn('Tick a tender to search its sites.', html)
@@ -397,18 +408,22 @@ class RaisePaymentTests(WorkspaceFixture):
         open_ = self.record(total='1000', po='PO-OPEN')
         self.pay_existing(open_, '250')
 
-        response = _client(self.scm).get(reverse('purchases_pay'))
+        response = _client(self.scm).get(reverse('purchases_pay'), follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_pay'))
         offered = {o['order']: o['available'] for o in response.context['options']}
         self.assertEqual(offered, {freed: Decimal('1000'), open_: Decimal('750')})
         self.assertContains(response, '₹750.00 available')
 
-        response = _client(self.scm).get(f"{reverse('purchases_pay')}?order={full.pk}")
+        response = _client(self.scm).get(f"{reverse('purchases_pay')}?order={full.pk}",
+                                         follow=True)
         self.assertTrue(response.context['not_offered'])
         self.assertContains(response, 'nothing left to request')
 
     def test_order_param_preselects_the_record(self):
         order = self.record(total='1000', project=self.project)
-        response = _client(self.scm).get(f"{reverse('purchases_pay')}?order={order.pk}")
+        response = _client(self.scm).get(f"{reverse('purchases_pay')}?order={order.pk}",
+                                         follow=True)
+        _assert_keyed_redirect(self, response, reverse('purchases_pay'))
         self.assertEqual(response.context['chosen']['order'], order)
         self.assertContains(response, f'value="{order.pk}" data-available="1000.00"')
         self.assertRegex(response.content.decode(),

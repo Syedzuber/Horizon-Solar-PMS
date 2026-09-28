@@ -36,7 +36,9 @@ from .models import (
     VendorOrder, VendorOrderDocument, VendorOrderLine, VendorOrderSite,
     VENDOR_ORDER_DOC_INVOICE, VENDOR_ORDER_DOC_PO,
 )
-from .tests_vendor_order_raise import RaiseFixture, _client, _pdf, _profile, _project
+from .tests_vendor_order_raise import (
+    RaiseFixture, _assert_keyed_redirect, _client, _pdf, _profile, _project,
+)
 
 
 def _make_order(fixture, total=Decimal('60000'), project=None, po='PO-B'):
@@ -143,7 +145,8 @@ class AddPaymentTests(PaymentFixture):
         self.assertEqual(PaymentRequest.objects.count(), 2)
 
     def test_the_page_renders_the_available_balance(self):
-        response = _client(self.scm).get(self.pay_url())
+        response = _client(self.scm).get(self.pay_url(), follow=True)
+        _assert_keyed_redirect(self, response, self.pay_url())
         self.assertContains(response, 'data-available="35000.00"')
 
     def test_zero_and_junk_amounts_are_refused(self):

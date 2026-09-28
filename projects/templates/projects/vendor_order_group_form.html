@@ -115,6 +115,19 @@ checks are the shared partial, so a file is held to the same standard on both ra
 
   {% include 'projects/partials/vendor_order_requirement.html' %}
 
+  {% if duplicate %}
+  {# The content-match warning (submission_guard, D3): a likely repeat, named, with an override. Never a block. #}
+  <div class="alert alert-warning small" role="alert" id="voDuplicate">
+    <div class="fw-semibold">{{ duplicate.heading }}</div>
+    {% for line in duplicate.lines %}<div>{{ line }}</div>{% endfor %}
+    <div class="mt-1"><a href="{{ duplicate.url }}" target="_blank" rel="noopener">Open it</a> to check before you continue.</div>
+    <div class="form-check mt-2">
+      <input class="form-check-input" type="checkbox" name="confirm_duplicate" value="1" id="voConfirmDuplicate">
+      <label class="form-check-label" for="voConfirmDuplicate">{{ duplicate.override_label }}</label>
+    </div>
+  </div>
+  {% endif %}
+
   <div class="alert alert-danger small py-2 d-none" id="voProblems" role="alert"></div>
 
   <div class="d-grid d-md-flex justify-content-md-end mb-4">
@@ -145,8 +158,21 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
     var btn = document.getElementById('voSubmit');
+    btn.dataset.label = btn.textContent;
     btn.disabled = true;
     btn.textContent = 'Submitting…';
+  });
+
+  /* Back to this page from the one it led to: the browser can restore it exactly as it
+     was left, button disabled. Re-enable it with its own label. The form keeps its
+     client_uuid, so a resubmit is still answered as a repeat by the server. */
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    var btn = document.getElementById('voSubmit');
+    if (btn && btn.disabled) {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
   });
 });
 </script>

@@ -87,6 +87,10 @@ from .permissions import (
     user_can_view_project, user_can_view_project_vendor_orders,
     user_can_view_vendor_order, user_is_payment_approver,
 )
+from .submission_guard import (
+    already_submitted, confirmed, document_size_kb, documents_duplicate, keyed_redirect,
+    order_duplicate, payment_duplicate, url_key,
+)
 from .supabase_storage import vendor_order_document_url
 from .utils import record_transition
 from .views import _validate_and_upload, _validate_upload_file
@@ -373,12 +377,16 @@ def _form_context(project, boq_items, post=None, client_uuid=None):
     }
 
 
-def _refuse(request, project, boq_items, errors, client_uuid):
+def _refuse(request, project, boq_items, errors, client_uuid, status=400, duplicate=None):
+    """Re-render the raise page with the entries kept. A refusal is a 400; the
+    duplicate warning (submission_guard) passes status=200 and its `duplicate` context,
+    and is otherwise this same page — same key, same kept entries, files to re-attach."""
     for error in errors:
         messages.error(request, error)
     context = _form_context(project, boq_items, post=request.POST, client_uuid=client_uuid)
     context['refused'] = True
-    return render(request, 'projects/vendor_order_form.html', context, status=400)
+    context['duplicate'] = duplicate
+    return render(request, 'projects/vendor_order_form.html', context, status=status)
 
 
 def _remove_uploaded(client, bucket, paths):
@@ -447,7 +455,8 @@ def _upload_and_record_documents(documents, folder, profile, write):
                     invoice_amount=doc['invoice_amount'],
                     file_name=doc['file'].name, bucket=bucket, path=doc['path'],
                     file_type=(doc['file'].content_type or '')[:100],
-                    file_size_kb=max(1, doc['file'].size // 1024),
+                    # The documents matcher compares this exact figure, so one helper.
+                    file_size_kb=document_size_kb(doc['file']),
                     uploaded_by=profile,
                 )
                 for doc in documents
@@ -579,11 +588,19 @@ def vendor_order_create(request, project_pk):
     boq_items = _project_boq_items(project)
 
     if request.method != 'POST':
+        # The key lives in the URL (submission_guard): Back and reload return this same
+        # key, so a re-fetched form cannot make a second order.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = VendorOrder.objects.filter(client_uuid=key).first()
+        if existing is not None:
+            return already_submitted(request, existing)
         return render(request, 'projects/vendor_order_form.html',
-                      _form_context(project, boq_items))
+                      _form_context(project, boq_items, client_uuid=key))
 
     # R-14. A double-click, or a resubmit after a slow response, carries the same key:
-    # send it to the order it already made and create nothing.
+    # send it to the order it already made, say so (D2), and create nothing.
     try:
         posted_uuid = _uuid.UUID(request.POST.get('client_uuid', ''))
     except ValueError:
@@ -591,7 +608,7 @@ def vendor_order_create(request, project_pk):
     if posted_uuid is not None:
         existing = VendorOrder.objects.filter(client_uuid=posted_uuid).first()
         if existing is not None:
-            return redirect('vendor_order_detail', order_pk=existing.pk)
+            return already_submitted(request, existing)
 
     cleaned, errors = _parse_submission(request, boq_items)
     if errors:
@@ -599,6 +616,15 @@ def vendor_order_create(request, project_pk):
 
     client_uuid = cleaned['client_uuid']
     vendor, payment = cleaned['vendor'], cleaned['payment']
+
+    # The content match (D3), before any upload, so a warning stores no file. Same key
+    # on the re-render; the override tick box posts confirm_duplicate=1.
+    if not confirmed(request):
+        duplicate = order_duplicate(profile, vendor, cleaned['total'],
+                                    cleaned['po_number'], cleaned['pi_number'])
+        if duplicate is not None:
+            return _refuse(request, project, boq_items, [], client_uuid,
+                           status=200, duplicate=duplicate)
 
     def write():
         """Runs inside _upload_and_record_documents' atomic block, after every file is
@@ -659,7 +685,7 @@ def vendor_order_create(request, project_pk):
         # here on the unique index. Send it to the winner rather than to an error.
         existing = VendorOrder.objects.filter(client_uuid=client_uuid).first()
         if existing is not None:
-            return redirect('vendor_order_detail', order_pk=existing.pk)
+            return already_submitted(request, existing)
         # uniq_invoice_number_per_order: same message as the check, files already removed.
         if isinstance(exc.__cause__, IntegrityError):
             duplicates = _duplicate_invoice_numbers(cleaned['documents'])
@@ -798,16 +824,26 @@ def vendor_order_add_payment(request, order_pk):
         return HttpResponseForbidden()
 
     if request.method != 'POST':
+        # The key lives in the URL (submission_guard), as on the raise pages.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = (PaymentRequest.objects.filter(client_uuid=key)
+                    .select_related('vendor_order').first())
+        if existing is not None:
+            return already_submitted(request, existing.vendor_order)
         return render(request, 'projects/vendor_order_payment_form.html',
-                      _payment_context(order, order.available_to_request))
+                      _payment_context(order, order.available_to_request, client_uuid=key))
 
-    def refuse(errors, available, client_uuid):
+    def refuse(errors, available, client_uuid, status=400, duplicate=None):
         for error in errors:
             messages.error(request, error)
-        return render(request, 'projects/vendor_order_payment_form.html',
-                      _payment_context(order, available, request.POST, client_uuid,
-                                       refused=True),
-                      status=400)
+        context = _payment_context(order, available, request.POST, client_uuid,
+                                   refused=True)
+        # The duplicate warning (status 200) is this same page with its warning drawn.
+        context['duplicate'] = duplicate
+        return render(request, 'projects/vendor_order_payment_form.html', context,
+                      status=status)
 
     return _submit_order_payment(request, order, refuse)
 
@@ -853,8 +889,9 @@ def _create_order_payment(order, project, amount, note, user, profile, client_uu
 def _submit_order_payment(request, order, refuse):
     """The POST half of a further payment request against `order` — idempotency key,
     amount and note, the locked balance check, the write, the feed line and the redirect.
-    `refuse(errors, available, client_uuid)` renders the caller's page with the entries
-    kept. The caller has already checked user_can_request_order_payment().
+    `refuse(errors, available, client_uuid, status=400, duplicate=None)` renders the
+    caller's page with the entries kept; the duplicate warning calls it with status=200.
+    The caller has already checked user_can_request_order_payment().
 
     Shared, not copied: the record page (vendor_order_add_payment) and the purchases
     workspace's Raise payment request (O8a) are two doors onto this one path.
@@ -868,13 +905,17 @@ def _submit_order_payment(request, order, refuse):
     profile = request.user.profile
     project = _order_project(order)
 
-    # R-14, as on the raise page: a repeated key goes to the order, and creates nothing.
+    # R-14, as on the raise page: a repeated key goes to the order its payment was raised
+    # against, says so (D2), and creates nothing.
     try:
         client_uuid = _uuid.UUID(request.POST.get('client_uuid', ''))
     except ValueError:
         client_uuid = None
-    if client_uuid is not None and PaymentRequest.objects.filter(client_uuid=client_uuid).exists():
-        return redirect('vendor_order_detail', order_pk=order.pk)
+    if client_uuid is not None:
+        existing = (PaymentRequest.objects.filter(client_uuid=client_uuid)
+                    .select_related('vendor_order').first())
+        if existing is not None:
+            return already_submitted(request, existing.vendor_order)
 
     errors = []
     if client_uuid is None:
@@ -886,13 +927,24 @@ def _submit_order_payment(request, order, refuse):
     if errors:
         return refuse(errors, order.available_to_request, client_uuid)
 
+    # The content match (D3). OUTSIDE the order-row lock, which _create_order_payment
+    # takes for the balance check alone; _create_order_payment itself carries no warning
+    # logic, because purchases_new calls it for a brand-new order.
+    if not confirmed(request):
+        duplicate = payment_duplicate(order, amount)
+        if duplicate is not None:
+            return refuse([], order.available_to_request, client_uuid,
+                          status=200, duplicate=duplicate)
+
     try:
         pr, available = _create_order_payment(order, project, amount, note, request.user,
                                                profile, client_uuid)
     except IntegrityError:
         # The same key raced past the check above; the winner holds the unique index.
-        if PaymentRequest.objects.filter(client_uuid=client_uuid).exists():
-            return redirect('vendor_order_detail', order_pk=order.pk)
+        existing = (PaymentRequest.objects.filter(client_uuid=client_uuid)
+                    .select_related('vendor_order').first())
+        if existing is not None:
+            return already_submitted(request, existing.vendor_order)
         raise
 
     if pr is None:
@@ -908,13 +960,14 @@ def _submit_order_payment(request, order, refuse):
     return redirect('vendor_order_detail', order_pk=order.pk)
 
 
-def _documents_context(order, post=None, refused=False):
+def _documents_context(order, post=None, refused=False, duplicate=None):
     # No 'project' key — see _payment_context.
     return {
         'order':            order,
         'doc_rows':         _doc_rows(post or {}, {}),
         'doc_type_choices': _DOC_TYPE_SELECT,
         'refused':          refused,
+        'duplicate':        duplicate,
     }
 
 
@@ -937,11 +990,13 @@ def vendor_order_add_documents(request, order_pk):
         return render(request, 'projects/vendor_order_documents_form.html',
                       _documents_context(order))
 
-    def refuse(errors):
+    def refuse(errors, status=400, duplicate=None):
         for error in errors:
             messages.error(request, error)
         return render(request, 'projects/vendor_order_documents_form.html',
-                      _documents_context(order, request.POST, refused=True), status=400)
+                      _documents_context(order, request.POST, refused=True,
+                                         duplicate=duplicate),
+                      status=status)
 
     documents, errors = _validate_document_slots(request)
     if not documents and not errors:
@@ -949,6 +1004,15 @@ def vendor_order_add_documents(request, order_pk):
     errors.extend(_duplicate_invoice_errors(_duplicate_invoice_numbers(documents, order)))
     if errors:
         return refuse(errors)
+
+    # NO KEY ON THIS PAGE: VendorOrderDocument has no client_uuid column, and adding one
+    # is a migration (SECONDARY_FINDINGS). The content match is its only repeat guard —
+    # a warning with an "Attach anyway" override, never a silent skip, and before any
+    # upload so a warning stores no file.
+    if not confirmed(request):
+        duplicate = documents_duplicate(order, documents)
+        if duplicate is not None:
+            return refuse([], status=200, duplicate=duplicate)
 
     # Files go in the order's own folder, beside the ones it was raised with.
     folder = order.client_uuid or f'order-{order.pk}'
@@ -1549,11 +1613,13 @@ def _write_order_record(cleaned, profile, client_uuid):
     return order
 
 
-def _save_order_submission(documents, client_uuid, profile, write, refuse, failed_text):
+def _save_order_submission(request, documents, client_uuid, profile, write, refuse,
+                           failed_text):
     """Upload, then write, then answer. Returns (result, None) on success — `result` is
     what write() returned as its second item — or (None, response) when the save did not
     happen. `refuse(errors, client_uuid)` renders the caller's page; `failed_text` is its
-    wording for a write that failed for no reason worth naming."""
+    wording for a write that failed for no reason worth naming. `request` is for the
+    key-match answer (submission_guard.already_submitted)."""
     try:
         return _upload_and_record_documents(documents, client_uuid, profile, write), None
     except _UploadRefused as exc:
@@ -1563,7 +1629,7 @@ def _save_order_submission(documents, client_uuid, profile, write, refuse, faile
         # here on the unique index. Send it to the winner rather than to an error.
         existing = VendorOrder.objects.filter(client_uuid=client_uuid).first()
         if existing is not None:
-            return None, redirect('vendor_order_detail', order_pk=existing.pk)
+            return None, already_submitted(request, existing)
         # uniq_invoice_number_per_order: same message as the check, files already removed.
         if isinstance(exc.__cause__, IntegrityError):
             duplicates = _duplicate_invoice_numbers(documents)
@@ -1625,23 +1691,32 @@ def vendor_order_create_group(request):
     entering = _entering_program(request)
 
     if request.method != 'POST':
+        # The key lives in the URL (submission_guard); ?program= is kept beside it.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = VendorOrder.objects.filter(client_uuid=key).first()
+        if existing is not None:
+            return already_submitted(request, existing)
         return render(request, 'projects/vendor_order_group_form.html',
-                      _group_form_context(request, entering))
+                      _group_form_context(request, entering, client_uuid=key))
 
-    def refuse(errors, client_uuid):
+    def refuse(errors, client_uuid, status=400, duplicate=None):
         for error in errors:
             messages.error(request, error)
         context = _group_form_context(request, entering, post=request.POST,
                                       client_uuid=client_uuid)
         context['refused'] = True
+        # The duplicate warning (status 200) is this same page with its warning drawn.
+        context['duplicate'] = duplicate
         return render(request, 'projects/vendor_order_group_form.html', context,
-                      status=400)
+                      status=status)
 
-    # R-14, as on the Residential raise: a repeated key goes to the order it already made
-    # and creates nothing.
+    # R-14, as on the Residential raise: a repeated key goes to the order it already
+    # made, says so (D2), and creates nothing.
     posted_uuid, existing = _posted_order_uuid(request)
     if existing is not None:
-        return redirect('vendor_order_detail', order_pk=existing.pk)
+        return already_submitted(request, existing)
 
     cleaned, errors = _parse_group_submission(request)
     if errors:
@@ -1649,6 +1724,14 @@ def vendor_order_create_group(request):
 
     client_uuid = cleaned['client_uuid']
     vendor, payment, sites = cleaned['vendor'], cleaned['payment'], cleaned['sites']
+
+    # The content match (D3), before any upload. The payment is on the new order, so
+    # the order rule is the only one that can match here.
+    if not confirmed(request):
+        duplicate = order_duplicate(profile, vendor, cleaned['order_total'],
+                                    cleaned['po_number'], cleaned['pi_number'])
+        if duplicate is not None:
+            return refuse([], client_uuid, status=200, duplicate=duplicate)
     projects = [site['project'] for site in sites]
     anchor = _write_anchor(projects)
 
@@ -1670,7 +1753,7 @@ def vendor_order_create_group(request):
         return order, (order, pr)
 
     saved, refusal = _save_order_submission(
-        cleaned['documents'], client_uuid, profile, write, refuse,
+        request, cleaned['documents'], client_uuid, profile, write, refuse,
         'The payment request could not be saved. Nothing was recorded; try again.')
     if refusal is not None:
         return refusal

@@ -13,6 +13,7 @@ What this file pins, and why each matters:
 Run with:
     python manage.py test projects.tests_vendor_order_raise --settings=solarpms.test_settings
 """
+import re
 import uuid
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -48,6 +49,15 @@ def _client(profile):
 
 def _pdf(name):
     return SimpleUploadedFile(name, b'%PDF-1.4 fake', content_type='application/pdf')
+
+
+def _assert_keyed_redirect(test, response, path):
+    """A form page reached with follow=True came through the key redirect
+    (submission_guard): the first hop is a 302 to the same path with a ?key= added, any
+    other query parameters kept. One assertion."""
+    first_url, first_status = response.redirect_chain[0]
+    test.assertRegex(f'{first_status} {first_url}',
+                     rf'^302 {re.escape(path)}\?(?:.*&)?key=[0-9a-f-]{{36}}$')
 
 
 def _project(name, pm, project_type='Residential', **extra):
@@ -188,7 +198,8 @@ class RaiseTests(RaiseFixture):
         self.assertEqual(PaymentRequest.objects.count(), 0)
 
     def test_the_page_renders_this_projects_boq_only(self):
-        response = _client(self.scm).get(self.url())
+        response = _client(self.scm).get(self.url(), follow=True)
+        _assert_keyed_redirect(self, response, self.url())
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, f'name="qty_{self.item_module.pk}"')
         self.assertNotContains(response, f'name="qty_{self.other_item.pk}"')
