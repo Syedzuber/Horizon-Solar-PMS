@@ -64,6 +64,13 @@ host is SITE_BASE_URL, production's, even for a send from a local database (ruli
 `message` is both the bell text and the email's plain-text part, so it carries no URL;
 the absolute URL appears only in the HTML part, rendered from
 projects/email/approval_notice.html (autoescaped).
+
+MATERIAL LINES (28 Sep 2026). Every approval email of a material request carries one line
+saying what it is about — "120 Nos — Solar module 540W, +2 more" (lines_summary): the
+first line, and how many others. In BOTH email parts: the HTML part draws it as a row
+(approval_notice.html), and the plain-text part is `message` plus a "Material: ..." line.
+The bell text stays `message` alone, one sentence — so an email that carries a summary is
+sent in a call of its own (_send), and the in-app notice in another.
 """
 import logging
 
@@ -71,7 +78,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 
 from .models import (
-    ApprovalRequest, ApprovalStep, UserProfile,
+    ApprovalRequest, ApprovalStep, MaterialApprovalLine, UserProfile,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
     APPROVAL_KIND_CHOICES, APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN,
     APPROVAL_PROXY_EMAIL, APPROVAL_PROXY_IN_PERSON, APPROVAL_PROXY_PHONE,
@@ -80,6 +87,7 @@ from .models import (
     APPROVAL_STEP_SUPERSEDED,
 )
 from .notifications import send_notification
+from .units import format_quantity
 from .utils import _abs_url
 
 logger = logging.getLogger(__name__)
@@ -166,20 +174,49 @@ def _link(approval):
     return reverse('approval_detail', args=[approval.pk])
 
 
-def email_html(approval, subject, body, quote_label='', quote=''):
+def lines_summary(approval):
+    """What a material request is about, in one line for an email: the first material
+    line as "<quantity> <unit> — <description>", then ", +N more" for the rest. '' for a
+    request with no lines — a contractor bill, or one raised before lines. One query."""
+    # Every line, not just the first: the count of the rest comes from the same query.
+    lines = list(MaterialApprovalLine.objects.filter(detail__request_id=approval.pk)
+                 .order_by('position'))
+    if not lines:
+        return ''
+    first = lines[0]
+    summary = (f'{format_quantity(first.quantity, first.unit)} {first.unit} — '
+               f'{first.description}')
+    if len(lines) > 1:
+        summary += f', +{len(lines) - 1} more'
+    return summary
+
+
+def email_html(approval, subject, body, quote_label='', quote='', summary=None):
     """The HTML part of an approval email. Autoescaped, so text a user typed arrives as
-    text; the one place the absolute URL appears."""
+    text; the one place the absolute URL appears. Carries the material line summary
+    when the request has lines: `summary` if the caller already read it, otherwise
+    lines_summary()."""
+    if summary is None:
+        summary = lines_summary(approval)
     return render_to_string('projects/email/approval_notice.html', {
         'subject': subject, 'body': body, 'quote_label': quote_label, 'quote': quote,
+        'lines_summary': summary,
         'url': _abs_url(_link(approval), None),
     })
 
 
 def _send(approval, notices, excluded, actor):
     """Send `notices` in order: the actor and anyone already told in this action are
-    skipped, as is anyone inactive. One failing send is logged and the rest still go."""
+    skipped, as is anyone inactive. One failing send is logged and the rest still go.
+
+    A material request's email carries its line summary in the plain-text part as well
+    as the HTML part. send_notification() sends one `message` as both the bell text and
+    the email's text part, so such an email goes in a second call with the summary
+    appended, and the bell keeps `message` alone. Same channels, same log rows, same
+    template name; only the email row's message differs."""
     told = set(excluded)
     link = _link(approval)
+    summary = None      # read once per action, and only if someone is emailed
     for notice in notices:
         person = notice.recipient
         if not _is_active(person) or person.pk in told:
@@ -187,13 +224,25 @@ def _send(approval, notices, excluded, actor):
         told.add(person.pk)
         try:
             html = None
+            channels, email_text = notice.channels, notice.message
             if 'email' in notice.channels:
+                if summary is None:
+                    summary = lines_summary(approval)
                 html = email_html(approval, notice.subject, notice.body,
-                                  notice.quote_label, notice.quote)
-            send_notification(
-                recipient=person, message=notice.message, channels=notice.channels,
-                link=link, subject=notice.subject, html_message=html,
-                template=notice.template, related_project=None, actor=actor)
+                                  notice.quote_label, notice.quote, summary=summary)
+                if summary:
+                    channels = [c for c in notice.channels if c != 'email']
+                    email_text = f'{notice.message}\n\nMaterial: {summary}'
+            if channels:
+                send_notification(
+                    recipient=person, message=notice.message, channels=channels,
+                    link=link, subject=notice.subject, html_message=html,
+                    template=notice.template, related_project=None, actor=actor)
+            if channels != notice.channels:
+                send_notification(
+                    recipient=person, message=email_text, channels=['email'],
+                    link=link, subject=notice.subject, html_message=html,
+                    template=notice.template, related_project=None, actor=actor)
         except Exception:
             logger.exception('approval_notices: the %s notice on approval #%s to %s '
                              'failed; the approval action stands.',

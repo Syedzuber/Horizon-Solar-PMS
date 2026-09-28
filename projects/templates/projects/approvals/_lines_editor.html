@@ -1,0 +1,132 @@
+{% comment %}
+Material lines (D-A28) — the lines table of the raise and resubmit forms. Included by
+approvals/create.html and approvals/resubmit.html, inside their <form>, so there is one
+copy of the markup, its phone layout and its script.
+
+Context: `lines` — the rows to draw (approval_forms.parse_lines / line_rows shape, via
+approval_views._line_form_rows, so there is always at least one); `units` —
+approval_views._UNIT_OPTIONS, (code, label, is_count); `resubmit` (include … with
+resubmit=True) — adds one sentence to the hint.
+
+Inputs are named line-<i>-<field>; each row's hidden line-<i>-id is the line's pk on a
+resubmit (empty for a new line), which is how the chokepoint edits a line in place. "+ Add
+line" clones the first row with the next unused index, so indices may have gaps after a
+removal; the server reads them in order. The last row is cleared, never removed.
+
+The quantity box is type="number" step="any" as drawn; the script sets step="1" min="1"
+when the row's unit counts whole things and step="any" min="0.01" when it measures. A
+typing aid only: approvals._clean_lines refuses a quantity its unit does not allow.
+
+Below 768px each row is a bordered block with its fields stacked and labelled from
+data-label, so a phone never scrolls sideways. The <style> sits here, in the page body,
+rather than in each page's extra_head, so the layout travels with the markup.
+{% endcomment %}
+<style>
+  /* The lines table. Below 768px each line is a bordered block with its fields stacked
+     and labelled from data-label, so a phone never scrolls sideways. */
+  .ap-lines th:first-child, .ap-lines td:first-child { width: 2rem; }
+  .ap-lines .ap-qty { min-width: 6rem; }
+  @media (max-width: 767.98px) {
+    .ap-lines thead { display: none; }
+    .ap-lines tr { display: block; border: 1px solid #dee2e6; border-radius: .375rem;
+                   padding: .5rem; margin-bottom: .5rem; }
+    .ap-lines td { display: block; border: 0; padding: .25rem 0; width: auto !important; }
+    .ap-lines td[data-label]::before { content: attr(data-label); display: block;
+                                       font-size: .8rem; color: #6c757d; }
+    .ap-lines .ap-remove-line { width: 100%; min-height: 44px; }
+  }
+</style>
+<div class="mb-3">
+  <div class="form-label">Material lines</div>
+  <table class="table table-sm align-top mb-2 ap-lines" id="apLines">
+    <thead class="small text-muted">
+      <tr><th>#</th><th>Description</th><th>Make</th><th>Specification</th><th>Quantity</th><th>Unit</th><th><span class="visually-hidden">Remove</span></th></tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr class="ap-line">
+        <td class="ap-line-no text-muted small" data-label="Line">{{ forloop.counter }}</td>
+        <td data-label="Description">
+          <input type="hidden" name="line-{{ forloop.counter0 }}-id" value="{{ line.id|default:'' }}">
+          <input type="text" name="line-{{ forloop.counter0 }}-description" class="form-control form-control-sm" maxlength="300" required
+                 value="{{ line.description }}" placeholder="e.g. Solar module 540 Wp" aria-label="Description">
+        </td>
+        <td data-label="Make"><input type="text" name="line-{{ forloop.counter0 }}-make" class="form-control form-control-sm" maxlength="200" value="{{ line.make }}" aria-label="Make"></td>
+        <td data-label="Specification"><textarea name="line-{{ forloop.counter0 }}-specification" class="form-control form-control-sm" rows="1" aria-label="Specification">{{ line.specification }}</textarea></td>
+        <td data-label="Quantity"><input type="number" step="any" min="0.01" inputmode="decimal" name="line-{{ forloop.counter0 }}-quantity" class="form-control form-control-sm ap-qty" required value="{{ line.quantity }}" aria-label="Quantity"></td>
+        <td data-label="Unit">
+          <select name="line-{{ forloop.counter0 }}-unit" class="form-select form-select-sm ap-unit" required aria-label="Unit">
+            <option value="">Unit</option>
+            {% for code, label, is_count in units %}<option value="{{ code }}"{% if is_count %} data-count{% endif %}{% if code == line.unit %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select>
+        </td>
+        <td><button type="button" class="btn btn-outline-danger btn-sm ap-remove-line">Remove</button></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="d-grid d-sm-block">
+    <button type="button" class="btn btn-outline-secondary btn-sm" id="apAddLine">+ Add line</button>
+  </div>
+  <div class="form-text">{% if resubmit %}Edit, add or remove lines; the next round is asked about the lines as they stand. {% endif %}Nos, Set, Packet, Pair and Lot take whole numbers. Meter, KWp, Kg and Lump sum take up to 2 decimal places. A quantity is never rounded — one that does not fit its unit is refused.</div>
+</div>
+<script>
+// The lines table: add a row, remove a row, and match each quantity box to its unit.
+// Added rows take the next unused index, so indices may have gaps after a removal;
+// the server reads them in order and does not care. The last row is cleared, never
+// removed, so there is always one to type into. step/min are typing aids only — the
+// server refuses a quantity that does not fit its unit, whatever the browser allowed.
+document.addEventListener('DOMContentLoaded', function () {
+  var body = document.querySelector('#apLines tbody');
+  var add = document.getElementById('apAddLine');
+  if (!body || !add) return;
+  function syncStep(row) {
+    var unit = row.querySelector('.ap-unit'), qty = row.querySelector('.ap-qty');
+    var chosen = unit.options[unit.selectedIndex];
+    var isCount = !!chosen && chosen.hasAttribute('data-count');
+    qty.step = isCount ? '1' : 'any';
+    qty.min = isCount ? '1' : '0.01';
+  }
+  function renumber() {
+    Array.prototype.forEach.call(body.querySelectorAll('.ap-line-no'), function (cell, i) {
+      cell.textContent = i + 1;
+    });
+  }
+  function nextIndex() {
+    var top = -1;
+    Array.prototype.forEach.call(body.querySelectorAll('[name^="line-"]'), function (el) {
+      top = Math.max(top, parseInt(el.name.split('-')[1], 10));
+    });
+    return top + 1;
+  }
+  function clear(row) {
+    Array.prototype.forEach.call(row.querySelectorAll('input, textarea, select'), function (el) {
+      el.value = '';
+    });
+    syncStep(row);
+  }
+  add.addEventListener('click', function () {
+    var first = body.querySelector('.ap-line');
+    var row = first.cloneNode(true);
+    var index = nextIndex();
+    Array.prototype.forEach.call(row.querySelectorAll('[name^="line-"]'), function (el) {
+      el.name = el.name.replace(/^line-\d+-/, 'line-' + index + '-');
+    });
+    clear(row);
+    body.appendChild(row);
+    renumber();
+    row.querySelector('[name$="-description"]').focus();
+  });
+  body.addEventListener('click', function (event) {
+    var button = event.target.closest('.ap-remove-line');
+    if (!button) return;
+    var row = button.closest('.ap-line');
+    if (body.querySelectorAll('.ap-line').length > 1) row.remove(); else clear(row);
+    renumber();
+  });
+  body.addEventListener('change', function (event) {
+    if (event.target.classList.contains('ap-unit')) syncStep(event.target.closest('.ap-line'));
+  });
+  Array.prototype.forEach.call(body.querySelectorAll('.ap-line'), syncStep);
+});
+</script>

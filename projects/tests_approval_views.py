@@ -40,7 +40,8 @@ from .approvals import (
 )
 from .utils import record_transition
 from .models import (
-    ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep, Program,
+    ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep,
+    MaterialApprovalLine, Program,
     Project, SiteGroup, StatusTransition, Vendor, VendorOrder, VendorOrderSite,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER,
@@ -50,6 +51,7 @@ from .models import (
     APPROVAL_STEP_SUPERSEDED, GROUP_TYPE_PROCUREMENT, SUBJECT_APPROVAL_REQUEST,
 )
 from .permissions import user_can_view_vendor_order
+from .tests_approvals import MODULE_LINE
 
 
 def _profile(username, role, **flags):
@@ -94,7 +96,7 @@ class ApprovalViewFixture(TestCase):
             title='Module make', description='Propose Waaree 545 Wp.',
             pm_assignee=self.pm, design_signoff_required=design,
             design_assignee=self.head if design else None,
-            material={'proposed_make': 'Waaree', 'specification': '545 Wp mono PERC'},
+            material={}, lines=[dict(MODULE_LINE)],
         )
         kwargs.update(overrides)
         return create_approval_request(**kwargs)
@@ -103,6 +105,20 @@ class ApprovalViewFixture(TestCase):
         approval.refresh_from_db()
         return ApprovalStep.objects.exclude(verdict=APPROVAL_STEP_SUPERSEDED).get(
             request=approval, party=party, round=approval.current_round)
+
+    @staticmethod
+    def line_post(index=0, line_id='', **fields):
+        """One row of the lines table as the page posts it (line-<index>-<field>):
+        MODULE_LINE's values unless overridden, and `line_id` in its hidden id input."""
+        values = dict(MODULE_LINE, **fields)
+        data = {f'line-{index}-{field}': value for field, value in values.items()}
+        data[f'line-{index}-id'] = line_id
+        return data
+
+    @staticmethod
+    def first_line(approval):
+        return MaterialApprovalLine.objects.filter(detail__request=approval) \
+            .order_by('position').first()
 
     def client_for(self, profile):
         client = Client(SERVER_NAME='localhost')
@@ -358,8 +374,9 @@ class CreateTests(ApprovalViewFixture):
     def form(self, **overrides):
         data = {'client_uuid': str(uuid.uuid4()), 'title': 'Inverter make',
                 'description': 'Propose Sungrow for the tender.',
-                'proposed_make': 'Sungrow', 'specification': '50 kW',
-                'quantity_note': '12 units', 'pm_assignee': self.pm.pk,
+                **self.line_post(description='String inverter', make='Sungrow',
+                                 specification='50 kW', quantity='12'),
+                'pm_assignee': self.pm.pk,
                 'design_signoff_required': 'on', 'design_assignee': self.head.pk,
                 'program': [self.program.pk], 'project': [self.site.pk],
                 'site_group': [self.group.pk], 'vendor': self.vendor.pk}
@@ -373,7 +390,9 @@ class CreateTests(ApprovalViewFixture):
         self.assertEqual((approval.kind, approval.raised_by, approval.vendor,
                           approval.design_signoff_required),
                          (APPROVAL_KIND_MATERIAL_PRE_ORDER, self.scm, self.vendor, True))
-        self.assertEqual(approval.material_detail.proposed_make, 'Sungrow')
+        self.assertEqual(list(approval.material_detail.lines.values_list(
+            'description', 'make', 'quantity', 'unit')),
+            [('String inverter', 'Sungrow', Decimal('12'), 'Nos')])
         self.assertEqual((list(approval.programs.all()), list(approval.projects.all()),
                           list(approval.site_groups.all())),
                          ([self.program], [self.site], [self.group]))
@@ -795,12 +814,13 @@ class RevisionFixture(ApprovalViewFixture):
         apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Use Adani.')
         self.url = reverse('approval_resubmit', args=[self.approval.pk])
+        self.line = self.first_line(self.approval)
 
     def form(self, **overrides):
         """The resubmit page's POST with every drawn field as it was pre-filled."""
         data = {'revise': '1', 'title': 'Module make', 'description': 'Propose Waaree 545 Wp.',
-                'proposed_make': 'Waaree', 'specification': '545 Wp mono PERC',
-                'quantity_note': '', 'vendor': '', 'program': [self.tender_a.pk],
+                **self.line_post(line_id=self.line.pk),
+                'vendor': '', 'program': [self.tender_a.pk],
                 'project': [self.site.pk], 'note': 'Changed the make.',
                 f'assignee_{APPROVAL_PARTY_PM}': self.pm.pk,
                 f'assignee_{APPROVAL_PARTY_DESIGN}': self.head.pk}
@@ -816,13 +836,13 @@ class ResubmitRevisionTests(RevisionFixture):
 
     def test_a_revision_changes_the_fields_and_round_2_shows_them(self):
         response = self.client_for(self.scm).post(
-            self.url, self.form(title='Module make v2', proposed_make='Adani'))
+            self.url, self.form(title='Module make v2', **{'line-0-make': 'Adani'}))
         self.assert_to_detail(response, self.approval)
         self.approval.refresh_from_db()
         self.assertEqual((self.approval.current_round, self.approval.title),
                          (2, 'Module make v2'))
-        self.assertEqual(self.approval.material_detail.proposed_make, 'Adani')
-        self.assertEqual(round_snapshot(self.approval, 2)['material']['proposed_make'],
+        self.assertEqual(self.first_line(self.approval).make, 'Adani')
+        self.assertEqual(round_snapshot(self.approval, 2)['material']['lines'][0]['make'],
                          'Adani')
         page = self.detail()
         self.assertContains(page, 'Details approvers saw in round 2')
@@ -830,10 +850,15 @@ class ResubmitRevisionTests(RevisionFixture):
         self.assertContains(page, 'Module make v2')
 
     def test_only_the_fields_that_changed_are_sent_as_the_revision(self):
+        """The request's own fields: only what changed. The lines: the whole table, as
+        one set, in `lines` — never in the revision."""
         with mock.patch('projects.approval_views.resubmit_approval_request',
                         wraps=resubmit_approval_request) as resubmit:
-            self.client_for(self.scm).post(self.url, self.form(proposed_make='Adani'))
-        self.assertEqual(resubmit.call_args.kwargs['revision'], {'proposed_make': 'Adani'})
+            self.client_for(self.scm).post(self.url, self.form(
+                title='Module make v2', **{'line-0-make': 'Adani'}))
+        self.assertEqual(resubmit.call_args.kwargs['revision'], {'title': 'Module make v2'})
+        self.assertEqual(resubmit.call_args.kwargs['lines'],
+                         [dict(MODULE_LINE, id=self.line.pk, make='Adani')])
 
     def test_an_untouched_form_sends_no_revision(self):
         with mock.patch('projects.approval_views.resubmit_approval_request',
@@ -846,7 +871,13 @@ class ResubmitRevisionTests(RevisionFixture):
         self.assertContains(response, 'name="revise" value="1"')
         self.assertContains(response, 'value="Module make"')
         self.assertContains(response, f'<option value="{self.tender_a.pk}" selected>AV Tender A')
-        self.assertContains(response, 'BOQ items and design sign-off cannot be changed')
+        self.assertContains(response, 'Design sign-off cannot be changed')
+        self.assertContains(response, f'name="line-0-id" value="{self.line.pk}"')
+        self.assertContains(response, 'value="Solar module 545 Wp"')
+        self.assertContains(response, 'name="line-0-quantity" class="form-control '
+                                      'form-control-sm ap-qty" required value="120"')
+        self.assertContains(response, '<option value="Nos" data-count selected>Nos</option>')
+        self.assertNotContains(response, 'Recorded before line items')
         self.assertNotContains(response, 'NOT editable here')
 
     def test_an_inactive_vendor_stays_offered_as_before(self):
@@ -946,10 +977,12 @@ class RoundChangeTests(RevisionFixture):
 
     def test_the_change_list_shows_old_and_new_values_and_scope_added_and_removed(self):
         self.client_for(self.scm).post(self.url, self.form(
-            proposed_make='Adani', program=[self.tender_b.pk]))
+            program=[self.tender_b.pk], **{'line-0-make': 'Adani'}))
         page = self.detail()
         self.assertContains(page, 'Changed since round 1')
-        self.assertContains(page, '<span class="text-muted">Waaree</span> → Adani', html=False)
+        self.assertContains(page, 'Line 1 · Solar module 545 Wp')
+        self.assertContains(page, 'Make: <span class="text-muted">Waaree</span> → Adani',
+                            html=False)
         self.assertContains(page, '+ Added: AV Tender B')
         self.assertContains(page, '− Removed: AV Tender A')
         self.assertNotContains(page, 'Change list unavailable')
@@ -1162,8 +1195,7 @@ class PreDispatchFixture(ApprovalViewFixture):
         kwargs = dict(
             kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH, title='Modules, lot 1 of 2',
             vendor=order.vendor,
-            material={'proposed_make': 'Waaree', 'vendor_order': order,
-                      'pre_order_request': pre_order})
+            material={'vendor_order': order, 'pre_order_request': pre_order})
         kwargs.update(overrides)
         return self.raise_material(**kwargs)
 
@@ -1175,8 +1207,7 @@ class PreDispatchFixture(ApprovalViewFixture):
 
     def form(self, **overrides):
         data = {'client_uuid': str(uuid.uuid4()), 'title': 'Modules, lot 2 of 3',
-                'description': 'First truck of modules.', 'proposed_make': 'Waaree',
-                'specification': '545 Wp', 'quantity_note': '120 modules',
+                'description': 'First truck of modules.', **self.line_post(),
                 'pm_assignee': self.pm.pk, 'vendor_order': self.order.pk}
         data.update(overrides)
         return data
@@ -1418,13 +1449,14 @@ class PreDispatchResubmitTests(PreDispatchFixture):
         response = self.client_for(self.scm).post(self.url, {
             'revise': '1', 'note': 'Changed the make.', 'title': self.approval.title,
             'description': self.approval.description, 'vendor': self.other_vendor.pk,
-            'proposed_make': 'Adani'})
+            **self.line_post(line_id=self.first_line(self.approval).pk, make='Adani')})
         self.assert_to_detail(response, self.approval)
         self.approval.refresh_from_db()
         self.assertEqual((self.approval.current_round, self.approval.vendor),
                          (2, self.vendor))
         snapshot = round_snapshot(self.approval, 2)
-        self.assertEqual((snapshot['vendor']['id'], snapshot['material']['proposed_make']),
+        self.assertEqual((snapshot['vendor']['id'],
+                          snapshot['material']['lines'][0]['make']),
                          (self.vendor.pk, 'Adani'))
 
     def test_a_pre_order_request_still_edits_its_vendor(self):
@@ -1435,7 +1467,8 @@ class PreDispatchResubmitTests(PreDispatchFixture):
         self.assertContains(self.client_for(self.scm).get(url), 'name="vendor"')
         self.client_for(self.scm).post(url, {
             'revise': '1', 'note': 'Other vendor.', 'title': pre.title,
-            'description': pre.description, 'vendor': self.other_vendor.pk})
+            'description': pre.description, 'vendor': self.other_vendor.pk,
+            **self.line_post(line_id=self.first_line(pre).pk)})
         pre.refresh_from_db()
         self.assertEqual(pre.vendor, self.other_vendor)
 

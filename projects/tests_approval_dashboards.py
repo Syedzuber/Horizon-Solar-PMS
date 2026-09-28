@@ -47,6 +47,7 @@ from .models import (
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
     APPROVAL_STEP_SUPERSEDED,
 )
+from .tests_approvals import MODULE_LINE
 
 
 def _profile(username, role, **flags):
@@ -91,7 +92,7 @@ class DashboardFixture(TestCase):
             title=title, description='Propose Waaree 545 Wp.',
             pm_assignee=pm or self.pm, design_signoff_required=design,
             design_assignee=self.head if design else None, vendor=vendor,
-            material={'proposed_make': 'Waaree', 'specification': '545 Wp mono PERC'},
+            material={}, lines=[dict(MODULE_LINE)],
         )
 
     def raise_bill(self, title='Civil works bill'):

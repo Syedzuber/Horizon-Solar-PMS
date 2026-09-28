@@ -42,7 +42,7 @@ from .approvals import (
 )
 from .models import (
     AppendOnlyViolation, ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot,
-    ApprovalStep, BOQItemMaster, MaterialApprovalDetail, Program, Project, SiteGroup,
+    ApprovalStep, MaterialApprovalDetail, MaterialApprovalLine, Program, Project, SiteGroup,
     StatusTransition, Vendor, VendorOrder,
     APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER,
@@ -62,6 +62,11 @@ from .permissions import (
 from .utils import _subject_type_registry
 
 ON_POSTGRES = connection.vendor == 'postgresql'
+
+#: The one material line every fixture raises a material request with (D-A28: at least
+#: one is required). Tests about lines pass their own.
+MODULE_LINE = {'description': 'Solar module 545 Wp', 'make': 'Waaree',
+               'specification': '545 Wp mono PERC', 'quantity': '120', 'unit': 'Nos'}
 
 
 def _profile(username, role, **flags):
@@ -109,7 +114,7 @@ class ApprovalFixture(TestCase):
             pm_assignee=self.pm,
             design_signoff_required=design,
             design_assignee=self.head if design else None,
-            material={'proposed_make': 'Waaree', 'specification': '545 Wp mono PERC'},
+            material={}, lines=[dict(MODULE_LINE)],
             attachments=[{'file_name': 'datasheet.pdf', 'bucket': 'approvals',
                           'path': 'r1/datasheet.pdf', 'label': 'Datasheet'}],
         )
@@ -918,8 +923,6 @@ class CreateTests(ApprovalFixture):
         cls.program = Program.objects.create(
             name='Approval Tender', program_type='OPEX', client_name='Client',
             status='Active', short_tender_code='APT')
-        cls.item = BOQItemMaster.objects.create(code='APPRT-001', description='Module',
-                                                unit='Nos')
         cls.order = VendorOrder.objects.create(
             vendor=cls.vendor, project_type='Residential', total_amount=Decimal('1000'),
             created_by=cls.scm)
@@ -942,11 +945,18 @@ class CreateTests(ApprovalFixture):
     def test_material_detail_scope_and_attachments_are_written(self):
         approval = self.raise_material(
             programs=[self.program], projects=[self.pm_project],
-            material={'proposed_make': ' Waaree ', 'specification': '545 Wp',
-                      'boq_items': [self.item]})
+            lines=[{'description': ' Solar module ', 'make': ' Waaree ',
+                    'specification': '545 Wp', 'quantity': '120', 'unit': 'Nos'},
+                   {'description': 'DC cable', 'quantity': '250.50', 'unit': 'Meter'}])
         detail = MaterialApprovalDetail.objects.get(request=approval)
-        self.assertEqual(detail.proposed_make, 'Waaree')
-        self.assertEqual(list(detail.boq_items.all()), [self.item])
+        self.assertEqual(
+            list(detail.lines.values_list('position', 'description', 'make',
+                                          'specification', 'quantity', 'unit')),
+            [(1, 'Solar module', 'Waaree', '545 Wp', Decimal('120'), 'Nos'),
+             (2, 'DC cable', '', '', Decimal('250.50'), 'Meter')])
+        # The request-wide fields lines replaced are written by nothing.
+        self.assertEqual((detail.proposed_make, detail.specification, detail.quantity_note),
+                         ('', '', ''))
         self.assertEqual(list(approval.programs.all()), [self.program])
         self.assertEqual(list(approval.projects.all()), [self.pm_project])
         attachment = ApprovalAttachment.objects.get(request=approval)
@@ -1120,10 +1130,6 @@ class RevisionFixture(ApprovalFixture):
             site_address='2 Sun Road', city='Lucknow', state='Uttar Pradesh',
             project_type='Residential', dc_capacity_kw=Decimal('5.00'),
             assigned_pm=cls.pm)
-        cls.item = BOQItemMaster.objects.create(code='APRV-001', description='Module',
-                                                unit='Nos')
-        cls.item_b = BOQItemMaster.objects.create(code='APRV-002', description='Inverter',
-                                                  unit='Nos')
         cls.order = VendorOrder.objects.create(
             vendor=cls.vendor, project_type='Residential', total_amount=Decimal('1000'),
             created_by=cls.scm)
@@ -1149,6 +1155,15 @@ class RevisionFixture(ApprovalFixture):
         approval.refresh_from_db()
         return approval
 
+    @staticmethod
+    def live_line(approval):
+        """The request's first live line, in the shape resubmit's `lines` takes."""
+        line = (MaterialApprovalLine.objects.filter(detail__request=approval)
+                .order_by('position').first())
+        return {'id': line.pk, 'description': line.description, 'make': line.make,
+                'specification': line.specification, 'quantity': str(line.quantity),
+                'unit': line.unit}
+
     def untouched(self, approval):
         """Everything a refused resubmit must leave exactly as it was."""
         approval.refresh_from_db()
@@ -1158,6 +1173,8 @@ class RevisionFixture(ApprovalFixture):
                 sorted(approval.projects.values_list('pk', flat=True)),
                 sorted(approval.site_groups.values_list('pk', flat=True)),
                 detail,
+                list(MaterialApprovalLine.objects.filter(detail__request=approval)
+                     .order_by('pk').values()),
                 list(ApprovalStep.objects.filter(request=approval).order_by('pk').values()),
                 list(ApprovalAttachment.objects.filter(request=approval)
                      .order_by('pk').values()),
@@ -1170,13 +1187,11 @@ class RoundSnapshotTests(RevisionFixture):
 
     def test_create_writes_the_round_one_snapshot_with_names_beside_ids(self):
         approval = self.raise_material(
-            programs=[self.program], projects=[self.site], site_groups=[self.group],
-            material={'proposed_make': 'Waaree', 'specification': '545 Wp',
-                      'quantity_note': '120 modules', 'boq_items': [self.item]})
+            programs=[self.program], projects=[self.site], site_groups=[self.group])
         row = ApprovalRoundSnapshot.objects.get(request=approval)
         self.assertEqual((row.round, row.created_by), (1, self.scm))
         snap = row.snapshot
-        self.assertEqual(snap['schema'], 1)
+        self.assertEqual(snap['schema'], 2)
         self.assertEqual(snap['round'], 1)
         self.assertEqual(snap['title'], 'Module make')
         self.assertIsNone(snap['vendor'])
@@ -1184,9 +1199,13 @@ class RoundSnapshotTests(RevisionFixture):
                                              'short_tender_code': 'RVT'}])
         self.assertEqual(snap['projects'][0]['customer_name'], 'Revision Site')
         self.assertEqual(snap['site_groups'][0]['program_name'], 'Revision Tender')
-        self.assertEqual(snap['material']['boq_items'],
-                         [{'id': self.item.pk, 'code': 'APRV-001', 'description': 'Module',
-                           'unit': 'Nos'}])
+        line = MaterialApprovalLine.objects.get(detail__request=approval)
+        self.assertEqual(snap['material']['lines'],
+                         [{'id': line.pk, 'position': 1, 'description': 'Solar module 545 Wp',
+                           'make': 'Waaree', 'specification': '545 Wp mono PERC',
+                           'quantity': '120', 'unit': 'Nos'}])
+        self.assertNotIn('boq_items', snap['material'])
+        self.assertNotIn('legacy', snap['material'])   # all three empty: left out
         self.assertEqual([(s['party'], s['assignee_id'], s['carried'])
                           for s in snap['steps']],
                          [(APPROVAL_PARTY_DESIGN, self.head.pk, False),
@@ -1214,8 +1233,8 @@ class RoundSnapshotTests(RevisionFixture):
                          .values())
         resubmit_approval_request(
             approval, self.scm, note='New vendor.',
-            revision={'vendor': self.vendor_b, 'programs': [],
-                      'specification': '550 Wp'})
+            revision={'vendor': self.vendor_b, 'programs': []},
+            lines=[dict(self.live_line(approval), specification='550 Wp')])
         Vendor.objects.filter(pk=self.vendor.pk).update(name='Renamed Vendor')
         Program.objects.filter(pk=self.program.pk).update(name='Renamed Tender')
         self.assertEqual(list(ApprovalRoundSnapshot.objects.filter(request=approval,
@@ -1227,6 +1246,10 @@ class RoundSnapshotTests(RevisionFixture):
         self.assertEqual(round_snapshot(approval, 2)['vendor'],
                          {'id': self.vendor_b.pk, 'name': 'Second Vendor'})
         self.assertEqual(round_snapshot(approval, 2)['programs'], [])
+        self.assertEqual(round_snapshot(approval, 1)['material']['lines'][0]['specification'],
+                         '545 Wp mono PERC')
+        self.assertEqual(round_snapshot(approval, 2)['material']['lines'][0]['specification'],
+                         '550 Wp')
 
     def test_a_round_without_a_snapshot_reads_none_and_does_not_stop_a_resubmit(self):
         """A request raised before S1.1 has no snapshot. The queryset delete bypasses the
@@ -1262,16 +1285,15 @@ class RoundSnapshotTests(RevisionFixture):
 class RevisionTests(RevisionFixture):
 
     def test_a_revision_writes_every_revisable_field(self):
-        approval = self.pm_changes_first(
-            programs=[self.program], material={'proposed_make': 'Waaree',
-                                               'boq_items': [self.item]})
+        approval = self.pm_changes_first(programs=[self.program])
+        line = self.live_line(approval)
         resubmit_approval_request(
             approval, self.scm, note='Switched to Adani.',
             revision={'title': ' Module make v2 ', 'description': 'Adani 550 Wp.',
                       'vendor': self.vendor_b, 'programs': [], 'projects': [self.site],
-                      'site_groups': [self.group], 'proposed_make': 'Adani',
-                      'specification': '550 Wp', 'quantity_note': '110 modules',
-                      'boq_items': [self.item_b]})
+                      'site_groups': [self.group]},
+            lines=[dict(line, make='Adani', specification='550 Wp', quantity='110'),
+                   {'description': 'Inverter 50 kW', 'quantity': '2', 'unit': 'Nos'}])
         approval.refresh_from_db()
         detail = MaterialApprovalDetail.objects.get(request=approval)
         self.assertEqual((approval.title, approval.description, approval.vendor),
@@ -1279,27 +1301,28 @@ class RevisionTests(RevisionFixture):
         self.assertEqual(list(approval.programs.all()), [])
         self.assertEqual(list(approval.projects.all()), [self.site])
         self.assertEqual(list(approval.site_groups.all()), [self.group])
-        self.assertEqual((detail.proposed_make, detail.specification, detail.quantity_note),
-                         ('Adani', '550 Wp', '110 modules'))
-        self.assertEqual(list(detail.boq_items.all()), [self.item_b])
+        # The edited line keeps its pk; the new one is added after it.
+        added = detail.lines.get(position=2)
+        self.assertEqual(
+            list(detail.lines.values_list('pk', 'position', 'make', 'quantity')),
+            [(line['id'], 1, 'Adani', Decimal('110')), (added.pk, 2, '', Decimal('2'))])
         snap = round_snapshot(approval, 2)
         self.assertEqual(snap['title'], 'Module make v2')
-        self.assertEqual(snap['material']['proposed_make'], 'Adani')
-        self.assertEqual([i['code'] for i in snap['material']['boq_items']], ['APRV-002'])
+        self.assertEqual([(l['make'], l['quantity']) for l in snap['material']['lines']],
+                         [('Adani', '110'), ('', '2')])
 
     def test_omitted_keys_stay_as_they_were(self):
-        approval = self.pm_changes_first(
-            vendor=self.vendor, programs=[self.program],
-            material={'proposed_make': 'Waaree', 'specification': '545 Wp',
-                      'boq_items': [self.item]})
-        resubmit_approval_request(approval, self.scm, note='Only the spec.',
-                                  revision={'specification': '550 Wp'})
+        approval = self.pm_changes_first(vendor=self.vendor, programs=[self.program])
+        lines_before = list(MaterialApprovalLine.objects.filter(detail__request=approval)
+                            .values())
+        resubmit_approval_request(approval, self.scm, note='Only the description.',
+                                  revision={'description': 'Waaree 550 Wp instead.'})
         approval.refresh_from_db()
-        detail = MaterialApprovalDetail.objects.get(request=approval)
-        self.assertEqual((approval.title, approval.vendor), ('Module make', self.vendor))
+        self.assertEqual((approval.title, approval.description, approval.vendor),
+                         ('Module make', 'Waaree 550 Wp instead.', self.vendor))
         self.assertEqual(list(approval.programs.all()), [self.program])
-        self.assertEqual((detail.proposed_make, detail.specification), ('Waaree', '550 Wp'))
-        self.assertEqual(list(detail.boq_items.all()), [self.item])
+        self.assertEqual(list(MaterialApprovalLine.objects.filter(detail__request=approval)
+                              .values()), lines_before)
 
     def test_a_revision_refused_by_the_kind_rules_writes_nothing(self):
         deleted = Project.objects.create(
@@ -1316,7 +1339,8 @@ class RevisionTests(RevisionFixture):
             (dispatch, {'vendor': self.vendor_b}, 'different vendor'),   # order mismatch
             (dispatch, {'vendor': None}, 'Choose the vendor'),
             (bill, {'vendor': None}, 'Choose the vendor'),
-            (bill, {'proposed_make': 'X'}, 'no material detail'),
+            (bill, {'proposed_make': 'X'}, 'cannot be changed'),     # retired: lines now
+            (dispatch, {'boq_items': []}, 'cannot be changed'),
             (dispatch, {'title': '   '}, 'title and a description'),
             (dispatch, {'title': 'x' * 201}, '200 characters'),
             (dispatch, {'projects': [deleted]}, 'deleted project'),
@@ -1346,7 +1370,9 @@ class RevisionTests(RevisionFixture):
                 resubmit_approval_request(
                     approval, self.scm, note='New PM and title.',
                     assignees={APPROVAL_PARTY_PM: self.pm_b},
-                    revision={'title': 'Changed', 'proposed_make': 'Adani'})
+                    revision={'title': 'Changed'},
+                    lines=[{'description': 'Adani module', 'quantity': '90',
+                            'unit': 'Nos'}])
         self.assertEqual(self.untouched(approval), before)
 
 
@@ -1548,7 +1574,8 @@ class CarryForwardTests(RevisionFixture):
         resubmit_approval_request(
             approval, self.scm_b, note='Revised.',
             attachments=[{'file_name': 'q.pdf', 'bucket': 'approvals', 'path': 'r2/q.pdf'}],
-            revision={'title': 'Module make v2', 'programs': [], 'proposed_make': 'Adani'},
+            revision={'title': 'Module make v2', 'programs': []},
+            lines=[dict(self.live_line(approval), make='Adani')],
             carry={APPROVAL_PARTY_DESIGN: 'Design unaffected by the make.'})
         apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_APPROVED, self.pm)

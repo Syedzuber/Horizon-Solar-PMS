@@ -14,6 +14,10 @@ Before dispatch: the PO/PI record picker (required) replaces the vendor list —
 is taken from the record on the server. The optional pre-order approval picker is grouped
 by vendor; a small script disables the groups whose vendor is not the chosen record's.
 The server checks the vendor again whatever the page sent.
+
+Material lines (D-A28): the material is a table of lines — _lines_editor.html, with its
+own phone layout and script (add, remove, step per unit). At least one. A refusal redraws
+every line as typed. The ?key= in the URL (duplicate-submission guard) is unchanged.
 {% endcomment %}
 {% block title %}Raise approval — SolarPMS{% endblock %}
 
@@ -60,19 +64,7 @@ The server checks the vendor again whatever the page sent.
   <div class="card shadow-sm mb-3">
     <div class="card-header fw-semibold">2 · The material</div>
     <div class="card-body">
-      <div class="mb-3">
-        <label for="apMake" class="form-label">Proposed make</label>
-        <input type="text" name="proposed_make" id="apMake" class="form-control" maxlength="200"
-               value="{{ post.proposed_make|default:'' }}">
-      </div>
-      <div class="mb-3">
-        <label for="apSpec" class="form-label">Specification</label>
-        <textarea name="specification" id="apSpec" class="form-control" rows="2">{{ post.specification|default:'' }}</textarea>
-      </div>
-      <div class="mb-3">
-        <label for="apQty" class="form-label">Quantity</label>
-        <textarea name="quantity_note" id="apQty" class="form-control" rows="2">{{ post.quantity_note|default:'' }}</textarea>
-      </div>
+      {% include "projects/approvals/_lines_editor.html" %}
       {% if is_pre_dispatch %}
       <div class="mb-3">
         <label for="apOrder" class="form-label">PO/PI record</label>

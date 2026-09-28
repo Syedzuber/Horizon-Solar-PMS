@@ -9,7 +9,7 @@ from .models import (
     DesignFile, DesignChangeRequest,
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
     ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
-    ApprovalRoundSnapshot, ApprovalOrderLink,
+    ApprovalRoundSnapshot, ApprovalOrderLink, MaterialApprovalLine,
 )
 from .utils import assign_task_to
 
@@ -702,9 +702,31 @@ class ApprovalAttachmentAdmin(_ApprovalRecordAdmin):
     list_display  = ['request', 'round', 'label', 'file_name', 'uploaded_by', 'uploaded_at']
 
 
+class MaterialApprovalLineInline(admin.TabularInline):
+    """A material request's lines, read-only. approvals.py is their only writer: a line
+    changed here would skip the unit rules' refusal and would not reach any round
+    snapshot, so no add, change or delete — the same lockdown as _ApprovalRecordAdmin."""
+    model = MaterialApprovalLine
+    extra = 0
+    fields = readonly_fields = ['position', 'description', 'make', 'specification',
+                                'quantity', 'unit']
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(MaterialApprovalDetail)
 class MaterialApprovalDetailAdmin(_ApprovalRecordAdmin):
+    # proposed_make is legacy (requests raised before material lines); the lines are
+    # the inline below.
     list_display  = ['request', 'proposed_make', 'vendor_order', 'pre_order_request']
+    inlines       = [MaterialApprovalLineInline]
 
 
 @admin.register(ApprovalRoundSnapshot)

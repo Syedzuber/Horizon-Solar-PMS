@@ -38,6 +38,15 @@ A CARRIED STEP IS NOT A DECISION (D-A20). A resubmit may keep a party's approval
 the previous round; the new round's step is created approved with `carried_from` set.
 Turnaround and aging figures must read steps through exclude_carried_steps().
 
+A MATERIAL REQUEST IS ITS LINES (28 Sep 2026, D-A28 .. D-A30, D-A43). create and resubmit
+take `lines`, each a description, make, specification, quantity and unit, and this module
+is their only writer. The unit decides the quantity: a whole number for a count unit, up
+to two places for a measured one (projects/units.py), read by number_input's
+parse_decimal_input() and refused — never rounded — otherwise; three CHECKs on
+MaterialApprovalLine hold the same rules. A resubmit replaces the set: lines may be added,
+edited or removed. The request-wide make, specification and quantity note that lines
+replaced stay on older requests, read-only; the BOQ-item picks are gone.
+
 NOTIFICATIONS (Approvals 2b) ARE REGISTERED HERE AND BUILT ELSEWHERE. Each entry point
 registers exactly one transaction.on_commit(..., robust=True) callback from
 approval_notices.py, inside its own atomic block, passing ids: a refused or rolled-back
@@ -52,12 +61,14 @@ written when a refusal is raised.
 """
 from collections import namedtuple
 
+from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import F, Max
 from django.utils import timezone
 
 from .models import (
     ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalRoundSnapshot,
-    ApprovalStep, MaterialApprovalDetail,
+    ApprovalStep, MaterialApprovalDetail, MaterialApprovalLine,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_MATERIAL_KINDS,
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED, APPROVAL_REJECTED,
@@ -74,6 +85,8 @@ from .permissions import (
     user_can_raise_approval_request, user_can_reassign_approval_step,
     user_can_record_proxy_decision, user_can_withdraw_approval_request,
 )
+from .number_input import decimal_field_max, parse_decimal_input
+from .units import COUNT_UNITS, format_quantity, unit_places
 from .utils import record_transition
 from . import approval_notices
 
@@ -96,13 +109,21 @@ ProxyDecision = namedtuple('ProxyDecision', 'decided_by channel evidence files',
 _KINDS = {value for value, _ in APPROVAL_KIND_CHOICES}
 _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
 
-#: The keys resubmit_approval_request(revision=...) accepts (D-A18). The request's own
-#: fields, its scope, and the material detail's proposal. Not the kind, not design
-#: sign-off (that changes who is asked), not the vendor order or pre-order link.
+#: The keys resubmit_approval_request(revision=...) accepts (D-A18): the request's own
+#: fields and its scope. Not the kind, not design sign-off (that changes who is asked),
+#: not the vendor order or pre-order link. The material is revised through the `lines`
+#: argument instead, as one set (material lines); the request-wide make, specification,
+#: quantity note and BOQ items it replaced are no longer written by anything.
 _REVISABLE_REQUEST = ('title', 'description', 'vendor')
 _REVISABLE_SCOPE = ('programs', 'projects', 'site_groups')
-_REVISABLE_MATERIAL = ('proposed_make', 'specification', 'quantity_note', 'boq_items')
-_REVISABLE = _REVISABLE_REQUEST + _REVISABLE_SCOPE + _REVISABLE_MATERIAL
+_REVISABLE = _REVISABLE_REQUEST + _REVISABLE_SCOPE
+
+#: What a material line is given as, in create_approval_request(lines=...) and
+#: resubmit_approval_request(lines=...). `id` only on a resubmit, naming a live line.
+_LINE_FIELDS = ('id', 'description', 'make', 'specification', 'quantity', 'unit')
+#: The request-wide material fields lines replaced. Refused if a caller still sends one,
+#: so nothing writes them again (they stay on older requests, read-only).
+_LEGACY_MATERIAL = ('proposed_make', 'specification', 'quantity_note', 'boq_items')
 _PROXY_CHANNELS = {value for value, _ in APPROVAL_PROXY_CHANNEL_CHOICES}
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
 
@@ -265,6 +286,110 @@ def _add_attachments(approval, round_no, attachments, uploaded_by, step=None):
 
 
 # ---------------------------------------------------------------------------
+# Material lines (D-A28 .. D-A30)
+# ---------------------------------------------------------------------------
+
+def _clean_lines(lines, live_ids=frozenset()):
+    """Validate material lines. Returns [{id, description, make, specification, quantity,
+    unit}] in the order given, quantity a Decimal and texts stripped. Writes nothing;
+    raises ApprovalRefused, naming the line, for the first problem found.
+
+    Each line needs a description (300 characters at most; make 200), a unit from
+    projects/units.py, and a quantity above zero that its unit allows (D-A30):
+    parse_decimal_input() at places=0 for a count unit and places=2 for a measured one.
+    REFUSED, NEVER ROUNDED — 2.5 Nos and 2.505 KWp are refused, not stored as 3 and 2.51.
+    At least one line is required.
+
+    `id` is for a resubmit: the pk of one of the request's live lines (`live_ids`), which
+    that line then replaces in place. A line without one is new. On create `live_ids` is
+    empty, so any id is refused.
+    """
+    lines = list(lines or ())
+    if not lines:
+        raise ApprovalRefused('Add at least one material line.')
+    ceiling = decimal_field_max(MaterialApprovalLine, 'quantity')
+    cleaned, named = [], set()
+    for number, line in enumerate(lines, start=1):
+        unknown = sorted(set(line) - set(_LINE_FIELDS))
+        if unknown:
+            raise ApprovalRefused(f'Line {number}: "{unknown[0]}" is not part of a line.')
+        description = _clean(line.get('description'))
+        make = _clean(line.get('make'))
+        unit = _clean(line.get('unit'))
+        if not description:
+            raise ApprovalRefused(f'Line {number}: say what the material is.')
+        if len(description) > 300:
+            raise ApprovalRefused(f'Line {number}: the description must be 300 characters '
+                                  f'or fewer.')
+        if len(make) > 200:
+            raise ApprovalRefused(f'Line {number}: the make must be 200 characters or fewer.')
+        places = unit_places(unit)
+        if places is None:
+            raise ApprovalRefused(f'Line {number}: choose a unit from the list.')
+        # The unit is named in the label of a count unit, so "must be a whole number"
+        # says why: Nos, Set, Packet, Pair and Lot count whole things.
+        label = (f'Line {number} quantity ({unit})' if unit in COUNT_UNITS
+                 else f'Line {number} quantity')
+        try:
+            quantity = parse_decimal_input(line.get('quantity'), places=places,
+                                           max_value=ceiling, field_label=label)
+        except ValidationError as exc:
+            raise ApprovalRefused(exc.messages[0])
+        if quantity is None:
+            raise ApprovalRefused(f'{label}: enter how many or how much.')
+        if quantity <= 0:
+            raise ApprovalRefused(f'{label}: must be more than zero.')
+        line_id = line.get('id')
+        if line_id in (None, ''):
+            line_id = None
+        elif line_id not in live_ids or line_id in named:
+            raise ApprovalRefused(f'Line {number} is not one of this request\'s lines. '
+                                  f'Open the request again and start over.')
+        else:
+            named.add(line_id)
+        cleaned.append({'id': line_id, 'description': description, 'make': make,
+                        'specification': _clean(line.get('specification')),
+                        'quantity': quantity, 'unit': unit})
+    return cleaned
+
+
+def _line_fields(line, position):
+    return {'position': position, 'description': line['description'], 'make': line['make'],
+            'specification': line['specification'], 'quantity': line['quantity'],
+            'unit': line['unit']}
+
+
+def _replace_lines(material, cleaned):
+    """Make `material`'s lines exactly `cleaned` (from _clean_lines), numbered 1..n in
+    that order. A line with an id is updated in place, so round_changes can follow it
+    from round to round by id; one without is created; a live line not named is DELETED.
+
+    Hard-deleting is safe because every round's lines are in its ApprovalRoundSnapshot
+    (D-A19): create and resubmit write the snapshot of the round they open, after their
+    lines, in the same transaction, so the round being replaced was snapshotted when it
+    opened. A request raised before snapshots existed (S1.1) predates lines too, so it
+    has no lines to delete.
+
+    The caller holds the request's row lock (_lock), and every writer of lines takes it
+    first, so no other transaction writes these lines meanwhile."""
+    live = MaterialApprovalLine.objects.filter(detail=material)
+    kept = [line['id'] for line in cleaned if line['id'] is not None]
+    live.exclude(pk__in=kept).delete()
+    # (detail, position) is UNIQUE and checked row by row, so renumbering in place could
+    # collide (line 3 moving to 2 while line 2 still holds it). Park the kept lines above
+    # every position in use and every final position first; then each one moves to its
+    # final position into a gap. Race: none — the request lock is held (docstring).
+    top = max(live.aggregate(top=Max('position'))['top'] or 0, len(cleaned))
+    live.filter(pk__in=kept).update(position=F('position') + top)
+    for position, line in enumerate(cleaned, start=1):
+        if line['id'] is None:
+            MaterialApprovalLine.objects.create(detail=material, **_line_fields(line, position))
+        else:
+            # Race: none — the request lock is held (docstring).
+            live.filter(pk=line['id']).update(**_line_fields(line, position))
+
+
+# ---------------------------------------------------------------------------
 # Round snapshots and carried steps (S1.1)
 # ---------------------------------------------------------------------------
 
@@ -279,20 +404,29 @@ def _round_snapshot_payload(approval, round_no):
     """What round `round_no`'s approvers are asked about, read from the database as this
     transaction holds it. JSON-safe; display names stored beside ids (D-A19).
 
-    Schema 1:
+    Schema 2 (material lines):
       schema, round, kind, kind_label, title, description, design_signoff_required,
       vendor {id, name} | null,
       programs [{id, name, short_tender_code}],
       projects [{id, project_id, customer_name, is_deleted}],
       site_groups [{id, name, program_id, program_name}],
-      material null | {proposed_make, specification, quantity_note,
-                       boq_items [{id, code, description, unit}],
+      material null | {lines [{id, position, description, make, specification,
+                               quantity, unit}],
+                       legacy {proposed_make?, specification?, quantity_note?}
+                              — present only when one of them is non-empty, holding
+                              only the non-empty ones,
                        vendor_order {id, po_number, pi_number} | null,
                        pre_order_request {id, title} | null},
       steps [{party, party_label, sequence, assignee_id, assignee_name, carried,
               carried_from_step, carried_from_round, decided_in_round,
               carried_decider_name}]
-    Lists are in pk order; steps in (sequence, party) order, live rows only.
+    Lines are in position order, `quantity` a string as units.format_quantity() writes
+    it ("120" for Nos, "2.50" for KWp) — a JSON number would be a float. Other lists are
+    in pk order; steps in (sequence, party) order, live rows only.
+
+    Schema 1 (before lines) differs only in `material`: proposed_make, specification and
+    quantity_note always present, boq_items [{id, code, description, unit}], no lines,
+    no legacy. Rows already written stay schema 1; readers accept both.
     """
     request = (ApprovalRequest.objects.select_related('vendor')
                .get(pk=approval.pk))
@@ -300,7 +434,7 @@ def _round_snapshot_payload(approval, round_no):
                 .select_related('vendor_order', 'pre_order_request')
                 .filter(request=request).first())
     payload = {
-        'schema': 1,
+        'schema': 2,
         'round': round_no,
         'kind': request.kind,
         'kind_label': _KIND_LABELS.get(request.kind, request.kind),
@@ -324,17 +458,23 @@ def _round_snapshot_payload(approval, round_no):
     if material is not None:
         order, pre_order = material.vendor_order, material.pre_order_request
         payload['material'] = {
-            'proposed_make': material.proposed_make,
-            'specification': material.specification,
-            'quantity_note': material.quantity_note,
-            'boq_items': [{'id': i.pk, 'code': i.code, 'description': i.description,
-                           'unit': i.unit} for i in material.boq_items.order_by('pk')],
+            'lines': [{'id': line.pk, 'position': line.position,
+                       'description': line.description, 'make': line.make,
+                       'specification': line.specification,
+                       'quantity': format_quantity(line.quantity, line.unit),
+                       'unit': line.unit}
+                      for line in material.lines.order_by('position')],
             'vendor_order': ({'id': order.pk, 'po_number': order.po_number,
                               'pi_number': order.pi_number}
                              if order is not None else None),
             'pre_order_request': ({'id': pre_order.pk, 'title': pre_order.title}
                                   if pre_order is not None else None),
         }
+        legacy = {key: getattr(material, key)
+                  for key in ('proposed_make', 'specification', 'quantity_note')
+                  if getattr(material, key)}
+        if legacy:
+            payload['material']['legacy'] = legacy
     steps = (ApprovalStep.objects.filter(request=request, round=round_no)
              .exclude(verdict=APPROVAL_STEP_SUPERSEDED)
              .select_related('assignee__user', 'decided_by__user', 'carried_from')
@@ -422,13 +562,16 @@ def _step_state_refusal(step, approval):
 def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
                             design_assignee=None, site_engineer_assignee=None,
                             design_signoff_required=False, vendor=None, material=None,
-                            programs=(), projects=(), site_groups=(), attachments=(),
-                            client_uuid=None):
+                            lines=None, programs=(), projects=(), site_groups=(),
+                            attachments=(), client_uuid=None):
     """Raise a request and open round 1. Returns the ApprovalRequest.
 
-    `material` is a dict for the two material kinds (proposed_make, specification,
-    quantity_note, boq_items, vendor_order, pre_order_request) and must be None for a
-    contractor bill. Kind-specific rules enforced here:
+    `material` is a dict for the two material kinds (vendor_order, pre_order_request)
+    and must be None for a contractor bill. `lines` is the material, one dict per line
+    (description, make, specification, quantity, unit — _clean_lines): at least one for
+    a material kind (D-A28), none for a contractor bill. The request-wide proposed_make,
+    specification, quantity_note and boq_items that lines replaced are refused in
+    `material`. Kind-specific rules enforced here:
 
       * a vendor for pre-dispatch and the contractor bill (a CHECK holds it as well);
       * a vendor order (PO/PI record) for pre-dispatch, placed with that same vendor, and
@@ -474,9 +617,15 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
     if not is_bill and site_engineer_assignee is not None:
         raise ApprovalRefused('Only a contractor bill is confirmed by a Site Engineer.')
 
-    detail = None
+    detail = new_lines = None
     if kind in APPROVAL_MATERIAL_KINDS:
         detail = dict(material or {})
+        for key in _LEGACY_MATERIAL:
+            if key in detail:
+                raise ApprovalRefused(
+                    f'"{key}" is not recorded on a request any more: each material line '
+                    f'carries its own make, specification, quantity and unit.')
+        new_lines = _clean_lines(lines)
         vendor_order = detail.get('vendor_order')
         pre_order = detail.get('pre_order_request')
         if kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH:
@@ -498,6 +647,8 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
                 raise ApprovalRefused('The linked pre-order approval names a different vendor.')
     elif material:
         raise ApprovalRefused('A contractor bill carries no material detail.')
+    elif lines:
+        raise ApprovalRefused('A contractor bill carries no material lines.')
 
     projects = list(projects)
     if any(project.is_deleted for project in projects):
@@ -522,12 +673,11 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         if detail is not None:
             material_row = MaterialApprovalDetail.objects.create(
                 request=approval,
-                proposed_make=_clean(detail.get('proposed_make')),
-                specification=_clean(detail.get('specification')),
-                quantity_note=_clean(detail.get('quantity_note')),
                 vendor_order=detail.get('vendor_order'),
                 pre_order_request=detail.get('pre_order_request'))
-            material_row.boq_items.set(detail.get('boq_items') or ())
+            MaterialApprovalLine.objects.bulk_create(
+                MaterialApprovalLine(detail=material_row, **_line_fields(line, position))
+                for position, line in enumerate(new_lines, start=1))
 
         now = timezone.now()
         _open_round(approval, 1, plan, assignees, now)
@@ -665,20 +815,36 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
 # 3. Resubmit
 # ---------------------------------------------------------------------------
 
-def _revision_writes(approval, revision):
-    """Validate `revision` against `approval` (locked) and return what to write:
-    (request_fields, scope, material_fields, boq_items). The kind's rules are re-checked
-    against the request AS REVISED. Refuses an unknown key, a material key on a request
-    with no material detail, a blank title or description, a missing or mismatched
-    vendor, or a deleted project in the scope. Writes nothing."""
+def _revision_writes(approval, revision, lines):
+    """Validate `revision` and `lines` against `approval` (locked) and return what to
+    write: (request_fields, scope, material, new_lines). The kind's rules are re-checked
+    against the request AS REVISED. Refuses an unknown key (the retired material keys
+    among them), a blank title or description, a missing or mismatched vendor, a deleted
+    project in the scope, lines on a request with no material detail, and invalid lines
+    (_clean_lines).
+
+    `new_lines` is None when `lines` is None: the lines stay as they are. That is refused
+    for a material request that has NO lines — one raised before lines existed: its
+    resubmit must record the quantity as lines (at least one). Writes nothing."""
     revision = dict(revision or {})
     for key in revision:
         if key not in _REVISABLE:
             raise ApprovalRefused(f'"{key}" cannot be changed on a resubmit.')
     material = (MaterialApprovalDetail.objects.select_related('vendor_order')
                 .filter(request=approval).first())
-    if material is None and any(key in revision for key in _REVISABLE_MATERIAL):
-        raise ApprovalRefused('A contractor bill carries no material detail.')
+    if material is None:
+        if lines is not None:
+            raise ApprovalRefused('A contractor bill carries no material lines.')
+        new_lines = None
+    else:
+        live_ids = set(material.lines.values_list('pk', flat=True))
+        if lines is not None:
+            new_lines = _clean_lines(lines, live_ids)
+        elif not live_ids:
+            raise ApprovalRefused('This request was raised before material lines. Record '
+                                  'its material as lines — at least one — to resubmit it.')
+        else:
+            new_lines = None
 
     request_fields = {}
     for key in ('title', 'description'):
@@ -704,18 +870,11 @@ def _revision_writes(approval, revision):
     scope = {key: list(revision[key]) for key in _REVISABLE_SCOPE if key in revision}
     if any(project.is_deleted for project in scope.get('projects', ())):
         raise ApprovalRefused('A deleted project cannot be named in the scope.')
-
-    material_fields = {key: _clean(revision[key])
-                       for key in ('proposed_make', 'specification', 'quantity_note')
-                       if key in revision}
-    if len(material_fields.get('proposed_make', '')) > 200:
-        raise ApprovalRefused('The proposed make must be 200 characters or fewer.')
-    boq_items = list(revision['boq_items']) if 'boq_items' in revision else None
-    return request_fields, scope, material_fields, boq_items
+    return request_fields, scope, material, new_lines
 
 
 def resubmit_approval_request(approval, actor, note, attachments=(), assignees=None,
-                              revision=None, carry=None):
+                              revision=None, carry=None, lines=None):
     """SCM's revision after changes were requested: open round N+1. Returns the request.
 
     New step rows for the same parties, same sequences; the previous round's rows are
@@ -743,11 +902,17 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
     Naming the same person again is not a change: no segment, no reassign check.
 
     REVISION (S1.1, D-A18). `revision` is a dict of any of title, description, vendor,
-    programs, projects, site_groups, proposed_make, specification, quantity_note,
-    boq_items. Omitted keys stay as they are; a scope or boq_items key replaces that
-    whole set. The kind's rules are re-checked against the revised request
+    programs, projects, site_groups. Omitted keys stay as they are; a scope key replaces
+    that whole set. The kind's rules are re-checked against the revised request
     (_revision_writes). Kind, design sign-off, vendor order and pre-order link are not
     revisable.
+
+    LINES (material lines). `lines`, when given, REPLACES the material's lines as a set
+    (_replace_lines): a line carrying the `id` of a live line edits it, one without adds
+    a line, a live line left out is removed. At least one; each validated as on create.
+    None leaves the lines as they are — refused for a request raised before lines, which
+    has none. The round snapshot written below records the new set; the replaced set is
+    in the previous round's.
 
     CARRY-FORWARD (S1.1, D-A20). `carry` is {party: reason}: keep that party's APPROVAL
     from the previous round instead of asking again. Refused without a reason; refused
@@ -788,8 +953,8 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                     f'final. Raise a new request instead.')
             raise ApprovalRefused('This request is still being decided; nothing to resubmit.')
 
-        request_fields, scope, material_fields, boq_items = _revision_writes(
-            approval, revision)
+        request_fields, scope, material, new_lines = _revision_writes(
+            approval, revision, lines)
 
         previous = approval.current_round
         latest = {}
@@ -846,13 +1011,8 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
         ).update(status=APPROVAL_OPEN, current_round=new_round, **request_fields)
         for key, rows in scope.items():
             getattr(approval, key).set(rows)
-        if material_fields or boq_items is not None:
-            material = MaterialApprovalDetail.objects.get(request=approval)
-            if material_fields:
-                MaterialApprovalDetail.objects.filter(pk=material.pk).update(
-                    **material_fields)
-            if boq_items is not None:
-                material.boq_items.set(boq_items)
+        if new_lines is not None:
+            _replace_lines(material, new_lines)
         _open_round(approval, new_round, plan, chosen, now,
                     carries=carries, carried_by=actor)
 

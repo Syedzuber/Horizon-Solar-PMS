@@ -44,6 +44,7 @@ from .models import (
     APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_PM, APPROVAL_STEP_APPROVED,
     APPROVAL_STEP_SUPERSEDED, SUBJECT_APPROVAL_REQUEST,
 )
+from .tests_approvals import MODULE_LINE
 
 
 def _profile(username, role, **flags):
@@ -100,7 +101,7 @@ class LinkFixture(TestCase):
             kind=APPROVAL_KIND_MATERIAL_PRE_ORDER, raised_by=self.scm, title=title,
             description='Propose Waaree 545 Wp.', pm_assignee=self.pm,
             design_signoff_required=True, design_assignee=self.head, vendor=vendor,
-            material={'proposed_make': 'Waaree'})
+            material={}, lines=[dict(MODULE_LINE)])
 
     def approve(self, approval):
         apply_approval_decision(self.step(approval, APPROVAL_PARTY_PM),
@@ -148,7 +149,7 @@ class LinkRefusalTests(LinkFixture):
             kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH, raised_by=self.scm,
             title='Dispatch', description='Lot 1.', pm_assignee=self.pm,
             design_signoff_required=True, design_assignee=self.head, vendor=self.vendor,
-            material={'vendor_order': self.order}))
+            material={'vendor_order': self.order}, lines=[dict(MODULE_LINE)]))
         self.assert_refused(lambda: link_order_to_approval(dispatch, self.order, self.scm),
                             'Only a pre-order approval covers PO/PI records.')
 
@@ -438,7 +439,8 @@ class LinkViewTests(LinkFixture):
             kind=APPROVAL_KIND_MATERIAL_PRE_DISPATCH, raised_by=self.scm,
             title='Dispatch', description='Lot 1.', pm_assignee=self.pm,
             vendor=self.vendor, material={'vendor_order': self.order,
-                                          'pre_order_request': self.approval})
+                                          'pre_order_request': self.approval},
+            lines=[dict(MODULE_LINE)])
         self.assertNotIn(b'PO/PI records covered', self.detail(self.scm, dispatch).content)
 
     def test_history_shows_each_link_and_removal_once(self):

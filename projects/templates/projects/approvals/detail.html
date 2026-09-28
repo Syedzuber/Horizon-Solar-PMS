@@ -28,6 +28,13 @@ only where the viewer may open them; the numbers and title are shown to every re
 Approvals 3b: an approved pre-order request shows "PO/PI records covered"
 (_order_links.html) — its linked records, SCM's link form and remove action, and the
 removed links struck through. History lists each link and each removal.
+
+Material lines (D-A28): the Request card and each round draw the material as a lines table
+(#, the material with its make and specification, the quantity with its unit) — three
+columns, the one table on this page, narrow enough for a phone. A request raised before
+lines draws its old make, specification and quantity under "Recorded before line items",
+only when one is non-empty. The change list names each line that changed and each field
+of it, before and after (approval_views.round_changes).
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -74,19 +81,38 @@ removed links struck through. History lists each link and each removal.
   <div class="card-header fw-semibold">Request</div>
   <div class="card-body">
     <p class="mb-3 text-break" style="white-space:pre-line;">{{ approval.description }}</p>
+    {% if material_now %}
+    {% if material_now.lines %}
+    <table class="table table-sm small mb-3">
+      <thead class="text-muted"><tr><th class="fw-normal">#</th><th class="fw-normal">Material</th><th class="fw-normal text-end">Quantity</th></tr></thead>
+      <tbody>
+        {% for line in material_now.lines %}
+        <tr>
+          <td class="text-muted">{{ line.position }}</td>
+          <td class="text-break">
+            <div>{{ line.description }}</div>
+            {% if line.make %}<div class="text-muted">Make: {{ line.make }}</div>{% endif %}
+            {% if line.specification %}<div class="text-muted" style="white-space:pre-line;">{{ line.specification }}</div>{% endif %}
+          </td>
+          <td class="text-end text-nowrap">{{ line.quantity }} {{ line.unit_label }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if material_now.legacy %}
+    <div class="border rounded p-2 mb-3 small">
+      <div class="fw-semibold mb-1">Recorded before line items</div>
+      <dl class="row mb-0">
+        {% for item in material_now.legacy %}
+        <dt class="col-5 col-sm-3 text-muted fw-normal">{{ item.label }}</dt>
+        <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ item.value }}</dd>
+        {% endfor %}
+      </dl>
+    </div>
+    {% endif %}
+    {% endif %}
     <dl class="row mb-0 small">
-      {% if material %}
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Proposed make</dt>
-      <dd class="col-7 col-sm-9 text-break">{{ material.proposed_make|default:"—" }}</dd>
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Specification</dt>
-      <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ material.specification|default:"—" }}</dd>
-      <dt class="col-5 col-sm-3 text-muted fw-normal">Quantity</dt>
-      <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ material.quantity_note|default:"—" }}</dd>
-      {% if boq_items %}
-      <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
-      <dd class="col-7 col-sm-9">{% for item in boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% endfor %}</dd>
-      {% endif %}
-      {% endif %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
       <dd class="col-7 col-sm-9">{% if approval.vendor %}{{ approval.vendor.name }}{% else %}—{% endif %}</dd>
       {% if dispatch %}
@@ -142,7 +168,9 @@ removed links struck through. History lists each link and each removal.
       {% for c in round.changes %}
       <li class="text-break{% if not forloop.last %} mb-2{% endif %}">
         <div class="text-muted">{{ c.label }}</div>
-        {% if 'old' in c %}
+        {% if c.fields %}
+        {% for f in c.fields %}<div style="white-space:pre-line;">{{ f.label }}: <span class="text-muted">{{ f.old }}</span> → {{ f.new }}</div>{% endfor %}
+        {% elif 'old' in c %}
         <div style="white-space:pre-line;"><span class="text-muted">{{ c.old }}</span> → {{ c.new }}</div>
         {% else %}
         {% for item in c.added %}<div class="text-success">+ Added: {{ item }}</div>{% endfor %}

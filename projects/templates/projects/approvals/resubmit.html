@@ -3,12 +3,17 @@
 Approvals 2a-2 — SCM resubmits after changes were requested (approval_views.approval_resubmit).
 
 WHAT A RESUBMIT CAN CARRY (D-A18, D-A20): the request's revisable details, pre-filled —
-title, description, vendor, the three scope lists, proposed make, specification, quantity
-note — of which the view sends ONLY the changed ones; BOQ items and design sign-off shown
-read-only. For each party whose step in the round that asked for changes is approved, a
-"Keep <name>'s approval" box: ticking it reveals the reason box (CSS only, no script —
-.ap-keep:checked ~ .ap-keep-reason), so a box ticked before a refusal is open again when
-the page is redrawn. An approver per party, as before. The note, and new attachments.
+title, description, vendor, the three scope lists — of which the view sends ONLY the
+changed ones; design sign-off shown read-only. The material lines table (D-A28),
+pre-filled from the live lines with each line's id hidden in its row, sent whole: lines
+may be edited, added ("+ Add line") or removed (Remove), at least one — the same
+_lines_editor.html as create.html, with its phone layout and script. A request raised
+before lines shows its old make, specification and quantity read-only under "Recorded
+before line items", above an empty row. For each party whose step in the round that asked for
+changes is approved, a "Keep <name>'s approval" box: ticking it reveals the reason box
+(CSS only, no script — .ap-keep:checked ~ .ap-keep-reason), so a box ticked before a
+refusal is open again when the page is redrawn. An approver per party, as before. The
+note, and new attachments.
 
 The hidden revise=1 tells the view these fields were drawn: without it nothing is revised.
 A refusal redraws this page with what was typed; files must be chosen again (a browser
@@ -61,19 +66,19 @@ text with no input — approval_forms.parse_revision also ignores a posted vendo
     <div class="card-header fw-semibold">The material</div>
     <div class="card-body">
       {% if material %}
-      <div class="mb-3">
-        <label for="apMake" class="form-label">Proposed make</label>
-        <input type="text" name="proposed_make" id="apMake" class="form-control w-100" maxlength="200"
-               value="{{ values.proposed_make }}">
+      {% if legacy %}
+      <div class="border rounded p-2 mb-3 small">
+        <div class="fw-semibold mb-1">Recorded before line items</div>
+        <dl class="row mb-0">
+          {% for item in legacy %}
+          <dt class="col-5 col-sm-3 text-muted fw-normal">{{ item.label }}</dt>
+          <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ item.value }}</dd>
+          {% endfor %}
+        </dl>
+        <div class="text-muted mt-1">Read-only. Record the material as lines below — at least one — to resubmit.</div>
       </div>
-      <div class="mb-3">
-        <label for="apSpec" class="form-label">Specification</label>
-        <textarea name="specification" id="apSpec" class="form-control w-100" rows="2">{{ values.specification }}</textarea>
-      </div>
-      <div class="mb-3">
-        <label for="apQty" class="form-label">Quantity</label>
-        <textarea name="quantity_note" id="apQty" class="form-control w-100" rows="2">{{ values.quantity_note }}</textarea>
-      </div>
+      {% endif %}
+      {% include "projects/approvals/_lines_editor.html" with resubmit=True %}
       {% endif %}
       {% if is_pre_dispatch %}
       <div class="mb-3">
@@ -96,14 +101,10 @@ text with no input — approval_forms.parse_revision also ignores a posted vendo
       </div>
       {% endif %}
       <dl class="row small mb-0">
-        {% if material %}
-        <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
-        <dd class="col-7 col-sm-9 text-break">{% for item in boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
-        {% endif %}
         <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
         <dd class="col-7 col-sm-9 mb-0">{% if approval.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
       </dl>
-      <div class="form-text">BOQ items and design sign-off cannot be changed on a resubmit.</div>
+      <div class="form-text">Design sign-off cannot be changed on a resubmit.</div>
     </div>
   </div>
 

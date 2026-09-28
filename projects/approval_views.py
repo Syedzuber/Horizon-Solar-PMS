@@ -54,10 +54,18 @@ it is linked to, a link form and a remove-with-reason action for SCM
 (approval_link_order, approval_unlink_order — one approvals.py entry point each), and
 the removed links, struck through, with who, when and why. Linking is optional. History
 draws each link and each removal from the link rows (_history).
+
+MATERIAL LINES (28 Sep 2026, D-A28) replace the request-wide make, specification and
+quantity on the raise and resubmit forms (a lines table) and on the detail page. Every
+round's material is drawn through material_display(), which reads snapshot schema 1 and
+2 alike; a request's old make, specification and quantity, when it has them, are drawn
+under "Recorded before line items". round_changes follows each line by id and names
+each changed field.
 """
 import logging
 import uuid as _uuid
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.contrib import messages
@@ -69,11 +77,11 @@ from django.utils import timezone
 
 from .approval_forms import (
     ATTACHMENT_LIMIT, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN, assignee_choices,
-    current_scope_pks, design_authority_choices, keepable_steps, parse_assignee_overrides,
-    parse_attachments, parse_carry, parse_client_uuid, parse_create, parse_evidence_files,
-    parse_linked_order, parse_new_assignee, parse_proxy, parse_revision, person_name,
-    order_link_choices, po_pi_record_choices, po_pi_record_label, pre_order_choices,
-    scope_choices, vendor_choices,
+    current_scope_pks, design_authority_choices, keepable_steps, line_rows,
+    parse_assignee_overrides, parse_attachments, parse_carry, parse_client_uuid,
+    parse_create, parse_evidence_files, parse_linked_order, parse_lines, parse_new_assignee,
+    parse_proxy, parse_revision, person_name, order_link_choices, po_pi_record_choices,
+    po_pi_record_label, pre_order_choices, scope_choices, vendor_choices,
 )
 from .approval_queries import AGING_WINDOW_DAYS, aging_rows
 from .approvals import (
@@ -104,6 +112,7 @@ from .permissions import (
     user_can_withdraw_approval_request, user_may_answer_approval_step,
 )
 from .supabase_storage import get_supabase_client, vendor_order_document_url
+from .units import UNIT_COUNT, UNIT_LABELS, UNITS, format_quantity
 from .views import _validate_and_upload
 
 logger = logging.getLogger(__name__)
@@ -299,10 +308,11 @@ def _kept(step, by_pk):
     }
 
 
-def _current_details(approval, material, boq_items, programs, projects, site_groups):
-    """The request as it stands NOW, in round_snapshot()'s shape, for a round that has no
-    snapshot (raised before S1.1). The page draws it under a label saying so — it is not
-    what that round's approvers saw if anything was revised since."""
+def _current_details(approval, material, lines, programs, projects, site_groups):
+    """The request as it stands NOW, in round_snapshot()'s shape (schema 2), for a round
+    that has no snapshot (raised before S1.1). The page draws it under a label saying so
+    — it is not what that round's approvers saw if anything was revised since. `lines`
+    are the material's live MaterialApprovalLine rows, in position order."""
     return {
         'title':                   approval.title,
         'description':             approval.description,
@@ -317,13 +327,58 @@ def _current_details(approval, material, boq_items, programs, projects, site_gro
                          'program_name': g.program.name if g.program_id else None}
                         for g in site_groups],
         'material': None if material is None else {
-            'proposed_make': material.proposed_make,
-            'specification': material.specification,
-            'quantity_note': material.quantity_note,
-            'boq_items': [{'id': i.pk, 'code': i.code, 'description': i.description}
-                          for i in boq_items],
+            'lines': [{'id': line.pk, 'position': line.position,
+                       'description': line.description, 'make': line.make,
+                       'specification': line.specification,
+                       'quantity': format_quantity(line.quantity, line.unit),
+                       'unit': line.unit} for line in lines],
+            'legacy': {key: getattr(material, key) for key in _LEGACY_MATERIAL_TEXT
+                       if getattr(material, key)},
         },
     }
+
+
+#: The request-wide material fields that lines replaced, with their labels — shown
+#: under "Recorded before line items" when a request still carries one.
+_LEGACY_MATERIAL_LABELS = (('proposed_make', 'Proposed make'),
+                           ('specification', 'Specification'),
+                           ('quantity_note', 'Quantity'))
+_LEGACY_MATERIAL_TEXT = tuple(key for key, _ in _LEGACY_MATERIAL_LABELS)
+
+
+def material_display(material):
+    """A round's material — snapshot schema 1 or 2, or _current_details' — in the one
+    shape the pages draw and round_changes compares. None stays None.
+
+      lines   [{id, position, description, make, specification, quantity, unit,
+                unit_label}] in position order; [] in schema 1, which had none
+      legacy  [{key, label, value}] for each non-empty request-wide field lines
+              replaced: schema 1 holds them at the top of `material`, schema 2 under
+              `legacy` and only when non-empty
+      boq_items  schema 1's BOQ-item picks ([] in every snapshot ever written; kept so
+              one that is not still draws)
+
+    Built from the dict alone, never a live row: a snapshot says what that round saw."""
+    if material is None:
+        return None
+    legacy_source = material.get('legacy') or material
+    lines = sorted(material.get('lines') or (), key=lambda line: line.get('position', 0))
+    return {
+        'lines': [dict(line, unit_label=UNIT_LABELS.get(line.get('unit'), line.get('unit')))
+                  for line in lines],
+        'legacy': [{'key': key, 'label': label, 'value': legacy_source.get(key)}
+                   for key, label in _LEGACY_MATERIAL_LABELS if legacy_source.get(key)],
+        'boq_items': list(material.get('boq_items') or ()),
+    }
+
+
+def _for_display(details):
+    """`details` (a snapshot or _current_details) with its material normalised by
+    material_display, for _round_details.html. A copy: the snapshot dict itself is left
+    as stored, because round_changes reads it too."""
+    if details is None:
+        return None
+    return dict(details, material=material_display(details.get('material')))
 
 
 def _dispatch_against(user, approval, material, snapshots):
@@ -453,9 +508,12 @@ def _order_links_section(user, approval, links):
 
 # The change list's fields, in the order the page draws a request's details.
 _CHANGE_REQUEST_TEXT  = (('title', 'Title'), ('description', 'Description'))
-_CHANGE_MATERIAL_TEXT = (('proposed_make', 'Proposed make'),
-                         ('specification', 'Specification'),
-                         ('quantity_note', 'Quantity'))
+# A line's fields, in the order its row draws them. Position is not compared: lines are
+# renumbered 1..n on every resubmit, so a removal above a line moves it without anyone
+# changing it. Each line is followed by its id instead.
+_CHANGE_LINE_FIELDS = (('description', 'Description'), ('make', 'Make'),
+                       ('specification', 'Specification'), ('quantity', 'Quantity'),
+                       ('unit', 'Unit'))
 _CHANGE_SCOPE_LISTS = (
     ('programs',    'Tenders',     lambda i: i['name']),
     ('projects',    'Sites',       lambda i: f"{i['project_id']} — {i['customer_name']}"),
@@ -465,6 +523,90 @@ _CHANGE_SCOPE_LISTS = (
 
 def _describe_boq(item):
     return f"{item['code']} — {item['description']}"
+
+
+def _describe_line(line, removed=False):
+    """One added or removed line in a change list, as its own round saw it, the
+    description always beside the position:
+
+      added    'Line 3 · Mounting clamps — 40 Packet (Waaree)'
+      removed  'Tracker capacity (was line 3) — 2.25 KWp'
+
+    Lines are renumbered on every resubmit, so a new line can take a removed line's
+    number; "(was line N)" and the description keep the two apart."""
+    make = f" ({line['make']})" if line.get('make') else ''
+    amount = f"{line['quantity']} {_unit_label(line.get('unit'))}"
+    if removed:
+        return f"{line['description']} (was line {line['position']}) — {amount}{make}"
+    return f"Line {line['position']} · {line['description']} — {amount}{make}"
+
+
+def _unit_label(unit):
+    """A unit as the lines table shows it ("Packet", "Lump sum"), so the change list and
+    the table use the same word. A code not on the list is shown as stored."""
+    return UNIT_LABELS.get(unit, unit)
+
+
+def _shown(field, value):
+    """One line field's value as the change list shows it: a unit by its label."""
+    return _unit_label(value) if field == 'unit' else value
+
+
+def _same_line_value(field, before, after):
+    """Whether one field of a line is unchanged. A quantity is compared as a number:
+    "120" (Nos) and "120.00" (Meter) are the same quantity, and a unit change must not
+    also read as a quantity change."""
+    if field == 'quantity':
+        try:
+            return Decimal(str(before)) == Decimal(str(after))
+        except (InvalidOperation, TypeError):
+            pass
+    return (before or '') == (after or '')
+
+
+def _line_changes(old_lines, new_lines):
+    """The change-list entries for a round's material lines, followed BY ID (every line
+    keeps its pk across resubmits; approvals._replace_lines updates in place):
+
+      * lines added and removed — one {label, added, removed} entry, each line described
+        as its own round saw it, description beside position (_describe_line); a removed
+        line reads "(was line N)";
+      * each line still there with any field changed — {label: 'Line <n> · <what it
+        was>', plus "(was line N)" if it moved, fields: [{label, old, new}]}, one entry
+        per line, naming every changed field with its before and after;
+      * a round with no lines followed by one with lines — a request raised before lines
+        whose resubmit recorded them — reads 'Quantity recorded as lines' and lists them,
+        instead of reading as every line added.
+    """
+    if not old_lines:
+        if not new_lines:
+            return []
+        return [{'label': 'Quantity recorded as lines',
+                 'added': [_describe_line(line) for line in new_lines], 'removed': []}]
+    old = {line['id']: line for line in old_lines}
+    new = {line['id']: line for line in new_lines}
+    changes = []
+    added = [_describe_line(new[key]) for key in new if key not in old]
+    removed = [_describe_line(old[key], removed=True) for key in old if key not in new]
+    if added or removed:
+        changes.append({'label': 'Material lines', 'added': added, 'removed': removed})
+    for key, after in new.items():
+        before = old.get(key)
+        if before is None:
+            continue
+        fields = [{'label': label, 'old': _shown(field, before.get(field)) or '—',
+                   'new': _shown(field, after.get(field)) or '—'}
+                  for field, label in _CHANGE_LINE_FIELDS
+                  if not _same_line_value(field, before.get(field), after.get(field))]
+        if fields:
+            # The description as it was, beside the line's number now — and its old
+            # number too when a removal above it moved it.
+            moved = (f" (was line {before['position']})"
+                     if before['position'] != after['position'] else '')
+            changes.append({'label': f"Line {after['position']} · {before['description']}"
+                                     f"{moved}",
+                            'fields': fields})
+    return changes
 
 
 def _list_change(label, old_items, new_items, describe):
@@ -483,13 +625,16 @@ def _list_change(label, old_items, new_items, describe):
 def round_changes(old, new):
     """What changed from one round's snapshot to the next (D-A19), in the order the page
     draws the details: [{label, old, new}] for a single value, [{label, added, removed}]
-    for a list. [] when nothing did. None when either snapshot is missing — the page then
+    for a list, [{label, fields: [{label, old, new}]}] for one material line's edited
+    fields. [] when nothing did. None when either snapshot is missing — the page then
     says the change list is unavailable, never guesses.
 
-    Compared: title, description, the material's make, specification, quantity and BOQ
-    items, the vendor (by id, shown by name), and the three scope lists. Not compared:
-    the kind, design sign-off, the vendor order and pre-order link (none is revisable),
-    and the steps — an approver change or a kept approval is in History and on the step.
+    Compared: title, description, the material lines (_line_changes: by id, field by
+    field), the request-wide make, specification and quantity note recorded before lines,
+    schema 1's BOQ items, the vendor (by id, shown by name), and the three scope lists.
+    Either snapshot may be schema 1 or 2 (material_display reads both). Not compared: the
+    kind, design sign-off, the vendor order and pre-order link (none is revisable), and
+    the steps — an approver change or a kept approval is in History and on the step.
     """
     if old is None or new is None:
         return None
@@ -501,11 +646,17 @@ def round_changes(old, new):
 
     for key, label in _CHANGE_REQUEST_TEXT:
         single(label, old.get(key), new.get(key))
-    old_material, new_material = old.get('material') or {}, new.get('material') or {}
-    for key, label in _CHANGE_MATERIAL_TEXT:
-        single(label, old_material.get(key), new_material.get(key))
-    boq = _list_change('BOQ items', old_material.get('boq_items'),
-                       new_material.get('boq_items'), _describe_boq)
+    old_material = material_display(old.get('material') or {})
+    new_material = material_display(new.get('material') or {})
+    changes += _line_changes(old_material['lines'], new_material['lines'])
+    # Nothing writes these any more, so they change only if a schema-1 and a schema-2
+    # snapshot disagree — which would be worth seeing.
+    old_legacy = {item['key']: item['value'] for item in old_material['legacy']}
+    new_legacy = {item['key']: item['value'] for item in new_material['legacy']}
+    for key, label in _LEGACY_MATERIAL_LABELS:
+        single(label, old_legacy.get(key), new_legacy.get(key))
+    boq = _list_change('BOQ items', old_material['boq_items'],
+                       new_material['boq_items'], _describe_boq)
     if boq:
         changes.append(boq)
     old_vendor, new_vendor = old.get('vendor'), new.get('vendor')
@@ -608,6 +759,20 @@ def approval_aging(request):
 # Raise
 # ---------------------------------------------------------------------------
 
+#: The unit select's options as the lines table draws them: (code, label, is_count). A
+#: count unit's <option> carries data-count, so the page's script can set the quantity
+#: input's step and min when the unit changes; the server's rule is approvals.py's.
+_UNIT_OPTIONS = [(code, label, kind == UNIT_COUNT) for code, label, kind in UNITS]
+
+
+def _line_form_rows(rows):
+    """The lines table's rows to draw: `rows` (parse_lines' or line_rows' shape), or one
+    empty row when there are none, so the table never opens with nothing to type into."""
+    rows = list(rows)
+    return rows or [{'id': '', 'description': '', 'make': '', 'specification': '',
+                     'quantity': '', 'unit': ''}]
+
+
 def _create_context(kind, post=None, client_uuid=None, already=None):
     heads = assignee_choices(APPROVAL_PARTY_DESIGN)
     is_pre_dispatch = kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH
@@ -629,6 +794,10 @@ def _create_context(kind, post=None, client_uuid=None, already=None):
         # Pre-selected only when there is exactly one to choose (spec T1).
         'default_head_pk':  heads[0].pk if len(heads) == 1 else None,
         'attachment_limit': ATTACHMENT_LIMIT,
+        # After a refusal, every line exactly as typed — gaps in the posted indices
+        # closed up — so nothing has to be entered again.
+        'lines':            _line_form_rows(parse_lines(post) if post else ()),
+        'units':            _UNIT_OPTIONS,
         'picked': {
             'program':    set(post.getlist('program')) if post else set(),
             'project':    set(post.getlist('project')) if post else set(),
@@ -924,13 +1093,13 @@ def approval_detail(request, approval_pk):
 
     # A contractor bill has none; the reverse accessor's DoesNotExist is an AttributeError.
     material = getattr(approval, 'material_detail', None)
-    boq_items = list(material.boq_items.all()) if material else []
+    lines = list(material.lines.order_by('position')) if material else []
     programs = list(approval.programs.all())
     # Scope is for record; a soft-deleted site is not drawn (models.ApprovalRequest).
     projects = list(approval.projects.filter(is_deleted=False)
                     .only('pk', 'project_id', 'customer_name', 'is_deleted'))
     site_groups = list(approval.site_groups.all())
-    current = _current_details(approval, material, boq_items, programs, projects,
+    current = _current_details(approval, material, lines, programs, projects,
                                site_groups)
 
     steps = list(approval.steps.all())
@@ -953,7 +1122,7 @@ def approval_detail(request, approval_pk):
             # A proxy's evidence is drawn under its step, not with the round's files.
             'attachments':  [a for a in attachments
                              if a['file'].round == round_no and a['file'].step_id is None],
-            'details':      snapshot if snapshot is not None else current,
+            'details':      _for_display(snapshot if snapshot is not None else current),
             'dispatch':     round_dispatch.get(round_no),
             'has_snapshot': snapshot is not None,
             'changes':      (round_changes(snapshots[round_no - 1], snapshot)
@@ -964,8 +1133,9 @@ def approval_detail(request, approval_pk):
         'approval':       approval,
         'status_badge':   _STATUS_BADGES.get(approval.status, 'text-bg-secondary'),
         'material':       material,
+        # The request's material as it stands, drawn as the rounds draw theirs.
+        'material_now':   material_display(current['material']),
         'dispatch':       dispatch,
-        'boq_items':      boq_items,
         'programs':       programs,
         'projects':       projects,
         'site_groups':    site_groups,
@@ -1072,17 +1242,15 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post):
     stands, or — after a refusal — from what was posted, so nothing typed is lost."""
     if post is not None:
         values = {key: post.get(key, '') for key in
-                  ('title', 'description', 'vendor', 'proposed_make', 'specification',
-                   'quantity_note', 'note')}
+                  ('title', 'description', 'vendor', 'note')}
+        lines = parse_lines(post)
         picked = {'program':    set(post.getlist('program')),
                   'project':    set(post.getlist('project')),
                   'site_group': set(post.getlist('site_group'))}
     else:
         values = {'title': approval.title, 'description': approval.description,
-                  'vendor': str(approval.vendor_id or ''), 'note': '',
-                  'proposed_make': material.proposed_make if material else '',
-                  'specification': material.specification if material else '',
-                  'quantity_note': material.quantity_note if material else ''}
+                  'vendor': str(approval.vendor_id or ''), 'note': ''}
+        lines = line_rows(material)
         scope = current_scope_pks(approval)
         picked = {'program':    {str(pk) for pk in scope['programs']},
                   'project':    {str(pk) for pk in scope['projects']},
@@ -1110,7 +1278,13 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post):
         'material':         material,
         # The vendor is the PO/PI record's (Approvals 3a): drawn read-only, never posted.
         'is_pre_dispatch':  approval.kind == APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
-        'boq_items':        list(material.boq_items.all()) if material else [],
+        'lines':            _line_form_rows(lines) if material else [],
+        'units':            _UNIT_OPTIONS,
+        # A request raised before lines: its request-wide make, specification and
+        # quantity, read-only above the table it must now fill in.
+        'legacy':           ([{'label': label, 'value': getattr(material, key)}
+                              for key, label in _LEGACY_MATERIAL_LABELS
+                              if getattr(material, key)] if material else []),
         'parties':          parties,
         'values':           values,
         'picked':           picked,
@@ -1131,9 +1305,12 @@ def approval_resubmit(request, approval_pk):
     """GET: the resubmit form. POST: open the next round.
 
     The form carries (Approvals 2a-2): the request's revisable details, pre-filled —
-    title, description, vendor, the three scope lists, proposed make, specification,
-    quantity note (D-A18) — of which ONLY the changed ones are sent as `revision`
-    (parse_revision); BOQ items and design sign-off are shown read-only. For each party
+    title, description, vendor, the three scope lists (D-A18) — of which ONLY the changed
+    ones are sent as `revision` (parse_revision); design sign-off is shown read-only. The
+    material lines table, pre-filled from the live lines, where lines may be added,
+    edited or removed; it is sent whole as `lines` (at least one — a request raised
+    before lines shows its old make, specification and quantity read-only above an
+    empty table it must fill in). For each party
     whose step in the round that asked for changes is APPROVED, a "Keep <name>'s
     approval" box with a reason (D-A20; parse_carry holds the form rules). An approver
     override per party, as before. The note ("Describe what you changed") and new
@@ -1181,7 +1358,13 @@ def approval_resubmit(request, approval_pk):
     errors = []
     files = parse_attachments(request, errors)
     overrides = parse_assignee_overrides(request.POST, holders, errors)
-    revision = parse_revision(request.POST, approval, material, errors)
+    revision = parse_revision(request.POST, approval, errors)
+    # The lines table is sent whole, as the set the next round is asked about — only
+    # from a page that drew the editable fields (revise=1, as parse_revision), and only
+    # for a material request. Unchanged lines are rewritten as they were; round_changes
+    # compares by content, so that reads as no change.
+    lines = (parse_lines(request.POST)
+             if material is not None and request.POST.get('revise') == '1' else None)
     carry = parse_carry(request.POST, keepable, overrides, errors)
     if errors:
         for error in errors:
@@ -1201,7 +1384,8 @@ def approval_resubmit(request, approval_pk):
                                                 attachments=stored,
                                                 assignees=overrides or None,
                                                 revision=revision or None,
-                                                carry=carry or None)
+                                                carry=carry or None,
+                                                lines=lines)
     except ApprovalRefused as exc:
         cleanup()
         messages.error(request, str(exc))

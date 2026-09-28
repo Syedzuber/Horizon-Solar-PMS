@@ -31,6 +31,12 @@ on a pre-dispatch request.
 Approvals 3b adds which PO/PI records an approved pre-order approval covers: the link
 form's picker (order_link_choices, parse_linked_order) and the read-only block on a PO/PI
 record's page (pre_order_coverage). Linking is optional; approvals.py writes the links.
+
+Material lines (28 Sep 2026, D-A28) replace the request-wide make, specification and
+quantity note on both forms: parse_lines reads the lines table (inputs line-<i>-<field>),
+line_rows fills it from a request's live lines. THIS MODULE DOES NOT CHECK A QUANTITY. The
+unit rules (a whole number for a count unit, two places for a measured one) are
+approvals._clean_lines', which refuses; a second copy here could only disagree with it.
 """
 import re
 import uuid as _uuid
@@ -50,6 +56,7 @@ from .permissions import (
     profile_can_be_approval_assignee, user_can_view_approval_request,
     user_has_design_head_authority,
 )
+from .units import format_quantity
 from .views import _validate_upload_file
 
 #: Files one submission may carry — the vendor-order raise's DOC_SLOTS number. The page
@@ -65,6 +72,10 @@ EVIDENCE_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png']
 KEEP_REASON_MIN = 15
 
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
+
+#: The fields of one row of the lines table, as its inputs name them: line-<i>-<field>.
+LINE_FIELDS = ('id', 'description', 'make', 'specification', 'quantity', 'unit')
+_LINE_INPUT = re.compile(r'^line-(\d+)-(' + '|'.join(LINE_FIELDS) + r')$')
 
 
 def person_name(profile):
@@ -345,13 +356,56 @@ def _pre_order(post, errors, vendor):
     return pre_order
 
 
+def parse_lines(post):
+    """The lines table's rows, from inputs named line-<i>-<field>. Returns
+    [{id, description, make, specification, quantity, unit}] in order of i, every value
+    as posted (quantity a string), for the chokepoint's `lines` — and, after a refusal,
+    for drawing the table again exactly as typed.
+
+    GAPS IN i ARE EXPECTED: removing a row removes its inputs, so line-0 and line-2 may
+    arrive without line-1. Rows are ordered by i as a NUMBER (line-10 after line-9), and
+    the numbers themselves mean nothing beyond that order.
+
+    A row with nothing typed in it — no description, make, specification or quantity,
+    and no id — is a row that was added and left empty; it is dropped, not sent as a
+    line to be refused. `id` becomes an int when it is one; anything else is passed on
+    as posted, for the chokepoint to refuse."""
+    rows = {}
+    for key in post:
+        match = _LINE_INPUT.match(key)
+        if match:
+            rows.setdefault(int(match.group(1)), {})[match.group(2)] = post.get(key, '')
+    lines = []
+    for index in sorted(rows):
+        row = {field: rows[index].get(field, '') for field in LINE_FIELDS}
+        raw_id = row['id'].strip()
+        row['id'] = int(raw_id) if raw_id.isdigit() else (raw_id or None)
+        typed = any(row[field].strip() for field in
+                    ('description', 'make', 'specification', 'quantity'))
+        if typed or row['id'] is not None:
+            lines.append(row)
+    return lines
+
+
+def line_rows(material):
+    """The lines table's rows for `material` as it stands: its live lines in position
+    order, in parse_lines' shape, quantity written as people read it ("120", "2.50").
+    [] for a request with no lines (one raised before lines) or no material."""
+    if material is None:
+        return []
+    return [{'id': line.pk, 'description': line.description, 'make': line.make,
+             'specification': line.specification,
+             'quantity': format_quantity(line.quantity, line.unit), 'unit': line.unit}
+            for line in material.lines.order_by('position')]
+
+
 def parse_create(request, kind=APPROVAL_KIND_MATERIAL_PRE_ORDER):
     """The raise page's POST. Returns (cleaned, errors).
 
     `cleaned` holds create_approval_request()'s keyword arguments, less kind, raised_by
     and attachments, plus `files` (the validated uploads) and `client_uuid`. Missing
-    people, a missing title and the like are NOT errors here: the chokepoint refuses
-    them, in its own words.
+    people, a missing title, a bad quantity and the like are NOT errors here: the
+    chokepoint refuses them, in its own words. The material is `lines` (parse_lines).
 
     Pre-dispatch (Approvals 3a): the PO/PI record is required and the vendor is the
     record's — a posted `vendor` is ignored. The pre-order link is optional.
@@ -379,11 +433,8 @@ def parse_create(request, kind=APPROVAL_KIND_MATERIAL_PRE_ORDER):
         # Ignored unless the box is ticked, so a Head picked and then un-ticked is not
         # sent to the chokepoint as a contradiction the person can no longer see.
         'design_assignee':         _profile(post, 'design_assignee') if design else None,
-        'material': {
-            'proposed_make': post.get('proposed_make', ''),
-            'specification': post.get('specification', ''),
-            'quantity_note': post.get('quantity_note', ''),
-        },
+        'material':    {},
+        'lines':       parse_lines(post),
         'programs':    programs,
         'projects':    projects,
         'site_groups': site_groups,
@@ -446,7 +497,7 @@ def current_scope_pks(approval):
     }
 
 
-def parse_revision(post, approval, material, errors):
+def parse_revision(post, approval, errors):
     """The resubmit page's edited details. Returns the `revision` dict for
     resubmit_approval_request() holding ONLY the keys whose posted value differs from
     what the request holds now — an untouched field is never sent, so the round's change
@@ -458,7 +509,9 @@ def parse_revision(post, approval, material, errors):
     Scope is compared with the LIVE scope (current_scope_pks), which is all the pickers
     can show. When SCM does change a scope list, the posted list replaces that whole set,
     so a since-deleted site in it is dropped; the chokepoint refuses a deleted one
-    anyway. BOQ items and design sign-off are read-only on the page and never sent.
+    anyway. Design sign-off is read-only on the page and never sent. The material lines
+    are not part of the revision: the view reads them with parse_lines and sends them as
+    resubmit_approval_request(lines=...), as one set.
 
     A pre-dispatch request's vendor is the PO/PI record's (Approvals 3a): the page draws
     it read-only, and a posted `vendor` is ignored here, never sent.
@@ -479,11 +532,6 @@ def parse_revision(post, approval, material, errors):
     for key, rows in picked.items():
         if {row.pk for row in rows} != current[key]:
             revision[key] = rows
-
-    if material is not None:
-        for key in ('proposed_make', 'specification', 'quantity_note'):
-            if key in post and _text(post[key]) != _text(getattr(material, key)):
-                revision[key] = post[key]
     return revision
 
 

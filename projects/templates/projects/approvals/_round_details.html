@@ -1,10 +1,16 @@
 {% comment %}
 Approvals 2a-2 — one round's request details (included by detail.html).
 
-`d` is a round snapshot (approvals.round_snapshot(), schema 1) or, for a round with no
-snapshot, approval_views._current_details() — the same shape, so one drawing serves
+`d` is a round snapshot (approvals.round_snapshot(), schema 1 or 2) or, for a round with
+no snapshot, approval_views._current_details() — the same shape, so one drawing serves
 both. The caller says which it is in the label above this block. Display names come from
 the dict itself, never from a live row: a snapshot says what that round saw.
+
+`d.material` has been through approval_views.material_display(), so it reads the same
+whatever the schema: `lines` (a table: #, the material with its make and specification,
+the quantity with its unit — three columns, so it fits a phone), `legacy` and
+`boq_items` (drawn under "Recorded before line items", only when non-empty: a request
+raised before lines, or a schema-1 BOQ pick).
 
 `dispatch` (Approvals 3a, pre-dispatch only) is that round's "Dispatch against" block from
 approval_views._dispatch_against(): numbers from the snapshot, the recorded date from the
@@ -12,19 +18,44 @@ live PO/PI record (which is never edited), links only where the viewer may open 
 {% endcomment %}
 <p class="mb-2 fw-semibold text-break">{{ d.title }}</p>
 <p class="mb-2 text-break" style="white-space:pre-line;">{{ d.description }}</p>
+{% if d.material %}
+{% if d.material.lines %}
+<table class="table table-sm mb-2">
+  <thead class="text-muted"><tr><th class="fw-normal">#</th><th class="fw-normal">Material</th><th class="fw-normal text-end">Quantity</th></tr></thead>
+  <tbody>
+    {% for line in d.material.lines %}
+    <tr>
+      <td class="text-muted">{{ line.position }}</td>
+      <td class="text-break">
+        <div>{{ line.description }}</div>
+        {% if line.make %}<div class="text-muted">Make: {{ line.make }}</div>{% endif %}
+        {% if line.specification %}<div class="text-muted" style="white-space:pre-line;">{{ line.specification }}</div>{% endif %}
+      </td>
+      <td class="text-end text-nowrap">{{ line.quantity }} {{ line.unit_label }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% elif not d.material.legacy and not d.material.boq_items %}
+<p class="text-muted mb-2">No material lines.</p>
+{% endif %}
+{% if d.material.legacy or d.material.boq_items %}
+<div class="border rounded p-2 mb-2">
+  <div class="fw-semibold mb-1">Recorded before line items</div>
+  <dl class="row mb-0">
+    {% for item in d.material.legacy %}
+    <dt class="col-5 col-sm-3 text-muted fw-normal">{{ item.label }}</dt>
+    <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ item.value }}</dd>
+    {% endfor %}
+    {% if d.material.boq_items %}
+    <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
+    <dd class="col-7 col-sm-9 text-break">{% for item in d.material.boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% endfor %}</dd>
+    {% endif %}
+  </dl>
+</div>
+{% endif %}
+{% endif %}
 <dl class="row mb-0">
-  {% if d.material %}
-  <dt class="col-5 col-sm-3 text-muted fw-normal">Proposed make</dt>
-  <dd class="col-7 col-sm-9 text-break">{{ d.material.proposed_make|default:"—" }}</dd>
-  <dt class="col-5 col-sm-3 text-muted fw-normal">Specification</dt>
-  <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ d.material.specification|default:"—" }}</dd>
-  <dt class="col-5 col-sm-3 text-muted fw-normal">Quantity</dt>
-  <dd class="col-7 col-sm-9 text-break" style="white-space:pre-line;">{{ d.material.quantity_note|default:"—" }}</dd>
-  {% if d.material.boq_items %}
-  <dt class="col-5 col-sm-3 text-muted fw-normal">BOQ items</dt>
-  <dd class="col-7 col-sm-9 text-break">{% for item in d.material.boq_items %}<div>{{ item.code }} — {{ item.description }}</div>{% endfor %}</dd>
-  {% endif %}
-  {% endif %}
   <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
   <dd class="col-7 col-sm-9 text-break">{% if d.vendor %}{{ d.vendor.name }}{% else %}—{% endif %}</dd>
   {% if dispatch %}

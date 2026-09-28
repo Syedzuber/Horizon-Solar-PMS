@@ -2,8 +2,11 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
+from django.db.models.functions import Floor
 from django.contrib.auth.models import User
 from django.utils import timezone
+
+from .units import MEASURED_UNITS, UNIT_CHOICES, UNIT_CODES
 
 
 class Project(models.Model):
@@ -6339,21 +6342,27 @@ class ApprovalAttachment(models.Model):
 class MaterialApprovalDetail(models.Model):
     """What a material request proposes. 1:1 with a request of a material kind.
 
+    WHAT IS PROPOSED IS ITS LINES (D-A28): MaterialApprovalLine, one row per material, each
+    with its own make, specification, quantity and unit. A request raised or resubmitted
+    since has at least one (approvals.py refuses none).
+
     `vendor_order` is required for pre-dispatch — the order whose goods are about to
     ship. `pre_order_request` optionally links a pre-dispatch request to the pre-order
     approval behind that order; older orders have none (D-A13). Both are enforced by
     create_approval_request(), because each depends on the request's kind.
+
+    The BOQ-item picks (`boq_items`) are retired (D-A43): nothing ever filled them.
     """
 
     request = models.OneToOneField(ApprovalRequest, on_delete=models.PROTECT,
                                    related_name='material_detail')
 
-    proposed_make = models.CharField(max_length=200, blank=True, default='')
-    specification = models.TextField(blank=True, default='')
-    quantity_note = models.TextField(blank=True, default='')
-
-    boq_items = models.ManyToManyField('BOQItemMaster', blank=True,
-                                       related_name='material_approvals')
+    # LEGACY: one make, specification and free-text quantity for the whole request, as
+    # requests were raised before material lines. Kept so those requests still read as
+    # raised; no view and no chokepoint path writes them any more.
+    proposed_make = models.CharField(max_length=200, blank=True, default='')  # Legacy — per line now
+    specification = models.TextField(blank=True, default='')                  # Legacy — per line now
+    quantity_note = models.TextField(blank=True, default='')                  # Legacy — lines hold quantities now
 
     vendor_order = models.ForeignKey(
         'VendorOrder', on_delete=models.PROTECT, null=True, blank=True,
@@ -6368,6 +6377,56 @@ class MaterialApprovalDetail(models.Model):
         return f"{self.request} — {self.proposed_make or 'material'}"
 
 
+class MaterialApprovalLine(models.Model):
+    """One material a request proposes: what it is, its make and specification, and how
+    much (D-A28). Written only by approvals.py — create_approval_request() writes a
+    request's first lines, resubmit_approval_request() replaces them (lines may be added,
+    edited or removed on a resubmit, D-A18).
+
+    NOT APPEND-ONLY, unlike the rest of the approval records: a removed line is deleted.
+    What each round was asked about lives in that round's ApprovalRoundSnapshot (D-A19),
+    which every writer of lines also writes, in the same transaction.
+
+    THE UNIT DECIDES THE QUANTITY (D-A30): a count unit takes a whole number, a measured
+    unit up to two decimal places (projects/units.py). The chokepoint refuses anything
+    else, never rounding, and three CHECKs hold it in the database as well.
+    """
+
+    detail = models.ForeignKey(MaterialApprovalDetail, on_delete=models.CASCADE,
+                               related_name='lines')
+    position = models.PositiveSmallIntegerField()  # 1, 2, 3… in the order SCM entered them; renumbered on each resubmit
+    description = models.CharField(max_length=300)
+    make = models.CharField(max_length=200, blank=True, default='')
+    specification = models.TextField(blank=True, default='')
+    quantity = models.DecimalField(max_digits=12, decimal_places=2)
+    unit = models.CharField(max_length=20, choices=UNIT_CHOICES)  # A code from projects/units.py UNITS
+
+    class Meta:
+        ordering = ['detail', 'position']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(quantity__gt=0),
+                name='material_line_quantity_positive'),
+            # Choices are a form's business; the database never sees them. A CHECK is
+            # what keeps this column from drifting the way BOQItem.uom did.
+            models.CheckConstraint(
+                condition=models.Q(unit__in=UNIT_CODES),
+                name='material_line_unit_known'),
+            # A count unit holds a whole number. FLOOR, not TRUNC: they agree for every
+            # value the quantity CHECK allows (all > 0), and Django's Floor() works on
+            # SQLite (the test database) as well as Postgres.
+            models.CheckConstraint(
+                condition=(models.Q(unit__in=MEASURED_UNITS)
+                           | models.Q(quantity=Floor(models.F('quantity')))),
+                name='material_line_count_unit_whole'),
+            models.UniqueConstraint(fields=['detail', 'position'],
+                                    name='uniq_material_line_position'),
+        ]
+
+    def __str__(self):
+        return f"{self.detail.request} — line {self.position}: {self.description}"
+
+
 class ApprovalRoundSnapshot(models.Model):
     """What one round's approvers were asked about, frozen (D-A19). APPEND-ONLY.
 
@@ -6377,9 +6436,10 @@ class ApprovalRoundSnapshot(models.Model):
     new round) in the same transaction, after the revision is applied. There is no
     update path: save() on an existing row and delete() both raise.
 
-    `snapshot` stores display names beside ids (vendor, scope, BOQ items, assignees), so
-    a later rename does not change what a past round shows. Schema: approvals.
-    _round_snapshot_payload(), "schema": 1. Requests raised before S1.1 have no
+    `snapshot` stores display names beside ids (vendor, scope, material lines,
+    assignees), so a later rename does not change what a past round shows. Schema:
+    approvals._round_snapshot_payload(), "schema": 2 since material lines; rows written
+    before them are schema 1 and stay as written. Requests raised before S1.1 have no
     snapshot; readers use approvals.round_snapshot(), which returns None for them.
     """
 
