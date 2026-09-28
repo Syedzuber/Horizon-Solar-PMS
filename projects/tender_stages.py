@@ -19,8 +19,9 @@ EACH SITE IS COUNTED ONCE, AT ITS FURTHEST STAGE. Precedence, highest first:
     S0-S5  STATUS_TO_STAGE[DesignAssignment.status], or S0 when there is no row
 
 FIXED QUERY BUDGET. site_stages() and stage_summary() are ONE query each whatever the
-number of sites; activated_progress() is one more. Nothing here may be called per site —
-tests_tender_stages pins 3 sites and 30 sites to the same count.
+number of sites; activated_progress() is one more; tender_cards() is two whatever the
+number of programmes. Nothing here may be called per site — tests_tender_stages pins 3
+sites and 30 sites to the same count, tests_tender_cards 2x3 and 4x30.
 
 design_metrics is NOT reused, deliberately (pre-flight P1). Its tender_metrics() runs per
 programme, counts only sites that have a DesignAssignment, and splits `arka_submitted` on
@@ -30,6 +31,7 @@ from collections import namedtuple
 from decimal import Decimal
 
 from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
+from django.urls import reverse
 
 # latest_design_transition lives in design_views beside the ledger's other readers.
 # design_views does not import views or this module, so importing it here is not a cycle.
@@ -277,3 +279,107 @@ def activated_progress(sites_qs):
         if row['status'] == 'Commissioned':
             progress['commissioned'] += 1
     return progress
+
+
+# The five buckets a tender card folds S0-S7 into, in workflow order. The stacked bar and
+# its legend render in this order, light to dark, so survey is always on the left.
+BUCKETS = [
+    ('survey',      'Survey',      (STAGE_NO_SURVEY, STAGE_SURVEY_ON_FILE)),
+    ('design',      'Design',      (STAGE_IN_DESIGN, STAGE_IN_QC, STAGE_AWAITING_PM)),
+    ('released',    'Released',    (STAGE_RELEASED,)),
+    ('procurement', 'Procurement', (STAGE_LOCKED_GROUP,)),
+    ('execution',   'Execution',   (STAGE_ACTIVATED,)),
+]
+
+# Worst first: the precedence _get_ceo_dashboard_context gives a project card's badge
+# (Blocked > Delayed > At Risk > On Time), so a tender's pill agrees with its sites' pills.
+HEALTH_SEVERITY = ['blocked', 'delayed', 'at_risk', 'on_time']
+
+
+def tender_cards(sites_qs, health_by_pk):
+    """One card per programme with at least one site in `sites_qs`, sites descending then
+    name. TWO queries whatever the number of programmes or sites: site_stages() and one
+    values() read of the programme and display columns, joined here by pk.
+
+    Each card: programme pk, name, code, detail url; sites, kwp, kwp_sites; `buckets` (the
+    five BUCKETS with sites and pct of the tender's sites); released, released_kwp,
+    released_kwp_sites; `stages` (S0-S7 with sites, kwp, kwp_sites); `activated` (S7 sites
+    with pk, project_id, name, badge, status); `health` (the worst activated badge).
+
+    `health_by_pk` is {project pk: badge} from the dashboard's own project cards, passed
+    in rather than recomputed: the badge rule lives in views, which imports this module,
+    so reading it here would be a cycle and restating it would be a second rule. A site
+    that is not in it (On Hold, Commissioned — outside projects_qs) has badge None; the
+    template shows its status instead, and it takes no part in the tender's health.
+
+    RELEASED IS THE DESIGN STATUS, NOT THE S5 COUNT. A site released and then locked into
+    a group, or activated, has moved past S5 but its design is still released, and the
+    card's "Design released" counts it. An activated site whose design is still open is
+    in S7 and is NOT counted.
+
+    A site with no programme belongs to no tender and has no card (SECONDARY_FINDINGS, S4).
+    kWp counts only known capacity — null or zero is unknown — as stage_summary() does.
+    """
+    stages = site_stages(sites_qs)
+    rows = sites_qs.filter(program__isnull=False).order_by().values(
+        'pk', 'program_id', 'project_id', 'site_name', 'customer_name', 'status',
+        'dc_capacity_kw',
+        program_name=F('program__name'), program_code=F('program__short_tender_code'),
+    )
+    stage_number = {key: n for n, (key, _) in enumerate(STAGES)}
+    bucket_of = {stage: key for key, _, members in BUCKETS for stage in members}
+
+    cards = {}
+    for row in rows:
+        card = cards.get(row['program_id'])
+        if card is None:
+            card = cards[row['program_id']] = {
+                'program_pk': row['program_id'],
+                'name': row['program_name'],
+                'code': row['program_code'],
+                'url': reverse('program_detail', args=[row['program_id']]),
+                'sites': 0, 'kwp': Decimal('0'), 'kwp_sites': 0,
+                'buckets': {key: {'key': key, 'label': label, 'sites': 0}
+                            for key, label, _ in BUCKETS},
+                'released': 0, 'released_kwp': Decimal('0'), 'released_kwp_sites': 0,
+                'stages': [{'code': f'S{n}', 'key': key, 'label': label, 'sites': 0,
+                            'kwp': Decimal('0'), 'kwp_sites': 0}
+                           for n, (key, label) in enumerate(STAGES)],
+                'activated': [],
+            }
+        info = stages[row['pk']]
+        kwp = row['dc_capacity_kw']      # falsy for null and zero: both unknown
+        stage = card['stages'][stage_number[info.stage_key]]
+
+        card['sites'] += 1
+        stage['sites'] += 1
+        card['buckets'][bucket_of[info.stage_key]]['sites'] += 1
+        if kwp:
+            card['kwp'] += kwp
+            card['kwp_sites'] += 1
+            stage['kwp'] += kwp
+            stage['kwp_sites'] += 1
+        if info.design_status == DESIGN_RELEASED:
+            card['released'] += 1
+            if kwp:
+                card['released_kwp'] += kwp
+                card['released_kwp_sites'] += 1
+        if info.stage_key == STAGE_ACTIVATED:
+            card['activated'].append({
+                'pk': row['pk'],
+                'project_id': row['project_id'],
+                'name': row['site_name'] or row['customer_name'],
+                'badge': health_by_pk.get(row['pk']),
+                'status': row['status'],
+            })
+
+    for card in cards.values():
+        buckets = [card['buckets'][key] for key, _, _ in BUCKETS]
+        for bucket in buckets:
+            bucket['pct'] = round(bucket['sites'] * 100 / card['sites'], 1)
+        card['buckets'] = buckets
+        card['activated'].sort(key=lambda site: site['project_id'])
+        badges = [site['badge'] for site in card['activated'] if site['badge']]
+        card['health'] = min(badges, key=HEALTH_SEVERITY.index) if badges else None
+
+    return sorted(cards.values(), key=lambda card: (-card['sites'], card['name']))

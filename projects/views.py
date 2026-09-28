@@ -60,7 +60,7 @@ from .models import (
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
-from .tender_stages import activated_progress, stage_summary
+from .tender_stages import activated_progress, stage_summary, tender_cards
 from .approval_queries import pending_approvals_card
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
@@ -2179,6 +2179,42 @@ def _site_pipeline(sites_qs):
     }
 
 
+# A health badge as the tender cards render it: CSS class, Lucide icon, label. The same
+# classes and icons the per-site Active projects cards use, so a pill reads the same in
+# both places.
+HEALTH_PILLS = {
+    'blocked': {'css': 'badge-blocked', 'icon': 'ban',            'label': 'Blocked'},
+    'delayed': {'css': 'badge-delayed', 'icon': 'clock-alert',    'label': 'Delayed'},
+    'at_risk': {'css': 'badge-at-risk', 'icon': 'triangle-alert', 'label': 'At Risk'},
+    'on_time': {'css': 'badge-on-time', 'icon': 'check-circle-2', 'label': 'On Time'},
+}
+
+
+def _tender_card_rows(sites_qs, project_cards):
+    """The Tenders "Tenders" section (S4): tender_stages.tender_cards() plus display text,
+    in the two queries tender_cards() costs. No query here.
+
+    The health badges are read off `project_cards`, the per-site cards this dashboard has
+    already classified, so a site's pill here and on its own card cannot disagree. kWp
+    cells use _kwp_coverage_text, as the pipeline does. Bar widths are pre-formatted
+    strings so a localised decimal comma can never reach the CSS.
+    """
+    health = {card['project'].pk: card['badge'] for card in project_cards}
+    cards = tender_cards(sites_qs, health)
+    for card in cards:
+        card['pill'] = HEALTH_PILLS.get(card['health'])
+        card['kwp_text'] = _kwp_coverage_text(card['kwp'], card['kwp_sites'], card['sites'])
+        card['released_kwp_text'] = _kwp_coverage_text(
+            card['released_kwp'], card['released_kwp_sites'], card['released'])
+        for bucket in card['buckets']:
+            bucket['width'] = f'{bucket["pct"]:.1f}'
+        for stage in card['stages']:
+            stage['kwp_text'] = _kwp_coverage_text(stage['kwp'], stage['kwp_sites'], stage['sites'])
+        for site in card['activated']:
+            site['pill'] = HEALTH_PILLS.get(site['badge'])
+    return cards
+
+
 def _get_ceo_dashboard_context(context=None):
     """
     Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
@@ -2771,10 +2807,15 @@ def _get_ceo_dashboard_context(context=None):
         # one stage by tender_stages, over the same tender_sites_qs() the header counts,
         # so the pipeline's total and the header's site count are one number.
         ctx['site_pipeline'] = _site_pipeline(tender_sites_qs())
+        # S4, two more queries whatever the number of tenders: one card per programme,
+        # replacing the per-site Active projects cards in this view. The health pills are
+        # the badges project_cards already carries, so no site is classified twice.
+        ctx['tender_cards'] = _tender_card_rows(tender_sites_qs(), project_cards)
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
         ctx['site_pipeline'] = None
+        ctx['tender_cards'] = None
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.
