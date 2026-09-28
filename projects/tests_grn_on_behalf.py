@@ -371,9 +371,11 @@ class BlankReasonRefusalTests(GrnOnBehalfBase):
         self.assertEqual(self.challan.status, DeliveryChallan.RECEIVED)
 
     def test_a_submission_with_no_parseable_line_needs_no_reason(self):
-        """Blank and unparseable quantities are skipped, unchanged by G2 — so a
-        submission that writes nothing takes no first-time branch and is not refused
-        for want of a reason it does not need."""
+        """A blank quantity is skipped, unchanged by G2. An unparseable one is REFUSED
+        since the number-input session (it used to be skipped too), and that refusal
+        runs before the reason check. Either way nothing is written and no first-time
+        branch is taken, so the submission is never refused for want of a reason it
+        does not need."""
         before = self._transitions().count()
         response = self._override({
             f'received_qty_{self.line_a.pk}': '',

@@ -1,3 +1,4 @@
+{% load static %}
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -181,5 +182,6 @@
     });
   </script>
   {% block extra_js %}{% endblock %}
+  <script src="{% static 'projects/js/number_input_guard.js' %}"></script>
 </body>
 </html>

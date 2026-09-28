@@ -61,6 +61,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Prefetch, Q
 from django.http import HttpResponseForbidden
@@ -71,6 +72,7 @@ from django.utils import timezone
 from .approval_forms import pre_order_coverage
 from .decorators import login_required
 from .design_views import aggregate_group_boq
+from .number_input import decimal_field_max, parse_decimal_input
 from .models import (
     BOQItem, BOQItemMaster, PaymentRequest, PaymentRequestHold, Program, Project,
     SiteGroup, SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument,
@@ -288,10 +290,23 @@ def _parse_submission(request, boq_items):
             # Never another project's row, whatever the form was made to post.
             errors.append("A chosen item is not on this project's BOQ.")
             continue
-        quantity = _parse_decimal(post.get(f'qty_{item.pk}'), 10)
+        # The quantity goes through the app's one number reader, so its refusal names
+        # what was wrong ("more than 2 decimal places", "not a number") instead of the
+        # single "must be more than 0" that _parse_decimal() gives for every failure.
+        # Blank keeps that old message: an ordered line with no quantity is still an
+        # error. The amount is money and stays on _parse_decimal(), which already
+        # reads it with Decimal().
+        try:
+            quantity = parse_decimal_input(
+                post.get(f'qty_{item.pk}'), places=2, min_value=Decimal('0.01'),
+                max_value=decimal_field_max(VendorOrderLine, 'quantity'),
+                field_label=f'{item.description}: quantity')
+            if quantity is None:
+                errors.append(f'{item.description}: quantity must be more than 0.')
+        except ValidationError as exc:
+            quantity = None
+            errors.extend(exc.messages)
         amount   = _parse_decimal(post.get(f'amount_{item.pk}'), 12)
-        if quantity is None:
-            errors.append(f'{item.description}: quantity must be more than 0.')
         if amount is None:
             errors.append(f'{item.description}: amount must be more than 0.')
         if quantity is not None and amount is not None:

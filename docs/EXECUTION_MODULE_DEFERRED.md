@@ -4131,6 +4131,96 @@ parser a PM with no claim on the site
 end-to-end one, which cannot exist yet. The deleted-site half of the same guard IS reachable
 and is tested through the view.
 
+### G27 — `project_detail.html`'s number input was left alone because the template is dead
+
+Found by the number-input session (28 Sep 2026). Not edited, because that session's MODE did not allow it.
+
+`project_detail.html` has `<input type="number" name="amount" step="0.01" min="0">`. It already
+has an explicit step, so the policy test would pass. It is still excluded from that test
+by name (`tests_number_input.EXCLUDED_TEMPLATES`), so that nobody reads the exclusion as
+coverage of a page nobody can reach. Same template, same reason, as **§G8**. Remove the
+exclusion when the template is deleted.
+
+### G28 — the BOQ upload and `boq_correct` still round a third decimal place
+
+Found by the number-input session (28 Sep 2026). Not fixed, because neither path was on that session's field list.
+
+Both read their quantity through `views._boq_upload_quantity()`. It refuses text,
+negatives, NaN and values above `BOQ_UPLOAD_MAX_QUANTITY`, but it accepts `38.405`, and
+the `boq_quantity` column (2 dp) rounds that to `38.41` without saying so. Every other BOQ
+quantity path now refuses a third decimal place through
+`number_input.parse_decimal_input()`. The fix is one extra check, or routing the cell
+through the parser with `places=2`. The upload's "blank cell = leave alone" rule has to be
+kept either way. A TODO sits on the function.
+
+### G29 — `BOQItem.uom` holds values outside `UOM_CHOICES`
+
+Found by the number-input session (28 Sep 2026). Not fixed, because a change to the choices list is a model change and the session's MODE did not allow one.
+
+`UOM_CHOICES` lists Nos, LOT, Mtr, Pkt, LS, Sets and Kg. Local data (`solarpms_local`) also
+holds **KWp (7 rows), Meter (71), Pair (5) and Set (19)**. All of these are on OPEX BOQs, copied
+from `BOQItemMaster.unit` by the picker and the upload. Nothing calls `full_clean()`, so
+nothing refuses them. Two consequences:
+
+* **Meter/Mtr and Set/Sets are the same unit spelled two ways.** Anything that groups or
+  compares by `uom` will split them.
+* **A ModelForm or admin edit of one of these rows fails validation on a field the user did
+  not touch.**
+
+Decide whether the catalogue spellings become the choices, or the catalogue is normalised
+to the choices. Re-check on Railway before choosing.
+
+### G30 — a damaged quantity must be a whole number, but a received quantity need not be
+
+Found by the number-input session (28 Sep 2026). Not fixed, because it needs a model change.
+
+`DCLineItem.received_quantity` is `DecimalField(10, 2)`. `damaged_quantity` is a
+`PositiveIntegerField`. So "12.5 m of cable received, 0.5 m damaged" cannot be recorded.
+The GRN form now refuses a fractional damaged value, where it used to truncate it silently
+with `int(float(...))`. The clamp `min(damaged, int(received))` floors the received
+quantity, so when fewer than 1 unit was received, any damaged count is clamped to 0 and
+the line reads GOOD.
+
+### G31 — a refused quantity throws away the user's other unsaved edits
+
+Found by the number-input session (28 Sep 2026). Not fixed, because a form re-render is a UI change beyond that session's scope.
+
+The quantity inputs are now `step="any"`, so the browser accepts a third decimal place.
+The server then refuses it (`parse_decimal_input`). On `boq_detail` (both branches),
+`opex_boq_entry`, `confirm_grn` and `override_grn`, the refusal is a **redirect**: the
+error names the row, but every other box the user changed in that submission is lost,
+because none of these views has a re-render that keeps what was posted.
+`vendor_order_create` is the only path that puts the posted values back.
+
+**`create_delivery_challan` re-renders; it does not redirect. The effect is the same.**
+The refusal returns
+`return render(request, 'projects/delivery_challan_create.html', _form_context())` with a
+200. But `_form_context()` carries only `project`, `vendors`, `warehouses` and
+`category_choices`, and `delivery_challan_create.html` reads nothing from the POST: no
+`value=` on any header input, and only line 0 in the table. So **every entered line is lost, and so is every header field** (DC number,
+dates, vendor, PO number, warehouse, notes). The error message names the refused line
+("Line N quantity: …"), but the user has to re-enter the whole challan. This is the same
+as the view's four existing refusals (missing DC number or date, a bad date, no line
+items), which all return the same blank render. In practice this only happens when someone types three decimals, which the
+browser does not stop. A client-side hint would also prevent it: `step="0.01"` looks like
+a fix but would bring back the stepping problem this session removed.
+
+### G32 — a non-author designer sees an editable BOQ form whose Save does nothing
+
+Found by the number-input session (28 Sep 2026), while checking whether an OPEX BOQ holding
+38.40 could be saved. Not fixed, because it is an authority/UI question and was not on that session's list.
+
+`boq_detail` computes `design_form_open` from the BOQ status and the two locks only. It
+has no authority term. So any Design-role user who can **read** a BOQ, but is not its
+author, gets `boq_qty_` inputs and the Save / Submit buttons. Their POST fails
+`_can_edit`, falls through to the bare redirect and is **silently dropped**, and the page
+comes back unchanged. Verified in the browser on `TESTTENDER26-MB010` (unlocked OPEX Draft)
+as `praveen`. The fix is to AND `user_can_edit_project_boq()` into `design_form_open`.
+
+The same check found that `TESTTENDER26-MB010` is an OPEX BOQ carrying **37 Residential
+catalogue rows** (every `item_master` is `project_type='Residential'`). It was seeded before
+Part 11 scoped `get_standard_boq_items()`.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

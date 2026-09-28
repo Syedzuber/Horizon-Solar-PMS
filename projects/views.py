@@ -16,7 +16,7 @@ from django.db.models import (
     Prefetch, Q, Subquery, Sum, Value,
 )
 from django.db.models.functions import Coalesce
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonResponse
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
@@ -57,6 +57,7 @@ from .models import (
     REASON_GRN_CONFIRMED, REASON_GRN_OVERRIDDEN, REASON_REVISION_REQUESTED,
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
+from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import payment_counts
 from .approval_queries import pending_approvals_card
@@ -6896,15 +6897,33 @@ def boq_detail(request, project_id):
             return redirect('boq_detail', project_id=project_id)
 
         if action in ('save_design', 'submit_design') and _can_edit and boq.status in _DESIGN_EDITABLE:
+            # EVERY QUANTITY IS READ BEFORE ANYTHING IS WRITTEN, so one refused box
+            # refuses the whole save — notes included — rather than leaving half the
+            # sheet saved. A malformed or negative number used to be stored as a blank
+            # (or, if negative, as typed) and a third decimal place was rounded by the
+            # column; all three are now refused with the row named.
+            items      = list(boq.items.all())
+            quantities = {}
+            qty_errors = []
+            for item in items:
+                try:
+                    quantities[item.pk] = parse_decimal_input(
+                        request.POST.get(f'boq_qty_{item.pk}'), places=2, min_value=0,
+                        max_value=decimal_field_max(BOQItem, 'boq_quantity'),
+                        field_label=f'{item.description} (BOQ Qty)')
+                except ValidationError as exc:
+                    qty_errors.extend(exc.messages)
+            if qty_errors:
+                for error in qty_errors:
+                    messages.error(request, error)
+                messages.error(request, 'Nothing was saved.')
+                return redirect('boq_detail', project_id=project_id)
+
             boq.notes = request.POST.get('notes', '').strip() or None
             boq.save(update_fields=['notes'])
-            for item in boq.items.all():
-                qty_str    = request.POST.get(f'boq_qty_{item.pk}', '').strip()
+            for item in items:
                 vendor_str = request.POST.get(f'make_pref_{item.pk}', '').strip()
-                try:
-                    item.boq_quantity = Decimal(qty_str) if qty_str else None
-                except InvalidOperation:
-                    item.boq_quantity = None
+                item.boq_quantity = quantities[item.pk]
                 item.make_preference_id = int(vendor_str) if vendor_str.isdigit() else None
                 item.save(update_fields=['boq_quantity', 'make_preference'])
 
@@ -6952,15 +6971,32 @@ def boq_detail(request, project_id):
                 return redirect('boq_detail', project_id=project_id)
 
         elif action in ('save_scm', 'acknowledge_scm') and role == 'SCM' and boq.status in ('Submitted', 'Acknowledged'):
+            # Read every ordered quantity before writing any, for the same reason as the
+            # design branch above: a refused box refuses the save (and the acknowledge)
+            # whole, instead of storing a blank or a rounded number in its place. Zero is
+            # allowed — it is how SCM records "not ordering this row".
+            items      = list(boq.items.all())
+            quantities = {}
+            qty_errors = []
+            for item in items:
+                try:
+                    quantities[item.pk] = parse_decimal_input(
+                        request.POST.get(f'ord_qty_{item.pk}'), places=2, min_value=0,
+                        max_value=decimal_field_max(BOQItem, 'ordered_quantity'),
+                        field_label=f'{item.description} (Ordered Qty)')
+                except ValidationError as exc:
+                    qty_errors.extend(exc.messages)
+            if qty_errors:
+                for error in qty_errors:
+                    messages.error(request, error)
+                messages.error(request, 'Nothing was saved.')
+                return redirect('boq_detail', project_id=project_id)
+
             # Save ordered qty, make preference, and ordered vendor regardless of save vs. acknowledge
-            for item in boq.items.all():
-                qty_str    = request.POST.get(f'ord_qty_{item.pk}', '').strip()
+            for item in items:
                 make_str   = request.POST.get(f'make_pref_{item.pk}', '').strip()
                 vendor_str = request.POST.get(f'ord_vendor_{item.pk}', '').strip()
-                try:
-                    item.ordered_quantity = Decimal(qty_str) if qty_str else None
-                except InvalidOperation:
-                    item.ordered_quantity = None
+                item.ordered_quantity = quantities[item.pk]
                 item.make_preference_id = int(make_str) if make_str.isdigit() else None
                 item.ordered_vendor_id  = int(vendor_str) if vendor_str.isdigit() else None
                 item.save(update_fields=['ordered_quantity', 'make_preference', 'ordered_vendor'])
@@ -7195,7 +7231,9 @@ def opex_boq_entry(request, project_id):
         # has no master. Only rows on THIS BOQ are addressable.
         keep_off = {int(raw) for raw in request.POST.getlist('keep_row') if raw.isdigit()}
 
-        def _quantity(field, current=None):
+        qty_errors = []
+
+        def _quantity(field, label, current=None):
             """The posted quantity for one row.
 
             AN ABSENT FIELD MEANS UNCHANGED; an EMPTY one means cleared. The browser always
@@ -7203,60 +7241,77 @@ def opex_boq_entry(request, project_id):
             hand-built POST that names a row without naming its quantity must not silently
             wipe a number the designer entered on a previous save.
 
-            A malformed or negative value is treated as no quantity rather than rejected:
-            the same forgiving read boq_detail applies, and the "at least one quantity"
-            guard on marking complete is what actually stops an unusable BOQ.
+            A MALFORMED, NEGATIVE OR THREE-DECIMAL VALUE IS REFUSED, no longer forgiven.
+            It used to read as "no quantity" (clearing the row) or, for a third decimal
+            place, be rounded by the column. The refusal is collected into `qty_errors`
+            and the whole save is rolled back after the loops below, so every bad box is
+            named at once and nothing on the sheet is half-saved.
             """
             if field not in request.POST:
                 return current
-            raw = (request.POST.get(field) or '').strip()
-            if not raw:
-                return None
             try:
-                value = Decimal(raw)
-            except InvalidOperation:
-                return None
-            return value if value >= 0 else None
+                return parse_decimal_input(
+                    request.POST.get(field), places=2, min_value=0,
+                    max_value=decimal_field_max(BOQItem, 'boq_quantity'),
+                    field_label=label)
+            except ValidationError as exc:
+                qty_errors.extend(exc.messages)
+                return current
 
-        with transaction.atomic():
-            if boq is None:
-                # Created on first save, never on GET — a page load must not bring a BOQ
-                # row into existence on a site nobody has entered anything for.
-                boq = BOQ.objects.create(project=project)
+        try:
+            with transaction.atomic():
+                if boq is None:
+                    # Created on first save, never on GET — a page load must not bring a BOQ
+                    # row into existence on a site nobody has entered anything for.
+                    boq = BOQ.objects.create(project=project)
 
-            existing_on, existing_off = split_opex_boq_rows(boq, set(catalogue_by_id))
-            by_master = {row.item_master_id: row for row in existing_on}
+                existing_on, existing_off = split_opex_boq_rows(boq, set(catalogue_by_id))
+                by_master = {row.item_master_id: row for row in existing_on}
 
-            # Removed catalogue rows, and removed off-catalogue rows.
-            for master_id, row in by_master.items():
-                if master_id not in chosen_set:
-                    row.delete()
-            for row in existing_off:
-                if row.pk not in keep_off:
-                    row.delete()
+                # Removed catalogue rows, and removed off-catalogue rows.
+                for master_id, row in by_master.items():
+                    if master_id not in chosen_set:
+                        row.delete()
+                for row in existing_off:
+                    if row.pk not in keep_off:
+                        row.delete()
 
-            # Added and updated catalogue rows. serial_no comes from the catalogue's
-            # sort_order, the same rule the Residential template uses, so a row's number is
-            # stable regardless of the order it was added in.
-            for master_id in chosen:
-                master = catalogue_by_id[master_id]
-                row    = by_master.get(master_id)
-                if row is None:
-                    BOQItem.objects.create(
-                        boq=boq, item_master=master, serial_no=master.sort_order,
-                        category=master.category, description=master.description,
-                        uom=master.unit, boq_quantity=_quantity(f'qty_{master_id}'),
-                        is_standard_item=True,
-                    )
-                else:
-                    row.boq_quantity = _quantity(f'qty_{master_id}', row.boq_quantity)
-                    row.save(update_fields=['boq_quantity'])
+                # Added and updated catalogue rows. serial_no comes from the catalogue's
+                # sort_order, the same rule the Residential template uses, so a row's number is
+                # stable regardless of the order it was added in.
+                for master_id in chosen:
+                    master = catalogue_by_id[master_id]
+                    row    = by_master.get(master_id)
+                    if row is None:
+                        BOQItem.objects.create(
+                            boq=boq, item_master=master, serial_no=master.sort_order,
+                            category=master.category, description=master.description,
+                            uom=master.unit,
+                            boq_quantity=_quantity(f'qty_{master_id}', master.description),
+                            is_standard_item=True,
+                        )
+                    else:
+                        row.boq_quantity = _quantity(f'qty_{master_id}', master.description,
+                                                     row.boq_quantity)
+                        row.save(update_fields=['boq_quantity'])
 
-            # Surviving off-catalogue rows keep their quantity editable.
-            for row in existing_off:
-                if row.pk in keep_off:
-                    row.boq_quantity = _quantity(f'qty_row_{row.pk}', row.boq_quantity)
-                    row.save(update_fields=['boq_quantity'])
+                # Surviving off-catalogue rows keep their quantity editable.
+                for row in existing_off:
+                    if row.pk in keep_off:
+                        row.boq_quantity = _quantity(f'qty_row_{row.pk}', row.description,
+                                                     row.boq_quantity)
+                        row.save(update_fields=['boq_quantity'])
+
+                # Raised INSIDE the atomic block so it rolls back the rows the loops above
+                # already created, updated or deleted — including a BOQ created by this
+                # very save. Caught just below; the designer sees every refused box.
+                if qty_errors:
+                    raise ValidationError(qty_errors)
+        except ValidationError as exc:
+            for error in exc.messages:
+                messages.error(request, error)
+            messages.error(request, 'Nothing was saved.')
+            return redirect('opex_boq_entry', project_id=project_id)
 
         # SAY SO WHEN A ROW WAS PUT BACK. Silent re-add is the correct behaviour and a
         # confusing one at the same time: a designer who removed a row and watched it
@@ -7692,10 +7747,14 @@ def _boq_upload_quantity(raw):
     result for, and a column the designer filtered out all look like. Clearing is
     still expressible — type 0, or use the picker.
 
-    A MALFORMED OR NEGATIVE VALUE IS AN ERROR HERE, where _quantity() forgives it
-    and reads None. Forgiveness is right on the picker because a human is looking
-    at the box they just typed into. In a fifty-row file, silently blanking
+    A MALFORMED OR NEGATIVE VALUE IS AN ERROR HERE. The picker's _quantity() used
+    to forgive it and read None; since the number-input session it refuses too, via
+    number_input.parse_decimal_input(). In a fifty-row file, silently blanking
     "1,200" because of its comma is data loss nobody would notice.
+
+    TODO: a third decimal place is still accepted here and rounded by the column
+    (38.405 -> 38.41). Not routed through parse_decimal_input() because upload and
+    boq_correct were outside that session's field list; see DEFERRED §G28.
     """
     if raw is None:
         return None, None
@@ -11603,13 +11662,28 @@ def create_delivery_challan(request, project_id):
     # Parse dynamically indexed line item fields from POST
     # Field names follow the pattern: line_item_category_N, line_item_description_N, etc.
     line_items_data = []
+    qty_errors      = []
     i = 0
     while f'line_item_category_{i}' in request.POST:
         category    = request.POST.get(f'line_item_category_{i}', '').strip()
         description = request.POST.get(f'line_item_description_{i}', '').strip()
-        qty_str     = request.POST.get(f'line_item_qty_{i}', '').strip()
         unit        = request.POST.get(f'line_item_unit_{i}', 'Nos').strip() or 'Nos'
-        qty         = _safe_decimal(qty_str)
+        # A dispatched quantity of zero is meaningless, so the floor is 0.01. This used
+        # to go through _safe_decimal(), which strips every non-digit ("-5" became 5)
+        # and let the column round a third decimal place; both are now refused. A blank
+        # quantity still drops the row, as before.
+        try:
+            qty = parse_decimal_input(
+                request.POST.get(f'line_item_qty_{i}'), places=2,
+                min_value=Decimal('0.01'),
+                max_value=decimal_field_max(DCLineItem, 'ordered_quantity'),
+                field_label=f'Line {i + 1} quantity')
+        except ValidationError as exc:
+            # Only a row that would otherwise be saved is worth refusing the challan
+            # for; an abandoned row with no description is dropped, as it always was.
+            if category and description:
+                qty_errors.extend(exc.messages)
+            qty = None
         if category and description and qty:
             line_items_data.append({
                 'boq_category':     category,
@@ -11618,6 +11692,11 @@ def create_delivery_challan(request, project_id):
                 'unit':             unit,
             })
         i += 1
+
+    if qty_errors:
+        for error in qty_errors:
+            messages.error(request, error)
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
 
     # Minimum 1 line item — DC with zero items rejected
     if not line_items_data:
@@ -11726,6 +11805,62 @@ def delivery_challan_detail(request, project_id, dc_id):
     })
 
 
+def _read_grn_lines(request, line_items):
+    """Parse the received / damaged boxes of a GRN form. Returns (lines, errors).
+
+    `lines` is [(item, received_qty, damaged_qty, derived_condition, grn_notes)] for
+    every line whose received box was filled in; a blank received box skips the line,
+    as it always has. Writes nothing — confirm_grn and override_grn both refuse the
+    whole submission on any error BEFORE their first save, so a GRN is never half
+    recorded.
+
+    WHAT CHANGED. Received quantity went through _safe_decimal(), which strips every
+    non-digit, so "-5" was recorded as 5 received; and a third decimal place was rounded
+    by the column. Damaged quantity went through int(float(...)), which truncated "2.7"
+    damaged to 2. All three are refused now. Damaged stays a whole number because its
+    column is a PositiveIntegerField (a fractional damage is DEFERRED §G30).
+    """
+    lines, errors = [], []
+    for item in line_items:
+        grn_notes = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+        try:
+            received_qty = parse_decimal_input(
+                request.POST.get(f'received_qty_{item.pk}'), places=2, min_value=0,
+                max_value=decimal_field_max(DCLineItem, 'received_quantity'),
+                field_label=f'{item.item_description}: received quantity')
+        except ValidationError as exc:
+            errors.extend(exc.messages)
+            continue
+        if received_qty is None:
+            continue  # Skip items where no received quantity was entered
+
+        try:
+            damaged_qty = parse_decimal_input(
+                request.POST.get(f'damaged_qty_{item.pk}'), places=0, min_value=0,
+                max_value=2147483647,   # PositiveIntegerField's ceiling on Postgres
+                field_label=f'{item.item_description}: damaged quantity')
+        except ValidationError as exc:
+            errors.extend(exc.messages)
+            continue
+
+        # Clamp damaged to [0, received]. int() floors the Decimal received quantity,
+        # which is right for a whole-number count: 2 damaged of 2.5 received is fine,
+        # 3 is not. An empty damaged box means none damaged.
+        damaged_qty = min(int(damaged_qty or 0), int(received_qty))
+
+        # Derive condition for backward compatibility with code that reads this field
+        # condition string is now secondary — damaged_quantity is the precise source of truth
+        if damaged_qty == 0:
+            derived_condition = DCLineItem.GOOD
+        elif damaged_qty >= received_qty:
+            derived_condition = DCLineItem.DAMAGED
+        else:
+            derived_condition = DCLineItem.PARTIAL
+
+        lines.append((item, received_qty, damaged_qty, derived_condition, grn_notes))
+    return lines, errors
+
+
 @login_required
 @role_required(['Site Engineer'])
 def confirm_grn(request, project_id, dc_id):
@@ -11773,34 +11908,16 @@ def confirm_grn(request, project_id, dc_id):
     today      = date.today()
     line_items = challan.line_items.all()
 
-    for item in line_items:
-        qty_str        = request.POST.get(f'received_qty_{item.pk}', '').strip()
-        damaged_qty_str = request.POST.get(f'damaged_qty_{item.pk}', '0').strip()
-        grn_notes      = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+    # Every line is read before any is saved: a refused box refuses the whole GRN, with
+    # no line written and no status recalculated.
+    grn_lines, qty_errors = _read_grn_lines(request, line_items)
+    if qty_errors:
+        for error in qty_errors:
+            messages.error(request, error)
+        messages.error(request, 'The GRN was not recorded.')
+        return redirect('delivery_challan_detail', project_id=project_id, dc_id=dc_id)
 
-        if not qty_str:
-            continue  # Skip items where SE didn't enter a received quantity
-
-        received_qty = _safe_decimal(qty_str)
-        if received_qty is None:
-            continue
-
-        # Parse damaged_quantity; clamp to [0, received_qty]
-        try:
-            damaged_qty = max(0, int(float(damaged_qty_str)))
-        except (ValueError, TypeError):
-            damaged_qty = 0
-        damaged_qty = min(damaged_qty, int(received_qty))
-
-        # Derive condition for backward compatibility with code that reads this field
-        # condition string is now secondary — damaged_quantity is the precise source of truth
-        if damaged_qty == 0:
-            derived_condition = DCLineItem.GOOD
-        elif damaged_qty >= received_qty:
-            derived_condition = DCLineItem.DAMAGED
-        else:
-            derived_condition = DCLineItem.PARTIAL
-
+    for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
         item.received_quantity = received_qty
         item.damaged_quantity  = damaged_qty
         item.condition         = derived_condition
@@ -11888,33 +12005,17 @@ def override_grn(request, project_id, dc_id):
     pending      = []
     any_on_behalf = False
 
-    for item in line_items:
-        qty_str        = request.POST.get(f'received_qty_{item.pk}', '').strip()
-        damaged_qty_str = request.POST.get(f'damaged_qty_{item.pk}', '0').strip()
-        grn_notes      = request.POST.get(f'grn_notes_{item.pk}', '').strip()
+    grn_lines, qty_errors = _read_grn_lines(request, line_items)
 
-        if not qty_str:
-            continue  # Skip items where no received quantity was entered
+    # A refused quantity refuses the whole submission before the reason check and
+    # before any write, the same shape as the R3 refusal below.
+    if qty_errors:
+        for error in qty_errors:
+            messages.error(request, error)
+        messages.error(request, 'The GRN was not changed.')
+        return back
 
-        received_qty = _safe_decimal(qty_str)
-        if received_qty is None:
-            continue
-
-        # Parse damaged_quantity; clamp to [0, received_qty]
-        try:
-            damaged_qty = max(0, int(float(damaged_qty_str)))
-        except (ValueError, TypeError):
-            damaged_qty = 0
-        damaged_qty = min(damaged_qty, int(received_qty))
-
-        # Derive condition for backward compatibility
-        if damaged_qty == 0:
-            derived_condition = DCLineItem.GOOD
-        elif damaged_qty >= received_qty:
-            derived_condition = DCLineItem.DAMAGED
-        else:
-            derived_condition = DCLineItem.PARTIAL
-
+    for item, received_qty, damaged_qty, derived_condition, grn_notes in grn_lines:
         # `_id`, so an unconfirmed line costs no query to recognise.
         first_time = item.grn_confirmed_by_id is None
         any_on_behalf = any_on_behalf or first_time

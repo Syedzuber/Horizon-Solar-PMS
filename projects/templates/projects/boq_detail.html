@@ -173,7 +173,7 @@ same fact into the seven Design input gates below.
               <td class="align-middle">
                 {% if design_form_open %}
                 <input form="saveDesignForm"
-                       type="number" step="1" min="0"
+                       type="number" step="any" min="0"
                        name="boq_qty_{{ item.pk }}"
                        value="{{ item.boq_quantity|default:'' }}"
                        class="form-control form-control-sm">
@@ -214,7 +214,7 @@ same fact into the seven Design input gates below.
               <td class="align-middle">
                 {% if boq.status == 'Submitted' or boq.status == 'Acknowledged' %}
                 <input form="saveSCMForm"
-                       type="number" step="1" min="0"
+                       type="number" step="any" min="0"
                        name="ord_qty_{{ item.pk }}"
                        value="{{ item.ordered_quantity|default:'' }}"
                        class="form-control form-control-sm">

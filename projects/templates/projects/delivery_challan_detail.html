@@ -235,7 +235,7 @@
               <td>
                 <input type="number" name="received_qty_{{ item.pk }}"
                        class="form-control form-control-sm"
-                       step="1" min="0"
+                       step="any" min="0"
                        value="{{ item.received_quantity|default:'' }}"
                        placeholder="0">
               </td>
@@ -479,7 +479,7 @@ document.addEventListener('DOMContentLoaded', function () {
                   <td>
                     <input type="number" name="received_qty_{{ item.pk }}"
                            class="form-control form-control-sm"
-                           step="0.01" min="0"
+                           step="any" min="0"
                            value="{{ item.received_quantity|default:'' }}"
                            placeholder="0">
                   </td>

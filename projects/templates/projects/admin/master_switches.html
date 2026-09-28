@@ -76,7 +76,7 @@
               Gantt view, cascading downstream. Internal view is unaffected.</p>
           </div>
         </div>
-        <input type="number" min="0" name="gantt_client_buffer_days"
+        <input type="number" step="1" min="0" name="gantt_client_buffer_days"
                value="{{ settings.gantt_client_buffer_days }}"
                class="w-20 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-right">
       </div>
@@ -93,7 +93,7 @@
               (DISCOM, customer) so they don't render as thin slivers.</p>
           </div>
         </div>
-        <input type="number" min="0" name="gantt_external_min_display_days"
+        <input type="number" step="1" min="0" name="gantt_external_min_display_days"
                value="{{ settings.gantt_external_min_display_days }}"
                class="w-20 rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-right">
       </div>
