@@ -60,6 +60,7 @@ from .models import (
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
+from .tender_stages import activated_progress, stage_summary
 from .approval_queries import pending_approvals_card
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
@@ -2120,6 +2121,64 @@ def _payment_strip_cards(strip):
             for label, bucket, detail in rows]
 
 
+def _kwp_coverage_text(kwp, kwp_sites, sites):
+    """One pipeline row's kWp cell (S3): '4,745' when every site's capacity is known,
+    '— (0 of 109)' when none is, '1,200 (40 of 80)' when some are, and '—' for an empty
+    stage. The count is always shown when coverage is partial, for the reason the header
+    gives: a bare total would read as the whole stage's."""
+    if not sites:
+        return '—'
+    if not kwp_sites:
+        return f'— (0 of {sites})'
+    if kwp_sites == sites:
+        return _format_kwp(kwp)
+    return f'{_format_kwp(kwp)} ({kwp_sites} of {sites})'
+
+
+# The bar of a non-empty stage never renders narrower than this, so a 1-site stage beside
+# a 109-site one is still visibly not zero.
+PIPELINE_MIN_BAR_PCT = 2
+
+# The rows under S7, in display order, with the one-line note of what each counts
+# (tender_stages.activated_progress gives the rule and its known gaps).
+PIPELINE_PROGRESS_ROWS = [
+    ('material_delivered', 'Material delivered',
+     'All delivery mirror tasks Done — from recorded delivery challans'),
+    ('installation_complete', 'Installation complete',
+     'All installation-phase template tasks Done'),
+    ('commissioned', 'Commissioned', 'Project status Commissioned'),
+]
+
+
+def _site_pipeline(sites_qs):
+    """The Tenders "Site pipeline" section (S3), in two queries: stage_summary() and
+    activated_progress(). Bar widths are percentages of the largest stage, computed here
+    so the template needs no arithmetic and the page no JavaScript."""
+    stages = stage_summary(sites_qs)
+    largest = max(s['sites'] for s in stages)
+    rows = []
+    for number, s in enumerate(stages):
+        width = round(s['sites'] * 100 / largest) if largest else 0
+        if s['sites']:
+            width = max(width, PIPELINE_MIN_BAR_PCT)
+        rows.append({
+            'code':  f'S{number}',
+            'label': s['label'],
+            'sites': s['sites'],
+            'width': width,
+            'kwp':   _kwp_coverage_text(s['kwp'], s['kwp_sites'], s['sites']),
+            # Only S0 can carry held sites; the note keeps them from hiding in "No survey".
+            'note':  f'incl. {s["held"]} returned — survey inadequate' if s['held'] else '',
+        })
+    progress = activated_progress(sites_qs)
+    return {
+        'stages':   rows,
+        'progress': [{'label': label, 'sites': progress[key], 'note': note}
+                     for key, label, note in PIPELINE_PROGRESS_ROWS],
+        'total':    sum(s['sites'] for s in stages),
+    }
+
+
 def _get_ceo_dashboard_context(context=None):
     """
     Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
@@ -2708,9 +2767,14 @@ def _get_ceo_dashboard_context(context=None):
         ctx['payment_strip'] = _payment_strip_cards(
             ceo_payment_strip(CEO_TENDER_TYPES, timezone.localdate()))
         ctx['capex_hidden'] = _capex_hidden_count()
+        # S3, two more queries whatever the site count: every live tender site placed in
+        # one stage by tender_stages, over the same tender_sites_qs() the header counts,
+        # so the pipeline's total and the header's site count are one number.
+        ctx['site_pipeline'] = _site_pipeline(tender_sites_qs())
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
+        ctx['site_pipeline'] = None
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.

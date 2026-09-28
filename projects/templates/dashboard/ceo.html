@@ -206,6 +206,62 @@ below, unchanged.
 </div>
 {% endif %}
 
+{# ── SITE PIPELINE (Tenders only) ─────────────────────────────────────────── #}
+{% comment %}
+S3: every live tender site in exactly one stage (projects/tender_stages.py decides which).
+Bar widths are percentages computed in views._site_pipeline, so there is no arithmetic
+here and no JavaScript. Residential and no-context set site_pipeline to None.
+{% endcomment %}
+{% if site_pipeline %}
+<div class="section-label">Site pipeline</div>
+<div class="card shadow-sm mb-4">
+  <div class="card-body">
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-2">
+        <thead>
+          <tr class="text-muted small">
+            <th class="fw-normal">Stage</th>
+            <th class="fw-normal w-50"></th>
+            <th class="fw-normal text-end">Sites</th>
+            <th class="fw-normal text-end">kWp</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in site_pipeline.stages %}
+          <tr>
+            <td class="small">
+              <span class="text-muted me-1">{{ row.code }}</span>{{ row.label }}
+              {% if row.note %}<div class="text-muted" style="font-size:.72rem;">{{ row.note }}</div>{% endif %}
+            </td>
+            <td>
+              <div class="progress" style="height:.6rem;">
+                <div class="progress-bar" role="progressbar" style="width:{{ row.width }}%; background-color:#1a7a4a;"
+                     aria-valuenow="{{ row.sites }}" aria-valuemin="0" aria-valuemax="{{ site_pipeline.total }}"></div>
+              </div>
+            </td>
+            <td class="text-end fw-semibold">{{ row.sites }}</td>
+            <td class="text-end small text-nowrap">{{ row.kwp }}</td>
+          </tr>
+          {% endfor %}
+          {# Under S7: how far the activated sites have got. Each counts S7 sites only. #}
+          {% for row in site_pipeline.progress %}
+          <tr>
+            <td class="small ps-4" colspan="2">
+              {{ row.label }}
+              <div class="text-muted" style="font-size:.72rem;">{{ row.note }}</div>
+            </td>
+            <td class="text-end">{{ row.sites }}</td>
+            <td></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="text-muted mb-0" style="font-size:.75rem;">Each site counted once, at its furthest stage. {{ site_pipeline.total }} site{{ site_pipeline.total|pluralize }} total.</p>
+  </div>
+</div>
+{% endif %}
+
 {# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
 <div class="section-label">Portfolio health</div>
 <div class="row g-3 mb-4">
