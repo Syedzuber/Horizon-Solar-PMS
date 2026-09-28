@@ -117,7 +117,8 @@
 
   {# Refresh control — top-left; CEO taps this during the board demo after commissioning is marked Done #}
   <div class="d-flex align-items-center gap-2">
-    <a href="{% url 'dashboard_ceo' %}"
+    {# Keeps ?context= so Refresh reloads the view the CEO is on, not the no-context one (S2). #}
+    <a href="{% url 'dashboard_ceo' %}{% if ceo_context %}?context={{ ceo_context }}{% endif %}"
        class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-1"
        title="Reload the dashboard to pick up the latest project data">
       <i data-lucide="refresh-cw" class="icon-sm"></i>
@@ -130,7 +131,12 @@
     <h5 class="mb-0 fw-bold">Portfolio Overview</h5>
     {# Set only under ?context=tenders; counts Draft sites too, unlike the cards below. #}
     {% if tender_header %}
-    <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_display }} kWp · {{ tender_header.activated }} activated</p>
+    {# kWp covers only sites with a capacity; "(N of M sites)" says so whenever some have none (S2). #}
+    <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_display }} kWp{% if tender_header.kwp_partial %} ({{ tender_header.kwp_sites }} of {{ tender_header.sites }} sites){% endif %} · {{ tender_header.activated }} activated</p>
+    {# D2 hides CAPEX from Tenders; this line keeps it from vanishing silently. #}
+    {% if capex_hidden %}
+    <p class="text-muted mb-0" style="font-size:.75rem;">Not shown: CAPEX · {{ capex_hidden }} project{{ capex_hidden|pluralize }}</p>
+    {% endif %}
     {% else %}
     <p class="text-muted small mb-0">{{ proj_total }} active project{{ proj_total|pluralize }}</p>
     {% endif %}
@@ -139,6 +145,26 @@
 
 
 {# ── FINANCE SUMMARY STRIP ────────────────────────────────────────────────── #}
+{% comment %}
+Tenders (S2): four payment-request buckets, and no contract or client money (decision
+D3). Test-site payments are left out. Residential and no-context keep the four cards
+below, unchanged.
+{% endcomment %}
+{% if payment_strip %}
+<div class="row g-3 mb-4">
+  {% for card in payment_strip %}
+  <div class="col-sm-6 col-md-3">
+    <div class="card shadow-sm text-center py-3">
+      <div class="card-body p-2">
+        <div class="fw-bold fs-2 text-dark">{{ card.amount }}</div>
+        <div class="text-muted small mt-1">{{ card.label }}</div>
+        <div class="text-muted mt-1" style="font-size:.75rem;">{{ card.sub }}</div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
 <div class="row g-3 mb-4">
 
   <div class="col-sm-6 col-md-3">
@@ -178,6 +204,7 @@
   </div>
 
 </div>
+{% endif %}
 
 {# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
 <div class="section-label">Portfolio health</div>

@@ -3,7 +3,7 @@ import logging
 import re
 import uuid as _uuid
 from datetime import date, timedelta, datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import urlparse as _urlparse
 
 from django.conf import settings
@@ -59,7 +59,7 @@ from .models import (
 )
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
-from .payments import payment_counts
+from .payments import ceo_payment_strip, payment_counts
 from .approval_queries import pending_approvals_card
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
@@ -2000,18 +2000,19 @@ def _ceo_context_filter(context, prefix=''):
     """
     The CEO dashboard's counterpart of `_context_filter`: filter kwargs for the given
     context, with CEO_TENDER_TYPES in place of the shared Tenders list and test data
-    (Project.is_test) excluded in BOTH contexts.
+    (Project.is_test) excluded in EVERY view, the no-context one included.
 
-    Returns {} when context is None — the no-context view stays the exact portfolio-wide
-    behaviour it always was, test data included. `prefix` is the ORM path to Project, as
-    in `_context_filter`.
+    context=None narrows by is_test alone (S2): the navbar Home link lands a CEO there,
+    and test sites must not reach the CEO by that door either. It keeps every project
+    type — CAPEX stays visible there. `prefix` is the ORM path to Project, as in
+    `_context_filter`.
     """
     if context == CONTEXT_TENDERS:
         types = CEO_TENDER_TYPES
     else:
         types = CONTEXT_PROJECT_TYPES.get(context)
     if not types:
-        return {}
+        return {f'{prefix}is_test': False}
     return {f'{prefix}project_type__in': types, f'{prefix}is_test': False}
 
 
@@ -2048,15 +2049,75 @@ def _tender_header(sites_qs):
 
     tenders = distinct non-null programs (a site with no program belongs to no tender);
     activated = sites with activated_at set, which is what project_activate stamps.
+
+    kwp_sites = sites whose capacity is known (S2). A null OR zero dc_capacity_kw is
+    unknown, not a zero-capacity site, so the kWp total covers only kwp_sites and the
+    header says "(N of M sites)" whenever the two differ — production had 109 of 196
+    IPGCL sites with no capacity, and a bare total read as the whole tender's.
     """
     agg = sites_qs.aggregate(
         tenders=Count('program', distinct=True),
         sites=Count('pk'),
         kwp=Sum('dc_capacity_kw'),
+        kwp_sites=Count('pk', filter=Q(dc_capacity_kw__gt=0)),
         activated=Count('pk', filter=Q(activated_at__isnull=False)),
     )
     agg['kwp_display'] = _format_kwp(agg['kwp'])
+    agg['kwp_partial'] = agg['kwp_sites'] != agg['sites']
     return agg
+
+
+def _capex_hidden_count():
+    """Live CAPEX projects the Tenders view leaves out (decision D2), for the header's
+    "Not shown: CAPEX" line. Same liveness as tender_sites_qs() — not deleted, not test
+    data, any TENDER_SITE_LIVE_STATUSES status — so the CEO learns CAPEX exists instead
+    of it vanishing silently."""
+    return Project.objects.filter(
+        project_type='CAPEX', is_deleted=False, is_test=False,
+        status__in=TENDER_SITE_LIVE_STATUSES,
+    ).count()
+
+
+def _format_inr(value):
+    """Whole rupees in Indian grouping: Decimal('200000.00') -> '2,00,000',
+    Decimal('12345678.50') -> '1,23,45,679'. Formatted here because Django's
+    intcomma groups in thousands (200,000), which a CEO reading lakhs would misread."""
+    digits = str(int((value or Decimal('0')).quantize(Decimal('1'), rounding=ROUND_HALF_UP)))
+    head, tail = digits[:-3], digits[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    return ','.join(groups + [tail])
+
+
+def _requests_phrase(count):
+    return f'{count} request{"" if count == 1 else "s"}'
+
+
+def _payment_strip_cards(strip):
+    """The four Tenders money cards (S2) from ceo_payment_strip(), as display rows:
+    label, amount and one sub-line each. A zero card still renders — "₹0" and "No
+    requests" — because an empty card is itself the news, and a blank one reads as
+    broken."""
+    def sub(bucket, detail):
+        if not bucket.count:
+            return 'No requests'
+        return ' · '.join([_requests_phrase(bucket.count)] + ([detail] if detail else []))
+
+    awaiting, on_hold = strip['awaiting'], strip['on_hold']
+    approved, paid = strip['approved'], strip['paid_month']
+    rows = [
+        ('Awaiting approval', awaiting, f'oldest raised {awaiting.days} d ago'),
+        ('On hold — SCM to justify', on_hold, f'held {on_hold.days} d'),
+        ('Approved, not yet paid', approved, ''),
+        ('Paid this month', paid, f'{paid.partial} partial'),
+    ]
+    return [{'label': label, 'amount': f'₹{_format_inr(bucket.amount)}',
+             'sub': sub(bucket, detail)}
+            for label, bucket, detail in rows]
 
 
 def _get_ceo_dashboard_context(context=None):
@@ -2448,7 +2509,9 @@ def _get_ceo_dashboard_context(context=None):
     # payment and one on a Draft OPEX site are counted.
     # S1: Tenders reads CEO_TENDER_TYPES (RESCO only), so CAPEX money is off this tile while
     # Finance's Tenders tile still counts it. Test-site payments are NOT excluded here —
-    # payment_counts scopes by the order's type, not by a site's is_test (deferred to S2).
+    # payment_counts scopes by the order's type, not by a site's is_test. S2 renders the
+    # Tenders money row from ceo_payment_strip() instead, which does exclude them; these
+    # figures still drive the Residential and no-context tiles.
     fin_to_pay = payment_counts(
         CEO_TENDER_TYPES if context == CONTEXT_TENDERS else _context_types(context)
     )[PaymentRequest.APPROVED]
@@ -2635,6 +2698,23 @@ def _get_ceo_dashboard_context(context=None):
     ctx['tender_header'] = (
         _tender_header(tender_sites_qs()) if context == CONTEXT_TENDERS else None
     )
+    # S2, Tenders only (three more queries): the four-bucket payment strip that replaces
+    # the four money cards, and the count behind "Not shown: CAPEX". The fin_* figures
+    # above are still computed under Tenders — tests_payment_readers_o6 holds the CEO,
+    # Finance and the queue to one count through them — they are just not rendered.
+    # timezone.localdate(), not `today` above: `today` is date.today(), the server's
+    # date (UTC on Railway), and "this month" must be the CEO's month (IST).
+    if context == CONTEXT_TENDERS:
+        ctx['payment_strip'] = _payment_strip_cards(
+            ceo_payment_strip(CEO_TENDER_TYPES, timezone.localdate()))
+        ctx['capex_hidden'] = _capex_hidden_count()
+    else:
+        ctx['payment_strip'] = None
+        ctx['capex_hidden'] = 0
+    # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
+    # Read here rather than from context_nav because context_nav is None for Admin and
+    # System Admin, who reach this page too.
+    ctx['ceo_context'] = context
     return ctx
 
 

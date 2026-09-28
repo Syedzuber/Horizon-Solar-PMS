@@ -12,6 +12,10 @@ Three things live here, and all three are here because more than one door reache
     dashboard's payment tiles and the CEO dashboard's finance tile all call it, so the
     three figures cannot disagree.
 
+  * ceo_payment_strip() — the CEO Tenders strip (S2): the same scope as payment_counts()
+    with test-site payments dropped, in four buckets. A separate function, so the
+    queue and Finance keep counting every row.
+
   * send_payment_notices() — who hears about a payment's move. It is called from ONE
     place: a post_save receiver on StatusTransition (signals.py), because a payment's
     status only ever moves where record_transition() writes its ledger row. Hooking the
@@ -23,14 +27,19 @@ Neither function imports views: views.py imports this module, and a cycle would 
 """
 import logging
 from collections import namedtuple
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, DecimalField, Exists, F, Min, OuterRef, Q, Sum
+from django.db.models.functions import Coalesce
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import PaymentRequest, UserProfile, effective_amount_sum, log_activity
+from .models import (
+    PaymentRequest, PaymentRequestHold, UserProfile, VendorOrderSite,
+    effective_amount_sum, log_activity,
+)
 from .notifications import send_notification
 from .permissions import user_can_mark_paid
 from .utils import record_transition
@@ -70,6 +79,91 @@ def payment_counts(project_types=None):
         counts[row['status']] = PaymentTotals(
             row['n'], row['effective_sum'] or zero, row['requested_sum'] or zero)
     return counts
+
+
+#: One card of the CEO payment strip (S2). `days` is the oldest raise (awaiting) or the
+#: longest open hold (on_hold), None where the card shows no age; `partial` is how many
+#: paid requests were approved for less than asked (paid_month only), else None.
+StripBucket = namedtuple('StripBucket', 'count amount days partial')
+
+
+def ceo_payment_strip(project_types, today):
+    """The CEO Tenders payment strip (S2): {'awaiting', 'on_hold', 'approved',
+    'paid_month'} -> StripBucket. TWO queries.
+
+    SCOPED LIKE payment_counts() — through `vendor_order__project_type`, never through
+    `project` — PLUS ONE TERM payment_counts() does not have: a request is dropped when
+    EVERY site its order was sized against is test data (Project.is_test). A request
+    whose order names at least one real site is kept, and so is one whose order names no
+    site at all: "no project link" is not evidence of test data. payment_counts() itself
+    is left alone because the queue and Finance must keep counting every row.
+
+    WHICH AMOUNT EACH CARD SUMS IS A DECISION, NOT AN ACCIDENT:
+      awaiting / on_hold — `amount`, what SCM asked for. A request re-awaiting after a
+        hold on an approval carries an approved ceiling, but nobody has approved it now.
+      approved / paid_month — effective_amount (the approved figure, O4b), the money
+        that is due or that left.
+    REJECTED is on no card.
+
+    `today` is the IST calendar date (the caller passes timezone.localdate()). Ages are
+    whole IST days, and "this month" is today's IST month, compared against
+    `payment_date` — the date Finance recorded the money leaving, not the moment the
+    row was marked paid.
+    """
+    queryset = PaymentRequest.objects.all()
+    if project_types is not None:
+        queryset = queryset.filter(vendor_order__project_type__in=list(project_types))
+    # Two Exists rather than a join through vendor_order__sites: a join multiplies each
+    # request by its site count and every Sum below would be counted that many times.
+    order_sites = VendorOrderSite.objects.filter(order=OuterRef('vendor_order'))
+    queryset = queryset.exclude(
+        Exists(order_sites) & ~Exists(order_sites.filter(project__is_test=False)))
+
+    month_start = today.replace(day=1)
+    next_month_start = (month_start + timedelta(days=32)).replace(day=1)
+
+    awaiting = Q(status=PaymentRequest.PENDING_APPROVAL)
+    on_hold  = Q(status=PaymentRequest.ON_HOLD)
+    approved = Q(status=PaymentRequest.APPROVED)
+    paid     = Q(status=PaymentRequest.CONFIRMED, payment_date__gte=month_start,
+                 payment_date__lt=next_month_start)
+    # effective_amount as SQL — the expression models.effective_amount_sum() sums,
+    # restated because that helper takes no filter and models.py was outside S2.
+    effective = Coalesce('approved_amount', 'amount',
+                         output_field=DecimalField(max_digits=14, decimal_places=2))
+    agg =queryset.aggregate(
+        awaiting_n=Count('pk', filter=awaiting),
+        awaiting_sum=Sum('amount', filter=awaiting),
+        awaiting_oldest=Min('requested_date', filter=awaiting),
+        hold_n=Count('pk', filter=on_hold),
+        hold_sum=Sum('amount', filter=on_hold),
+        approved_n=Count('pk', filter=approved),
+        approved_sum=Sum(effective, filter=approved),
+        paid_n=Count('pk', filter=paid),
+        paid_sum=Sum(effective, filter=paid),
+        paid_partial=Count('pk', filter=paid & Q(approved_amount__lt=F('amount'))),
+    )
+    # Second query, on the holds themselves: an on-hold request has exactly one open
+    # hold (uniq_open_hold_per_payment_request), and joining holds into the aggregate
+    # above would repeat each request once per hold it has EVER had, inflating hold_sum.
+    held_since = (PaymentRequestHold.objects
+                  .filter(responded_at__isnull=True,
+                          payment_request__in=queryset.filter(on_hold))
+                  .aggregate(m=Min('held_at'))['m'])
+
+    def _age(moment):
+        return (today - timezone.localdate(moment)).days if moment else None
+
+    zero = Decimal('0')
+    return {
+        'awaiting':   StripBucket(agg['awaiting_n'], agg['awaiting_sum'] or zero,
+                                  _age(agg['awaiting_oldest']), None),
+        'on_hold':    StripBucket(agg['hold_n'], agg['hold_sum'] or zero,
+                                  _age(held_since), None),
+        'approved':   StripBucket(agg['approved_n'], agg['approved_sum'] or zero, None, None),
+        'paid_month': StripBucket(agg['paid_n'], agg['paid_sum'] or zero, None,
+                                  agg['paid_partial']),
+    }
 
 
 class PaymentRefused(Exception):

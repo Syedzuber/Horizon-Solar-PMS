@@ -90,9 +90,10 @@ class CeoTendersScopeTests(TestCase):
         _project('S1-RES-T', 'Residential', is_test=True)
         self.assertNotIn('S1-RES-T', _card_ids('residential'))
 
-    def test_no_context_still_shows_test_data(self):
-        """?context absent keeps the exact portfolio-wide behaviour, test data included."""
-        self.assertIn('S1-TEST', _card_ids(None))
+    def test_no_context_hides_test_data(self):
+        """?context absent hides test data too since S2 (T4) — the navbar Home link lands
+        a CEO there. It still spans every project type."""
+        self.assertNotIn('S1-TEST', _card_ids(None))
 
     # b) CAPEX -----------------------------------------------------------------
 
