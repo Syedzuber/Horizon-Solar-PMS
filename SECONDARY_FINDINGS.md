@@ -139,3 +139,7 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 - **A request raised before S1.1 still loses its round-N details on resubmit.** `resubmit_approval_request` neither checks for nor writes a missing round-N snapshot. Material lines are safe (every writer of lines also writes that round's snapshot, so a line is never deleted from an unsnapshotted round), but the title, description, vendor and scope such a round was asked about are overwritten. No such request exists: approvals are not on Railway, and every round of the 4 local approvals has a snapshot.
 - **Every page overflows by 49 px at 380 px wide.** The navbar brand in `base.html` ("Horizon Solar — PMS" beside the logo and the user's name) runs past the viewport on every page, including the unchanged approvals list. The approval pages' own content, the lines table included, fits. `base.html` was outside this session's scope.
 - **`0106_material_approval_lines` refuses to drop `boq_items` if any pick exists.** It found 0 rows in `solarpms_local`; on Railway the table is created empty by 0103 in the same deploy. A future database with picks would stop at 0106 with a message naming the table.
+
+## From the walkthrough seed's approvals area (2026-09-28)
+
+- **`SeededWalkthroughTests` now derives its whole-database counts from the seed's own `USERS` / `APPROVAL_USERS` / `APPROVAL_RECORDS` lists.** An unwanted user added to those lists would not be caught.
