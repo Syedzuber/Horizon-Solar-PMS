@@ -128,7 +128,12 @@
 
   <div class="text-end">
     <h5 class="mb-0 fw-bold">Portfolio Overview</h5>
+    {# Set only under ?context=tenders; counts Draft sites too, unlike the cards below. #}
+    {% if tender_header %}
+    <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_display }} kWp · {{ tender_header.activated }} activated</p>
+    {% else %}
     <p class="text-muted small mb-0">{{ proj_total }} active project{{ proj_total|pluralize }}</p>
+    {% endif %}
   </div>
 </div>
 

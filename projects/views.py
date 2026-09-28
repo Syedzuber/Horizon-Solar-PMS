@@ -1975,6 +1975,90 @@ def _attach_person_display(rows, prefix):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# CEO dashboard scope (session S1)
+# ---------------------------------------------------------------------------
+# The CEO dashboard's Tenders view deliberately differs from the shared context
+# mapping above, and ONLY the CEO dashboard reads what follows. CONTEXT_PROJECT_TYPES,
+# _context_filter, _context_types, _context_includes and _TENDER_TYPES are left as they
+# were because landing, Finance, SCM and the PM / Design sectioning all read them —
+# narrowing them would move CAPEX projects into "EPC Residential" on the PM and Design
+# dashboards. The resulting mismatches (landing count, CEO vs Finance payments) are
+# recorded in SECONDARY_FINDINGS.md.
+
+# Tenders on the CEO dashboard is RESCO only (decision D2: CAPEX is hidden there).
+CEO_TENDER_TYPES = ['OPEX']
+
+# Every status in which a RESCO site is still part of a tender the CEO tracks: Draft
+# counts because most sites of a newly won tender sit in Draft for weeks before
+# activation (decision D1), and Commissioned / On Hold are still sites of the tender.
+# Only Cancelled leaves the tender.
+TENDER_SITE_LIVE_STATUSES = ['Draft', 'Active', 'In Progress', 'On Hold', 'Commissioned']
+
+
+def _ceo_context_filter(context, prefix=''):
+    """
+    The CEO dashboard's counterpart of `_context_filter`: filter kwargs for the given
+    context, with CEO_TENDER_TYPES in place of the shared Tenders list and test data
+    (Project.is_test) excluded in BOTH contexts.
+
+    Returns {} when context is None — the no-context view stays the exact portfolio-wide
+    behaviour it always was, test data included. `prefix` is the ORM path to Project, as
+    in `_context_filter`.
+    """
+    if context == CONTEXT_TENDERS:
+        types = CEO_TENDER_TYPES
+    else:
+        types = CONTEXT_PROJECT_TYPES.get(context)
+    if not types:
+        return {}
+    return {f'{prefix}project_type__in': types, f'{prefix}is_test': False}
+
+
+def tender_sites_qs():
+    """
+    Every live tender site: RESCO (OPEX), not deleted, not test data, in any
+    TENDER_SITE_LIVE_STATUSES status — activated or not.
+
+    THE single definition of "a live tender site". The CEO Tenders header counts from it
+    today; later sessions build their cards on it rather than restating the filter.
+    Unlike the dashboard's projects_qs it is not limited to Active / In Progress, which
+    is why the two counts differ.
+    """
+    return Project.objects.filter(
+        project_type='OPEX',
+        is_deleted=False,
+        is_test=False,
+        status__in=TENDER_SITE_LIVE_STATUSES,
+    )
+
+
+def _format_kwp(value):
+    """Thousands separators, and decimals only when the figure is not whole:
+    Decimal('7125.50') -> '7,125.5', Decimal('4745.00') -> '4,745'. Formatted here rather
+    than with floatformat, which pads to a fixed decimal count or rounds away a digit."""
+    value = (value or Decimal('0')).normalize()
+    # normalize() turns 4745.00 into 4.745E+3; 'f' prints it back in positional form.
+    return format(value, ',f')
+
+
+def _tender_header(sites_qs):
+    """
+    The CEO Tenders header figures, from tender_sites_qs(), in one query.
+
+    tenders = distinct non-null programs (a site with no program belongs to no tender);
+    activated = sites with activated_at set, which is what project_activate stamps.
+    """
+    agg = sites_qs.aggregate(
+        tenders=Count('program', distinct=True),
+        sites=Count('pk'),
+        kwp=Sum('dc_capacity_kw'),
+        activated=Count('pk', filter=Q(activated_at__isnull=False)),
+    )
+    agg['kwp_display'] = _format_kwp(agg['kwp'])
+    return agg
+
+
 def _get_ceo_dashboard_context(context=None):
     """
     Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
@@ -2101,7 +2185,7 @@ def _get_ceo_dashboard_context(context=None):
     )
     projects_qs = (
         Project.objects
-        .filter(is_deleted=False, status__in=active_statuses, **_context_filter(context))
+        .filter(is_deleted=False, status__in=active_statuses, **_ceo_context_filter(context))
         .annotate(
             has_blocked_task=Exists(blocked_subq),
             has_at_risk_task=Exists(at_risk_subq),
@@ -2242,7 +2326,7 @@ def _get_ceo_dashboard_context(context=None):
     task_agg = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
-        **_context_filter(context, 'phase__project__'),
+        **_ceo_context_filter(context, 'phase__project__'),
     ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
@@ -2328,7 +2412,7 @@ def _get_ceo_dashboard_context(context=None):
     issue_agg = Issue.objects.filter(
         project__is_deleted=False,
         project__status__in=active_statuses,
-        **_context_filter(context, 'project__'),
+        **_ceo_context_filter(context, 'project__'),
     ).aggregate(
         issue_total     =Count('pk'),
         issue_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -2362,14 +2446,19 @@ def _get_ceo_dashboard_context(context=None):
     # payments queue and the Finance dashboard call — through the ORDER's project type,
     # never through `project` and never filtered on a project's status, so a site-less
     # payment and one on a Draft OPEX site are counted.
-    fin_to_pay = payment_counts(_context_types(context))[PaymentRequest.APPROVED]
+    # S1: Tenders reads CEO_TENDER_TYPES (RESCO only), so CAPEX money is off this tile while
+    # Finance's Tenders tile still counts it. Test-site payments are NOT excluded here —
+    # payment_counts scopes by the order's type, not by a site's is_test (deferred to S2).
+    fin_to_pay = payment_counts(
+        CEO_TENDER_TYPES if context == CONTEXT_TENDERS else _context_types(context)
+    )[PaymentRequest.APPROVED]
     fin_payment_requests_pending    = fin_to_pay.count
     fin_vendor_payments_outstanding = fin_to_pay.amount
     fin_vendor_payments_requested   = fin_to_pay.requested
     fin_client_contract_value = (
         Project.objects.filter(
             is_deleted=False, status__in=['Active', 'In Progress'],
-            **_context_filter(context),
+            **_ceo_context_filter(context),
         ).aggregate(s=Sum('contract_value'))['s'] or 0
     )
     # Milestones Finance has invoiced (triggered by task Done) but not yet fully collected.
@@ -2382,7 +2471,7 @@ def _get_ceo_dashboard_context(context=None):
             project__status__in=['Active', 'In Progress'],
             status__in=['Invoiced', 'Received'],
             amount__isnull=False,
-            **_context_filter(context, 'project__'),
+            **_ceo_context_filter(context, 'project__'),
         ).filter(
             Q(amount_received__isnull=True) | Q(amount_received__lt=F('amount'))
         ).aggregate(
@@ -2417,7 +2506,7 @@ def _get_ceo_dashboard_context(context=None):
             phase__project__status__in=active_statuses,
             assigned_to__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            **_context_filter(context, 'phase__project__'),
+            **_ceo_context_filter(context, 'phase__project__'),
         )
         .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
         .values(
@@ -2449,7 +2538,7 @@ def _get_ceo_dashboard_context(context=None):
             status=Task.DONE,
             completed_at__isnull=False,
             completed_at__gte=top_people_cutoff,
-            **_context_filter(context, 'phase__project__'),
+            **_ceo_context_filter(context, 'phase__project__'),
         )
         .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
         .values(
@@ -2540,6 +2629,12 @@ def _get_ceo_dashboard_context(context=None):
     }
     ctx.update(task_agg)
     ctx.update(issue_agg)
+    # Tenders header only: counts every live tender site (Draft included), a wider set
+    # than projects_qs above, which still drives every card. One extra query, and only
+    # under ?context=tenders — Residential and no-context render exactly as before.
+    ctx['tender_header'] = (
+        _tender_header(tender_sites_qs()) if context == CONTEXT_TENDERS else None
+    )
     return ctx
 
 

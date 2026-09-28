@@ -95,7 +95,9 @@ class ProgramAdmin(admin.ModelAdmin):
 class ProjectAdmin(admin.ModelAdmin):
     list_display    = ['project_id', 'customer_name', 'project_type', 'status',
                        'city', 'dc_capacity_kw', 'contract_value', 'assigned_pm', 'is_deleted']
-    list_filter     = ['project_type', 'status', 'city', 'state', 'is_deleted']
+    # is_test: filterable here and editable in the 'Test data' fieldset below. Admin-only by
+    # design — no portal screen can flag a project as test data.
+    list_filter    = ['project_type', 'status', 'city', 'state', 'is_deleted', 'is_test']
     search_fields   = ['project_id', 'customer_name', 'customer_phone', 'zoho_crm_id']
     # DO NOT REMOVE — R-10. `status` is deliberately read-only here, and an unhelpfully
     # read-only field is exactly what a future maintainer will want to delete.
@@ -148,6 +150,11 @@ class ProjectAdmin(admin.ModelAdmin):
         ('Deletion', {
             'fields': ('is_deleted', 'deleted_at'),
             'classes': ('collapse',),
+        }),
+        # Not collapsed: a flagged project vanishes from the CEO dashboard, so the flag
+        # must be visible to whoever opens the record wondering where it went.
+        ('Test data', {
+            'fields': ('is_test',),
         }),
     )
 

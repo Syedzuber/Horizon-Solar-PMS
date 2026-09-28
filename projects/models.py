@@ -138,6 +138,14 @@ class Project(models.Model):
     )
     is_deleted                = models.BooleanField(default=False)
     deleted_at                = models.DateTimeField(null=True, blank=True)
+    # Seed / walkthrough / pilot data. Set by `flag_test_projects` or the Django admin, never
+    # inferred from a project_id prefix in code (decision D4) — a prefix rule silently
+    # misfiles the next real tender whose code happens to match. Only the CEO dashboard
+    # reads it today (_ceo_context_filter, tender_sites_qs); nothing else hides these rows.
+    is_test                   = models.BooleanField(
+        default=False, db_index=True,
+        help_text="Test or demo data. Hidden from the CEO dashboard.",
+    )
 
     class Meta:
         ordering = ['-created_at']

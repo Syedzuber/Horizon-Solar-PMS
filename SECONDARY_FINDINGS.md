@@ -143,3 +143,15 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 ## From the walkthrough seed's approvals area (2026-09-28)
 
 - **`SeededWalkthroughTests` now derives its whole-database counts from the seed's own `USERS` / `APPROVAL_USERS` / `APPROVAL_RECORDS` lists.** An unwanted user added to those lists would not be caught.
+
+## From the CEO Tenders-view audit (2026-09-28)
+
+- `projects/views.py` `CONTEXT_PROJECT_TYPES` — the comment "CAPEX has zero rows today" is stale. `HRP-CAP-2026-001` (CAPEX, Active) exists in `solarpms_local` and, per the 2026-08-15 entry above, on production.
+- `projects/views.py` `_get_ceo_dashboard_context`, card loop — the comment "a tender site (no phase template at all)" is stale for the same reason the RESIDENTIAL_DELIVERY/BOQ block was corrected by 1.3b: migration 0075 seeded an OPEX template. The guard is still correct because it tests `project_type`.
+- `projects/views.py` `_get_ceo_dashboard_context` docstring — the 2026-08-15 entry above records the measured figure as 8 queries. It is now 10 under `?context=tenders` (CaptureQueriesContext on the function alone): `payment_counts`, `top_completed`, `top_usage` and the account aggregate were added since. The docstring still says 3.
+
+## From S1 — CEO Tenders view foundation (2026-09-28)
+
+- **`projects/views.py` `landing` — the Tenders card count no longer matches the CEO dashboard it opens.** Its docstring promises "a card's number always matches the dashboard it opens". S1 deliberately left the shared `_context_filter` alone (CEO-only scope), so the landing Tenders card still counts OPEX + CAPEX, test data included, at Active / In Progress. Meanwhile the CEO Tenders cards count OPEX only with test data excluded, and the CEO header counts every live site including Draft. For the CEO, both numbers now differ from the card.
+- **CEO vs Finance Tenders payment tiles diverge as soon as an approved CAPEX payment exists.** The CEO passes `CEO_TENDER_TYPES` (`['OPEX']`) to `payment_counts`, and Finance passes `_context_types('tenders')` (`['OPEX', 'CAPEX']`). `tests_payment_readers_o6.ThreeWayAgreementTests.test_they_agree_under_each_context` asserts that the CEO, Finance and the payment queue agree under `tenders`. It still passes only because its fixture has no APPROVED CAPEX payment (its CAPEX payment is `pending_approval`), so it would not catch the divergence.
+- **CEO payment tiles still include test-site payments.** `payment_counts` scopes by `VendorOrder.project_type`, not by any site's `is_test`. On `solarpms_local` all 4 PaymentRequests (orders 39 and 46, ORDDEMOA01–A03) sit on flagged sites and still count under CEO Tenders. Deferred to S2 by decision.
