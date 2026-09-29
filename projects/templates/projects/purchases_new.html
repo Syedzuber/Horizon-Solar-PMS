@@ -131,11 +131,11 @@ then it is required. The script below only shows and hides it; the server decide
   </div>
 
   {% if duplicate %}
-  {# The content-match warning (submission_guard, D3): a likely repeat, named, with an override. Never a block. #}
+  {# The content-match warning (submission_guard, D3 + D-A44): each line names one record and links to it, with an override. Never a block. #}
   <div class="alert alert-warning small" role="alert" id="voDuplicate">
     <div class="fw-semibold">{{ duplicate.heading }}</div>
-    {% for line in duplicate.lines %}<div>{{ line }}</div>{% endfor %}
-    <div class="mt-1"><a href="{{ duplicate.url }}" target="_blank" rel="noopener">Open it</a> to check before you continue.</div>
+    {% for line in duplicate.lines %}<div>{{ line.text }} <a href="{{ line.url }}" target="_blank" rel="noopener">{{ line.link }}</a>{{ line.link_tail }}</div>{% endfor %}
+    {% for note in duplicate.notes %}<div class="mt-1">{{ note }}</div>{% endfor %}
     <div class="form-check mt-2">
       <input class="form-check-input" type="checkbox" name="confirm_duplicate" value="1" id="voConfirmDuplicate">
       <label class="form-check-label" for="voConfirmDuplicate">{{ duplicate.override_label }}</label>

@@ -15,6 +15,10 @@ What this file pins, and why each matters:
     recent one re-renders the form with a warning (200, same key, nothing written,
     nothing uploaded); confirm_duplicate=1 makes exactly one record. Different values, a
     rejected payment, or a match older than the window do not warn.
+  * THE SAME PO / PI NUMBER WARNS AT ANY AGE (D-A44). A PO / PI record whose vendor and
+    PO (or PI) number match an earlier record — anyone's, any age, case ignored — warns,
+    naming that record with a link and "add it to that record instead". A blank number
+    never matches. A record both rules find is named once, in the D-A44 wording.
   * DOCUMENTS HAVE NO KEY. The same file on the same order within the window warns, with
     "Attach anyway"; a different file does not.
 
@@ -30,12 +34,15 @@ from urllib.parse import parse_qs, urlparse
 
 from django.contrib.messages import get_messages
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import dateformat, timezone
+from django.utils.html import escape
 
 from .models import (
     PaymentRequest, Vendor, VendorOrder, VendorOrderDocument, VENDOR_ORDER_DOC_PI,
 )
-from .submission_guard import ALREADY_SUBMITTED
+from .submission_guard import (
+    ALREADY_SUBMITTED, NUMBER_MATCH_ADVICE, ORDER_MATCH_RULES, order_duplicate,
+)
 from .tests_purchases_workspace import WorkspaceFixture
 from .tests_vendor_order_raise import RaiseFixture, _client, _pdf
 
@@ -260,7 +267,9 @@ class _OrderPathCases(_PathCases):
 
     def test_a_match_older_than_the_window_does_not_warn(self):
         self.submit_first()
-        VendorOrder.objects.update(created_at=timezone.now() - timedelta(minutes=31))
+        # Numbers blanked so D-A44 (any age, same number) stays out of this window case.
+        VendorOrder.objects.update(created_at=timezone.now() - timedelta(minutes=31),
+                                   po_number='', pi_number='')
         before = self.made()
         _, key = self.open_form()
         self.assertEqual(self.submit(key).status_code, 302)
@@ -272,7 +281,9 @@ class _OrderPathCases(_PathCases):
         self.submit_first()
         before = self.made()
         _, key = self.open_form()
-        self.assertEqual(self.submit(key, po_number='PO-DIFFERENT').status_code, 302)
+        # PI left off the second record, so D-A44 cannot match on the PI it shares.
+        self.assertEqual(self.submit(key, po_number='PO-DIFFERENT', pi_number='').status_code,
+                         302)
         self.assertEqual(self.made(), before + 1)
 
     def test_the_same_po_number_warns(self):
@@ -299,11 +310,167 @@ class _OrderPathCases(_PathCases):
     def test_another_persons_record_does_not_warn(self):
         """The order rule is the same person's re-fetch; a colleague's record is not it."""
         self.submit_first()
-        VendorOrder.objects.update(created_by=self.pm)
+        # Numbers blanked so D-A44 (anyone, same number) stays out of this creator case.
+        VendorOrder.objects.update(created_by=self.pm, po_number='', pi_number='')
         before = self.made()
         _, key = self.open_form()
         self.assertEqual(self.submit(key).status_code, 302)
         self.assertEqual(self.made(), before + 1)
+
+    # ── D-A44: the same vendor and the same PO / PI number, any age, anyone ─────
+
+    def earlier_record(self, po='', pi='', vendor=None, project=None, days=10):
+        """A colleague's record of `days` ago, of a different total — outside the
+        30-minute rule on three counts, so only D-A44 can find it."""
+        order = self.record(total='777', po=po, vendor=vendor, project=project)
+        VendorOrder.objects.filter(pk=order.pk).update(
+            pi_number=pi, created_by=self.pm, created_at=timezone.now() - timedelta(days=days))
+        return VendorOrder.objects.get(pk=order.pk)
+
+    @staticmethod
+    def url_of(order):
+        return reverse('vendor_order_detail', args=[order.pk])
+
+    @staticmethod
+    def number_line(kind, order):
+        """D-A44's wording for `order`, found by its `kind` number, as the page escapes it."""
+        user = order.created_by.user
+        number = order.po_number if kind == 'PO' else order.pi_number
+        created = dateformat.format(timezone.localtime(order.created_at), 'j M Y')
+        return escape(
+            f'{kind} {number} is already recorded for {order.vendor.name} '
+            f'({order.scope_label}, created {created} by '
+            f'{user.get_full_name() or user.username}). If this is another payment or '
+            f'document on the same {kind}, add it to that record instead.')
+
+    def test_the_same_po_number_days_later_by_anyone_warns_with_the_record(self):
+        earlier = self.earlier_record(po=self.values()['po_number'], project=self.project)
+        self.storage.reset_mock()
+        before = self.made()
+        _, key = self.open_form()
+        response = self.submit(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'This looks like a PO / PI already recorded.')
+        self.assertContains(response, self.number_line('PO', earlier))
+        self.assertContains(response, f'({self.project.project_id}, created ')
+        self.assertContains(response, f'href="{self.url_of(earlier)}"', count=1)
+        self.assertContains(response, '>Open record</a>', count=1)
+        self.assertContains(response, escape(NUMBER_MATCH_ADVICE), count=1)
+        self.assertContains(response, 'name="confirm_duplicate"')
+        self.assertEqual(_rendered_key(response), key)
+        self.assertEqual(self.made(), before)
+        self.assertNothingUploaded()
+
+    def test_the_number_is_compared_ignoring_case(self):
+        earlier = self.earlier_record(po=self.values()['po_number'].lower())
+        _, key = self.open_form()
+        response = self.submit(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.number_line('PO', earlier))
+
+    def test_the_same_po_number_for_another_vendor_does_not_warn(self):
+        self.earlier_record(po=self.values()['po_number'], vendor=self.vendor2)
+        before = self.made()
+        _, key = self.open_form()
+        self.assertEqual(self.submit(key).status_code, 302)
+        self.assertEqual(self.made(), before + 1)
+
+    def test_a_blank_po_number_on_the_earlier_record_never_matches_on_it(self):
+        self.earlier_record(po='', pi='PI-EARLIER')
+        before = self.made()
+        _, key = self.open_form()
+        self.assertEqual(self.submit(key).status_code, 302)
+        self.assertEqual(self.made(), before + 1)
+
+    def test_a_blank_po_number_on_the_new_record_never_matches_on_it(self):
+        self.earlier_record(po=self.values()['po_number'])
+        before = self.made()
+        _, key = self.open_form()
+        self.assertEqual(self.submit(key, po_number='', pi_number='PI-NEW').status_code, 302)
+        self.assertEqual(self.made(), before + 1)
+
+    def test_blank_po_numbers_on_both_sides_do_not_match(self):
+        self.earlier_record(po='', pi='PI-EARLIER')
+        before = self.made()
+        _, key = self.open_form()
+        self.assertEqual(self.submit(key, po_number='', pi_number='PI-NEW').status_code, 302)
+        self.assertEqual(self.made(), before + 1)
+
+    def test_the_same_pi_number_warns_worded_pi(self):
+        earlier = self.earlier_record(po='PO-EARLIER', pi='PI-SHARED')
+        before = self.made()
+        _, key = self.open_form()
+        response = self.submit(key, pi_number='PI-SHARED')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.number_line('PI', earlier))
+        self.assertContains(response, 'on the same PI, add it to that record instead.')
+        self.assertContains(response, f'href="{self.url_of(earlier)}"', count=1)
+        self.assertEqual(self.made(), before)
+
+    def test_create_anyway_on_a_number_match_creates(self):
+        self.earlier_record(po=self.values()['po_number'])
+        before = self.made()
+        _, key = self.open_form()
+        self.assertEqual(self.submit(key).status_code, 200)
+        self.assertEqual(self.submit(key, confirm=True).status_code, 302)
+        self.assertEqual(self.made(), before + 1)
+
+    def test_several_earlier_records_name_the_newest_only(self):
+        po = self.values()['po_number']
+        older = self.earlier_record(po=po, days=20)
+        newer = self.earlier_record(po=po, days=5)
+        _, key = self.open_form()
+        response = self.submit(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{self.url_of(newer)}"', count=1)
+        self.assertNotContains(response, f'href="{self.url_of(older)}"')
+
+    def test_po_and_pi_on_the_same_record_are_one_line_worded_po(self):
+        earlier = self.earlier_record(po='PO-SHARED', pi='PI-SHARED')
+        _, key = self.open_form()
+        response = self.submit(key, po_number='PO-SHARED', pi_number='PI-SHARED')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.number_line('PO', earlier))
+        self.assertNotContains(response, 'PI PI-SHARED is already recorded')
+        self.assertContains(response, f'href="{self.url_of(earlier)}"', count=1)
+
+    def test_po_and_pi_on_different_records_are_two_lines(self):
+        by_po = self.earlier_record(po='PO-SHARED')
+        by_pi = self.earlier_record(po='PO-OTHER', pi='PI-SHARED')
+        _, key = self.open_form()
+        response = self.submit(key, po_number='PO-SHARED', pi_number='PI-SHARED')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.number_line('PO', by_po))
+        self.assertContains(response, self.number_line('PI', by_pi))
+        self.assertContains(response, f'href="{self.url_of(by_po)}"', count=1)
+        self.assertContains(response, f'href="{self.url_of(by_pi)}"', count=1)
+        # The closing advice is the warning's, not each line's.
+        self.assertContains(response, escape(NUMBER_MATCH_ADVICE), count=1)
+
+    def test_a_record_both_rules_find_is_named_once_in_the_number_wording(self):
+        self.submit_first()
+        earlier = VendorOrder.objects.latest('pk')
+        _, key = self.open_form()
+        response = self.submit(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{self.url_of(earlier)}"', count=1)
+        self.assertContains(response, self.number_line('PO', earlier))
+        self.assertNotContains(response, 'to check before you continue')
+
+    def test_both_rules_on_different_records_name_each_once(self):
+        # The re-fetch rule's record: this person's, just now, its numbers left off.
+        self.submit_first()
+        recent = VendorOrder.objects.latest('pk')
+        VendorOrder.objects.filter(pk=recent.pk).update(po_number='', pi_number='')
+        # D-A44's record: a colleague's, ten days ago, the same PO.
+        earlier = self.earlier_record(po=self.values()['po_number'])
+        _, key = self.open_form()
+        response = self.submit(key)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{self.url_of(recent)}"', count=1)
+        self.assertContains(response, f'href="{self.url_of(earlier)}"', count=1)
+        self.assertContains(response, 'Open it</a> to check before you continue.', count=1)
+        self.assertContains(response, self.number_line('PO', earlier))
 
 
 class ResidentialRaiseDuplicateTests(_OrderPathCases, _Fixture):
@@ -326,7 +493,9 @@ class ResidentialRaiseDuplicateTests(_OrderPathCases, _Fixture):
         self.submit_first()
         before = self.made()
         _, key = self.open_form()
-        self.assertEqual(self.submit(key, pi_number='PI-DIFFERENT').status_code, 302)
+        # PO left off the second record, so D-A44 cannot match on the PO it shares.
+        self.assertEqual(self.submit(key, pi_number='PI-DIFFERENT', po_number='').status_code,
+                         302)
         self.assertEqual(self.made(), before + 1)
 
 
@@ -362,6 +531,17 @@ class PurchasesNewDuplicateTests(_OrderPathCases, _Fixture):
 
     def values(self, **changes):
         return self.new_payload(pay='1000', project_type='Residential', **changes)
+
+
+class OrderDuplicateQueryTests(_Fixture):
+    """P3 of D-A44: the number rule costs one query per POST when nothing matches, and the
+    naming queries (scope_label's prefetch) only when something does."""
+
+    def test_no_match_costs_one_query_per_rule(self):
+        self.assertEqual(len(ORDER_MATCH_RULES), 2)
+        with self.assertNumQueries(len(ORDER_MATCH_RULES)):
+            self.assertIsNone(order_duplicate(self.scm, self.vendor, Decimal('1'),
+                                              'PO-NONE', 'PI-NONE'))
 
 
 # ---------------------------------------------------------------------------

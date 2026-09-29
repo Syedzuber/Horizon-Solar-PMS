@@ -16,7 +16,8 @@ Two guards, both shared by the five create paths and the documents append:
 
 2. THE CONTENT-MATCH WARNING (D3). A fresh form (no key, so a new one) with the same
    values still makes a second record. The matchers below find a recent record that
-   looks like the same thing, and the view re-renders its form with a warning and an
+   looks like the same thing (for a PO / PI record, also one of any age carrying the
+   same vendor and PO or PI number, D-A44), and the view re-renders its form with a warning and an
    override tick box instead of writing. NEVER A BLOCK: with confirm_duplicate=1 in the
    POST the view proceeds exactly as before. The check runs before any upload, so a
    warning leaves no file in storage.
@@ -35,7 +36,7 @@ from django.db.models import Q
 from django.http import HttpResponseForbidden
 from django.shortcuts import redirect
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import dateformat, timezone
 from django.utils.html import format_html
 
 from .models import (
@@ -132,10 +133,12 @@ def _order_ref(order):
     return order.po_number or order.pi_number or f'#{order.pk}'
 
 
-def _warning(heading, lines, url, override_label):
-    """The context a form template draws its warning from."""
+def _warning(heading, lines, url, override_label, notes=()):
+    """The context a form template draws its warning from. The payment and documents
+    warnings pass text lines and one `url`; the order warning passes _order_line() dicts,
+    each with its own link, `url=None`, and `notes` drawn once below the lines."""
     return {'heading': heading, 'lines': lines, 'url': url,
-            'override_label': override_label}
+            'override_label': override_label, 'notes': list(notes)}
 
 
 def document_size_kb(upload):
@@ -146,12 +149,13 @@ def document_size_kb(upload):
 
 # ── Orders ────────────────────────────────────────────────────────────────────
 #
-# A LIST OF RULES, SO A SECOND ONE IS ONE ENTRY. Each takes the candidate (a dict of
-# created_by, vendor, total_amount, po_number, pi_number) and the window's start, and
-# returns a VendorOrder queryset. The first rule with a row wins. The any-time
-# "same vendor + same PO / PI number" rule is on hold (D3) until the production query
-# says whether one PO is legitimately recorded as several records; if it goes in, it is
-# a function here and a name in ORDER_MATCH_RULES, and nothing else changes.
+# A LIST OF RULES, SO A SECOND ONE IS ONE ENTRY. Each entry is a (matcher, describer)
+# pair. The matcher takes the candidate (a dict of created_by, vendor, total_amount,
+# po_number, pi_number) and the window's start, and returns a VendorOrder queryset. The
+# describer takes the candidate, that queryset (newest first, vendor and creator joined)
+# and now, and returns [(order, line)]: the records it names and what it says of each.
+# A rule carries its own wording because the two rules tell SCM different things — "you
+# may have just submitted this" against "this PO already has a record; add to it".
 
 def _same_person_vendor_total(candidate, since):
     """The re-fetch duplicate: the same person, the same vendor and the same total from
@@ -175,30 +179,121 @@ def _same_person_vendor_total(candidate, since):
     return matches
 
 
-ORDER_MATCH_RULES = (_same_person_vendor_total,)
+def _describe_recent(candidate, matches, now):
+    """The re-fetch duplicate's wording (D3), for the newest match only."""
+    match = matches.first()
+    if match is None:
+        return []
+    return [(match, _order_line(
+        f'{_order_ref(match)} with {match.vendor.name}, total ₹{match.total_amount}, '
+        f'recorded by {_person(match.created_by.user)} {_age(match.created_at, now)}.',
+        match, 'Open it', ' to check before you continue.'))]
+
+
+def _same_vendor_number(candidate, since):
+    """D-A44: the same vendor and the same PO number, or the same vendor and the same PI
+    number, recorded at ANY time by ANYONE — `since` is deliberately not read. One PO is
+    one record; a further payment or document on it belongs on the record already there.
+
+    Case-insensitive on the trimmed numbers (_parse_header trims), so "po-100" finds
+    "PO-100". A BLANK NUMBER NEVER MATCHES: it names no document, and two records that
+    both left the PO number off share nothing.
+    """
+    numbers = Q()
+    for field in ('po_number', 'pi_number'):
+        if candidate[field]:
+            numbers |= Q(**{f'{field}__iexact': candidate[field]})
+    if not numbers:
+        # Unreachable from the three raise paths (_parse_header refuses a record with
+        # neither number), but a numberless candidate must match nothing, not every
+        # numberless record.
+        return VendorOrder.objects.none()
+    return VendorOrder.objects.filter(vendor=candidate['vendor']).filter(numbers)
+
+
+#: D-A44's closing advice, drawn once below the lines however many records matched.
+#: Value changes go to "Create anyway" because a PO / PI record has no edit path yet
+#: (SECONDARY_FINDINGS.md) — its total cannot be raised to take a PI of a new value.
+NUMBER_MATCH_ADVICE = ("Create anyway only for a revised PO, a blanket/rate PO, or a PI "
+                       "that changes the order's value. PO/PI records cannot be edited yet.")
+
+
+def _describe_number(candidate, matches, now):
+    """D-A44's wording: the newest record carrying the PO number and the newest carrying
+    the PI number — one line, worded "PO", when that is the same record; two when not.
+
+    Reads every match, newest first, because the newest PI match may sit behind older
+    PO matches. The rows are one vendor's records of one or two numbers: a handful.
+    scope_label reads each record's sites (and their projects) and programs, so they are
+    prefetched — at most four queries, and none when nothing matched (an empty result
+    prefetches nothing).
+    """
+    found = {}
+    for order in matches.prefetch_related('sites__project', 'programs__program'):
+        for kind, field in (('PO', 'po_number'), ('PI', 'pi_number')):
+            number = candidate[field]
+            if (kind not in found and number
+                    and getattr(order, field).lower() == number.lower()):
+                found[kind] = order
+    described = []
+    for kind, field in (('PO', 'po_number'), ('PI', 'pi_number')):
+        order = found.get(kind)
+        # PO comes first, so a record both numbers found is already named, as "PO".
+        if order is None or any(named.pk == order.pk for named, _ in described):
+            continue
+        created = dateformat.format(timezone.localtime(order.created_at), 'j M Y')
+        described.append((order, _order_line(
+            f'{kind} {getattr(order, field)} is already recorded for {order.vendor.name} '
+            f'({order.scope_label}, created {created} by {_person(order.created_by.user)}). '
+            f'If this is another payment or document on the same {kind}, add it to that '
+            f'record instead.',
+            order, 'Open record', note=NUMBER_MATCH_ADVICE)))
+    return described
+
+
+#: Least specific first: a record found by more than one rule is described by the LAST
+#: of them (see order_duplicate), so D-A44's "add it to that record" wins over the
+#: re-fetch wording for the same record.
+ORDER_MATCH_RULES = (
+    (_same_person_vendor_total, _describe_recent),
+    (_same_vendor_number, _describe_number),
+)
+
+
+def _order_line(text, order, link, link_tail='', note=''):
+    """One record named in the order warning, with its own link — two rules can name two
+    different records, so the warning's single `url` cannot serve."""
+    return {'text': text, 'url': reverse('vendor_order_detail', args=[order.pk]),
+            'link': link, 'link_tail': link_tail, 'note': note}
 
 
 def order_duplicate(created_by, vendor, total_amount, po_number='', pi_number=''):
     """The warning for a new PO / PI record that looks like one already recorded, or
-    None. Runs before any upload."""
+    None. Runs before any upload.
+
+    EVERY RULE RUNS — one query each, plus a matching rule's naming queries — so a record
+    the re-fetch rule found and a different one found by its number are both named. ONE
+    LINE PER RECORD: a record found twice keeps the place it first appeared and takes the
+    later rule's wording (reassigning a dict key keeps its position).
+    """
     now = timezone.now()
     since = now - DUPLICATE_WINDOW
     candidate = {'created_by': created_by, 'vendor': vendor, 'total_amount': total_amount,
                  'po_number': po_number, 'pi_number': pi_number}
-    for rule in ORDER_MATCH_RULES:
-        # The most recent match is the one the person most likely means; select_related
-        # because the warning names its creator.
-        match = (rule(candidate, since).select_related('vendor', 'created_by__user')
-                 .order_by('-created_at', '-pk').first())
-        if match is not None:
-            return _warning(
-                'This looks like a PO / PI already recorded.',
-                [f'{_order_ref(match)} with {match.vendor.name}, total '
-                 f'₹{match.total_amount}, recorded by {_person(match.created_by.user)} '
-                 f'{_age(match.created_at, now)}.'],
-                reverse('vendor_order_detail', args=[match.pk]),
-                'Create anyway')
-    return None
+    lines = {}
+    for matcher, describe in ORDER_MATCH_RULES:
+        # Newest first: the most recent match is the one the person most likely means.
+        # select_related because every wording names the vendor and the creator.
+        matches = (matcher(candidate, since).select_related('vendor', 'created_by__user')
+                   .order_by('-created_at', '-pk'))
+        for order, line in describe(candidate, matches, now):
+            lines[order.pk] = line
+    if not lines:
+        return None
+    lines = list(lines.values())
+    return _warning('This looks like a PO / PI already recorded.', lines, None,
+                    'Create anyway',
+                    notes=dict.fromkeys(line['note'] for line in lines if line['note']))
 
 
 # ── Payments ──────────────────────────────────────────────────────────────────
