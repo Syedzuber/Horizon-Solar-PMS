@@ -881,6 +881,22 @@ class VendorCategory(models.Model):
         return self.name
 
 
+# What a vendor is to Horizon (D-A14). It filters ONE choice only — the vendor a contractor
+# bill may name (D-A38); purchases, orders and material approvals offer every vendor
+# whatever its kind. Every vendor that existed before contractor bills is a supplier.
+VENDOR_KIND_SUPPLIER   = 'supplier'
+VENDOR_KIND_CONTRACTOR = 'contractor'
+VENDOR_KIND_BOTH       = 'both'
+
+VENDOR_KIND_CHOICES = [
+    (VENDOR_KIND_SUPPLIER,   'Supplier'),
+    (VENDOR_KIND_CONTRACTOR, 'Contractor'),
+    (VENDOR_KIND_BOTH,       'Supplier and contractor'),
+]
+# The kinds a contractor bill may name.
+VENDOR_BILLABLE_KINDS = frozenset({VENDOR_KIND_CONTRACTOR, VENDOR_KIND_BOTH})
+
+
 class Vendor(models.Model):
     """Supplier / vendor in the master list. Used as make preferences in BOQ items."""
 
@@ -894,6 +910,8 @@ class Vendor(models.Model):
     address        = models.TextField(null=True, blank=True)
     categories     = models.ManyToManyField(VendorCategory, related_name='vendors')
     is_active      = models.BooleanField(default=True)  # Inactive vendors hidden from BOQ dropdowns but kept for history
+    kind           = models.CharField(max_length=20, choices=VENDOR_KIND_CHOICES,
+                                      default=VENDOR_KIND_SUPPLIER)  # Supplier / contractor / both — decides only whether a contractor bill may name this vendor (D-A38)
     created_by     = models.ForeignKey(
         'UserProfile',
         on_delete=models.SET_NULL,
@@ -904,6 +922,14 @@ class Vendor(models.Model):
 
     class Meta:
         ordering = ['-is_active', 'name']  # Active vendors surface first in lists
+        constraints = [
+            # Choices are a form's business; the database never sees them. The contractor
+            # bill's vendor rule reads this column, so a value outside the three must not
+            # get in by a shell or a bulk script.
+            models.CheckConstraint(
+                condition=models.Q(kind__in=[value for value, _ in VENDOR_KIND_CHOICES]),
+                name='vendor_kind_known'),
+        ]
 
     def __str__(self):
         return self.name
@@ -5994,7 +6020,7 @@ class PunchPoint(models.Model):
 APPROVAL_KIND_MATERIAL_PRE_ORDER    = 'material_pre_order'
 APPROVAL_KIND_MATERIAL_PRE_DISPATCH = 'material_pre_dispatch'
 # The constant exists from S1 so the step sequencing (SE first, then PM) is built and
-# tested once. Its detail model, ContractorBillDetail, arrives in Session 4.
+# tested once. Its detail model, ContractorBillDetail, arrived in 4a-1 (bottom of file).
 APPROVAL_KIND_CONTRACTOR_BILL       = 'contractor_bill'
 
 APPROVAL_KIND_CHOICES = [
@@ -6552,3 +6578,95 @@ class ApprovalOrderLink(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             'ApprovalOrderLink is append-only — a removed link stays in history.')
+
+
+# ---------------------------------------------------------------------------
+# Contractor bills 4a-1 (29 Sep 2026, D-A10, D-A31 .. D-A42)
+#
+# A contractor bill is an ApprovalRequest of kind contractor_bill: the Site Engineer
+# confirms the work, then the PM signs off (D-A11, already sequenced by approvals._plan).
+# What the bill IS — its site, amount, the contractor's own number and date, the PDF
+# and the tasks it covers — lives here, 1:1 with the request, the way a material
+# request's proposal lives on MaterialApprovalDetail.
+#
+# NOTHING HERE SAYS THE AMOUNT WAS CHECKED (B-16). There is no rate contract; the amount
+# is what the contractor billed, recorded as billed.
+# ---------------------------------------------------------------------------
+
+class ContractorBillDetail(models.Model):
+    """What one contractor bill claims. 1:1 with a contractor_bill ApprovalRequest.
+
+    Written by approvals.create_approval_request() only; the rules that depend on other
+    rows (the vendor is a contractor, the tasks are on `project`, the PDF is in the
+    private bills bucket) are its refusals. The database holds the same-row rules below.
+
+    ONE PROJECT PER BILL (D-A10, D-A31). The project is here, not on the request: the
+    request's `projects` scope M2M is record-only (D-A2) and is set to this one project
+    by the chokepoint so scope readers see the bill. A bill's ledger rows carry this
+    project through utils._SUBJECT_PROJECT_RESOLVERS (D-A32).
+
+    THE PDF IS IN A PRIVATE BUCKET (D-A40) and no URL is stored: bill_storage.bill_pdf_url()
+    signs a short-lived link per page render. Each round's snapshot (schema 3) records
+    the file too, so when 4b lets a resubmit replace these fields, an earlier round's PDF
+    stays reachable from that round's snapshot. Stored bill PDFs are never deleted.
+    """
+
+    request = models.OneToOneField(ApprovalRequest, on_delete=models.PROTECT,
+                                   related_name='bill_detail')
+    # PROTECT: projects soft-delete; a bill must never lose the site it was raised against.
+    project = models.ForeignKey(Project, on_delete=models.PROTECT,
+                                related_name='contractor_bills')
+
+    amount      = models.DecimalField(max_digits=12, decimal_places=2)  # As billed by the contractor, in rupees — not checked against any rate (B-16)
+    bill_number = models.CharField(max_length=100)   # The contractor's own bill number, as printed on their bill (D-A41)
+    bill_date   = models.DateField()                 # The date printed on the contractor's bill, not when SCM raised it
+
+    pdf_file_name = models.CharField(max_length=255)   # Original filename, as uploaded
+    pdf_bucket    = models.CharField(max_length=100)   # Always the private SUPABASE_BILLS_BUCKET at write time
+    pdf_path      = models.CharField(max_length=500)   # Path within `pdf_bucket`
+    pdf_size_kb   = models.PositiveIntegerField(default=0)
+
+    tasks = models.ManyToManyField('Task', through='ContractorBillTask', blank=True,
+                                   related_name='contractor_bills')
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(amount__gt=0),
+                                   name='contractor_bill_amount_positive'),
+            models.CheckConstraint(condition=~models.Q(bill_number=''),
+                                   name='contractor_bill_number_required'),
+            # D-A39: a bill is raised with its PDF, never without.
+            models.CheckConstraint(
+                condition=(~models.Q(pdf_file_name='') & ~models.Q(pdf_bucket='')
+                           & ~models.Q(pdf_path='')),
+                name='contractor_bill_pdf_required'),
+        ]
+
+    def __str__(self):
+        return f"{self.request} — bill {self.bill_number}"
+
+
+class ContractorBillTask(models.Model):
+    """One task a contractor bill covers (D-A10). A task may be on several bills (D-A34):
+    that is a warning (bill_rules.other_bill_warnings), never a block, so the only
+    uniqueness is one row per task per bill.
+
+    "The task is on the bill's project" crosses tables (task -> phase -> project), so the
+    database cannot hold it; create_approval_request() refuses it. PROTECT at both ends,
+    unlike a plain M2M whose auto-created rows CASCADE away without a word (the S1
+    finding on approval scope): a bill must not silently stop naming a task.
+    """
+
+    detail = models.ForeignKey(ContractorBillDetail, on_delete=models.PROTECT,
+                               related_name='task_links')
+    task   = models.ForeignKey('Task', on_delete=models.PROTECT, related_name='bill_links')
+
+    class Meta:
+        ordering = ['detail', 'pk']
+        constraints = [
+            models.UniqueConstraint(fields=['detail', 'task'],
+                                    name='uniq_contractor_bill_task'),
+        ]
+
+    def __str__(self):
+        return f"{self.detail} — {self.task}"

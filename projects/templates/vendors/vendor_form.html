@@ -31,6 +31,16 @@
             {% endif %}
           </div>
 
+          {# Kind — supplier / contractor / both (D-A14); decides only who a contractor bill may name #}
+          <div class="mb-3">
+            <label class="form-label fw-semibold" for="{{ form.kind.id_for_label }}">Kind</label>
+            {{ form.kind }}
+            <div class="form-text">{{ form.kind.help_text }}</div>
+            {% if form.kind.errors %}
+              <div class="text-danger small mt-1">{{ form.kind.errors.0 }}</div>
+            {% endif %}
+          </div>
+
           {% comment %}
           Make / Brand — multiple entries, each optionally scoped to one supply category.
           Submitted as parallel lists: make_brand[] and brand_category[].

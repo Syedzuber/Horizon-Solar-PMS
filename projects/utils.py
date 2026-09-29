@@ -478,7 +478,25 @@ _SUBJECT_PROJECT_RESOLVERS = {
     'DesignAssignment': lambda s: s.project,
     # O1. Registered ahead of its call sites (O4/O5) so those sessions add calls only.
     'PaymentRequest':   lambda s: s.project,
+    # Contractor bills 4a-1 (D-A32): a bill's rows carry its one site; every material
+    # approval's rows keep project=None, because its scope is record-only (D-A2).
+    'ApprovalRequest':  lambda s: _approval_request_project(s),
 }
+
+
+def _approval_request_project(approval):
+    """The project a contractor bill is for, or None — for every material request, and
+    for a bill without its detail row (none can exist: the chokepoint writes the detail
+    before the ledger row). Asks the database only for a bill, so a material request's
+    transition costs no extra query."""
+    # Lazy import: utils cannot import models at module level (see _subject_type_registry)
+    # — models imports from utils, so a top-level import here would be circular.
+    from .models import APPROVAL_KIND_CONTRACTOR_BILL, ContractorBillDetail
+    if approval.kind != APPROVAL_KIND_CONTRACTOR_BILL:
+        return None
+    detail = (ContractorBillDetail.objects.select_related('project')
+              .filter(request_id=approval.pk).first())
+    return detail.project if detail is not None else None
 
 
 def _subject_type_registry():
@@ -502,8 +520,9 @@ def _subject_type_registry():
             PaymentMilestone: SUBJECT_PAYMENT_MILESTONE,
             DesignAssignment: SUBJECT_DESIGN_ASSIGNMENT,
             PaymentRequest:   SUBJECT_PAYMENT_REQUEST,
-            # Approvals S1. No _SUBJECT_PROJECT_RESOLVERS entry: a request's scope is a
-            # record-only M2M, not an owning project, so its rows carry project=None.
+            # Approvals S1. A request's scope is a record-only M2M, not an owning
+            # project, so a material request's rows carry project=None; a contractor
+            # bill's carry its one site (4a-1, _approval_request_project).
             ApprovalRequest:  SUBJECT_APPROVAL_REQUEST,
         }
     return _SUBJECT_TYPE_REGISTRY

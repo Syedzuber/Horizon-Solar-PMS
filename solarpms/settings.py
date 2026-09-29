@@ -29,6 +29,11 @@ SUPABASE_BUCKET = config('SUPABASE_BUCKET', default='solarpms-files')  # Bucket 
 # Objects here are reachable only via a short-lived signed URL minted per request; no URL
 # is ever stored. SUPABASE_BUCKET above stays public and is untouched.
 SUPABASE_DESIGN_BUCKET = config('SUPABASE_DESIGN_BUCKET', default='Horizon-PMS-Design')
+# PRIVATE bucket for contractor bill PDFs (D-A40), served only by expiring signed links.
+# DEFAULT EMPTY, deliberately unlike the design bucket: empty means bill storage is OFF —
+# a bill PDF upload is refused with a message and no link is minted, and nothing else in
+# the app changes. projects/bill_storage.py reads it at call time.
+SUPABASE_BILLS_BUCKET = config('SUPABASE_BILLS_BUCKET', default='')
 
 # How long (days) to keep soft-deleted files before purge_deleted_files hard-deletes them
 FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)

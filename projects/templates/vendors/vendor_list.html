@@ -41,6 +41,7 @@
       <thead class="table-light">
         <tr>
           <th>Vendor Name</th>
+          <th>Kind</th>
           <th>Categories</th>
           <th>Contact Person</th>
           <th>Phone</th>
@@ -52,6 +53,7 @@
         {% for vendor in vendors %}
         <tr>
           <td class="fw-semibold">{{ vendor.name }}</td>
+          <td>{{ vendor.get_kind_display }}</td>
           <td>
             {% for cat in vendor.categories.all %}
               <span class="badge bg-light text-dark border me-1">{{ cat.name }}</span>
@@ -81,7 +83,7 @@
         </tr>
         {% empty %}
         <tr>
-          <td colspan="6" class="text-center text-muted py-4">No vendors found.</td>
+          <td colspan="7" class="text-center text-muted py-4">No vendors found.</td>
         </tr>
         {% endfor %}
       </tbody>

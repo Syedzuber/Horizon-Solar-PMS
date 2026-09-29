@@ -47,6 +47,15 @@ MaterialApprovalLine hold the same rules. A resubmit replaces the set: lines may
 edited or removed. The request-wide make, specification and quantity note that lines
 replaced stay on older requests, read-only; the BOQ-item picks are gone.
 
+A CONTRACTOR BILL IS ITS DETAIL (4a-1, D-A10, D-A31 .. D-A41). create takes `bill`, a
+ContractorBill: one site, the tasks it covers on that site, the amount as billed, the
+contractor's own bill number and date, and the PDF already stored in the private bills
+bucket (bill_storage.py). This module writes its ContractorBillDetail and task links,
+and sets the request's record-only scope to that one site. What SCM is only WARNED about
+— an unfinished task, a task on another bill, a repeated bill number, a Site Engineer or
+PM not on the site — is bill_rules.py's, and never refuses anything here. Nothing here
+checks the amount against a rate (B-16).
+
 NOTIFICATIONS (Approvals 2b) ARE REGISTERED HERE AND BUILT ELSEWHERE. Each entry point
 registers exactly one transaction.on_commit(..., robust=True) callback from
 approval_notices.py, inside its own atomic block, passing ids: a refused or rolled-back
@@ -68,7 +77,8 @@ from django.utils import timezone
 
 from .models import (
     ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalRoundSnapshot,
-    ApprovalStep, MaterialApprovalDetail, MaterialApprovalLine,
+    ApprovalStep, ContractorBillDetail, ContractorBillTask, MaterialApprovalDetail,
+    MaterialApprovalLine, Task,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_MATERIAL_KINDS,
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED, APPROVAL_REJECTED,
@@ -78,8 +88,12 @@ from .models import (
     APPROVAL_STEP_PENDING, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
     APPROVAL_STEP_SUPERSEDED, APPROVAL_STEP_DECISIONS, APPROVAL_STEP_NOTE_REQUIRED,
     APPROVAL_PROXY_CHANNEL_CHOICES,
-    REASON_CREATED, REASON_RESUBMITTED,
+    REASON_CREATED, REASON_RESUBMITTED, VENDOR_BILLABLE_KINDS,
 )
+from .bill_storage import bills_bucket
+# forms.py is imported for check_typed_date(), the one typed-date range rule (2020 to
+# today + 5 years); forms imports models, utils and permissions, never this module.
+from .forms import check_typed_date
 from .permissions import (
     profile_can_be_approval_assignee, user_can_decide_approval_step,
     user_can_raise_approval_request, user_can_reassign_approval_step,
@@ -105,6 +119,15 @@ class ApprovalRefused(Exception):
 #: mandatory with or without files.
 ProxyDecision = namedtuple('ProxyDecision', 'decided_by channel evidence files',
                            defaults=((),))
+
+#: A contractor bill's own details (4a-1), given to create_approval_request(bill=...).
+#: `project` the one site (D-A10); `tasks` the Tasks on it the bill covers, at least one;
+#: `amount` as billed (a Decimal or the typed string); `bill_number` and `bill_date` as
+#: printed on the contractor's bill (D-A41; the date a date or an ISO string); `pdf` the
+#: bill PDF ALREADY stored by bill_storage.upload_bill_pdf() — a dict of file_name,
+#: bucket, path and optionally file_size_kb (D-A39, D-A40).
+ContractorBill = namedtuple('ContractorBill',
+                            'project tasks amount bill_number bill_date pdf')
 
 _KINDS = {value for value, _ in APPROVAL_KIND_CHOICES}
 _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
@@ -427,14 +450,27 @@ def _round_snapshot_payload(approval, round_no):
     Schema 1 (before lines) differs only in `material`: proposed_make, specification and
     quantity_note always present, boq_items [{id, code, description, unit}], no lines,
     no legacy. Rows already written stay schema 1; readers accept both.
+
+    Schema 3 (contractor bills, 4a-1) is schema 2 — `material` null — plus
+      bill {project {id, project_id, customer_name}, amount, bill_number, bill_date,
+            pdf {file_name, bucket, path, size_kb},
+            tasks [{id, task_name, location_label, phase_name}]}
+    `amount` a string with two places ("12500.00"), `bill_date` ISO, tasks in the order
+    the bill names them. The PDF's bucket and path are kept so a round's own PDF stays
+    reachable after a later round replaces it (4b). ONLY A BILL IS SCHEMA 3: a material
+    request's snapshot stays schema 2, with no `bill` key, exactly as before.
     """
     request = (ApprovalRequest.objects.select_related('vendor')
                .get(pk=approval.pk))
     material = (MaterialApprovalDetail.objects
                 .select_related('vendor_order', 'pre_order_request')
                 .filter(request=request).first())
+    # Asked for a bill only, so a material snapshot costs the same queries as before.
+    bill = (ContractorBillDetail.objects.select_related('project')
+            .filter(request=request).first()
+            if request.kind == APPROVAL_KIND_CONTRACTOR_BILL else None)
     payload = {
-        'schema': 2,
+        'schema': 3 if bill is not None else 2,
         'round': round_no,
         'kind': request.kind,
         'kind_label': _KIND_LABELS.get(request.kind, request.kind),
@@ -475,6 +511,21 @@ def _round_snapshot_payload(approval, round_no):
                   if getattr(material, key)}
         if legacy:
             payload['material']['legacy'] = legacy
+    if bill is not None:
+        payload['bill'] = {
+            'project': {'id': bill.project.pk, 'project_id': bill.project.project_id,
+                        'customer_name': bill.project.customer_name},
+            'amount': format(bill.amount, '.2f'),
+            'bill_number': bill.bill_number,
+            'bill_date': bill.bill_date.isoformat(),
+            'pdf': {'file_name': bill.pdf_file_name, 'bucket': bill.pdf_bucket,
+                    'path': bill.pdf_path, 'size_kb': bill.pdf_size_kb},
+            'tasks': [{'id': link.task.pk, 'task_name': link.task.task_name,
+                       'location_label': link.task.location_label,
+                       'phase_name': link.task.phase.phase_name}
+                      for link in bill.task_links.select_related('task__phase')
+                      .order_by('pk')],
+        }
     steps = (ApprovalStep.objects.filter(request=request, round=round_no)
              .exclude(verdict=APPROVAL_STEP_SUPERSEDED)
              .select_related('assignee__user', 'decided_by__user', 'carried_from')
@@ -556,6 +607,109 @@ def _step_state_refusal(step, approval):
 
 
 # ---------------------------------------------------------------------------
+# Contractor bills (4a-1)
+# ---------------------------------------------------------------------------
+
+def _task_label(task):
+    if task.location_label:
+        return f'{task.task_name} — {task.location_label}'
+    return task.task_name
+
+
+def _clean_bill(bill, vendor, programs, projects, site_groups):
+    """Validate a contractor bill's details. Returns a dict of project, tasks (re-read,
+    in the order given, de-duplicated), amount (Decimal), bill_number, bill_date and pdf.
+    Writes nothing; raises ApprovalRefused for the first problem found, in this order:
+    the vendor, the site, the scope, the tasks, the amount, the bill number and date,
+    the PDF. `vendor` is already known to be present (checked before this is called)."""
+    if bill is None:
+        raise ApprovalRefused('Enter the contractor bill\'s details.')
+    # D-A14 / D-A38: only a vendor recorded as a contractor (or both) may send a bill; a
+    # supplier's invoice is a purchase, paid through the PO/PI record, not approved here.
+    if vendor.kind not in VENDOR_BILLABLE_KINDS:
+        raise ApprovalRefused(f'{vendor.name} is recorded as a supplier, not a contractor. '
+                              f'Only a contractor\'s bill can be raised.')
+    if not vendor.is_active:
+        raise ApprovalRefused(f'{vendor.name} is inactive.')
+
+    project = bill.project
+    if project is None:
+        raise ApprovalRefused('Choose the site this bill is for.')
+    if project.is_deleted:
+        raise ApprovalRefused('That site has been deleted.')
+    # A Draft site has not been activated, so no work on it can have been done. Every
+    # other status may be billed: work finished before a hold, a cancellation or
+    # commissioning is still owed.
+    if project.status == 'Draft':
+        raise ApprovalRefused(f'{project.project_id} is Draft; a bill cannot be raised '
+                              f'against it.')
+    # D-A10 / D-A31: one site per bill. The chokepoint sets the scope to that site itself,
+    # so a caller may pass it or nothing — never anything else.
+    if list(programs) or list(site_groups) or any(p.pk != project.pk for p in projects):
+        raise ApprovalRefused('A contractor bill is about its one site; it names no other '
+                              'tenders, sites or site groups.')
+
+    wanted = list(dict.fromkeys(task.pk for task in (bill.tasks or ())))
+    if not wanted:
+        raise ApprovalRefused('Choose at least one task this bill covers.')
+    # Re-read by pk with the phase joined: the phase's project is what the "task is on
+    # this site" rule compares, and a stale instance must not decide it.
+    found = Task.objects.select_related('phase').in_bulk(wanted)
+    if len(found) != len(wanted):
+        raise ApprovalRefused('A task you chose no longer exists. Choose again.')
+    tasks = [found[pk] for pk in wanted]
+    for task in tasks:
+        if task.phase.project_id != project.pk:
+            raise ApprovalRefused(f"'{_task_label(task)}' is not a task on "
+                                  f"{project.project_id}.")
+        # A mirror's status is derived from another record; there is no contractor work
+        # of its own to confirm, so it is never billed.
+        if task.is_mirror:
+            raise ApprovalRefused(f"'{_task_label(task)}' is a mirror task — it records "
+                                  f"another workspace's progress, so it cannot be billed.")
+
+    try:
+        amount = parse_decimal_input(
+            bill.amount, places=2,
+            max_value=decimal_field_max(ContractorBillDetail, 'amount'),
+            field_label='The bill amount')
+    except ValidationError as exc:
+        raise ApprovalRefused(exc.messages[0])
+    if amount is None:
+        raise ApprovalRefused('Enter the bill amount.')
+    if amount <= 0:
+        raise ApprovalRefused('The bill amount must be more than zero.')
+
+    bill_number = _clean(bill.bill_number)
+    if not bill_number:
+        raise ApprovalRefused('Enter the contractor\'s bill number.')
+    if len(bill_number) > 100:
+        raise ApprovalRefused('The bill number must be 100 characters or fewer.')
+
+    if bill.bill_date in (None, ''):
+        raise ApprovalRefused('Enter the bill date.')
+    bill_date, error = check_typed_date(bill.bill_date)
+    if error:
+        raise ApprovalRefused(f'Bill date: {error}')
+    if bill_date > timezone.localdate():
+        raise ApprovalRefused('The bill date cannot be in the future.')
+
+    pdf = dict(bill.pdf or {})
+    if not all(_clean(pdf.get(key)) for key in ('file_name', 'bucket', 'path')):
+        raise ApprovalRefused('Attach the contractor\'s bill as a PDF.')
+    if not pdf['file_name'].lower().endswith('.pdf'):
+        raise ApprovalRefused('The bill must be a PDF.')
+    # D-A40: only a file stored in the PRIVATE bills bucket is recorded. With the setting
+    # empty nothing matches, so a bill is refused rather than pointed at a public file.
+    if pdf['bucket'] != bills_bucket():
+        raise ApprovalRefused('The bill PDF must be stored privately, and it was not. '
+                              'Nothing was saved.')
+
+    return {'project': project, 'tasks': tasks, 'amount': amount,
+            'bill_number': bill_number, 'bill_date': bill_date, 'pdf': pdf}
+
+
+# ---------------------------------------------------------------------------
 # 1. Create
 # ---------------------------------------------------------------------------
 
@@ -563,7 +717,7 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
                             design_assignee=None, site_engineer_assignee=None,
                             design_signoff_required=False, vendor=None, material=None,
                             lines=None, programs=(), projects=(), site_groups=(),
-                            attachments=(), client_uuid=None):
+                            attachments=(), client_uuid=None, bill=None):
     """Raise a request and open round 1. Returns the ApprovalRequest.
 
     `material` is a dict for the two material kinds (vendor_order, pre_order_request)
@@ -582,8 +736,15 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
       * a Design Head named exactly when design sign-off is ticked, a Site Engineer
         exactly for a contractor bill.
 
-    CONTRACTOR BILLS: S1 builds the sequencing only. Session 4 adds ContractorBillDetail
-    and its one required project; until then nothing calls this with that kind.
+    CONTRACTOR BILLS (4a-1). `bill` (a ContractorBill) is required for that kind and
+    refused for the others; _clean_bill() gives its refusals and their order. The vendor
+    must be an active contractor (D-A14, D-A38); the site not deleted and not Draft; the
+    tasks at least one, all on that site, none a mirror; the amount above zero; the bill
+    number and date present, the date not in the future; the PDF recorded in the private
+    bills bucket (D-A39, D-A40). The request's scope is SET to the bill's one site: a
+    caller may pass that site or nothing, and any other scope is refused (D-A31). Written
+    in the transaction, before the ledger row, so the row's project resolves (D-A32).
+    Warnings are bill_rules.py's and are not asked here.
 
     Idempotent on `client_uuid` (R-14): a repeat returns the request already written.
     """
@@ -650,6 +811,13 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
     elif lines:
         raise ApprovalRefused('A contractor bill carries no material lines.')
 
+    bill_row = None
+    if is_bill:
+        bill_row = _clean_bill(bill, vendor, programs, projects, site_groups)
+        programs, projects, site_groups = (), [bill_row['project']], ()
+    elif bill is not None:
+        raise ApprovalRefused('Only a contractor bill carries bill details.')
+
     projects = list(projects)
     if any(project.is_deleted for project in projects):
         raise ApprovalRefused('A deleted project cannot be named in the scope.')
@@ -678,6 +846,16 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
             MaterialApprovalLine.objects.bulk_create(
                 MaterialApprovalLine(detail=material_row, **_line_fields(line, position))
                 for position, line in enumerate(new_lines, start=1))
+        if bill_row is not None:
+            pdf = bill_row['pdf']
+            bill_detail = ContractorBillDetail.objects.create(
+                request=approval, project=bill_row['project'], amount=bill_row['amount'],
+                bill_number=bill_row['bill_number'], bill_date=bill_row['bill_date'],
+                pdf_file_name=_clean(pdf['file_name']), pdf_bucket=pdf['bucket'],
+                pdf_path=pdf['path'], pdf_size_kb=pdf.get('file_size_kb') or 0)
+            ContractorBillTask.objects.bulk_create(
+                ContractorBillTask(detail=bill_detail, task=task)
+                for task in bill_row['tasks'])
 
         now = timezone.now()
         _open_round(approval, 1, plan, assignees, now)

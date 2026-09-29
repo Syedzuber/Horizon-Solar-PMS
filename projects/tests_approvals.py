@@ -122,13 +122,38 @@ class ApprovalFixture(TestCase):
         return create_approval_request(**kwargs)
 
     def raise_bill(self, **overrides):
+        # Contractor bills 4a-1: a bill now needs an active contractor, one site with a
+        # task on it, and its PDF recorded in the private bills bucket. Built here, once
+        # per test, so no caller changes. Imports local to keep the edit to this helper.
+        from .approvals import ContractorBill
+        from .models import ProjectPhase, Task
+        contractor, _ = Vendor.objects.get_or_create(
+            name='Approval Contractor',
+            defaults={'contact_person': 'R', 'phone': '9000000002', 'kind': 'contractor'})
+        site = Project.objects.filter(customer_name='Bill Fixture Site').first()
+        if site is None:
+            site = Project.objects.create(
+                customer_name='Bill Fixture Site', status='Active',
+                customer_phone='9876543210', site_address='3 Sun Road', city='Lucknow',
+                state='Uttar Pradesh', project_type='Residential',
+                dc_capacity_kw=Decimal('5.00'), assigned_pm=self.pm)
+            phase = ProjectPhase.objects.create(project=site, phase_name='Installation',
+                                                phase_order=1)
+            Task.objects.create(phase=phase, task_name='Foundation', task_order=1)
+        task = Task.objects.get(phase__project=site, task_name='Foundation')
         kwargs = dict(
             kind=APPROVAL_KIND_CONTRACTOR_BILL, raised_by=self.scm,
             title='Civil works bill', description='Foundation work, block A.',
-            pm_assignee=self.pm, site_engineer_assignee=self.se, vendor=self.vendor,
+            pm_assignee=self.pm, site_engineer_assignee=self.se, vendor=contractor,
+            bill=ContractorBill(
+                project=site, tasks=[task], amount='12500.00', bill_number='CB-001',
+                bill_date=timezone.localdate(),
+                pdf={'file_name': 'bill.pdf', 'bucket': 'fixture-bills',
+                     'path': 'bill/fixture.pdf'}),
         )
         kwargs.update(overrides)
-        return create_approval_request(**kwargs)
+        with self.settings(SUPABASE_BILLS_BUCKET='fixture-bills'):
+            return create_approval_request(**kwargs)
 
     def step(self, approval, party, round_no=None):
         approval.refresh_from_db()

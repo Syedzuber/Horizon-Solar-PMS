@@ -5,7 +5,7 @@ from django import forms
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_date
-from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation
+from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
 from .permissions import PAYMENT_APPROVER_ROLES
 
@@ -695,11 +695,12 @@ class VendorForm(forms.ModelForm):
         model  = Vendor
         fields = [
             'name', 'contact_person', 'phone', 'email', 'address',
-            'gst_number', 'msme_status', 'msme_number', 'categories',
+            'gst_number', 'msme_status', 'msme_number', 'categories', 'kind',
         ]
         widgets = {
             'address':    forms.Textarea(attrs={'rows': 3, 'class': 'form-control'}),
             'categories': forms.CheckboxSelectMultiple(),
+            'kind':       forms.Select(attrs={'class': 'form-select'}),
         }
 
     def __init__(self, *args, **kwargs):
@@ -713,6 +714,21 @@ class VendorForm(forms.ModelForm):
                 field.widget.attrs.setdefault('class', 'form-control')
         self.fields['categories'].queryset = VendorCategory.objects.all()
         self.fields['categories'].error_messages['required'] = 'Select at least one category.'
+        # Not required, so a POST that predates the field (seed_order_demo posts this form
+        # without it) still saves: clean_kind() reads a blank as "supplier" on add and as
+        # "unchanged" on edit. The page's select always sends a value.
+        self.fields['kind'].required = False
+        self.fields['kind'].label = 'Kind'
+        self.fields['kind'].help_text = ('Only a contractor (or a vendor that is both) can '
+                                         'be named on a contractor bill.')
+
+    def clean_kind(self):
+        value = self.cleaned_data.get('kind')
+        if value:
+            return value
+        if self.instance.pk is not None:
+            return self.instance.kind
+        return VENDOR_KIND_SUPPLIER
 
     def clean_gst_number(self):
         value = (self.cleaned_data.get('gst_number') or '').strip().upper()

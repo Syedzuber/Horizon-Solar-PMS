@@ -10,6 +10,7 @@ from .models import (
     TaskTemplate, TaskTemplatePhase, TaskTemplateTask,
     ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
     ApprovalRoundSnapshot, ApprovalOrderLink, MaterialApprovalLine,
+    ContractorBillDetail, ContractorBillTask,
 )
 from .utils import assign_task_to
 
@@ -747,3 +748,30 @@ class ApprovalRoundSnapshotAdmin(_ApprovalRecordAdmin):
 class ApprovalOrderLinkAdmin(_ApprovalRecordAdmin):
     list_display  = ['approval', 'vendor_order', 'linked_by', 'linked_at', 'removed_by',
                      'removed_at']
+
+
+class ContractorBillTaskInline(admin.TabularInline):
+    """The tasks a contractor bill covers, read-only. approvals.create_approval_request()
+    is their only writer: a task added here would skip the same-site and mirror refusals
+    and would not reach the round snapshot, so no add, change or delete."""
+    model = ContractorBillTask
+    extra = 0
+    fields = readonly_fields = ['task']
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+# Contractor bills 4a-1. Read-only like every approval record: the chokepoint is the only
+# writer. The PDF shows as its bucket and path only — the admin mints no signed link.
+@admin.register(ContractorBillDetail)
+class ContractorBillDetailAdmin(_ApprovalRecordAdmin):
+    list_display  = ['request', 'project', 'bill_number', 'bill_date', 'amount']
+    search_fields = ['bill_number']
+    inlines       = [ContractorBillTaskInline]
