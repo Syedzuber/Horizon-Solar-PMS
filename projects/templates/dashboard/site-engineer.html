@@ -119,6 +119,9 @@
   </div>
 </div>
 
+{# ── Work to confirm (contractor bills 4b-1): None draws nothing ─────────────── #}
+{% include "projects/approvals/_pending_card_se.html" %}
+
 {# ── Project cards ────────────────────────────────────────────────────────── #}
 {# Empty state: rendered when SE has no active projects assigned #}
 {% if not projects %}

@@ -1,0 +1,63 @@
+{% comment %}
+Contractor bills 4b-1 — "Work to confirm", the Site Engineer dashboard's card
+(dashboard/site-engineer.html). Context: `work_to_confirm`, from
+approval_queries.work_to_confirm_card(). None — anyone who is not a Site Engineer — draws
+nothing.
+
+Each row: the bill's title, site and contractor, and the days waiting, linking to the
+request. NEVER the amount, bill number, date or PDF (D-A53): the rows are plain dicts
+holding none of them, and the query does not even fetch them.
+
+ALPINE, like the project cards on this dashboard, whose page loads it: x-data starts
+`open: false`, so the card is collapsed on every render and a tap on the header opens it.
+No hover style (the project cards' .se-card-header:hover is deliberately not reused). With
+nothing waiting the header is a plain line with a green check and nothing opens. The same
+pattern as _pending_card_design.html.
+{% endcomment %}
+{% if work_to_confirm %}
+{% if work_to_confirm.count %}
+<div x-data="{ open: false }" class="card shadow-sm border-0 mb-4">
+  <div @click="open = !open" role="button" :aria-expanded="open.toString()" aria-expanded="false"
+       class="card-header bg-white d-flex align-items-center gap-2 py-2 px-3"
+       style="cursor:pointer; border-radius: inherit; border-bottom-color: transparent;">
+    <div class="se-urgency-circle flex-shrink-0" style="background:#f0a829; color:#fff;">{{ work_to_confirm.count }}</div>
+    <div class="flex-grow-1" style="min-width:0;">
+      <div class="fw-semibold">Work to confirm</div>
+      <div class="small text-muted">Oldest: {{ work_to_confirm.oldest_text }}</div>
+    </div>
+    <svg class="se-chevron" :style="open ? 'transform:rotate(180deg)' : ''"
+         xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+         fill="none" stroke="#6c757d" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </div>
+  <div x-show="open" x-cloak class="list-group list-group-flush border-top">
+    {% for row in work_to_confirm.rows %}
+    <a href="{% url 'approval_detail' row.approval_pk %}" class="list-group-item text-decoration-none text-reset px-3 py-2">
+      <div class="d-flex justify-content-between align-items-start gap-2">
+        <span class="fw-semibold text-break" style="min-width:0;">{{ row.title }}</span>
+        <span class="small flex-shrink-0 {% if row.days >= 3 %}text-danger fw-semibold{% else %}text-muted{% endif %}">{{ row.days_text }}</span>
+      </div>
+      <div class="small text-muted text-break">{{ row.site }}</div>
+      <div class="small text-muted text-break">{{ row.contractor }}</div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% else %}
+<div class="card shadow-sm border-0 mb-4">
+  <div class="card-body py-2 px-3 d-flex align-items-center gap-2">
+    <div class="se-urgency-circle clear flex-shrink-0">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
+           fill="none" stroke="currentColor" stroke-width="3"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+    </div>
+    <span class="fw-semibold">Work to confirm</span>
+    <span class="text-muted small">Nothing to confirm</span>
+  </div>
+</div>
+{% endif %}
+{% endif %}

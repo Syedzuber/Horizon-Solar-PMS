@@ -25,10 +25,15 @@ reason stacked under the approver select, long text breaks rather than scrolling
 Approvals 3a: a pre-dispatch request's vendor is its PO/PI record's, so it is drawn as
 text with no input — approval_forms.parse_revision also ignores a posted vendor for it.
 
-Contractor bills 4a-2: a bill (`bill` set) is drawn read-only (_bill_block.html) in place
-of the request, material and scope cards, with no revise=1 — the view ignores any posted
-revision for a bill anyway. What a bill's resubmit carries: the note, new photos (JPG and
-PNG only), approver changes and kept approvals.
+Contractor bills 4b-1: a bill (`bill` set, approval_views._bill_resubmit) is revised here
+in place of the request, material and scope cards: its bill number, date, amount, tasks,
+title and description, and optionally a new PDF (the current one is linked, signed). The
+contractor and site are text — locked. The raise page's rules carry over: every required
+field is `required`, the task list is required as a group by a small script, the warnings
+come back with "Resubmit anyway", and after a re-render in which a new PDF was chosen a
+banner and a red line say to attach it again. The same script hides and unticks the Site
+Engineer's keep box once the ticked tasks differ from the bill's (B); the server refuses
+it too, and does not draw the box after such a re-render. New photos: JPG and PNG only.
 {% endcomment %}
 {% block title %}Resubmit approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -48,17 +53,103 @@ PNG only), approver changes and kept approvals.
   <small class="text-muted">This opens round {{ approval.current_round|add:1 }}</small>
 </div>
 
-<form method="post" enctype="multipart/form-data">
+<form method="post" enctype="multipart/form-data" id="apResubmitForm">
   {% csrf_token %}
+  {% if bill and replacing_pdf %}
+  <div class="alert alert-danger" id="apReattach">Attach the new bill PDF again — the browser does not keep a chosen file after the page reloads.</div>
+  {% endif %}
   {% if bill %}
-  {# A bill is not revised on this page (4a-2): shown read-only, and no revise=1 is sent. #}
-  <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">The bill</div>
-    <div class="card-body small">
-      {% include "projects/approvals/_bill_block.html" with b=bill note=bill_note %}
-      <div class="form-text">The bill's details cannot be changed on a resubmit yet. Say what was done about the requested changes in the note below.</div>
+  {# A contractor bill (4b-1): the bill revised in place; contractor and site read-only. #}
+  <input type="hidden" name="revise" value="1">
+
+  {% if warnings %}
+  <div class="alert alert-warning">
+    <div class="fw-semibold mb-1">Check before resubmitting this bill</div>
+    {% for w in warnings %}<div class="text-break">{{ w }}</div>{% endfor %}
+    <div class="mt-2">Nothing was saved. Choose any new PDF and photos again, then resubmit.</div>
+    <div class="form-check mt-2">
+      <input class="form-check-input" type="checkbox" name="confirm_warnings" value="1" id="apConfirmWarnings">
+      <label class="form-check-label" for="apConfirmWarnings">Resubmit anyway</label>
     </div>
   </div>
+  {% endif %}
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">The bill</div>
+    <div class="card-body">
+      <dl class="row small mb-3">
+        <dt class="col-5 col-sm-3 text-muted fw-normal">Contractor</dt>
+        <dd class="col-7 col-sm-9 text-break">{{ contractor }}</dd>
+        <dt class="col-5 col-sm-3 text-muted fw-normal">Site</dt>
+        <dd class="col-7 col-sm-9 mb-0 text-break">{{ project.project_id }} — {{ project.customer_name }}</dd>
+      </dl>
+      <div class="form-text mt-n2 mb-3">The contractor and site cannot be changed. For another one, withdraw this bill and raise a new one.</div>
+      <div class="mb-3">
+        <label for="apBillNumber" class="form-label">Contractor's bill number</label>
+        <input type="text" name="bill_number" id="apBillNumber" class="form-control w-100" maxlength="100" required
+               value="{{ values.bill_number }}">
+      </div>
+      <div class="mb-3">
+        <label for="apBillDate" class="form-label">Bill date</label>
+        <input type="date" name="bill_date" id="apBillDate" class="form-control w-100" required
+               max="{{ today|date:'Y-m-d' }}" value="{{ values.bill_date }}">
+      </div>
+      <div class="mb-3">
+        <label for="apAmount" class="form-label">Amount (₹)</label>
+        <input type="number" name="amount" id="apAmount" class="form-control w-100" step="0.01" min="0.01" inputmode="decimal" required
+               value="{{ values.amount }}">
+        <div class="form-text">As billed. Nothing checks it against a rate or work order.</div>
+      </div>
+      <div class="mb-0">
+        <div class="form-label mb-1">Bill PDF</div>
+        <div class="small mb-2 text-break">
+          {% if pdf_url %}<a href="{{ pdf_url }}" target="_blank" rel="noopener"><i class="bi bi-file-earmark-pdf"></i> {{ pdf_name }}</a>{% if pdf_size_kb %} <span class="text-muted">({{ pdf_size_kb }} KB)</span>{% endif %}{% else %}{{ pdf_name }} <span class="text-muted">· file unavailable</span>{% endif %}
+        </div>
+        <label for="apBillPdf" class="form-label small mb-1">Replace it with a new PDF <span class="text-muted">(optional)</span></label>
+        <input type="file" name="bill_pdf" id="apBillPdf" class="form-control w-100" accept="{{ pdf_accept }}">
+        {% if replacing_pdf %}<div class="form-text text-danger fw-semibold">Attach the new bill PDF again — the browser does not keep a chosen file after the page reloads.</div>{% endif %}
+        <div class="form-text">Leave empty to keep the PDF above. A replaced PDF stays on its earlier round.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">The work it covers</div>
+    <div class="card-body" id="apBillTasks" data-bill-tasks="{{ bill_task_pks }}">
+      {% for group in task_groups %}
+      <div class="{% if not forloop.last %}mb-3{% endif %}">
+        <div class="fw-semibold small mb-1">{{ group.phase }}</div>
+        {% for t in group.tasks %}
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="task" value="{{ t.task.pk }}" id="apTask{{ t.task.pk }}"{% if t.task.pk|stringformat:"s" in picked_tasks %} checked{% endif %}>
+          <label class="form-check-label text-break" for="apTask{{ t.task.pk }}">{{ t.label }} <span class="text-muted">· {{ t.status }}</span></label>
+        </div>
+        {% endfor %}
+      </div>
+      {% empty %}
+      <div class="text-muted">This site has no tasks a bill can name.</div>
+      {% endfor %}
+      <div class="form-text">Adding or removing a task means the Site Engineer must confirm the work again.</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">Title and description</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="apTitle" class="form-label">Title</label>
+        <input type="text" name="title" id="apTitle" class="form-control w-100" maxlength="200" required
+               value="{{ values.title }}">
+      </div>
+      <div class="mb-0">
+        <label for="apDescription" class="form-label">Description</label>
+        <textarea name="description" id="apDescription" class="form-control w-100" rows="3" required>{{ values.description }}</textarea>
+        <div class="form-text">The Site Engineer sees the title and description. Do not put the amount in them.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="alert alert-light border small">{{ bill_note }}</div>
   {% else %}
   <input type="hidden" name="revise" value="1">
 
@@ -175,7 +266,7 @@ PNG only), approver changes and kept approvals.
           {% endif %}
         </select>
         {% if p.keep %}
-        <div class="ap-keep-block border rounded p-2 mt-2">
+        <div class="ap-keep-block border rounded p-2 mt-2" data-party="{{ p.party }}">
           <input class="form-check-input ap-keep me-1" type="checkbox" name="keep_{{ p.party }}" id="apKeep{{ p.party }}"{% if p.keep_checked %} checked{% endif %}>
           <label class="form-check-label" for="apKeep{{ p.party }}">Keep {{ p.keep.decider }}'s approval from round {{ p.keep.round }}</label>
           <div class="ap-keep-reason mt-2">
@@ -213,5 +304,41 @@ PNG only), approver changes and kept approvals.
     <button type="submit" class="btn btn-brand">Resubmit</button>
   </div>
 </form>
+
+{% if bill %}
+<script>
+// Contractor bills 4b-1. The task tick-list, required as a group, as on the raise page:
+// while nothing is ticked the first box carries a custom validity message, so the browser
+// stops the submit before the page reloads and a chosen PDF is lost. And the Site
+// Engineer's keep box: it confirms the tasks the bill named, so once the ticks differ from
+// them it is unticked and hidden (B). The server refuses both without the script.
+document.addEventListener('DOMContentLoaded', function () {
+  var holder = document.getElementById('apBillTasks');
+  if (!holder) return;
+  var boxes = Array.prototype.slice.call(holder.querySelectorAll('input[name="task"]'));
+  var original = (holder.getAttribute('data-bill-tasks') || '').split(',').filter(Boolean).sort().join(',');
+  var keep = document.querySelector('.ap-keep-block[data-party="site_engineer"]');
+  function sync() {
+    var ticked = boxes.filter(function (b) { return b.checked; });
+    if (boxes.length) boxes[0].setCustomValidity(ticked.length ? '' : 'Tick at least one task this bill covers.');
+    if (!keep) return;
+    var now = ticked.map(function (b) { return b.value; }).sort().join(',');
+    var changed = now !== original;
+    if (changed) keep.querySelector('.ap-keep').checked = false;
+    keep.style.display = changed ? 'none' : '';
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', sync); });
+  sync();
+});
+{% if posted %}
+// After a server re-render, bring the first message into view, whatever scroll position
+// the browser kept.
+document.addEventListener('DOMContentLoaded', function () {
+  var first = document.querySelector('.container .alert');
+  if (first) first.scrollIntoView({ block: 'start' });
+});
+{% endif %}
+</script>
+{% endif %}
 
 {% endblock %}

@@ -76,9 +76,15 @@ CONTRACTOR BILLS 4a-2 (29 Sep 2026) put the 4a-1 bill on the page:
     link to the PDF (bill_storage.bill_pdf_url, never a stored or public URL), the tasks
     with their status now, and, while the bill is open or waiting for changes, the
     warnings — and each round's bill from its schema-3 snapshot (bill_display);
-  * a bill's resubmit carries the note, photos, approver changes and kept approvals
-    only. Any posted revision is IGNORED for a bill: the chokepoint does not yet refuse a
-    scope or vendor change on one (SECONDARY_FINDINGS, 4a-2; 4b adds bill revision).
+  * a bill's resubmit carried the note, photos, approver changes and kept approvals
+    only, until 4b-1 (below).
+
+CONTRACTOR BILLS 4b-1: a bill's resubmit revises the bill (_bill_resubmit) — title,
+description, amount, number, date, tasks and, optionally, a replacement PDF — in the raise
+page's order (parse -> refusals -> warnings -> upload -> chokepoint). The contractor and
+site are locked by the chokepoint. Each round's change list names the bill's changes; the
+Site Engineer reads only the task changes (round_changes(work_only=True)). Every file
+input's accept attribute names MIME types as well as extensions (approval_forms.file_accept).
 
 CONTRACTOR BILLS 4a-3 (D-A53, D-A54): the Site Engineer confirms the WORK, never the bill.
 A viewer whose only standing is being the bill's Site Engineer (sees_bill) reads the site,
@@ -102,9 +108,9 @@ from django.utils import timezone
 from .approval_forms import (
     ATTACHMENT_LIMIT, BILL_PHOTO_EXTENSIONS, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN,
     assignee_choices, bill_site, bill_site_choices, bill_task_choices, contractor_choices,
-    current_scope_pks, design_authority_choices, keepable_steps, line_rows,
+    current_scope_pks, design_authority_choices, file_accept, keepable_steps, line_rows,
     parse_assignee_overrides, parse_attachments, parse_bill_create, parse_bill_photos,
-    parse_carry, parse_client_uuid, parse_site_photos,
+    parse_bill_revision, parse_carry, parse_client_uuid, parse_site_photos,
     parse_create, parse_evidence_files, parse_linked_order, parse_lines, parse_new_assignee,
     parse_proxy, parse_revision, person_name, order_link_choices, po_pi_record_choices,
     po_pi_record_label, pre_order_choices, scope_choices, vendor_choices,
@@ -116,8 +122,8 @@ from .approval_queries import AGING_WINDOW_DAYS, aging_rows
 # reads (the vendor, the site, the tasks, bills_bucket()) and writes nothing; the real
 # create_approval_request() asks it again, under its own rules, after the upload.
 from .approvals import (
-    ApprovalRefused, ContractorBill, ProxyDecision, _clean_bill, apply_approval_decision,
-    create_approval_request,
+    ApprovalRefused, ContractorBill, ProxyDecision, _clean_bill, _revision_writes,
+    apply_approval_decision, create_approval_request,
     link_order_to_approval, reassign_approval_step, resubmit_approval_request,
     round_snapshot, unlink_order_from_approval, withdraw_approval_request,
 )
@@ -853,22 +859,86 @@ def _list_change(label, old_items, new_items, describe):
     return {'label': label, 'added': added, 'removed': removed}
 
 
-def round_changes(old, new):
+def _snapshot_date(value):
+    """A snapshot's ISO date as a bill block draws it ("26 Sep 2026"); as stored if not."""
+    try:
+        return date.fromisoformat(value).strftime('%d %b %Y')
+    except (TypeError, ValueError):
+        return value or '—'
+
+
+def _bill_changes(old, new):
+    """What changed between two rounds' `bill` blocks (schema 3, 4b-1), as
+    [(is_work, entry)] in the order a bill block draws them. `is_work` marks what a
+    viewer who is only the bill's Site Engineer may read (D-A53): the tasks, and the site
+    (locked, so it never changes — compared only so a change could never pass unseen).
+
+      Amount       compared as a number, shown as format_bill_amount writes it
+      Bill number  exact text
+      Bill date    the ISO date, shown as a date
+      Tasks        added and removed, by task id, each described as its round saw it
+      Bill PDF     a different stored file (bucket and path), shown by file name
+    """
+    entries = []
+
+    def single(is_work, label, before, after):
+        entries.append((is_work, {'label': label, 'old': before or '—', 'new': after or '—'}))
+
+    try:
+        amount_same = Decimal(str(old.get('amount'))) == Decimal(str(new.get('amount')))
+    except (InvalidOperation, TypeError):
+        amount_same = old.get('amount') == new.get('amount')
+    if not amount_same:
+        single(False, 'Amount', format_bill_amount(old.get('amount')),
+               format_bill_amount(new.get('amount')))
+    if (old.get('bill_number') or '') != (new.get('bill_number') or ''):
+        single(False, 'Bill number', old.get('bill_number'), new.get('bill_number'))
+    if old.get('bill_date') != new.get('bill_date'):
+        single(False, 'Bill date', _snapshot_date(old.get('bill_date')),
+               _snapshot_date(new.get('bill_date')))
+    tasks = _list_change('Tasks', old.get('tasks'), new.get('tasks'),
+                         lambda t: _bill_task_label(t.get('task_name'),
+                                                    t.get('location_label')))
+    if tasks:
+        entries.append((True, tasks))
+    old_pdf, new_pdf = old.get('pdf') or {}, new.get('pdf') or {}
+    if (old_pdf.get('bucket'), old_pdf.get('path')) != (new_pdf.get('bucket'),
+                                                        new_pdf.get('path')):
+        after = new_pdf.get('file_name') or 'Bill PDF'
+        if after == old_pdf.get('file_name'):
+            after = f'{after} (new file)'
+        single(False, 'Bill PDF', old_pdf.get('file_name'), after)
+    old_site, new_site = old.get('project') or {}, new.get('project') or {}
+    if old_site.get('id') != new_site.get('id'):
+        single(True, 'Site', old_site.get('project_id'), new_site.get('project_id'))
+    return entries
+
+
+def round_changes(old, new, work_only=False):
     """What changed from one round's snapshot to the next (D-A19), in the order the page
     draws the details: [{label, old, new}] for a single value, [{label, added, removed}]
     for a list, [{label, fields: [{label, old, new}]}] for one material line's edited
     fields. [] when nothing did. None when either snapshot is missing — the page then
     says the change list is unavailable, never guesses.
 
-    Compared: title, description, the material lines (_line_changes: by id, field by
-    field), the request-wide make, specification and quantity note recorded before lines,
-    schema 1's BOQ items, the vendor (by id, shown by name), and the three scope lists.
-    Either snapshot may be schema 1 or 2 (material_display reads both). Not compared: the
-    kind, design sign-off, the vendor order and pre-order link (none is revisable), and
-    the steps — an approver change or a kept approval is in History and on the step.
+    Compared: title, description, a bill's amount, number, date, tasks and PDF
+    (_bill_changes, 4b-1 — both rounds schema 3), the material lines (_line_changes: by
+    id, field by field), the request-wide make, specification and quantity note recorded
+    before lines, schema 1's BOQ items, the vendor (by id, shown by name), and the three
+    scope lists. Either snapshot may be schema 1 or 2 (material_display reads both). Not
+    compared: the kind, design sign-off, the vendor order and pre-order link (none is
+    revisable), and the steps — an approver change or a kept approval is in History and
+    on the step.
+
+    `work_only` (4b-1, D-A53): the viewer is only the bill's Site Engineer, who reads the
+    work, never the bill — only the bill's task (and site) changes are returned.
     """
     if old is None or new is None:
         return None
+    old_bill, new_bill = old.get('bill'), new.get('bill')
+    bill = _bill_changes(old_bill, new_bill) if old_bill and new_bill else []
+    if work_only:
+        return [entry for is_work, entry in bill if is_work]
     changes = []
 
     def single(label, before, after):
@@ -877,6 +947,7 @@ def round_changes(old, new):
 
     for key, label in _CHANGE_REQUEST_TEXT:
         single(label, old.get(key), new.get(key))
+    changes += [entry for _, entry in bill]
     old_material = material_display(old.get('material') or {})
     new_material = material_display(new.get('material') or {})
     changes += _line_changes(old_material['lines'], new_material['lines'])
@@ -1207,7 +1278,7 @@ def _bill_create_context(key, project=None, post=None, already=None, warnings=No
         'selected_pm':   selected_pm,
         'today':         timezone.localdate(),
         'attachment_limit': ATTACHMENT_LIMIT,
-        'photo_accept':  ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
+        'photo_accept':  file_accept(BILL_PHOTO_EXTENSIONS),
         'approval_note': BILL_APPROVAL_NOTE,
     })
     return context
@@ -1625,7 +1696,9 @@ def approval_detail(request, approval_pk):
             'details':      details,
             'dispatch':     round_dispatch.get(round_no),
             'has_snapshot': snapshot is not None,
-            'changes':      (round_changes(snapshots[round_no - 1], snapshot)
+            # The bill's Site Engineer reads only the work's changes (D-A53, 4b-1).
+            'changes':      (round_changes(snapshots[round_no - 1], snapshot,
+                                           work_only=bill is not None and not full)
                              if round_no > 1 else None),
         })
 
@@ -1645,8 +1718,8 @@ def approval_detail(request, approval_pk):
         'rounds':         rounds,
         'order_links':    _order_links_section(user, approval, links),
         'history':        _history(approval, steps, links),
-        'evidence_accept': ','.join(f'.{ext}' for ext in EVIDENCE_EXTENSIONS),
-        'photo_accept':   ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
+        'evidence_accept': file_accept(EVIDENCE_EXTENSIONS),
+        'photo_accept':   file_accept(BILL_PHOTO_EXTENSIONS),
         'decisions':      _DECISIONS,
         'channels':       APPROVAL_PROXY_CHANNEL_CHOICES,
         'can_withdraw':   user_can_withdraw_approval_request(user, approval),
@@ -1773,35 +1846,13 @@ def approval_record_proxy(request, step_pk):
     return _detail(approval.pk)
 
 
-def _resubmit_context(approval, material, latest, keepable, by_pk, post, bill=None):
-    """The resubmit form's context. Every value is pre-filled from the request as it
-    stands, or — after a refusal — from what was posted, so nothing typed is lost.
-
-    `bill` (4a-2) is a contractor bill's _bill_now() block: the page then draws it
-    read-only in place of the request, material and scope cards, and offers photos only;
-    the vendor and scope lists are not read, because nothing on a bill's page edits
-    them."""
-    if post is not None:
-        values = {key: post.get(key, '') for key in
-                  ('title', 'description', 'vendor', 'note')}
-        lines = parse_lines(post)
-        picked = {'program':    set(post.getlist('program')),
-                  'project':    set(post.getlist('project')),
-                  'site_group': set(post.getlist('site_group'))}
-    else:
-        values = {'title': approval.title, 'description': approval.description,
-                  'vendor': str(approval.vendor_id or ''), 'note': ''}
-        lines = line_rows(material)
-        # A bill's page draws no scope pickers, so its scope is not read.
-        scope = (current_scope_pks(approval) if bill is None
-                 else {'programs': (), 'projects': (), 'site_groups': ()})
-        picked = {'program':    {str(pk) for pk in scope['programs']},
-                  'project':    {str(pk) for pk in scope['projects']},
-                  'site_group': {str(pk) for pk in scope['site_groups']}}
-
+def _resubmit_parties(latest, keepable, by_pk, post, no_keep=()):
+    """The resubmit form's approver rows, one per party: who holds it, the choices, and
+    the "Keep <name>'s approval" box when that party's step was approved — except for a
+    party in `no_keep` (a bill's Site Engineer once its tasks changed, 4b-1, B)."""
     parties = []
     for party, step in latest.items():
-        kept = keepable.get(party)
+        kept = keepable.get(party) if party not in no_keep else None
         parties.append({
             'party':    party,
             'label':    _PARTY_LABELS.get(party, party),
@@ -1815,18 +1866,28 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post, bill=No
             'keep_checked': post is not None and post.get(f'keep_{party}') == 'on',
             'keep_reason':  post.get(f'keep_reason_{party}', '') if post is not None else '',
         })
+    return parties
 
-    if bill is not None:
-        return {
-            'approval':         approval,
-            'bill':             bill,
-            'bill_note':        BILL_APPROVAL_NOTE,
-            'parties':          parties,
-            'values':           values,
-            'attachment_limit': ATTACHMENT_LIMIT,
-            'attachment_accept': ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
-            'keep_reason_min':  KEEP_REASON_MIN,
-        }
+
+def _resubmit_context(approval, material, latest, keepable, by_pk, post):
+    """The resubmit form's context for a material request. Every value is pre-filled from
+    the request as it stands, or — after a refusal — from what was posted, so nothing
+    typed is lost. A contractor bill's page is _bill_resubmit_context."""
+    if post is not None:
+        values = {key: post.get(key, '') for key in
+                  ('title', 'description', 'vendor', 'note')}
+        lines = parse_lines(post)
+        picked = {'program':    set(post.getlist('program')),
+                  'project':    set(post.getlist('project')),
+                  'site_group': set(post.getlist('site_group'))}
+    else:
+        values = {'title': approval.title, 'description': approval.description,
+                  'vendor': str(approval.vendor_id or ''), 'note': ''}
+        lines = line_rows(material)
+        scope = current_scope_pks(approval)
+        picked = {'program':    {str(pk) for pk in scope['programs']},
+                  'project':    {str(pk) for pk in scope['projects']},
+                  'site_group': {str(pk) for pk in scope['site_groups']}}
 
     context = {
         'approval':         approval,
@@ -1840,7 +1901,7 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post, bill=No
         'legacy':           ([{'label': label, 'value': getattr(material, key)}
                               for key, label in _LEGACY_MATERIAL_LABELS
                               if getattr(material, key)] if material else []),
-        'parties':          parties,
+        'parties':          _resubmit_parties(latest, keepable, by_pk, post),
         'values':           values,
         'picked':           picked,
         'vendors':          vendor_choices(),
@@ -1853,6 +1914,56 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post, bill=No
     }
     context.update(scope_choices())
     return context
+
+
+def _bill_resubmit_context(approval, detail, task_pks, latest, keepable, by_pk, post,
+                           sign, warnings=None, tasks_changed=False, replacing_pdf=False):
+    """A contractor bill's resubmit form (4b-1). The contractor and site read-only; the
+    title, description, bill number, date, amount and tasks editable, pre-filled from the
+    bill as it stands or — after a refusal or the warnings — from what was posted; the
+    current PDF behind a signed link, with an optional input to replace it.
+
+    `tasks_changed` (the posted ticks differ from the bill's): the Site Engineer's keep
+    box is not drawn (B). `replacing_pdf` (a PDF was posted): the page says to attach it
+    again, since a browser never re-fills a file input."""
+    project = detail.project
+    if post is not None:
+        values = {key: post.get(key, '') for key in
+                  ('title', 'description', 'note', 'amount', 'bill_number', 'bill_date')}
+        picked = set(post.getlist('task'))
+    else:
+        values = {'title': approval.title, 'description': approval.description,
+                  'note': '', 'amount': format(detail.amount, '.2f'),
+                  'bill_number': detail.bill_number,
+                  'bill_date': detail.bill_date.isoformat()}
+        picked = {str(pk) for pk in task_pks}
+    return {
+        'approval':         approval,
+        'bill':             True,
+        'project':          project,
+        'contractor':       approval.vendor.name if approval.vendor is not None else '—',
+        'pdf_name':         detail.pdf_file_name,
+        'pdf_size_kb':      detail.pdf_size_kb,
+        'pdf_url':          sign(detail.pdf_bucket, detail.pdf_path),
+        'pdf_accept':       file_accept(['pdf']),
+        'task_groups':      _task_groups(project, bill_task_choices(project)),
+        'picked_tasks':     picked,
+        # The bill's own tasks, for the script that hides the keep box once they differ.
+        'bill_task_pks':    ','.join(str(pk) for pk in task_pks),
+        'warnings':         warnings or [],
+        'replacing_pdf':    replacing_pdf,
+        'posted':           post is not None,
+        'today':            timezone.localdate(),
+        'bill_note':        BILL_APPROVAL_NOTE,
+        'parties':          _resubmit_parties(
+                                latest, keepable, by_pk, post,
+                                no_keep=(APPROVAL_PARTY_SITE_ENGINEER,) if tasks_changed
+                                else ()),
+        'values':           values,
+        'attachment_limit': ATTACHMENT_LIMIT,
+        'attachment_accept': file_accept(BILL_PHOTO_EXTENSIONS),
+        'keep_reason_min':  KEEP_REASON_MIN,
+    }
 
 
 @login_required
@@ -1875,9 +1986,7 @@ def approval_resubmit(request, approval_pk):
     Anyone else: 403. A request no longer waiting for changes: a message and back to the
     request. Calls resubmit_approval_request().
 
-    A CONTRACTOR BILL (4a-2, ruling 3) carries the note, photos (jpg/jpeg/png), approver
-    changes and kept approvals only: the bill is shown read-only and no revision is ever
-    sent for it, whatever is posted.
+    A CONTRACTOR BILL (4b-1) is revised on its own form: _bill_resubmit.
 
     A REFUSAL — the form's or the chokepoint's — redraws the form (400) with its message
     and everything typed still in it, while the request is still waiting for changes.
@@ -1885,6 +1994,8 @@ def approval_resubmit(request, approval_pk):
     message goes back to the request instead: there is no form left to fill.
     """
     approval = _request_for_read(approval_pk)
+    # SCM only: the resubmit is SCM's revision (D-A22); the request must also be one the
+    # caller may read. Approvers answer steps, they never revise the request.
     if not (user_can_view_approval_request(request.user, approval)
             and user_can_raise_approval_request(request.user)):
         return _forbidden(request)
@@ -1896,9 +2007,6 @@ def approval_resubmit(request, approval_pk):
     material = getattr(approval, 'material_detail', None)
     steps = list(approval.steps.all())
     by_pk = {s.pk: s for s in steps}
-    is_bill = approval.kind == APPROVAL_KIND_CONTRACTOR_BILL
-    # A bill is drawn read-only on its resubmit page; its PDF link is minted per render.
-    bill = _bill_now(approval, steps, _pdf_signer()) if is_bill else None
     # Who holds each party now: the last row per party in the round that asked for
     # changes — the same rule resubmit_approval_request() applies.
     latest = {}
@@ -1907,25 +2015,22 @@ def approval_resubmit(request, approval_pk):
         latest[step.party] = step
     holders = {party: step.assignee for party, step in latest.items()}
     keepable = keepable_steps(latest)
+    if approval.kind == APPROVAL_KIND_CONTRACTOR_BILL:
+        return _bill_resubmit(request, approval, latest, holders, keepable, by_pk)
 
     def form(status=200):
         post = request.POST if request.method == 'POST' else None
         return render(request, 'projects/approvals/resubmit.html',
-                      _resubmit_context(approval, material, latest, keepable, by_pk, post,
-                                        bill=bill),
+                      _resubmit_context(approval, material, latest, keepable, by_pk, post),
                       status=status)
 
     if request.method != 'POST':
         return form()
 
     errors = []
-    files = parse_bill_photos(request, errors) if is_bill else parse_attachments(request, errors)
+    files = parse_attachments(request, errors)
     overrides = parse_assignee_overrides(request.POST, holders, errors)
-    # A BILL IS NEVER REVISED HERE (ruling 3, 4a-2), whatever the POST carries: the page
-    # draws no editable field for it, and the chokepoint does not yet refuse a scope or
-    # vendor change on a bill — one would move the bill's recorded site off the site the
-    # bill is for (SECONDARY_FINDINGS, 4a-2). 4b adds bill revision to the chokepoint.
-    revision = {} if is_bill else parse_revision(request.POST, approval, errors)
+    revision = parse_revision(request.POST, approval, errors)
     # The lines table is sent whole, as the set the next round is asked about — only
     # from a page that drew the editable fields (revise=1, as parse_revision), and only
     # for a material request. Unchanged lines are rewritten as they were; round_changes
@@ -1962,6 +2067,132 @@ def approval_resubmit(request, approval_pk):
         return _detail(approval.pk)
     except Exception:
         cleanup()
+        raise
+    messages.success(request, f'Resubmitted as round {resubmitted.current_round}.')
+    return _detail(resubmitted.pk)
+
+
+def _bill_resubmit(request, approval, latest, holders, keepable, by_pk):
+    """A contractor bill's resubmit form and POST (4b-1). approval_resubmit has already
+    asked who may be here (SCM) and that the bill is waiting for changes.
+
+    What it revises: the title, description, amount, contractor's bill number, bill date,
+    the tasks covered, and — optionally — the bill PDF, replaced by a new upload to the
+    private bucket. The contractor and site are LOCKED (the chokepoint refuses a change).
+    Plus, as for every request: the note, photos (jpg/png), approver changes and a kept
+    Site Engineer confirmation — only while the tasks are unchanged (B).
+
+    THE ORDER OF A POST, and what each failure leaves behind:
+      1. the form (parse_bill_revision, photos, approvers, keeps — including "the tasks
+         changed, so the confirmation cannot be kept"): 400, nothing uploaded;
+      2. a new PDF posted while the bills bucket is unset: BILL_STORAGE_OFF, 400, nothing
+         uploaded (without a new PDF the bucket does not matter, as before 4b-1);
+      3. the chokepoint's own refusals, asked read-only (approvals._revision_writes, with a
+         placeholder PDF in the configured bucket, as the raise page does): 400, nothing
+         uploaded;
+      4. the warnings (bill_rules.bill_warnings on the bill as revised, this bill left out
+         of "another bill" and "repeated number"), on EVERY bill resubmit unless "Resubmit
+         anyway" was ticked (Q3): the page again, 200, nothing uploaded;
+      5. the new PDF, to the private bucket — a failure is its message, nothing stored;
+      6. the photos — a failure removes the photos already stored and the new PDF;
+      7. resubmit_approval_request() — a refusal or error removes the photos and the new
+         PDF, and the transaction leaves the bill recording its old PDF.
+    THE OLD PDF IS NEVER DELETED: nothing here removes a file but the one this POST
+    stored, and discard_unrecorded_bill_pdf also refuses any file a round snapshot
+    records. The old file stays in its round's snapshot, whose block signs it.
+    """
+    # The bill with its site: the page names the site, its tasks are the tick-list, and
+    # the warnings compare against its assigned PM.
+    detail = ContractorBillDetail.objects.select_related('project').get(request=approval)
+    # The bill's tasks in the order it names them.
+    task_pks = list(detail.task_links.order_by('pk').values_list('task_id', flat=True))
+
+    def page(status=200, warnings=None, tasks_changed=False):
+        post = request.POST if request.method == 'POST' else None
+        return render(request, 'projects/approvals/resubmit.html',
+                      _bill_resubmit_context(
+                          approval, detail, task_pks, latest, keepable, by_pk, post,
+                          _pdf_signer(), warnings=warnings, tasks_changed=tasks_changed,
+                          replacing_pdf='bill_pdf' in request.FILES),
+                      status=status)
+
+    if request.method != 'POST':
+        return page()
+
+    errors = []
+    revision, pdf_file, tasks_changed = parse_bill_revision(request, approval, task_pks,
+                                                            errors)
+    photos = parse_bill_photos(request, errors)
+    overrides = parse_assignee_overrides(request.POST, holders, errors)
+    carry = parse_carry(request.POST, keepable, overrides, errors,
+                        tasks_changed=tasks_changed)
+
+    def refuse(problems):
+        for problem in problems:
+            messages.error(request, problem)
+        return page(status=400, tasks_changed=tasks_changed)
+
+    if errors:
+        return refuse(errors)
+    if pdf_file is not None and not bills_bucket():
+        return refuse([BILL_STORAGE_OFF])
+    if revision:
+        checked = dict(revision)
+        if pdf_file is not None:
+            # Names the configured private bucket, so the chokepoint judges everything but
+            # a file that does not exist yet; the real one is judged in step 7.
+            checked['pdf'] = {'file_name': pdf_file.name, 'bucket': bills_bucket(),
+                              'path': 'not-yet-uploaded'}
+        try:
+            _revision_writes(approval, checked, None)
+        except ApprovalRefused as exc:
+            return refuse([str(exc)])
+
+    if request.POST.get('confirm_warnings') != '1':
+        tasks = revision.get('tasks') or [
+            link.task for link in detail.task_links.select_related('task').order_by('pk')]
+        warnings = bill_warnings(
+            detail.project, tasks, approval.vendor,
+            revision.get('bill_number', detail.bill_number),
+            overrides.get(APPROVAL_PARTY_SITE_ENGINEER,
+                          holders.get(APPROVAL_PARTY_SITE_ENGINEER)),
+            overrides.get(APPROVAL_PARTY_PM, holders.get(APPROVAL_PARTY_PM)),
+            exclude=approval)
+        if warnings:
+            return page(warnings=warnings, tasks_changed=tasks_changed)
+
+    stored_pdf = None
+    if pdf_file is not None:
+        try:
+            stored_pdf = upload_bill_pdf(pdf_file, detail.project)
+        except BillStorageError as exc:
+            return refuse([str(exc)])
+        revision['pdf'] = stored_pdf
+    try:
+        stored, cleanup = _upload_attachments(
+            photos, f'{approval.pk}/round-{approval.current_round + 1}')
+    except _AttachmentUploadFailed as exc:
+        discard_unrecorded_bill_pdf(stored_pdf)
+        return refuse([str(exc)])
+
+    try:
+        resubmitted = resubmit_approval_request(approval, request.user.profile,
+                                                request.POST.get('note', ''),
+                                                attachments=stored,
+                                                assignees=overrides or None,
+                                                revision=revision or None,
+                                                carry=carry or None)
+    except ApprovalRefused as exc:
+        cleanup()
+        discard_unrecorded_bill_pdf(stored_pdf)
+        if ApprovalRequest.objects.filter(pk=approval.pk,
+                                          status=APPROVAL_CHANGES_REQUESTED).exists():
+            return refuse([str(exc)])
+        messages.error(request, str(exc))
+        return _detail(approval.pk)
+    except Exception:
+        cleanup()
+        discard_unrecorded_bill_pdf(stored_pdf)
         raise
     messages.success(request, f'Resubmitted as round {resubmitted.current_round}.')
     return _detail(resubmitted.pk)

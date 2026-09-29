@@ -183,7 +183,7 @@ SCM's proxy form on that step offers the same two outcomes.
     {% if round.changes is None %}
     <div class="text-muted">Change list unavailable for this round</div>
     {% elif not round.changes %}
-    <div class="text-muted">No details changed in this round.</div>
+    <div class="text-muted">{% if bill.work_only %}No change to the work in this round.{% else %}No details changed in this round.{% endif %}</div>
     {% else %}
     <ul class="list-unstyled mb-0">
       {% for c in round.changes %}

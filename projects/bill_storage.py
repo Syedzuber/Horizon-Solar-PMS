@@ -26,7 +26,7 @@ from django.conf import settings
 from .design_storage import (
     DesignStorageError, _client, build_design_path, get_design_file_url,
 )
-from .models import ContractorBillDetail
+from .models import ApprovalRoundSnapshot, ContractorBillDetail
 
 logger = logging.getLogger(__name__)
 
@@ -124,11 +124,20 @@ def discard_unrecorded_bill_pdf(stored):
     Refuses to remove anything a ContractorBillDetail records — a recorded bill PDF is
     never deleted — or anything outside the bills bucket. Never raises: a failed cleanup
     leaves an orphan object, which is logged, never a failed page. Returns True when the
-    object was removed."""
+    object was removed.
+
+    4b-1: nor anything a round snapshot records. Once a resubmit replaces a bill's PDF,
+    the old one is on no ContractorBillDetail — only in its round's schema-3 snapshot —
+    and it must stay reachable from there."""
     bucket, path = (stored or {}).get('bucket'), (stored or {}).get('path')
     if not bucket or not path or bucket != bills_bucket():
         return False
     if ContractorBillDetail.objects.filter(pdf_bucket=bucket, pdf_path=path).exists():
+        return False
+    # Every round snapshot whose bill block names this very file (schema 3 only; other
+    # snapshots have no `bill` key). Asked only when no live bill records it.
+    if ApprovalRoundSnapshot.objects.filter(snapshot__bill__pdf__bucket=bucket,
+                                            snapshot__bill__pdf__path=path).exists():
         return False
     try:
         _client().storage.from_(bucket).remove([path])

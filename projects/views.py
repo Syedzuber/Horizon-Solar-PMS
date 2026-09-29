@@ -65,7 +65,9 @@ from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
 )
-from .approval_queries import pending_approvals_card, tender_approvals_waiting
+from .approval_queries import (
+    pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
+)
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -1175,6 +1177,9 @@ def dashboard_site_engineer(request):
         'tasks_overdue':     se_tasks_overdue,
         'today':             today,
         'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
+        # 4b-1: the contractor bills waiting for this Site Engineer to confirm the work.
+        # One query; no amount, bill number or PDF reaches the page (D-A53).
+        'work_to_confirm':   work_to_confirm_card(request.user),
     })
 
 

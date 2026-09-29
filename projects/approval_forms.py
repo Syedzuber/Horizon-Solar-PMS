@@ -45,6 +45,14 @@ number and date are approvals._clean_bill's, and the view asks it before anythin
 uploaded. This module only reads the POST, and checks the PDF's bytes and the photos'
 types — because those must be refused before a file reaches storage, and the chokepoint
 only ever sees a file already stored.
+
+Contractor bills 4b-1 add a bill's resubmit (parse_bill_revision): the title,
+description, amount, bill number, date, ticked tasks and an optional replacement PDF. The
+contractor and site are not drawn; a posted one that differs is still passed on, so the
+chokepoint's own refusal is what SCM reads. parse_carry refuses keeping the Site
+Engineer's confirmation once the ticked tasks differ from the bill's (B). file_accept
+builds every file input's accept attribute: MIME types as well as extensions, so a phone
+offers photos in a format the server takes (Q6).
 """
 import re
 import uuid as _uuid
@@ -54,12 +62,15 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateformat import format as date_format
 
+# approvals.py imports nothing of this module (nor of views), so no circular import.
+from .approvals import BILL_CONTRACTOR_LOCKED
 from .bill_storage import BillStorageError, validate_bill_pdf
 from .models import (
     ApprovalOrderLink, ApprovalRequest, Program, Project, SiteGroup, Task, UserProfile, Vendor,
     VendorOrder,
     APPROVAL_APPROVED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH, APPROVAL_KIND_MATERIAL_PRE_ORDER,
-    APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_STEP_APPROVED,
+    APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_SITE_ENGINEER,
+    APPROVAL_STEP_APPROVED,
     GROUP_TYPE_PROCUREMENT, VENDOR_BILLABLE_KINDS,
 )
 from .permissions import (
@@ -67,7 +78,7 @@ from .permissions import (
     user_has_design_head_authority,
 )
 from .units import format_quantity
-from .views import _validate_upload_file
+from .views import MIME_TYPE_MAP, _validate_upload_file
 
 #: Files one submission may carry — the vendor-order raise's DOC_SLOTS number. The page
 #: may be used again (a resubmit adds more), so this caps a request, not a round.
@@ -95,6 +106,18 @@ _LINE_INPUT = re.compile(r'^line-(\d+)-(' + '|'.join(LINE_FIELDS) + r')$')
 
 def person_name(profile):
     return profile.user.get_full_name() or profile.user.username
+
+
+def file_accept(extensions):
+    """A file input's accept attribute for `extensions` (4b-1, Q6): each type's MIME type
+    (views.MIME_TYPE_MAP), then each extension — "image/jpeg,image/png,.jpg,.jpeg,.png".
+    Naming image/jpeg is meant to make an iPhone hand over a HEIC photo converted to JPEG
+    (not yet walked on a real iPhone); the extensions keep a desktop picker filtering by
+    name. No `capture`: that would take the
+    choice of a photo already in the gallery away on many phones. Only a convenience —
+    the server still judges every file (views._validate_upload_file)."""
+    mimes = dict.fromkeys(MIME_TYPE_MAP[ext] for ext in extensions if ext in MIME_TYPE_MAP)
+    return ','.join(list(mimes) + [f'.{ext}' for ext in extensions])
 
 
 def _pks(post, name):
@@ -559,7 +582,7 @@ def keepable_steps(latest):
             if step.verdict == APPROVAL_STEP_APPROVED}
 
 
-def parse_carry(post, keepable, overrides, errors):
+def parse_carry(post, keepable, overrides, errors, tasks_changed=False):
     """The ticked "Keep <name>'s approval" boxes. Returns {party: reason}, the `carry`
     argument of resubmit_approval_request().
 
@@ -567,7 +590,9 @@ def parse_carry(post, keepable, overrides, errors):
       * a reason of at least KEEP_REASON_MIN non-space characters — the chokepoint only
         refuses an empty one;
       * no keep for a party whose approver this resubmit also changes (`overrides`) —
-        the chokepoint refuses it too, but in words about the ledger, not the form.
+        the chokepoint refuses it too, but in words about the ledger, not the form;
+      * `tasks_changed` (a bill whose ticked tasks differ from its own, 4b-1, B): no keep
+        of the Site Engineer's confirmation — the chokepoint refuses it too.
     Whether an approval can be kept at all is re-decided by the chokepoint under its lock.
     """
     carry = {}
@@ -585,6 +610,11 @@ def parse_carry(post, keepable, overrides, errors):
         if party in overrides:
             errors.append(f'{name}\'s approval cannot be kept while you change the {label} '
                           f'approver. Untick "Keep", or leave the approver as before.')
+            refused = True
+        if tasks_changed and party == APPROVAL_PARTY_SITE_ENGINEER:
+            errors.append(f'{name}\'s confirmation cannot be kept: the tasks on this bill '
+                          f'changed, so the Site Engineer must confirm the work again. '
+                          f'Untick "Keep".')
             refused = True
         if len(re.sub(r'\s', '', reason)) < KEEP_REASON_MIN:
             errors.append(f'Say why {name}\'s approval is being kept — at least '
@@ -705,6 +735,61 @@ def parse_bill_create(request):
         'client_uuid':            parse_client_uuid(post),
     }
     return cleaned, errors
+
+
+def parse_bill_revision(request, approval, task_pks, errors):
+    """A contractor bill's resubmit POST (4b-1). Returns (revision, pdf, tasks_changed):
+    the `revision` for resubmit_approval_request() without its `pdf` (the view stores the
+    file first), the replacement PDF as uploaded (not stored) or None, and whether the
+    ticked tasks differ from `task_pks` — the bill's own, in its order.
+
+    Nothing at all unless the page drew the bill's fields (hidden revise=1), as
+    parse_revision. The title and description are sent only when changed; the amount,
+    number, date and ticked tasks always — the chokepoint writes only the columns whose
+    value changes, and judges all of them as create does.
+
+    THE CONTRACTOR AND SITE ARE NOT DRAWN, but a posted one is passed on when it differs,
+    so SCM reads the chokepoint's refusal (BILL_CONTRACTOR_LOCKED, BILL_SITE_LOCKED); one
+    that repeats what the bill holds is dropped. A posted contractor that is blank or no
+    longer exists cannot be passed on as a vendor, so it is refused here in the
+    chokepoint's own words.
+
+    Errors here are only what must be settled before a file reaches storage: the PDF's
+    bytes (bill_storage.validate_bill_pdf) and ticked tasks that no longer exist."""
+    post = request.POST
+    if post.get('revise') != '1':
+        return {}, None, False
+    revision = {}
+    for key in ('title', 'description'):
+        if key in post and _text(post[key]) != _text(getattr(approval, key)):
+            revision[key] = post[key]
+    raw_vendor = (post.get('vendor') or '').strip() if 'vendor' in post else None
+    if raw_vendor is not None and raw_vendor != str(approval.vendor_id):
+        vendor = (Vendor.objects.filter(pk=int(raw_vendor)).first()
+                  if raw_vendor.isdigit() else None)
+        if vendor is None:
+            errors.append(BILL_CONTRACTOR_LOCKED)
+        else:
+            revision['vendor'] = vendor     # another contractor: the chokepoint refuses it
+    if any(name in post for name in ('program', 'project', 'site_group')):
+        picked = dict(zip(('programs', 'projects', 'site_groups'),
+                          parse_scope(post, errors)))
+        for name, key in (('program', 'programs'), ('project', 'projects'),
+                          ('site_group', 'site_groups')):
+            if name in post:
+                revision[key] = picked[key]
+    revision['amount'] = post.get('amount', '')
+    revision['bill_number'] = post.get('bill_number', '')
+    revision['bill_date'] = post.get('bill_date', '')
+    tasks = _bill_tasks(post, errors)
+    revision['tasks'] = tasks
+    pdf = request.FILES.get('bill_pdf')
+    if pdf is not None:
+        try:
+            validate_bill_pdf(pdf)
+        except BillStorageError as exc:
+            errors.append(str(exc))
+    return revision, pdf, {task.pk for task in tasks} != set(task_pks)
 
 
 def parse_bill_photos(request, errors):

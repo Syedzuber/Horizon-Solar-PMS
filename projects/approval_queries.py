@@ -2,8 +2,8 @@
 Approvals 2c — the read-only queries behind the pending-approvals cards and the aging
 list (27 Sep 2026). Nothing here writes.
 
-The dashboards import ONE function each, pending_approvals_card(); the aging page reads
-aging_rows(). Both read STEP ROWS through approvals.exclude_carried_steps(), never the
+The dashboards import ONE function each, pending_approvals_card() — the Site Engineer's,
+work_to_confirm_card() (4b-1); the aging page reads aging_rows(). Both read STEP ROWS through approvals.exclude_carried_steps(), never the
 ledger: the step row is the accountability record (who was asked, when their turn came,
 who decided, who typed it), and a carried step is not a fresh decision (D-A20).
 
@@ -26,7 +26,8 @@ from django.utils import timezone
 from .approvals import exclude_carried_steps
 from .models import (
     ApprovalRequest, ApprovalStep, Program, SiteGroup, SiteGroupMembership,
-    APPROVAL_OPEN, APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN,
+    APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_OPEN, APPROVAL_PARTY_CHOICES,
+    APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_SITE_ENGINEER,
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_DECISIONS, APPROVAL_STEP_PENDING,
 )
 from .permissions import APPROVAL_ASSIGNEE_ROLES, user_has_design_head_authority
@@ -121,6 +122,53 @@ def pending_approvals_card(user, now=None):
     if not rows and not (profile.role in _APPROVER_ROLES
                          or user_has_design_head_authority(user)):
         return None
+    return {
+        'rows':        rows,
+        'count':       len(rows),
+        'oldest_text': rows[0]['days_text'] if rows else '',
+    }
+
+
+def work_to_confirm_card(user, now=None):
+    """The Site Engineer dashboard's "Work to confirm" card (4b-1): the contractor bills
+    whose Site Engineer step is `user`'s and waiting on them now — the same "live" rule as
+    pending_approvals_card (live_pending_steps). None for anyone who is not a Site
+    Engineer, so the partial draws nothing.
+
+    ONE query. Each row is a plain dict — approval pk, title, site, contractor, days
+    waiting — never a model instance, and the query fetches none of the bill's money
+    columns (.only): the Site Engineer confirms the work, never the bill (D-A53). The
+    title is SCM's free text and is shown, as on the Site Engineer's request page
+    (SECONDARY_FINDINGS, 4a-3)."""
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role != 'Site Engineer':
+        return None
+    now = now or timezone.now()
+    # This Site Engineer's own live steps on bills, oldest turn first, with the contractor
+    # and the bill's site joined and nothing else of the bill read.
+    steps = (live_pending_steps()
+             .filter(assignee=profile, party=APPROVAL_PARTY_SITE_ENGINEER,
+                     request__kind=APPROVAL_KIND_CONTRACTOR_BILL)
+             .select_related('request__vendor', 'request__bill_detail__project')
+             .only('activated_at', 'request', 'request__title', 'request__vendor',
+                   'request__vendor__name', 'request__bill_detail__request',
+                   'request__bill_detail__project',
+                   'request__bill_detail__project__project_id',
+                   'request__bill_detail__project__customer_name')
+             .order_by('activated_at', 'pk'))
+    rows = []
+    for step in steps:
+        approval = step.request
+        project = approval.bill_detail.project
+        days = days_waiting(step.activated_at, now)
+        rows.append({
+            'approval_pk': approval.pk,
+            'title':       approval.title,
+            'site':        f'{project.project_id} — {project.customer_name}',
+            'contractor':  approval.vendor.name if approval.vendor_id else '—',
+            'days':        days,
+            'days_text':   days_text(days),
+        })
     return {
         'rows':        rows,
         'count':       len(rows),

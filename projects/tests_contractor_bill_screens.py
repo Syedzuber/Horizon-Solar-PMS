@@ -12,8 +12,8 @@ What this file pins, and why each matters:
   * THE PDF IS ONLY EVER A SIGNED, EXPIRING LINK on the page, minted per render (once per
     distinct file), "File unavailable" when none can be minted — and never in an email or
     an in-app notice, which carry a one-line summary instead.
-  * A BILL'S RESUBMIT NEVER REVISES THE BILL: a posted scope or vendor change is ignored
-    (the chokepoint would accept it — SECONDARY_FINDINGS, 4a-2).
+  * A BILL'S RESUBMIT NEVER MOVES THE BILL: a posted scope or vendor change is refused
+    (4b-1; the rest of bill revision is tests_contractor_bill_revision.py).
   * WHO SEES A BILL is the approvals rule: SCM, the named Site Engineer and PM; not
     another PM or Site Engineer, not Finance.
 
@@ -503,7 +503,8 @@ class DetailTests(ScreenFixture):
         page = self.client_for(self.scm).get(self.url)
         self.assertContains(page, '₹99,999.50')        # round 1, as its snapshot says
         self.assertContains(page, '₹12,500.00')        # the bill now, and round 2
-        self.assertContains(page, 'No details changed in this round.')
+        # 4b-1: the change list compares the two snapshots' bill blocks.
+        self.assertContains(page, '<span class="text-muted">₹99,999.50</span> → ₹12,500.00')
         self.signer.assert_called_once()
 
     def test_a_material_page_reads_nothing_of_bills(self):
@@ -545,29 +546,54 @@ class ResubmitTests(ScreenFixture):
     def test_the_page_draws_the_bill_read_only_and_nothing_material(self):
         page = self.client_for(self.scm).get(self.url)
         self.assertEqual(page.status_code, 200)
-        for absent in ('name="revise"', 'name="project"', 'name="vendor"', 'The material',
+        # 4b-1: the bill's own fields are editable; the contractor and site are text.
+        for absent in ('name="project"', 'name="vendor"', 'The material',
                        'line-0-description'):
             self.assertNotContains(page, absent)
+        for present in ('name="revise"', 'name="amount"', 'name="bill_number"',
+                        'name="bill_date"', 'name="bill_pdf"', 'name="task"'):
+            self.assertContains(page, present)
         self.assertContains(page, 'CB-7')
         self.assertContains(page, 'name="keep_site_engineer"')
-        self.assertContains(page, 'accept=".jpg,.jpeg,.png"')
+        self.assertContains(page, 'accept="image/jpeg,image/png,.jpg,.jpeg,.png"')
 
     def test_only_scm_opens_it(self):
         for profile in (self.se, self.pm):
             self.assertEqual(self.client_for(profile).get(self.url).status_code, 403)
 
-    def test_a_posted_revision_is_ignored_and_a_kept_approval_goes_to_the_pm(self):
-        response = self.client_for(self.scm).post(self.url, {
-            'revise': '1', 'title': 'Changed title', 'description': 'Changed.',
-            'vendor': str(self.supplier.pk), 'project': [str(self.other_site.pk)],
+    def bill_post(self, **overrides):
+        """The resubmit page's POST as drawn for the fixture bill, unchanged, with the
+        warnings already accepted."""
+        values = {
+            'revise': '1', 'title': 'Civil works bill', 'description': 'Foundation, block A.',
+            'amount': '12500.00', 'bill_number': 'CB-7',
+            'bill_date': (timezone.localdate() - timedelta(days=3)).isoformat(),
+            'task': [str(self.foundation.pk), str(self.wiring.pk)],
             'assignee_site_engineer': str(self.se.pk), 'assignee_pm': str(self.pm.pk),
-            'keep_site_engineer': 'on',
-            'keep_reason_site_engineer': 'Only photos were added to the bill.',
-            'note': 'Photos added.'})
+            'confirm_warnings': '1', 'note': 'Photos added.'}
+        values.update(overrides)
+        return values
+
+    def test_a_posted_contractor_or_site_change_is_refused(self):
+        for change, message in (({'vendor': str(self.supplier.pk)}, 'contractor on a bill'),
+                                ({'project': [str(self.other_site.pk)]}, 'site on a bill')):
+            with self.subTest(change=list(change)):
+                response = self.client_for(self.scm).post(self.url, self.bill_post(**change))
+                self.assertEqual(response.status_code, 400)
+                self.assertTrue(any(message in m for m in self.messages_of(response)))
+                approval = ApprovalRequest.objects.get(pk=self.approval.pk)
+                self.assertEqual(approval.current_round, 1)
+                self.assertEqual(approval.vendor, self.contractor)
+                self.assertEqual(list(approval.projects.all()), [self.site])
+
+    def test_a_title_change_with_the_site_engineer_kept_goes_to_the_pm(self):
+        response = self.client_for(self.scm).post(self.url, self.bill_post(
+            title='Changed title', keep_site_engineer='on',
+            keep_reason_site_engineer='Only the title of the bill changed.'))
         self.assertEqual(response.status_code, 302)
         approval = ApprovalRequest.objects.get(pk=self.approval.pk)
         self.assertEqual((approval.status, approval.current_round), (APPROVAL_OPEN, 2))
-        self.assertEqual(approval.title, 'Civil works bill')
+        self.assertEqual(approval.title, 'Changed title')
         self.assertEqual(approval.vendor, self.contractor)
         self.assertEqual(list(approval.projects.all()), [self.site])
         pm_step = ApprovalStep.objects.get(request=approval, round=2, party=APPROVAL_PARTY_PM)

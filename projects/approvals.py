@@ -54,7 +54,9 @@ bucket (bill_storage.py). This module writes its ContractorBillDetail and task l
 and sets the request's record-only scope to that one site. What SCM is only WARNED about
 — an unfinished task, a task on another bill, a repeated bill number, a Site Engineer or
 PM not on the site — is bill_rules.py's, and never refuses anything here. Nothing here
-checks the amount against a rate (B-16).
+checks the amount against a rate (B-16). A resubmit (4b-1) may revise the amount, number,
+date, tasks and PDF, never the contractor or the site; a replaced PDF stays recorded in
+its round's snapshot and is never deleted.
 
 THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53, D-A54). A Site Engineer
 step is approved only with at least one site photo, linked to the step, and never
@@ -145,7 +147,12 @@ _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
 #: quantity note and BOQ items it replaced are no longer written by anything.
 _REVISABLE_REQUEST = ('title', 'description', 'vendor')
 _REVISABLE_SCOPE = ('programs', 'projects', 'site_groups')
-_REVISABLE = _REVISABLE_REQUEST + _REVISABLE_SCOPE
+#: A contractor bill's own revisable fields (4b-1): `tasks` replaces the set, `pdf` is a
+#: NEW file already stored by bill_storage.upload_bill_pdf(). A bill's contractor and site
+#: are locked — `vendor` and the scope keys are refused on a bill unless they repeat what
+#: it already holds (_revision_writes).
+_REVISABLE_BILL = ('amount', 'bill_number', 'bill_date', 'tasks', 'pdf')
+_REVISABLE = _REVISABLE_REQUEST + _REVISABLE_SCOPE + _REVISABLE_BILL
 
 #: What a material line is given as, in create_approval_request(lines=...) and
 #: resubmit_approval_request(lines=...). `id` only on a resubmit, naming a live line.
@@ -661,9 +668,26 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
     in the order given, de-duplicated), amount (Decimal), bill_number, bill_date and pdf.
     Writes nothing; raises ApprovalRefused for the first problem found, in this order:
     the vendor, the site, the scope, the tasks, the amount, the bill number and date,
-    the PDF. `vendor` is already known to be present (checked before this is called)."""
+    the PDF. `vendor` is already known to be present (checked before this is called).
+
+    4b-1 split it into its parts so a resubmit can ask only what it revises: the
+    contractor is locked on a resubmit, so _clean_bill_contractor is not asked again, and
+    the PDF is judged only when a new one is posted (_clean_bill_pdf). Create asks every
+    part, in the order above, exactly as before."""
     if bill is None:
         raise ApprovalRefused('Enter the contractor bill\'s details.')
+    _clean_bill_contractor(vendor)
+    project = bill.project
+    _clean_bill_site(project, programs, projects, site_groups)
+    cleaned = _clean_bill_values(project, bill.tasks, bill.amount, bill.bill_number,
+                                 bill.bill_date)
+    cleaned['pdf'] = _clean_bill_pdf(bill.pdf)
+    return cleaned
+
+
+def _clean_bill_contractor(vendor):
+    """Refuse a vendor who may not send a bill. Create only: a resubmit cannot change the
+    contractor, so it does not ask again (4b-1, Q1)."""
     # D-A14 / D-A38: only a vendor recorded as a contractor (or both) may send a bill; a
     # supplier's invoice is a purchase, paid through the PO/PI record, not approved here.
     if vendor.kind not in VENDOR_BILLABLE_KINDS:
@@ -672,7 +696,9 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
     if not vendor.is_active:
         raise ApprovalRefused(f'{vendor.name} is inactive.')
 
-    project = bill.project
+
+def _clean_bill_site(project, programs, projects, site_groups):
+    """Refuse a missing, deleted or Draft site, and any scope but that one site."""
     if project is None:
         raise ApprovalRefused('Choose the site this bill is for.')
     if project.is_deleted:
@@ -689,7 +715,12 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
         raise ApprovalRefused('A contractor bill is about its one site; it names no other '
                               'tenders, sites or site groups.')
 
-    wanted = list(dict.fromkeys(task.pk for task in (bill.tasks or ())))
+
+def _clean_bill_values(project, tasks, amount, bill_number, bill_date):
+    """The tasks, amount, bill number and date, validated against `project`. Returns a
+    dict of project, tasks (re-read, in the order given, de-duplicated), amount (Decimal),
+    bill_number and bill_date. Writes nothing."""
+    wanted = list(dict.fromkeys(task.pk for task in (tasks or ())))
     if not wanted:
         raise ApprovalRefused('Choose at least one task this bill covers.')
     # Re-read by pk with the phase joined: the phase's project is what the "task is on
@@ -710,7 +741,7 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
 
     try:
         amount = parse_decimal_input(
-            bill.amount, places=2,
+            amount, places=2,
             max_value=decimal_field_max(ContractorBillDetail, 'amount'),
             field_label='The bill amount')
     except ValidationError as exc:
@@ -720,21 +751,27 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
     if amount <= 0:
         raise ApprovalRefused('The bill amount must be more than zero.')
 
-    bill_number = _clean(bill.bill_number)
+    bill_number = _clean(bill_number)
     if not bill_number:
         raise ApprovalRefused('Enter the contractor\'s bill number.')
     if len(bill_number) > 100:
         raise ApprovalRefused('The bill number must be 100 characters or fewer.')
 
-    if bill.bill_date in (None, ''):
+    if bill_date in (None, ''):
         raise ApprovalRefused('Enter the bill date.')
-    bill_date, error = check_typed_date(bill.bill_date)
+    bill_date, error = check_typed_date(bill_date)
     if error:
         raise ApprovalRefused(f'Bill date: {error}')
     if bill_date > timezone.localdate():
         raise ApprovalRefused('The bill date cannot be in the future.')
 
-    pdf = dict(bill.pdf or {})
+    return {'project': project, 'tasks': tasks, 'amount': amount,
+            'bill_number': bill_number, 'bill_date': bill_date}
+
+
+def _clean_bill_pdf(pdf):
+    """The bill PDF as recorded: a .pdf in the private bills bucket. Returns the dict."""
+    pdf = dict(pdf or {})
     if not all(_clean(pdf.get(key)) for key in ('file_name', 'bucket', 'path')):
         raise ApprovalRefused('Attach the contractor\'s bill as a PDF.')
     if not pdf['file_name'].lower().endswith('.pdf'):
@@ -744,9 +781,7 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
     if pdf['bucket'] != bills_bucket():
         raise ApprovalRefused('The bill PDF must be stored privately, and it was not. '
                               'Nothing was saved.')
-
-    return {'project': project, 'tasks': tasks, 'amount': amount,
-            'bill_number': bill_number, 'bill_date': bill_date, 'pdf': pdf}
+    return pdf
 
 
 # ---------------------------------------------------------------------------
@@ -1063,21 +1098,116 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None, files=())
 # 3. Resubmit
 # ---------------------------------------------------------------------------
 
+#: 4b-1: what a resubmit that tries to move a bill to another contractor or site reads.
+BILL_CONTRACTOR_LOCKED = ('The contractor on a bill cannot be changed. Withdraw it and '
+                          'raise a new bill from the other contractor.')
+BILL_SITE_LOCKED = ('The site on a bill cannot be changed. Withdraw it and raise a new '
+                    'bill for the other site.')
+#: 4b-1 (D-A20, B): the Site Engineer confirmed the tasks the bill named; other tasks are
+#: work they have not confirmed.
+BILL_KEEP_TASKS_CHANGED = ('The Site Engineer\'s confirmation cannot be kept: the tasks on '
+                           'this bill changed, so the Site Engineer must confirm the work '
+                           'again.')
+
+
+def _bill_revision(approval, revision):
+    """A contractor bill's part of a revision (4b-1): validate it against the bill and
+    return what to write — {detail, fields, add, remove, tasks_changed}. `fields` holds
+    only the ContractorBillDetail columns whose value changes; `add` the Tasks to link,
+    `remove` the task pks to unlink. Writes nothing.
+
+    THE SITE IS LOCKED. A scope key that names exactly the bill's one site (projects) or
+    nothing (programs, site_groups) repeats what the bill holds and is dropped; anything
+    else is refused with BILL_SITE_LOCKED. (The contractor lock is _revision_writes'.)
+
+    When any bill key is sent, the bill as revised is judged by create's own parts: the
+    site (_clean_bill_site — not deleted, not Draft) and the tasks, amount, number and
+    date (_clean_bill_values). Not the contractor — it cannot change (Q1) — and the PDF
+    only when a new one is sent (_clean_bill_pdf), so an unchanged PDF is never refused
+    for a bucket setting changed since."""
+    # The bill with its site: the lock compares against the site, and the revised tasks
+    # must be on it.
+    detail = ContractorBillDetail.objects.select_related('project').get(request=approval)
+    site = detail.project
+    for key in _REVISABLE_SCOPE:
+        if key in revision:
+            wanted = [row.pk for row in revision[key]]
+            if wanted != ([site.pk] if key == 'projects' else []):
+                raise ApprovalRefused(BILL_SITE_LOCKED)
+    # The bill's tasks now, in the order it names them: the default when `tasks` is not
+    # revised, and what "the tasks changed" (B) is measured against.
+    current = [link.task for link in detail.task_links.select_related('task').order_by('pk')]
+    result = {'detail': detail, 'fields': {}, 'add': [], 'remove': [],
+              'tasks_changed': False}
+    if not any(key in revision for key in _REVISABLE_BILL):
+        return result
+
+    _clean_bill_site(site, (), [site], ())
+    cleaned = _clean_bill_values(
+        site, revision.get('tasks', current), revision.get('amount', detail.amount),
+        revision.get('bill_number', detail.bill_number),
+        revision.get('bill_date', detail.bill_date))
+    fields = result['fields']
+    for key in ('amount', 'bill_number', 'bill_date'):
+        if cleaned[key] != getattr(detail, key):
+            fields[key] = cleaned[key]
+    if 'pdf' in revision:
+        pdf = _clean_bill_pdf(revision['pdf'])
+        fields.update(pdf_file_name=_clean(pdf['file_name']), pdf_bucket=pdf['bucket'],
+                      pdf_path=pdf['path'], pdf_size_kb=pdf.get('file_size_kb') or 0)
+    held = {task.pk for task in current}
+    kept = {task.pk for task in cleaned['tasks']}
+    result['add'] = [task for task in cleaned['tasks'] if task.pk not in held]
+    result['remove'] = [pk for pk in held if pk not in kept]
+    result['tasks_changed'] = bool(result['add'] or result['remove'])
+    return result
+
+
+def _write_bill_revision(bill):
+    """Write _bill_revision()'s result. Called inside resubmit's transaction, under the
+    request lock, before the new round's snapshot, so that snapshot records the revised
+    bill and the previous round's keeps the old one — its PDF included (never deleted)."""
+    if bill['fields']:
+        # Race: this is the only UPDATE of a bill's detail, and resubmit holds the request
+        # row lock (_lock) for its whole transaction, so two resubmits of one bill run one
+        # after the other — and the second is refused, the bill no longer waiting.
+        ContractorBillDetail.objects.filter(pk=bill['detail'].pk).update(**bill['fields'])
+    if bill['remove']:
+        ContractorBillTask.objects.filter(detail=bill['detail'],
+                                          task_id__in=bill['remove']).delete()
+    # Tasks still on the bill keep their link rows (and their place in its order); the
+    # added ones follow, in the order given.
+    ContractorBillTask.objects.bulk_create(
+        ContractorBillTask(detail=bill['detail'], task=task) for task in bill['add'])
+
+
 def _revision_writes(approval, revision, lines):
     """Validate `revision` and `lines` against `approval` (locked) and return what to
-    write: (request_fields, scope, material, new_lines). The kind's rules are re-checked
-    against the request AS REVISED. Refuses an unknown key (the retired material keys
-    among them), a blank title or description, a missing or mismatched vendor, a deleted
-    project in the scope, lines on a request with no material detail, and invalid lines
-    (_clean_lines).
+    write: (request_fields, scope, material, new_lines, bill). The kind's rules are
+    re-checked against the request AS REVISED. Refuses an unknown key (the retired
+    material keys among them), a bill's key on any other kind, a blank title or
+    description, a missing or mismatched vendor, a deleted project in the scope, lines on
+    a request with no material detail, and invalid lines (_clean_lines).
 
     `new_lines` is None when `lines` is None: the lines stay as they are. That is refused
     for a material request that has NO lines — one raised before lines existed: its
-    resubmit must record the quantity as lines (at least one). Writes nothing."""
+    resubmit must record the quantity as lines (at least one).
+
+    `bill` (4b-1) is None for a material request, else _bill_revision()'s result. A
+    bill's contractor is LOCKED: a `vendor` naming another one is refused
+    (BILL_CONTRACTOR_LOCKED) — after the "Choose the vendor" check, which still answers a
+    vendor of None — and the same vendor is dropped. Its site is locked the same way
+    (_bill_revision), so `scope` is always empty for a bill. Writes nothing."""
     revision = dict(revision or {})
     for key in revision:
         if key not in _REVISABLE:
             raise ApprovalRefused(f'"{key}" cannot be changed on a resubmit.')
+    is_bill = approval.kind == APPROVAL_KIND_CONTRACTOR_BILL
+    if not is_bill:
+        for key in _REVISABLE_BILL:
+            if key in revision:
+                raise ApprovalRefused(f'"{key}" belongs to a contractor bill; this request '
+                                      f'is not one.')
     material = (MaterialApprovalDetail.objects.select_related('vendor_order')
                 .filter(request=approval).first())
     if material is None:
@@ -1115,10 +1245,17 @@ def _revision_writes(approval, revision, lines):
             and material.vendor_order.vendor_id != vendor.pk:
         raise ApprovalRefused('The vendor order was placed with a different vendor.')
 
+    if is_bill:
+        if 'vendor' in request_fields:
+            if request_fields['vendor'].pk != approval.vendor_id:
+                raise ApprovalRefused(BILL_CONTRACTOR_LOCKED)
+            del request_fields['vendor']
+        return request_fields, {}, material, new_lines, _bill_revision(approval, revision)
+
     scope = {key: list(revision[key]) for key in _REVISABLE_SCOPE if key in revision}
     if any(project.is_deleted for project in scope.get('projects', ())):
         raise ApprovalRefused('A deleted project cannot be named in the scope.')
-    return request_fields, scope, material, new_lines
+    return request_fields, scope, material, new_lines, None
 
 
 def resubmit_approval_request(approval, actor, note, attachments=(), assignees=None,
@@ -1154,6 +1291,14 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
     that whole set. The kind's rules are re-checked against the revised request
     (_revision_writes). Kind, design sign-off, vendor order and pre-order link are not
     revisable.
+
+    A CONTRACTOR BILL (4b-1) may also revise amount, bill_number, bill_date, tasks (the
+    set, replaced) and pdf (a NEW file already in the private bucket; the old one stays
+    recorded in the previous round's snapshot and is never deleted). Its contractor and
+    site are LOCKED: a vendor or scope naming anything else is refused; repeating what the
+    bill holds is dropped. The revised values meet create's refusals (_bill_revision).
+    A Site Engineer's confirmation may be kept only while the tasks are unchanged: with a
+    task added or removed, keeping it is refused (BILL_KEEP_TASKS_CHANGED).
 
     LINES (material lines). `lines`, when given, REPLACES the material's lines as a set
     (_replace_lines): a line carrying the `id` of a live line edits it, one without adds
@@ -1201,7 +1346,7 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                     f'final. Raise a new request instead.')
             raise ApprovalRefused('This request is still being decided; nothing to resubmit.')
 
-        request_fields, scope, material, new_lines = _revision_writes(
+        request_fields, scope, material, new_lines, bill = _revision_writes(
             approval, revision, lines)
 
         previous = approval.current_round
@@ -1244,6 +1389,11 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
                     f'The {_party_label(party)} approval cannot be kept while its '
                     f'approver is being changed.')
             carries[party] = (kept, reason)
+        # B (4b-1, D-A20): the Site Engineer confirmed the tasks the bill named; with a
+        # task added or removed there is work they have not confirmed.
+        if bill is not None and bill['tasks_changed'] \
+                and APPROVAL_PARTY_SITE_ENGINEER in carries:
+            raise ApprovalRefused(BILL_KEEP_TASKS_CHANGED)
 
         # Every decider in every earlier round, by party. The new round has no rows yet,
         # so there are no live assignees to add; the planned ones are _check_assignees'.
@@ -1261,6 +1411,8 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
             getattr(approval, key).set(rows)
         if new_lines is not None:
             _replace_lines(material, new_lines)
+        if bill is not None:
+            _write_bill_revision(bill)
         _open_round(approval, new_round, plan, chosen, now,
                     carries=carries, carried_by=actor)
 
