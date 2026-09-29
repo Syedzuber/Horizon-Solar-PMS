@@ -637,5 +637,6 @@ class EmailTextPartTests(NoticeBase):
         self.assertEqual(len(mail), 1)
         self.assertNotIn('Material:', mail[0]['text'])
         self.assertNotIn('Material:', mail[0]['html'])
-        self.assertTrue(mail[0]['text'].startswith(f'{self.note_for(self.se)}\n\nBill: '))
-        self.assertNotIn('Bill:', self.note_for(self.se))
+        # 4a-3 (D-A53): the Site Engineer's email carries the work, never the bill.
+        self.assertTrue(mail[0]['text'].startswith(f'{self.note_for(self.se)}\n\nWork: '))
+        self.assertNotIn('Work:', self.note_for(self.se))

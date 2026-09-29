@@ -68,6 +68,11 @@ ON_POSTGRES = connection.vendor == 'postgresql'
 MODULE_LINE = {'description': 'Solar module 545 Wp', 'make': 'Waaree',
                'specification': '545 Wp mono PERC', 'quantity': '120', 'unit': 'Nos'}
 
+#: A Site Engineer's site photo, already stored (4a-3, D-A53): a Site Engineer's
+#: confirmation of the work needs at least one.
+SE_PHOTO = {'file_name': 'work.jpg', 'bucket': 'fixture-photos',
+            'path': 'approvals/fixture/work.jpg'}
+
 
 def _profile(username, role, **flags):
     """A post_save signal creates the UserProfile; fetch and set, never create."""
@@ -362,7 +367,7 @@ class CaseDContractorBillSequenceTests(ApprovalFixture):
         with self.assertRaises(ApprovalRefused):
             apply_approval_decision(pm_step, APPROVAL_STEP_APPROVED, self.pm)
 
-        apply_approval_decision(se_step, APPROVAL_STEP_APPROVED, self.se)
+        apply_approval_decision(se_step, APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         se_step.refresh_from_db()
         pm_step.refresh_from_db()
         approval.refresh_from_db()
@@ -1521,7 +1526,7 @@ class CarryForwardTests(RevisionFixture):
         """R4: _open_round activates the lowest sequence with a step still to decide."""
         bill = self.raise_bill()
         apply_approval_decision(self.step(bill, APPROVAL_PARTY_SITE_ENGINEER),
-                                APPROVAL_STEP_APPROVED, self.se)
+                                APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         apply_approval_decision(self.step(bill, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Rate?')
         round_one_se = ApprovalStep.objects.get(request=bill, round=1,

@@ -47,6 +47,7 @@ from .models import (
     VENDOR_KIND_BOTH, VENDOR_KIND_CONTRACTOR,
 )
 from .tests_approval_notices import NoticeBase
+from .tests_approvals import SE_PHOTO
 from .tests_contractor_bills import BUCKET, PDF, BillFixture, _profile, _site, _task
 
 SIGNED = 'https://storage.example/signed/bill.pdf?token=abc'
@@ -476,7 +477,7 @@ class DetailTests(ScreenFixture):
         warning = escape("'Foundation' is not complete")
         self.assertContains(self.client_for(self.scm).get(self.url), warning)
         apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_SITE_ENGINEER),
-                                APPROVAL_STEP_APPROVED, self.se)
+                                APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Fix it.')
         self.assertContains(self.client_for(self.scm).get(self.url), warning)
@@ -536,7 +537,7 @@ class ResubmitTests(ScreenFixture):
         super().setUp()
         self.approval = self.raise_bill()
         apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_SITE_ENGINEER),
-                                APPROVAL_STEP_APPROVED, self.se)
+                                APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         apply_approval_decision(self.step(self.approval, APPROVAL_PARTY_PM),
                                 APPROVAL_STEP_CHANGES_REQUESTED, self.pm, note='Photos.')
         self.url = reverse('approval_resubmit', args=[self.approval.pk])
@@ -606,17 +607,29 @@ class BillEmailTests(NoticeBase):
             self.assertNotIn(secret, mail['text'])
             self.assertNotIn(secret, mail['html'])
 
+    def assert_carries_work(self, mail, approval):
+        """4a-3 (D-A53): a Site Engineer's email carries the work — contractor, site,
+        tasks — and never the bill number, the amount or the PDF."""
+        site = approval.bill_detail.project.project_id
+        self.assertTrue(mail['text'].endswith(
+            f'\n\nWork: Approval Contractor · {site} · Foundation'), mail['text'])
+        for secret in ('CB-001', '₹', 'fixture-bills', 'bill/fixture.pdf', 'bill.pdf',
+                       'token'):
+            self.assertNotIn(secret, mail['text'])
+            self.assertNotIn(secret, mail['html'])
+
     def test_e1_to_the_site_engineer(self):
         approval, _ = self.act(self.raise_bill)
         mail = [m for m in self.mail if m['to'] == 'ap_se@example.com']
         self.assertEqual(len(mail), 1)
-        self.assert_carries_summary(mail[0], approval)
-        self.assertNotIn('Bill:', self.note_for(self.se))
+        self.assert_carries_work(mail[0], approval)
+        self.assertNotIn('Work:', self.note_for(self.se))
         self.assertTrue(mail[0]['text'].startswith(self.note_for(self.se)))
 
     def test_e1_to_the_pm_and_e2_to_the_raiser(self):
         approval, _ = self.act(self.raise_bill)
-        self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVAL_STEP_APPROVED, self.se)
+        self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVAL_STEP_APPROVED, self.se,
+                    files=[dict(SE_PHOTO)])
         pm_mail = [m for m in self.mail if m['to'] == 'ap_pm@example.com']
         self.assert_carries_summary(pm_mail[-1], approval)
         self.decide(approval, APPROVAL_PARTY_PM, APPROVAL_STEP_APPROVED, self.pm)
@@ -629,7 +642,7 @@ class BillEmailTests(NoticeBase):
         self.act(withdraw_approval_request, approval, self.scm, 'Raised twice.')
         mail = [m for m in self.mail if m['to'] == 'ap_se@example.com']
         self.assertTrue(mail[-1]['subject'].startswith('Withdrawn'))
-        self.assert_carries_summary(mail[-1], approval)
+        self.assert_carries_work(mail[-1], approval)
 
     def test_a_material_email_is_unchanged(self):
         self.create_material(design=False)
@@ -658,7 +671,7 @@ class KindLabelTests(ScreenFixture):
         self.assertContains(self.client_for(self.scm).get(reverse('approval_aging')),
                             'Contractor bill')
         apply_approval_decision(self.step(approval, APPROVAL_PARTY_SITE_ENGINEER),
-                                APPROVAL_STEP_APPROVED, self.se)
+                                APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         card = pending_approvals_card(self.pm.user)
         self.assertEqual([row['kind_label'] for row in card['rows']], ['Contractor bill'])
 

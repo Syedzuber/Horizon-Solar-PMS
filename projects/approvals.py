@@ -56,6 +56,11 @@ and sets the request's record-only scope to that one site. What SCM is only WARN
 PM not on the site — is bill_rules.py's, and never refuses anything here. Nothing here
 checks the amount against a rate (B-16).
 
+THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53, D-A54). A Site Engineer
+step is approved only with at least one site photo, linked to the step, and never
+rejected; "work not done" is a changes request. apply_approval_decision holds the rules
+(_site_engineer_refusal), so no screen can go around them.
+
 NOTIFICATIONS (Approvals 2b) ARE REGISTERED HERE AND BUILT ELSEWHERE. Each entry point
 registers exactly one transaction.on_commit(..., robust=True) callback from
 approval_notices.py, inside its own atomic block, passing ids: a refused or rolled-back
@@ -72,7 +77,7 @@ from collections import namedtuple
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import F, Max
+from django.db.models import F, Max, Q
 from django.utils import timezone
 
 from .models import (
@@ -86,7 +91,8 @@ from .models import (
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_PM,
     APPROVAL_PARTY_SITE_ENGINEER,
     APPROVAL_STEP_PENDING, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
-    APPROVAL_STEP_SUPERSEDED, APPROVAL_STEP_DECISIONS, APPROVAL_STEP_NOTE_REQUIRED,
+    APPROVAL_STEP_REJECTED, APPROVAL_STEP_SUPERSEDED, APPROVAL_STEP_DECISIONS,
+    APPROVAL_STEP_NOTE_REQUIRED,
     APPROVAL_PROXY_CHANNEL_CHOICES,
     REASON_CREATED, REASON_RESUBMITTED, VENDOR_BILLABLE_KINDS,
 )
@@ -149,6 +155,11 @@ _LINE_FIELDS = ('id', 'description', 'make', 'specification', 'quantity', 'unit'
 _LEGACY_MATERIAL = ('proposed_make', 'specification', 'quantity_note', 'boq_items')
 _PROXY_CHANNELS = {value for value, _ in APPROVAL_PROXY_CHANNEL_CHOICES}
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
+
+#: What counts as a site photo on a Site Engineer's confirmation (D-A53, 4a-3): the file
+#: name's extension, the same three types the screens accept (approval_forms
+#: .BILL_PHOTO_EXTENSIONS, which this module cannot import — approval_forms imports views).
+_SITE_PHOTO_SUFFIXES = ('.jpg', '.jpeg', '.png')
 
 
 def _clean(text):
@@ -289,12 +300,16 @@ def _add_attachments(approval, round_no, attachments, uploaded_by, step=None):
     With `step` (S1.1, D-A21) the files are evidence for that step's PROXY decision and
     are linked to it. Refused unless the step, as the database holds it now, is a proxy
     record of this request and round — evidence never attaches to a decision the decider
-    typed themselves."""
+    typed themselves. EXCEPT a Site Engineer's step (4a-3, D-A53): the Site Engineer's own
+    site photos are linked to their decision, typed by them or recorded by SCM."""
     attachments = list(attachments)
     if step is not None and attachments:
-        is_proxy_step = ApprovalStep.objects.filter(
-            pk=step.pk, request=approval, round=round_no, is_proxy=True).exists()
-        if not is_proxy_step:
+        # The step as written in this transaction: a proxy record of this round, or any
+        # decision on a Site Engineer step of it.
+        may_carry_files = ApprovalStep.objects.filter(
+            Q(is_proxy=True) | Q(party=APPROVAL_PARTY_SITE_ENGINEER),
+            pk=step.pk, request=approval, round=round_no).exists()
+        if not may_carry_files:
             raise ApprovalRefused(
                 'Evidence files are attached only to a decision recorded on someone '
                 'else\'s behalf.')
@@ -590,6 +605,31 @@ def _locked_step(step, approval):
     return fresh
 
 
+def _site_engineer_refusal(step, verdict, files):
+    """Why this verdict with these files cannot be recorded on `step` — the Site Engineer
+    rules (4a-3, D-A53, D-A54) — or None. `step` is the row re-read under the lock;
+    `files` the photos the decision carries (the Site Engineer's own, or a proxy's).
+
+      * files on any other party's step: refused — photos are the Site Engineer's;
+      * a Site Engineer reject: refused — they confirm the work, never the bill;
+      * a Site Engineer approval ("work confirmed") with no .jpg/.jpeg/.png among the
+        files: refused. A proxy's evidence may also carry a PDF, but it needs one photo.
+    """
+    if step.party != APPROVAL_PARTY_SITE_ENGINEER:
+        # Nothing to add for other parties: a proxy's evidence files are allowed on any
+        # step (D-A21), and apply_approval_decision refuses the Site Engineer's own
+        # `files` on any other step itself.
+        return None
+    if verdict == APPROVAL_STEP_REJECTED:
+        return ('A Site Engineer confirms the work, or says it is not done; a bill is '
+                'never rejected at this step.')
+    if verdict == APPROVAL_STEP_APPROVED and not any(
+            _clean(item.get('file_name')).lower().endswith(_SITE_PHOTO_SUFFIXES)
+            for item in files):
+        return 'Attach at least one photo of the work on site (JPG or PNG) to confirm it.'
+    return None
+
+
 def _step_state_refusal(step, approval):
     """Why nobody may act on `step` now, or None."""
     if approval.status != APPROVAL_OPEN:
@@ -873,7 +913,7 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
 # 2. Decide
 # ---------------------------------------------------------------------------
 
-def apply_approval_decision(step, verdict, actor, note='', proxy=None):
+def apply_approval_decision(step, verdict, actor, note='', proxy=None, files=()):
     """Record one verdict on `step`. Returns the request, re-read.
 
     `actor` is who is typing it into PMS (`recorded_by`). Without `proxy` the actor is
@@ -882,6 +922,21 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
     `proxy.files` (already uploaded by the caller) become ApprovalAttachment rows linked
     to the step, uploaded_by the actor, written after the step inside this transaction —
     so a refused decision leaves no attachment row.
+
+    THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53, D-A54). On a Site
+    Engineer step:
+
+      * approved means "work confirmed done", and needs at least one site photo (a .jpg,
+        .jpeg or .png): in `files` when the Site Engineer decides it, in `proxy.files`
+        when SCM records it on their behalf (the photos they sent on WhatsApp);
+      * changes requested means "work not done" — the note is required, as for every
+        changes request, and the bill goes back to SCM;
+      * rejected is refused: whether a bill is paid is not the Site Engineer's question.
+
+    `files` (4a-3) are the Site Engineer's own photos, already uploaded by the caller,
+    written like proxy files, linked to the step. Refused on any other party's step, and
+    alongside `proxy` (a proxy's files are `proxy.files`). The party is read from the step
+    re-read UNDER THE LOCK, never before it (Layer 5 #1).
 
     Under the request lock, in this order: re-read the step; refuse a step that is not
     live; refuse a recorder or decider without the authority; apply the same-person
@@ -912,6 +967,13 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
             if not all(_clean(item.get(key)) for key in ('file_name', 'bucket', 'path')):
                 raise ApprovalRefused('An evidence file is missing its name or where it '
                                       'was stored.')
+    files = list(files or ())
+    if files and proxy is not None:
+        raise ApprovalRefused('A decision recorded on someone\'s behalf carries its files '
+                              'as evidence.')
+    for item in files:
+        if not all(_clean(item.get(key)) for key in ('file_name', 'bucket', 'path')):
+            raise ApprovalRefused('A photo is missing its name or where it was stored.')
     decider = proxy.decided_by if proxy is not None else actor
 
     with transaction.atomic():
@@ -919,6 +981,12 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
         step = _locked_step(step, approval)
 
         message = _step_state_refusal(step, approval)
+        if message:
+            raise ApprovalRefused(message)
+        if files and step.party != APPROVAL_PARTY_SITE_ENGINEER:
+            raise ApprovalRefused("Photos are attached only to a Site Engineer's decision.")
+        message = _site_engineer_refusal(
+            step, verdict, list(proxy.files or ()) if proxy is not None else files)
         if message:
             raise ApprovalRefused(message)
         if proxy is not None and not user_can_record_proxy_decision(actor.user, step):
@@ -945,6 +1013,8 @@ def apply_approval_decision(step, verdict, actor, note='', proxy=None):
             raise ApprovalRefused('The step changed while you were deciding it.')
         if proxy is not None:
             _add_attachments(approval, step.round, proxy.files or (), actor, step=step)
+        elif files:
+            _add_attachments(approval, step.round, files, actor, step=step)
 
         round_filter = dict(request=approval, round=approval.current_round)
         if verdict in APPROVAL_STEP_NOTE_REQUIRED:

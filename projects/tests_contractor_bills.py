@@ -49,7 +49,7 @@ from .models import (
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
     SUBJECT_APPROVAL_REQUEST, VENDOR_KIND_CONTRACTOR, VENDOR_KIND_SUPPLIER,
 )
-from .tests_approvals import MODULE_LINE
+from .tests_approvals import MODULE_LINE, SE_PHOTO
 
 BUCKET = 'test-bills'
 PDF = {'file_name': 'CB-7.pdf', 'bucket': BUCKET, 'path': 'site/bill/abc.pdf',
@@ -334,7 +334,7 @@ class ValidBillTests(BillFixture):
     def test_the_bill_ledger_rows_carry_the_site(self):
         bill = self.raise_bill()
         apply_approval_decision(self.step(bill, 'site_engineer'), APPROVAL_STEP_APPROVED,
-                                self.se)
+                                self.se, files=[dict(SE_PHOTO)])
         apply_approval_decision(self.step(bill, 'pm'), APPROVAL_STEP_APPROVED, self.pm)
         rows = self.ledger(bill)
         self.assertEqual([row.to_status for row in rows], [APPROVAL_OPEN, APPROVAL_APPROVED])

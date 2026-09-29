@@ -42,7 +42,7 @@ from .models import (
     APPROVAL_PROXY_PHONE, APPROVAL_PROXY_WHATSAPP,
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
 )
-from .tests_approvals import ApprovalFixture, _profile
+from .tests_approvals import SE_PHOTO, ApprovalFixture, _profile
 from .utils import SITE_BASE_URL
 
 A = approval_notices
@@ -129,9 +129,9 @@ class NoticeBase(ApprovalFixture):
     def create_material(self, design=True, **overrides):
         return self.act(self.raise_material, design=design, **overrides)
 
-    def decide(self, approval, party, verdict, who, note='', proxy=None):
+    def decide(self, approval, party, verdict, who, note='', proxy=None, files=()):
         return self.act(apply_approval_decision, self.step(approval, party), verdict, who,
-                        note=note, proxy=proxy)
+                        note=note, proxy=proxy, files=files)
 
     def silently(self, fn, *args, **kwargs):
         """Set-up that is not under test: callbacks are discarded unrun."""
@@ -173,9 +173,11 @@ class ActivationTests(NoticeBase):
         approval, sent = self.act(self.raise_bill)
         self.assertEqual(sent, {'ap_se': (A.T_ACTIVATED, BOTH)})
 
-        _, sent = self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se)
+        _, sent = self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se,
+                              files=[dict(SE_PHOTO)])
         self.assertEqual(sent, {'ap_pm': (A.T_ACTIVATED, BOTH)})
-        self.assertIn('Ap_Se approved as the Site Engineer; you are now asked to approve',
+        self.assertIn('Ap_Se confirmed the work done as the Site Engineer; you are now asked '
+                      'to approve',
                       self.note_for(self.pm))
 
     def test_a_deputy_who_is_also_an_assignee_is_told_once_as_the_assignee(self):
@@ -344,7 +346,8 @@ class ProxyTests(NoticeBase):
 
     def test_a_proxy_that_advances_a_bill_tells_the_pm_and_the_se(self):
         approval, _ = self.act(self.raise_bill)
-        proxy = ProxyDecision(self.se, APPROVAL_PROXY_WHATSAPP, 'Measured, OK.')
+        proxy = ProxyDecision(self.se, APPROVAL_PROXY_WHATSAPP, 'Measured, OK.',
+                              files=[dict(SE_PHOTO)])
         _, sent = self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.scm,
                               proxy=proxy)
         self.assertEqual(sent, {'ap_pm': (A.T_ACTIVATED, BOTH),
@@ -406,7 +409,8 @@ class ReassignTests(NoticeBase):
         _, sent = self.act(reassign_approval_step, self.step(approval, APPROVAL_PARTY_PM),
                            self.pm_b, self.scm, 'Site handed over.')
         self.assertEqual(sent, {})
-        _, sent = self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se)
+        _, sent = self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se,
+                              files=[dict(SE_PHOTO)])
         self.assertEqual(sent, {'ap_pm_b': (A.T_ACTIVATED, BOTH)})
 
     def test_reassigning_a_design_step_tells_the_new_heads_deputy(self):
@@ -461,7 +465,7 @@ class ResubmitTests(NoticeBase):
 
     def test_a_kept_site_engineer_approval_sends_the_bill_straight_to_the_pm(self):
         approval, _ = self.act(self.raise_bill)
-        self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se)
+        self.decide(approval, APPROVAL_PARTY_SITE_ENGINEER, APPROVE, self.se, files=[dict(SE_PHOTO)])
         self.decide(approval, APPROVAL_PARTY_PM, CHANGES, self.pm, note='Rate wrong.')
         _, sent = self.act(resubmit_approval_request, approval, self.scm, 'Rate fixed.',
                            carry={APPROVAL_PARTY_SITE_ENGINEER: 'Work unchanged'})

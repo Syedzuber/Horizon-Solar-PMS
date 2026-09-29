@@ -79,6 +79,12 @@ CONTRACTOR BILLS 4a-2 (29 Sep 2026) put the 4a-1 bill on the page:
   * a bill's resubmit carries the note, photos, approver changes and kept approvals
     only. Any posted revision is IGNORED for a bill: the chokepoint does not yet refuse a
     scope or vendor change on one (SECONDARY_FINDINGS, 4a-2; 4b adds bill revision).
+
+CONTRACTOR BILLS 4a-3 (D-A53, D-A54): the Site Engineer confirms the WORK, never the bill.
+A viewer whose only standing is being the bill's Site Engineer (sees_bill) reads the site,
+contractor, tasks, description, photos and task warnings — never the amount, bill number,
+date or PDF. Their step is answered with "Confirm work done" (site photos required) or
+"Work not done" (a note), in approval_decide; the rules are the chokepoint's.
 """
 import logging
 import uuid as _uuid
@@ -98,7 +104,7 @@ from .approval_forms import (
     assignee_choices, bill_site, bill_site_choices, bill_task_choices, contractor_choices,
     current_scope_pks, design_authority_choices, keepable_steps, line_rows,
     parse_assignee_overrides, parse_attachments, parse_bill_create, parse_bill_photos,
-    parse_carry, parse_client_uuid,
+    parse_carry, parse_client_uuid, parse_site_photos,
     parse_create, parse_evidence_files, parse_linked_order, parse_lines, parse_new_assignee,
     parse_proxy, parse_revision, person_name, order_link_choices, po_pi_record_choices,
     po_pi_record_label, pre_order_choices, scope_choices, vendor_choices,
@@ -116,7 +122,8 @@ from .approvals import (
     round_snapshot, unlink_order_from_approval, withdraw_approval_request,
 )
 from .bill_rules import (
-    bill_warnings, format_bill_amount, site_engineer_choices, task_status_label,
+    bill_warnings, format_bill_amount, incomplete_task_warnings, site_engineer_choices,
+    task_status_label,
 )
 from .bill_storage import (
     BILL_STORAGE_NOT_READY, BILL_STORAGE_OFF, BillStorageError, bill_pdf_url, bills_bucket,
@@ -128,8 +135,8 @@ from .models import (
     ContractorBillDetail, StatusTransition, VendorOrder,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
-    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN, APPROVAL_PARTY_PM,
-    APPROVAL_PARTY_SITE_ENGINEER,
+    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
+    APPROVAL_PARTY_PM, APPROVAL_PARTY_SITE_ENGINEER,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_PROXY_CHANNEL_CHOICES,
     APPROVAL_STATUS_CHOICES, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
     APPROVAL_STEP_PENDING, APPROVAL_STEP_REJECTED, APPROVAL_STEP_SUPERSEDED,
@@ -137,6 +144,7 @@ from .models import (
 )
 from .order_views import _remove_uploaded
 from .permissions import (
+    APPROVAL_PORTFOLIO_ROLES, user_has_design_head_authority,
     approval_request_visibility_q, user_can_decide_approval_step,
     user_can_link_approval_order, user_can_raise_approval_request,
     user_can_reassign_approval_step, user_can_record_proxy_decision,
@@ -172,6 +180,51 @@ BILL_APPROVAL_NOTE = ('Approving confirms the work was done. Nobody has checked 
 #: The bill statuses whose detail page shows the warnings (ruling 7, 4a-2): while someone
 #: may still act on them. On a closed bill they would only be noise.
 _BILL_WARNING_STATUSES = (APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED)
+
+#: What a viewer who is only the bill's Site Engineer reads in place of B-16's note
+#: (D-A53, 4a-3).
+SITE_ENGINEER_WORK_NOTE = ('You are confirming the work on site. You are not approving '
+                           'the bill or its amount.')
+
+#: A Site Engineer step's verdicts as the page names them (D-A53): the Site Engineer
+#: confirms the work or says it is not done; "approved" would read as approving the bill.
+_SITE_ENGINEER_VERDICTS = {
+    APPROVAL_STEP_APPROVED:          'Work confirmed',
+    APPROVAL_STEP_CHANGES_REQUESTED: 'Work not done',
+}
+
+#: The Site Engineer's two outcomes, for the SCM proxy form on that step. No reject.
+_SITE_ENGINEER_DECISIONS = [
+    (APPROVAL_STEP_APPROVED,          'Confirm work done'),
+    (APPROVAL_STEP_CHANGES_REQUESTED, 'Work not done'),
+]
+
+
+def sees_bill(user, approval, steps):
+    """True when `user` may see a contractor bill's amount, bill number, bill date and
+    PDF (D-A53, 4a-3): every reader of the request EXCEPT one whose ONLY standing on it is
+    being its Site Engineer. The Site Engineer confirms the work, never the bill.
+
+    Read as permissions.user_can_view_approval_request with the Site Engineer steps left
+    out: SCM, CEO, Admin and System Admin; the raiser; anyone who is or was the assignee,
+    or the decider, of any other party's step in any round; Design Head authority where
+    there is a design step (never on a bill — kept so the two rules read alike). A past
+    Site Engineer who is now a PM on the bill therefore sees it all. `steps` are the
+    request's steps already in memory, so no query.
+
+    Lives here, not in permissions.py, by ruling (Q6, 4a-3); it belongs there
+    (SECONDARY_FINDINGS, 4a-3)."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    # SCM, CEO, Admin and System Admin read every request in full; so does whoever raised it.
+    if profile.role in APPROVAL_PORTFOLIO_ROLES or approval.raised_by_id == profile.pk:
+        return True
+    others = [s for s in steps if s.party != APPROVAL_PARTY_SITE_ENGINEER]
+    if any(s.assignee_id == profile.pk or s.decided_by_id == profile.pk for s in others):
+        return True
+    return (any(s.party == APPROVAL_PARTY_DESIGN for s in others)
+            and user_has_design_head_authority(user))
 
 # The decision buttons, in the order drawn. Plain English, never the stored value.
 _DECISIONS = [
@@ -516,12 +569,23 @@ def _bill_task_label(task_name, location_label):
     return f'{task_name} — {location_label}' if location_label else task_name
 
 
-def bill_display(bill, contractor_name, sign):
+def _work_only(block):
+    """`block` (a _bill_block.html dict) as a viewer who is only the bill's Site Engineer
+    reads it (D-A53): the site, the contractor and the tasks, never the amount, the bill
+    number, the bill date or the PDF. The keys stay, empty, so no template can draw them by
+    accident; `work_only` tells the block to leave their rows out."""
+    return dict(block, bill_number=None, bill_date=None, amount=None, pdf_name=None,
+                pdf_size_kb=None, pdf_url=None, work_only=True)
+
+
+def bill_display(bill, contractor_name, sign, full=True):
     """A round's bill — a schema-3 snapshot's `bill` block — in the shape _bill_block.html
     draws, or None when the round has none (every material round). Built from the dict
     alone, never a live row: a snapshot says what that round saw. The PDF is the one that
     ROUND recorded, signed through `sign` (_pdf_signer). No status and no warnings: those
-    are about now, and are drawn on the request's own bill block (_bill_now)."""
+    are about now, and are drawn on the request's own bill block (_bill_now).
+
+    `full` False (sees_bill, 4a-3): the work-only block, and the PDF is not even signed."""
     if not bill:
         return None
     project, pdf = bill.get('project') or {}, bill.get('pdf') or {}
@@ -529,7 +593,7 @@ def bill_display(bill, contractor_name, sign):
         bill_date = date.fromisoformat(bill.get('bill_date') or '')
     except ValueError:
         bill_date = None
-    return {
+    block = {
         'contractor':  contractor_name or '—',
         'site':        f"{project.get('project_id', '—')} — {project.get('customer_name', '')}",
         'bill_number': bill.get('bill_number') or '—',
@@ -537,12 +601,17 @@ def bill_display(bill, contractor_name, sign):
         'amount':      format_bill_amount(bill.get('amount')),
         'pdf_name':    pdf.get('file_name') or 'Bill PDF',
         'pdf_size_kb': pdf.get('size_kb'),
-        'pdf_url':     sign(pdf.get('bucket'), pdf.get('path')),
+        'pdf_url':     None,
         'tasks':       [{'label': _bill_task_label(t.get('task_name'), t.get('location_label')),
                          'phase': t.get('phase_name'), 'status': None}
                         for t in bill.get('tasks') or ()],
         'warnings':    [],
+        'work_only':   False,
     }
+    if not full:
+        return _work_only(block)
+    block['pdf_url'] = sign(pdf.get('bucket'), pdf.get('path'))
+    return block
 
 
 def _current_assignees(steps, round_no):
@@ -555,14 +624,19 @@ def _current_assignees(steps, round_no):
     return held
 
 
-def _bill_now(approval, steps, sign):
+def _bill_now(approval, steps, sign, full=True):
     """The request's bill as it stands, for the detail and resubmit pages, in
     bill_display()'s shape plus each task's status NOW (bill_rules.task_status_label) and,
     while the bill is open or waiting for changes, its warnings (bill_rules.bill_warnings,
     this bill excluded from "another bill", the Site Engineer and PM as they hold the
     current round). None for any other kind, at no query.
 
-    Two queries for the bill and its tasks, three more for the warnings when drawn."""
+    `full` False — the viewer is only the bill's Site Engineer (sees_bill, 4a-3, D-A53):
+    the work-only block, the PDF not signed, and only the task warnings (unfinished and
+    Not Applicable, bill_rules.incomplete_task_warnings) — the others name bill numbers or
+    are about who SCM chose (Q3).
+
+    Two queries for the bill and its tasks, three more for the full warnings when drawn."""
     if approval.kind != APPROVAL_KIND_CONTRACTOR_BILL:
         return None
     # The bill with its site: the block names the site, and the warnings compare against
@@ -578,11 +652,14 @@ def _bill_now(approval, steps, sign):
              .order_by('pk')]
     warnings = []
     if approval.status in _BILL_WARNING_STATUSES:
-        held = _current_assignees(steps, approval.current_round)
-        warnings = bill_warnings(project, tasks, approval.vendor, detail.bill_number,
-                                 held.get(APPROVAL_PARTY_SITE_ENGINEER),
-                                 held.get(APPROVAL_PARTY_PM), exclude=approval)
-    return {
+        if full:
+            held = _current_assignees(steps, approval.current_round)
+            warnings = bill_warnings(project, tasks, approval.vendor, detail.bill_number,
+                                     held.get(APPROVAL_PARTY_SITE_ENGINEER),
+                                     held.get(APPROVAL_PARTY_PM), exclude=approval)
+        else:
+            warnings = incomplete_task_warnings(project, tasks)
+    block = {
         'contractor':  approval.vendor.name if approval.vendor is not None else '—',
         'site':        f'{project.project_id} — {project.customer_name}',
         'bill_number': detail.bill_number,
@@ -590,13 +667,18 @@ def _bill_now(approval, steps, sign):
         'amount':      format_bill_amount(detail.amount),
         'pdf_name':    detail.pdf_file_name,
         'pdf_size_kb': detail.pdf_size_kb,
-        'pdf_url':     sign(detail.pdf_bucket, detail.pdf_path),
+        'pdf_url':     None,
         'tasks':       [{'label': _bill_task_label(t.task_name, t.location_label),
                          'phase': t.phase.phase_name,
                          'status': task_status_label(t, project.project_type)}
                         for t in tasks],
         'warnings':    warnings,
+        'work_only':   False,
     }
+    if not full:
+        return _work_only(block)
+    block['pdf_url'] = sign(detail.pdf_bucket, detail.pdf_path)
+    return block
 
 
 def _record_short(order):
@@ -1273,6 +1355,12 @@ _DECISION_VERBS = {
     APPROVAL_STEP_REJECTED:          'rejected',
 }
 
+#: A Site Engineer's decisions in History (D-A53, Q4): what they said about the work.
+_SITE_ENGINEER_HISTORY = {
+    APPROVAL_STEP_APPROVED:          'confirmed the work done',
+    APPROVAL_STEP_CHANGES_REQUESTED: 'said the work is not done',
+}
+
 # The request status a decision moves it to, and the step verdict that moved it there.
 _VERDICT_FOR_STATUS = {
     APPROVAL_APPROVED:          APPROVAL_STEP_APPROVED,
@@ -1323,8 +1411,12 @@ def _history(approval, steps, links=()):
             continue
         party = _PARTY_LABELS.get(step.party, step.party)
         proxy = _proxy_line(step)
+        # A Site Engineer confirms the work or says it is not done (D-A53, Q4).
+        verb = (_SITE_ENGINEER_HISTORY.get(step.verdict, _DECISION_VERBS[step.verdict])
+                if step.party == APPROVAL_PARTY_SITE_ENGINEER
+                else _DECISION_VERBS[step.verdict])
         event = _event(step.decided_at, (1, step.pk),
-                       f'{party} {_DECISION_VERBS[step.verdict]} (round {step.round})',
+                       f'{party} {verb} (round {step.round})',
                        person_name(step.decided_by), lines=[proxy] if proxy else (),
                        remark=step.note)
         decisions[step.pk] = event
@@ -1391,12 +1483,19 @@ def _history(approval, steps, links=()):
     return events
 
 
-def _step_row(user, step, approval, deciders, by_pk=None, evidence=()):
+def _step_row(user, step, approval, deciders, by_pk=None, evidence=(), kept_photos=()):
     """One step as the page draws it, with the action forms its predicates allow. A
     carried step is described as kept (_kept) and is never timed: it was activated and
-    decided in the same instant by nobody's fresh act (approvals.exclude_carried_steps)."""
+    decided in the same instant by nobody's fresh act (approvals.exclude_carried_steps).
+
+    A Site Engineer step (4a-3, D-A53) reads as the work, not the bill: its verdict as
+    "Work confirmed" / "Work not done", its own site photos as `evidence`, and — when it
+    is kept — the photos of the step it keeps as `kept_photos` ("Photos from round N").
+    Its decider gets two forms, confirm (photos required) and work not done (note
+    required), instead of the three decision buttons; SCM's proxy form offers those two."""
     step.request = approval   # the predicates read step.request; no query
     kept = _kept(step, by_pk or {})
+    is_site_engineer = step.party == APPROVAL_PARTY_SITE_ENGINEER
     turnaround = step_turnaround(step)
     if kept:
         turnaround_text = 'Not timed (kept)'
@@ -1408,7 +1507,12 @@ def _step_row(user, step, approval, deciders, by_pk=None, evidence=()):
         'badge':        _STEP_BADGES.get(step.verdict, 'text-bg-secondary'),
         'turnaround':   turnaround_text,
         'kept':         kept,
+        'kept_photos':  list(kept_photos),
         'evidence':     list(evidence),
+        'is_site_engineer': is_site_engineer,
+        'verdict_label': (_SITE_ENGINEER_VERDICTS.get(step.verdict)
+                          if is_site_engineer else None) or step.get_verdict_display(),
+        'proxy_decisions': _SITE_ENGINEER_DECISIONS if is_site_engineer else _DECISIONS,
         'proxy_line':   _proxy_line(step),
         'can_decide':   user_can_decide_approval_step(user, step),
         'can_proxy':    user_can_record_proxy_decision(user, step),
@@ -1442,6 +1546,13 @@ def approval_detail(request, approval_pk):
     status now, the warnings while it is open or waiting for changes, and B-16's note.
     Each round draws the bill its snapshot recorded (bill_display). A material request
     pays no query for any of it.
+
+    THE SITE ENGINEER SEES THE WORK, NOT THE BILL (4a-3, D-A53). When sees_bill() says the
+    viewer's only standing is being the bill's Site Engineer, the Request card and every
+    round draw the site, contractor and tasks without the amount, bill number, date or PDF
+    (the PDF is not even signed), only the task warnings, and the Site Engineer's note in
+    place of B-16's. A Site Engineer step shows its site photos; a kept one, the photos of
+    the step it keeps.
 
     Access: user_can_view_approval_request — SCM, CEO, Admin, System Admin; the raiser;
     anyone named on or deciding any step; Design Head authority where there is a design
@@ -1481,7 +1592,15 @@ def approval_detail(request, approval_pk):
     links = _order_links(approval)
     # A contractor bill's PDF links are minted here, per render, never stored (D-A40).
     sign = _pdf_signer()
-    bill = _bill_now(approval, steps, sign)
+    # A viewer who is only the bill's Site Engineer reads the work, never the bill's
+    # amount, number, date or PDF — on the Request card and on every round (D-A53).
+    full = sees_bill(user, approval, steps)
+    bill = _bill_now(approval, steps, sign, full=full)
+    # Each step's own files: a proxy's evidence, or a Site Engineer's site photos.
+    files_of = {}
+    for a in attachments:
+        if a['file'].step_id is not None:
+            files_of.setdefault(a['file'].step_id, []).append(a)
     rounds = []
     for round_no in range(approval.current_round, 0, -1):     # newest first
         snapshot = snapshots[round_no]
@@ -1489,12 +1608,16 @@ def approval_detail(request, approval_pk):
         if bill is not None:
             details['bill'] = bill_display((snapshot or {}).get('bill'),
                                            ((snapshot or {}).get('vendor') or {}).get('name'),
-                                           sign)
+                                           sign, full=full)
         rounds.append({
             'number':       round_no,
             'is_current':   round_no == approval.current_round,
             'steps':        [_step_row(user, s, approval, deciders, by_pk,
-                                       [a for a in attachments if a['file'].step_id == s.pk])
+                                       files_of.get(s.pk, ()),
+                                       # A kept Site Engineer step shows the photos of the
+                                       # step it keeps (P6, 4a-3); a kept step has none.
+                                       files_of.get(_origin_step(s, by_pk).pk, ())
+                                       if s.carried_from_id is not None else ())
                              for s in steps if s.round == round_no],
             # A proxy's evidence is drawn under its step, not with the round's files.
             'attachments':  [a for a in attachments
@@ -1513,7 +1636,8 @@ def approval_detail(request, approval_pk):
         # The request's material as it stands, drawn as the rounds draw theirs.
         'material_now':   material_display(current['material']),
         'bill':           bill,
-        'bill_note':      BILL_APPROVAL_NOTE,
+        # B-16's note for whoever sees the bill; the Site Engineer's own note otherwise.
+        'bill_note':      BILL_APPROVAL_NOTE if full else SITE_ENGINEER_WORK_NOTE,
         'dispatch':       dispatch,
         'programs':       programs,
         'projects':       projects,
@@ -1522,6 +1646,7 @@ def approval_detail(request, approval_pk):
         'order_links':    _order_links_section(user, approval, links),
         'history':        _history(approval, steps, links),
         'evidence_accept': ','.join(f'.{ext}' for ext in EVIDENCE_EXTENSIONS),
+        'photo_accept':   ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
         'decisions':      _DECISIONS,
         'channels':       APPROVAL_PROXY_CHANNEL_CHOICES,
         'can_withdraw':   user_can_withdraw_approval_request(user, approval),
@@ -1542,8 +1667,16 @@ def approval_decide(request, step_pk):
     never the assignee of a PM step; a raiser who holds Design Head authority is refused
     by the chokepoint's same-person rule, as a message. A stale page (the step already
     closed) is the chokepoint's refusal, as a message. Calls apply_approval_decision().
+
+    A SITE ENGINEER STEP (4a-3, D-A53): "Confirm work done" (approved) or "Work not done"
+    (changes requested), each with site photos under `site_photos` — jpg/jpeg/png,
+    checked before any is stored, uploaded, then passed as `files` and linked to the step
+    by the chokepoint. At least one photo to confirm, and no reject, are the chokepoint's
+    rules; on its refusal or any error the stored photos are removed again.
     """
     step, approval = _step_for_action(step_pk)
+    # Only the person who answers this step (its assignee, or Design Head authority on a
+    # design step) may post here; anyone else who can read the request is not its decider.
     if not (user_can_view_approval_request(request.user, approval)
             and user_may_answer_approval_step(request.user, step)):
         return _forbidden(request)
@@ -1551,13 +1684,33 @@ def approval_decide(request, step_pk):
         return _detail(approval.pk)
 
     verdict = request.POST.get('verdict', '')
+    is_site_engineer = step.party == APPROVAL_PARTY_SITE_ENGINEER
+    stored, cleanup = [], lambda: None
+    if is_site_engineer:
+        errors = []
+        photos = parse_site_photos(request, errors)
+        if errors:
+            for error in errors:
+                messages.error(request, error)
+            return _detail(approval.pk)
+        try:
+            stored, cleanup = _upload_attachments(
+                photos, f'{approval.pk}/round-{step.round}/site-{step.pk}')
+        except _AttachmentUploadFailed as exc:
+            messages.error(request, str(exc))
+            return _detail(approval.pk)
     try:
         apply_approval_decision(step, verdict, request.user.profile,
-                                note=request.POST.get('note', ''))
+                                note=request.POST.get('note', ''), files=stored)
     except ApprovalRefused as exc:
+        cleanup()
         messages.error(request, str(exc))
         return _detail(approval.pk)
-    label = dict(_DECISIONS).get(verdict, verdict)
+    except Exception:
+        cleanup()
+        raise
+    label = ((_SITE_ENGINEER_VERDICTS if is_site_engineer else dict(_DECISIONS))
+             .get(verdict, verdict))
     messages.success(request, f'Recorded: {label.lower()} for the '
                               f'{_PARTY_LABELS.get(step.party, step.party)} step.')
     return _detail(approval.pk)
@@ -1577,6 +1730,10 @@ def approval_record_proxy(request, step_pk):
     chokepoint writes their rows, linked to the step, inside its transaction. On any
     refusal or error the uploaded files are removed again (_remove_uploaded, via the
     upload helper's cleanup), so a refused proxy leaves neither a row nor a file.
+
+    On a Site Engineer step (4a-3) the form offers "Confirm work done" and "Work not
+    done" only; confirming needs at least one photo among the evidence files (the ones the
+    Site Engineer sent), which the chokepoint enforces.
     """
     step, approval = _step_for_action(step_pk)
     if not (user_can_view_approval_request(request.user, approval)

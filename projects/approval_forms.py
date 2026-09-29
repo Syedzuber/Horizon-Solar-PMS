@@ -711,3 +711,11 @@ def parse_bill_photos(request, errors):
     """A bill resubmit's new photos, under `attachments`: jpg/jpeg/png only, as on the
     raise page. Touches no storage."""
     return _validated_files(request, 'attachments', errors, BILL_PHOTO_EXTENSIONS)
+
+
+def parse_site_photos(request, errors):
+    """A Site Engineer's site photos, under `site_photos` (4a-3, D-A53): jpg/jpeg/png
+    only, 20 MB each, at most ATTACHMENT_LIMIT. Whether a confirmation has at least one is
+    the chokepoint's rule (approvals._site_engineer_refusal), not this function's. Touches
+    no storage."""
+    return _validated_files(request, 'site_photos', errors, BILL_PHOTO_EXTENSIONS)

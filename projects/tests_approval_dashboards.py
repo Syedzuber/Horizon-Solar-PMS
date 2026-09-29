@@ -47,7 +47,7 @@ from .models import (
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
     APPROVAL_STEP_SUPERSEDED,
 )
-from .tests_approvals import MODULE_LINE
+from .tests_approvals import MODULE_LINE, SE_PHOTO
 
 
 def _profile(username, role, **flags):
@@ -243,7 +243,7 @@ class CardTests(DashboardFixture):
         self.assertEqual([r['step'].party for r in pending_steps_for(self.se)],
                          [APPROVAL_PARTY_SITE_ENGINEER])
         apply_approval_decision(self.step(bill, APPROVAL_PARTY_SITE_ENGINEER),
-                                APPROVAL_STEP_APPROVED, self.se)
+                                APPROVAL_STEP_APPROVED, self.se, files=[dict(SE_PHOTO)])
         self.assertEqual(self.titles(pending_steps_for(self.pm)), ['Civil works bill'])
 
     def test_zero_state_for_an_approver(self):

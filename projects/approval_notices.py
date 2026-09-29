@@ -78,6 +78,12 @@ the contractor, the site, the contractor's bill number and the amount — labell
 instead of "Material". Every bill email carries it (E1, E2 and E3, ruling 4). NO EMAIL AND
 NO IN-APP NOTICE EVER CARRIES THE BILL PDF, A LINK TO IT, OR WHERE IT IS STORED: the summary
 is built from those four values only, and this module does not import bill_storage.
+
+THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53). A notice to a Site
+Engineer — asked to confirm (E1), or told the bill was withdrawn (E3) — carries no amount,
+bill number or PDF: its email summary is the work — contractor · site · tasks
+("Foundation, +1 more", work_summary), labelled "Work". It asks them "to confirm the
+work", never to approve. The PM, SCM and the raiser keep the full bill summary.
 """
 import logging
 
@@ -89,7 +95,7 @@ from .models import (
     ApprovalRequest, ApprovalStep, ContractorBillDetail, MaterialApprovalLine, UserProfile,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_PARTY_CHOICES,
-    APPROVAL_PARTY_DESIGN,
+    APPROVAL_PARTY_DESIGN, APPROVAL_PARTY_SITE_ENGINEER,
     APPROVAL_PROXY_EMAIL, APPROVAL_PROXY_IN_PERSON, APPROVAL_PROXY_PHONE,
     APPROVAL_PROXY_WHATSAPP,
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
@@ -137,11 +143,22 @@ T_KEPT = 'approval_kept'
 T_PROXY = 'approval_proxy_recorded'
 
 
+#: E6's "<verdict>" for a Site Engineer (4a-3): what they said about the work.
+_SITE_ENGINEER_VERDICT_NOUNS = {
+    APPROVAL_STEP_APPROVED: 'confirmation that the work is done',
+    APPROVAL_STEP_CHANGES_REQUESTED: 'report that the work is not done',
+}
+
+
 class _Notice:
-    """One message to one person. `html` is None for an in-app-only notice."""
+    """One message to one person. `html` is None for an in-app-only notice.
+
+    `work_only` (4a-3): the recipient is told as the bill's Site Engineer, so an email
+    carries the work summary, never the bill's (D-A53)."""
 
     def __init__(self, recipient, message, channels, template, subject='',
-                 body='', quote_label='', quote=''):
+                 body='', quote_label='', quote='', work_only=False):
+        self.work_only = work_only
         self.recipient = recipient
         self.message = message
         self.channels = channels
@@ -215,11 +232,38 @@ def bill_summary(approval):
             f'bill {detail.bill_number} · {format_bill_amount(detail.amount)}')
 
 
-def email_summary(approval):
-    """(summary, label) for an approval email: a bill's bill_summary under "Bill", any
-    other request's lines_summary under "Material". The summary is '' when there is
-    nothing to say. One query."""
+def work_summary(approval):
+    """What a contractor bill's Site Engineer is asked about, in one line (4a-3, D-A53):
+    the contractor, the site and the tasks — "Civil Co · HRP-RES-2026-001 · Foundation, +1
+    more". Never the amount, the bill number or the PDF. '' for a request with no bill.
+    Two queries."""
+    # The bill with the contractor and the site, as bill_summary reads it.
+    detail = (ContractorBillDetail.objects.select_related('request__vendor', 'project')
+              .filter(request_id=approval.pk).first())
+    if detail is None:
+        return ''
+    # The bill's tasks in the order it names them; only the first is named.
+    tasks = list(detail.task_links.select_related('task').order_by('pk'))
+    vendor = detail.request.vendor
+    summary = f'{vendor.name if vendor else "—"} · {detail.project.project_id}'
+    if tasks:
+        first = tasks[0].task
+        label = (f'{first.task_name} — {first.location_label}' if first.location_label
+                 else first.task_name)
+        summary += f' · {label}'
+        if len(tasks) > 1:
+            summary += f', +{len(tasks) - 1} more'
+    return summary
+
+
+def email_summary(approval, work_only=False):
+    """(summary, label) for an approval email: a bill's bill_summary under "Bill" — or,
+    for its Site Engineer (`work_only`, 4a-3), work_summary under "Work" — and any other
+    request's lines_summary under "Material". The summary is '' when there is nothing to
+    say. One or two queries."""
     if approval.kind == APPROVAL_KIND_CONTRACTOR_BILL:
+        if work_only:
+            return work_summary(approval), 'Work'
         return bill_summary(approval), 'Bill'
     return lines_summary(approval), 'Material'
 
@@ -250,7 +294,9 @@ def _send(approval, notices, excluded, actor):
     template name; only the email row's message differs."""
     told = set(excluded)
     link = _link(approval)
-    summary = label = None      # read once per action, and only if someone is emailed
+    # Read once per action per kind of reader — the bill's own, or its Site Engineer's
+    # work-only line (4a-3) — and only if someone of that kind is emailed.
+    summaries = {}
     for notice in notices:
         person = notice.recipient
         if not _is_active(person) or person.pk in told:
@@ -260,8 +306,9 @@ def _send(approval, notices, excluded, actor):
             html = None
             channels, email_text = notice.channels, notice.message
             if 'email' in notice.channels:
-                if summary is None:
-                    summary, label = email_summary(approval)
+                if notice.work_only not in summaries:
+                    summaries[notice.work_only] = email_summary(approval, notice.work_only)
+                summary, label = summaries[notice.work_only]
                 html = email_html(approval, notice.subject, notice.body,
                                   notice.quote_label, notice.quote, summary=summary,
                                   summary_label=label)
@@ -296,6 +343,14 @@ def _activated_notices(approval, steps, asked_by):
     notices, deputies = [], []
     for step in steps:
         party = _PARTY_LABELS.get(step.party, step.party)
+        if step.party == APPROVAL_PARTY_SITE_ENGINEER:
+            # The Site Engineer confirms the work, never the bill (D-A53, Q4).
+            body = (f'{asked_by} to confirm the work on {_about(approval)}. Open it to '
+                    f'confirm the work done, or say it is not done.')
+            notices.append(_Notice(step.assignee, body, IN_APP_AND_EMAIL, T_ACTIVATED,
+                                   subject=f'Work to confirm: {approval.title}', body=body,
+                                   work_only=True))
+            continue
         body = (f'{asked_by} to approve {_about(approval)} as the {party}. '
                 f'Open it to approve, request changes or reject.')
         notices.append(_Notice(step.assignee, body, IN_APP_AND_EMAIL, T_ACTIVATED,
@@ -339,15 +394,24 @@ def after_decision(step_pk, actor_pk, closed_as=None):
                                    activated_at=step.decided_at,
                                    carried_from__isnull=True)
                  if s.pk != step.pk]
+    # A Site Engineer confirmed the work; they did not approve the bill (D-A53, Q4).
+    did = ('confirmed the work done' if step.party == APPROVAL_PARTY_SITE_ENGINEER
+           else 'approved')
     notices += _activated_notices(
         approval, activated,
-        f'{_name(decider)} approved as the {party}; you are now asked')
+        f'{_name(decider)} {did} as the {party}; you are now asked')
 
     if closed_as in T_CLOSED:
         if closed_as == APPROVAL_APPROVED:
             subject = f'Approved: {approval.title}'
             body = (f'{_about(approval)} is approved. {_name(decider)} gave the last '
                     f'approval, as the {party}.')
+        elif closed_as == APPROVAL_CHANGES_REQUESTED                 and step.party == APPROVAL_PARTY_SITE_ENGINEER:
+            # "Work not done" (D-A53): the Site Engineer's changes request, as History
+            # words it.
+            subject = f'Changes requested: {approval.title}'
+            body = (f'{_name(decider)} said the work on {_about(approval)} is not done, as '
+                    f'the {party}. Revise and resubmit it, or withdraw it.')
         elif closed_as == APPROVAL_CHANGES_REQUESTED:
             subject = f'Changes requested: {approval.title}'
             body = (f'{_name(decider)} requested changes to {_about(approval)} as the '
@@ -376,8 +440,11 @@ def after_decision(step_pk, actor_pk, closed_as=None):
     _send(approval, notices, excluded, recorder)
 
     if step.is_proxy and decider.pk != actor_pk:
+        # A Site Engineer's decision is about the work, never an approval (4a-3).
+        nouns = (_SITE_ENGINEER_VERDICT_NOUNS
+                 if step.party == APPROVAL_PARTY_SITE_ENGINEER else _VERDICT_NOUNS)
         message = (f'{_name(recorder)} recorded your '
-                   f'{_VERDICT_NOUNS.get(step.verdict, step.verdict)} on '
+                   f'{nouns.get(step.verdict, step.verdict)} on '
                    f'"{approval.title}" from '
                    f'{_CHANNEL_PHRASES.get(step.proxy_channel, step.proxy_channel)}.')
         # Told nothing else in this action: E1 and E2 above excluded the decider.
@@ -429,9 +496,11 @@ def after_withdraw(approval_pk, actor_pk):
     subject = f'Withdrawn: {approval.title}'
     body = f'{_name(actor)} withdrew {_about(approval)}. You no longer need to decide it.'
     note = approval.withdrawal_note
+    # A Site Engineer's E3 email carries the work summary, not the bill's (4a-3).
     notices = [_Notice(s.assignee, f'{body} Reason: "{note}"', IN_APP_AND_EMAIL,
                        T_WITHDRAWN, subject=subject, body=body,
-                       quote_label='Reason', quote=note)
+                       quote_label='Reason', quote=note,
+                       work_only=s.party == APPROVAL_PARTY_SITE_ENGINEER)
                for s in steps]
     _send(approval, notices, {actor_pk}, actor)
 

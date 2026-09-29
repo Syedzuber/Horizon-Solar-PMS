@@ -19,6 +19,15 @@ and has no Raise button: a POST would be refused anyway.
 
 BUILT FOR 380 px, like every approvals page: one column, full-width inputs, the task list
 as stacked check boxes under each phase's name.
+
+NEVER A SILENT FAILURE (4a-3, D-A54). Every required field carries `required`, and the
+task tick-list — which HTML cannot mark required as a group — is made invalid by a small
+script while nothing is ticked, so the browser stops the submit BEFORE any reload, while
+the PDF is still chosen. After any server re-render (`post` set: a refusal or the
+warnings) a banner at the top and a red line beside the PDF field say to attach the PDF
+again, and the page scrolls to the first message: a re-rendered page has an empty
+required PDF field, and without them the next Raise would only be stopped by the browser's
+own bubble (walked in Edge, 4a-3 pre-flight). Without script the server still refuses.
 {% endcomment %}
 {% block title %}Raise contractor bill — SolarPMS{% endblock %}
 
@@ -34,6 +43,10 @@ as stacked check boxes under each phase's name.
 
 {% if not storage_ready %}
 <div class="alert alert-warning">{{ storage_notice }}</div>
+{% endif %}
+
+{% if post %}
+<div class="alert alert-danger" id="cbReattach">Attach the bill PDF again — the browser does not keep a chosen file after the page reloads.</div>
 {% endif %}
 
 {% if already %}
@@ -131,6 +144,7 @@ as stacked check boxes under each phase's name.
       <div class="mb-0">
         <label for="cbPdf" class="form-label">Bill PDF</label>
         <input type="file" name="bill_pdf" id="cbPdf" class="form-control w-100" accept=".pdf,application/pdf" required>
+        {% if post %}<div class="form-text text-danger fw-semibold">Attach the bill PDF again — the browser does not keep a chosen file after the page reloads.</div>{% endif %}
         <div class="form-text">The contractor's bill, as a PDF, 20 MB at most. Stored privately.</div>
       </div>
     </div>
@@ -190,6 +204,7 @@ as stacked check boxes under each phase's name.
       <div class="mb-0">
         <label for="cbDescription" class="form-label">Description</label>
         <textarea name="description" id="cbDescription" class="form-control w-100" rows="3" required>{{ post.description|default:'' }}</textarea>
+        <div class="form-text">The Site Engineer sees the title and description. Do not put the amount in them.</div>
       </div>
     </div>
   </div>
@@ -209,6 +224,31 @@ as stacked check boxes under each phase's name.
     {% if storage_ready and not already %}<button type="submit" class="btn btn-brand">Raise bill</button>{% endif %}
   </div>
 </form>
+
+<script>
+// The task tick-list, required as a group: while no task is ticked the first box carries
+// a custom validity message, so the browser stops the submit before the page reloads and
+// the chosen PDF is lost. The server still refuses a bill with no task (no script, or a
+// page with no tasks).
+document.addEventListener('DOMContentLoaded', function () {
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('#cbCreateForm input[name="task"]'));
+  if (!boxes.length) return;
+  function sync() {
+    var none = !boxes.some(function (b) { return b.checked; });
+    boxes[0].setCustomValidity(none ? 'Tick at least one task this bill covers.' : '');
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', sync); });
+  sync();
+});
+{% if post %}
+// After a server re-render, bring the first message into view (a message, or the
+// "attach the PDF again" banner), whatever scroll position the browser kept.
+document.addEventListener('DOMContentLoaded', function () {
+  var first = document.querySelector('.container .alert');
+  if (first) first.scrollIntoView({ block: 'start' });
+});
+{% endif %}
+</script>
 {% endif %}
 
 {% endblock %}

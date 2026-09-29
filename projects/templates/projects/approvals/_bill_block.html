@@ -8,12 +8,17 @@ minted for this render only); when none could be minted the row says "File unava
 never a broken link. A task's status is drawn only for the bill as it stands (a round's
 snapshot records names, not statuses); the warnings only while the bill is open or waiting
 for changes. `note` is B-16's fixed sentence, passed by the pages that draw the live bill.
+
+`b.work_only` (4a-3, D-A53): the viewer is only the bill's Site Engineer. The bill number,
+date, amount and PDF rows are left out altogether (their values are empty too); `note` is
+then the Site Engineer's note, "You are confirming the work on site…".
 {% endcomment %}
 <dl class="row mb-2">
   <dt class="col-5 col-sm-3 text-muted fw-normal">Contractor</dt>
   <dd class="col-7 col-sm-9 text-break">{{ b.contractor }}</dd>
   <dt class="col-5 col-sm-3 text-muted fw-normal">Site</dt>
   <dd class="col-7 col-sm-9 text-break">{{ b.site }}</dd>
+  {% if not b.work_only %}
   <dt class="col-5 col-sm-3 text-muted fw-normal">Bill number</dt>
   <dd class="col-7 col-sm-9 text-break">{{ b.bill_number }}</dd>
   <dt class="col-5 col-sm-3 text-muted fw-normal">Bill date</dt>
@@ -23,6 +28,7 @@ for changes. `note` is B-16's fixed sentence, passed by the pages that draw the 
     <span class="fw-semibold">{{ b.amount }}</span> ·
     {% if b.pdf_url %}<a href="{{ b.pdf_url }}" target="_blank" rel="noopener"><i class="bi bi-file-earmark-pdf"></i> {{ b.pdf_name }}</a>{% if b.pdf_size_kb %} <span class="text-muted">({{ b.pdf_size_kb }} KB)</span>{% endif %}{% else %}<span class="text-muted">File unavailable</span>{% endif %}
   </dd>
+  {% endif %}
   <dt class="col-5 col-sm-3 text-muted fw-normal">Tasks</dt>
   <dd class="col-7 col-sm-9 mb-0 text-break">
     {% for t in b.tasks %}
