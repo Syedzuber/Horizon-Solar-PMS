@@ -2067,6 +2067,8 @@ def _tender_header(sites_qs):
     )
     agg['kwp_display'] = _format_kwp(agg['kwp'])
     agg['kwp_partial'] = agg['kwp_sites'] != agg['sites']
+    # The header's rendered cell, through the one formatter the cards and pipeline use (S8 T5).
+    agg['kwp_text'] = _kwp_coverage_text(agg['kwp'], agg['kwp_sites'], agg['sites'])
     return agg
 
 
@@ -2124,17 +2126,20 @@ def _payment_strip_cards(strip):
 
 
 def _kwp_coverage_text(kwp, kwp_sites, sites):
-    """One pipeline row's kWp cell (S3): '4,745' when every site's capacity is known,
-    '— (0 of 109)' when none is, '1,200 (40 of 80)' when some are, and '—' for an empty
-    stage. The count is always shown when coverage is partial, for the reason the header
-    gives: a bare total would read as the whole stage's."""
+    """THE kWp text of the Tenders page — header, tender cards, their stage rows and the
+    pipeline all render through it (S8 T5), number before unit: '4,745 kWp' when every
+    site's capacity is known, '— kWp (0 of 109 sites)' when none is, '1,200 kWp (40 of 80
+    sites)' when some are, and '—' for an empty stage. The count is shown only when
+    coverage is partial, for the reason the header gives: a bare total would read as the
+    whole set's. (The Design throughput card has no kWp figure.)"""
     if not sites:
         return '—'
+    of_sites = f'of {sites} site{"" if sites == 1 else "s"}'
     if not kwp_sites:
-        return f'— (0 of {sites})'
+        return f'— kWp (0 {of_sites})'
     if kwp_sites == sites:
-        return _format_kwp(kwp)
-    return f'{_format_kwp(kwp)} ({kwp_sites} of {sites})'
+        return f'{_format_kwp(kwp)} kWp'
+    return f'{_format_kwp(kwp)} kWp ({kwp_sites} {of_sites})'
 
 
 # The bar of a non-empty stage never renders narrower than this, so a 1-site stage beside
@@ -2219,14 +2224,26 @@ def _tender_card_rows(sites_qs, project_cards):
 
 def _get_ceo_dashboard_context(context=None):
     """
-    Aggregates portfolio-wide metrics for the CEO dashboard in exactly 3 DB queries.
+    Aggregates portfolio-wide metrics for the CEO dashboard.
+
+    QUERY COUNT (measured 29 Sep 2026, S8, this function alone; the page adds session,
+    user and navbar reads): 35 under ?context=tenders, 10 under Residential and with no
+    context. Fixed whatever the number of projects, tasks or requests. The QUERY 1-8
+    headings below name blocks of work, not single queries — QUERY 4 is several — and
+    the Tenders-only sections state their own costs where they are built.
+
     Query 1: Active project list with Exists annotations for blocked/at_risk classification.
     Query 2: Full task aggregate — status counts, dept rollup (18 cells), KPI time windows,
              blocked KPI, external-dependency KPI — all via a single .aggregate() call.
     Query 3: Full issue aggregate — status counts and resolution time windows.
     Returns a dict ready to be unpacked into the template context.
     """
-    today  = date.today()
+    # The CEO's calendar date (Asia/Kolkata), not date.today() (S8 T6). date.today() is the
+    # process's date, which is UTC wherever the process clock is not IST, so between 00:00
+    # and 05:30 IST these cards read yesterday while the S7 stuck list, the payment strip
+    # and the throughput card — all given localdate() — read today. make_aware() in _to_dt
+    # below already treats the boundaries as IST midnights, so the dates now match it.
+    today  = timezone.localdate()
     now_dt = timezone.now()
 
     # -- Date-window boundaries (computed once; reused across all conditional filters) --
@@ -2799,11 +2816,12 @@ def _get_ceo_dashboard_context(context=None):
     # the four money cards, and the count behind "Not shown: CAPEX". The fin_* figures
     # above are still computed under Tenders — tests_payment_readers_o6 holds the CEO,
     # Finance and the queue to one count through them — they are just not rendered.
-    # timezone.localdate(), not `today` above: `today` is date.today(), the server's
-    # date (UTC on Railway), and "this month" must be the CEO's month (IST).
+    # `today` is timezone.localdate() (S8 T6), so "this month" is the CEO's month (IST).
+    # Every Tenders section below takes that one `today`, so no two of them can straddle
+    # midnight between their own calls.
     if context == CONTEXT_TENDERS:
         ctx['payment_strip'] = _payment_strip_cards(
-            ceo_payment_strip(CEO_TENDER_TYPES, timezone.localdate()))
+            ceo_payment_strip(CEO_TENDER_TYPES, today))
         ctx['capex_hidden'] = _capex_hidden_count()
         # S3, two more queries whatever the site count: every live tender site placed in
         # one stage by tender_stages, over the same tender_sites_qs() the header counts,
@@ -2814,18 +2832,16 @@ def _get_ceo_dashboard_context(context=None):
         # the badges project_cards already carries, so no site is classified twice.
         ctx['tender_cards'] = _tender_card_rows(tender_sites_qs(), project_cards)
         # S5, four more queries whatever the site count: the Design throughput card, every
-        # figure the Design Head's own (tender_stages.design_throughput). localdate(), not
-        # `today`, for the IST reason given above the payment strip.
-        ctx['design_throughput'] = design_throughput(tender_sites_qs(), timezone.localdate())
+        # figure the Design Head's own (tender_stages.design_throughput), on the IST `today`.
+        ctx['design_throughput'] = design_throughput(tender_sites_qs(), today)
         # S6, two queries (six once a step is waiting) whatever the number of requests:
         # approval steps waiting on someone, scoped to live tender sites. The figures are
         # live_pending_steps() and days_waiting() — the aging list's own — only narrowed.
         ctx['tender_approvals'] = tender_approvals_waiting(tender_sites_qs())
-        # S7, seven queries whatever the site count: sites past their stage's limit. The
+        # S7, seven queries at most whatever the site count: sites past their stage's limit. The
         # S7 rule is this function's own Blocked Tasks term, so the same aged_block_cutoff
         # is passed in rather than a second "7 days" (SECONDARY_FINDINGS, S7).
-        ctx['stuck_sites'] = stuck_sites(tender_sites_qs(), timezone.localdate(),
-                                         aged_block_cutoff)
+        ctx['stuck_sites'] = stuck_sites(tender_sites_qs(), today, aged_block_cutoff)
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
@@ -2844,7 +2860,7 @@ def _get_ceo_dashboard_context(context=None):
 @login_required
 @role_required(['CEO', 'Admin', 'System Admin'])
 def dashboard_ceo(request):
-    """CEO portfolio overview. Renders in 3 DB queries via _get_ceo_dashboard_context.
+    """CEO portfolio overview; the figures and their query count are _get_ceo_dashboard_context's.
 
     Access: CEO, plus Admin and System Admin per execution-model §2 D-4 (the
     administrative roles are unrestricted).

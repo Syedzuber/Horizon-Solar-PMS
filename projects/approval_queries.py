@@ -20,7 +20,7 @@ No import of approval_forms: it imports views, and views imports this module.
 from datetime import timedelta
 from statistics import median
 
-from django.db.models import F, Prefetch, Q, prefetch_related_objects
+from django.db.models import Count, F, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
 
 from .approvals import exclude_carried_steps
@@ -246,15 +246,23 @@ def tender_approval_requests(sites_qs):
             .values('pk'))
 
 
-def _unlinked_requests():
-    """Requests with no scope link at all — no program, project or site group. A request
-    linked only to test or non-tender sites is NOT unlinked: it is about something, just
-    not a tender, so it stays out of the card entirely."""
-    linked = (ApprovalRequest.objects
-              .filter(Q(programs__isnull=False) | Q(projects__isnull=False)
-                      | Q(site_groups__isnull=False))
-              .values('pk'))
-    return ApprovalRequest.objects.exclude(pk__in=linked).values('pk')
+def _test_only_requests():
+    """Requests about test data only, as a subquery: their links reach at least one site
+    (a linked project, any membership of a linked site group, a site of a linked program)
+    and every site reached is_test (S8 T3). Removed memberships count as reached: a group
+    that ever held a real site is about real work. A request whose links reach no site at
+    all — none, or only an empty program or group — is NOT test-only."""
+    reaches_real = (ApprovalRequest.objects
+                    .filter(Q(projects__is_test=False)
+                            | Q(site_groups__memberships__project__is_test=False)
+                            | Q(programs__sites__is_test=False))
+                    .values('pk'))
+    return (ApprovalRequest.objects
+            .filter(Q(projects__isnull=False)
+                    | Q(site_groups__memberships__isnull=False)
+                    | Q(programs__sites__isnull=False))
+            .exclude(pk__in=reaches_real)
+            .values('pk'))
 
 
 def _scope_label(approval):
@@ -283,9 +291,9 @@ def tender_approvals_waiting(sites_qs, now=None):
     """The CEO Tenders card: approval steps waiting on someone, tenders only.
 
     QUERIES, whatever the number of requests or sites: 1 for every scoped live step,
-    1 for the unlinked count, and — only when there are rows — 4 prefetches for the scope
-    labels of the TENDER_WAITING_ROWS rows shown (projects, programs, site groups, their
-    live memberships). So 2 or 6.
+    1 aggregate for `unlinked` and `any_raised`, and — only when there are rows — 4
+    prefetches for the scope labels of the TENDER_WAITING_ROWS rows shown (projects,
+    programs, site groups, their live memberships). So 2 or 6.
 
     Returns:
       count        scoped steps waiting (the aging list's "steps waiting", scoped)
@@ -295,7 +303,12 @@ def tender_approvals_waiting(sites_qs, now=None):
                    aging_rows() orders them: _pending_row() plus `waiting_on` (the
                    assignee — the Head on a design step, as the aging list names him)
                    and `scope_label`
-      unlinked     open requests with a live step and no scope link at all
+      unlinked     open requests with a live step that are outside tender scope for ANY
+                   reason — no links, or links only to deleted, cancelled or CAPEX sites —
+                   less the test-only ones (S8 T3; the footer's "not linked to any live
+                   tender")
+      any_raised   whether any approval request exists at all, portfolio-wide, so the
+                   empty state can tell "none raised yet" from "none waiting" (S8 T2)
     """
     now = now or timezone.now()
     # Every scoped live step, oldest first. The whole list rather than count() + [:5]:
@@ -325,12 +338,18 @@ def tender_approvals_waiting(sites_qs, now=None):
         row['scope_label'] = _scope_label(step.request)
         rows.append(row)
 
-    # A request counts once however many of its steps wait (a PM and a Design Head in
-    # parallel are one request). order_by() clears Meta.ordering, whose columns would
-    # otherwise join the DISTINCT and count a request once per step.
-    unlinked = (live_pending_steps()
-                .filter(request__in=_unlinked_requests())
-                .order_by().values('request').distinct().count())
+    # Both footer figures in ONE aggregate over the request table (S8: the T2 empty-state
+    # test rides the T3 count, so the card still costs 2 or 6). Counting request rows, not
+    # steps, means a request counts once however many of its steps wait (a PM and a Design
+    # Head in parallel are one request) with no DISTINCT needed.
+    outside = (live_pending_steps()
+               .exclude(request__in=tender_approval_requests(sites_qs))
+               .exclude(request__in=_test_only_requests())
+               .values('request'))
+    totals = ApprovalRequest.objects.aggregate(
+        raised=Count('pk'),
+        unlinked=Count('pk', filter=Q(pk__in=outside)),
+    )
 
     oldest = rows[0]['days'] if rows else None
     return {
@@ -338,5 +357,6 @@ def tender_approvals_waiting(sites_qs, now=None):
         'oldest_days': oldest,
         'oldest_text': rows[0]['days_text'] if rows else '—',
         'rows':        rows,
-        'unlinked':    unlinked,
+        'unlinked':    totals['unlinked'],
+        'any_raised':  bool(totals['raised']),
     }

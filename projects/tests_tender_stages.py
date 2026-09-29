@@ -308,9 +308,9 @@ class KwpCoverageTests(StageFixtures):
     """h) the kWp cell for all / none / some known."""
 
     def test_text(self):
-        self.assertEqual(_kwp_coverage_text(Decimal('4745.00'), 3, 3), '4,745')
-        self.assertEqual(_kwp_coverage_text(Decimal('0'), 0, 109), '— (0 of 109)')
-        self.assertEqual(_kwp_coverage_text(Decimal('1200.00'), 40, 80), '1,200 (40 of 80)')
+        self.assertEqual(_kwp_coverage_text(Decimal('4745.00'), 3, 3), '4,745 kWp')
+        self.assertEqual(_kwp_coverage_text(Decimal('0'), 0, 109), '— kWp (0 of 109 sites)')
+        self.assertEqual(_kwp_coverage_text(Decimal('1200.00'), 40, 80), '1,200 kWp (40 of 80 sites)')
         self.assertEqual(_kwp_coverage_text(Decimal('0'), 0, 0), '—')
 
     def test_from_real_sites(self):
@@ -322,9 +322,9 @@ class KwpCoverageTests(StageFixtures):
         self._design(self._site('K3A', kwp=None), DESIGN_IN_QC)
 
         rows = {r['code']: r for r in _site_pipeline(tender_sites_qs())['stages']}
-        self.assertEqual(rows['S1']['kwp'], '150.5')
-        self.assertEqual(rows['S2']['kwp'], '1,200 (1 of 3)')
-        self.assertEqual(rows['S3']['kwp'], '— (0 of 1)')
+        self.assertEqual(rows['S1']['kwp'], '150.5 kWp')
+        self.assertEqual(rows['S2']['kwp'], '1,200 kWp (1 of 3 sites)')
+        self.assertEqual(rows['S3']['kwp'], '— kWp (0 of 1 site)')
         self.assertEqual(rows['S0']['kwp'], '—')
 
 

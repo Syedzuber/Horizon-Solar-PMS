@@ -149,8 +149,8 @@
     <h5 class="mb-0 fw-bold">Portfolio Overview</h5>
     {# Set only under ?context=tenders; counts Draft sites too, unlike the cards below. #}
     {% if tender_header %}
-    {# kWp covers only sites with a capacity; "(N of M sites)" says so whenever some have none (S2). #}
-    <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_display }} kWp{% if tender_header.kwp_partial %} ({{ tender_header.kwp_sites }} of {{ tender_header.sites }} sites){% endif %} · {{ tender_header.activated }} activated</p>
+    {# kWp covers only sites with a capacity; "(N of M sites)" says so whenever some have none (S2). One formatter for every kWp on this page (S8). #}
+    <p class="text-muted small mb-0">{{ tender_header.tenders }} tender{{ tender_header.tenders|pluralize }} · {{ tender_header.sites }} site{{ tender_header.sites|pluralize }} · {{ tender_header.kwp_text }} · {{ tender_header.activated }} activated</p>
     {# D2 hides CAPEX from Tenders; this line keeps it from vanishing silently. #}
     {% if capex_hidden %}
     <p class="text-muted mb-0" style="font-size:.75rem;">Not shown: CAPEX · {{ capex_hidden }} project{{ capex_hidden|pluralize }}</p>
@@ -252,7 +252,7 @@ default, opened by the button only. Residential and no-context set tender_cards 
             </span>
           {% endif %}
         </div>
-        <p class="text-muted mb-2" style="font-size:.8rem;">{{ card.sites }} site{{ card.sites|pluralize }} · kWp {{ card.kwp_text }}</p>
+        <p class="text-muted mb-2" style="font-size:.8rem;">{{ card.sites }} site{{ card.sites|pluralize }} · {{ card.kwp_text }}</p>
 
         {# Five buckets, light to dark. The legend carries the counts, so nothing depends on colour. #}
         <div class="tender-bar" role="img" aria-label="{% for b in card.buckets %}{{ b.label }} {{ b.sites }}{% if not forloop.last %}, {% endif %}{% endfor %}">
@@ -270,7 +270,7 @@ default, opened by the button only. Residential and no-context set tender_cards 
             <span class="fact-val">{{ card.released }} / {{ card.sites }}</span>
           </div>
           <div class="fact">
-            <span class="fact-lbl">kWp released</span>
+            <span class="fact-lbl">Released</span>
             <span class="fact-val">{{ card.released_kwp_text }}</span>
           </div>
         </div>
@@ -288,7 +288,7 @@ default, opened by the button only. Residential and no-context set tender_cards 
               <tr class="text-muted small">
                 <th class="fw-normal">Stage</th>
                 <th class="fw-normal text-end">Sites</th>
-                <th class="fw-normal text-end">kWp</th>
+                <th class="fw-normal text-end">Capacity</th>
               </tr>
             </thead>
             <tbody>
@@ -351,7 +351,7 @@ here and no JavaScript. Residential and no-context set site_pipeline to None.
             <th class="fw-normal">Stage</th>
             <th class="fw-normal w-50"></th>
             <th class="fw-normal text-end">Sites</th>
-            <th class="fw-normal text-end">kWp</th>
+            <th class="fw-normal text-end">Capacity</th>
           </tr>
         </thead>
         <tbody>
@@ -480,11 +480,15 @@ to None.
           </a>
           {% endfor %}
         </div>
+        {% elif not ta.any_raised %}
+        {# No approval request exists anywhere yet (S8): "nothing waiting" would imply some had been. #}
+        <p class="text-muted small mb-0">No approvals raised yet.</p>
         {% else %}
         <p class="text-muted small mb-0">Nothing waiting on anyone in the tenders.</p>
         {% endif %}
+        {# Outside tender scope for any reason — no links, or deleted / cancelled / CAPEX sites only; test-only requests are left out (S8). #}
         {% if ta.unlinked %}
-        <div class="small mt-2"><a href="{% url 'approval_aging' %}" class="text-decoration-none">+{{ ta.unlinked }} open request{{ ta.unlinked|pluralize }} not linked to any tender →</a></div>
+        <div class="small mt-2"><a href="{% url 'approval_aging' %}" class="text-decoration-none">+{{ ta.unlinked }} open request{{ ta.unlinked|pluralize }} not linked to any live tender →</a></div>
         {% endif %}
         <div class="small mt-2"><a href="{% url 'approval_aging' %}" class="text-decoration-none">View all approvals →</a></div>
       </div>
@@ -554,6 +558,15 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
   </div>
 </div>
 {% endwith %}
+{% endif %}
+
+{% comment %}
+S8: under Tenders everything from here down counts projects_qs — sites Active or In
+Progress — not the header's wider live-site set, so one heading says so. N is proj_total,
+the Projects card's own count, so the heading and that card cannot disagree.
+{% endcomment %}
+{% if tender_header %}
+<h6 class="fw-semibold mt-2 mb-3" data-execution-scope>Execution — sites Active or In Progress ({{ proj_total }})</h6>
 {% endif %}
 
 {# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
@@ -664,7 +677,7 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
 <div class="row g-3 mb-4">
 
   {# PM #}
-  <div class="col-6 col-md-4 col-xl-2">
+  <div class="col-6 col-md-4{% if not tender_header %} col-xl-2{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
         <div class="d-flex align-items-center gap-2 mb-2">
@@ -696,7 +709,7 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
   </div>
 
   {# SCM #}
-  <div class="col-6 col-md-4 col-xl-2">
+  <div class="col-6 col-md-4{% if not tender_header %} col-xl-2{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
         <div class="d-flex align-items-center gap-2 mb-2">
@@ -727,7 +740,8 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
     </div>
   </div>
 
-  {# Design #}
+  {# Design — hidden under Tenders (S8): the tender tiles keep PM, SCM and Execution #}
+  {% if not tender_header %}
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
@@ -758,8 +772,10 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
       </div>
     </div>
   </div>
+  {% endif %}
 
-  {# BD #}
+  {# BD — hidden under Tenders (S8): the tender tiles keep PM, SCM and Execution #}
+  {% if not tender_header %}
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
@@ -790,9 +806,10 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
       </div>
     </div>
   </div>
+  {% endif %}
 
   {# Execution #}
-  <div class="col-6 col-md-4 col-xl-2">
+  <div class="col-6 col-md-4{% if not tender_header %} col-xl-2{% endif %}">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
         <div class="d-flex align-items-center gap-2 mb-2">
@@ -823,7 +840,8 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
     </div>
   </div>
 
-  {# Finance #}
+  {# Finance — hidden under Tenders (S8): the tender tiles keep PM, SCM and Execution #}
+  {% if not tender_header %}
   <div class="col-6 col-md-4 col-xl-2">
     <div class="card shadow-sm h-100">
       <div class="card-body py-3 px-3">
@@ -854,6 +872,7 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
       </div>
     </div>
   </div>
+  {% endif %}
 
 </div>{# /row dept cards #}
 
@@ -963,6 +982,8 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
             do not abbreviate it, and do not move it behind the toggle.
           {% endcomment %}
           <p class="text-muted mt-2 mb-0 people-foot">
+            {# Usage is never context-filtered (QUERY 7 says why), so on Tenders it must say so (S8). #}
+            {% if tender_header %}All users, all projects.<br>{% endif %}
             Actions logged in the last {{ usage_window_days }} days.<br>
             {{ usage_accounts_idle }} of {{ usage_accounts_total }} accounts had no activity in this period.
           </p>

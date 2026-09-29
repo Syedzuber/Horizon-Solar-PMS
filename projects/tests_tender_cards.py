@@ -184,12 +184,12 @@ class KwpCoverageTests(TenderCardFixtures):
 
     def test_coverage(self):
         rows = {c['name']: c for c in _tender_card_rows(tender_sites_qs(), [])}
-        self.assertEqual(rows['Alpha']['kwp_text'], '150 (5 of 7)')
-        self.assertEqual(rows['Bravo']['kwp_text'], '— (0 of 3)')
-        self.assertEqual(rows['Charlie']['kwp_text'], '10')
-        self.assertEqual(rows['Alpha']['released_kwp_text'], '70 (2 of 3)')
+        self.assertEqual(rows['Alpha']['kwp_text'], '150 kWp (5 of 7 sites)')
+        self.assertEqual(rows['Bravo']['kwp_text'], '— kWp (0 of 3 sites)')
+        self.assertEqual(rows['Charlie']['kwp_text'], '10 kWp')
+        self.assertEqual(rows['Alpha']['released_kwp_text'], '70 kWp (2 of 3 sites)')
         self.assertEqual(rows['Bravo']['released_kwp_text'], '—')
-        self.assertEqual(rows['Charlie']['released_kwp_text'], '4.5')
+        self.assertEqual(rows['Charlie']['released_kwp_text'], '4.5 kWp')
         self.assertEqual([b['width'] for b in rows['Alpha']['buckets']],
                          ['28.6', '14.3', '14.3', '14.3', '28.6'])
 
@@ -296,8 +296,8 @@ class RenderTests(TenderCardFixtures):
         # The label's initial text, one per card (x-text holds the string a second time).
         self.assertContains(page, "'Show stage breakdown'\">Show stage breakdown</span>", count=3)
         self.assertContains(page, '<span class="text-muted">ALP</span> · Alpha')
-        self.assertContains(page, '7 sites · kWp 150 (5 of 7)')
-        self.assertContains(page, '3 sites · kWp — (0 of 3)')
+        self.assertContains(page, '7 sites · 150 kWp (5 of 7 sites)')
+        self.assertContains(page, '3 sites · — kWp (0 of 3 sites)')
         self.assertContains(page, 'aria-label="Survey 2, Design 1, Released 1, Procurement 1, Execution 2"')
         self.assertContains(page, 'style="width:28.6%;"')
         self.assertContains(page, '<span class="fact-val">3 / 7</span>')

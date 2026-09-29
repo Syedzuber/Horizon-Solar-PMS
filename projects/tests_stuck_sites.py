@@ -441,11 +441,11 @@ class WaitingOnTests(Builders):
                          {'due_date': TODAY - timedelta(days=2)}])
         result = self.result()
         got = {r['site']: r['waiting_on'] for r in result['rows']}
-        heads = 'Hana, Hari · Design Head'           # every ACTIVE holder, not head_gone
+        heads = 'Design Head'                        # the role alone: no record names one (S8)
         self.assertEqual(got, {
             'W-S1': heads,
             'W-DESIGN': 'Dev · Designer',
-            'W-UPLOADED': 'Quinn · Design QC',
+            'W-UPLOADED': 'Design QC',
             'W-QC': 'Quinn · Design QC',
             'W-PMR': heads,
             'W-S4': 'Pam · PM',
@@ -471,7 +471,7 @@ class WaitingOnTests(Builders):
                 capacity_kw=Decimal('10'), arka_link='https://arka.example/x',
                 submitted_by=self.designer, verdict=verdict, head_verdict=verdict)
         got = {r['site']: r['waiting_on'] for r in self.result()['rows']}
-        self.assertEqual(got['ARKA-QC'], 'Quinn · Design QC')
+        self.assertEqual(got['ARKA-QC'], 'Design QC')
         self.assertEqual(got['ARKA-OK'], 'Dev · Designer')
 
 
@@ -571,7 +571,7 @@ class PageTests(Builders):
         text = _text(self.page())
         self.assertIn('1 site stuck — Design backlog 1', text)
         self.assertIn('PG-1 · Hilltop Alpha Survey on file, not allocated 10 days 7 days '
-                      'Hana, Hari · Design Head', text)
+                      'Design Head', text)
         self.assertIn("Alpha: 1 unfinished site with no agreed due date (Design Head's count)",
                       text)
         self.assertNotIn('No site is past its limit.', text)

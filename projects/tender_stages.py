@@ -599,20 +599,20 @@ def _person(profile):
     return profile.user.get_full_name() or profile.user.username
 
 
-def _people_text(profiles, role, empty):
-    """'A, B · Role' for everyone listed, or `empty` when nobody is."""
-    if not profiles:
-        return empty
-    return f"{', '.join(_person(p) for p in profiles)} · {role}"
-
-
 def stuck_sites(sites_qs, today, aged_block_cutoff):
     """Which live tender sites are stuck, where, for how long and who holds them (S7).
 
-    SEVEN QUERIES whatever the number of sites: site_stages(); one values() read of the
-    display and "waiting on" columns; the design assignments, their due-date commitments
-    and their current Arkas (the Head's own three reads, scoped by `sites_qs`); the S7
-    tasks; and one read of every person named. tests_stuck_sites pins 3 and 30 sites.
+    SEVEN QUERIES whatever the number of sites (six when no row names anyone, since
+    Django skips an IN () read): site_stages(); one values() read of the display and
+    "waiting on" columns; the design assignments, their due-date commitments and their
+    current Arkas (the Head's own three reads, scoped by `sites_qs`); the S7 tasks; and
+    one read of every person named. tests_stuck_sites pins 3 and 30 sites.
+
+    WAITING ON names a person only when the record names one — the designer, the QC
+    reviewer from the ledger, the PM, the group's adder or creator — as "Name · Role".
+    A stage owned by a role rather than a person (the Head's backlog, the QC queue, an
+    in_qc package with no ledger row) shows the role alone (S8 T1): listing every holder
+    of the role read as if all of them were holding the site.
 
     THE RULE PER STAGE (STUCK_LIMITS; every limit >= and overshoot = days - limit):
       S1, S4, S5, S6  our limit, counted in IST calendar days from the stage's entered_at.
@@ -697,20 +697,17 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
         tasks_by_site.setdefault(t['project_pk'], []).append(t)
         task_counts['blocked_aged' if t['status'] == Task.BLOCKED else 'overdue'] += 1
 
-    # Everyone a row can name, plus every active Design Head and Design QC holder (the
-    # same is_active test design_gate_next_actors applies to the Heads), in ONE read.
+    # Everyone a row can name, in ONE read. Role holders are not read: a stage the record
+    # pins on nobody shows the role alone (S8 T1), whoever holds it.
     ids = {pk for row in site_rows.values()
            for pk in (row['assigned_pm_id'], row['designer_pk'], row['qc_actor_pk'],
                       row['group_adder_pk'], row['group_creator_pk']) if pk}
     ids |= {t['assigned_to_id'] for ts in tasks_by_site.values() for t in ts
             if t['assigned_to_id']}
     people = {p.pk: p for p in UserProfile.objects.filter(                   # query 7
-        Q(pk__in=ids) | Q(is_active=True, is_design_head=True)
-        | Q(is_active=True, is_design_qc=True)).select_related('user').order_by('pk')}
-    heads_text = _people_text([p for p in people.values() if p.is_design_head and p.is_active],
-                              'Design Head', 'No active Design Head')
-    qc_text = _people_text([p for p in people.values() if p.is_design_qc and p.is_active],
-                           'Design QC', 'No active Design QC')
+        pk__in=ids).select_related('user').order_by('pk')}
+    heads_text = 'Design Head'
+    qc_text = 'Design QC'
 
     def _one(pk, role, empty):
         person = people.get(pk) if pk else None

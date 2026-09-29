@@ -178,8 +178,9 @@ class ScopeTests(WaitingFixture):
         card = self.card()
         self.assertEqual(card['count'], 0)
         self.assertEqual(card['rows'], [])
-        # Linked to something, so not "unlinked" either.
-        self.assertEqual(card['unlinked'], 0)
+        # by_prog's tender also holds S6-CANC, a real cancelled site, so it is outside
+        # tender scope, not test-only, and the footer counts it (S8 T3).
+        self.assertEqual(card['unlinked'], 1)
 
     def test_a_removed_membership_is_not_scope(self):
         approval = self.raise_request('Removed', pm=self.pm_x,
@@ -238,7 +239,7 @@ class UnlinkedTests(WaitingFixture):
         text = _text(client.get(reverse('dashboard_ceo'), {'context': 'tenders'}))
         self.assertIn('Waiting on someone', text)
         self.assertIn('Nothing waiting on anyone in the tenders.', text)
-        self.assertIn('+2 open requests not linked to any tender →', text)
+        self.assertIn('+2 open requests not linked to any live tender →', text)
         self.assertIn('View all approvals →', text)
 
     def test_no_footer_when_nothing_is_unlinked(self):
@@ -246,7 +247,7 @@ class UnlinkedTests(WaitingFixture):
         client = Client(SERVER_NAME='localhost')
         client.force_login(self.ceo.user)
         text = _text(client.get(reverse('dashboard_ceo'), {'context': 'tenders'}))
-        self.assertNotIn('not linked to any tender', text)
+        self.assertNotIn('not linked to any live tender', text)
         self.assertNotIn('Nothing waiting on anyone in the tenders.', text)
 
 
