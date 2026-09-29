@@ -352,8 +352,8 @@ Nothing is wrong with the page.
 
 ## Files: why a download does nothing
 
-The local `.env` carries the PRODUCTION Supabase key, so the seed never touches storage.
-While it runs, uploads are stubbed and `SUPABASE_URL` / `SUPABASE_KEY` are blanked, so
+Local `.env` should point at the dev Supabase project; check `SUPABASE_URL` before
+walking. The seed blanks storage either way. While it runs, uploads are stubbed and `SUPABASE_URL` / `SUPABASE_KEY` are blanked, so
 any call it did not stub fails instead of reaching production. Every file it "uploads"
 is named `SEEDED-NO-FILE-<kind>` — `SEEDED-NO-FILE-cad_zip.zip`, `SEEDED-NO-FILE-po.pdf`,
 `SEEDED-NO-FILE-pi.pdf`, `SEEDED-NO-FILE-invoice.pdf` — and recorded in the bucket
@@ -422,8 +422,6 @@ not exist.
 * **A due-date extension already approved or rejected, and a Head's direct due-date
   change** — reachable, not seeded. A PENDING extension request is seeded, on
   WALKFRESHEXT (see *Fresh starting points*), so both verdicts can be walked from there.
-* **The deputy acting as Head** — `walk.designdeputy` holds the authority; no verdict
-  was recorded as deputy.
 * **`is_hse`** — the flag has no reader and no writer in the product; nothing to show.
 * **The deputy link itself** has no portal writer (Django admin only) and is set
   directly — `# NO PRODUCT PATH` in the seed. So is the first Admin account, because on
