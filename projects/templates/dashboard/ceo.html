@@ -443,6 +443,55 @@ to None.
       </div>
     </div>
   </div>
+  {% comment %}
+  S6: approval steps waiting on someone, tenders only (approval_queries.
+  tender_approvals_waiting). "Waiting" and the days are the aging list's own
+  (live_pending_steps, days_waiting, days_text); only the scope is new. Red at 3 days or
+  more, as on the aging list and the pending cards. Payment-request approvals are on the
+  payment strip, not here. "View all" needs no permission check: every role that reaches
+  this page may open the aging list (SECONDARY_FINDINGS S6).
+  {% endcomment %}
+  {% if tender_approvals %}
+  {% with ta=tender_approvals %}
+  <div class="col-12 col-lg-6">
+    <div class="section-label">Waiting on someone</div>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="row g-2 mb-3">
+          <div class="col-6">
+            <div class="kpi-val text-dark">{{ ta.count }}</div>
+            <div class="kpi-sublbl">Steps waiting</div>
+          </div>
+          <div class="col-6">
+            <div class="kpi-val {% if ta.oldest_days is not None and ta.oldest_days >= 3 %}text-danger{% else %}text-dark{% endif %}">{{ ta.oldest_text }}</div>
+            <div class="kpi-sublbl">Oldest wait</div>
+          </div>
+        </div>
+        {% if ta.rows %}
+        <div class="list-group list-group-flush border-top">
+          {% for row in ta.rows %}
+          <a href="{% url 'approval_detail' row.approval.pk %}" class="list-group-item text-decoration-none text-reset px-0 py-2">
+            <div class="d-flex justify-content-between align-items-start gap-2">
+              <span class="fw-semibold text-break" style="min-width:0;">#{{ row.approval.pk }} · {{ row.title|truncatechars:60 }}</span>
+              <span class="small flex-shrink-0 {% if row.days >= 3 %}text-danger fw-semibold{% else %}text-muted{% endif %}">{{ row.days_text }}</span>
+            </div>
+            <div class="small text-muted text-break">{{ row.kind_label }} · {{ row.scope_label }}</div>
+            <div class="small text-muted text-break">Waiting on {{ row.waiting_on }} · {{ row.party_label }}</div>
+          </a>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-muted small mb-0">Nothing waiting on anyone in the tenders.</p>
+        {% endif %}
+        {% if ta.unlinked %}
+        <div class="small mt-2"><a href="{% url 'approval_aging' %}" class="text-decoration-none">+{{ ta.unlinked }} open request{{ ta.unlinked|pluralize }} not linked to any tender →</a></div>
+        {% endif %}
+        <div class="small mt-2"><a href="{% url 'approval_aging' %}" class="text-decoration-none">View all approvals →</a></div>
+      </div>
+    </div>
+  </div>
+  {% endwith %}
+  {% endif %}
 </div>
 {% endwith %}
 {% endif %}

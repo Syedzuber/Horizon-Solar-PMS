@@ -61,7 +61,7 @@ from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
 from .tender_stages import activated_progress, design_throughput, stage_summary, tender_cards
-from .approval_queries import pending_approvals_card
+from .approval_queries import pending_approvals_card, tender_approvals_waiting
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -2815,12 +2815,17 @@ def _get_ceo_dashboard_context(context=None):
         # figure the Design Head's own (tender_stages.design_throughput). localdate(), not
         # `today`, for the IST reason given above the payment strip.
         ctx['design_throughput'] = design_throughput(tender_sites_qs(), timezone.localdate())
+        # S6, two queries (six once a step is waiting) whatever the number of requests:
+        # approval steps waiting on someone, scoped to live tender sites. The figures are
+        # live_pending_steps() and days_waiting() — the aging list's own — only narrowed.
+        ctx['tender_approvals'] = tender_approvals_waiting(tender_sites_qs())
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
         ctx['site_pipeline'] = None
         ctx['tender_cards'] = None
         ctx['design_throughput'] = None
+        ctx['tender_approvals'] = None
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.

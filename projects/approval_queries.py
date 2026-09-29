@@ -20,12 +20,12 @@ No import of approval_forms: it imports views, and views imports this module.
 from datetime import timedelta
 from statistics import median
 
-from django.db.models import F, Q
+from django.db.models import F, Prefetch, Q, prefetch_related_objects
 from django.utils import timezone
 
 from .approvals import exclude_carried_steps
 from .models import (
-    ApprovalStep,
+    ApprovalRequest, ApprovalStep, Program, SiteGroup, SiteGroupMembership,
     APPROVAL_OPEN, APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN,
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_DECISIONS, APPROVAL_STEP_PENDING,
 )
@@ -210,4 +210,133 @@ def aging_rows(since, now=None):
         'carried':        carried,
         'fresh_approved': fresh_approved,
         'carry_rate':     carried / denominator if denominator else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# S6 — the CEO Tenders "Waiting on someone" card (29 Sep 2026)
+#
+# A SCOPE, NEVER A NEW DEFINITION. "Waiting" is live_pending_steps() and the days are
+# days_waiting()/days_text(), exactly as the aging list and the pending cards read them;
+# this section only narrows which requests count. No median turnaround: no approvals
+# screen shows one across people, so the card could not match one (S6 ruling C).
+#
+# `sites_qs` is views.tender_sites_qs(), passed in because this module cannot import
+# views (see the module docstring).
+# ---------------------------------------------------------------------------
+
+#: How many of the oldest waiting steps the card lists.
+TENDER_WAITING_ROWS = 5
+
+
+def tender_approval_requests(sites_qs):
+    """The pks of approval requests about a live tender site, as a subquery.
+
+    A request is in when it links to at least one site in `sites_qs` directly
+    (`projects`), through a site group with a LIVE membership of such a site (a removed
+    membership is history, not scope), or through a program that has such a site. A link
+    to test-only sites or programs therefore never brings a request in. The three M2M
+    joins repeat a request's pk, which is harmless inside an IN (…)."""
+    live_groups = SiteGroup.objects.filter(memberships__removed_at__isnull=True,
+                                           memberships__project__in=sites_qs)
+    return (ApprovalRequest.objects
+            .filter(Q(projects__in=sites_qs)
+                    | Q(site_groups__in=live_groups)
+                    | Q(programs__in=sites_qs.values('program')))
+            .values('pk'))
+
+
+def _unlinked_requests():
+    """Requests with no scope link at all — no program, project or site group. A request
+    linked only to test or non-tender sites is NOT unlinked: it is about something, just
+    not a tender, so it stays out of the card entirely."""
+    linked = (ApprovalRequest.objects
+              .filter(Q(programs__isnull=False) | Q(projects__isnull=False)
+                      | Q(site_groups__isnull=False))
+              .values('pk'))
+    return ApprovalRequest.objects.exclude(pk__in=linked).values('pk')
+
+
+def _scope_label(approval):
+    """"MPUVNL · 3 sites", the site code when the request reaches one site, or the
+    program name(s) alone when it is linked only to whole programs.
+
+    Sites are those reached through `projects` and live group memberships, read from the
+    prefetches tender_approvals_waiting() set up, so this issues no query. Programs are
+    the sites' own plus any linked program with a live site, comma-joined by name."""
+    sites = {site.pk: site for site in approval.projects.all()}
+    for group in approval.site_groups.all():
+        for membership in group.memberships.all():
+            sites[membership.project.pk] = membership.project
+    names = {program.name for program in approval.programs.all()}
+    names.update(site.program.name for site in sites.values() if site.program_id)
+    if len(sites) == 1:
+        return next(iter(sites.values())).project_id
+    programs = ', '.join(sorted(names))
+    if not sites:
+        return programs
+    count = f'{len(sites)} sites'
+    return f'{programs} · {count}' if programs else count
+
+
+def tender_approvals_waiting(sites_qs, now=None):
+    """The CEO Tenders card: approval steps waiting on someone, tenders only.
+
+    QUERIES, whatever the number of requests or sites: 1 for every scoped live step,
+    1 for the unlinked count, and — only when there are rows — 4 prefetches for the scope
+    labels of the TENDER_WAITING_ROWS rows shown (projects, programs, site groups, their
+    live memberships). So 2 or 6.
+
+    Returns:
+      count        scoped steps waiting (the aging list's "steps waiting", scoped)
+      oldest_days  whole days the oldest has waited; None when nothing waits
+      oldest_text  days_text() of it, '—' when nothing waits
+      rows         the oldest TENDER_WAITING_ROWS steps, ordered activated_at, pk as
+                   aging_rows() orders them: _pending_row() plus `waiting_on` (the
+                   assignee — the Head on a design step, as the aging list names him)
+                   and `scope_label`
+      unlinked     open requests with a live step and no scope link at all
+    """
+    now = now or timezone.now()
+    # Every scoped live step, oldest first. The whole list rather than count() + [:5]:
+    # one query instead of two, and pending steps number in the tens.
+    steps = list(live_pending_steps()
+                 .filter(request__in=tender_approval_requests(sites_qs))
+                 .select_related('request__vendor', 'assignee__user')
+                 .order_by('activated_at', 'pk'))
+    shown = steps[:TENDER_WAITING_ROWS]
+    # Scope links narrowed to what the label may name: live tender sites only, programs
+    # with one, live memberships of one. Prefetched on the shown rows alone, so the cost
+    # stays four queries however many steps wait.
+    prefetch_related_objects(
+        shown,
+        Prefetch('request__projects', queryset=sites_qs.select_related('program')),
+        Prefetch('request__programs',
+                 queryset=Program.objects.filter(pk__in=sites_qs.values('program'))),
+        Prefetch('request__site_groups__memberships',
+                 queryset=(SiteGroupMembership.objects
+                           .filter(removed_at__isnull=True, project__in=sites_qs)
+                           .select_related('project__program'))),
+    )
+    rows = []
+    for step in shown:
+        row = _pending_row(step, now)
+        row['waiting_on'] = _person(step.assignee)
+        row['scope_label'] = _scope_label(step.request)
+        rows.append(row)
+
+    # A request counts once however many of its steps wait (a PM and a Design Head in
+    # parallel are one request). order_by() clears Meta.ordering, whose columns would
+    # otherwise join the DISTINCT and count a request once per step.
+    unlinked = (live_pending_steps()
+                .filter(request__in=_unlinked_requests())
+                .order_by().values('request').distinct().count())
+
+    oldest = rows[0]['days'] if rows else None
+    return {
+        'count':       len(steps),
+        'oldest_days': oldest,
+        'oldest_text': rows[0]['days_text'] if rows else '—',
+        'rows':        rows,
+        'unlinked':    unlinked,
     }
