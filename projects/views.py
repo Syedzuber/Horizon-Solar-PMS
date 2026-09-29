@@ -60,7 +60,9 @@ from .models import (
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
-from .tender_stages import activated_progress, design_throughput, stage_summary, tender_cards
+from .tender_stages import (
+    activated_progress, design_throughput, stage_summary, stuck_sites, tender_cards,
+)
 from .approval_queries import pending_approvals_card, tender_approvals_waiting
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
@@ -2819,6 +2821,11 @@ def _get_ceo_dashboard_context(context=None):
         # approval steps waiting on someone, scoped to live tender sites. The figures are
         # live_pending_steps() and days_waiting() — the aging list's own — only narrowed.
         ctx['tender_approvals'] = tender_approvals_waiting(tender_sites_qs())
+        # S7, seven queries whatever the site count: sites past their stage's limit. The
+        # S7 rule is this function's own Blocked Tasks term, so the same aged_block_cutoff
+        # is passed in rather than a second "7 days" (SECONDARY_FINDINGS, S7).
+        ctx['stuck_sites'] = stuck_sites(tender_sites_qs(), timezone.localdate(),
+                                         aged_block_cutoff)
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
@@ -2826,6 +2833,7 @@ def _get_ceo_dashboard_context(context=None):
         ctx['tender_cards'] = None
         ctx['design_throughput'] = None
         ctx['tender_approvals'] = None
+        ctx['stuck_sites'] = None
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.

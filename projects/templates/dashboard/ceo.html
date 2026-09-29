@@ -496,6 +496,66 @@ to None.
 {% endwith %}
 {% endif %}
 
+{# ── STUCK SITES (Tenders only) ───────────────────────────────────────────── #}
+{% comment %}
+S7: sites past their stage's limit (projects/tender_stages.stuck_sites). Where the app
+already defines "late" for a stage that definition is used; STUCK_LIMITS holds the rest,
+and the footer lists every stage's rule, always all seven. Rows beyond the tenth are
+hidden until the toggle opens them (Alpine, x-cloak, so they never flash). Full width;
+the table scrolls sideways on a phone. Residential and no-context set stuck_sites to None.
+{% endcomment %}
+{% if stuck_sites %}
+{% with ss=stuck_sites %}
+<div class="section-label">Stuck sites</div>
+<div class="card shadow-sm mb-4" x-data="{ all: false }">
+  <div class="card-body">
+    {% if ss.rows %}
+    <p class="mb-2"><span class="fw-semibold">{{ ss.stuck }} site{{ ss.stuck|pluralize }} stuck</span>{% if ss.by_stage %} — {% for b in ss.by_stage %}{{ b.label }} {{ b.sites }}{% if not forloop.last %} · {% endif %}{% endfor %}{% endif %}</p>
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-2">
+        <thead>
+          <tr class="text-muted small">
+            <th class="fw-normal">Site</th>
+            <th class="fw-normal">Tender</th>
+            <th class="fw-normal">Stuck at</th>
+            <th class="fw-normal">In stage</th>
+            <th class="fw-normal">Limit</th>
+            <th class="fw-normal">Waiting on</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in ss.rows %}
+          <tr class="small"{% if forloop.counter > 10 %} x-show="all" x-cloak{% endif %}>
+            <td class="text-nowrap"><a href="{{ row.url }}" class="text-decoration-none">{{ row.site }}</a></td>
+            <td class="text-nowrap">{{ row.tender }}</td>
+            <td>{{ row.stage_label }}</td>
+            <td class="text-nowrap text-danger fw-semibold">{{ row.days_text }}</td>
+            <td class="text-nowrap">{{ row.limit_text }}</td>
+            <td>{{ row.waiting_on }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if ss.rows|length > 10 %}
+    <button type="button" class="btn btn-link btn-sm p-0 mb-2 text-decoration-none" @click="all = !all"
+            x-text="all ? 'Show top 10 rows' : 'Show all {{ ss.rows|length }} rows'">Show all {{ ss.rows|length }} rows</button>
+    {% endif %}
+    {% else %}
+    <p class="text-muted small mb-2">No site is past its limit.</p>
+    {% endif %}
+    {% for t in ss.no_due_date %}
+    <p class="small text-muted mb-1">{{ t.tender }}: {{ t.count }} unfinished site{{ t.count|pluralize }} with no agreed due date (Design Head's count)</p>
+    {% endfor %}
+    {% if ss.undated %}
+    <p class="small text-muted mb-1">{{ ss.undated }} site{{ ss.undated|pluralize }} could not be timed: no stage entry date is recorded.</p>
+    {% endif %}
+    <p class="text-muted mb-0 mt-2" style="font-size:.75rem;" data-stuck-limits>{% for line in ss.limits %}{{ line }}{% if not forloop.last %} · {% endif %}{% endfor %}</p>
+  </div>
+</div>
+{% endwith %}
+{% endif %}
+
 {# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
 <div class="section-label">Portfolio health</div>
 <div class="row g-3 mb-4">
