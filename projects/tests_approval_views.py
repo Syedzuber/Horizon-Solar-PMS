@@ -1253,8 +1253,26 @@ class PreDispatchRaiseTests(PreDispatchFixture):
         self.assertContains(page, 'name="vendor"')
         self.assertNotContains(page, 'name="vendor_order"')
 
-    def test_any_other_kind_goes_back_to_the_list(self):
-        for kind in ('contractor_bill', 'nonsense', ''):
+    def test_contractor_bill_draws_the_bill_form_and_unknown_kinds_go_back(self):
+        # Replaced deliberately in 4a-2 (T1): the raise page refused ?kind=contractor_bill
+        # until the bill screens existed. It now draws the bill's first step, with the
+        # bills bucket set or not — unset, it says bills cannot be stored yet.
+        client = self.client_for(self.scm)
+        with self.settings(SUPABASE_BILLS_BUCKET='test-bills'):
+            page = client.get(reverse('approval_create'), {'kind': 'contractor_bill'},
+                              follow=True)
+            self.assertEqual(page.status_code, 200)
+            self.assertContains(page, 'Raise contractor bill')
+            self.assertContains(page, 'name="project"')
+            self.assertNotContains(page, 'cannot be raised yet')
+        with self.settings(SUPABASE_BILLS_BUCKET=''):
+            page = client.get(reverse('approval_create'), {'kind': 'contractor_bill'},
+                              follow=True)
+            self.assertEqual(page.status_code, 200)
+            self.assertContains(page, 'Contractor bills cannot be raised yet: the private '
+                                      'store for bill PDFs is not configured.')
+        # An unknown kind is still refused, on GET and POST alike, as before.
+        for kind in ('nonsense', ''):
             with self.subTest(kind=kind):
                 response = self.client_for(self.scm).get(reverse('approval_create'),
                                                          {'kind': kind})

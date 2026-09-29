@@ -44,6 +44,12 @@ BILL_PDF_MIME_TYPES = frozenset({'application/pdf', 'application/octet-stream'})
 BILL_STORAGE_OFF = ('Bill PDFs cannot be stored right now: the private bills bucket is not '
                     'configured. Nothing was saved.')
 
+#: What the raise page says BEFORE anything is submitted while the bucket is unset (4a-2).
+#: BILL_STORAGE_OFF ends "Nothing was saved", which reads wrongly on a page nobody has
+#: submitted yet; a POST is still refused with BILL_STORAGE_OFF itself.
+BILL_STORAGE_NOT_READY = ('Contractor bills cannot be raised yet: the private store for '
+                          'bill PDFs is not configured.')
+
 
 class BillStorageError(Exception):
     """A bill PDF was refused or could not be stored. str(exc) is the message for the

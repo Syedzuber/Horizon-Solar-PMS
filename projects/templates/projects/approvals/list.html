@@ -4,6 +4,7 @@ Approvals S2a — every approval request the viewer may read (approval_views.app
 Rows are cards, not a table, so the page reads at phone width with no sideways scroll.
 The row rule is permissions.approval_request_visibility_q(), the same as the detail page.
 Approvals 3a: two raise actions, one per material kind, each passing ?kind= to the raise page.
+Contractor bills 4a-2: a third, "Raise a contractor bill" (?kind=contractor_bill).
 {% endcomment %}
 {% block title %}Approvals — SolarPMS{% endblock %}
 
@@ -12,7 +13,7 @@ Approvals 3a: two raise actions, one per material kind, each passing ?kind= to t
 <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
   <div>
     <h4 class="mb-0">Approvals</h4>
-    <small class="text-muted">Material approvals asked of PMs and the Design Head</small>
+    <small class="text-muted">Material approvals and contractor bills</small>
   </div>
   <div class="d-flex flex-wrap gap-2">
     {% if can_view_aging %}
@@ -21,6 +22,7 @@ Approvals 3a: two raise actions, one per material kind, each passing ?kind= to t
     {% if can_raise %}
     <a href="{% url 'approval_create' %}?kind=material_pre_order" class="btn btn-brand btn-sm"><i class="bi bi-plus-lg me-1"></i>Raise — before order</a>
     <a href="{% url 'approval_create' %}?kind=material_pre_dispatch" class="btn btn-brand btn-sm"><i class="bi bi-plus-lg me-1"></i>Raise — before dispatch</a>
+    <a href="{% url 'approval_create' %}?kind=contractor_bill" class="btn btn-brand btn-sm"><i class="bi bi-receipt me-1"></i>Raise a contractor bill</a>
     {% endif %}
   </div>
 </div>

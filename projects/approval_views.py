@@ -61,10 +61,28 @@ round's material is drawn through material_display(), which reads snapshot schem
 2 alike; a request's old make, specification and quantity, when it has them, are drawn
 under "Recorded before line items". round_changes follows each line by id and names
 each changed field.
+
+CONTRACTOR BILLS 4a-2 (29 Sep 2026) put the 4a-1 bill on the page:
+
+  * the raise page (?kind=contractor_bill) is two steps: choose the site, then the page
+    reloads with ?project= in its URL and asks for the rest (_bill_create). The order of
+    a POST is fixed: parse -> refusals (the bills bucket, the form, then
+    approvals._clean_bill with a placeholder PDF, which writes nothing) -> warnings
+    (bill_rules, a re-render with "Raise anyway", never a block) -> upload the PDF
+    (private bucket) -> upload the photos (public bucket, jpg/png) -> the chokepoint. NO
+    FILE IS STORED BEFORE THE WARNING CHECK. Anything stored for a bill that was then not
+    written is removed again (bill_storage.discard_unrecorded_bill_pdf, _remove_uploaded);
+  * the detail page draws the bill (_bill_now) — the amount beside a SIGNED, expiring
+    link to the PDF (bill_storage.bill_pdf_url, never a stored or public URL), the tasks
+    with their status now, and, while the bill is open or waiting for changes, the
+    warnings — and each round's bill from its schema-3 snapshot (bill_display);
+  * a bill's resubmit carries the note, photos, approver changes and kept approvals
+    only. Any posted revision is IGNORED for a bill: the chokepoint does not yet refuse a
+    scope or vendor change on one (SECONDARY_FINDINGS, 4a-2; 4b adds bill revision).
 """
 import logging
 import uuid as _uuid
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -76,26 +94,42 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .approval_forms import (
-    ATTACHMENT_LIMIT, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN, assignee_choices,
+    ATTACHMENT_LIMIT, BILL_PHOTO_EXTENSIONS, EVIDENCE_EXTENSIONS, KEEP_REASON_MIN,
+    assignee_choices, bill_site, bill_site_choices, bill_task_choices, contractor_choices,
     current_scope_pks, design_authority_choices, keepable_steps, line_rows,
-    parse_assignee_overrides, parse_attachments, parse_carry, parse_client_uuid,
+    parse_assignee_overrides, parse_attachments, parse_bill_create, parse_bill_photos,
+    parse_carry, parse_client_uuid,
     parse_create, parse_evidence_files, parse_linked_order, parse_lines, parse_new_assignee,
     parse_proxy, parse_revision, person_name, order_link_choices, po_pi_record_choices,
     po_pi_record_label, pre_order_choices, scope_choices, vendor_choices,
 )
 from .approval_queries import AGING_WINDOW_DAYS, aging_rows
+# _clean_bill is the chokepoint's own bill validator, private by name. The raise page asks
+# it BEFORE the PDF is uploaded (ruling 2, 4a-2), with a placeholder PDF, so a typo in the
+# bill number is refused in the chokepoint's words without a 20 MB upload first. It only
+# reads (the vendor, the site, the tasks, bills_bucket()) and writes nothing; the real
+# create_approval_request() asks it again, under its own rules, after the upload.
 from .approvals import (
-    ApprovalRefused, ProxyDecision, apply_approval_decision, create_approval_request,
+    ApprovalRefused, ContractorBill, ProxyDecision, _clean_bill, apply_approval_decision,
+    create_approval_request,
     link_order_to_approval, reassign_approval_step, resubmit_approval_request,
     round_snapshot, unlink_order_from_approval, withdraw_approval_request,
 )
+from .bill_rules import (
+    bill_warnings, format_bill_amount, site_engineer_choices, task_status_label,
+)
+from .bill_storage import (
+    BILL_STORAGE_NOT_READY, BILL_STORAGE_OFF, BillStorageError, bill_pdf_url, bills_bucket,
+    discard_unrecorded_bill_pdf, upload_bill_pdf,
+)
 from .decorators import _forbidden, login_required
 from .models import (
-    ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalStep, StatusTransition,
-    VendorOrder,
+    ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalStep,
+    ContractorBillDetail, StatusTransition, VendorOrder,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
-    APPROVAL_KIND_CHOICES, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
-    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
+    APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+    APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN, APPROVAL_PARTY_PM,
+    APPROVAL_PARTY_SITE_ENGINEER,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_PROXY_CHANNEL_CHOICES,
     APPROVAL_STATUS_CHOICES, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
     APPROVAL_STEP_PENDING, APPROVAL_STEP_REJECTED, APPROVAL_STEP_SUPERSEDED,
@@ -111,6 +145,7 @@ from .permissions import (
     user_can_view_approval_request, user_can_view_vendor_order,
     user_can_withdraw_approval_request, user_may_answer_approval_step,
 )
+from .submission_guard import keyed_redirect
 from .supabase_storage import get_supabase_client, vendor_order_document_url
 from .units import UNIT_COUNT, UNIT_LABELS, UNITS, format_quantity
 from .views import _validate_and_upload
@@ -124,9 +159,19 @@ _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
 _STATUS_LABELS = dict(APPROVAL_STATUS_CHOICES)
 _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
 
-#: The kinds the raise page takes as ?kind= (Approvals 3a). No ?kind= at all is a
-#: pre-order request, so every link and bookmark from before 3a still works.
-_RAISE_KINDS = (APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_KIND_MATERIAL_PRE_DISPATCH)
+#: The kinds the raise page takes as ?kind= (Approvals 3a; the contractor bill since
+#: 4a-2, drawn by _bill_create). No ?kind= at all is a pre-order request, so every link
+#: and bookmark from before 3a still works.
+_RAISE_KINDS = (APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
+                APPROVAL_KIND_CONTRACTOR_BILL)
+
+#: B-16, on every bill: what an approval of a bill does and does not mean.
+BILL_APPROVAL_NOTE = ('Approving confirms the work was done. Nobody has checked this amount '
+                      'against a rate or work order.')
+
+#: The bill statuses whose detail page shows the warnings (ruling 7, 4a-2): while someone
+#: may still act on them. On a closed bill they would only be noise.
+_BILL_WARNING_STATUSES = (APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED)
 
 # The decision buttons, in the order drawn. Plain English, never the stored value.
 _DECISIONS = [
@@ -448,6 +493,110 @@ def _dispatch_against(user, approval, material, snapshots):
                                    seen_material.get('vendor_order'),
                                    seen_material.get('pre_order_request'))
     return current, by_round
+
+
+def _pdf_signer():
+    """A signer for bill PDFs that mints each distinct file's link ONCE per page render.
+
+    Every signing is a network call to storage, and until 4b every round of a bill
+    records the same PDF, so the current block and each round would otherwise sign the
+    same file again. The link itself only ever comes from bill_storage.bill_pdf_url():
+    signed, expiring, None when storage is off or signing fails."""
+    cache = {}
+
+    def sign(bucket, path):
+        if (bucket, path) not in cache:
+            cache[(bucket, path)] = bill_pdf_url(bucket, path)
+        return cache[(bucket, path)]
+    return sign
+
+
+def _bill_task_label(task_name, location_label):
+    """A task as a bill names it: "Module Installation — Block A" for a per-location copy."""
+    return f'{task_name} — {location_label}' if location_label else task_name
+
+
+def bill_display(bill, contractor_name, sign):
+    """A round's bill — a schema-3 snapshot's `bill` block — in the shape _bill_block.html
+    draws, or None when the round has none (every material round). Built from the dict
+    alone, never a live row: a snapshot says what that round saw. The PDF is the one that
+    ROUND recorded, signed through `sign` (_pdf_signer). No status and no warnings: those
+    are about now, and are drawn on the request's own bill block (_bill_now)."""
+    if not bill:
+        return None
+    project, pdf = bill.get('project') or {}, bill.get('pdf') or {}
+    try:
+        bill_date = date.fromisoformat(bill.get('bill_date') or '')
+    except ValueError:
+        bill_date = None
+    return {
+        'contractor':  contractor_name or '—',
+        'site':        f"{project.get('project_id', '—')} — {project.get('customer_name', '')}",
+        'bill_number': bill.get('bill_number') or '—',
+        'bill_date':   bill_date,
+        'amount':      format_bill_amount(bill.get('amount')),
+        'pdf_name':    pdf.get('file_name') or 'Bill PDF',
+        'pdf_size_kb': pdf.get('size_kb'),
+        'pdf_url':     sign(pdf.get('bucket'), pdf.get('path')),
+        'tasks':       [{'label': _bill_task_label(t.get('task_name'), t.get('location_label')),
+                         'phase': t.get('phase_name'), 'status': None}
+                        for t in bill.get('tasks') or ()],
+        'warnings':    [],
+    }
+
+
+def _current_assignees(steps, round_no):
+    """{party: profile} — who holds each party in `round_no` now: the last live
+    (not superseded) row per party, the rows being in memory already."""
+    held = {}
+    for step in sorted((s for s in steps if s.round == round_no), key=lambda s: s.pk):
+        if step.verdict != APPROVAL_STEP_SUPERSEDED:
+            held[step.party] = step.assignee
+    return held
+
+
+def _bill_now(approval, steps, sign):
+    """The request's bill as it stands, for the detail and resubmit pages, in
+    bill_display()'s shape plus each task's status NOW (bill_rules.task_status_label) and,
+    while the bill is open or waiting for changes, its warnings (bill_rules.bill_warnings,
+    this bill excluded from "another bill", the Site Engineer and PM as they hold the
+    current round). None for any other kind, at no query.
+
+    Two queries for the bill and its tasks, three more for the warnings when drawn."""
+    if approval.kind != APPROVAL_KIND_CONTRACTOR_BILL:
+        return None
+    # The bill with its site: the block names the site, and the warnings compare against
+    # the site's assigned PM and its tasks.
+    detail = (ContractorBillDetail.objects.select_related('project')
+              .filter(request=approval).first())
+    if detail is None:
+        return None
+    project = detail.project
+    # The bill's task links in the order the bill names them (the snapshot's order), with
+    # each task's phase for its heading.
+    tasks = [link.task for link in detail.task_links.select_related('task__phase')
+             .order_by('pk')]
+    warnings = []
+    if approval.status in _BILL_WARNING_STATUSES:
+        held = _current_assignees(steps, approval.current_round)
+        warnings = bill_warnings(project, tasks, approval.vendor, detail.bill_number,
+                                 held.get(APPROVAL_PARTY_SITE_ENGINEER),
+                                 held.get(APPROVAL_PARTY_PM), exclude=approval)
+    return {
+        'contractor':  approval.vendor.name if approval.vendor is not None else '—',
+        'site':        f'{project.project_id} — {project.customer_name}',
+        'bill_number': detail.bill_number,
+        'bill_date':   detail.bill_date,
+        'amount':      format_bill_amount(detail.amount),
+        'pdf_name':    detail.pdf_file_name,
+        'pdf_size_kb': detail.pdf_size_kb,
+        'pdf_url':     sign(detail.pdf_bucket, detail.pdf_path),
+        'tasks':       [{'label': _bill_task_label(t.task_name, t.location_label),
+                         'phase': t.phase.phase_name,
+                         'status': task_status_label(t, project.project_type)}
+                        for t in tasks],
+        'warnings':    warnings,
+    }
 
 
 def _record_short(order):
@@ -823,6 +972,8 @@ def approval_create(request):
 
     Access: user_can_raise_approval_request — SCM.
 
+    ?kind=contractor_bill (4a-2) is handed to _bill_create, before anything below runs.
+
     THE KIND IS ?kind= IN THE URL (Approvals 3a), read on GET and POST alike, the way the
     key is: the form has no action, so it posts back to its own URL. Only the two
     material kinds are taken; anything else goes back to the list with a message. No
@@ -848,6 +999,10 @@ def approval_create(request):
         messages.error(request, 'Choose "Raise — before order" or "Raise — before '
                                 'dispatch".')
         return redirect('approval_list')
+    if kind == APPROVAL_KIND_CONTRACTOR_BILL:
+        # A contractor bill is its own page (two steps, a PDF, warnings); the material
+        # flow below is left exactly as it was.
+        return _bill_create(request, parse_client_uuid(request.GET, 'key'))
     kind_query = f'kind={kind}&' if kind is not None else ''
     kind = kind or APPROVAL_KIND_MATERIAL_PRE_ORDER
     key = parse_client_uuid(request.GET, 'key')
@@ -897,6 +1052,214 @@ def approval_create(request):
         cleanup()   # the chokepoint returned an earlier submit's request
 
     messages.success(request, f'Approval request raised: {approval.title}.')
+    return _detail(approval.pk)
+
+
+# ---------------------------------------------------------------------------
+# Raise — contractor bill (4a-2)
+# ---------------------------------------------------------------------------
+
+def _bill_step_url(key, project=None):
+    """The bill raise page: step 1 (choose the site) under `key`, or step 2 for
+    `project`. The key stays the same across the two steps and a change of site."""
+    url = f"{reverse('approval_create')}?kind={APPROVAL_KIND_CONTRACTOR_BILL}&key={key}"
+    return f'{url}&project={project.pk}' if project is not None else url
+
+
+def _task_groups(project, tasks):
+    """Step 2's task list: [{phase, tasks: [{task, status}]}], one entry per phase in the
+    order bill_task_choices() gives. Each task shows its status now, so SCM sees an
+    unfinished one before ticking it."""
+    groups = []
+    for task in tasks:
+        if not groups or groups[-1]['phase_pk'] != task.phase_id:
+            groups.append({'phase_pk': task.phase_id, 'phase': task.phase.phase_name,
+                           'tasks': []})
+        groups[-1]['tasks'].append({
+            'task':   task,
+            'label':  _bill_task_label(task.task_name, task.location_label),
+            'status': task_status_label(task, project.project_type)})
+    return groups
+
+
+def _bill_create_context(key, project=None, post=None, already=None, warnings=None):
+    """The bill raise page's context. Step 1 (no `project`): the sites. Step 2: the
+    contractors, the site's tasks, its Site Engineers (bill_rules.site_engineer_choices —
+    those holding a task on the site first) and the PMs, pre-filled from `post` after a
+    refusal or a warning, otherwise with the defaults: the site's assigned PM when that
+    person may be named, and the Site Engineer when exactly one holds a task on the site
+    (ruling 8)."""
+    context = {
+        'kind_label':     dict(APPROVAL_KIND_CHOICES)[APPROVAL_KIND_CONTRACTOR_BILL],
+        'client_uuid':    key,
+        'already':        already,
+        'storage_ready':  bool(bills_bucket()),
+        'storage_notice': BILL_STORAGE_NOT_READY,
+        'project':        project,
+        'post':           post,
+        'warnings':       warnings or [],
+        'step1_url':      _bill_step_url(key),
+    }
+    if project is None:
+        context['sites'] = bill_site_choices()
+        return context
+    engineers = site_engineer_choices(project)
+    on_site = [profile for profile, holds in engineers if holds]
+    pms = assignee_choices('pm')
+    if post is not None:
+        selected_se = post.get('site_engineer_assignee', '')
+        selected_pm = post.get('pm_assignee', '')
+        picked = set(post.getlist('task'))
+    else:
+        selected_se = str(on_site[0].pk) if len(on_site) == 1 else ''
+        selected_pm = (str(project.assigned_pm_id)
+                       if project.assigned_pm_id in {p.pk for p in pms} else '')
+        picked = set()
+    context.update({
+        'contractors':   contractor_choices(),
+        'task_groups':   _task_groups(project, bill_task_choices(project)),
+        'picked_tasks':  picked,
+        'engineers':     engineers,
+        'pms':           pms,
+        'selected_se':   selected_se,
+        'selected_pm':   selected_pm,
+        'today':         timezone.localdate(),
+        'attachment_limit': ATTACHMENT_LIMIT,
+        'photo_accept':  ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
+        'approval_note': BILL_APPROVAL_NOTE,
+    })
+    return context
+
+
+def _bill_create(request, key):
+    """Raise a contractor bill: ?kind=contractor_bill on the raise page (4a-2).
+
+    Access: SCM — approval_create asked user_can_raise_approval_request before handing
+    over; nobody else reaches this function.
+
+    TWO STEPS (ruling 1). Without ?project= the page asks for the site only (a GET form
+    that keeps the key); with it, the rest. The site is read from the URL on GET and POST
+    alike, as the kind is, and must be one bill_sites() offers — anything else goes back
+    to step 1 with a message. The key (?key=, D-A27) is the same across both steps.
+
+    THE ORDER OF A POST, and what each failure leaves behind:
+      1. the key has already raised a bill: that bill, nothing uploaded;
+      2. the bills bucket is unset: BILL_STORAGE_OFF, nothing uploaded (400);
+      3. the form (parse_bill_create: the PDF's bytes, the photos, stale choices), then
+         approvals._clean_bill with a placeholder PDF — the chokepoint's own refusals for
+         the contractor, site, tasks, amount, number and date: 400, nothing uploaded;
+      4. the warnings (bill_rules.bill_warnings), unless "Raise anyway" was ticked: the
+         page again with them, status 200, the same key, nothing uploaded (D-A50);
+      5. the PDF, to the private bucket — a failure is its message, nothing stored;
+      6. the photos, to the public bucket — a failure removes the photos already stored
+         (_upload_attachments) and the PDF (discard_unrecorded_bill_pdf);
+      7. create_approval_request() — a refusal or error removes the photos and the PDF;
+         if it returned a racing twin's bill, our PDF and photos are removed.
+    A refusal after step 5 means choosing the files again; the rules asked in step 3 are
+    the ones most often got wrong, so few refusals come that late.
+    """
+    raw_project = request.GET.get('project')
+    project = bill_site(raw_project) if raw_project is not None else None
+
+    if request.method != 'POST':
+        if key is None:
+            return keyed_redirect(request)
+        already = ApprovalRequest.objects.filter(client_uuid=key).first()
+        if raw_project is not None and project is None:
+            messages.error(request, 'That site cannot take a bill: it is Draft, deleted, '
+                                    'test data or not found. Choose the site again.')
+            return redirect(_bill_step_url(key))
+        return render(request, 'projects/approvals/create_bill.html',
+                      _bill_create_context(key, project, already=already))
+
+    if project is None:
+        messages.error(request, 'Choose the site this bill is for.')
+        return redirect(_bill_step_url(key or _uuid.uuid4()))
+
+    cleaned, errors = parse_bill_create(request)
+    client_uuid = cleaned.pop('client_uuid') or key
+    if client_uuid is not None:
+        existing = ApprovalRequest.objects.filter(client_uuid=client_uuid).first()
+        if existing is not None:
+            messages.info(request, f'This form already raised request #{existing.pk} — '
+                                   f'here it is. Nothing new was raised.')
+            return _detail(existing.pk)
+    else:
+        client_uuid = _uuid.uuid4()   # a page without its key still gets one folder
+
+    def page(problems=(), status=400, warnings=None):
+        for problem in problems:
+            messages.error(request, problem)
+        return render(request, 'projects/approvals/create_bill.html',
+                      _bill_create_context(client_uuid, project, post=request.POST,
+                                           warnings=warnings),
+                      status=status)
+
+    if not bills_bucket():
+        return page([BILL_STORAGE_OFF])
+    if errors:
+        return page(errors)
+    pdf_file, photos, vendor = cleaned['pdf'], cleaned['photos'], cleaned['vendor']
+    try:
+        # The placeholder names the configured private bucket, so _clean_bill judges
+        # everything but a file that does not exist yet; the real one is judged in step 7.
+        checked = _clean_bill(
+            ContractorBill(project, cleaned['tasks'], cleaned['amount'],
+                           cleaned['bill_number'], cleaned['bill_date'],
+                           {'file_name': pdf_file.name, 'bucket': bills_bucket(),
+                            'path': 'not-yet-uploaded'}),
+            vendor, (), [project], ())
+    except ApprovalRefused as exc:
+        return page([str(exc)])
+
+    if request.POST.get('confirm_warnings') != '1':
+        warnings = bill_warnings(project, checked['tasks'], vendor, checked['bill_number'],
+                                 cleaned['site_engineer_assignee'], cleaned['pm_assignee'])
+        if warnings:
+            return page(warnings=warnings, status=200)
+
+    try:
+        stored_pdf = upload_bill_pdf(pdf_file, project)
+    except BillStorageError as exc:
+        return page([str(exc)])
+    try:
+        stored_photos, cleanup = _upload_attachments(photos, client_uuid)
+    except _AttachmentUploadFailed as exc:
+        discard_unrecorded_bill_pdf(stored_pdf)
+        return page([str(exc)])
+
+    try:
+        approval = create_approval_request(
+            kind=APPROVAL_KIND_CONTRACTOR_BILL, raised_by=request.user.profile,
+            title=cleaned['title'], description=cleaned['description'],
+            pm_assignee=cleaned['pm_assignee'],
+            site_engineer_assignee=cleaned['site_engineer_assignee'], vendor=vendor,
+            bill=ContractorBill(project, cleaned['tasks'], cleaned['amount'],
+                                cleaned['bill_number'], cleaned['bill_date'], stored_pdf),
+            attachments=stored_photos, client_uuid=client_uuid)
+    except ApprovalRefused as exc:
+        cleanup()
+        discard_unrecorded_bill_pdf(stored_pdf)
+        return page([str(exc)])
+    except Exception:
+        cleanup()
+        # A racing twin wrote the same client_uuid between the read above and this
+        # create: its bill is the answer, and the discard below removes our PDF. Anything
+        # else is a real failure, and our PDF is removed before it is raised.
+        approval = ApprovalRequest.objects.filter(client_uuid=client_uuid).first()
+        if approval is None:
+            discard_unrecorded_bill_pdf(stored_pdf)
+            raise
+
+    # The chokepoint returned an earlier submit's bill: our PDF is recorded by no bill, so
+    # this removes it (it refuses to remove a recorded PDF — the normal case — and does
+    # nothing then). The same for our photos, by the material path's check.
+    discard_unrecorded_bill_pdf(stored_pdf)
+    if stored_photos and not approval.attachments.filter(
+            path__in=[item['path'] for item in stored_photos]).exists():
+        cleanup()
+
+    messages.success(request, f'Contractor bill raised: {approval.title}.')
     return _detail(approval.pk)
 
 
@@ -1074,6 +1437,12 @@ def approval_detail(request, approval_pk):
     reads as kept (_kept). A proxy's evidence files are listed under its step. History
     is _history(): every action, who and when.
 
+    A contractor bill (4a-2) adds its bill block (_bill_now): the amount beside a signed
+    link to the PDF ("File unavailable" when none can be minted), the tasks with their
+    status now, the warnings while it is open or waiting for changes, and B-16's note.
+    Each round draws the bill its snapshot recorded (bill_display). A material request
+    pays no query for any of it.
+
     Access: user_can_view_approval_request — SCM, CEO, Admin, System Admin; the raiser;
     anyone named on or deciding any step; Design Head authority where there is a design
     step. A CLOSED step is shown read-only to all of them, never a 403. Each action form
@@ -1110,9 +1479,17 @@ def approval_detail(request, approval_pk):
                  for n in range(1, approval.current_round + 1)}
     dispatch, round_dispatch = _dispatch_against(user, approval, material, snapshots)
     links = _order_links(approval)
+    # A contractor bill's PDF links are minted here, per render, never stored (D-A40).
+    sign = _pdf_signer()
+    bill = _bill_now(approval, steps, sign)
     rounds = []
     for round_no in range(approval.current_round, 0, -1):     # newest first
         snapshot = snapshots[round_no]
+        details = _for_display(snapshot if snapshot is not None else current)
+        if bill is not None:
+            details['bill'] = bill_display((snapshot or {}).get('bill'),
+                                           ((snapshot or {}).get('vendor') or {}).get('name'),
+                                           sign)
         rounds.append({
             'number':       round_no,
             'is_current':   round_no == approval.current_round,
@@ -1122,7 +1499,7 @@ def approval_detail(request, approval_pk):
             # A proxy's evidence is drawn under its step, not with the round's files.
             'attachments':  [a for a in attachments
                              if a['file'].round == round_no and a['file'].step_id is None],
-            'details':      _for_display(snapshot if snapshot is not None else current),
+            'details':      details,
             'dispatch':     round_dispatch.get(round_no),
             'has_snapshot': snapshot is not None,
             'changes':      (round_changes(snapshots[round_no - 1], snapshot)
@@ -1135,6 +1512,8 @@ def approval_detail(request, approval_pk):
         'material':       material,
         # The request's material as it stands, drawn as the rounds draw theirs.
         'material_now':   material_display(current['material']),
+        'bill':           bill,
+        'bill_note':      BILL_APPROVAL_NOTE,
         'dispatch':       dispatch,
         'programs':       programs,
         'projects':       projects,
@@ -1237,9 +1616,14 @@ def approval_record_proxy(request, step_pk):
     return _detail(approval.pk)
 
 
-def _resubmit_context(approval, material, latest, keepable, by_pk, post):
+def _resubmit_context(approval, material, latest, keepable, by_pk, post, bill=None):
     """The resubmit form's context. Every value is pre-filled from the request as it
-    stands, or — after a refusal — from what was posted, so nothing typed is lost."""
+    stands, or — after a refusal — from what was posted, so nothing typed is lost.
+
+    `bill` (4a-2) is a contractor bill's _bill_now() block: the page then draws it
+    read-only in place of the request, material and scope cards, and offers photos only;
+    the vendor and scope lists are not read, because nothing on a bill's page edits
+    them."""
     if post is not None:
         values = {key: post.get(key, '') for key in
                   ('title', 'description', 'vendor', 'note')}
@@ -1251,7 +1635,9 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post):
         values = {'title': approval.title, 'description': approval.description,
                   'vendor': str(approval.vendor_id or ''), 'note': ''}
         lines = line_rows(material)
-        scope = current_scope_pks(approval)
+        # A bill's page draws no scope pickers, so its scope is not read.
+        scope = (current_scope_pks(approval) if bill is None
+                 else {'programs': (), 'projects': (), 'site_groups': ()})
         picked = {'program':    {str(pk) for pk in scope['programs']},
                   'project':    {str(pk) for pk in scope['projects']},
                   'site_group': {str(pk) for pk in scope['site_groups']}}
@@ -1272,6 +1658,18 @@ def _resubmit_context(approval, material, latest, keepable, by_pk, post):
             'keep_checked': post is not None and post.get(f'keep_{party}') == 'on',
             'keep_reason':  post.get(f'keep_reason_{party}', '') if post is not None else '',
         })
+
+    if bill is not None:
+        return {
+            'approval':         approval,
+            'bill':             bill,
+            'bill_note':        BILL_APPROVAL_NOTE,
+            'parties':          parties,
+            'values':           values,
+            'attachment_limit': ATTACHMENT_LIMIT,
+            'attachment_accept': ','.join(f'.{ext}' for ext in BILL_PHOTO_EXTENSIONS),
+            'keep_reason_min':  KEEP_REASON_MIN,
+        }
 
     context = {
         'approval':         approval,
@@ -1320,6 +1718,10 @@ def approval_resubmit(request, approval_pk):
     Anyone else: 403. A request no longer waiting for changes: a message and back to the
     request. Calls resubmit_approval_request().
 
+    A CONTRACTOR BILL (4a-2, ruling 3) carries the note, photos (jpg/jpeg/png), approver
+    changes and kept approvals only: the bill is shown read-only and no revision is ever
+    sent for it, whatever is posted.
+
     A REFUSAL — the form's or the chokepoint's — redraws the form (400) with its message
     and everything typed still in it, while the request is still waiting for changes.
     If it no longer is (another SCM user resubmitted or withdrew it meanwhile), the
@@ -1337,6 +1739,9 @@ def approval_resubmit(request, approval_pk):
     material = getattr(approval, 'material_detail', None)
     steps = list(approval.steps.all())
     by_pk = {s.pk: s for s in steps}
+    is_bill = approval.kind == APPROVAL_KIND_CONTRACTOR_BILL
+    # A bill is drawn read-only on its resubmit page; its PDF link is minted per render.
+    bill = _bill_now(approval, steps, _pdf_signer()) if is_bill else None
     # Who holds each party now: the last row per party in the round that asked for
     # changes — the same rule resubmit_approval_request() applies.
     latest = {}
@@ -1349,16 +1754,21 @@ def approval_resubmit(request, approval_pk):
     def form(status=200):
         post = request.POST if request.method == 'POST' else None
         return render(request, 'projects/approvals/resubmit.html',
-                      _resubmit_context(approval, material, latest, keepable, by_pk, post),
+                      _resubmit_context(approval, material, latest, keepable, by_pk, post,
+                                        bill=bill),
                       status=status)
 
     if request.method != 'POST':
         return form()
 
     errors = []
-    files = parse_attachments(request, errors)
+    files = parse_bill_photos(request, errors) if is_bill else parse_attachments(request, errors)
     overrides = parse_assignee_overrides(request.POST, holders, errors)
-    revision = parse_revision(request.POST, approval, errors)
+    # A BILL IS NEVER REVISED HERE (ruling 3, 4a-2), whatever the POST carries: the page
+    # draws no editable field for it, and the chokepoint does not yet refuse a scope or
+    # vendor change on a bill — one would move the bill's recorded site off the site the
+    # bill is for (SECONDARY_FINDINGS, 4a-2). 4b adds bill revision to the chokepoint.
+    revision = {} if is_bill else parse_revision(request.POST, approval, errors)
     # The lines table is sent whole, as the set the next round is asked about — only
     # from a page that drew the editable fields (revise=1, as parse_revision), and only
     # for a material request. Unchanged lines are rewritten as they were; round_changes

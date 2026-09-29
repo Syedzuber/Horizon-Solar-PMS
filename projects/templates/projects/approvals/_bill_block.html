@@ -1,0 +1,41 @@
+{% comment %}
+Contractor bills 4a-2 — one bill, drawn from `b` (approval_views._bill_now for the bill as
+it stands, bill_display for a round's snapshot; the same shape).
+
+The amount sits BESIDE the PDF link, in one row, so nobody approves an amount without the
+bill it came from in reach. The link is signed and expires (bill_storage.bill_pdf_url,
+minted for this render only); when none could be minted the row says "File unavailable",
+never a broken link. A task's status is drawn only for the bill as it stands (a round's
+snapshot records names, not statuses); the warnings only while the bill is open or waiting
+for changes. `note` is B-16's fixed sentence, passed by the pages that draw the live bill.
+{% endcomment %}
+<dl class="row mb-2">
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Contractor</dt>
+  <dd class="col-7 col-sm-9 text-break">{{ b.contractor }}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Site</dt>
+  <dd class="col-7 col-sm-9 text-break">{{ b.site }}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Bill number</dt>
+  <dd class="col-7 col-sm-9 text-break">{{ b.bill_number }}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Bill date</dt>
+  <dd class="col-7 col-sm-9">{% if b.bill_date %}{{ b.bill_date|date:"d M Y" }}{% else %}—{% endif %}</dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Amount</dt>
+  <dd class="col-7 col-sm-9 text-break">
+    <span class="fw-semibold">{{ b.amount }}</span> ·
+    {% if b.pdf_url %}<a href="{{ b.pdf_url }}" target="_blank" rel="noopener"><i class="bi bi-file-earmark-pdf"></i> {{ b.pdf_name }}</a>{% if b.pdf_size_kb %} <span class="text-muted">({{ b.pdf_size_kb }} KB)</span>{% endif %}{% else %}<span class="text-muted">File unavailable</span>{% endif %}
+  </dd>
+  <dt class="col-5 col-sm-3 text-muted fw-normal">Tasks</dt>
+  <dd class="col-7 col-sm-9 mb-0 text-break">
+    {% for t in b.tasks %}
+    <div>{{ t.label }} <span class="text-muted">· {{ t.phase }}{% if t.status %} · {{ t.status }}{% endif %}</span></div>
+    {% empty %}<span class="text-muted">—</span>{% endfor %}
+  </dd>
+</dl>
+{% if b.warnings %}
+<div class="alert alert-warning py-2 px-2 mb-2">
+  <div class="fw-semibold mb-1">Warnings</div>
+  {% for w in b.warnings %}<div class="text-break">{{ w }}</div>{% endfor %}
+</div>
+{% endif %}
+{% if note %}
+<div class="alert alert-light border py-2 px-2 mb-0">{{ note }}</div>
+{% endif %}

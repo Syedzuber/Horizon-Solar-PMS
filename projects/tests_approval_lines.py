@@ -628,10 +628,14 @@ class EmailTextPartTests(NoticeBase):
         self.assertEqual(sent['ap_pm'], (approval_notices.T_ACTIVATED, ('email', 'in_app')))
         self.assertTrue(mail[0]['text'].startswith(self.note_for(self.pm)))
 
-    def test_a_request_without_lines_sends_one_part_as_before(self):
+    def test_a_request_without_lines_sends_no_material_line(self):
+        # Changed deliberately in 4a-2 (ruling 4): a contractor bill's email now carries
+        # its own one-line summary, under "Bill", after the notice — still never a
+        # "Material:" line, and the bell is still the notice alone.
         self.act(self.raise_bill)
         mail = [m for m in self.mail if m['to'] == 'ap_se@example.com']
         self.assertEqual(len(mail), 1)
         self.assertNotIn('Material:', mail[0]['text'])
         self.assertNotIn('Material:', mail[0]['html'])
-        self.assertEqual(mail[0]['text'], self.note_for(self.se))
+        self.assertTrue(mail[0]['text'].startswith(f'{self.note_for(self.se)}\n\nBill: '))
+        self.assertNotIn('Bill:', self.note_for(self.se))

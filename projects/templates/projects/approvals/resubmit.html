@@ -24,6 +24,11 @@ reason stacked under the approver select, long text breaks rather than scrolling
 
 Approvals 3a: a pre-dispatch request's vendor is its PO/PI record's, so it is drawn as
 text with no input — approval_forms.parse_revision also ignores a posted vendor for it.
+
+Contractor bills 4a-2: a bill (`bill` set) is drawn read-only (_bill_block.html) in place
+of the request, material and scope cards, with no revise=1 — the view ignores any posted
+revision for a bill anyway. What a bill's resubmit carries: the note, new photos (JPG and
+PNG only), approver changes and kept approvals.
 {% endcomment %}
 {% block title %}Resubmit approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -45,6 +50,16 @@ text with no input — approval_forms.parse_revision also ignores a posted vendo
 
 <form method="post" enctype="multipart/form-data">
   {% csrf_token %}
+  {% if bill %}
+  {# A bill is not revised on this page (4a-2): shown read-only, and no revise=1 is sent. #}
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">The bill</div>
+    <div class="card-body small">
+      {% include "projects/approvals/_bill_block.html" with b=bill note=bill_note %}
+      <div class="form-text">The bill's details cannot be changed on a resubmit yet. Say what was done about the requested changes in the note below.</div>
+    </div>
+  </div>
+  {% else %}
   <input type="hidden" name="revise" value="1">
 
   <div class="card shadow-sm mb-3">
@@ -143,6 +158,7 @@ text with no input — approval_forms.parse_revision also ignores a posted vendo
       <div class="form-text">Hold Ctrl (⌘ on a Mac) to choose more than one. On a phone, tap each one. Only live tenders and sites are listed.</div>
     </div>
   </div>
+  {% endif %}
 
   <div class="card shadow-sm mb-3">
     <div class="card-header fw-semibold">Approvers for the next round</div>
@@ -184,11 +200,11 @@ text with no input — approval_forms.parse_revision also ignores a posted vendo
   </div>
 
   <div class="card shadow-sm mb-3">
-    <div class="card-header fw-semibold">New attachments <span class="text-muted fw-normal">(optional)</span></div>
+    <div class="card-header fw-semibold">{% if bill %}New photos{% else %}New attachments{% endif %} <span class="text-muted fw-normal">(optional)</span></div>
     <div class="card-body">
       <input type="file" name="attachments" class="form-control w-100" multiple
-             accept=".pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png">
-      <div class="form-text">Earlier rounds' files stay on the request. Up to {{ attachment_limit }} files, 20 MB each.</div>
+             accept="{% if bill %}{{ attachment_accept }}{% else %}.pdf,.doc,.docx,.xls,.xlsx,.jpg,.jpeg,.png{% endif %}">
+      <div class="form-text">Earlier rounds' files stay on the request. {% if bill %}JPG or PNG, up{% else %}Up{% endif %} to {{ attachment_limit }} files, 20 MB each.</div>
     </div>
   </div>
 

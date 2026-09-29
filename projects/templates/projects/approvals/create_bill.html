@@ -1,0 +1,214 @@
+{% extends "base.html" %}
+{% comment %}
+Contractor bills 4a-2 — SCM raises a contractor bill (approval_views._bill_create).
+
+TWO STEPS, NO SCRIPT. Step 1 (no `project`) is a GET form: the site, with the kind and the
+key carried in hidden fields, so choosing a site reloads this page as
+?kind=contractor_bill&key=<same key>&project=<pk>. Step 2 asks for the rest; its tasks,
+Site Engineers and default PM depend on that site. "Change site" goes back to step 1 with
+the same key, and says that what was typed here is cleared.
+
+The rules are approvals.create_approval_request()'s (asked before any file is stored). A
+refusal comes back as a message with what was typed still here. WARNINGS (D-A50) come back
+as a yellow box with a "Raise anyway" tick: nothing was stored, the same key is kept, and
+ticking it and raising again goes ahead. The PDF and photos must be chosen again after
+either — a browser never re-fills a file input.
+
+With the private bills bucket unset (`storage_ready` false) the page still draws, says so,
+and has no Raise button: a POST would be refused anyway.
+
+BUILT FOR 380 px, like every approvals page: one column, full-width inputs, the task list
+as stacked check boxes under each phase's name.
+{% endcomment %}
+{% block title %}Raise contractor bill — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Raise contractor bill</h4>
+    <small class="text-muted">{{ kind_label }}{% if project %} · {{ project.project_id }} — {{ project.customer_name }}{% endif %}</small>
+  </div>
+  <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary btn-sm">← Approvals</a>
+</div>
+
+{% if not storage_ready %}
+<div class="alert alert-warning">{{ storage_notice }}</div>
+{% endif %}
+
+{% if already %}
+<div class="alert alert-info">
+  <div class="mb-2">This form has already raised <strong>request #{{ already.pk }} · {{ already.title }}</strong>. Submitting it again raises nothing new.</div>
+  <div class="d-grid d-sm-flex gap-2">
+    <a href="{% url 'approval_detail' already.pk %}" class="btn btn-brand btn-sm">Open request #{{ already.pk }}</a>
+    <a href="{% url 'approval_create' %}?kind=contractor_bill" class="btn btn-outline-secondary btn-sm">Start a new bill</a>
+  </div>
+</div>
+{% endif %}
+
+{% if not project %}
+{# ── Step 1 · the site ─────────────────────────────────────────────── #}
+<form method="get" action="{% url 'approval_create' %}">
+  <input type="hidden" name="kind" value="contractor_bill">
+  <input type="hidden" name="key" value="{{ client_uuid }}">
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">1 · The site</div>
+    <div class="card-body">
+      <label for="cbSite" class="form-label">Site this bill is for</label>
+      <select name="project" id="cbSite" class="form-select w-100" required>
+        <option value="">— Choose the site —</option>
+        {% for s in sites %}
+        <option value="{{ s.pk }}">{{ s.project_id }} — {{ s.customer_name }} ({{ s.status }})</option>
+        {% endfor %}
+      </select>
+      <div class="form-text">One site per bill. Draft sites are not listed: no work can have been done on them yet.</div>
+    </div>
+  </div>
+  <div class="d-grid d-sm-flex justify-content-sm-end gap-2 mb-4">
+    <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-brand">Next</button>
+  </div>
+</form>
+
+{% else %}
+{# ── Step 2 · the bill ─────────────────────────────────────────────── #}
+<form method="post" enctype="multipart/form-data" id="cbCreateForm">
+  {% csrf_token %}
+  <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
+
+  {% if warnings %}
+  <div class="alert alert-warning">
+    <div class="fw-semibold mb-1">Check before raising this bill</div>
+    {% for w in warnings %}<div class="text-break">{{ w }}</div>{% endfor %}
+    <div class="mt-2">Nothing was saved. Choose the PDF and any photos again, then raise.</div>
+    <div class="form-check mt-2">
+      <input class="form-check-input" type="checkbox" name="confirm_warnings" value="1" id="cbConfirm">
+      <label class="form-check-label" for="cbConfirm">Raise anyway</label>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold d-flex flex-wrap justify-content-between gap-2">
+      <span>1 · The site</span>
+      <a href="{{ step1_url }}" class="small fw-normal">Change site (clears this form)</a>
+    </div>
+    <div class="card-body">
+      <div class="text-break">{{ project.project_id }} — {{ project.customer_name }}</div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">2 · The bill</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="cbVendor" class="form-label">Contractor</label>
+        <select name="vendor" id="cbVendor" class="form-select w-100" required>
+          <option value="">— Choose the contractor —</option>
+          {% for v in contractors %}
+          <option value="{{ v.pk }}"{% if post and v.pk|stringformat:"s" == post.vendor %} selected{% endif %}>{{ v.name }}</option>
+          {% endfor %}
+        </select>
+        {% if not contractors %}<div class="form-text">No vendor is recorded as a contractor yet. Set the vendor's kind in the vendor master first.</div>{% endif %}
+      </div>
+      <div class="mb-3">
+        <label for="cbNumber" class="form-label">Contractor's bill number</label>
+        <input type="text" name="bill_number" id="cbNumber" class="form-control w-100" maxlength="100" required
+               value="{{ post.bill_number|default:'' }}">
+      </div>
+      <div class="mb-3">
+        <label for="cbDate" class="form-label">Bill date</label>
+        <input type="date" name="bill_date" id="cbDate" class="form-control w-100" required
+               max="{{ today|date:'Y-m-d' }}" value="{{ post.bill_date|default:'' }}">
+        <div class="form-text">The date printed on the bill.</div>
+      </div>
+      <div class="mb-3">
+        <label for="cbAmount" class="form-label">Amount (₹)</label>
+        <input type="number" name="amount" id="cbAmount" class="form-control w-100" step="0.01" min="0.01" inputmode="decimal" required
+               value="{{ post.amount|default:'' }}">
+        <div class="form-text">As billed. Nothing checks it against a rate or work order.</div>
+      </div>
+      <div class="mb-0">
+        <label for="cbPdf" class="form-label">Bill PDF</label>
+        <input type="file" name="bill_pdf" id="cbPdf" class="form-control w-100" accept=".pdf,application/pdf" required>
+        <div class="form-text">The contractor's bill, as a PDF, 20 MB at most. Stored privately.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">3 · The work it covers</div>
+    <div class="card-body">
+      {% for group in task_groups %}
+      <div class="{% if not forloop.last %}mb-3{% endif %}">
+        <div class="fw-semibold small mb-1">{{ group.phase }}</div>
+        {% for t in group.tasks %}
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" name="task" value="{{ t.task.pk }}" id="cbTask{{ t.task.pk }}"{% if t.task.pk|stringformat:"s" in picked_tasks %} checked{% endif %}>
+          <label class="form-check-label text-break" for="cbTask{{ t.task.pk }}">{{ t.label }} <span class="text-muted">· {{ t.status }}</span></label>
+        </div>
+        {% endfor %}
+      </div>
+      {% empty %}
+      <div class="text-muted">This site has no tasks a bill can name.</div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">4 · Who confirms</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="cbSe" class="form-label">Site Engineer <span class="text-muted small">(confirms the work first)</span></label>
+        <select name="site_engineer_assignee" id="cbSe" class="form-select w-100" required>
+          <option value="">— Choose the Site Engineer —</option>
+          {% for profile, holds in engineers %}
+          <option value="{{ profile.pk }}"{% if profile.pk|stringformat:"s" == selected_se %} selected{% endif %}>{{ profile.user.get_full_name|default:profile.user.username }}{% if holds %} · holds a task on this site{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="mb-0">
+        <label for="cbPm" class="form-label">PM <span class="text-muted small">(approves after the Site Engineer)</span></label>
+        <select name="pm_assignee" id="cbPm" class="form-select w-100" required>
+          <option value="">— Choose a PM —</option>
+          {% for p in pms %}
+          <option value="{{ p.pk }}"{% if p.pk|stringformat:"s" == selected_pm %} selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }}{% if p.pk == project.assigned_pm_id %} · this site's PM{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">5 · Title and description</div>
+    <div class="card-body">
+      <div class="mb-3">
+        <label for="cbTitle" class="form-label">Title</label>
+        <input type="text" name="title" id="cbTitle" class="form-control w-100" maxlength="200" required
+               value="{{ post.title|default:'' }}" placeholder="e.g. Civil works, block A">
+      </div>
+      <div class="mb-0">
+        <label for="cbDescription" class="form-label">Description</label>
+        <textarea name="description" id="cbDescription" class="form-control w-100" rows="3" required>{{ post.description|default:'' }}</textarea>
+      </div>
+    </div>
+  </div>
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-header fw-semibold">6 · Photos <span class="text-muted fw-normal">(optional)</span></div>
+    <div class="card-body">
+      <input type="file" name="attachments" class="form-control w-100" multiple accept="{{ photo_accept }}">
+      <div class="form-text">Photos of the work: JPG or PNG, up to {{ attachment_limit }} files, 20 MB each.</div>
+    </div>
+  </div>
+
+  <div class="alert alert-light border small">{{ approval_note }}</div>
+
+  <div class="d-grid d-sm-flex justify-content-sm-end gap-2 mb-4">
+    <a href="{% url 'approval_list' %}" class="btn btn-outline-secondary">Cancel</a>
+    {% if storage_ready and not already %}<button type="submit" class="btn btn-brand">Raise bill</button>{% endif %}
+  </div>
+</form>
+{% endif %}
+
+{% endblock %}

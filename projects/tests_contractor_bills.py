@@ -623,8 +623,9 @@ class StorageTests(BillFixture):
 
 class PagesWithStorageOffTests(BillFixture):
     """With the bills bucket unset, every approvals page, and the vendor master, renders.
-    The raise page's refusal of ?kind=contractor_bill is pinned, unchanged, by
-    tests_approval_views.RaisePageKindTests.test_any_other_kind_goes_back_to_the_list."""
+    Since 4a-2 the raise page draws ?kind=contractor_bill and says bills cannot be stored
+    yet — pinned by tests_approval_views.PreDispatchRaiseTests
+    .test_contractor_bill_draws_the_bill_form_and_unknown_kinds_go_back."""
 
     def test_every_approvals_page_renders(self):
         with self.settings(SUPABASE_BILLS_BUCKET=BUCKET):

@@ -37,6 +37,14 @@ quantity note on both forms: parse_lines reads the lines table (inputs line-<i>-
 line_rows fills it from a request's live lines. THIS MODULE DOES NOT CHECK A QUANTITY. The
 unit rules (a whole number for a count unit, two places for a measured one) are
 approvals._clean_lines', which refuses; a second copy here could only disagree with it.
+
+Contractor bills 4a-2 add the bill's raise page: bill_sites (step 1's list, and what a
+?project= must be), bill_task_choices, contractor_choices, and parse_bill_create. As for
+material, the RULES are the chokepoint's: which vendor may bill, which tasks, the amount,
+number and date are approvals._clean_bill's, and the view asks it before anything is
+uploaded. This module only reads the POST, and checks the PDF's bytes and the photos'
+types — because those must be refused before a file reaches storage, and the chokepoint
+only ever sees a file already stored.
 """
 import re
 import uuid as _uuid
@@ -46,11 +54,13 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateformat import format as date_format
 
+from .bill_storage import BillStorageError, validate_bill_pdf
 from .models import (
-    ApprovalOrderLink, ApprovalRequest, Program, Project, SiteGroup, UserProfile, Vendor, VendorOrder,
+    ApprovalOrderLink, ApprovalRequest, Program, Project, SiteGroup, Task, UserProfile, Vendor,
+    VendorOrder,
     APPROVAL_APPROVED, APPROVAL_KIND_MATERIAL_PRE_DISPATCH, APPROVAL_KIND_MATERIAL_PRE_ORDER,
     APPROVAL_PARTY_CHOICES, APPROVAL_PARTY_DESIGN, APPROVAL_STEP_APPROVED,
-    GROUP_TYPE_PROCUREMENT,
+    GROUP_TYPE_PROCUREMENT, VENDOR_BILLABLE_KINDS,
 )
 from .permissions import (
     profile_can_be_approval_assignee, user_can_view_approval_request,
@@ -67,6 +77,11 @@ ATTACHMENT_LIMIT = 5
 #: screenshot is PNG or JPEG). Not HEIC or WebP — views._validate_upload_file's MIME map
 #: has neither (SECONDARY_FINDINGS, Approvals 2a-2).
 EVIDENCE_EXTENSIONS = ['pdf', 'jpg', 'jpeg', 'png']
+
+#: What a contractor bill's photos may be (4a-2 ruling 6). Never a PDF: photos go to the
+#: PUBLIC bucket as ordinary attachments (D-A37), and a PDF there could be a second copy of
+#: the bill — the one document that must only ever sit in the private bills bucket.
+BILL_PHOTO_EXTENSIONS = ['jpg', 'jpeg', 'png']
 
 #: The shortest reason, in non-space characters, for keeping an earlier approval (D-A20).
 KEEP_REASON_MIN = 15
@@ -578,3 +593,121 @@ def parse_carry(post, keepable, overrides, errors):
         if not refused:
             carry[party] = reason
     return carry
+
+
+# ---------------------------------------------------------------------------
+# Contractor bills (4a-2)
+# ---------------------------------------------------------------------------
+
+def bill_sites():
+    """The sites a contractor bill may be raised against: live, not Draft, not test data.
+
+    Draft is left out because approvals._clean_bill refuses it (no work can have been done
+    on a site never activated); test data by ruling 8 (4a-2). The raise page's step 1 lists
+    exactly these, and the same queryset judges a ?project= in the URL, so no address
+    reaches a site the list does not offer."""
+    return Project.objects.filter(is_deleted=False, is_test=False).exclude(status='Draft')
+
+
+def bill_site_choices():
+    """Step 1's site list, by project id. One query."""
+    return list(bill_sites().only('pk', 'project_id', 'customer_name', 'project_type', 'status')
+                .order_by('project_id'))
+
+
+def bill_site(raw):
+    """The site `raw` (a ?project= value) names, if it is one bill_sites() offers; else
+    None. One query, none for junk."""
+    raw = (raw or '').strip()
+    if not raw.isdigit():
+        return None
+    return bill_sites().filter(pk=int(raw)).first()
+
+
+def contractor_choices():
+    """Active vendors recorded as a contractor or both (D-A14, D-A38), by name. The
+    chokepoint refuses any other vendor; this only keeps suppliers out of the list."""
+    return list(Vendor.objects.filter(is_active=True, kind__in=sorted(VENDOR_BILLABLE_KINDS))
+                .order_by('name'))
+
+
+def bill_task_choices(project):
+    """The tasks on `project` a bill may name, in the order the site's workspace shows them
+    (phase, then task). Mirror tasks are left out: their status is derived from another
+    record and the chokepoint refuses them. The phase is joined because the list is drawn
+    under each phase's name. One query."""
+    return list(Task.objects.filter(phase__project=project, is_mirror=False)
+                .select_related('phase')
+                .order_by('phase__phase_order', 'phase__pk', 'task_order', 'pk'))
+
+
+def _bill_vendor(post, errors):
+    """The posted contractor, or None when none is chosen. ANY vendor that still exists is
+    returned — whether it may bill (a contractor, active) is approvals._clean_bill's rule,
+    asked by the view before any upload, so its words are the ones SCM reads."""
+    raw = (post.get('vendor') or '').strip()
+    if not raw:
+        errors.append('Choose the contractor this bill is from.')
+        return None
+    vendor = Vendor.objects.filter(pk=int(raw)).first() if raw.isdigit() else None
+    if vendor is None:
+        errors.append('The contractor you chose no longer exists. Choose again.')
+    return vendor
+
+
+def _bill_tasks(post, errors):
+    """The ticked tasks, in the order posted, re-read. Whether each is on the site and not
+    a mirror is approvals._clean_bill's rule; one that no longer exists is an error here,
+    never dropped — a bill that quietly names less than SCM ticked says something untrue."""
+    wanted = _pks(post, 'task')
+    rows = Task.objects.in_bulk(wanted) if wanted else {}
+    if len(rows) != len(wanted):
+        errors.append('A task you chose no longer exists. Choose again.')
+    return [rows[pk] for pk in wanted if pk in rows]
+
+
+def parse_bill_create(request):
+    """The contractor bill raise page's POST. Returns (cleaned, errors).
+
+    `cleaned`: title, description, vendor, pm_assignee, site_engineer_assignee, tasks,
+    amount, bill_number and bill_date (as typed — the chokepoint parses them), `pdf` (the
+    uploaded file, not stored), `photos` (validated, not stored) and `client_uuid`. The
+    site is not here: it is the page's ?project=, read by the view.
+
+    Errors here are only what must be settled before a file reaches storage: the bill
+    PDF (present, and a real PDF by bill_storage.validate_bill_pdf — its bytes, not its
+    name), the photos (jpg/jpeg/png, 20 MB, at most ATTACHMENT_LIMIT), and choices that
+    no longer exist. Touches no storage."""
+    post, errors = request.POST, []
+    vendor = _bill_vendor(post, errors)
+    tasks = _bill_tasks(post, errors)
+    pdf = request.FILES.get('bill_pdf')
+    if pdf is None:
+        errors.append('Attach the contractor\'s bill as a PDF.')
+    else:
+        try:
+            validate_bill_pdf(pdf)
+        except BillStorageError as exc:
+            errors.append(str(exc))
+    photos = _validated_files(request, 'attachments', errors, BILL_PHOTO_EXTENSIONS)
+    cleaned = {
+        'title':                  post.get('title', ''),
+        'description':            post.get('description', ''),
+        'vendor':                 vendor,
+        'pm_assignee':            _profile(post, 'pm_assignee'),
+        'site_engineer_assignee': _profile(post, 'site_engineer_assignee'),
+        'tasks':                  tasks,
+        'amount':                 post.get('amount', ''),
+        'bill_number':            post.get('bill_number', ''),
+        'bill_date':              post.get('bill_date', ''),
+        'pdf':                    pdf,
+        'photos':                 photos,
+        'client_uuid':            parse_client_uuid(post),
+    }
+    return cleaned, errors
+
+
+def parse_bill_photos(request, errors):
+    """A bill resubmit's new photos, under `attachments`: jpg/jpeg/png only, as on the
+    raise page. Touches no storage."""
+    return _validated_files(request, 'attachments', errors, BILL_PHOTO_EXTENSIONS)

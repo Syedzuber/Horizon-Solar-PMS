@@ -15,6 +15,10 @@ raised before lines, or a schema-1 BOQ pick).
 `dispatch` (Approvals 3a, pre-dispatch only) is that round's "Dispatch against" block from
 approval_views._dispatch_against(): numbers from the snapshot, the recorded date from the
 live PO/PI record (which is never edited), links only where the viewer may open them.
+
+`d.bill` (contractor bills 4a-2) is a schema-3 round's bill from approval_views.bill_display:
+drawn with _bill_block.html in place of the vendor, sign-off and scope rows. Absent for
+every material round, which draws exactly as before.
 {% endcomment %}
 <p class="mb-2 fw-semibold text-break">{{ d.title }}</p>
 <p class="mb-2 text-break" style="white-space:pre-line;">{{ d.description }}</p>
@@ -55,6 +59,9 @@ live PO/PI record (which is never edited), links only where the viewer may open 
 </div>
 {% endif %}
 {% endif %}
+{% if d.bill %}
+{% include "projects/approvals/_bill_block.html" with b=d.bill note=None %}
+{% else %}
 <dl class="row mb-0">
   <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
   <dd class="col-7 col-sm-9 text-break">{% if d.vendor %}{{ d.vendor.name }}{% else %}—{% endif %}</dd>
@@ -76,3 +83,4 @@ live PO/PI record (which is never edited), links only where the viewer may open 
   <dt class="col-5 col-sm-3 text-muted fw-normal">Site groups</dt>
   <dd class="col-7 col-sm-9 mb-0 text-break">{% for g in d.site_groups %}<div>{{ g.program_name|default:"—" }} · {{ g.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
 </dl>
+{% endif %}

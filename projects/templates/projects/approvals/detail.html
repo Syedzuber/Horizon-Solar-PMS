@@ -35,6 +35,11 @@ columns, the one table on this page, narrow enough for a phone. A request raised
 lines draws its old make, specification and quantity under "Recorded before line items",
 only when one is non-empty. The change list names each line that changed and each field
 of it, before and after (approval_views.round_changes).
+
+Contractor bills 4a-2: a bill's Request card draws its bill (_bill_block.html, from
+approval_views._bill_now) in place of the vendor, sign-off and scope rows — the site is in
+the bill, and a bill takes no sign-off. Each round draws the bill its snapshot recorded.
+The PDF link is signed per render and expires; it is never an attachment row's link.
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -112,9 +117,14 @@ of it, before and after (approval_views.round_changes).
     </div>
     {% endif %}
     {% endif %}
+    {% if bill %}
+    <div class="small mb-3">{% include "projects/approvals/_bill_block.html" with b=bill note=bill_note %}</div>
+    {% endif %}
     <dl class="row mb-0 small">
+      {% if not bill %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Vendor</dt>
       <dd class="col-7 col-sm-9">{% if approval.vendor %}{{ approval.vendor.name }}{% else %}—{% endif %}</dd>
+      {% endif %}
       {% if dispatch %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Dispatch against</dt>
       <dd class="col-7 col-sm-9 text-break">
@@ -124,8 +134,10 @@ of it, before and after (approval_views.round_changes).
         {% if dispatch.pre_order %}<div class="mt-1">Pre-order approval: {% if dispatch.pre_order.url %}<a href="{{ dispatch.pre_order.url }}">{{ dispatch.pre_order.title }}</a>{% else %}{{ dispatch.pre_order.title }}{% endif %}</div>{% endif %}
       </dd>
       {% endif %}
+      {% if not bill %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Design sign-off</dt>
       <dd class="col-7 col-sm-9">{% if approval.design_signoff_required %}Required{% else %}Not required{% endif %}</dd>
+      {% endif %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Raised by</dt>
       <dd class="col-7 col-sm-9">{{ approval.raised_by.user.get_full_name|default:approval.raised_by.user.username }}, {{ approval.raised_at|date:"d M Y, H:i" }}</dd>
       {% if approval.closed_at %}
@@ -136,12 +148,14 @@ of it, before and after (approval_views.round_changes).
       <dt class="col-5 col-sm-3 text-muted fw-normal">Why withdrawn</dt>
       <dd class="col-7 col-sm-9 text-break">{{ approval.withdrawal_note }}</dd>
       {% endif %}
+      {% if not bill %}
       <dt class="col-5 col-sm-3 text-muted fw-normal">Tenders</dt>
       <dd class="col-7 col-sm-9">{% for p in programs %}<div>{{ p.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
       <dt class="col-5 col-sm-3 text-muted fw-normal">Sites</dt>
       <dd class="col-7 col-sm-9">{% for p in projects %}<div class="text-break">{{ p.project_id }} <span class="text-muted">— {{ p.customer_name }}</span></div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
       <dt class="col-5 col-sm-3 text-muted fw-normal">Site groups</dt>
       <dd class="col-7 col-sm-9 mb-0">{% for g in site_groups %}<div>{{ g.program.name }} · {{ g.name }}</div>{% empty %}<span class="text-muted">—</span>{% endfor %}</dd>
+      {% endif %}
     </dl>
   </div>
 </div>

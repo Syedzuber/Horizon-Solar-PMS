@@ -14,8 +14,16 @@ approvals.create_approval_request(), and nothing here is consulted by it.
   pm_warnings()                   the PM named is not the site's assigned PM
   site_engineer_choices()         D-A35 — the Site Engineer list, the site's own first
 
+4a-2 adds three helpers the screens and emails share, none of which changes the above:
+
+  bill_warnings()                 every warning above for one bill, in one list
+  task_status_label()             a task's status as a bill reader needs it
+  format_bill_amount()            "₹12,500.00" — Indian grouping, paise kept
+
 NOTHING HERE CHECKS THE AMOUNT (B-16). There is no rate contract to check it against.
 """
+from decimal import Decimal, InvalidOperation
+
 from .models import (
     ContractorBillDetail, ContractorBillTask, Task, UserProfile,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_OPEN,
@@ -150,3 +158,46 @@ def site_engineer_choices(project):
                  .select_related('user'))
     return sorted(((p, p.pk in on_site) for p in engineers),
                   key=lambda pair: (not pair[1], _person(pair[0]).lower()))
+
+
+def bill_warnings(project, tasks, vendor, bill_number, site_engineer, pm, exclude=None):
+    """Every warning for one bill, in the order SCM reads them: the tasks, other bills
+    naming them, the bill number, then the two people. `exclude` is the bill itself when
+    its own detail page re-reads them, so it is never "another bill". Three queries."""
+    return (incomplete_task_warnings(project, tasks)
+            + other_bill_warnings(tasks, exclude=exclude)
+            + repeated_bill_number_warnings(vendor, bill_number, exclude=exclude)
+            + site_engineer_warnings(project, site_engineer)
+            + pm_warnings(project, pm))
+
+
+def task_status_label(task, project_type):
+    """A task's status as a bill's reader needs it: Not Applicable first, then an OPEX
+    task's approval beside Done — Done alone does not finish an OPEX task for a bill
+    (task_complete_for_bill). No query."""
+    if task.is_not_applicable:
+        return 'Not Applicable'
+    if task.status == Task.DONE and project_type == 'OPEX':
+        return 'Done — approved' if task.approved_at is not None else 'Done — not yet approved'
+    return task.get_status_display()
+
+
+def format_bill_amount(amount):
+    """A bill amount as people read it: '₹12,500.00', '₹1,23,45,678.50'. Indian grouping
+    (lakhs and crores), and the paise KEPT — views._format_inr rounds to whole rupees,
+    which is right for a dashboard total and wrong for what a contractor billed. Takes a
+    Decimal or a snapshot's string ("12500.00"); anything unreadable is shown as given."""
+    try:
+        value = Decimal(str(amount)).quantize(Decimal('0.01'))
+    except (InvalidOperation, TypeError, ValueError):
+        return f'₹{amount}'
+    sign = '-' if value < 0 else ''
+    rupees, paise = f'{abs(value):.2f}'.split('.')
+    head, tail = rupees[:-3], rupees[-3:]
+    groups = []
+    while len(head) > 2:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    if head:
+        groups.insert(0, head)
+    return f"{sign}₹{','.join(groups + [tail])}.{paise}"
