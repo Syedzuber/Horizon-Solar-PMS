@@ -26,25 +26,36 @@ sites and 30 sites to the same count, tests_tender_cards 2x3 and 4x30.
 design_metrics is NOT reused, deliberately (pre-flight P1). Its tender_metrics() runs per
 programme, counts only sites that have a DesignAssignment, and splits `arka_submitted` on
 the current Arka — a read this mapping does not need, since both halves are S2.
+
+design_throughput() (S5) is the exception, and the opposite way round: its figures must
+equal the Design Head's, so it feeds its own four batched reads through design_metrics'
+and design_analytics' functions unchanged rather than restating any definition.
 """
 from collections import namedtuple
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
 from django.urls import reverse
+from django.utils import timezone
 
+from .design_analytics import STATE_INSUFFICIENT, m_cycle_time
+from .design_metrics import effective_commitment, is_overdue, rework_contribution
 # latest_design_transition lives in design_views beside the ledger's other readers.
 # design_views does not import views or this module, so importing it here is not a cycle.
 from .design_views import latest_design_transition
 from .models import (
+    CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_ORIGIN_SCM, CHANGE_REQUEST_WITH_PM,
     DC_CATEGORY_TO_MIRROR_CODE,
     DESIGN_ALLOCATED, DESIGN_ARKA_REJECTED, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_AWAITING_ALLOCATION, DESIGN_AWAITING_HEAD_ARKA,
     DESIGN_AWAITING_HEAD_QC, DESIGN_AWAITING_PM_APPROVAL, DESIGN_AWAITING_SURVEY,
     DESIGN_DUE_DATE_PROPOSED, DESIGN_IN_DESIGN, DESIGN_IN_QC, DESIGN_PM_REJECTED,
     DESIGN_QC_FAILED, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
+    DESIGN_WORK_FINISHED_STATUSES,
     GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
-    DesignAttempt, SiteGroupMembership, Task,
+    DesignAssignment, DesignAttempt, DesignChangeRequest, DueDateCommitment,
+    SiteGroupMembership, Task,
 )
 from .utils import applicable_tasks_q
 
@@ -383,3 +394,118 @@ def tender_cards(sites_qs, health_by_pk):
         card['health'] = min(badges, key=HEALTH_SEVERITY.index) if badges else None
 
     return sorted(cards.values(), key=lambda card: (-card['sites'], card['name']))
+
+
+def design_throughput(sites_qs, today):
+    """Whether design is moving, for the CEO Tenders "Design throughput" card (S5). FOUR
+    queries whatever the number of sites or programmes: assignments, attempts, due-date
+    commitments and open change requests, each scoped by `sites_qs` as a subquery.
+
+    EVERY FIGURE IS THE DESIGN HEAD'S OWN (S5 hard rule). Nothing below restates a
+    definition; the rows are shaped the way tender_metrics() / analytics_dataset() shape
+    them and handed to the same functions:
+
+        released_week / released_month
+                        status == released AND released_at's IST date inside the calendar
+                        week (Mon-Sun) / month containing `today`. The Head has no windowed
+                        figure; "released" is his strict one (awaiting PM is not released).
+                        Accepting a change request clears released_at, so these can fall
+                        after the fact (SECONDARY_FINDINGS, S5).
+        cycle           design_analytics.m_cycle_time()'s team figure, all time: working
+                        days from allocation to release, median and n. `cycle_insufficient`
+                        is its own MIN_DENOMINATOR state, so the card says "too few to
+                        judge" exactly when the Head's analytics does.
+        rework_loops / finished_sites
+                        design_metrics.rework_contribution() summed: designer-caused
+                        attempts on finished sites, and the finished sites. The numerator
+                        of the Head's Rework column and its denominator. A change request
+                        opens a pm_change attempt, which that function never counts.
+        change_requests open = CHANGE_REQUEST_OPEN_VERDICTS (with the PM, or pending with
+                        the Head), split by origin and by where it waits. `with_head` is
+                        the count the Head's own change-request queue shows.
+        on_hold         status == survey_returned, the Head's `blocked`.
+        past_due        design_metrics.is_overdue() on effective_commitment(), no stage
+                        filter: a held site past its date counts, a PM-rejected one does
+                        not, exactly as on the Head's dashboard.
+
+    `today` is passed in (the caller's timezone.localdate()) so the windows and the overdue
+    test share one IST date.
+    """
+    # The site pks as a subquery, so every read below is one statement with no pk list.
+    site_pks = sites_qs.order_by().values('pk')
+
+    # assigned_to__user rides along because m_cycle_time labels its per-designer rows
+    # (unused here) by the designer's name; without it each released site costs a query.
+    assignments = list(DesignAssignment.objects.filter(project__in=site_pks)
+                       .select_related('assigned_to__user'))
+    attempts_by_assignment = {}
+    for attempt in DesignAttempt.objects.filter(assignment__project__in=site_pks):
+        attempts_by_assignment.setdefault(attempt.assignment_id, []).append(attempt)
+    commitments_by_assignment = {}
+    for commitment in DueDateCommitment.objects.filter(assignment__project__in=site_pks):
+        commitments_by_assignment.setdefault(commitment.assignment_id, []).append(commitment)
+    # Open requests only: the card counts what is waiting, and closed verdicts are history.
+    open_requests = list(DesignChangeRequest.objects
+                         .filter(attempt__assignment__project__in=site_pks,
+                                 verdict__in=CHANGE_REQUEST_OPEN_VERDICTS)
+                         .values_list('origin', 'verdict'))
+
+    # The same per-site keys tender_metrics() and analytics_dataset() build, from the same
+    # status sets, so the shared functions read them exactly as they read the Head's.
+    sites = [{
+        'assignment': a,
+        'designer':   a.assigned_to,
+        'attempts':   attempts_by_assignment.get(a.pk, []),
+        'released':   a.status == DESIGN_RELEASED,
+        'finished':   a.status in DESIGN_WORK_FINISHED_STATUSES,
+    } for a in assignments]
+
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=7)
+    released_week = released_month = 0
+    for s in sites:
+        released_at = s['assignment'].released_at
+        if not s['released'] or released_at is None:
+            continue
+        # The IST calendar date of the release, so 00:30 on a Monday is the new week.
+        released_on = timezone.localtime(released_at).date()
+        if week_start <= released_on < week_end:
+            released_week += 1
+        if (released_on.year, released_on.month) == (today.year, today.month):
+            released_month += 1
+
+    cycle = m_cycle_time({'sites': sites})['team']
+
+    rework_loops = finished_sites = 0
+    for s in sites:
+        contribution = rework_contribution(s)
+        rework_loops += contribution['designer']
+        finished_sites += contribution['finished']
+
+    past_due = sum(
+        1 for s in sites
+        if is_overdue(s['assignment'],
+                      effective_commitment(commitments_by_assignment.get(s['assignment'].pk, [])),
+                      today))
+
+    return {
+        'week_start': week_start,
+        'released_week': released_week,
+        'released_month': released_month,
+        'cycle': cycle,
+        'cycle_insufficient': cycle['state'] == STATE_INSUFFICIENT,
+        'rework_loops': rework_loops,
+        'finished_sites': finished_sites,
+        'change_requests': {
+            'open': len(open_requests),
+            'pm': sum(1 for origin, _ in open_requests if origin != CHANGE_REQUEST_ORIGIN_SCM),
+            'scm': sum(1 for origin, _ in open_requests if origin == CHANGE_REQUEST_ORIGIN_SCM),
+            'with_pm': sum(1 for _, verdict in open_requests
+                           if verdict == CHANGE_REQUEST_WITH_PM),
+            # The only other open verdict is `pending`: with the Design Head.
+            'with_head': sum(1 for _, verdict in open_requests
+                             if verdict != CHANGE_REQUEST_WITH_PM),
+        },
+        'on_hold': sum(1 for s in sites if s['assignment'].status == DESIGN_SURVEY_RETURNED),
+        'past_due': past_due,
+    }

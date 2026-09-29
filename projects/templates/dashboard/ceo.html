@@ -390,6 +390,63 @@ here and no JavaScript. Residential and no-context set site_pipeline to None.
 </div>
 {% endif %}
 
+{# ── DESIGN THROUGHPUT (Tenders only) ─────────────────────────────────────── #}
+{% comment %}
+S5: whether design is moving (projects/tender_stages.design_throughput). Every figure is
+the Design Head's own definition, computed there; nothing is derived here. Half width on
+desktop, full on mobile: S6 fills the other half of this row. Amber marks only Design Hold
+and past due, and only when non-zero. Residential and no-context set design_throughput
+to None.
+{% endcomment %}
+{% if design_throughput %}
+{% with dt=design_throughput cr=design_throughput.change_requests %}
+<div class="row g-3 mb-4">
+  <div class="col-12 col-lg-6">
+    <div class="section-label">Design throughput</div>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <div class="row g-2 mb-3">
+          <div class="col-4">
+            <div class="kpi-val text-dark">{{ dt.released_week }}</div>
+            <div class="kpi-sublbl">Released this week</div>
+          </div>
+          <div class="col-4">
+            <div class="kpi-val text-dark">{{ dt.released_month }}</div>
+            <div class="kpi-sublbl">Released this month</div>
+          </div>
+          <div class="col-4">
+            <div class="kpi-val text-dark">{% if dt.cycle_insufficient %}—{% else %}{{ dt.cycle.median|floatformat:"-1" }}{% endif %}</div>
+            <div class="kpi-sublbl">Median allocation → release (working days)</div>
+            <div class="kpi-sublbl">n = {{ dt.cycle.n }}{% if dt.cycle_insufficient %}, too few to judge{% endif %}</div>
+          </div>
+        </div>
+        <div class="stat-row gap-2">
+          <span>Rework</span>
+          <span class="fw-semibold text-end">{% if dt.finished_sites %}{{ dt.rework_loops }} designer rework loop{{ dt.rework_loops|pluralize }} on {{ dt.finished_sites }} finished site{{ dt.finished_sites|pluralize }}{% else %}—{% endif %}</span>
+        </div>
+        <div class="stat-row gap-2">
+          <span>
+            Change requests
+            <span class="d-block text-muted" style="font-size:.72rem;">{{ cr.with_pm }} with the PM · {{ cr.with_head }} with the Design Head</span>
+          </span>
+          <span class="fw-semibold text-end text-nowrap">{{ cr.open }} open · PM {{ cr.pm }} · SCM {{ cr.scm }}</span>
+        </div>
+        <div class="stat-row gap-2">
+          <span>On Design Hold</span>
+          <span class="stat-num {% if dt.on_hold %}amber{% else %}dark{% endif %}">{{ dt.on_hold }}</span>
+        </div>
+        <div class="stat-row gap-2">
+          <span>Past agreed design due date</span>
+          <span class="stat-num {% if dt.past_due %}amber{% else %}dark{% endif %}">{{ dt.past_due }}</span>
+        </div>
+        <p class="text-muted mb-0 mt-2" style="font-size:.75rem;">Rework and change requests are counted separately. Change requests are not counted against the designer.</p>
+      </div>
+    </div>
+  </div>
+</div>
+{% endwith %}
+{% endif %}
+
 {# ── SECTION 1: STATUS CARDS — Projects / Tasks / Issues ─────────────────── #}
 <div class="section-label">Portfolio health</div>
 <div class="row g-3 mb-4">

@@ -60,7 +60,7 @@ from .models import (
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
-from .tender_stages import activated_progress, stage_summary, tender_cards
+from .tender_stages import activated_progress, design_throughput, stage_summary, tender_cards
 from .approval_queries import pending_approvals_card
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
 from .decorators import (
@@ -2811,11 +2811,16 @@ def _get_ceo_dashboard_context(context=None):
         # replacing the per-site Active projects cards in this view. The health pills are
         # the badges project_cards already carries, so no site is classified twice.
         ctx['tender_cards'] = _tender_card_rows(tender_sites_qs(), project_cards)
+        # S5, four more queries whatever the site count: the Design throughput card, every
+        # figure the Design Head's own (tender_stages.design_throughput). localdate(), not
+        # `today`, for the IST reason given above the payment strip.
+        ctx['design_throughput'] = design_throughput(tender_sites_qs(), timezone.localdate())
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
         ctx['site_pipeline'] = None
         ctx['tender_cards'] = None
+        ctx['design_throughput'] = None
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.
