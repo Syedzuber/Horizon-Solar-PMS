@@ -5,6 +5,7 @@ import uuid as _uuid
 from datetime import date, timedelta, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from urllib.parse import urlparse as _urlparse
+from urllib.parse import urlencode
 
 from django.conf import settings
 from django.contrib import messages
@@ -61,7 +62,8 @@ from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
 from .tender_stages import (
-    activated_progress, design_throughput, stage_summary, stuck_sites, tender_cards,
+    STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
+    stuck_sites, tender_cards, tender_site_list,
 )
 from .approval_queries import pending_approvals_card, tender_approvals_waiting
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
@@ -1957,6 +1959,11 @@ def _phase_state(total, done):
 #: last of the month.
 TOP_PEOPLE_WINDOW_DAYS = 30
 
+#: The CEO Blocked Tasks card's "Aged" age: a task blocked this many days or more. The S7
+#: stuck rule reuses it through the cutoff, and the S9 site list builds the same cutoff
+#: from it, so the dashboard and the list can never disagree about which S7 site is stuck.
+CEO_BLOCKED_AGED_DAYS = 7
+
 #: Rows rendered per view. Fixed across all three: a toggle card whose height changes
 #: when you switch views reads as a rendering fault, not as data.
 TOP_PEOPLE_ROWS = 5
@@ -2157,10 +2164,25 @@ PIPELINE_PROGRESS_ROWS = [
 ]
 
 
+def _tender_sites_url(stage, program=None, stuck=False, since=None, rule=None):
+    """The S9 site list's URL for one dashboard count. Parameters in a fixed order and
+    only when set, so a link and the chips that rebuild it produce the same string. No
+    query: reverse() and urlencode() only."""
+    params = [('stage', stage)]
+    if program is not None:
+        params.append(('program', program))
+    if stuck:
+        params.append(('stuck', '1'))
+    if since is not None:
+        params += [('since', since.isoformat()), ('rule', rule)]
+    return f"{reverse('dashboard_ceo_tender_sites')}?{urlencode(params)}"
+
+
 def _site_pipeline(sites_qs):
     """The Tenders "Site pipeline" section (S3), in two queries: stage_summary() and
     activated_progress(). Bar widths are percentages of the largest stage, computed here
-    so the template needs no arithmetic and the page no JavaScript."""
+    so the template needs no arithmetic and the page no JavaScript. A non-empty stage
+    links to its S9 site list; an empty one has no link (a list of nothing is no news)."""
     stages = stage_summary(sites_qs)
     largest = max(s['sites'] for s in stages)
     rows = []
@@ -2176,6 +2198,7 @@ def _site_pipeline(sites_qs):
             'kwp':   _kwp_coverage_text(s['kwp'], s['kwp_sites'], s['sites']),
             # Only S0 can carry held sites; the note keeps them from hiding in "No survey".
             'note':  f'incl. {s["held"]} returned — survey inadequate' if s['held'] else '',
+            'url':   _tender_sites_url(s['key']) if s['sites'] else None,
         })
     progress = activated_progress(sites_qs)
     return {
@@ -2217,9 +2240,32 @@ def _tender_card_rows(sites_qs, project_cards):
             bucket['width'] = f'{bucket["pct"]:.1f}'
         for stage in card['stages']:
             stage['kwp_text'] = _kwp_coverage_text(stage['kwp'], stage['kwp_sites'], stage['sites'])
+            # S9: the stage row's sites in this tender; no link on a zero count.
+            stage['url'] = (_tender_sites_url(stage['key'], program=card['program_pk'])
+                            if stage['sites'] else None)
         for site in card['activated']:
             site['pill'] = HEALTH_PILLS.get(site['badge'])
     return cards
+
+
+def _stuck_links(ss):
+    """S9 link data on stuck_sites()' result, added here rather than in tender_stages so
+    stuck_sites' own output stays as S7 pinned it. No query.
+
+    list_url on the summary (every stuck site), url on each per-stage figure, and
+    list_url on each grouped row. A grouped row's link carries its rule and clock date,
+    the rest of its grouping key, so the list holds exactly its "N sites" (S9 ruling 1).
+    A grouped row still carries stuck_sites' programme `url`; the template links the list.
+    """
+    ss['list_url'] = _tender_sites_url('stuck') if ss['stuck'] else None
+    for figure in ss['by_stage']:
+        figure['url'] = _tender_sites_url(figure['key'], stuck=True)
+    for row in ss['rows']:
+        if row['sites'] > 1:
+            row['list_url'] = _tender_sites_url(row['stage'], program=row['program_pk'],
+                                                stuck=True, since=row['clock_date'],
+                                                rule=row['rule'])
+    return ss
 
 
 def _get_ceo_dashboard_context(context=None):
@@ -2270,7 +2316,7 @@ def _get_ceo_dashboard_context(context=None):
     this_month_start_dt = _to_dt(this_month_start)
     next_month_start_dt = _to_dt(next_month_start)
     last_month_start_dt = _to_dt(last_month_start)
-    aged_block_cutoff   = now_dt - timedelta(days=7)
+    aged_block_cutoff   = now_dt - timedelta(days=CEO_BLOCKED_AGED_DAYS)
     # Rolling window shared by the Top People Completed and Usage views, so the two are
     # measured over the same span and can be read against each other.
     top_people_cutoff   = now_dt - timedelta(days=TOP_PEOPLE_WINDOW_DAYS)
@@ -2841,7 +2887,8 @@ def _get_ceo_dashboard_context(context=None):
         # S7, seven queries at most whatever the site count: sites past their stage's limit. The
         # S7 rule is this function's own Blocked Tasks term, so the same aged_block_cutoff
         # is passed in rather than a second "7 days" (SECONDARY_FINDINGS, S7).
-        ctx['stuck_sites'] = stuck_sites(tender_sites_qs(), today, aged_block_cutoff)
+        ctx['stuck_sites'] = _stuck_links(
+            stuck_sites(tender_sites_qs(), today, aged_block_cutoff))
     else:
         ctx['payment_strip'] = None
         ctx['capex_hidden'] = 0
@@ -2877,6 +2924,127 @@ def dashboard_ceo(request):
     ctx['now'] = timezone.now()
     ctx['context_nav'] = _context_nav(request, selected_context)
     return render(request, 'dashboard/ceo.html', ctx)
+
+
+#: The most rows the S9 site list renders. A guard, not a page size: production has about
+#: 200 live tender sites, so the list is unpaginated and says so if it ever cuts rows off.
+TENDER_SITE_LIST_LIMIT = 500
+
+# since= must be spelt YYYY-MM-DD exactly. date.fromisoformat() also takes 20260806 and
+# week dates, and a second spelling of one link would be a second URL for one list.
+_ISO_DATE = re.compile(r'\d{4}-\d{2}-\d{2}')
+_PK = re.compile(r'[0-9]+')          # ASCII digits only; str.isdigit() also passes '²'
+
+
+@login_required
+@role_required(['CEO', 'Admin', 'System Admin'])
+def dashboard_ceo_tender_sites(request):
+    """The CEO Tenders click-through list (S9): the live tender sites behind one count on
+    the dashboard — a pipeline stage, a tender card's stage row, the stuck summary, a
+    per-stage stuck figure or a grouped stuck row. Read-only; no form, no write.
+
+    Access: CEO, Admin and System Admin — dashboard_ceo's own decorator, because every
+    row here is a figure that page already shows them. Anyone else gets the same 403
+    dashboard_ceo gives (role_required), so the list is no side door to the dashboard.
+
+    GET filters, any other value a 404 rather than an empty list (S9 T1):
+        stage    required: a tender_stages.STAGES key, or "stuck" for every stuck site
+        program  a Program pk with at least one live tender site
+        stuck    "1": only sites past their stage's limit
+        since + rule  both or neither, only with a stage and stuck=1: the rest of a
+                 grouped stuck row's key (tender_stages.STUCK_RULES), so its link lists
+                 exactly its "N sites"
+
+    THE LIST IS THE COUNT. tender_site_list() runs stuck_sites()'s reads and per-site
+    verdict over tender_sites_qs(), and the filters below only drop rows, so no list can
+    hold a site its count did not. Seven queries plus the session's, whatever the number
+    of sites (tests_ceo_tender_sites pins 3 and 30).
+    """
+    stage = request.GET.get('stage')
+    if stage != 'stuck' and stage not in STAGE_LABELS:
+        raise Http404
+    stuck_param = request.GET.get('stuck')
+    if stuck_param not in (None, '1'):
+        raise Http404
+    # ?stage=stuck lists stuck sites already; a stuck=1 beside it changes nothing.
+    past_limit = stuck_param == '1' and stage != 'stuck'
+
+    since_param, rule = request.GET.get('since'), request.GET.get('rule')
+    since = None
+    if since_param is not None or rule is not None:
+        # Only a grouped stuck row sets these, and it always names a stage and stuck=1.
+        if (since_param is None or rule not in STUCK_RULES or not past_limit
+                or not _ISO_DATE.fullmatch(since_param)):
+            raise Http404
+        try:
+            since = date.fromisoformat(since_param)
+        except ValueError:           # the right shape but no such day: 2026-02-30
+            raise Http404
+
+    program_param = request.GET.get('program')
+    if program_param is not None and not _PK.fullmatch(program_param):
+        raise Http404
+    program_pk = int(program_param) if program_param is not None else None
+
+    # The dashboard's own `today` and Blocked Tasks cutoff, built the same way, so a site
+    # is stuck here exactly when the dashboard that linked here counted it stuck.
+    today = timezone.localdate()
+    cutoff = timezone.now() - timedelta(days=CEO_BLOCKED_AGED_DAYS)
+    rows = tender_site_list(tender_sites_qs(), today, cutoff)
+
+    tender = None
+    if program_pk is not None:
+        # A programme with no live tender site (CAPEX, deleted, test-only, or no such pk)
+        # is on no dashboard count, so no link leads here with it.
+        tender = next((r['tender'] for r in rows if r['program_pk'] == program_pk), None)
+        if tender is None:
+            raise Http404
+        rows = [r for r in rows if r['program_pk'] == program_pk]
+    if stage == 'stuck' or past_limit:
+        rows = [r for r in rows if r['stuck']]
+    if stage != 'stuck':
+        rows = [r for r in rows if r['stage'] == stage]
+    if since is not None:
+        rows = [r for r in rows if r['clock_date'] == since and r['rule'] == rule]
+
+    total = len(rows)
+    rows = rows[:TENDER_SITE_LIST_LIMIT]
+    for row in rows:
+        # A null or zero capacity is unknown, as on the dashboard (S2).
+        cap = row['dc_capacity_kw']
+        row['capacity'] = f'{_format_kwp(cap)} kWp' if cap else '—'
+
+    parts = [tender] if tender else []
+    parts.append('Stuck sites' if stage == 'stuck' else STAGE_LABELS[stage])
+    if past_limit:
+        parts.append('past limit')
+    parts.append(f'{total} site{"" if total == 1 else "s"}')
+
+    # One chip per optional filter, each linking to this list without it. The stage is
+    # the list itself, so it is the title rather than a removable chip. Dropping "past
+    # limit" drops since/rule too: they are only valid with it.
+    chips = []
+    if tender:
+        chips.append({'label': f'Tender: {tender}',
+                      'remove_url': _tender_sites_url(stage, stuck=past_limit,
+                                                      since=since, rule=rule)})
+    if past_limit:
+        chips.append({'label': 'Past limit only',
+                      'remove_url': _tender_sites_url(stage, program=program_pk)})
+    if since is not None:
+        chips.append({'label': f'{STUCK_RULES[rule]} {since.day} {since:%b %Y}',
+                      'remove_url': _tender_sites_url(stage, program=program_pk,
+                                                      stuck=True)})
+
+    return render(request, 'dashboard/ceo_tender_sites.html', {
+        'title': ' · '.join(parts),
+        'rows': rows,
+        'total': total,
+        'truncated': total > TENDER_SITE_LIST_LIMIT,
+        'limit': TENDER_SITE_LIST_LIMIT,
+        'chips': chips,
+        'back_url': f"{reverse('dashboard_ceo')}?{urlencode({'context': CONTEXT_TENDERS})}",
+    })
 
 
 # ---------------------------------------------------------------------------

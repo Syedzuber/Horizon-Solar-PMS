@@ -29,6 +29,9 @@ urlpatterns = [
     path('dashboard/finance/',       views.dashboard_finance,       name='dashboard_finance'),
     path('dashboard/scm/',           views.dashboard_scm,           name='dashboard_scm'),
     path('dashboard/ceo/',           views.dashboard_ceo,           name='dashboard_ceo'),
+    # S9: the sites behind one CEO Tenders count (read-only; CEO / Admin / System Admin).
+    path('dashboard/ceo/tender-sites/', views.dashboard_ceo_tender_sites,
+         name='dashboard_ceo_tender_sites'),
     path('dashboard/bd/',            views.dashboard_bd,            name='dashboard_bd'),
 
     # ---------------------------------------------------------------------------

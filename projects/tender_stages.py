@@ -34,6 +34,11 @@ and design_analytics' functions unchanged rather than restating any definition.
 stuck_sites() (S7) follows S5's rule: where the app already defines "late" for a stage it
 calls that definition, and STUCK_LIMITS holds the few limits nothing else had. Seven
 queries whatever the number of sites.
+
+tender_site_list() (S9) is the CEO's click-through list behind every count above. It runs
+stuck_sites()'s seven reads and its per-site verdict (_stuck_entry) rather than a filter of
+its own, so a list holds exactly the sites its count says and a stuck site's "Waiting on"
+and days read as they do in the stuck section.
 """
 from collections import namedtuple
 from datetime import timedelta
@@ -55,7 +60,7 @@ from .design_metrics import (
 from .design_views import latest_design_transition
 from .models import (
     CHANGE_REQUEST_OPEN_VERDICTS, CHANGE_REQUEST_ORIGIN_SCM, CHANGE_REQUEST_WITH_PM,
-    DC_CATEGORY_TO_MIRROR_CODE,
+    DC_CATEGORY_TO_MIRROR_CODE, DESIGN_ASSIGNMENT_STATUS_CHOICES,
     DESIGN_ALLOCATED, DESIGN_ARKA_REJECTED, DESIGN_ARKA_SUBMITTED,
     DESIGN_ARTIFACTS_UPLOADED, DESIGN_AWAITING_ALLOCATION, DESIGN_AWAITING_HEAD_ARKA,
     DESIGN_AWAITING_HEAD_QC, DESIGN_AWAITING_PM_APPROVAL, DESIGN_AWAITING_SURVEY,
@@ -566,6 +571,17 @@ STUCK_GROUP_MIN = 5
 # `active_statuses`); an S7 site On Hold or Commissioned is not stuck (ruling 3).
 STUCK_EXECUTION_STATUSES = ['Active', 'In Progress']
 
+# Every `rule` a stuck entry can carry, and the word the S9 list's filter chip puts before
+# its clock date. The rule is part of the grouping key, so a grouped row's list link names
+# it; the list 404s on any value not here.
+STUCK_RULES = {
+    'limit':        'In stage since',        # S1, S4, S5, S6: our limit from entered_at
+    'due':          'Due',                   # S2, S3: design_metrics.is_overdue
+    'pm_rejected':  'PM rejection on',       # S3 sent back by the PM: our limit
+    'blocked':      'Task blocked since',    # S7: Blocked Tasks "Aged" term
+    'overdue_task': 'Task due',              # S7: Tasks "Overdue" term
+}
+
 
 def _days_text(n):
     return f'{n} day' if n == 1 else f'{n} days'
@@ -599,43 +615,27 @@ def _person(profile):
     return profile.user.get_full_name() or profile.user.username
 
 
-def stuck_sites(sites_qs, today, aged_block_cutoff):
-    """Which live tender sites are stuck, where, for how long and who holds them (S7).
+def _one(people, pk, role, empty):
+    """'Name · Role' when the record names someone we read, else `empty` (S8 T1)."""
+    person = people.get(pk) if pk else None
+    return f'{_person(person)} · {role}' if person else empty
 
-    SEVEN QUERIES whatever the number of sites (six when no row names anyone, since
-    Django skips an IN () read): site_stages(); one values() read of the display and
-    "waiting on" columns; the design assignments, their due-date commitments and their
-    current Arkas (the Head's own three reads, scoped by `sites_qs`); the S7 tasks; and
-    one read of every person named. tests_stuck_sites pins 3 and 30 sites.
 
-    WAITING ON names a person only when the record names one — the designer, the QC
-    reviewer from the ledger, the PM, the group's adder or creator — as "Name · Role".
-    A stage owned by a role rather than a person (the Head's backlog, the QC queue, an
-    in_qc package with no ledger row) shows the role alone (S8 T1): listing every holder
-    of the role read as if all of them were holding the site.
+def _local_date(dt):
+    return timezone.localtime(dt).date()
 
-    THE RULE PER STAGE (STUCK_LIMITS; every limit >= and overshoot = days - limit):
-      S1, S4, S5, S6  our limit, counted in IST calendar days from the stage's entered_at.
-                      S6 counts only while the site has no PO/PI record. A site whose
-                      entry date is unknown (S4 before the ledger) cannot be timed and is
-                      counted in `undated` instead of being guessed at.
-      S2, S3          design_metrics.is_overdue() on effective_commitment(), exactly as
-                      the Head's dashboard: a pending extension still counts, a site with
-                      no approved date does not. Overshoot is days_overdue(). A
-                      PM-rejected package (never overdue there) takes our S3 limit from
-                      the ledger date of the rejection, waiting on the Design Head.
-      S7              the CEO page's Blocked Tasks "Aged >= 7 days" and Tasks "Overdue"
-                      terms, restated on the same human-owned, applicable tasks, with the
-                      page's own `aged_block_cutoff` passed in. Active / In Progress only.
-      S0              never.
 
-    Rows: longest overshoot first, then tender name, then site label. Five or more sites
-    with the same tender, stage, rule and clock date (entered_at for a limit, the due date
-    for a due-date rule) fold into one "N sites" row linked to the programme page.
+# _stuck_entry()'s answer for a site whose clock cannot start: no stage entry date.
+_UNDATED = object()
 
-    `no_due_date` is, per tender, the Head's own count: unfinished sites with no approved
-    due date (tender_metrics()'s expression, on this scope). `task_counts` holds the S7
-    task totals so tests can hold them equal to the page's two cards.
+
+def _stuck_reads(sites_qs, today, aged_block_cutoff):
+    """stuck_sites()'s SEVEN reads, returned as one dict so the S9 list can run the same
+    reads and the same per-site verdict (split out in S9, behaviour unchanged; the S7
+    fixtures and a golden copy of their output in tests_ceo_tender_sites pin it).
+
+    Keys: stages (site_stages), site_rows, assignments, commitments, arkas, tasks_by_site,
+    task_counts, people, block_days. The query budget is stuck_sites()'s docstring's.
     """
     stages = site_stages(sites_qs)                                           # query 1
     site_pks = sites_qs.order_by().values('pk')
@@ -648,9 +648,11 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
     )
     # One row per site with every id "waiting on" can name; the names come from query 7.
     # The S6 owner follows design_views._change_request_group_owner (D6): whoever added
-    # the site if active, else whoever created the group if active.
+    # the site if active, else whoever created the group if active. dc_capacity_kw rides
+    # along for the S9 list's Capacity column; stuck_sites() does not read it.
     site_rows = {row['pk']: row for row in sites_qs.order_by().values(      # query 2
         'pk', 'project_id', 'site_name', 'status', 'program_id', 'assigned_pm_id',
+        'dc_capacity_kw',
         program_name=F('program__name'),
         designer_pk=F('design_assignment__assigned_to'),
         # in_qc stores no reviewer; the ledger row INTO in_qc names who started QC.
@@ -706,119 +708,181 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
             if t['assigned_to_id']}
     people = {p.pk: p for p in UserProfile.objects.filter(                   # query 7
         pk__in=ids).select_related('user').order_by('pk')}
-    heads_text = 'Design Head'
-    qc_text = 'Design QC'
 
-    def _one(pk, role, empty):
-        person = people.get(pk) if pk else None
-        return f'{_person(person)} · {role}' if person else empty
+    return {
+        'stages': stages, 'site_rows': site_rows, 'assignments': assignments,
+        'commitments': commitments, 'arkas': arkas, 'tasks_by_site': tasks_by_site,
+        'task_counts': task_counts, 'people': people,
+        # The card's 7 days, read back off its cutoff, so the number is never restated here.
+        'block_days': (today - _local_date(aged_block_cutoff)).days,
+    }
 
-    def _local_date(dt):
-        return timezone.localtime(dt).date()
 
-    # The card's 7 days, read back off its cutoff, so the number is never restated here.
-    block_days = (today - _local_date(aged_block_cutoff)).days
-    entries = []
-    undated = 0
+def _waiting_on(reads, pk, stage):
+    """Who holds an S1-S6 site's next step, as the stuck section words it. Pure; no query.
 
-    def _add(row, stage, rule, clock_date, days, overshoot, days_text, limit_text, waiting_on):
+    S7 is not here: a stuck S7 site's text names its worst task, which only _stuck_entry()
+    has picked. The S9 list calls this for S1-S6 sites that are not stuck, so a site reads
+    the same whether or not it has passed its limit.
+    """
+    row, people = reads['site_rows'][pk], reads['people']
+    if stage in (STAGE_IN_DESIGN, STAGE_IN_QC):
+        a = reads['assignments'][pk]
+        if a.status == DESIGN_PM_REJECTED:
+            return 'Design Head'
+        court = _classify(a, reads['arkas'].get((a.pk, a.current_attempt_number)))
+        if court in HEAD_ACTION_STAGES:
+            return 'Design Head'
+        if court in QC_ACTION_STAGES:
+            # Started QC names its reviewer; a package not yet picked up is the queue's.
+            return (_one(people, row['qc_actor_pk'], 'Design QC', 'Design QC')
+                    if a.status == DESIGN_IN_QC else 'Design QC')
+        return _one(people, row['designer_pk'], 'Designer', 'No designer allocated')
+    if stage == STAGE_SURVEY_ON_FILE:
+        return 'Design Head'
+    if stage == STAGE_AWAITING_PM:
+        return _one(people, row['assigned_pm_id'], 'PM', 'No PM assigned')
+    if stage == STAGE_LOCKED_GROUP:
+        return _one(people, row['group_adder_pk'] or row['group_creator_pk'], 'SCM', 'SCM')
+    return 'SCM'           # S5: no group yet, so no owner to name
+
+
+def _stuck_entry(reads, pk, info, today):
+    """One site's stuck verdict: its entry dict when it is past its stage's limit, None
+    when it is not (or cannot be: S0), _UNDATED when its clock has no start. Pure; no
+    query. stuck_sites() folds these into rows; the S9 list shows them per site."""
+    stage, row = info.stage_key, reads['site_rows'][pk]
+    people, block_days = reads['people'], reads['block_days']
+
+    def _entry(rule, clock_date, days, overshoot, days_text, limit_text, waiting_on):
         label = row['project_id']
         if row['site_name']:
             label = f"{label} · {row['site_name']}"
-        entries.append({
+        return {
             'program_pk': row['program_id'], 'tender': row['program_name'] or '—',
             'site': label, 'sites': 1, 'stage': stage, 'stage_label': STAGE_LABELS[stage],
             'rule': rule, 'clock_date': clock_date, 'days': days, 'overshoot': overshoot,
             'days_text': days_text, 'limit_text': limit_text, 'waiting_on': waiting_on,
             'url': reverse('project_overview', args=[row['project_id']]),
-        })
+        }
 
-    for pk, info in stages.items():
-        stage, row = info.stage_key, site_rows[pk]
-        if stage == STAGE_NO_SURVEY:
-            continue
+    if stage == STAGE_NO_SURVEY:
+        return None
 
-        if stage in (STAGE_IN_DESIGN, STAGE_IN_QC):
-            a = assignments[pk]
-            if a.status == DESIGN_PM_REJECTED:
-                if info.entered_at is None:
-                    undated += 1
-                    continue
-                limit = STUCK_LIMITS[STAGE_IN_QC]['pm_rejected_days']
-                days = (today - _local_date(info.entered_at)).days
-                if days >= limit:
-                    _add(row, stage, 'pm_rejected', _local_date(info.entered_at), days,
-                         days - limit, f'{_days_text(days)} since PM rejection',
-                         _days_text(limit), heads_text)
-                continue
-            commitment = effective_commitment(commitments.get(a.pk, []))
-            if not is_overdue(a, commitment, today):
-                continue
-            over = days_overdue(commitment, today)
-            court = _classify(a, arkas.get((a.pk, a.current_attempt_number)))
-            if court in HEAD_ACTION_STAGES:
-                waiting = heads_text
-            elif court in QC_ACTION_STAGES:
-                # Started QC names its reviewer; a package not yet picked up is the queue's.
-                waiting = (_one(row['qc_actor_pk'], 'Design QC', qc_text)
-                           if a.status == DESIGN_IN_QC else qc_text)
+    if stage in (STAGE_IN_DESIGN, STAGE_IN_QC):
+        a = reads['assignments'][pk]
+        if a.status == DESIGN_PM_REJECTED:
+            if info.entered_at is None:
+                return _UNDATED
+            limit = STUCK_LIMITS[STAGE_IN_QC]['pm_rejected_days']
+            days = (today - _local_date(info.entered_at)).days
+            if days < limit:
+                return None
+            return _entry('pm_rejected', _local_date(info.entered_at), days, days - limit,
+                          f'{_days_text(days)} since PM rejection', _days_text(limit),
+                          _waiting_on(reads, pk, stage))
+        commitment = effective_commitment(reads['commitments'].get(a.pk, []))
+        if not is_overdue(a, commitment, today):
+            return None
+        over = days_overdue(commitment, today)
+        return _entry('due', commitment.proposed_date, over, over,
+                      f'{_days_text(over)} past due', _due_text(commitment.proposed_date),
+                      _waiting_on(reads, pk, stage))
+
+    if stage == STAGE_ACTIVATED:
+        if row['status'] not in STUCK_EXECUTION_STATUSES:
+            return None
+        tasks = reads['tasks_by_site'].get(pk, [])
+        if not tasks:
+            return None
+        candidates = []
+        for t in tasks:
+            if t['status'] == Task.BLOCKED:
+                since = _local_date(t['blocked_since'])
+                days = (today - since).days
+                candidates.append((days - block_days, 1, 'blocked', since, days, t))
             else:
-                waiting = _one(row['designer_pk'], 'Designer', 'No designer allocated')
-            _add(row, stage, 'due', commitment.proposed_date, over, over,
-                 f'{_days_text(over)} past due', _due_text(commitment.proposed_date), waiting)
-            continue
+                days = (today - t['due_date']).days
+                candidates.append((days, 0, 'overdue_task', t['due_date'], days, t))
+        # Worst overshoot; a blocked task beats an overdue one at equal overshoot; then
+        # the lower task pk, so the row never changes between loads.
+        over, _, rule, clock, days, task = max(candidates,
+                                                key=lambda c: (c[0], c[1], -c[5]['pk']))
+        more = len(candidates) - 1
+        what = 'blocked' if rule == 'blocked' else 'overdue'
+        waiting = (f"{_one(people, row['assigned_pm_id'], 'PM', 'No PM assigned')} — {what}: "
+                   f"{task['task_name']}" + (f' (+{more} more)' if more else ''))
+        if rule == 'blocked':
+            return _entry(rule, clock, days, over, f'{_days_text(days)} blocked',
+                          f'Blocked {_days_text(block_days)}', waiting)
+        return _entry(rule, clock, days, over, f'{_days_text(days)} past due',
+                      _due_text(clock), waiting)
 
-        if stage == STAGE_ACTIVATED:
-            if row['status'] not in STUCK_EXECUTION_STATUSES:
-                continue
-            tasks = tasks_by_site.get(pk, [])
-            if not tasks:
-                continue
-            candidates = []
-            for t in tasks:
-                if t['status'] == Task.BLOCKED:
-                    since = _local_date(t['blocked_since'])
-                    days = (today - since).days
-                    candidates.append((days - block_days, 1, 'blocked', since, days, t))
-                else:
-                    days = (today - t['due_date']).days
-                    candidates.append((days, 0, 'overdue_task', t['due_date'], days, t))
-            # Worst overshoot; a blocked task beats an overdue one at equal overshoot; then
-            # the lower task pk, so the row never changes between loads.
-            over, _, rule, clock, days, task = max(candidates,
-                                                    key=lambda c: (c[0], c[1], -c[5]['pk']))
-            more = len(candidates) - 1
-            what = 'blocked' if rule == 'blocked' else 'overdue'
-            waiting = (f"{_one(row['assigned_pm_id'], 'PM', 'No PM assigned')} — {what}: "
-                       f"{task['task_name']}" + (f' (+{more} more)' if more else ''))
-            if rule == 'blocked':
-                _add(row, stage, rule, clock, days, over, f'{_days_text(days)} blocked',
-                     f'Blocked {_days_text(block_days)}', waiting)
-            else:
-                _add(row, stage, rule, clock, days, over, f'{_days_text(days)} past due',
-                     _due_text(clock), waiting)
-            continue
+    # S1, S4, S5, S6: our limit from the stage's entry date.
+    if stage == STAGE_LOCKED_GROUP and row['has_order']:
+        return None
+    if info.entered_at is None:
+        return _UNDATED
+    limit = STUCK_LIMITS[stage]['days']
+    days = (today - _local_date(info.entered_at)).days
+    if days < limit:
+        return None
+    return _entry('limit', _local_date(info.entered_at), days, days - limit,
+                  _days_text(days), _days_text(limit), _waiting_on(reads, pk, stage))
 
-        # S1, S4, S5, S6: our limit from the stage's entry date.
-        if stage == STAGE_LOCKED_GROUP and row['has_order']:
-            continue
-        if info.entered_at is None:
+
+def stuck_sites(sites_qs, today, aged_block_cutoff):
+    """Which live tender sites are stuck, where, for how long and who holds them (S7).
+
+    SEVEN QUERIES whatever the number of sites (six when no row names anyone, since
+    Django skips an IN () read), all in _stuck_reads(): site_stages(); one values() read
+    of the display and "waiting on" columns; the design assignments, their due-date
+    commitments and their current Arkas (the Head's own three reads, scoped by
+    `sites_qs`); the S7 tasks; and one read of every person named. tests_stuck_sites pins
+    3 and 30 sites.
+
+    WAITING ON names a person only when the record names one — the designer, the QC
+    reviewer from the ledger, the PM, the group's adder or creator — as "Name · Role".
+    A stage owned by a role rather than a person (the Head's backlog, the QC queue, an
+    in_qc package with no ledger row) shows the role alone (S8 T1): listing every holder
+    of the role read as if all of them were holding the site.
+
+    THE RULE PER STAGE (STUCK_LIMITS; every limit >= and overshoot = days - limit):
+      S1, S4, S5, S6  our limit, counted in IST calendar days from the stage's entered_at.
+                      S6 counts only while the site has no PO/PI record. A site whose
+                      entry date is unknown (S4 before the ledger) cannot be timed and is
+                      counted in `undated` instead of being guessed at.
+      S2, S3          design_metrics.is_overdue() on effective_commitment(), exactly as
+                      the Head's dashboard: a pending extension still counts, a site with
+                      no approved date does not. Overshoot is days_overdue(). A
+                      PM-rejected package (never overdue there) takes our S3 limit from
+                      the ledger date of the rejection, waiting on the Design Head.
+      S7              the CEO page's Blocked Tasks "Aged >= 7 days" and Tasks "Overdue"
+                      terms, restated on the same human-owned, applicable tasks, with the
+                      page's own `aged_block_cutoff` passed in. Active / In Progress only.
+      S0              never.
+
+    Rows: longest overshoot first, then tender name, then site label. Five or more sites
+    with the same tender, stage, rule and clock date (entered_at for a limit, the due date
+    for a due-date rule) fold into one "N sites" row linked to the programme page.
+
+    `no_due_date` is, per tender, the Head's own count: unfinished sites with no approved
+    due date (tender_metrics()'s expression, on this scope). `task_counts` holds the S7
+    task totals so tests can hold them equal to the page's two cards.
+    """
+    reads = _stuck_reads(sites_qs, today, aged_block_cutoff)
+    site_rows, assignments, commitments = (
+        reads['site_rows'], reads['assignments'], reads['commitments'])
+    block_days, task_counts = reads['block_days'], reads['task_counts']
+
+    entries = []
+    undated = 0
+    for pk, info in reads['stages'].items():
+        entry = _stuck_entry(reads, pk, info, today)
+        if entry is _UNDATED:
             undated += 1
-            continue
-        limit = STUCK_LIMITS[stage]['days']
-        days = (today - _local_date(info.entered_at)).days
-        if days < limit:
-            continue
-        if stage == STAGE_SURVEY_ON_FILE:
-            waiting = heads_text
-        elif stage == STAGE_AWAITING_PM:
-            waiting = _one(row['assigned_pm_id'], 'PM', 'No PM assigned')
-        elif stage == STAGE_LOCKED_GROUP:
-            waiting = _one(row['group_adder_pk'] or row['group_creator_pk'], 'SCM', 'SCM')
-        else:
-            waiting = 'SCM'           # S5: no group yet, so no owner to name
-        _add(row, stage, 'limit', _local_date(info.entered_at), days, days - limit,
-             _days_text(days), _days_text(limit), waiting)
+        elif entry is not None:
+            entries.append(entry)
 
     # Fold 5+ sites with one tender, stage, rule and clock date into one row. The clock
     # date fixes the overshoot, so every site in a group shares the row's numbers.
@@ -867,3 +931,74 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
         'limits': stuck_limit_lines(block_days),
         'task_counts': task_counts,
     }
+
+
+# ---------------------------------------------------------------------------
+# S9 — the click-through site list
+# ---------------------------------------------------------------------------
+
+DESIGN_STATUS_LABELS = dict(DESIGN_ASSIGNMENT_STATUS_CHOICES)
+
+
+def tender_site_list(sites_qs, today, aged_block_cutoff):
+    """Every site in `sites_qs` as one row of the CEO's click-through list (S9), in the
+    list's default order. stuck_sites()'s SEVEN reads (six when nobody is named) whatever
+    the number of sites, and no other query; the caller filters in Python, so a list is
+    always a subset of exactly the rows the dashboard counted.
+
+    Each row: pk, project_id, site ("ID · site name"), url, program_pk, tender, stage,
+    stage_code, stage_label, design_status (display label, '—' with no assignment),
+    days (IST days since entered_at, None when undated), in_stage, dc_capacity_kw,
+    waiting_on, stuck, and the stuck entry's rule, clock_date and overshoot (None when
+    not stuck).
+
+    A STUCK site's in_stage and waiting_on are its _stuck_entry() texts, the very strings
+    the stuck section shows. Any other site reads its days in stage ('—' when undated) and
+    _waiting_on(), so a site's holder does not change the day it passes its limit. No one
+    is named for S0 (no survey is never Design's, D6), for an S6 site whose PO/PI is
+    recorded, or for an S7 site with nothing stuck (S9 ruling 3).
+
+    Order: stuck first, by the stuck section's key (longest overshoot, tender, site); then
+    the rest by days in stage, longest first, undated last; then project_id.
+    """
+    reads = _stuck_reads(sites_qs, today, aged_block_cutoff)
+    stage_number = {key: n for n, (key, _) in enumerate(STAGES)}
+    stuck_rows, other_rows = [], []
+    for pk, info in reads['stages'].items():
+        row, stage = reads['site_rows'][pk], info.stage_key
+        entry = _stuck_entry(reads, pk, info, today)
+        if entry is _UNDATED:
+            entry = None
+        days = (today - _local_date(info.entered_at)).days if info.entered_at else None
+
+        if entry:
+            in_stage, waiting = entry['days_text'], entry['waiting_on']
+        else:
+            in_stage = _days_text(days) if days is not None else '—'
+            if (stage in (STAGE_NO_SURVEY, STAGE_ACTIVATED)
+                    or (stage == STAGE_LOCKED_GROUP and row['has_order'])):
+                waiting = '—'
+            else:
+                waiting = _waiting_on(reads, pk, stage)
+
+        label = row['project_id']
+        if row['site_name']:
+            label = f"{label} · {row['site_name']}"
+        item = {
+            'pk': pk, 'project_id': row['project_id'], 'site': label,
+            'url': reverse('project_overview', args=[row['project_id']]),
+            'program_pk': row['program_id'], 'tender': row['program_name'] or '—',
+            'stage': stage, 'stage_code': f'S{stage_number[stage]}',
+            'stage_label': STAGE_LABELS[stage],
+            'design_status': DESIGN_STATUS_LABELS.get(info.design_status, '—'),
+            'days': days, 'in_stage': in_stage, 'dc_capacity_kw': row['dc_capacity_kw'],
+            'waiting_on': waiting, 'stuck': entry is not None,
+            'rule': entry['rule'] if entry else None,
+            'clock_date': entry['clock_date'] if entry else None,
+            'overshoot': entry['overshoot'] if entry else None,
+        }
+        (stuck_rows if entry else other_rows).append(item)
+
+    stuck_rows.sort(key=lambda r: (-r['overshoot'], r['tender'], r['site']))
+    other_rows.sort(key=lambda r: (r['days'] is None, -(r['days'] or 0), r['project_id']))
+    return stuck_rows + other_rows

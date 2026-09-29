@@ -292,10 +292,11 @@ default, opened by the button only. Residential and no-context set tender_cards 
               </tr>
             </thead>
             <tbody>
+              {# S9: a non-empty stage row opens this tender's sites in that stage. #}
               {% for stage in card.stages %}
               <tr class="small">
-                <td><span class="text-muted me-1">{{ stage.code }}</span>{{ stage.label }}</td>
-                <td class="text-end fw-semibold">{{ stage.sites }}</td>
+                <td><span class="text-muted me-1">{{ stage.code }}</span>{% if stage.url %}<a href="{{ stage.url }}" class="text-decoration-none">{{ stage.label }}</a>{% else %}{{ stage.label }}{% endif %}</td>
+                <td class="text-end fw-semibold">{% if stage.url %}<a href="{{ stage.url }}" class="text-decoration-none" aria-label="{{ stage.sites }} site{{ stage.sites|pluralize }}: {{ stage.label }}, {{ card.name }}">{{ stage.sites }}</a>{% else %}{{ stage.sites }}{% endif %}</td>
                 <td class="text-end text-nowrap">{{ stage.kwp_text }}</td>
               </tr>
               {% endfor %}
@@ -357,8 +358,9 @@ here and no JavaScript. Residential and no-context set site_pipeline to None.
         <tbody>
           {% for row in site_pipeline.stages %}
           <tr>
+            {# S9: a non-empty stage's label and count open its site list; zero stays plain text. #}
             <td class="small">
-              <span class="text-muted me-1">{{ row.code }}</span>{{ row.label }}
+              <span class="text-muted me-1">{{ row.code }}</span>{% if row.url %}<a href="{{ row.url }}" class="text-decoration-none">{{ row.label }}</a>{% else %}{{ row.label }}{% endif %}
               {% if row.note %}<div class="text-muted" style="font-size:.72rem;">{{ row.note }}</div>{% endif %}
             </td>
             <td>
@@ -367,7 +369,7 @@ here and no JavaScript. Residential and no-context set site_pipeline to None.
                      aria-valuenow="{{ row.sites }}" aria-valuemin="0" aria-valuemax="{{ site_pipeline.total }}"></div>
               </div>
             </td>
-            <td class="text-end fw-semibold">{{ row.sites }}</td>
+            <td class="text-end fw-semibold">{% if row.url %}<a href="{{ row.url }}" class="text-decoration-none" aria-label="{{ row.sites }} site{{ row.sites|pluralize }}: {{ row.label }}">{{ row.sites }}</a>{% else %}{{ row.sites }}{% endif %}</td>
             <td class="text-end small text-nowrap">{{ row.kwp }}</td>
           </tr>
           {% endfor %}
@@ -514,7 +516,8 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
 <div class="card shadow-sm mb-4" x-data="{ all: false }">
   <div class="card-body">
     {% if ss.rows %}
-    <p class="mb-2"><span class="fw-semibold">{{ ss.stuck }} site{{ ss.stuck|pluralize }} stuck</span>{% if ss.by_stage %} — {% for b in ss.by_stage %}{{ b.label }} {{ b.sites }}{% if not forloop.last %} · {% endif %}{% endfor %}{% endif %}</p>
+    {# S9: the total opens every stuck site; each stage figure opens that stage's stuck sites. #}
+    <p class="mb-2"><a href="{{ ss.list_url }}" class="fw-semibold text-decoration-none">{{ ss.stuck }} site{{ ss.stuck|pluralize }} stuck</a>{% if ss.by_stage %} — {% for b in ss.by_stage %}<a href="{{ b.url }}" class="text-decoration-none">{{ b.label }} {{ b.sites }}</a>{% if not forloop.last %} · {% endif %}{% endfor %}{% endif %}</p>
     <div class="table-responsive">
       <table class="table table-sm align-middle mb-2">
         <thead>
@@ -530,7 +533,8 @@ the table scrolls sideways on a phone. Residential and no-context set stuck_site
         <tbody>
           {% for row in ss.rows %}
           <tr class="small"{% if forloop.counter > 10 %} x-show="all" x-cloak{% endif %}>
-            <td class="text-nowrap"><a href="{{ row.url }}" class="text-decoration-none">{{ row.site }}</a></td>
+            {# S9: a grouped "N sites" row opens exactly its N sites (list_url); a single site its overview. #}
+            <td class="text-nowrap"><a href="{% if row.list_url %}{{ row.list_url }}{% else %}{{ row.url }}{% endif %}" class="text-decoration-none">{{ row.site }}</a></td>
             <td class="text-nowrap">{{ row.tender }}</td>
             <td>{{ row.stage_label }}</td>
             <td class="text-nowrap text-danger fw-semibold">{{ row.days_text }}</td>

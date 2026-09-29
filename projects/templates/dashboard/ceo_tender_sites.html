@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — CEO Dashboard — SolarPMS{% endblock %}
+
+{% comment %}
+S9: the live tender sites behind one CEO Tenders count (views.dashboard_ceo_tender_sites).
+Every figure is computed in tender_stages.tender_site_list and the view; nothing is
+derived here. Read-only: no form, no JavaScript. Chips are plain links to this list
+without that filter. The table scrolls sideways on a phone (table-responsive).
+{% endcomment %}
+
+{% block content %}
+<div class="mb-3">
+  <a href="{{ back_url }}" class="text-decoration-none small">← Back to dashboard</a>
+  <h5 class="mb-0 mt-1 fw-bold">{{ title }}</h5>
+</div>
+
+{% if chips %}
+<div class="d-flex flex-wrap gap-2 mb-3">
+  {% for chip in chips %}
+  <a href="{{ chip.remove_url }}" class="badge rounded-pill text-bg-light border text-decoration-none fw-normal py-2 px-3"
+     aria-label="Remove filter: {{ chip.label }}">{{ chip.label }} <span aria-hidden="true">×</span></a>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card shadow-sm">
+  <div class="card-body">
+    {% if truncated %}
+    <p class="small text-muted mb-2">Showing the first {{ limit }} of {{ total }} sites.</p>
+    {% endif %}
+    {% if rows %}
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr class="text-muted small">
+            <th class="fw-normal">Site</th>
+            <th class="fw-normal">Tender</th>
+            <th class="fw-normal">Stage</th>
+            <th class="fw-normal">Design status</th>
+            <th class="fw-normal">In stage</th>
+            <th class="fw-normal text-end">Capacity</th>
+            <th class="fw-normal">Waiting on</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr class="small">
+            <td class="text-nowrap"><a href="{{ row.url }}" class="text-decoration-none">{{ row.site }}</a></td>
+            <td class="text-nowrap">{{ row.tender }}</td>
+            <td><span class="text-muted me-1">{{ row.stage_code }}</span>{{ row.stage_label }}</td>
+            <td>{{ row.design_status }}</td>
+            {# A stuck site's text is the stuck section's own, and red as it is there. #}
+            <td class="text-nowrap{% if row.stuck %} text-danger fw-semibold{% endif %}">{{ row.in_stage }}</td>
+            <td class="text-end text-nowrap">{{ row.capacity }}</td>
+            <td>{{ row.waiting_on }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted small mb-0">No site matches these filters.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
