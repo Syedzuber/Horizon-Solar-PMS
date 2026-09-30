@@ -25,6 +25,7 @@ from django.utils import timezone
 from .models import (
     SUBJECT_TASK, ActivityLog, Project, StatusTransition, Task, UserProfile,
 )
+from .task_health import overdue_q
 from .utils import human_owned_tasks_q, applicable_tasks_q
 
 
@@ -162,9 +163,10 @@ def build_user_status_rows(report_date):
             completed=Count('id', filter=Q(status=Task.DONE)),
             blocked=Count('id', filter=Q(status=Task.BLOCKED)),
             # Overdue OVERLAPS the four status columns by design — an overdue task is
-            # still Not Started / In Progress / Blocked. due_date is nullable and
-            # `__lt` already excludes NULL, so undated tasks never count as overdue.
-            overdue=Count('id', filter=Q(due_date__lt=report_date) & ~Q(status=Task.DONE)),
+            # still Not Started / In Progress / Blocked. The rule is task_health's, the
+            # one every dashboard counts by; this report's scope (assigned, human-owned,
+            # activated and not cancelled projects) is the base above.
+            overdue=Count('id', filter=overdue_q(report_date)),
             # completed_at is a DateTimeField; the `__date` lookup is timezone-aware
             # under USE_TZ=True and resolves against TIME_ZONE (Asia/Kolkata), which is
             # the same IST calendar day report_date is expressed in.

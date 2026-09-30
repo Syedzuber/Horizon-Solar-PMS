@@ -241,7 +241,7 @@ Expected context:
         {% csrf_token %}
         <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
                value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
-               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}{% if task.overdue_days %} text-danger{% endif %}"
                style="width:135px; font-size:.78rem;"
                onchange="this.form.requestSubmit()">
       </form>
@@ -253,19 +253,29 @@ Expected context:
         {% csrf_token %}
         <input type="date" min="{{ typed_date_min }}" max="{{ typed_date_max }}" name="due_date"
                value="{% if task.due_date %}{{ task.due_date|date:'Y-m-d' }}{% endif %}"
-               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}"
+               class="form-control form-control-sm {% if not task.due_date %}border-warning{% endif %}{% if task.overdue_days %} text-danger{% endif %}"
                style="width:135px; font-size:.78rem;"
                onchange="this.form.requestSubmit()">
       </form>
     {% elif project.cascade_scheduling and task.assigned_role == user_task_role and not is_assigned_pm %}
       {# Non-PM, cascade ON: read-only with lock icon #}
-      <span class="small {% if not task.due_date %}text-muted{% endif %}"
+      <span class="small {% if not task.due_date %}text-muted{% elif task.overdue_days %}text-danger{% endif %}"
             title="Managed by cascading scheduling">
         {{ task.due_date|default:"—" }}
         <i data-lucide="lock" style="width:11px;height:11px;color:var(--bs-secondary);vertical-align:middle;" class="ms-1"></i>
       </span>
     {% else %}
-      <span class="small {% if not task.due_date %}text-muted{% endif %}">{{ task.due_date|default:"—" }}</span>
+      <span class="small {% if not task.due_date %}text-muted{% elif task.overdue_days %}text-danger{% endif %}">{{ task.due_date|default:"—" }}</span>
+    {% endif %}
+    {% comment %}OVERDUE / DUE TODAY, the same in all four branches above. Both values are
+       set by views._attach_due_health() against one `today` per response; nothing is
+       compared to a date here. Overdue is task_health's rule, so a Done row, a Not
+       Applicable row and a row with no due date get nothing, and a Derived row is marked
+       like any other. The date turns red and the badge sits under it: no row background.{% endcomment %}
+    {% if task.overdue_days %}
+      <div class="mt-1"><span class="badge bg-danger-subtle text-danger-emphasis" style="font-size:.68rem;font-weight:600;">Overdue · {{ task.overdue_days }}d</span></div>
+    {% elif task.due_today %}
+      <div class="mt-1"><span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:.68rem;font-weight:600;">Due today</span></div>
     {% endif %}
   </td>
   <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>

@@ -44,7 +44,9 @@ from collections import namedtuple
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
+from django.db.models import (
+    BooleanField, Count, Exists, ExpressionWrapper, F, OuterRef, Q, Subquery,
+)
 from django.urls import reverse
 from django.utils import timezone
 
@@ -71,6 +73,9 @@ from .models import (
     ArkaSubmission, DesignAssignment, DesignAttempt, DesignChangeRequest, DueDateCommitment,
     SiteGroupMembership, Task, UserProfile, VendorOrderSite,
 )
+# The TASK overdue rule, for the S7 stuck term. Imported as a module because is_overdue /
+# days_overdue above are design_metrics' and mean a design due date, not a task's.
+from . import task_health
 from .utils import applicable_tasks_q, human_owned_tasks_q
 
 
@@ -682,22 +687,32 @@ def _stuck_reads(sites_qs, today, aged_block_cutoff):
                                            is_current=True).select_related('attempt')}
 
     # S7: the page's two task terms, on the same human-owned, applicable base as its
-    # task aggregate. The two branches cannot both match one task (Blocked vs open).
+    # task aggregate. "Overdue" is the shared rule (task_health) scoped to Internal, as
+    # on the CEO Tasks card.
+    #
+    # ONE TASK CAN NOW MATCH BOTH. The shared rule counts a Blocked task that is past its
+    # date, so a task blocked 7 days or more AND past due is in both counts, as it is on
+    # both cards. Each row therefore carries the two answers (is_aged, is_late), computed
+    # in SQL from the very Q objects that filter it, instead of being sorted into one
+    # branch by its status.
     execution_pks = sites_qs.filter(activated_at__isnull=False,
                                     status__in=STUCK_EXECUTION_STATUSES).order_by().values('pk')
+    aged_q = Q(status=Task.BLOCKED, blocked_since__lte=aged_block_cutoff,
+               blocked_since__isnull=False)
+    late_q = Q(task_type=Task.INTERNAL) & task_health.overdue_q(today)
     tasks_by_site = {}
     task_counts = {'blocked_aged': 0, 'overdue': 0}
     for t in (Task.objects.filter(phase__project__in=execution_pks)          # query 6
               .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
-              .filter(Q(status=Task.BLOCKED, blocked_since__lte=aged_block_cutoff,
-                        blocked_since__isnull=False)
-                      | Q(task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False,
-                          status__in=[Task.NOT_STARTED, Task.IN_PROGRESS]))
+              .filter(aged_q | late_q)
               .values('pk', 'task_name', 'status', 'blocked_since', 'due_date',
-                      'assigned_to_id', project_pk=F('phase__project_id'))
+                      'assigned_to_id', project_pk=F('phase__project_id'),
+                      is_aged=ExpressionWrapper(aged_q, output_field=BooleanField()),
+                      is_late=ExpressionWrapper(late_q, output_field=BooleanField()))
               .order_by('pk')):
         tasks_by_site.setdefault(t['project_pk'], []).append(t)
-        task_counts['blocked_aged' if t['status'] == Task.BLOCKED else 'overdue'] += 1
+        task_counts['blocked_aged'] += bool(t['is_aged'])
+        task_counts['overdue'] += bool(t['is_late'])
 
     # Everyone a row can name, in ONE read. Role holders are not read: a stage the record
     # pins on nobody shows the role alone (S8 T1), whoever holds it.
@@ -797,13 +812,18 @@ def _stuck_entry(reads, pk, info, today):
             return None
         candidates = []
         for t in tasks:
-            if t['status'] == Task.BLOCKED:
+            # One candidate per TASK, so "(+N more)" counts tasks. A task that is both
+            # blocked past the limit and past its due date enters once, under whichever
+            # of its two rules overshoots further (blocked wins a tie, as between tasks).
+            options = []
+            if t['is_aged']:
                 since = _local_date(t['blocked_since'])
                 days = (today - since).days
-                candidates.append((days - block_days, 1, 'blocked', since, days, t))
-            else:
+                options.append((days - block_days, 1, 'blocked', since, days, t))
+            if t['is_late']:
                 days = (today - t['due_date']).days
-                candidates.append((days, 0, 'overdue_task', t['due_date'], days, t))
+                options.append((days, 0, 'overdue_task', t['due_date'], days, t))
+            candidates.append(max(options, key=lambda c: (c[0], c[1])))
         # Worst overshoot; a blocked task beats an overdue one at equal overshoot; then
         # the lower task pk, so the row never changes between loads.
         over, _, rule, clock, days, task = max(candidates,
@@ -860,6 +880,8 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
       S7              the CEO page's Blocked Tasks "Aged >= 7 days" and Tasks "Overdue"
                       terms, restated on the same human-owned, applicable tasks, with the
                       page's own `aged_block_cutoff` passed in. Active / In Progress only.
+                      "Overdue" is task_health.overdue_q() scoped to Internal, so a
+                      Blocked task past its due date is late too.
       S0              never.
 
     Rows: longest overshoot first, then tender name, then site label. Five or more sites

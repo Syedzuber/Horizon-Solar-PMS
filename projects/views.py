@@ -61,6 +61,9 @@ from .models import (
 from .number_input import decimal_field_max, parse_decimal_input
 from .notifications import send_notification, send_raw_email
 from .payments import ceo_payment_strip, payment_counts
+# The one overdue rule. Every overdue count, list and flag in this module takes it from
+# here and adds only its own scope (type, mirror, assignee, project).
+from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -563,7 +566,9 @@ def tasks_drill_down(request, filter_type):
     if filter_type not in _FILTER_TITLES:
         raise Http404
 
-    today   = date.today()
+    # The IST calendar date, as the CEO page and the daily report read it: the three
+    # windows below and the dashboards' stat blocks that link here must share one day.
+    today   = timezone.localdate()
     profile = request.user.profile
     role    = profile.role
 
@@ -631,7 +636,7 @@ def tasks_drill_down(request, filter_type):
             status__in=active_statuses,
         )
     else:  # overdue
-        tasks_qs = base_qs.filter(due_date__lt=today).exclude(status=Task.DONE)
+        tasks_qs = base_qs.filter(overdue_q(today))
 
     project_map = {}
     for task in tasks_qs.order_by('phase__project__project_id', 'due_date'):
@@ -667,6 +672,10 @@ def dashboard_pm(request):
     annotating with Subquery or moving to prefetch_related before scaling.
     """
     pm_profile = request.user.profile
+    # One IST calendar date for every count on this page. task_health takes `today`
+    # from its caller, and the due-today cards must not read a different day from the
+    # overdue ones beside them.
+    today = timezone.localdate()
 
     # Projects this user manages: own PM projects OR projects they coordinate.
     # For a pure PM (no coordinator rows) this equals their assigned projects
@@ -695,7 +704,7 @@ def dashboard_pm(request):
     # HOTO) would land on this card whether or not anyone was assigned to them.
     due_today = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
-        due_date=date.today(),
+        due_date=today,
         due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
@@ -781,11 +790,12 @@ def dashboard_pm(request):
             phase__project=project, task_type=Task.EXTERNAL,
             status__in=['Not Started', 'In Progress'],
         ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
+        # The shared rule (task_health), scoped to Internal. It counts a Blocked task
+        # that is past its date, so that task is in blocked_count below as well and
+        # `urgency_count` counts it twice.
         overdue_count  = Task.objects.filter(
             phase__project=project, task_type=Task.INTERNAL,
-            due_date__lt=date.today(), due_date__isnull=False,
-            status__in=['Not Started', 'In Progress'],
-        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
+        ).filter(overdue_q(today)).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
         blocked_count = Task.objects.filter(
             phase__project=project, status='Blocked',
         ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
@@ -800,16 +810,14 @@ def dashboard_pm(request):
         overdue_tasks_for_project = list(
             Task.objects.filter(
                 phase__project=project, task_type=Task.INTERNAL,
-                due_date__lt=date.today(), due_date__isnull=False,
-                status__in=['Not Started', 'In Progress'],
-            ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).select_related('phase')[:5]
+            ).filter(overdue_q(today)).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).select_related('phase')[:5]
         )
         is_delayed = bool(
             project.target_commissioning_date
-            and project.target_commissioning_date < date.today()
+            and project.target_commissioning_date < today
         )
         delay_days = (
-            (date.today() - project.target_commissioning_date).days
+            (today - project.target_commissioning_date).days
             if is_delayed else None
         )
         # R-21: the one implementation, mirrors excluded. Free here — the loop
@@ -818,7 +826,7 @@ def dashboard_pm(request):
         # Per-project due-today count on the same card.
         due_today_for_project = Task.objects.filter(
             phase__project=project,
-            due_date=date.today(), due_date__isnull=False,
+            due_date=today, due_date__isnull=False,
             status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
         ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
 
@@ -910,7 +918,7 @@ def dashboard_pm(request):
 
     due_today_tasks = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
-        due_date=date.today(), due_date__isnull=False,
+        due_date=today, due_date__isnull=False,
         task_type=Task.INTERNAL,
         status__in=['Not Started', 'In Progress'],
     ).select_related('phase__project', 'assigned_to').order_by('phase__project__project_id')
@@ -934,11 +942,11 @@ def dashboard_pm(request):
 
     team_due_today = Task.objects.filter(
         phase__project_id__in=managed_project_ids,
-        due_date=date.today(), due_date__isnull=False,
+        due_date=today, due_date__isnull=False,
         status__in=['Not Started', 'In Progress'],
     ).exclude(assigned_role=Task.PM).select_related('phase__project')
 
-    seven_days_ago = date.today() - timedelta(days=7)
+    seven_days_ago = today - timedelta(days=7)
     due_date_changes = DueDateChangeLog.objects.filter(
         task__phase__project_id__in=managed_project_ids,
         changed_at__date__gte=seven_days_ago,
@@ -953,10 +961,10 @@ def dashboard_pm(request):
         due_date__isnull=False,
     ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
     _active = [Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED]
-    _soon   = date.today() + timedelta(days=7)
-    tasks_due_today_count = _pm_task_base.filter(due_date=date.today(), status__in=_active).count()
-    tasks_due_soon_count  = _pm_task_base.filter(due_date__gt=date.today(), due_date__lte=_soon, status__in=_active).count()
-    tasks_overdue_count   = _pm_task_base.filter(due_date__lt=date.today()).exclude(status=Task.DONE).count()
+    _soon   = today + timedelta(days=7)
+    tasks_due_today_count = _pm_task_base.filter(due_date=today, status__in=_active).count()
+    tasks_due_soon_count  = _pm_task_base.filter(due_date__gt=today, due_date__lte=_soon, status__in=_active).count()
+    tasks_overdue_count   = _pm_task_base.filter(overdue_q(today)).count()
 
     return render(request, 'dashboard/pm.html', {
         'summary': {
@@ -977,7 +985,7 @@ def dashboard_pm(request):
         'external_pending_list':  external_pending_list,
         'team_due_today':         team_due_today,
         'due_date_changes':       due_date_changes,
-        'today':                  date.today(),
+        'today':                  today,
         'all_profiles':           UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
         'design_candidates':      UserProfile.objects.filter(role='Design', is_active=True).select_related('user'),
         'user_role':              user_role,
@@ -999,7 +1007,9 @@ def dashboard_site_engineer(request):
     # 5. task_type values: Task.INTERNAL='Internal', Task.EXTERNAL='External'
     #
     # SE role only — other roles are redirected at the decorator level
-    today      = date.today()
+    # The IST calendar date: task_health takes `today` from its caller, and every count
+    # on this page reads the same day.
+    today      = timezone.localdate()
     se_profile = request.user.profile
 
     # Annotate each project with per-SE urgency counts in a single DB round-trip.
@@ -1030,10 +1040,8 @@ def dashboard_site_engineer(request):
             filter=Q(
                 phases__tasks__task_type=Task.INTERNAL,
                 phases__tasks__assigned_to=se_profile,
-                phases__tasks__due_date__lt=today,
-                phases__tasks__due_date__isnull=False,
-                phases__tasks__status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-            ) & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
+            ) & overdue_q(today, 'phases__tasks__')
+              & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
             distinct=True,
         ),
         blocked_count=Count(
@@ -1113,7 +1121,10 @@ def dashboard_site_engineer(request):
             if next_task_obj.due_date:
                 # Use .day (no leading zero) + strftime('%b') — avoids %-d platform differences
                 next_due     = '{} {}'.format(next_task_obj.due_date.day, next_task_obj.due_date.strftime('%b'))
-                next_overdue = next_task_obj.due_date < today
+                # The shared rule, so a Not Applicable next task is no longer shown
+                # as late. WHICH task is "next" is unchanged: the queryset above still
+                # picks mirrors and N/A tasks (DEFERRED G33).
+                next_overdue = is_overdue(next_task_obj, today)
             else:
                 next_due = 'No due date set'
 
@@ -1163,7 +1174,7 @@ def dashboard_site_engineer(request):
     _se_soon   = today + timedelta(days=7)
     se_tasks_due_today = _se_task_base.filter(due_date=today, status__in=_se_active).count()
     se_tasks_due_soon  = _se_task_base.filter(due_date__gt=today, due_date__lte=_se_soon, status__in=_se_active).count()
-    se_tasks_overdue   = _se_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+    se_tasks_overdue   = _se_task_base.filter(overdue_q(today)).count()
 
     return render(request, 'dashboard/site-engineer.html', {
         'projects':          projects_data,
@@ -1187,7 +1198,8 @@ def dashboard_site_engineer(request):
 @role_required(['Design'])
 def dashboard_design(request):
     """Design dashboard. One card per assigned project, combined urgency circle. Design role only."""
-    today          = date.today()
+    # The IST calendar date: task_health takes `today` from its caller.
+    today          = timezone.localdate()
     design_profile = request.user.profile
 
     # Trigger 1: assigned_design FK confirmed on Project model.
@@ -1311,7 +1323,7 @@ def dashboard_design(request):
     _d_soon   = today + timedelta(days=7)
     design_tasks_due_today = _design_task_base.filter(due_date=today, status__in=_d_active).count()
     design_tasks_due_soon  = _design_task_base.filter(due_date__gt=today, due_date__lte=_d_soon, status__in=_d_active).count()
-    design_tasks_overdue   = _design_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+    design_tasks_overdue   = _design_task_base.filter(overdue_q(today)).count()
 
     # OPEX design state for the tender cards (Part 4.5). Computed in design_views so the
     # workflow's own rules stay in the design module; this view only carries the result
@@ -1497,7 +1509,9 @@ def dashboard_scm(request):
     All delivery/procurement signals read from DeliveryChallan/DCLineItem —
     not Task proxies — so they reflect actual receipt state. Access: SCM only.
     """
-    today = date.today()
+    # The IST calendar date: task_health takes `today` from its caller, and the delivery
+    # figures on this page read the same day as its task stat block.
+    today = timezone.localdate()
 
     # Display context (EPC Residential / Tenders). None => no filter => the exact
     # portfolio-wide behaviour this dashboard had before the context feature.
@@ -1790,7 +1804,7 @@ def dashboard_scm(request):
     _s_soon   = today + timedelta(days=7)
     scm_tasks_due_today = _scm_task_base.filter(due_date=today, status__in=_s_active).count()
     scm_tasks_due_soon  = _scm_task_base.filter(due_date__gt=today, due_date__lte=_s_soon, status__in=_s_active).count()
-    scm_tasks_overdue   = _scm_task_base.filter(due_date__lt=today).exclude(status=Task.DONE).count()
+    scm_tasks_overdue   = _scm_task_base.filter(overdue_q(today)).count()
 
     # ── OPEX tenders (Part 6) ──────────────────────────────────────────────────
     # A SEPARATE QUERY SET, NOT A WIDENING OF THE ONE ABOVE. `active_projects` keeps its
@@ -2342,13 +2356,14 @@ def _get_ceo_dashboard_context(context=None):
         status=Task.BLOCKED,
     )
     # Subquery: does this project have any overdue internal task (still future target date handled in Python)?
+    # The shared rule (task_health), so a Not Applicable task no longer makes a project
+    # At Risk. The rule also matches a Blocked task past its date, which cannot show
+    # here: that project already takes the Blocked badge, which outranks At Risk.
+    # Mirrors are still not excluded, as before (DEFERRED G33).
     at_risk_subq = Task.objects.filter(
         phase__project=OuterRef('pk'),
         task_type=Task.INTERNAL,
-        due_date__lt=today,
-        due_date__isnull=False,
-        status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
-    )
+    ).filter(overdue_q(today))
     # -- Card field subqueries (Session 1) -----------------------------------
     # All four card fields are annotations on THIS queryset. None of them may be
     # resolved in the template by crossing a relation ({{ p.design_assignment.status }}
@@ -2556,6 +2571,11 @@ def _get_ceo_dashboard_context(context=None):
     # place a mirror inflates whether or not anybody is assigned to it — an OPEX site
     # adds 2 to dept_pm_pending, 2 to dept_design_pending and 1 to dept_scm_pending on
     # attach alone. There is no values()/group-by here, so the base filter adds no join.
+    # "Overdue" on the Tasks card, the six department rows and the S7 stuck rule is the
+    # shared rule (task_health) scoped to Internal work: a late DISCOM or customer step
+    # is counted on the External Dependencies card instead. The rule counts a Blocked
+    # task that is past its date; before task_health these terms did not.
+    internal_overdue = Q(task_type=Task.INTERNAL) & overdue_q(today)
     task_agg = Task.objects.filter(
         phase__project__is_deleted=False,
         phase__project__status__in=active_statuses,
@@ -2567,10 +2587,7 @@ def _get_ceo_dashboard_context(context=None):
         task_inprogress=Count('pk', filter=Q(status=Task.IN_PROGRESS)),
         task_completed =Count('pk', filter=Q(status=Task.DONE)),
         # Overdue = internal tasks only; external delays are not team overdue (SE has DISCOM tasks)
-        task_overdue   =Count('pk', filter=Q(
-            task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False,
-            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS],
-        )),
+        task_overdue   =Count('pk', filter=internal_overdue),
         # Blocked KPI (two distinct numbers — see Layer 5 §3: they will not reconcile, that is expected)
         blocked_open   =Count('pk', filter=Q(status=Task.BLOCKED)),
         blocked_aged_7d=Count('pk', filter=Q(
@@ -2580,10 +2597,7 @@ def _get_ceo_dashboard_context(context=None):
         )),
         # External dependency KPI
         ext_closed =Count('pk', filter=Q(task_type=Task.EXTERNAL, status=Task.DONE)),
-        ext_overdue=Count('pk', filter=Q(
-            task_type=Task.EXTERNAL, due_date__lt=today, due_date__isnull=False,
-            status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED],
-        )),
+        ext_overdue=Count('pk', filter=Q(task_type=Task.EXTERNAL) & overdue_q(today)),
         # Due-date windows — internal-only (matches Overdue convention); Blocked counts as still-open.
         # "This week" reuses the Mon–Sun boundaries above; today's tasks intentionally count in both.
         due_today_count    =Count('pk', filter=Q(
@@ -2603,27 +2617,27 @@ def _get_ceo_dashboard_context(context=None):
         # PM
         dept_pm_assigned=Count('pk', filter=Q(assigned_role=Task.PM, assigned_to__isnull=False)),
         dept_pm_pending =Count('pk', filter=Q(assigned_role=Task.PM, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_pm_overdue =Count('pk', filter=Q(assigned_role=Task.PM, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_pm_overdue =Count('pk', filter=Q(assigned_role=Task.PM) & internal_overdue),
         # Site Engineer — overdue MUST filter Internal; SE tasks include DISCOM/authority External tasks
         dept_se_assigned=Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, assigned_to__isnull=False)),
         dept_se_pending =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_se_overdue =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_se_overdue =Count('pk', filter=Q(assigned_role=Task.SITE_ENGINEER) & internal_overdue),
         # SCM
         dept_scm_assigned=Count('pk', filter=Q(assigned_role=Task.SCM, assigned_to__isnull=False)),
         dept_scm_pending =Count('pk', filter=Q(assigned_role=Task.SCM, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_scm_overdue =Count('pk', filter=Q(assigned_role=Task.SCM, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_scm_overdue =Count('pk', filter=Q(assigned_role=Task.SCM) & internal_overdue),
         # Design
         dept_design_assigned=Count('pk', filter=Q(assigned_role=Task.DESIGN, assigned_to__isnull=False)),
         dept_design_pending =Count('pk', filter=Q(assigned_role=Task.DESIGN, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_design_overdue =Count('pk', filter=Q(assigned_role=Task.DESIGN, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_design_overdue =Count('pk', filter=Q(assigned_role=Task.DESIGN) & internal_overdue),
         # BD / Sales — filter on assigned_role='BD / Sales' (Task.BD constant); 'BD' alone returns zero
         dept_bd_assigned=Count('pk', filter=Q(assigned_role=Task.BD, assigned_to__isnull=False)),
         dept_bd_pending =Count('pk', filter=Q(assigned_role=Task.BD, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_bd_overdue =Count('pk', filter=Q(assigned_role=Task.BD, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_bd_overdue =Count('pk', filter=Q(assigned_role=Task.BD) & internal_overdue),
         # Finance — overdue will read near-zero if finance tasks lack due dates; that is expected, not a bug
         dept_finance_assigned=Count('pk', filter=Q(assigned_role=Task.FINANCE, assigned_to__isnull=False)),
         dept_finance_pending =Count('pk', filter=Q(assigned_role=Task.FINANCE, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS, Task.BLOCKED])),
-        dept_finance_overdue =Count('pk', filter=Q(assigned_role=Task.FINANCE, task_type=Task.INTERNAL, due_date__lt=today, due_date__isnull=False, status__in=[Task.NOT_STARTED, Task.IN_PROGRESS])),
+        dept_finance_overdue =Count('pk', filter=Q(assigned_role=Task.FINANCE) & internal_overdue),
         # -- Per-department due-date windows: 6 roles × 2 columns (Due Today / Due This Week) --
         # Same convention as the portfolio-wide due counts: internal-only, open incl. Blocked.
         # "This week" reuses the Mon–Sun boundaries; today's tasks intentionally count in both.
@@ -4329,13 +4343,14 @@ def _render_phase_tasks_hx(request, project, phase, status=200):
     """Re-render one phase's <tbody> and task count out-of-band, in
     _task_add_success.html's shape, WITHOUT its taskFormDone trigger: no modal is open.
 
-    Row context comes from `_task_row_context()` and `_attach_delivery_consignments()`,
-    as on every other responder, so a reorder redraws rows identical to the page it
-    came from."""
+    Row context comes from `_task_row_context()`, `_attach_delivery_consignments()` and
+    `_attach_due_health()`, as on every other responder, so a reorder redraws rows
+    identical to the page it came from."""
     phase_tasks = list(phase.tasks.select_related('template_task'))
     for task in phase_tasks:
         task.phase = phase
     _attach_delivery_consignments(phase_tasks)
+    _attach_due_health(phase_tasks, timezone.localdate())
     return render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -5158,6 +5173,27 @@ def _attach_delivery_consignments(tasks):
             task.delivery_consignments = delivery['consignments']
 
 
+def _attach_due_health(tasks, today):
+    """Attach what `_task_row.html`'s Due Date cell shows, on the instances the template
+    iterates: `task.overdue_days` (0 when not overdue) and `task.due_today`.
+
+    No query. `today` is the caller's one timezone.localdate(), so every row of a
+    response is judged against the same day. Overdue is task_health's rule, the one the
+    dashboards count by, so a row marked here is a row they count (within each one's own
+    scope). Mirrors are included: a Derived task with a date can be late like any other.
+
+    Called by project_overview and by all four responders that redraw a row, next to
+    `_attach_delivery_consignments()`. A responder that skipped it would drop the badge
+    from the row it had just redrawn."""
+    for task in tasks:
+        task.overdue_days = days_overdue(task, today)
+        # The same two "still open" terms as the overdue rule: a Done or Not Applicable
+        # task due today gets nothing.
+        task.due_today = (task.due_date == today
+                          and task.status in OPEN_STATUSES
+                          and not task.is_not_applicable)
+
+
 def _render_task_row_hx(request, project, task, oob_tasks=None):
     """Render the HTMX task-row response for project_overview (#1/#3/#5):
     the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
@@ -5165,6 +5201,7 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
     permission context the page uses so role-gating is identical to a full render."""
     oob_tasks = oob_tasks or []
     _attach_delivery_consignments([task, *oob_tasks])
+    _attach_due_health([task, *oob_tasks], timezone.localdate())
     row_context = _task_row_context(request, project)
     return render(request, 'projects/partials/_task_row_response.html', {
         'project':             project,
@@ -5436,6 +5473,7 @@ def _render_task_assign_design_success_hx(request, project, task):
     the page uses, from the requesting user's perspective (a Design Head need not
     be the PM)."""
     _attach_delivery_consignments([task])
+    _attach_due_health([task], timezone.localdate())
     row_context = _task_row_context(request, project)
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
@@ -5454,6 +5492,7 @@ def _render_task_add_success_hx(request, project, phase):
     page order and correctly places the new row."""
     phase_tasks = list(phase.tasks.select_related('template_task'))
     _attach_delivery_consignments(phase_tasks)
+    _attach_due_health(phase_tasks, timezone.localdate())
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -9875,6 +9914,9 @@ def project_overview(request, project_id):
                 'tasks', queryset=Task.objects.select_related('template_task')))
             .order_by('phase_order')
         )
+        # Read once, outside the loop: every row's overdue badge is judged against the
+        # same IST calendar day.
+        today = timezone.localdate()
         for phase in phases:
             tasks = list(phase.tasks.all())
             if not tasks:
@@ -9890,6 +9932,9 @@ def project_overview(request, project_id):
             # THE SAME HELPER THE PANEL USES, deliberately: the number on the row and
             # the panel it opens are one computation, so they cannot drift apart.
             _attach_delivery_consignments(tasks)
+            # The Due Date cell's Overdue / Due today badge. Python over the prefetched
+            # rows, against the one `today` read once above the loop: no query.
+            _attach_due_health(tasks, today)
 
             # THIS IS PHASE COMPLETENESS, SO DERIVED WORK COUNTS. The bar answers
             # "how much of this phase is finished", and an undelivered consignment is

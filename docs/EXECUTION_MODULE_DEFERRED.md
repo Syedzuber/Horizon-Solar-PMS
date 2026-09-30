@@ -4221,6 +4221,69 @@ The same check found that `TESTTENDER26-MB010` is an OPEX BOQ carrying **37 Resi
 catalogue rows** (every `item_master` is `project_type='Residential'`). It was seeded before
 Part 11 scoped `get_standard_boq_items()`.
 
+### G33 — what the shared overdue rule did not change
+
+Recorded by the task-health session (30 Sep 2026). `projects/task_health.py` now holds the
+one overdue rule (a due date before today, status not Done, not Not Applicable) and every
+reader takes it from there. The rule was unified. Each reader's **scope** was left as it
+was, because changing a scope is a product decision. What is still different:
+
+- **The CEO Tasks card, the department rows and the S7 stuck rule count Internal tasks
+  only.** A late External task is on the External Dependencies card. The task table marks
+  every late row, External and Derived included. So a site with a late External or Derived
+  task shows more badges on its task table than the CEO card counts for it.
+- **The daily report counts assigned tasks only**, and counts Commissioned and On Hold
+  projects, which the CEO cards do not. Locally the two totals are both 39 by coincidence:
+  the CEO drops 7 tasks on a test site, the report drops 7 unassigned tasks on
+  `HRP-RES-2026-041` and `-042`.
+- **The CEO At Risk badge (`at_risk_subq`) still does not exclude mirrors.** Harmless today:
+  mirrors are seeded with no due date. A PM who types a date on a Derived row changes that.
+  `blocked_subq` beside it excludes neither mirrors nor Not Applicable tasks.
+- **The Site Engineer's "next task" still picks mirrors and Not Applicable tasks.** Only its
+  red "late" flag goes through the rule now, so a Not Applicable task can still be named as
+  the next task, just never as a late one.
+- **PM dashboard `urgency_count` counts a Blocked, past-due task twice**, once in
+  `blocked_count` and once in `overdue_count`. The Site Engineer card already did. Before
+  the shared rule the PM card did not count a Blocked task as overdue at all.
+
+### G34 — a due date with a mistyped year, and the overdue badge
+
+Not fixed by the task-health session, by instruction. G6 and G7 above are the standing
+entries on typed dates that bypass the range check and on the production rows that are
+still wrong; this adds what the overdue badge does with such a row.
+
+A task whose due date is in the year 20 or 26 is "before today", so if it is open and
+applicable it is overdue under the rule like any other: the task table shows
+`Overdue · 732,000d` or so, and `stuck_sites()` names it as the site's worst task, which
+pushes every real late task on that site into "(+N more)". A Not Applicable or Done task
+with such a date shows nothing, which is the production CEIG task's case.
+
+Counts. **Production: not determined.** The audit session (29 Sep 2026) could not read
+production, so there is no count by status to record here; `manage.py
+list_implausible_dates` run against production gives it. **Local (`solarpms_local`,
+30 Sep 2026): 1 task with a due-date year before 2020, status Done; none after 2035.**
+
+One entry point the audit found that copies a date without checking it:
+`task_duplicate_locations_create` copies `source.due_date` to every new location task, so
+one bad source date becomes several.
+
+### G35 — `date.today()` is still read outside the overdue readers
+
+The task-health session moved `tasks_drill_down`, `dashboard_pm`, `dashboard_site_engineer`,
+`dashboard_design` and `dashboard_scm` to `timezone.localdate()`, because the shared rule
+takes `today` from its caller. `dashboard_finance`, `dashboard_bd`, the two GRN views, the
+milestone date stamps and `project_overview`'s `'today'` context key still call
+`date.today()`. On Railway the two agree (Django sets the process timezone from
+`TIME_ZONE`), so nothing is wrong today; the split is a trap for whoever next runs the app
+on a host where they differ.
+
+### G36 — two comments still say nothing promotes an OPEX site out of Draft
+
+`dashboard_pm` (above `pm_change_request_targets`) and `dashboard_design` (the "OPEX sites
+are exempt from the status filter" note) both say `create_opex_site()` hardcodes Draft
+"and nothing promotes it". `opex_site_activate` now does exactly that. The code
+under both comments is still right; only the stated reason is out of date.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session
