@@ -5,7 +5,8 @@ What this file pins, and why each matters:
   * A BILL'S CONTRACTOR AND SITE ARE LOCKED in the chokepoint: another vendor or any other
     scope is refused and writes nothing; repeating what the bill holds is dropped (Q4).
   * THE REVISED VALUES MEET CREATE'S REFUSALS (_clean_bill's parts) — but the contractor
-    is not asked again, and the PDF only when a new one is sent (Q1).
+    is not asked again, and the PDF only when a new one is sent (Q1); nor is the site's
+    deleted/Draft check — the site is locked and was checked at raise (4b-2).
   * A REPLACED PDF IS NEVER LOST: the previous round's snapshot keeps the old file, its
     round still signs it, and discard_unrecorded_bill_pdf refuses any file a snapshot
     records (Q2).
@@ -210,11 +211,32 @@ class ChokepointRevisionTests(RevisionFixture):
         self.assertEqual(self.detail().amount, Decimal('12600.00'))
         self.assertEqual(self.detail().pdf_path, PDF['path'])
 
-    def test_a_deleted_site_refuses_a_revision(self):
-        self.sent_back_by_se()
-        type(self.site).objects.filter(pk=self.site.pk).update(is_deleted=True)
-        with self.assertRaisesMessage(ApprovalRefused, 'That site has been deleted.'):
-            self.resubmit(revision={'amount': '12600.00'})
+    def test_a_site_deleted_or_put_back_to_draft_after_raise_does_not_refuse_a_revision(self):
+        """4b-2 (D-A55 extension): the site is locked and was checked at raise, so a
+        resubmit does not ask again. A raise on such a site is still refused."""
+        Site = type(self.site)
+        status = self.site.status
+        for label, change in (('deleted', {'is_deleted': True}), ('Draft', {'status': 'Draft'})):
+            with self.subTest(label):
+                self.approval = self.raise_bill()
+                self.sent_back_by_se()
+                Site.objects.filter(pk=self.site.pk).update(**change)
+                try:
+                    self.resubmit(revision={'amount': '12600.00'})
+                finally:
+                    Site.objects.filter(pk=self.site.pk).update(is_deleted=False, status=status)
+                approval = ApprovalRequest.objects.get(pk=self.approval.pk)
+                self.assertEqual((approval.status, approval.current_round), (APPROVAL_OPEN, 2))
+                self.assertEqual(self.detail().amount, Decimal('12600.00'))
+        for change, message in (({'is_deleted': True}, 'That site has been deleted.'),
+                                ({'status': 'Draft'}, 'is Draft; a bill cannot be raised')):
+            with self.subTest(raise_on=change):
+                Site.objects.filter(pk=self.site.pk).update(**change)
+                try:
+                    with self.assertRaisesMessage(ApprovalRefused, message):
+                        self.raise_bill(self.bill(project=Site.objects.get(pk=self.site.pk)))
+                finally:
+                    Site.objects.filter(pk=self.site.pk).update(is_deleted=False, status=status)
 
     def test_a_bill_key_on_a_material_request_is_refused(self):
         material = self.raise_material()
@@ -315,6 +337,16 @@ class ResubmitPageTests(RevisionFixture):
                          (Decimal('13000.00'), 'CB-7A', STORED['path']))
         self.assertEqual(round_snapshot(self.approval, 1)['bill']['pdf']['path'], PDF['path'])
         self.assertEqual(self.task_pks(), [self.foundation.pk])
+
+    def test_a_site_deleted_after_raise_does_not_stop_the_resubmit_post(self):
+        """4b-2: the view's read-only pre-check (_revision_writes) no longer asks the
+        site's deleted/Draft question either."""
+        self.sent_back_by_se()
+        type(self.site).objects.filter(pk=self.site.pk).update(is_deleted=True)
+        response = self.post(amount='12600.00')
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.detail().amount, Decimal('12600.00'))
+        self.assertEqual(ApprovalRequest.objects.get(pk=self.approval.pk).current_round, 2)
 
     def test_nothing_is_uploaded_before_form_storage_refusals_and_warnings(self):
         self.sent_back_by_se()

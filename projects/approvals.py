@@ -672,8 +672,9 @@ def _clean_bill(bill, vendor, programs, projects, site_groups):
 
     4b-1 split it into its parts so a resubmit can ask only what it revises: the
     contractor is locked on a resubmit, so _clean_bill_contractor is not asked again, and
-    the PDF is judged only when a new one is posted (_clean_bill_pdf). Create asks every
-    part, in the order above, exactly as before."""
+    the PDF is judged only when a new one is posted (_clean_bill_pdf). 4b-2: the site is
+    locked too, so _clean_bill_site is not asked again either. Create asks every part, in
+    the order above, exactly as before."""
     if bill is None:
         raise ApprovalRefused('Enter the contractor bill\'s details.')
     _clean_bill_contractor(vendor)
@@ -1121,10 +1122,12 @@ def _bill_revision(approval, revision):
     else is refused with BILL_SITE_LOCKED. (The contractor lock is _revision_writes'.)
 
     When any bill key is sent, the bill as revised is judged by create's own parts: the
-    site (_clean_bill_site — not deleted, not Draft) and the tasks, amount, number and
-    date (_clean_bill_values). Not the contractor — it cannot change (Q1) — and the PDF
-    only when a new one is sent (_clean_bill_pdf), so an unchanged PDF is never refused
-    for a bucket setting changed since."""
+    tasks, amount, number and date (_clean_bill_values), and the PDF only when a new one
+    is sent (_clean_bill_pdf), so an unchanged PDF is never refused for a bucket setting
+    changed since. Not the contractor — it cannot change (Q1) — and not the site's
+    deleted/Draft check (_clean_bill_site): the site cannot change either, and it was
+    checked at raise, so a site deleted or put back to Draft since never stops a bill
+    from being corrected (4b-2, D-A55 extension)."""
     # The bill with its site: the lock compares against the site, and the revised tasks
     # must be on it.
     detail = ContractorBillDetail.objects.select_related('project').get(request=approval)
@@ -1142,7 +1145,6 @@ def _bill_revision(approval, revision):
     if not any(key in revision for key in _REVISABLE_BILL):
         return result
 
-    _clean_bill_site(site, (), [site], ())
     cleaned = _clean_bill_values(
         site, revision.get('tasks', current), revision.get('amount', detail.amount),
         revision.get('bill_number', detail.bill_number),
