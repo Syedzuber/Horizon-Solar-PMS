@@ -1,3 +1,4 @@
+from django import forms
 from django.contrib import admin
 from django.utils import timezone
 from .models import (
@@ -12,6 +13,7 @@ from .models import (
     ApprovalRoundSnapshot, ApprovalOrderLink, MaterialApprovalLine,
     ContractorBillDetail, ContractorBillTask,
 )
+from .forms import check_typed_date
 from .utils import assign_task_to
 
 
@@ -202,8 +204,35 @@ class ProjectPhaseAdmin(admin.ModelAdmin):
     list_filter  = ['project']
 
 
+class TaskAdminForm(forms.ModelForm):
+    """The admin's Task form, with the typed-date range rule on due_date.
+
+    The admin was the one screen where a due date could be typed with no year check
+    (EXECUTION_MODULE_DEFERRED.md G6): forms.DateField reads '0020-09-24' as the year
+    20. Same rule and same message as every view, from forms.check_typed_date().
+
+    ON THE FORM, NOT THE MODEL, for the reason forms.py gives: a model constraint
+    would refuse the save that corrects a bad row. A row that already holds a bad
+    date still opens here, and saves once its date is corrected or cleared. It does
+    not save with the bad date left in place, whatever else was edited.
+    """
+
+    class Meta:
+        model = Task
+        fields = '__all__'
+
+    def clean_due_date(self):
+        value = self.cleaned_data.get('due_date')
+        _, error = check_typed_date(value)
+        if error:
+            raise forms.ValidationError(error)
+        return value
+
+
 @admin.register(Task)
 class TaskAdmin(admin.ModelAdmin):
+    # The year check on due_date; see the form.
+    form = TaskAdminForm
     list_display = ['task_name', 'phase', 'assigned_role', 'status', 'due_date', 'completed_at']
     list_filter  = ['assigned_role', 'status']
     search_fields = ['task_name']

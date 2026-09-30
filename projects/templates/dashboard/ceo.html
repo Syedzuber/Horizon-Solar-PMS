@@ -632,7 +632,8 @@ the Projects card's own count, so the heading and that card cannot disagree.
         </div>
         <div class="stat-row">
           <span class="text-muted">Overdue <span class="badge" style="background:#f3f4f6;color:#374151;font-size:.65rem;font-weight:600;">internal only</span></span>
-          <span class="stat-num{% if task_overdue %} red{% endif %}">{{ task_overdue }}</span>
+          {# The number links to exactly the tasks it counts (dashboard_ceo_overdue_tasks). A zero stays plain text. #}
+          {% if task_overdue %}<a href="{{ task_overdue_url }}" class="stat-num red text-decoration-none" aria-label="{{ task_overdue }} overdue internal task{{ task_overdue|pluralize }}: open the list">{{ task_overdue }}</a>{% else %}<span class="stat-num">{{ task_overdue }}</span>{% endif %}
         </div>
       </div>
     </div>

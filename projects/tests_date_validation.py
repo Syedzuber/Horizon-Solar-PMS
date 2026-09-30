@@ -718,3 +718,117 @@ class ListImplausibleDatesCommandTests(DateFixture):
                   if not q['sql'].lstrip().upper().startswith('SELECT')]
         self.assertEqual(writes, [], 'the listing command issued a non-SELECT query')
         self.assertGreater(len(ctx.captured_queries), 0)
+
+
+# ---------------------------------------------------------------------------
+# The Django admin's Task form (G6). Not one of the fourteen view entry points: the
+# admin writes the column straight from a ModelForm, so the rule rides on that form.
+# ---------------------------------------------------------------------------
+
+class TaskAdminDueDateTests(TestCase):
+    """TaskAdminForm.clean_due_date is forms.check_typed_date(). A year-20 date is
+    refused on add and on change; a row that already holds one still opens, and saves
+    once the date is corrected or cleared."""
+
+    RANGE_ERROR = 'is outside that range'
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.superuser = User.objects.create_superuser('dv_admin', 'dv@example.com', 'pw')
+        cls.superuser.profile.role = 'Admin'
+        cls.superuser.profile.save(update_fields=['role'])
+        project = Project.objects.create(
+            customer_name='Admin Date Site', customer_phone='9000000003',
+            site_address='4 Sun Road', city='Lucknow', project_type='OPEX',
+            dc_capacity_kw=Decimal('10.00'), status='Active')
+        cls.phase = ProjectPhase.objects.create(project=project, phase_order=1,
+                                                phase_name='Approvals')
+
+    def setUp(self):
+        self.client.force_login(self.superuser)
+        # The production shape: CEIG, Not Applicable, due in the year 20.
+        self.bad = Task.objects.create(
+            phase=self.phase, task_name='CEIG Approval', task_order=1,
+            assigned_role=Task.PM, due_date=date(20, 9, 24), is_not_applicable=True,
+            not_applicable_reason='Not in scope')
+        self.url = reverse('admin:projects_task_change', args=[self.bad.pk])
+
+    def _data(self, task, **changes):
+        data = {
+            'phase': task.phase_id, 'task_name': task.task_name,
+            'task_order': task.task_order, 'assigned_role': task.assigned_role,
+            'task_type': task.task_type, 'duration_days': task.duration_days,
+            'not_applicable_reason': task.not_applicable_reason,
+            'is_not_applicable': 'on' if task.is_not_applicable else '',
+            'due_date': task.due_date.isoformat() if task.due_date else '',
+            '_save': 'Save',
+        }
+        data.update(changes)
+        return data
+
+    def _errors(self, response):
+        self.assertEqual(response.status_code, 200, 'the form was accepted')
+        return response.context['adminform'].form.errors.get('due_date', [])
+
+    def test_an_existing_year_20_row_opens(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        form = response.context['adminform'].form
+        self.assertEqual(form.initial['due_date'], date(20, 9, 24))
+        self.assertIn('name="due_date"', response.content.decode())
+
+    def test_a_year_20_date_is_refused_on_change(self):
+        good = Task.objects.create(phase=self.phase, task_name='Dated', task_order=2,
+                                   assigned_role=Task.PM, due_date=date(2026, 10, 1))
+        response = self.client.post(
+            reverse('admin:projects_task_change', args=[good.pk]),
+            self._data(good, due_date=YEAR_20))
+        errors = self._errors(response)
+        self.assertEqual(len(errors), 1)
+        self.assertIn(self.RANGE_ERROR, errors[0])
+        self.assertEqual(Task.objects.get(pk=good.pk).due_date, date(2026, 10, 1))
+
+    def test_a_year_26_date_and_a_date_past_the_ceiling_are_refused(self):
+        for bad in (YEAR_26, _past_ceiling()):
+            with self.subTest(due_date=bad):
+                errors = self._errors(self.client.post(
+                    self.url, self._data(self.bad, due_date=bad, task_name='Renamed')))
+                self.assertIn(self.RANGE_ERROR, errors[0])
+        self.bad.refresh_from_db()
+        self.assertEqual((self.bad.task_name, self.bad.due_date),
+                         ('CEIG Approval', date(20, 9, 24)))
+
+    def test_a_year_20_date_is_refused_on_add(self):
+        before = Task.objects.count()
+        new = Task(phase=self.phase, task_name='Typed in the admin', task_order=9,
+                   assigned_role=Task.PM)
+        response = self.client.post(reverse('admin:projects_task_add'),
+                                    self._data(new, due_date=YEAR_20))
+        self.assertIn(self.RANGE_ERROR, self._errors(response)[0])
+        self.assertEqual(Task.objects.count(), before)
+
+    def test_the_bad_row_is_corrected_by_a_good_date(self):
+        response = self.client.post(self.url, self._data(self.bad, due_date='2026-09-24'))
+        self.assertEqual(response.status_code, 302, 'the correction was refused')
+        self.assertEqual(Task.objects.get(pk=self.bad.pk).due_date, date(2026, 9, 24))
+
+    def test_the_bad_row_is_corrected_by_clearing_the_date(self):
+        response = self.client.post(self.url, self._data(self.bad, due_date=''))
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(Task.objects.get(pk=self.bad.pk).due_date)
+
+    def test_the_bad_row_does_not_save_with_its_bad_date_left_in_place(self):
+        """Another field edited, the year-20 date resubmitted as it stands: refused, and
+        nothing about the row changes. The way out is the two tests above."""
+        errors = self._errors(self.client.post(
+            self.url, self._data(self.bad, task_name='CEIG Approval (renamed)')))
+        self.assertIn(self.RANGE_ERROR, errors[0])
+        self.assertEqual(Task.objects.get(pk=self.bad.pk).task_name, 'CEIG Approval')
+
+    def test_the_two_ends_of_the_range_are_accepted(self):
+        for good in (TYPED_DATE_FLOOR, typed_date_ceiling()):
+            with self.subTest(due_date=good):
+                response = self.client.post(
+                    self.url, self._data(self.bad, due_date=good.isoformat()))
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(Task.objects.get(pk=self.bad.pk).due_date, good)

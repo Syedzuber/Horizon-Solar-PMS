@@ -4231,20 +4231,25 @@ was, because changing a scope is a product decision. What is still different:
 - **The CEO Tasks card, the department rows and the S7 stuck rule count Internal tasks
   only.** A late External task is on the External Dependencies card. The task table marks
   every late row, External and Derived included. So a site with a late External or Derived
-  task shows more badges on its task table than the CEO card counts for it.
+  task shows more labels on its task table than the CEO card counts for it.
+  **Ruled 30 Sep 2026: the CEO card and the stuck list stay Internal-only.** The card's
+  number now links to a list of exactly the tasks it counts
+  (`dashboard_ceo_overdue_tasks`).
 - **The daily report counts assigned tasks only**, and counts Commissioned and On Hold
   projects, which the CEO cards do not. Locally the two totals are both 39 by coincidence:
   the CEO drops 7 tasks on a test site, the report drops 7 unassigned tasks on
-  `HRP-RES-2026-041` and `-042`.
+  `HRP-RES-2026-041` and `-042`. **Ruled 30 Sep 2026: the report stays assigned-only.**
+  The unassigned tasks are G37.
 - **The CEO At Risk badge (`at_risk_subq`) still does not exclude mirrors.** Harmless today:
   mirrors are seeded with no due date. A PM who types a date on a Derived row changes that.
   `blocked_subq` beside it excludes neither mirrors nor Not Applicable tasks.
 - **The Site Engineer's "next task" still picks mirrors and Not Applicable tasks.** Only its
   red "late" flag goes through the rule now, so a Not Applicable task can still be named as
   the next task, just never as a late one.
-- **PM dashboard `urgency_count` counts a Blocked, past-due task twice**, once in
-  `blocked_count` and once in `overdue_count`. The Site Engineer card already did. Before
-  the shared rule the PM card did not count a Blocked task as overdue at all.
+- ~~PM dashboard `urgency_count` counts a Blocked, past-due task twice.~~ **Fixed
+  30 Sep 2026** by ruling: `urgency_count` on the PM card and on the Site Engineer card
+  (which had always double-counted) now counts each task once. `blocked_count` and
+  `overdue_count` themselves still overlap on such a task, as the two lists under them do.
 
 ### G34 — a due date with a mistyped year, and the overdue badge
 
@@ -4254,7 +4259,7 @@ still wrong; this adds what the overdue badge does with such a row.
 
 A task whose due date is in the year 20 or 26 is "before today", so if it is open and
 applicable it is overdue under the rule like any other: the task table shows
-`Overdue · 732,000d` or so, and `stuck_sites()` names it as the site's worst task, which
+`Delayed · 732,000d` or so, the CEO overdue list puts it first with the same figure, and `stuck_sites()` names it as the site's worst task, which
 pushes every real late task on that site into "(+N more)". A Not Applicable or Done task
 with such a date shows nothing, which is the production CEIG task's case.
 
@@ -4266,6 +4271,31 @@ list_implausible_dates` run against production gives it. **Local (`solarpms_loca
 One entry point the audit found that copies a date without checking it:
 `task_duplicate_locations_create` copies `source.due_date` to every new location task, so
 one bad source date becomes several.
+
+**Partly closed 30 Sep 2026** (the due-date entry session). Three things changed:
+
+- `task_duplicate_locations_create` runs the source's date through `check_typed_date()`.
+  A date outside the range is left off the copies and the success message names it; the
+  copy is never refused over it.
+- The Django admin's Task form (`admin.TaskAdminForm`) applies the same check to
+  `due_date`. This closes G6's admin path for `Task.due_date` only; every other date
+  field the admin can write is as G6 left it.
+- On the task table an overdue task whose due date is before 2020-01-01 reads
+  `Delayed · check date` instead of a day count.
+
+Still open:
+
+- **The production rows are not corrected** (G7). The changes above stop new bad dates
+  and stop one spreading; they change no stored row.
+- **The CEO overdue list and the stuck-sites row still show the raw day count** for such
+  a task (732,000 or so) and still rank it first, by instruction: the display guard is
+  on the task table only.
+- **A bad row in the admin saves only once its date is corrected or cleared.** An edit to
+  any other field, with the year-20 date left as it stands, is refused. The alternative
+  (check the date only when it was changed) would let a bad date ride through unrelated
+  edits. Put to the product owner as a question.
+- **A due date from 2019 or earlier that is not a typo** (none is known) would read
+  `check date` too: the guard is the range floor, not a test for a two-digit year.
 
 ### G35 — `date.today()` is still read outside the overdue readers
 
@@ -4283,6 +4313,30 @@ on a host where they differ.
 are exempt from the status filter" note) both say `create_opex_site()` hardcodes Draft
 "and nothing promotes it". `opex_site_activate` now does exactly that. The code
 under both comments is still right; only the stated reason is out of date.
+
+### G37 — a late task nobody holds has no row on the daily report
+
+Recorded 30 Sep 2026, by ruling: the daily report stays assigned-only, and this is not
+built. `build_user_status_rows()` groups by assignee, so a late task with no assignee is
+in nobody's row and in no total. Locally that is 7 tasks, all on `HRP-RES-2026-041` and
+`-042`. The CEO Tasks card does count them, and its overdue list shows them with the owning
+role in the Assignee column, so they are visible there and absent here.
+
+Candidate, not decided: an "Unassigned" totals line under the per-user rows.
+
+### G38 — the two older CEO views do not read `CEO_DASHBOARD_ROLES`
+
+`permissions.CEO_DASHBOARD_ROLES` and `user_can_view_ceo_dashboard_lists()` were added
+for the overdue-task list (30 Sep 2026). `dashboard_ceo` and `dashboard_ceo_tender_sites`
+still spell the same three roles in their own `@role_required` lists. The three agree
+today; a role added to one place would not reach the others.
+
+### G39 — the CEO overdue list stops at 500 rows
+
+`CEO_OVERDUE_LIST_LIMIT = 500`, the S9 site list's guard under another name. Past it the
+page says "Showing the first 500 of N tasks" and the title still carries the true N, so
+the count is right and the list is short. No pagination was asked for. Locally the list
+holds 39 rows; the production figure is not known here.
 
 ---
 

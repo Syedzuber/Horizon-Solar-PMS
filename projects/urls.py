@@ -32,6 +32,10 @@ urlpatterns = [
     # S9: the sites behind one CEO Tenders count (read-only; CEO / Admin / System Admin).
     path('dashboard/ceo/tender-sites/', views.dashboard_ceo_tender_sites,
          name='dashboard_ceo_tender_sites'),
+    # The tasks behind the CEO Tasks card's "Overdue" number (read-only; CEO / Admin /
+    # System Admin, permissions.CEO_DASHBOARD_ROLES).
+    path('dashboard/ceo/overdue-tasks/', views.dashboard_ceo_overdue_tasks,
+         name='dashboard_ceo_overdue_tasks'),
     path('dashboard/bd/',            views.dashboard_bd,            name='dashboard_bd'),
 
     # ---------------------------------------------------------------------------

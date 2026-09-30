@@ -1189,6 +1189,30 @@ def can_view_user_status_report(user):
     return profile.role in USER_STATUS_REPORT_ROLES
 
 
+# Who may open a list that itemises a CEO dashboard figure: today the overdue-task list
+# behind the Tasks card's "Overdue" number. The dashboard's own audience, because every
+# row is a task that number already counted for them: CEO, plus Admin and System Admin
+# (execution-model §2 D-4, the administrative roles are unrestricted).
+#
+# Its own frozenset, like USER_STATUS_REPORT_ROLES above: Finance and SCM read the
+# portfolio (PORTFOLIO_VIEW_ROLES) but not the CEO dashboard, and widening that set must
+# not open this list.
+#
+# dashboard_ceo and dashboard_ceo_tender_sites still name the same three roles in their
+# own decorators; they predate this set and were not changed when it was added.
+CEO_DASHBOARD_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+
+def user_can_view_ceo_dashboard_lists(user):
+    """True for CEO, Admin and System Admin (CEO_DASHBOARD_ROLES); False for everyone
+    else and for a user with no UserProfile. Not project-scoped: the lists are
+    portfolio-wide, as the dashboard they itemise is."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in CEO_DASHBOARD_ROLES
+
+
 # Who may read the reviewer-correction trail on a BOQ's history page — who changed which
 # quantity on somebody else's bill, and when.
 #

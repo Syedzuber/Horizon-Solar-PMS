@@ -30,6 +30,11 @@
   /* Rename sits beside the copy icon (both float right); a little air between them. */
   .task-rename-btn { margin-right:2px; }
 
+  /* ── "Due Today" label (Due Date cell, _task_row.html) ─────────────
+     Bootstrap has no orange background utility. Solid, white text, and otherwise a
+     plain .badge, so it is the size and shape of the bg-danger "Delayed" label. */
+  .badge-due-today { background-color: var(--bs-orange); color: #fff; }
+
   /* ── Reorder grip (# cell, _task_row.html) and SortableJS states ───── */
   .task-drag-handle { cursor:grab; align-items:center; color:#9aa5a0; background:transparent;
                       border:1px solid transparent; border-radius:4px; padding:1px 2px;

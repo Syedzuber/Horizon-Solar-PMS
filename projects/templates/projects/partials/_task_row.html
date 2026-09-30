@@ -267,15 +267,22 @@ Expected context:
     {% else %}
       <span class="small {% if not task.due_date %}text-muted{% elif task.overdue_days %}text-danger{% endif %}">{{ task.due_date|default:"—" }}</span>
     {% endif %}
-    {% comment %}OVERDUE / DUE TODAY, the same in all four branches above. Both values are
-       set by views._attach_due_health() against one `today` per response; nothing is
-       compared to a date here. Overdue is task_health's rule, so a Done row, a Not
-       Applicable row and a row with no due date get nothing, and a Derived row is marked
-       like any other. The date turns red and the badge sits under it: no row background.{% endcomment %}
+    {% comment %}DELAYED / DUE TODAY, the same in all four branches above. All three values
+       are set by views._attach_due_health() against one `today` per response; nothing is
+       compared to a date here. "Delayed" is task_health's overdue rule, so a Done row, a
+       Not Applicable row and a row with no due date get nothing, and a Derived row is
+       marked like any other. A submitted task waiting for its approver is still open and
+       still late; the suffix says whose move it is. SOLID labels, the size and shape of
+       the status labels in the cell beside this one: the date turns red and the label
+       sits under it, with no row background. Orange is .badge-due-today, defined with
+       the other row styles in project_overview.html. text-wrap on the red label: a
+       badge does not break by default, and "· awaiting approval" makes it wider than
+       this 10rem column, which would widen the whole table. overdue_label is "Nd", or
+       "check date" when the due date is before 2020 (a mistyped year, not a delay).{% endcomment %}
     {% if task.overdue_days %}
-      <div class="mt-1"><span class="badge bg-danger-subtle text-danger-emphasis" style="font-size:.68rem;font-weight:600;">Overdue · {{ task.overdue_days }}d</span></div>
+      <div class="mt-1"><span class="badge bg-danger text-wrap text-start">Delayed · {{ task.overdue_label }}{% if task.awaiting_approval %} · awaiting approval{% endif %}</span></div>
     {% elif task.due_today %}
-      <div class="mt-1"><span class="badge bg-warning-subtle text-warning-emphasis" style="font-size:.68rem;font-weight:600;">Due today</span></div>
+      <div class="mt-1"><span class="badge badge-due-today">Due Today</span></div>
     {% endif %}
   </td>
   <td class="text-muted small">{% if task.completed_at %}{{ task.completed_at|date:"d M Y" }}{% else %}—{% endif %}</td>

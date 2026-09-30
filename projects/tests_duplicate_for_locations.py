@@ -30,7 +30,7 @@ carries the template_task the attach wrote — the field this feature turns on.
 Run with:
     python manage.py test projects.tests_duplicate_for_locations --settings=solarpms.test_settings
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
@@ -38,6 +38,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.template import Context, Template
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 
 from .models import (
     ActivityLog, Checklist, ChecklistItem, ChecklistItemCompletion, ChecklistTaskLink,
@@ -330,6 +331,63 @@ class CreateTests(DuplicateFixture):
             self.assertFalse(copy.is_mirror)
             self.assertFalse(copy.is_payment_milestone)
         self.assertIn(f'3 tasks created for {SOURCE_NAME}.', response.content.decode())
+        self.assertNotIn('was not copied', response.content.decode())
+
+    def test_a_year_20_source_date_is_not_copied_and_the_message_says_so(self):
+        """The source predates the range rule and holds a mistyped year. The copies are
+        still made, with no due date, and the PM is told which date to go and fix."""
+        Task.objects.filter(pk=self.source.pk).update(due_date=date(20, 9, 24))
+        response = self._create(new='Block A\nBlock B')
+        self.assertEqual(response.status_code, 200)
+        copies = self._copies()
+        self.assertEqual([c.location_label for c in copies], ['Block A', 'Block B'])
+        self.assertEqual([c.due_date for c in copies], [None, None])
+        # The source is not this view's to change.
+        self.assertEqual(Task.objects.get(pk=self.source.pk).due_date, date(20, 9, 24))
+        text = response.content.decode()
+        self.assertIn(f'2 tasks created for {SOURCE_NAME}.', text)
+        self.assertIn(f'The due date was not copied: {SOURCE_NAME} is due 0020-09-24, '
+                      f'which is outside the allowed range.', text)
+        self.assertIn('They have no due date', text)
+
+    def test_one_copy_gets_the_singular_message(self):
+        Task.objects.filter(pk=self.source.pk).update(due_date=date(26, 9, 17))
+        text = self._create(new='Block A').content.decode()
+        self.assertEqual([c.due_date for c in self._copies()], [None])
+        self.assertIn(f'1 task created for {SOURCE_NAME}.', text)
+        self.assertIn('is due 0026-09-17', text)
+        self.assertIn('It has no due date', text)
+
+    def test_a_date_past_the_ceiling_is_not_copied_either(self):
+        """The same range as a typed date: five years from today is the last day."""
+        today = timezone.localdate()
+        ceiling = today.replace(year=today.year + 5) if (today.month, today.day) != (2, 29) \
+            else today.replace(year=today.year + 5, day=28)
+        Task.objects.filter(pk=self.source.pk).update(due_date=ceiling)
+        self._create(new='Block A')
+        Task.objects.filter(pk=self.source.pk).update(due_date=ceiling + timedelta(days=1))
+        response = self._create(new='Block B')
+        self.assertEqual({c.location_label: c.due_date for c in self._copies()},
+                         {'Block A': ceiling, 'Block B': None})
+        self.assertIn('The due date was not copied', response.content.decode())
+
+    def test_an_undated_source_copies_with_no_date_and_no_notice(self):
+        Task.objects.filter(pk=self.source.pk).update(due_date=None)
+        text = self._create(new='Block A').content.decode()
+        self.assertEqual([c.due_date for c in self._copies()], [None])
+        self.assertNotIn('was not copied', text)
+
+    def test_the_redirect_path_carries_the_same_message(self):
+        Task.objects.filter(pk=self.source.pk).update(due_date=date(20, 9, 24))
+        response = self._create(new='Block A', hx=False)
+        self.assertEqual(response.status_code, 302)
+        page = _client_for(self.pm).get(response['Location'])
+        # The message was queued for the PM's next page on the client that posted; read
+        # it off the stored request instead of a second client.
+        from django.contrib.messages import get_messages
+        stored = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertTrue(any('The due date was not copied' in m for m in stored), stored)
+        self.assertEqual(page.status_code, 200)
 
     def test_the_template_task_is_shared_not_copied(self):
         self._create(new='Block A\nBlock B')

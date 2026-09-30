@@ -71,7 +71,7 @@ from .tender_stages import (
 from .approval_queries import (
     pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
 )
-from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date
+from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
@@ -117,6 +117,9 @@ from .permissions import (
     # non-milestone work whose name nothing looks up.
     can_rename_task, reserved_task_names,
     can_reorder_phase,
+    # The CEO dashboard's click-through lists (the overdue-task list). R-13: the audience
+    # is this frozenset and its predicate, read here by the decorator and the view.
+    CEO_DASHBOARD_ROLES, user_can_view_ceo_dashboard_lists,
     # O2 - the SCM card offers "Raise Order" only where vendor_order_create accepts it.
     user_can_raise_vendor_order,
     # O3 - the same, for the OPEX tender rows' group raise.
@@ -736,6 +739,8 @@ def dashboard_pm(request):
         ).order_by('-created_at')
     )
 
+    # "Overdue" on a project card: the shared rule on Internal work, as on the CEO card.
+    internal_overdue = Q(task_type=Task.INTERNAL) & overdue_q(today)
     projects_with_progress = []
     # The Prefetch is what makes get_current_phase() below free (R-21). Without it
     # the helper's Python loop would fire one query per PHASE per project; with it
@@ -790,15 +795,22 @@ def dashboard_pm(request):
             phase__project=project, task_type=Task.EXTERNAL,
             status__in=['Not Started', 'In Progress'],
         ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
-        # The shared rule (task_health), scoped to Internal. It counts a Blocked task
-        # that is past its date, so that task is in blocked_count below as well and
-        # `urgency_count` counts it twice.
-        overdue_count  = Task.objects.filter(
-            phase__project=project, task_type=Task.INTERNAL,
-        ).filter(overdue_q(today)).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
-        blocked_count = Task.objects.filter(
-            phase__project=project, status='Blocked',
-        ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).count()
+        # Overdue (the shared rule, scoped to Internal), Blocked, and the two together.
+        # A Blocked task that is past its date is in BOTH counts, so the urgency badge
+        # is not their sum: `urgent` counts each task once. One aggregate over one
+        # base, in place of the two count queries this replaced, so the three figures
+        # cannot be read off different rows.
+        _urgency = (
+            Task.objects.filter(phase__project=project)
+            .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
+            .aggregate(
+                overdue=Count('pk', filter=internal_overdue),
+                blocked=Count('pk', filter=Q(status=Task.BLOCKED)),
+                urgent=Count('pk', filter=Q(status=Task.BLOCKED) | internal_overdue),
+            )
+        )
+        overdue_count = _urgency['overdue']
+        blocked_count = _urgency['blocked']
         # The two five-row evidence lists under the counts above. Filtered to match:
         # they itemise blocked_count and overdue_count, so a mirror appearing in a list
         # whose own headline number excludes it would contradict the card.
@@ -854,13 +866,15 @@ def dashboard_pm(request):
             'overdue_tasks_for_project': overdue_tasks_for_project,
             'is_delayed':                is_delayed,
             'delay_days':                delay_days,
-            'urgency_count':             blocked_count + overdue_count,
+            'urgency_count':             _urgency['urgent'],
             'due_today_count':           due_today_for_project,
             'milestones':                milestones_list,
         })
 
+    # Ordered by the urgency badge the card shows (each task once), not by the sum of
+    # the two counts, which would rank a Blocked-and-late task twice.
     projects_with_progress.sort(
-        key=lambda row: (row['overdue_count'] + row['blocked_count'], row['is_delayed']),
+        key=lambda row: (row['urgency_count'], row['is_delayed']),
         reverse=True,
     )
 
@@ -1052,6 +1066,18 @@ def dashboard_site_engineer(request):
             ) & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
             distinct=True,
         ),
+        # The two above, each task once. overdue_count counts a Blocked task that is
+        # past its date and blocked_count counts it again, so the urgency circle adds
+        # this instead of their sum.
+        urgent_task_count=Count(
+            'phases__tasks',
+            filter=Q(phases__tasks__assigned_to=se_profile)
+                   & (Q(phases__tasks__status=Task.BLOCKED)
+                      | (Q(phases__tasks__task_type=Task.INTERNAL)
+                         & overdue_q(today, 'phases__tasks__')))
+                   & human_owned_tasks_q('phases__tasks__') & applicable_tasks_q('phases__tasks__'),
+            distinct=True,
+        ),
         pending_grn_count=Count(
             'delivery_challans',
             filter=Q(delivery_challans__status=DeliveryChallan.EXPECTED),
@@ -1128,9 +1154,9 @@ def dashboard_site_engineer(request):
             else:
                 next_due = 'No due date set'
 
+        # Tasks once each (urgent_task_count), then the two non-task signals.
         urgency_count = (
-            project.overdue_count
-            + project.blocked_count
+            project.urgent_task_count
             + project.pending_grn_count
             + project.issue_count
         )
@@ -2052,6 +2078,42 @@ def _ceo_context_filter(context, prefix=''):
     return {f'{prefix}project_type__in': types, f'{prefix}is_test': False}
 
 
+#: The project statuses the CEO dashboard's project cards and task figures cover.
+CEO_ACTIVE_PROJECT_STATUSES = ['Active', 'In Progress']
+
+
+def _ceo_task_base(context):
+    """The tasks every figure on the CEO Tasks card is counted over: human-owned (no
+    mirrors), applicable (no Not Applicable), on a project that is not deleted, is
+    Active or In Progress, and is in `context` (_ceo_context_filter, test data hidden).
+
+    ONE BUILDER FOR THE CARD AND ITS LIST. _get_ceo_dashboard_context aggregates over
+    this and dashboard_ceo_overdue_tasks lists from it, so the list cannot hold a task
+    the card did not count. No values() or group-by, so the project filter adds no
+    join fan-out."""
+    return Task.objects.filter(
+        phase__project__is_deleted=False,
+        phase__project__status__in=CEO_ACTIVE_PROJECT_STATUSES,
+        **_ceo_context_filter(context, 'phase__project__'),
+    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q())
+
+
+def _ceo_internal_overdue_q(today):
+    """"Overdue" as the CEO page means it: the shared rule (task_health) on Internal
+    work. A late DISCOM or customer step is on the External Dependencies card instead.
+    The Tasks card, the six department rows and the overdue list read this one Q.
+    tender_stages spells the same two terms for the S7 stuck rule, because it cannot
+    import this module; tests_stuck_sites holds the two counts equal."""
+    return Q(task_type=Task.INTERNAL) & overdue_q(today)
+
+
+def _ceo_overdue_tasks_url(context):
+    """The overdue-task list for `context` (None = no context). The Tasks card's
+    "Overdue" number links here, so the list opens in the view the CEO is on."""
+    url = reverse('dashboard_ceo_overdue_tasks')
+    return f'{url}?{urlencode({"context": context})}' if context else url
+
+
 def tender_sites_qs():
     """
     Every live tender site: RESCO (OPEX), not deleted, not test data, in any
@@ -2347,7 +2409,7 @@ def _get_ceo_dashboard_context(context=None):
     # measured over the same span and can be read against each other.
     top_people_cutoff   = now_dt - timedelta(days=TOP_PEOPLE_WINDOW_DAYS)
 
-    active_statuses = ['Active', 'In Progress']
+    active_statuses = CEO_ACTIVE_PROJECT_STATUSES
 
     # -- QUERY 1: Active project list + Exists subquery annotations --
     # Subquery: does this project have any task with status='Blocked'?
@@ -2571,16 +2633,12 @@ def _get_ceo_dashboard_context(context=None):
     # place a mirror inflates whether or not anybody is assigned to it — an OPEX site
     # adds 2 to dept_pm_pending, 2 to dept_design_pending and 1 to dept_scm_pending on
     # attach alone. There is no values()/group-by here, so the base filter adds no join.
-    # "Overdue" on the Tasks card, the six department rows and the S7 stuck rule is the
-    # shared rule (task_health) scoped to Internal work: a late DISCOM or customer step
-    # is counted on the External Dependencies card instead. The rule counts a Blocked
-    # task that is past its date; before task_health these terms did not.
-    internal_overdue = Q(task_type=Task.INTERNAL) & overdue_q(today)
-    task_agg = Task.objects.filter(
-        phase__project__is_deleted=False,
-        phase__project__status__in=active_statuses,
-        **_ceo_context_filter(context, 'phase__project__'),
-    ).filter(human_owned_tasks_q()).filter(applicable_tasks_q()).aggregate(
+    # The base and the "Overdue" term are the two builders the overdue list reads too
+    # (_ceo_task_base, _ceo_internal_overdue_q), so the Tasks card's number and the
+    # list it links to are one filter. The term counts a Blocked task that is past
+    # its date; before task_health it did not.
+    internal_overdue = _ceo_internal_overdue_q(today)
+    task_agg = _ceo_task_base(context).aggregate(
         task_total     =Count('pk'),
         # Status summary (portfolio-wide)
         task_unassigned=Count('pk', filter=Q(assigned_to__isnull=True)),
@@ -2923,6 +2981,9 @@ def _get_ceo_dashboard_context(context=None):
         ctx['design_throughput'] = None
         ctx['tender_approvals'] = None
         ctx['stuck_sites'] = None
+    # The Tasks card's "Overdue" number links to the tasks it counted, in this view.
+    # The template leaves a zero unlinked.
+    ctx['task_overdue_url'] = _ceo_overdue_tasks_url(context)
     # For the page's Refresh link (S2 T6), which must reload the view the CEO is on.
     # Read here rather than from context_nav because context_nav is None for Admin and
     # System Admin, who reach this page too.
@@ -3070,6 +3131,104 @@ def dashboard_ceo_tender_sites(request):
         'limit': TENDER_SITE_LIST_LIMIT,
         'chips': chips,
         'back_url': f"{reverse('dashboard_ceo')}?{urlencode({'context': CONTEXT_TENDERS})}",
+    })
+
+
+#: The most rows the overdue-task list renders. A guard, not a page size, as on the S9
+#: site list: past it the page says how many it left out instead of rendering them all.
+CEO_OVERDUE_LIST_LIMIT = 500
+
+
+def _awaiting_approval(task):
+    """True while a task is submitted and not yet approved (OPEX two-step completion).
+    Its status is still open, so it is still overdue if it is late; the label only says
+    whose move it is. A rejection clears submitted_at, so a rejected task reads False."""
+    return task.submitted_at is not None and task.approved_at is None
+
+
+@login_required
+@role_required(CEO_DASHBOARD_ROLES)
+def dashboard_ceo_overdue_tasks(request):
+    """The tasks behind the CEO Tasks card's "Overdue" number, in the view the CEO came
+    from. Read-only; no form, no write.
+
+    Access: CEO, Admin and System Admin (permissions.CEO_DASHBOARD_ROLES). Anyone else
+    gets role_required's 403 page.
+
+    GET: `context` absent (no context), 'residential' or 'tenders'. Any other value is
+    a 404, not a fallback to the whole portfolio: a mistyped link must not show a
+    different list from the one its number counted.
+
+    THE LIST IS THE COUNT. It reads _ceo_task_base() and _ceo_internal_overdue_q(),
+    the two builders the card's own aggregate reads, so it holds exactly the tasks the
+    number counted: Internal, no mirrors, no Not Applicable, on an Active or In Progress
+    project that is not deleted and not test data. NOT tasks_drill_down, whose scope is
+    wider (External tasks, test sites) and which other roles use.
+
+    One query for the rows whatever their number (project, programme and assignee ride
+    it as joins), plus the session's and the navbar's. Longest overdue first, then site.
+    """
+    # R-13: permissions.py decides who may read this list. The decorator above enforces
+    # the same frozenset at the request boundary with the app's standard 403 page; this
+    # is the predicate that owns the answer, as in report_views.ceo_daily_report.
+    if not user_can_view_ceo_dashboard_lists(request.user):
+        return HttpResponseForbidden('CEO, Admin or System Admin only.')
+
+    context = request.GET.get('context')
+    if context is not None and context not in VALID_CONTEXTS:
+        raise Http404
+
+    # The dashboard's own `today`, so a task is overdue here exactly when the card that
+    # linked here counted it.
+    today = timezone.localdate()
+    # Oldest due date first is longest overdue first. select_related carries the three
+    # things a row names (site, programme, assignee) on the same query, so the page
+    # costs the same for 5 rows and 500.
+    tasks = list(
+        _ceo_task_base(context)
+        .filter(_ceo_internal_overdue_q(today))
+        .select_related('phase__project__program', 'assigned_to__user')
+        .order_by('due_date', 'phase__project__project_id', 'pk')
+    )
+    total = len(tasks)
+
+    role_labels = dict(Task.ROLE_CHOICES)
+    rows = []
+    for task in tasks[:CEO_OVERDUE_LIST_LIMIT]:
+        project = task.phase.project
+        role = role_labels.get(task.assigned_role, task.assigned_role)
+        if task.assigned_to_id:
+            user = task.assigned_to.user
+            assignee = f'{user.get_full_name() or user.username} · {role}'
+        else:
+            # Nobody holds it, so the row names the role that owns it and no person (D8).
+            assignee = role
+        rows.append({
+            'site':       project.project_id,
+            'site_url':   reverse('project_overview', args=[project.project_id]),
+            'programme':  project.program.name if project.program_id else '—',
+            'task':       task.task_name,
+            'assignee':   assignee,
+            'due_date':   task.due_date,
+            'days':       days_overdue(task, today),
+            'status':     task.status,
+            'awaiting_approval': _awaiting_approval(task),
+        })
+
+    label = CONTEXT_LABELS.get(context)
+    parts = ([label] if label else []) + [
+        'Overdue tasks', f'{total} task{"" if total == 1 else "s"}']
+    back_url = reverse('dashboard_ceo')
+    if context:
+        back_url = f'{back_url}?{urlencode({"context": context})}'
+
+    return render(request, 'dashboard/ceo_overdue_tasks.html', {
+        'title':     ' · '.join(parts),
+        'rows':      rows,
+        'total':     total,
+        'truncated': total > CEO_OVERDUE_LIST_LIMIT,
+        'limit':     CEO_OVERDUE_LIST_LIMIT,
+        'back_url':  back_url,
     })
 
 
@@ -4029,6 +4188,13 @@ def task_duplicate_locations_create(request, project_id, task_id):
         return refuse('Choose who the new tasks are assigned to. It must be an active '
                       f'{source.get_assigned_role_display()} user.', assignee_pk='')
 
+    # THE SOURCE'S DUE DATE IS CHECKED LIKE A TYPED ONE BEFORE IT IS COPIED. A source
+    # that predates the range rule can hold a mistyped year (0020-09-24), and copying it
+    # turned one bad date into one per location. A date outside the range is left off
+    # the copies and the success message says so; the copy itself is never refused over
+    # it, because the PM asked for tasks, not for a date.
+    copied_due_date, due_date_error = check_typed_date(source.due_date)
+
     phase   = source.phase
     created = []
     skipped = []
@@ -4061,7 +4227,8 @@ def task_duplicate_locations_create(request, project_id, task_id):
                 assigned_role=source.assigned_role,
                 task_type=source.task_type,
                 duration_days=source.duration_days,
-                due_date=source.due_date,
+                # None when the source's date failed the range check above.
+                due_date=copied_due_date,
                 # Set explicitly, whatever the source holds: a copy is ordinary work.
                 is_mirror=False,
                 is_payment_milestone=False,
@@ -4082,7 +4249,16 @@ def task_duplicate_locations_create(request, project_id, task_id):
         )
 
     n = len(created)
-    messages.success(request, f'{n} task{"s" if n != 1 else ""} created for {source.task_name}.')
+    created_text = f'{n} task{"s" if n != 1 else ""} created for {source.task_name}.'
+    if due_date_error and created:
+        # isoformat(), not strftime: %Y prints the year 20 differently on Linux and
+        # Windows, and the PM has to recognise the date to go and correct it.
+        created_text += (
+            f' The due date was not copied: {source.task_name} is due '
+            f'{source.due_date.isoformat()}, which is outside the allowed range. '
+            f'{"It has" if n == 1 else "They have"} no due date; correct the date on '
+            f'{source.task_name} and set one on {"it" if n == 1 else "each"}.')
+    messages.success(request, created_text)
     if skipped:
         messages.info(request, 'Skipped, this task already exists at: ' + ', '.join(skipped) + '.')
     if hx:
@@ -5175,7 +5351,9 @@ def _attach_delivery_consignments(tasks):
 
 def _attach_due_health(tasks, today):
     """Attach what `_task_row.html`'s Due Date cell shows, on the instances the template
-    iterates: `task.overdue_days` (0 when not overdue) and `task.due_today`.
+    iterates: `task.overdue_days` (0 when not overdue), `task.overdue_label` (what the
+    "Delayed" label says after the dot), `task.due_today`, and
+    `task.awaiting_approval` for the label's suffix.
 
     No query. `today` is the caller's one timezone.localdate(), so every row of a
     response is judged against the same day. Overdue is task_health's rule, the one the
@@ -5187,11 +5365,24 @@ def _attach_due_health(tasks, today):
     from the row it had just redrawn."""
     for task in tasks:
         task.overdue_days = days_overdue(task, today)
+        # A DUE DATE BEFORE THE TYPED-DATE FLOOR IS A MISTYPED YEAR, NOT A DELAY. The
+        # year 20 reads as 732,000 days late, which is a number nobody should act on,
+        # so the label says what to do instead. DISPLAY ONLY, and on this table only:
+        # the task is still open and still overdue, so overdue_days keeps its value
+        # (the date stays red) and every count and the CEO list still include it.
+        # forms.TYPED_DATE_FLOOR is the floor check_typed_date() refuses below.
+        task.overdue_label = ''
+        if task.overdue_days:
+            task.overdue_label = ('check date' if task.due_date < TYPED_DATE_FLOOR
+                                  else f'{task.overdue_days}d')
         # The same two "still open" terms as the overdue rule: a Done or Not Applicable
         # task due today gets nothing.
         task.due_today = (task.due_date == today
                           and task.status in OPEN_STATUSES
                           and not task.is_not_applicable)
+        # Submitted and not yet approved: still open, so still late, but the next move
+        # is the approver's. The same test the CEO overdue list makes.
+        task.awaiting_approval = _awaiting_approval(task)
 
 
 def _render_task_row_hx(request, project, task, oob_tasks=None):

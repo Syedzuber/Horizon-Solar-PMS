@@ -1,16 +1,19 @@
 """
 task_health: one overdue rule, every reader routed through it, and the task table's
-Overdue / Due today badge.
+Delayed / Due Today label, and the CEO overdue list.
 
 THE RULES, each by a test class named for it
     PredicateAgreementTests   overdue_q() and is_overdue() give the same answer on every
                               status x Not Applicable x approved x date x project type,
                               and that answer is the rule as written. project_type and
                               approval make no difference.
-    TaskTableTests            the Due Date cell: red date and "Overdue · Nd" on an overdue
-                              row (a Derived row included), amber "Due today", nothing on a
-                              Done row, a Not Applicable row or an undated row; the HTMX
-                              responders draw the same cell the page draws.
+    TaskTableTests            the Due Date cell: red date and a solid red "Delayed · Nd"
+                              on an overdue row (a Derived row included), "· awaiting
+                              approval" while submitted and unapproved, a solid orange
+                              "Due Today", nothing on a Done row, a Not Applicable row or
+                              an undated row; "Delayed · check date" in place of a day
+                              count when the due date is before 2020; the HTMX responders
+                              draw the same cell.
     CountAgreementTests       on one project the task table, the CEO Tasks card, the S7
                               stuck count and the daily report agree, and where they can
                               differ the difference is each one's SCOPE (mirrors, External,
@@ -22,6 +25,11 @@ THE RULES, each by a test class named for it
                               Risk badge, the Site Engineer's next task) do now.
     CallerDateTests           the routed dashboards read timezone.localdate(), not
                               date.today().
+    CeoOverdueListTests       the CEO Tasks card's "Overdue" number links to a list of
+                              exactly the tasks it counts, in every context; who may open
+                              it; what a row says; a fixed query count.
+    UrgencyCountTests         the PM and Site Engineer urgency figures count a task that
+                              is both Blocked and overdue once.
     QueryCountTests           the badge adds no query to the task table page.
 
 Run with:
@@ -46,6 +54,7 @@ from django.utils import timezone
 from . import task_health
 from . import tests_stuck_sites as s7
 from .models import Project, ProjectPhase, Task
+from .permissions import CEO_DASHBOARD_ROLES, user_can_view_ceo_dashboard_lists
 from .reports import build_user_status_rows
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 from .tests_row_render_flags import MIRROR_NAME, RowFlagsFixture, _rows
@@ -60,8 +69,13 @@ from .views import (
 TODAY = date(2026, 9, 29)
 YEAR_20 = date(20, 9, 24)            # a mistyped year, as on the production CEIG task
 
-OVERDUE = 'Overdue ·'
-DUE_TODAY = 'Due today'
+# The task table's two labels. The CEO card and the counts still say "Overdue".
+# What the CEO overdue list costs: its one query, plus the session, the user, the
+# profile and the navbar's notification count.
+LIST_PAGE_QUERIES = 5
+
+OVERDUE = 'Delayed ·'
+DUE_TODAY = 'Due Today'
 
 _real_localdate = timezone.localdate
 
@@ -235,18 +249,33 @@ class TaskTableFixture(RowFlagsFixture):
     def assertUnmarked(self, row):
         self.assertNotIn(OVERDUE, row)
         self.assertNotIn(DUE_TODAY, row)
-        self.assertNotIn('bg-danger-subtle', row)
-        self.assertNotIn('bg-warning-subtle', row)
+        self.assertNotIn('badge-due-today', row)
 
 
 class TaskTableTests(TaskTableFixture):
 
     def test_the_two_net_metering_tasks(self):
         rows = self._page()
-        self.assertIn('Overdue · 5d', rows[self.ess2.pk])
-        self.assertIn('Overdue · 3d', rows[self.ess1.pk])
-        for task in (self.ess2, self.ess1):
-            self.assertIn('bg-danger-subtle text-danger-emphasis', rows[task.pk])
+        # Solid red, the status labels' own class, and no inline style on the label.
+        self.assertIn('<span class="badge bg-danger text-wrap text-start">Delayed · 5d</span>', rows[self.ess2.pk])
+        self.assertIn('<span class="badge bg-danger text-wrap text-start">Delayed · 3d</span>', rows[self.ess1.pk])
+
+    def test_a_submitted_task_says_it_is_awaiting_approval(self):
+        """Submitted and not approved is still open, so still delayed; the label adds
+        whose move it is. A rejection clears submitted_at and the suffix goes."""
+        Task.objects.filter(pk=self.ess2.pk).update(
+            submitted_at=timezone.now(), submitted_by=self.pm)
+        Task.objects.filter(pk=self.due_today.pk).update(
+            submitted_at=timezone.now(), submitted_by=self.pm)
+        rows = self._page()
+        self.assertIn('<span class="badge bg-danger text-wrap text-start">Delayed · 5d · awaiting approval</span>',
+                      rows[self.ess2.pk])
+        self.assertNotIn('awaiting approval</span></div>', rows[self.ess1.pk])
+        self.assertIn('<span class="badge badge-due-today">Due Today</span>',
+                      rows[self.due_today.pk])
+        Task.objects.filter(pk=self.ess2.pk).update(submitted_at=None, submitted_by=None)
+        self.assertIn('<span class="badge bg-danger text-wrap text-start">Delayed · 5d</span>',
+                      self._page()[self.ess2.pk])
 
     def test_a_not_applicable_task_with_a_year_20_date_shows_nothing(self):
         row = self._page()[self.ceig.pk]
@@ -260,20 +289,89 @@ class TaskTableTests(TaskTableFixture):
             with self.subTest(task=task.task_name):
                 self.assertUnmarked(rows[task.pk])
 
-    def test_due_today_is_amber_and_not_overdue(self):
+    def test_a_due_date_before_2020_says_check_date_not_a_day_count(self):
+        """An open, applicable task with a mistyped year is still overdue, but 732,000
+        days is not a delay anyone should read. The label says what to do; the date is
+        still red."""
+        Task.objects.filter(pk=self.ess2.pk).update(due_date=YEAR_20)
+        row = self._page()[self.ess2.pk]
+        self.assertIn('<span class="badge bg-danger text-wrap text-start">'
+                      'Delayed · check date</span>', row)
+        self.assertNotRegex(row, r'Delayed · \d')
+        self.assertRegex(row, r'<input type="date"[^>]*class="[^"]*text-danger')
+
+    def test_check_date_starts_the_day_before_the_floor(self):
+        Task.objects.filter(pk=self.ess2.pk).update(due_date=date(2019, 12, 31))
+        Task.objects.filter(pk=self.ess1.pk).update(due_date=date(2020, 1, 1))
+        rows = self._page()
+        self.assertIn('Delayed · check date</span>', rows[self.ess2.pk])
+        self.assertIn(f'Delayed · {(TODAY - date(2020, 1, 1)).days}d</span>',
+                      rows[self.ess1.pk])
+
+    def test_check_date_keeps_the_awaiting_approval_suffix(self):
+        Task.objects.filter(pk=self.ess2.pk).update(
+            due_date=YEAR_20, submitted_at=timezone.now(), submitted_by=self.pm)
+        self.assertIn('Delayed · check date · awaiting approval</span>',
+                      self._page()[self.ess2.pk])
+
+    def test_check_date_changes_no_count_and_not_the_ceo_list(self):
+        """Display only, on the task table only. The task is still open and still late:
+        the card, the stuck count and the report count it, and the CEO list shows it
+        with its day count, first."""
+        before = self._all_counts()
+        Task.objects.filter(pk=self.ess2.pk).update(due_date=YEAR_20)
+        self.assertEqual(self._all_counts(), before)
+        self.assertEqual(before['ceo_tenders'], 3)
+        ceo = _profile('th_ceo_check', 'CEO')
+        with _today_is(TODAY):
+            rows = _client_for(ceo).get(
+                reverse('dashboard_ceo_overdue_tasks') + '?context=tenders').context['rows']
+        self.assertEqual((rows[0]['task'], rows[0]['days']),
+                         (self.ess2.task_name, (TODAY - YEAR_20).days))
+
+    def _all_counts(self):
+        with _today_is(TODAY):
+            tenders = _get_ceo_dashboard_context(CONTEXT_TENDERS)
+        return {'ceo_tenders': tenders['task_overdue'],
+                'stuck': tenders['stuck_sites']['task_counts']['overdue'],
+                'report': build_user_status_rows(TODAY)['totals']['overdue'],
+                'table': sum(OVERDUE in row for row in self._page().values())}
+
+    def test_due_today_is_solid_orange_and_not_delayed(self):
         row = self._page()[self.due_today.pk]
-        self.assertIn(DUE_TODAY, row)
-        self.assertIn('bg-warning-subtle text-warning-emphasis', row)
+        self.assertIn('<span class="badge badge-due-today">Due Today</span>', row)
         self.assertNotIn(OVERDUE, row)
 
+    def test_the_long_label_can_wrap(self):
+        """A badge does not break by default, and "Delayed · Nd · awaiting approval" is
+        wider than the 10rem Due Date column. text-wrap lets it break at a space instead
+        of widening the table (the rule tests_phase_list_approval holds the Status cell
+        to)."""
+        Task.objects.filter(pk=self.ess2.pk).update(
+            submitted_at=timezone.now(), submitted_by=self.pm)
+        label = re.search(r'<span class="([^"]*)">Delayed · 5d · awaiting approval</span>',
+                          self._page()[self.ess2.pk]).group(1).split()
+        self.assertIn('text-wrap', label)
+        self.assertNotIn('text-nowrap', label)
+
+    def test_the_orange_is_one_css_class_on_the_page(self):
+        """The colour lives in one class beside the other row styles, not in the row."""
+        with _today_is(TODAY):
+            html = _client_for(self.pm).get(
+                reverse('project_overview', args=[self.site.project_id])).content.decode()
+        self.assertRegex(
+            html, r'\.badge-due-today\s*\{\s*background-color:\s*var\(--bs-orange\);\s*color:\s*#fff;\s*\}')
+        due_cell = self._page()[self.due_today.pk].split('Due Today')[0].rsplit('<div', 1)[1]
+        self.assertNotIn('style=', due_cell)
+
     def test_a_blocked_task_past_its_date_is_overdue(self):
-        self.assertIn('Overdue · 1d', self._page()[self.blocked.pk])
+        self.assertIn('Delayed · 1d', self._page()[self.blocked.pk])
 
     def test_a_derived_task_gets_the_same_treatment(self):
         Task.objects.filter(pk=self.mirror.pk).update(due_date=date(2026, 9, 19))
         row = self._page()[self.mirror.pk]
         self.assertIn('Derived', row)
-        self.assertIn('Overdue · 10d', row)
+        self.assertIn('Delayed · 10d', row)
 
     def test_the_date_is_red_in_the_editable_and_the_read_only_cell(self):
         """The PM gets a date input on every row; the Site Engineer gets plain text on a
@@ -283,7 +381,7 @@ class TaskTableTests(TaskTableFixture):
         as_se = self._page(self.se)[self.ess2.pk]
         self.assertNotIn('<input type="date"', as_se)
         self.assertRegex(as_se, r'<span class="small text-danger">')
-        self.assertIn('Overdue · 5d', as_se)
+        self.assertIn('Delayed · 5d', as_se)
         for row in (as_pm, as_se):
             self.assertNotRegex(row, r'<tr[^>]*(table-danger|bg-danger)')
         # A row that is not overdue keeps an uncoloured date.
@@ -311,7 +409,7 @@ class TaskTableTests(TaskTableFixture):
             today = _rows(self._hx_post('task_set_due_date', args,
                                         {'due_date': TODAY.isoformat()}))[self.ess2.pk]
         self.assertUnmarked(later)
-        self.assertIn('Overdue · 9d', earlier)
+        self.assertIn('Delayed · 9d', earlier)
         self.assertIn(DUE_TODAY, today)
 
 
@@ -543,7 +641,234 @@ class QueryCountTests(TaskTableFixture):
         tasks = list(Task.objects.filter(phase=self.phase))
         with self.assertNumQueries(0):
             _attach_due_health(tasks, TODAY)
-        marked = {t.pk: (t.overdue_days, t.due_today) for t in tasks}
-        self.assertEqual(marked[self.ess2.pk], (5, False))
-        self.assertEqual(marked[self.due_today.pk], (0, True))
-        self.assertEqual(marked[self.ceig.pk], (0, False))
+        marked = {t.pk: (t.overdue_days, t.overdue_label, t.due_today) for t in tasks}
+        self.assertEqual(marked[self.ess2.pk], (5, '5d', False))
+        self.assertEqual(marked[self.due_today.pk], (0, '', True))
+        self.assertEqual(marked[self.ceig.pk], (0, '', False))
+
+
+# ---------------------------------------------------------------------------
+# 8 — the CEO overdue list is the Tasks card's number
+# ---------------------------------------------------------------------------
+
+def _late(days, **fields):
+    """Task fields for one task `days` past due by the real timezone.localdate(), which
+    is what the dashboard and the list both read."""
+    fields.setdefault('due_date', timezone.localdate() - timedelta(days=days))
+    return fields
+
+
+class CeoOverdueListFixture(s7.Builders):
+    """One project of each type with every kind of task the card must and must not
+    count, plus the projects the card leaves out whole."""
+
+    # Task names the list must hold, on every project it shows.
+    COUNTED = ('Late', 'Blocked late', 'Unassigned late', 'Submitted late')
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.admin = s7._profile('ol_admin', 'Admin', 'Ada')
+        cls.sysadmin = s7._profile('ol_sys', 'System Admin', 'Sy')
+        cls.finance = s7._profile('ol_fin', 'Finance', 'Fin')
+        cls.se = s7._profile('ol_se', 'Site Engineer', 'Sita')
+
+    def _tasks(self):
+        now = timezone.now()
+        return [
+            _late(9, task_name='Late', status=Task.IN_PROGRESS, assigned_to=self.pm),
+            _late(6, task_name='Blocked late', status=Task.BLOCKED, blocked_since=now,
+                  assigned_to=self.se, assigned_role=Task.SITE_ENGINEER),
+            _late(3, task_name='Unassigned late', assigned_role=Task.SCM),
+            _late(1, task_name='Submitted late', status=Task.IN_PROGRESS,
+                  assigned_to=self.pm, submitted_at=now, submitted_by=self.pm),
+            # Everything below is left out by the card, so by the list.
+            _late(9, task_name='External late', task_type=Task.EXTERNAL),
+            _late(9, task_name='Mirror late', is_mirror=True),
+            _late(9, task_name='Not applicable late', is_not_applicable=True),
+            _late(9, task_name='Done late', status=Task.DONE),
+            _late(0, task_name='Due today'),
+            _late(-5, task_name='Not due yet'),
+            {'task_name': 'Undated', 'status': Task.IN_PROGRESS},
+        ]
+
+    def setUp(self):
+        self.s7('OL-OPEX', self._tasks())
+        self.s7('OL-RES', self._tasks())
+        self.s7('OL-CAPEX', self._tasks())
+        # Whole projects the card leaves out: test data, deleted, On Hold, Draft.
+        self.s7('OL-TEST', [_late(9, task_name='Late')])
+        self.s7('OL-DELETED', [_late(9, task_name='Late')])
+        self.s7('OL-HELD', [_late(9, task_name='Late')], status='On Hold')
+        self.s7('OL-DRAFT', [_late(9, task_name='Late')], status='Draft')
+        Project.objects.filter(project_id='OL-RES').update(project_type='Residential',
+                                                           program=None)
+        Project.objects.filter(project_id='OL-CAPEX').update(project_type='CAPEX')
+        Project.objects.filter(project_id='OL-TEST').update(is_test=True)
+        Project.objects.filter(project_id='OL-DELETED').update(is_deleted=True)
+
+    def _url(self, context=None):
+        url = reverse('dashboard_ceo_overdue_tasks')
+        return f'{url}?context={context}' if context else url
+
+    def _list(self, context=None, profile=None):
+        response = _client_for(profile or self.ceo).get(self._url(context))
+        self.assertEqual(response.status_code, 200)
+        return response
+
+
+class CeoOverdueListTests(CeoOverdueListFixture):
+
+    # Which projects each context shows: Tenders is RESCO only (D2 hides CAPEX there).
+    SITES = {None: ('OL-CAPEX', 'OL-OPEX', 'OL-RES'),
+             'residential': ('OL-RES',),
+             'tenders': ('OL-OPEX',)}
+
+    def test_the_list_is_the_cards_number_in_every_context(self):
+        for context, sites in self.SITES.items():
+            with self.subTest(context=context):
+                card = _get_ceo_dashboard_context(context)['task_overdue']
+                response = self._list(context)
+                rows = response.context['rows']
+                self.assertEqual(len(rows), card)
+                self.assertEqual(response.context['total'], card)
+                self.assertEqual(card, len(sites) * len(self.COUNTED))
+                self.assertEqual(sorted((r['site'], r['task']) for r in rows),
+                                 sorted((site, name) for site in sites
+                                        for name in self.COUNTED))
+
+    def test_the_card_links_to_the_list_in_its_own_context(self):
+        for context in self.SITES:
+            with self.subTest(context=context):
+                query = f'?context={context}' if context else ''
+                html = _client_for(self.ceo).get(
+                    reverse('dashboard_ceo') + query).content.decode()
+                count = _get_ceo_dashboard_context(context)['task_overdue']
+                self.assertRegex(
+                    html, r'<a href="%s" class="stat-num red[^>]*>%d</a>'
+                    % (re.escape(self._url(context)), count))
+
+    def test_a_zero_is_not_a_link(self):
+        Task.objects.all().update(due_date=None)
+        html = _client_for(self.ceo).get(reverse('dashboard_ceo')).content.decode()
+        self.assertNotIn(reverse('dashboard_ceo_overdue_tasks'), html)
+        self.assertEqual(self._list().context['rows'], [])
+        self.assertIn('No overdue task.', self._list().content.decode())
+
+    def test_longest_overdue_first_then_site(self):
+        rows = self._list().context['rows']
+        self.assertEqual([(r['days'], r['site']) for r in rows], [
+            (9, 'OL-CAPEX'), (9, 'OL-OPEX'), (9, 'OL-RES'),
+            (6, 'OL-CAPEX'), (6, 'OL-OPEX'), (6, 'OL-RES'),
+            (3, 'OL-CAPEX'), (3, 'OL-OPEX'), (3, 'OL-RES'),
+            (1, 'OL-CAPEX'), (1, 'OL-OPEX'), (1, 'OL-RES')])
+
+    def test_what_a_row_says(self):
+        response = self._list('tenders')
+        rows = {r['task']: r for r in response.context['rows']}
+        late = rows['Late']
+        self.assertEqual((late['site'], late['programme'], late['assignee'], late['days'],
+                          late['status'], late['awaiting_approval']),
+                         ('OL-OPEX', 'Alpha', 'Pam · PM', 9, Task.IN_PROGRESS, False))
+        self.assertEqual(late['due_date'], timezone.localdate() - timedelta(days=9))
+        self.assertEqual(late['site_url'], reverse('project_overview', args=['OL-OPEX']))
+        self.assertEqual((rows['Blocked late']['assignee'], rows['Blocked late']['status']),
+                         ('Sita · Site Engineer', Task.BLOCKED))
+        # Nobody holds it: the owning role alone, no person.
+        self.assertEqual(rows['Unassigned late']['assignee'], 'SCM')
+        self.assertTrue(rows['Submitted late']['awaiting_approval'])
+        text = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', response.content.decode()))
+        self.assertIn('Tenders · Overdue tasks · 4 tasks', text)
+        self.assertIn('In Progress · awaiting approval', text)
+        self.assertEqual(text.count('awaiting approval'), 1)
+        # A site with no programme shows a dash, not "None".
+        self.assertEqual({r['programme'] for r in self._list('residential').context['rows']},
+                         {'—'})
+
+    def test_an_invalid_context_is_a_404(self):
+        for bad in ('capex', 'Tenders', '', 'tenders ', 'all'):
+            with self.subTest(context=bad):
+                response = _client_for(self.ceo).get(
+                    reverse('dashboard_ceo_overdue_tasks'), {'context': bad})
+                self.assertEqual(response.status_code, 404)
+
+    def test_who_may_open_it(self):
+        for profile in (self.ceo, self.admin, self.sysadmin):
+            self.assertEqual(_client_for(profile).get(self._url()).status_code, 200)
+        for profile in (self.finance, self.pm, self.scm, self.se, self.designer):
+            with self.subTest(role=profile.role):
+                response = _client_for(profile).get(self._url('tenders'))
+                self.assertEqual(response.status_code, 403)
+                # The app's 403 page: not an empty body, and not a row of the list.
+                body = response.content.decode()
+                self.assertIn('<html', body.lower())
+                self.assertNotIn('OL-OPEX', body)
+        anonymous = self.client.get(self._url())
+        self.assertEqual(anonymous.status_code, 302)
+        self.assertIn('/login/', anonymous['Location'])
+
+    def test_the_roles_come_from_permissions(self):
+        self.assertEqual(CEO_DASHBOARD_ROLES, frozenset({'CEO', 'Admin', 'System Admin'}))
+        self.assertTrue(user_can_view_ceo_dashboard_lists(self.ceo.user))
+        self.assertFalse(user_can_view_ceo_dashboard_lists(self.finance.user))
+
+    def _queries(self):
+        client = _client_for(self.ceo)
+        client.get(self._url())                             # warm any per-process cache
+        with CaptureQueriesContext(connection) as captured:
+            response = client.get(self._url())
+        return len(captured), response.context['total']
+
+    def test_the_page_costs_the_same_for_12_rows_and_132(self):
+        few, total = self._queries()
+        self.assertEqual(total, 12)
+        people = [s7._profile(f'ol_p{i}', 'PM', f'P{i}') for i in range(6)]
+        for i in range(30):
+            program = s7._program(f'Tender {i}', f'T{i:02d}') if i % 3 == 0 else self.tender
+            self.s7(f'OL-MANY-{i:02d}',
+                    [_late(d, task_name=f'Late {d}', assigned_to=people[(i + d) % 6])
+                     for d in (2, 4, 5, 7)], program=program)
+        many, total = self._queries()
+        self.assertEqual(total, 12 + 120)
+        self.assertEqual(many, few)
+        # Stated, so a change to the page's cost is a decision.
+        self.assertEqual(few, LIST_PAGE_QUERIES)
+
+
+# ---------------------------------------------------------------------------
+# 9 — urgency counts a task once
+# ---------------------------------------------------------------------------
+
+class UrgencyCountTests(RowFlagsFixture):
+    """The Site Engineer holds three tasks on the site: one Blocked and late, one
+    Blocked with no date, one late and not blocked. Two are blocked, two are overdue,
+    and three tasks are urgent."""
+
+    def setUp(self):
+        super().setUp()
+        Task.objects.filter(phase__project=self.site).update(due_date=None)
+        yesterday = timezone.localdate() - timedelta(days=1)
+        others = list(Task.objects.filter(phase=self.phase, is_mirror=False,
+                                          assigned_role=Task.SITE_ENGINEER)
+                      .exclude(pk=self.task.pk).exclude(assigned_to=self.qaqc)[:2])
+        Task.objects.filter(pk=self.task.pk).update(
+            status=Task.BLOCKED, due_date=yesterday, assigned_to=self.se)
+        Task.objects.filter(pk=others[0].pk).update(
+            status=Task.BLOCKED, assigned_to=self.se)
+        Task.objects.filter(pk=others[1].pk).update(
+            status=Task.IN_PROGRESS, due_date=yesterday, assigned_to=self.se)
+
+    def test_pm_dashboard(self):
+        ctx = _client_for(self.pm).get(reverse('dashboard_pm')).context
+        row = next(r for r in ctx['projects_with_progress']
+                   if r['project'].pk == self.site.pk)
+        self.assertEqual((row['blocked_count'], row['overdue_count'], row['urgency_count']),
+                         (2, 2, 3))
+
+    def test_site_engineer_dashboard(self):
+        ctx = _client_for(self.se).get(reverse('dashboard_site_engineer')).context
+        card = next(p for p in ctx['projects'] if p['project_id'] == self.site.project_id)
+        self.assertEqual((card['blocked_count'], card['overdue_count']), (2, 2))
+        extra = card['pending_grn_count'] + card['issue_count']
+        self.assertEqual(card['urgency_count'], 3 + extra)
+        self.assertEqual(ctx['total_urgent'], 3 + extra)

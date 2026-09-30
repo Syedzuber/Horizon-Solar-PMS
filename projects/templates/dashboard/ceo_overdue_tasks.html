@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} — CEO Dashboard — SolarPMS{% endblock %}
+
+{% comment %}
+The tasks behind the CEO Tasks card's "Overdue" number (views.dashboard_ceo_overdue_tasks).
+Every value is computed in the view; nothing is derived here. Read-only: no form, no
+JavaScript. The table scrolls sideways on a phone (table-responsive). Same shell as
+ceo_tender_sites.html.
+{% endcomment %}
+
+{% block content %}
+<div class="mb-3">
+  <a href="{{ back_url }}" class="text-decoration-none small">← Back to dashboard</a>
+  <h5 class="mb-0 mt-1 fw-bold">{{ title }}</h5>
+  <p class="text-muted small mb-0">Internal tasks past their due date on active projects. Longest overdue first.</p>
+</div>
+
+<div class="card shadow-sm">
+  <div class="card-body">
+    {% if truncated %}
+    <p class="small text-muted mb-2">Showing the first {{ limit }} of {{ total }} tasks.</p>
+    {% endif %}
+    {% if rows %}
+    <div class="table-responsive">
+      <table class="table table-sm align-middle mb-0">
+        <thead>
+          <tr class="text-muted small">
+            <th class="fw-normal">Site</th>
+            <th class="fw-normal">Programme</th>
+            <th class="fw-normal">Task</th>
+            <th class="fw-normal">Assignee</th>
+            <th class="fw-normal">Due date</th>
+            <th class="fw-normal text-end">Days overdue</th>
+            <th class="fw-normal">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr class="small">
+            <td class="text-nowrap"><a href="{{ row.site_url }}" class="text-decoration-none">{{ row.site }}</a></td>
+            <td class="text-nowrap">{{ row.programme }}</td>
+            <td>{{ row.task }}</td>
+            <td>{{ row.assignee }}</td>
+            <td class="text-nowrap">{{ row.due_date|date:"j M Y" }}</td>
+            <td class="text-end text-nowrap text-danger fw-semibold">{{ row.days }}</td>
+            <td class="text-nowrap">{{ row.status }}{% if row.awaiting_approval %} <span class="text-muted">· awaiting approval</span>{% endif %}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="text-muted small mb-0">No overdue task.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
