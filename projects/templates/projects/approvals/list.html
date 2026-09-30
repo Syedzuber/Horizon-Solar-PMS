@@ -5,6 +5,9 @@ Rows are cards, not a table, so the page reads at phone width with no sideways s
 The row rule is permissions.approval_request_visibility_q(), the same as the detail page.
 Approvals 3a: two raise actions, one per material kind, each passing ?kind= to the raise page.
 Contractor bills 4a-2: a third, "Raise a contractor bill" (?kind=contractor_bill).
+D-A61: the Aging button needs can_view_aging (may open the page) AND show_aging_link
+(context_processors.approvals_nav: CEO, Admin, System Admin). SCM may open the page by
+its URL but is not shown the button.
 {% endcomment %}
 {% block title %}Approvals — SolarPMS{% endblock %}
 
@@ -16,7 +19,7 @@ Contractor bills 4a-2: a third, "Raise a contractor bill" (?kind=contractor_bill
     <small class="text-muted">Material approvals and contractor bills</small>
   </div>
   <div class="d-flex flex-wrap gap-2">
-    {% if can_view_aging %}
+    {% if can_view_aging and show_aging_link %}
     <a href="{% url 'approval_aging' %}" class="btn btn-outline-secondary btn-sm"><i class="bi bi-hourglass-split me-1"></i>Aging</a>
     {% endif %}
     {% if can_raise %}

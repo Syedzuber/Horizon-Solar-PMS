@@ -14,6 +14,8 @@ What this file pins, and why each matters:
     deputy decision, and a carried step that must stay out of turnaround.
   * WHO MAY OPEN THE AGING LIST: SCM, CEO, Admin, System Admin; a 403 WITH A BODY for
     PM, Design, Finance and Site Engineer.
+  * WHO IS SHOWN THE AGING BUTTON (D-A61): CEO, Admin, System Admin. Not SCM, who still
+    opens the page by its URL. The page's permission is pinned unchanged.
   * QUERY COUNTS do not grow with the number of requests or people.
 
 Timestamps are set with QuerySet.update() after the chokepoint has written each row —
@@ -40,6 +42,7 @@ from .approvals import (
     ProxyDecision, apply_approval_decision, create_approval_request,
     reassign_approval_step, resubmit_approval_request,
 )
+from .context_processors import AGING_LINK_ROLES
 from .models import (
     ApprovalStep, Vendor,
     APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_ORDER,
@@ -47,6 +50,7 @@ from .models import (
     APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED, APPROVAL_STEP_REJECTED,
     APPROVAL_STEP_SUPERSEDED,
 )
+from .permissions import APPROVAL_AGING_ROLES, user_can_view_approval_aging
 from .tests_approvals import MODULE_LINE, SE_PHOTO
 
 
@@ -507,12 +511,75 @@ class AgingAccessTests(DashboardFixture):
 
     def test_the_list_links_to_aging_only_when_allowed(self):
         aging = reverse('approval_aging')
-        for profile in (self.scm, self.ceo):
-            response = self.client_for(profile).get(reverse('approval_list'))
-            self.assertTrue(response.context['can_view_aging'])
-            self.assertContains(response, f'href="{aging}"')
+        response = self.client_for(self.ceo).get(reverse('approval_list'))
+        self.assertTrue(response.context['can_view_aging'])
+        self.assertContains(response, f'href="{aging}"')
+        # D-A61: SCM may still open the page, but the list no longer links to it.
+        response = self.client_for(self.scm).get(reverse('approval_list'))
+        self.assertTrue(response.context['can_view_aging'])
+        self.assertNotContains(response, f'href="{aging}"')
         for profile in (self.pm, self.head):
             response = self.client_for(profile).get(reverse('approval_list'))
             self.assertEqual(response.status_code, 200)
             self.assertFalse(response.context['can_view_aging'])
             self.assertNotContains(response, f'href="{aging}"')
+
+
+# ===========================================================================
+# D-A61 — who is SHOWN the Aging button; who may open the page is unchanged
+# ===========================================================================
+
+class AgingLinkVisibilityTests(DashboardFixture):
+
+    def list_page(self, profile):
+        response = self.client_for(profile).get(reverse('approval_list'))
+        self.assertEqual(response.status_code, 200, profile.role)
+        return response
+
+    def test_ceo_admin_and_system_admin_are_shown_the_button(self):
+        aging = reverse('approval_aging')
+        for profile in (self.ceo, self.admin, self.sysadmin):
+            response = self.list_page(profile)
+            self.assertTrue(response.context['show_aging_link'], profile.role)
+            self.assertContains(response, f'href="{aging}"')
+
+    def test_scm_is_not_shown_the_button(self):
+        response = self.list_page(self.scm)
+        self.assertFalse(response.context['show_aging_link'])
+        # Still allowed to open the page: only the button is withheld.
+        self.assertTrue(response.context['can_view_aging'])
+        self.assertNotContains(response, f'href="{reverse("approval_aging")}"')
+
+    def test_the_direct_url_answers_as_before(self):
+        for profile in (self.scm, self.ceo, self.admin, self.sysadmin):
+            response = self.client_for(profile).get(reverse('approval_aging'))
+            self.assertEqual(response.status_code, 200, profile.role)
+            self.assertContains(response, 'Approval aging')
+        for profile in (self.pm, self.head):
+            response = self.client_for(profile).get(reverse('approval_aging'))
+            self.assertEqual(response.status_code, 403, profile.role)
+
+    def test_the_pages_permission_is_unchanged(self):
+        self.assertEqual(APPROVAL_AGING_ROLES,
+                         frozenset({'SCM', 'CEO', 'Admin', 'System Admin'}))
+        for profile in (self.scm, self.ceo, self.admin, self.sysadmin):
+            self.assertTrue(user_can_view_approval_aging(profile.user), profile.role)
+        for profile in (self.pm, self.head, self.designer, self.finance, self.se):
+            self.assertFalse(user_can_view_approval_aging(profile.user), profile.role)
+
+    def test_the_flag_never_shows_the_button_to_a_role_the_page_refuses(self):
+        # The button needs both answers, so a role in AGING_LINK_ROLES alone gets nothing.
+        self.assertLessEqual(AGING_LINK_ROLES, APPROVAL_AGING_ROLES)
+        for profile in (self.pm, self.head):
+            self.assertFalse(self.list_page(profile).context['show_aging_link'],
+                             profile.role)
+
+    def test_the_ceo_dashboard_links_are_untouched(self):
+        # Ruling Q3: only CEO, Admin and System Admin reach that page, and all three
+        # keep its links to the aging list.
+        aging = reverse('approval_aging')
+        for profile in (self.ceo, self.admin, self.sysadmin):
+            response = self.client_for(profile).get(reverse('dashboard_ceo'),
+                                                    {'context': 'tenders'})
+            self.assertEqual(response.status_code, 200, profile.role)
+            self.assertContains(response, f'href="{aging}"')

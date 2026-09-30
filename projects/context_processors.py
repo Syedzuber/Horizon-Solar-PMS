@@ -81,17 +81,37 @@ def purchases_nav(request):
     return {'can_view_purchases_workspace': user_can_view_purchases_workspace(request.user)}
 
 
-def approvals_nav(request):
-    """Whether to show the Approvals nav entry (Approvals S2a).
+#: Who is SHOWN the Aging button on the approvals list (D-A61). Not who may open the page:
+#: that is permissions.APPROVAL_AGING_ROLES, which also holds SCM. SCM still opens the
+#: page by its URL; only the button is withheld. Its own set, so neither changes the other.
+AGING_LINK_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
 
-    The answer comes from permissions.user_can_view_approval_list(), the same helper
-    approval_list calls, so the link and the view cannot disagree. Imported here rather
-    than in the block above so this session adds one function and edits nothing else.
+
+def approvals_nav(request):
+    """Whether to show the Approvals nav entry (Approvals S2a), and the Aging button on
+    the approvals list (D-A61).
+
+    can_view_approvals comes from permissions.user_can_view_approval_list(), the same
+    helper approval_list calls, so the link and the view cannot disagree. Imported here
+    rather than in the block above so this session adds one function and edits nothing
+    else.
+
+    show_aging_link is visibility only and grants nothing: approval_aging checks
+    user_can_view_approval_aging itself, and list.html draws the button only when that
+    AND this are true, so the button can never lead to a 403.
     """
+    # Lazy import: kept inside the function as S2a wrote it, not for a circular import —
+    # the module-level block above already imports from .permissions.
     from .permissions import user_can_view_approval_list
     if not request.user.is_authenticated:
-        return {'can_view_approvals': False}
-    return {'can_view_approvals': user_can_view_approval_list(request.user)}
+        return {'can_view_approvals': False, 'show_aging_link': False}
+    # Shown to CEO, Admin and System Admin, by role. SCM is left out on purpose (D-A61);
+    # every other role cannot open the page at all, so has no button to hide.
+    profile = getattr(request.user, 'profile', None)
+    return {
+        'can_view_approvals': user_can_view_approval_list(request.user),
+        'show_aging_link': profile is not None and profile.role in AGING_LINK_ROLES,
+    }
 
 
 def typed_date_bounds(request):
