@@ -20,6 +20,13 @@ approvals.create_approval_request(), and nothing here is consulted by it.
   task_status_label()             a task's status as a bill reader needs it
   format_bill_amount()            "₹12,500.00" — Indian grouping, paise kept
 
+5c (D-A59) adds a KIND to each warning, so the ones SCM accepted with "Raise anyway" can
+be recorded on the round and filtered for the Site Engineer:
+
+  bill_warnings_tagged()          bill_warnings() as [(kind, message)], same order
+  WARNING_KINDS                   the five kinds, one per function above
+  WORK_WARNING_KINDS              the kinds a viewer who is only the Site Engineer reads
+
 NOTHING HERE CHECKS THE AMOUNT (B-16). There is no rate contract to check it against.
 """
 from decimal import Decimal, InvalidOperation
@@ -35,6 +42,22 @@ from .models import (
 COUNTING_BILL_STATUSES = frozenset({
     APPROVAL_OPEN, APPROVAL_CHANGES_REQUESTED, APPROVAL_APPROVED,
 })
+
+#: What a warning is about (5c, D-A59) — one kind per warning function, stored beside the
+#: message when SCM raises or resubmits a bill anyway (approvals._clean_accepted_warnings).
+WARNING_TASK = 'task'                     # incomplete_task_warnings: unfinished or N/A
+WARNING_OTHER_BILL = 'other_bill'         # other_bill_warnings: names another bill's number
+WARNING_BILL_NUMBER = 'bill_number'       # repeated_bill_number_warnings
+WARNING_SITE_ENGINEER = 'site_engineer'   # site_engineer_warnings
+WARNING_PM = 'pm'                         # pm_warnings
+WARNING_KINDS = frozenset({
+    WARNING_TASK, WARNING_OTHER_BILL, WARNING_BILL_NUMBER, WARNING_SITE_ENGINEER,
+    WARNING_PM,
+})
+#: The kinds a viewer who is only the bill's Site Engineer may read (D-A53): the task
+#: warnings are about the work. The others name a bill number or are about who SCM chose.
+#: An allowlist, so a kind added later stays hidden from the Site Engineer until listed.
+WORK_WARNING_KINDS = frozenset({WARNING_TASK})
 
 
 def _task_label(task):
@@ -160,15 +183,29 @@ def site_engineer_choices(project):
                   key=lambda pair: (not pair[1], _person(pair[0]).lower()))
 
 
+def bill_warnings_tagged(project, tasks, vendor, bill_number, site_engineer, pm,
+                         exclude=None):
+    """Every warning for one bill as [(kind, message)], in the order SCM reads them: the
+    tasks, other bills naming them, the bill number, then the two people. `exclude` is
+    the bill itself when its own page or resubmit re-reads them, so it is never "another
+    bill". The kind is WARNING_KINDS' (5c): what the raise and resubmit pages hand to the
+    chokepoint when SCM goes ahead anyway. Three queries."""
+    groups = (
+        (WARNING_TASK, incomplete_task_warnings(project, tasks)),
+        (WARNING_OTHER_BILL, other_bill_warnings(tasks, exclude=exclude)),
+        (WARNING_BILL_NUMBER,
+         repeated_bill_number_warnings(vendor, bill_number, exclude=exclude)),
+        (WARNING_SITE_ENGINEER, site_engineer_warnings(project, site_engineer)),
+        (WARNING_PM, pm_warnings(project, pm)),
+    )
+    return [(kind, message) for kind, messages in groups for message in messages]
+
+
 def bill_warnings(project, tasks, vendor, bill_number, site_engineer, pm, exclude=None):
-    """Every warning for one bill, in the order SCM reads them: the tasks, other bills
-    naming them, the bill number, then the two people. `exclude` is the bill itself when
-    its own detail page re-reads them, so it is never "another bill". Three queries."""
-    return (incomplete_task_warnings(project, tasks)
-            + other_bill_warnings(tasks, exclude=exclude)
-            + repeated_bill_number_warnings(vendor, bill_number, exclude=exclude)
-            + site_engineer_warnings(project, site_engineer)
-            + pm_warnings(project, pm))
+    """bill_warnings_tagged()'s messages alone, in the same order, for a page that only
+    draws them. Three queries."""
+    return [message for _, message in bill_warnings_tagged(
+        project, tasks, vendor, bill_number, site_engineer, pm, exclude=exclude)]
 
 
 def task_status_label(task, project_type):

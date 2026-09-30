@@ -58,6 +58,11 @@ checks the amount against a rate (B-16). A resubmit (4b-1) may revise the amount
 date, tasks and PDF, never the contractor or the site; a replaced PDF stays recorded in
 its round's snapshot and is never deleted.
 
+THE WARNINGS SCM ACCEPTED ARE RECORDED, NEVER JUDGED (5c, D-A59). create and resubmit take
+`accepted_warnings`, the [(kind, message)] the page computed when SCM raised or
+resubmitted a bill anyway, and write them into that round's snapshot exactly as given.
+This module still asks bill_rules nothing: it checks their shape and stores them.
+
 THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53, D-A54). A Site Engineer
 step is approved only with at least one site photo, linked to the step, and never
 rejected; "work not done" is a changes request. apply_approval_decision holds the rules
@@ -98,6 +103,7 @@ from .models import (
     APPROVAL_PROXY_CHANNEL_CHOICES,
     REASON_CREATED, REASON_RESUBMITTED, VENDOR_BILLABLE_KINDS,
 )
+from .bill_rules import WARNING_KINDS
 from .bill_storage import bills_bucket
 # forms.py is imported for check_typed_date(), the one typed-date range rule (2020 to
 # today + 5 years); forms imports models, utils and permissions, never this module.
@@ -481,6 +487,9 @@ def _round_snapshot_payload(approval, round_no):
     the bill names them. The PDF's bucket and path are kept so a round's own PDF stays
     reachable after a later round replaces it (4b). ONLY A BILL IS SCHEMA 3: a material
     request's snapshot stays schema 2, with no `bill` key, exactly as before.
+
+    A bill round written since 5c also carries `accepted_warnings` (D-A59), added by
+    _write_round_snapshot: it is not read from the database, so it is not built here.
     """
     request = (ApprovalRequest.objects.select_related('vendor')
                .get(pk=approval.pk))
@@ -569,12 +578,47 @@ def _round_snapshot_payload(approval, round_no):
     return payload
 
 
-def _write_round_snapshot(approval, round_no, created_by):
+def _clean_accepted_warnings(kind, accepted_warnings):
+    """The warnings SCM accepted when raising or resubmitting a bill anyway (5c, D-A59),
+    as the round snapshot stores them: [{kind, message}] in the order given. None for a
+    material kind, which records none — and is refused if handed any.
+
+    SHAPE ONLY. Each item is a (kind, message) pair as bill_rules.bill_warnings_tagged()
+    returns it: a kind in WARNING_KINDS and a message that is text and not blank, stored
+    EXACTLY as given. Whether the warning is true of the bill is never asked here — the
+    page computed it, and this records what the page was told."""
+    items = list(accepted_warnings or ())
+    if kind != APPROVAL_KIND_CONTRACTOR_BILL:
+        if items:
+            raise ApprovalRefused('Only a contractor bill records accepted warnings.')
+        return None
+    cleaned = []
+    for item in items:
+        try:
+            tag, message = item
+        except (TypeError, ValueError):
+            raise ApprovalRefused('An accepted warning is a kind and a message.')
+        if not isinstance(tag, str) or tag not in WARNING_KINDS:
+            raise ApprovalRefused(f'"{tag}" is not a kind of bill warning.')
+        if not isinstance(message, str) or not message.strip():
+            raise ApprovalRefused('An accepted warning needs its message.')
+        cleaned.append({'kind': tag, 'message': message})
+    return cleaned
+
+
+def _write_round_snapshot(approval, round_no, created_by, accepted_warnings=None):
     """The one writer of ApprovalRoundSnapshot. Called inside the caller's transaction,
-    after the round's steps and any revision are written."""
+    after the round's steps and any revision are written.
+
+    `accepted_warnings` (5c, D-A59) is _clean_accepted_warnings()' result: a list — empty
+    when SCM accepted none — for a bill, stored under `accepted_warnings` beside the
+    payload; None for a material request, whose snapshot gets no such key. A bill round
+    written before 5c has no key either, and readers treat that as none recorded."""
+    payload = _round_snapshot_payload(approval, round_no)
+    if accepted_warnings is not None:
+        payload['accepted_warnings'] = accepted_warnings
     ApprovalRoundSnapshot.objects.create(
-        request=approval, round=round_no, created_by=created_by,
-        snapshot=_round_snapshot_payload(approval, round_no))
+        request=approval, round=round_no, created_by=created_by, snapshot=payload)
 
 
 def round_snapshot(approval, round_no):
@@ -793,7 +837,8 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
                             design_assignee=None, site_engineer_assignee=None,
                             design_signoff_required=False, vendor=None, material=None,
                             lines=None, programs=(), projects=(), site_groups=(),
-                            attachments=(), client_uuid=None, bill=None):
+                            attachments=(), client_uuid=None, bill=None,
+                            accepted_warnings=()):
     """Raise a request and open round 1. Returns the ApprovalRequest.
 
     `material` is a dict for the two material kinds (vendor_order, pre_order_request)
@@ -821,6 +866,10 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
     caller may pass that site or nothing, and any other scope is refused (D-A31). Written
     in the transaction, before the ledger row, so the row's project resolves (D-A32).
     Warnings are bill_rules.py's and are not asked here.
+
+    `accepted_warnings` (5c, D-A59): the [(kind, message)] SCM raised the bill despite,
+    written into round 1's snapshot as given (_clean_accepted_warnings); empty when there
+    were none. Refused on a material kind.
 
     Idempotent on `client_uuid` (R-14): a repeat returns the request already written.
     """
@@ -893,6 +942,7 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         programs, projects, site_groups = (), [bill_row['project']], ()
     elif bill is not None:
         raise ApprovalRefused('Only a contractor bill carries bill details.')
+    accepted = _clean_accepted_warnings(kind, accepted_warnings)
 
     projects = list(projects)
     if any(project.is_deleted for project in projects):
@@ -936,7 +986,7 @@ def create_approval_request(*, kind, raised_by, title, description, pm_assignee,
         now = timezone.now()
         _open_round(approval, 1, plan, assignees, now)
         _add_attachments(approval, 1, attachments, raised_by)
-        _write_round_snapshot(approval, 1, raised_by)
+        _write_round_snapshot(approval, 1, raised_by, accepted)
         record_transition(approval, to_status=APPROVAL_OPEN, actor=raised_by,
                           reason_code=REASON_CREATED)
         transaction.on_commit(
@@ -1261,7 +1311,8 @@ def _revision_writes(approval, revision, lines):
 
 
 def resubmit_approval_request(approval, actor, note, attachments=(), assignees=None,
-                              revision=None, carry=None, lines=None):
+                              revision=None, carry=None, lines=None,
+                              accepted_warnings=()):
     """SCM's revision after changes were requested: open round N+1. Returns the request.
 
     New step rows for the same parties, same sequences; the previous round's rows are
@@ -1325,6 +1376,10 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
     carried approval is carried again. A reason that already ends in a full stop is not
     given a second one (_sentence).
 
+    `accepted_warnings` (5c, D-A59): the [(kind, message)] SCM resubmitted a bill despite,
+    written into the NEW round's snapshot as given (_clean_accepted_warnings); the earlier
+    rounds keep their own. Refused on a material request.
+
     Every write, including the new round's snapshot, is inside one transaction: a
     refusal leaves nothing behind.
     """
@@ -1350,6 +1405,7 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
 
         request_fields, scope, material, new_lines, bill = _revision_writes(
             approval, revision, lines)
+        accepted = _clean_accepted_warnings(approval.kind, accepted_warnings)
 
         previous = approval.current_round
         latest = {}
@@ -1441,7 +1497,7 @@ def resubmit_approval_request(approval, actor, note, attachments=(), assignees=N
         remark = changed_segments + kept_segments + note
 
         _add_attachments(approval, new_round, attachments, actor)
-        _write_round_snapshot(approval, new_round, actor)
+        _write_round_snapshot(approval, new_round, actor, accepted)
         record_transition(approval, to_status=APPROVAL_OPEN,
                           from_status=APPROVAL_CHANGES_REQUESTED, actor=actor,
                           reason_code=REASON_RESUBMITTED, remark=remark)

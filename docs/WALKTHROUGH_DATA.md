@@ -361,9 +361,10 @@ the bill number, the bill date, the PDF (name or link), any warning but an
 incomplete-task one, and any "what changed" line but Tasks. They do see the title and
 description (SCM's free text), which is why the seeded ones carry no money.
 
-**"Raise anyway" leaves no trace.** Nothing on WALK-22 records that SCM accepted a
-warning; the page shows the warning only because it is still true (open product gap,
-SECONDARY_FINDINGS 4b-2).
+**"Raise anyway" is recorded (5c, D-A59).** WALK-22's Round 1 card reads "Raised
+despite:" and lists the warning SCM accepted, as it read when the bill was raised; the
+Site Engineer does not see it (it names another bill's number). A `solarpms_walk` seeded
+before 5c has no such record on WALK-22 and draws nothing there until it is re-seeded.
 
 **The aging page** (`/approvals/aging/`, as `walk.scm` or `walk.ceo`), on the day of the
 seed. **"Days waiting" counts against the real clock**, so each waiting figure grows by

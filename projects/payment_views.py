@@ -22,6 +22,11 @@ tab's counts and the tiles' sums (O6: the same function the Finance and CEO dash
 call, so the three cannot disagree), one more asks whether any CAPEX order exists, one
 the invoice-awaited count, then the page and its six prefetches. Fifty rows cost what one
 row costs.
+
+5c (D-A59): a bill payment's row carries a "Raised despite warnings" marker when SCM
+raised or resubmitted the bill's current round over warnings (_bills_raised_despite) — the
+approver can act from the row without opening the bill, so the row has to say so. One more
+query, and only on a page that lists a bill payment; a PO/PI-only page costs what it did.
 """
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -41,7 +46,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from .decorators import login_required
 from .forms import check_typed_date
 from .models import (
-    PaymentRequest, PaymentRequestHold, VendorOrder, VendorOrderDocument,
+    ApprovalRoundSnapshot, PaymentRequest, PaymentRequestHold, VendorOrder,
+    VendorOrderDocument,
     VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE, committed_total,
     effective_amount_sum,
 )
@@ -138,11 +144,35 @@ def _search(queryset, text):
     return queryset.filter(pk__in=PaymentRequest.objects.filter(match).values('pk'))
 
 
-def _bill_part(user, payment):
+def _bills_raised_despite(request_ids):
+    """Of the bills whose approval requests are `request_ids`, the ids of those SCM raised
+    or resubmitted over warnings IN THEIR CURRENT ROUND (5c, D-A59) — the round that was
+    approved, since only an approved bill has a payment. A bill whose earlier round was
+    raised over warnings and whose current one was not is left out: what was approved
+    carried none.
+
+    No query for an empty set (a page of PO/PI payments), one otherwise. Only the ids are
+    fetched; the snapshot JSON and the warnings' text stay in the database."""
+    if not request_ids:
+        return frozenset()
+    # Each bill's snapshot for the round it stands at, kept only when its recorded
+    # `accepted_warnings` list has a first entry. A round written before 5c has no such
+    # key and an accepted-nothing round has an empty list: both have no element 0.
+    return frozenset(
+        ApprovalRoundSnapshot.objects
+        .filter(request_id__in=request_ids, round=F('request__current_round'),
+                snapshot__accepted_warnings__0__isnull=False)
+        .values_list('request_id', flat=True))
+
+
+def _bill_part(user, payment, raised_despite=frozenset()):
     """The bill half of a queue row for a contractor bill's payment (5a): the bill where
     an order row shows its order, and the display-only money line "bill · paid ·
     committed" (ruling Q7). The ceiling itself is enforced by the writer and the approve
     view (5b), under a lock on the bill row; this line only shows it.
+
+    `raised_despite` (5c) is _bills_raised_despite()'s set for the page: the row's marker,
+    which says only THAT warnings were accepted — the bill's page lists them.
 
     Reads the bill, its site, its request's contractor and its payments from the queue's
     select_related / prefetch, so no query. The link is the bill's approval page, which
@@ -158,6 +188,7 @@ def _bill_part(user, payment):
             'contractor': contractor.name if contractor is not None else '—',
             'number':     bill.bill_number,
             'url':        reverse('approval_detail', args=[bill.request_id]),
+            'raised_despite': bill.request_id in raised_despite,
         },
         'money': {
             'total':     bill.amount,
@@ -178,19 +209,20 @@ def _bill_part(user, payment):
     }
 
 
-def _row(user, payment, today):
+def _row(user, payment, today, raised_despite=frozenset()):
     """One queue row: the payment, its order's money, its latest hold, its documents,
     and which actions THIS viewer may take. The flags are the predicates the views
     enforce, asked here only to decide what to draw — each is re-checked under a lock.
 
-    A contractor bill's payment (5a) has no order: its bill half is _bill_part(). Mark
-    paid is asked of it as of any payment (ruling Q3 — the writer never reads the order).
+    A contractor bill's payment (5a) has no order: its bill half is _bill_part(), which
+    takes `raised_despite` (5c). Mark paid is asked of it as of any payment (ruling Q3 —
+    the writer never reads the order).
     """
     if payment.contractor_bill_id is not None:
         holds = list(payment.holds.all())
         return {
             'payment':  payment,
-            **_bill_part(user, payment),
+            **_bill_part(user, payment, raised_despite),
             'counted':  payment.status != PaymentRequest.REJECTED,
             'age_days': (today - timezone.localdate(payment.requested_date)).days,
             'hold':     holds[0] if holds and payment.status in (
@@ -311,6 +343,11 @@ def payment_queue(request):
 
     page = Paginator(queryset, QUEUE_PAGE_SIZE).get_page(request.GET.get('page'))
     today = timezone.localdate()
+    # 5c: the page's bills raised over warnings, for each bill row's marker. The bill is
+    # already joined onto each payment, so reading its request id costs nothing.
+    raised_despite = _bills_raised_despite(
+        {payment.contractor_bill.request_id for payment in page
+         if payment.contractor_bill_id is not None})
 
     return render(request, 'projects/payment_queue.html', {
         'tabs':      tabs,
@@ -321,7 +358,8 @@ def payment_queue(request):
         'status':    status,
         'q':         q,
         'page':      page,
-        'rows':      [_row(request.user, payment, today) for payment in page],
+        'rows':      [_row(request.user, payment, today, raised_despite)
+                      for payment in page],
         'today':     today,
         # Every action form posts this back, so the action returns to exactly this view
         # of the queue — same tab, same chip, same search, same page.

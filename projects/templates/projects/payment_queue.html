@@ -103,10 +103,13 @@ single-line and the rest would render into the page.
             {% comment %}
             5a: a contractor bill's payment shows the bill where an order row shows its order,
             and links to the bill's approval page, which Finance may open (D-A58, 5b).
+            5c (D-A59): the marker says only THAT SCM raised the approved round over
+            warnings; it links to the bill, whose round card lists them.
             {% endcomment %}
             <div class="fw-semibold">{{ row.bill.contractor }}</div>
             <div>Bill {{ row.bill.number }} · {{ row.bill.site }}</div>
             <div class="text-muted">bill ₹{{ m.total|floatformat:2 }} · paid ₹{{ m.paid|floatformat:2 }} · committed{% if row.counted %} incl. this{% endif %} ₹{{ m.committed|floatformat:2 }}</div>
+            {% if row.bill.raised_despite %}<a href="{{ row.bill.url }}" class="badge bg-warning text-dark text-decoration-none">Raised despite warnings</a>{% endif %}
             <div class="mt-1"><a href="{{ row.bill.url }}">Open bill</a></div>
             {% else %}
             <div class="fw-semibold">{{ p.vendor.name|default:"—" }}</div>

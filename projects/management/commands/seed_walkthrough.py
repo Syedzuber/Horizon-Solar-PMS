@@ -324,7 +324,8 @@ WALK_SCRIPT = [
      'Superseded; nobody\'s turn. Not on walk.se\'s "Work to confirm" card.'),
     ('WALK-22', 'walk.scm',
      'Open, round 1. Site Engineer step Pending: Walk Se\'s turn, 3 days. Raised with the '
-     'warnings accepted ("Raise anyway" - the request records no trace of that). Live '
+     'warnings accepted ("Raise anyway"): the Round 1 card reads "Raised despite:" and '
+     'lists the same warning as it read when the bill was raised. Live '
      'warning: \'Module Installation\' is also on bill WSW/26-27/017 - "WALK-17 ..." '
      '(approved).'),
     ('WALK-22', 'walk.se',

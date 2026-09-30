@@ -51,6 +51,13 @@ SCM's proxy form on that step offers the same two outcomes.
 Payments 5b: an approved bill shows its payments (_bill_payments.html) under the Request
 card — for every full reader, never the bill's Site Engineer — with the approver's and
 SCM's actions and SCM's "Request payment from Finance".
+
+Bills 5c (D-A59): a round SCM raised or resubmitted over warnings says so on its card —
+"Raised despite:" (round 1) or "Resubmitted despite:" — above the collapsed details, so
+nobody has to open anything to see it. `round.despite` is already filtered for the viewer
+(approval_views.accepted_warnings_display): the bill's Site Engineer gets the task warnings
+only. Empty for a round with none, a round written before 5c and every material round,
+which draw nothing.
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -208,6 +215,13 @@ SCM's actions and SCM's "Request payment from Finance".
       {% endfor %}
     </ul>
     {% endif %}
+  </div>
+  {% endif %}
+
+  {% if round.despite %}
+  <div class="card-body border-bottom small">
+    <div class="fw-semibold mb-1"><i class="bi bi-exclamation-triangle text-warning"></i> {% if round.number == 1 %}Raised despite:{% else %}Resubmitted despite:{% endif %}</div>
+    {% for w in round.despite %}<div class="text-break">{{ w }}</div>{% endfor %}
   </div>
   {% endif %}
 

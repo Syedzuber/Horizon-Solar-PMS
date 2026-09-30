@@ -91,6 +91,13 @@ A viewer whose only standing is being the bill's Site Engineer (sees_bill) reads
 contractor, tasks, description, photos and task warnings — never the amount, bill number,
 date or PDF. Their step is answered with "Confirm work done" (site photos required) or
 "Work not done" (a note), in approval_decide; the rules are the chokepoint's.
+
+CONTRACTOR BILLS 5c (D-A59): the warnings SCM accepted are recorded and shown. The raise
+and resubmit pages ALWAYS compute the warnings (bill_rules.bill_warnings_tagged) — a ticked
+"Raise anyway" / "Resubmit anyway" no longer skips the check — and hand the list that holds
+at that POST to the chokepoint, which writes it into the round's snapshot. Each round card
+on the detail page draws it as "Raised despite:" (round 1) or "Resubmitted despite:"
+(accepted_warnings_display), always visible; the Site Engineer reads only the task ones.
 """
 import logging
 import uuid as _uuid
@@ -129,8 +136,8 @@ from .approvals import (
     round_snapshot, unlink_order_from_approval, withdraw_approval_request,
 )
 from .bill_rules import (
-    bill_warnings, format_bill_amount, incomplete_task_warnings, site_engineer_choices,
-    task_status_label,
+    WORK_WARNING_KINDS, bill_warnings, bill_warnings_tagged, format_bill_amount,
+    incomplete_task_warnings, site_engineer_choices, task_status_label,
 )
 from .bill_storage import (
     BILL_STORAGE_NOT_READY, BILL_STORAGE_OFF, BillStorageError, bill_pdf_url, bills_bucket,
@@ -632,6 +639,31 @@ def bill_display(bill, contractor_name, sign, full=True):
         return _work_only(block)
     block['pdf_url'] = sign(pdf.get('bucket'), pdf.get('path'))
     return block
+
+
+def accepted_warnings_display(snapshot, full=True):
+    """The warnings SCM raised or resubmitted a round despite (5c, D-A59), as the messages
+    its round card draws — read from the round's snapshot alone, so the text is what SCM
+    was told THEN and never follows the tasks or the other bills since.
+
+    `full` False (sees_bill, D-A53): the viewer is only the bill's Site Engineer and reads
+    only the kinds in bill_rules.WORK_WARNING_KINDS (unfinished and Not Applicable tasks);
+    the others name another bill's number or are about who SCM chose.
+
+    [] for a round with no snapshot, a material round, a bill round written before 5c (no
+    key), and anything in the key that is not a {kind, message} entry — an old or odd
+    record draws nothing, never an error. No query."""
+    recorded = (snapshot or {}).get('accepted_warnings')
+    if not isinstance(recorded, list):
+        return []
+    shown = []
+    for item in recorded:
+        if not isinstance(item, dict) or not isinstance(item.get('message'), str):
+            continue
+        kind = item.get('kind')
+        if full or (isinstance(kind, str) and kind in WORK_WARNING_KINDS):
+            shown.append(item['message'])
+    return shown
 
 
 def _current_assignees(steps, round_no):
@@ -1367,8 +1399,11 @@ def _bill_create(request, key):
       3. the form (parse_bill_create: the PDF's bytes, the photos, stale choices), then
          approvals._clean_bill with a placeholder PDF — the chokepoint's own refusals for
          the contractor, site, tasks, amount, number and date: 400, nothing uploaded;
-      4. the warnings (bill_rules.bill_warnings), unless "Raise anyway" was ticked: the
-         page again with them, status 200, the same key, nothing uploaded (D-A50);
+      4. the warnings (bill_rules.bill_warnings_tagged), ALWAYS computed (5c): without
+         "Raise anyway" ticked, the page again with them, status 200, the same key,
+         nothing uploaded (D-A50); with it, the bill goes ahead and the warnings that
+         hold at this POST are recorded on round 1 (D-A59) — not the ones an earlier
+         screen showed, which this POST is never sent;
       5. the PDF, to the private bucket — a failure is its message, nothing stored;
       6. the photos, to the public bucket — a failure removes the photos already stored
          (_upload_attachments) and the PDF (discard_unrecorded_bill_pdf);
@@ -1431,11 +1466,14 @@ def _bill_create(request, key):
     except ApprovalRefused as exc:
         return page([str(exc)])
 
-    if request.POST.get('confirm_warnings') != '1':
-        warnings = bill_warnings(project, checked['tasks'], vendor, checked['bill_number'],
-                                 cleaned['site_engineer_assignee'], cleaned['pm_assignee'])
-        if warnings:
-            return page(warnings=warnings, status=200)
+    # Computed whether or not "Raise anyway" is ticked (5c, D-A59): the tick lets the bill
+    # through, it does not skip the check, so what SCM raised it despite can be recorded.
+    warnings = bill_warnings_tagged(project, checked['tasks'], vendor,
+                                    checked['bill_number'],
+                                    cleaned['site_engineer_assignee'],
+                                    cleaned['pm_assignee'])
+    if warnings and request.POST.get('confirm_warnings') != '1':
+        return page(warnings=[message for _, message in warnings], status=200)
 
     try:
         stored_pdf = upload_bill_pdf(pdf_file, project)
@@ -1455,7 +1493,8 @@ def _bill_create(request, key):
             site_engineer_assignee=cleaned['site_engineer_assignee'], vendor=vendor,
             bill=ContractorBill(project, cleaned['tasks'], cleaned['amount'],
                                 cleaned['bill_number'], cleaned['bill_date'], stored_pdf),
-            attachments=stored_photos, client_uuid=client_uuid)
+            attachments=stored_photos, client_uuid=client_uuid,
+            accepted_warnings=warnings)
     except ApprovalRefused as exc:
         cleanup()
         discard_unrecorded_bill_pdf(stored_pdf)
@@ -1691,6 +1730,12 @@ def approval_detail(request, approval_pk):
     place of B-16's. A Site Engineer step shows its site photos; a kept one, the photos of
     the step it keeps.
 
+    EACH ROUND SAYS WHAT SCM RAISED IT DESPITE (5c, D-A59): the warnings recorded in that
+    round's snapshot (accepted_warnings_display), on the round card itself, above the
+    collapsed details — whatever the bill's status, unlike the live warnings. Everyone
+    who sees the bill reads them all; the Site Engineer only the task ones. No query: the
+    snapshots are already in hand.
+
     AN APPROVED BILL HAS A PAYMENTS SECTION (5b, _bill_payments): its payments with their
     holds, the approver's actions and SCM's reply to a hold, and SCM's "Request payment
     from Finance". Drawn for full readers only — never for the Site Engineer.
@@ -1752,6 +1797,10 @@ def approval_detail(request, approval_pk):
     for round_no in range(approval.current_round, 0, -1):     # newest first
         snapshot = snapshots[round_no]
         details = _for_display(snapshot if snapshot is not None else current)
+        # The recorded list is drawn only through accepted_warnings_display ('despite'
+        # below), which filters it for the Site Engineer; the raw one never reaches the
+        # template.
+        details.pop('accepted_warnings', None)
         if bill is not None:
             details['bill'] = bill_display((snapshot or {}).get('bill'),
                                            ((snapshot or {}).get('vendor') or {}).get('name'),
@@ -1772,6 +1821,8 @@ def approval_detail(request, approval_pk):
             'details':      details,
             'dispatch':     round_dispatch.get(round_no),
             'has_snapshot': snapshot is not None,
+            # What SCM raised or resubmitted this round despite (5c); [] draws nothing.
+            'despite':      accepted_warnings_display(snapshot, full),
             # The bill's Site Engineer reads only the work's changes (D-A53, 4b-1).
             'changes':      (round_changes(snapshots[round_no - 1], snapshot,
                                            work_only=bill is not None and not full)
@@ -2167,9 +2218,11 @@ def _bill_resubmit(request, approval, latest, holders, keepable, by_pk):
       3. the chokepoint's own refusals, asked read-only (approvals._revision_writes, with a
          placeholder PDF in the configured bucket, as the raise page does): 400, nothing
          uploaded;
-      4. the warnings (bill_rules.bill_warnings on the bill as revised, this bill left out
-         of "another bill" and "repeated number"), on EVERY bill resubmit unless "Resubmit
-         anyway" was ticked (Q3): the page again, 200, nothing uploaded;
+      4. the warnings (bill_rules.bill_warnings_tagged on the bill as revised, this bill
+         left out of "another bill" and "repeated number"), computed on EVERY bill
+         resubmit (Q3; 5c: ticked or not). Without "Resubmit anyway" ticked: the page
+         again, 200, nothing uploaded. With it, the resubmit goes ahead and the warnings
+         that hold at this POST are recorded on the new round (D-A59);
       5. the new PDF, to the private bucket — a failure is its message, nothing stored;
       6. the photos — a failure removes the photos already stored and the new PDF;
       7. resubmit_approval_request() — a refusal or error removes the photos and the new
@@ -2225,18 +2278,21 @@ def _bill_resubmit(request, approval, latest, holders, keepable, by_pk):
         except ApprovalRefused as exc:
             return refuse([str(exc)])
 
-    if request.POST.get('confirm_warnings') != '1':
-        tasks = revision.get('tasks') or [
-            link.task for link in detail.task_links.select_related('task').order_by('pk')]
-        warnings = bill_warnings(
-            detail.project, tasks, approval.vendor,
-            revision.get('bill_number', detail.bill_number),
-            overrides.get(APPROVAL_PARTY_SITE_ENGINEER,
-                          holders.get(APPROVAL_PARTY_SITE_ENGINEER)),
-            overrides.get(APPROVAL_PARTY_PM, holders.get(APPROVAL_PARTY_PM)),
-            exclude=approval)
-        if warnings:
-            return page(warnings=warnings, tasks_changed=tasks_changed)
+    # Computed whether or not "Resubmit anyway" is ticked (5c, D-A59), as on the raise
+    # page: the tick lets the resubmit through and the warnings are recorded on its round.
+    # The bill's tasks as revised, or — unrevised — as it names them, in its own order.
+    tasks = revision.get('tasks') or [
+        link.task for link in detail.task_links.select_related('task').order_by('pk')]
+    warnings = bill_warnings_tagged(
+        detail.project, tasks, approval.vendor,
+        revision.get('bill_number', detail.bill_number),
+        overrides.get(APPROVAL_PARTY_SITE_ENGINEER,
+                      holders.get(APPROVAL_PARTY_SITE_ENGINEER)),
+        overrides.get(APPROVAL_PARTY_PM, holders.get(APPROVAL_PARTY_PM)),
+        exclude=approval)
+    if warnings and request.POST.get('confirm_warnings') != '1':
+        return page(warnings=[message for _, message in warnings],
+                    tasks_changed=tasks_changed)
 
     stored_pdf = None
     if pdf_file is not None:
@@ -2258,7 +2314,8 @@ def _bill_resubmit(request, approval, latest, holders, keepable, by_pk):
                                                 attachments=stored,
                                                 assignees=overrides or None,
                                                 revision=revision or None,
-                                                carry=carry or None)
+                                                carry=carry or None,
+                                                accepted_warnings=warnings)
     except ApprovalRefused as exc:
         cleanup()
         discard_unrecorded_bill_pdf(stored_pdf)
