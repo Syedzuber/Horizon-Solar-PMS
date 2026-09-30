@@ -126,7 +126,7 @@ file and `seed_walkthrough.py` are the only places it appears.
 | `walk.sysadmin` | System Admin | — | `/sub-admin/projects/` | Sub-admin shell, warehouse screens |
 | `walk.pm` | PM | — | `/dashboard/pm/` | Assigned PM on every site and project: PM approval queue, PM change requests, SCM-request triage, Not Applicable, punch-point waiver, issue close/reopen |
 | `walk.coord` | Project Coordinator | — | `/dashboard/pm/` | Coordinator on WALKE01; approved the Net Metering task; holds Completion Certificates |
-| `walk.se` | Site Engineer | — | `/dashboard/site-engineer/` | Holds the SE tasks on WALKE01 and two on WALKL01; confirmed the GRNs; submits tasks for approval |
+| `walk.se` | Site Engineer | — | `/dashboard/site-engineer/` | Holds the SE tasks on WALKE01 and two on WALKL01; confirmed the GRNs; submits tasks for approval. Area `approvals`: holds every SE task on WALKB01 and is the Site Engineer on every contractor bill (WALK-15 … WALK-22); three wait on their "Work to confirm" card |
 | `walk.qaqc` | Site Engineer | `is_qaqc` | `/dashboard/site-engineer/` | Approves / rejects submitted OPEX tasks (raises punch points). Holds Net Meter Installation so it can see WALKE01 |
 | `walk.design` | Design | — | `/dashboard/design/` | The designer on every design site and the Residential BOQs |
 | `walk.designqc` | Design | `is_design_qc` | `/dashboard/design/` | Gate 1: Arka review and package QC; recorded the BOQ correction on WALKC07; named QC reviewer on WALKD03 |
@@ -278,16 +278,16 @@ Warehouses `WALK-WH-DEL` and `WALK-WH-MUM` (keeper `walk.scm`), `WALK-WH-SITE` (
 keeper); three `WALK …` vendors; the seven OPEX installation checklists
 (`seed_opex_installation_checklists`, reused as is).
 
-### Approvals (area `approvals`) — material approvals, WALK-01 … WALK-14
+### Approvals (area `approvals`) — material approvals WALK-01 … WALK-14, contractor bills WALK-15 … WALK-22
 
 `python manage.py seed_walkthrough --only approvals` (it seeds `users` and `reference`
-first if they are absent; a full seed includes it, last). Material approvals only —
-pre-order and pre-dispatch. Contractor bills are not here yet; Session 4a adds them to
-this area.
+first if they are absent; a full seed includes it, last). Material approvals — pre-order
+and pre-dispatch — and contractor bills (4b-2), on a tender and site of the area's own
+(see *Contractor bills* below).
 
 **People.** The area reuses `walk.scm`, `walk.pm`, `walk.designhead`, `walk.designdeputy`
-(the deputy link the `users` area sets) and `walk.se` (not used until Session 4a), and
-adds `walk.scm2` (SCM) and `walk.pm2` (PM) through the Admin's `user_create`, with both
+(the deputy link the `users` area sets) and `walk.se` (the Site Engineer on every bill),
+and adds `walk.scm2` (SCM) and `walk.pm2` (PM) through the Admin's `user_create`, with both
 notification preferences off. Every request is raised by an SCM user and names `walk.pm`
 as its PM; a design sign-off names `walk.designhead`.
 
@@ -301,7 +301,11 @@ payment requested, 25–22 days before the seed: `WALK-APO-M1` ₹8,50,000 and
 except WALK-05's proxy decision, which carries an evidence file. `approval_views` binds
 its storage client when it is imported, so the seed's storage stub never reaches it and
 an upload through the view fails. That one decision goes through the chokepoint itself
-(`apply_approval_decision(proxy=...)`), with a stub file row.
+(`apply_approval_decision(proxy=...)`), with a stub file row. The contractor bills go
+through the views without exception: around them only, `bill_storage_stub()` patches the
+two clients the sandbox misses (`bill_storage._client`, `approval_views.get_supabase_client`)
+and sets the private bills bucket to `walkthrough-stub` (DEFERRED: that patch belongs in
+`seed_sandbox()`, where it would also let WALK-05 use the view).
 
 **The walk script.** Every run that includes this area prints one at the end: the seed
 date, then scenario | log in as | URL | what the page should show, then the aging page's
@@ -327,26 +331,69 @@ again and writes nothing. Log in by the usernames below (the password is under
 | WALK-13 | Open, round 1 | PM (`walk.pm`), 20 days | `walk.pm` | the oldest item on the aging page |
 | WALK-14 | Approved | nobody | `walk.scm` | decided 99 days ago: outside the 90-day window, in no aging figure |
 
+**Contractor bills (WALK-15 … WALK-22).** All on site **WALKB01** of tender **WALKBIL**
+("WALK Contractor Bills"), from **WALK Site Works Contractor** — added by `walk.scm`
+through Add Vendor (so a supplier) and made a contractor through Edit Vendor. `walk.pm`
+created and activated the site (so is its assigned PM) and assigned all eleven Site
+Engineer tasks to `walk.se`; `walk.se` submitted ten, and `walk.pm` approved them, so
+each is Done **and approved** and no bill but WALK-22 draws a warning. Net Meter
+Installation is left Not Started. Every bill is raised by `walk.scm` through the raise
+page's two steps, names `walk.se` as Site Engineer and `walk.pm` as PM, and runs Site
+Engineer first, then PM.
+
+| Scenario | Bill | Status | Whose turn | Log in as | What to look for |
+|---|---|---|---|---|---|
+| WALK-15 | B1 | Open, round 1 | Site Engineer (`walk.se`), 2 days | `walk.se` | AC Cable Laying; the Confirm / Work not done forms; on the "Work to confirm" card |
+| WALK-16 | B2 | Open, round 1 | PM (`walk.pm`), 5 days | `walk.pm` | "Work confirmed" (turnaround 1 d 23 h) with one photo; ₹1,12,000.00 |
+| WALK-17 | B3 | Approved | nobody | `walk.scm` | two tasks; Site Engineer 5 h 59 min, PM 1 d 18 h; ₹2,35,750.50 |
+| WALK-18 | B4 | Open, round 2 | Site Engineer (`walk.se`), 7 days | `walk.scm`, then `walk.se` | round 1 "Work not done"; round 2 adds DC Cable Laying with Conduit and replaces the PDF (amount unchanged, ₹64,000.00); nothing kept. The Site Engineer's "what changed" shows only the task |
+| WALK-19 | B5 | Open, round 2 | PM (`walk.pm`), 6 days | `walk.pm`, then `walk.se` | Site Engineer **Kept** with the reason; round 1 PM changes requested; amount ₹90,000.00 → ₹86,500.00. The Site Engineer reads "No change to the work in this round." |
+| WALK-20 | B6 | Rejected | nobody | `walk.pm` | the PM's rejection note |
+| WALK-21 | B7 | Withdrawn | nobody | `walk.scm` | the withdrawal note; the Site Engineer step superseded |
+| WALK-22 | B8 | Open, round 1 | Site Engineer (`walk.se`), 3 days | `walk.scm`, then `walk.se` | raised with "Raise anyway" over the warning that Module Installation is also on WALK-17's bill; SCM sees that warning live, the Site Engineer does not |
+
+Turnarounds on the page often read a minute short of the round figure ("1 d 23 h" for
+two days): the simulated clock steps a millisecond per timestamp. The aging figures,
+which use fractional days, are unaffected.
+
+**What a Site Engineer must not see**, on every bill page and on their card: the amount,
+the bill number, the bill date, the PDF (name or link), any warning but an
+incomplete-task one, and any "what changed" line but Tasks. They do see the title and
+description (SCM's free text), which is why the seeded ones carry no money.
+
+**"Raise anyway" leaves no trace.** Nothing on WALK-22 records that SCM accepted a
+warning; the page shows the warning only because it is still true (open product gap,
+SECONDARY_FINDINGS 4b-2).
+
 **The aging page** (`/approvals/aging/`, as `walk.scm` or `walk.ceo`), on the day of the
 seed. **"Days waiting" counts against the real clock**, so each waiting figure grows by
 one for every day after the seed date that you walk it. The other figures do not move.
 
 | Approver | Pending | Oldest | Decisions (90 days) | Median turnaround | Proxy share | Decided by deputy |
 |---|---|---|---|---|---|---|
-| Walk Pm | 4 | 20 days | 8 | 1.1 days | 12% (1 of 8) | 0 |
+| Walk Pm | 6 | 20 days | 11 | 1.0 days | 9% (1 of 11) | 0 |
+| Walk Se | 3 | 7 days | 5 | 1.0 days | 0% (0 of 5) | 0 |
 | Walk Designhead | 2 | 6 days | 3 | 2.0 days | 0% (0 of 3) | 1 |
 | Walk Pmtwo | 1 | 5 days | 0 | — | — | — |
 
-7 steps waiting in all; carry rate 100% (1 of 1: WALK-07's kept PM approval). Walk Pm's
-eight turnarounds are 2, 1, ½, 1½, 1¼, ¼, 1 and 3 days, chosen so the median (1.125,
-shown 1.1) is worth reading.
+12 steps waiting in all; carry rate 100% (2 of 2: WALK-07's kept PM approval and WALK-19's
+kept Site Engineer confirmation). Walk Pm's eight material turnarounds are 2, 1, ½, 1½,
+1¼, ¼, 1 and 3 days; its three bill turnarounds run from the Site Engineer's confirmation
+(the steps are sequential): 1¾, ½ and 1. Walk Se's five are 2, ¼, 1, ½ and 1 — WALK-18's
+"work not done" is a decision too.
 
 **Attachment links open "bucket not found", deliberately.** WALK-05's evidence file
 "Call note (seeded: no file behind it)" is a row naming a file in the bucket
 `walkthrough-stub`, which exists nowhere. The detail page builds its link from
 `SUPABASE_URL`, so clicking it asks the Supabase project in your `.env` for that bucket,
-and Supabase answers "bucket not found". The four PO/PI documents behave the same way.
+and Supabase answers "bucket not found". The four PO/PI documents behave the same way,
+and so does every Site Engineer photo on a bill (`SEEDED-NO-FILE-site-photo.jpg`).
 Nothing is wrong with the page.
+
+**A bill's PDF row reads "File unavailable", deliberately.** Each bill PDF
+(`SEEDED-NO-FILE-bill.pdf`) is recorded in `walkthrough-stub`, never the private bills
+bucket your `.env` names, and `bill_pdf_url()` signs nothing outside that bucket — so no
+link is drawn and no call is made.
 
 ---
 
@@ -356,7 +403,8 @@ Local `.env` should point at the dev Supabase project; check `SUPABASE_URL` befo
 walking. The seed blanks storage either way. While it runs, uploads are stubbed and `SUPABASE_URL` / `SUPABASE_KEY` are blanked, so
 any call it did not stub fails instead of reaching production. Every file it "uploads"
 is named `SEEDED-NO-FILE-<kind>` — `SEEDED-NO-FILE-cad_zip.zip`, `SEEDED-NO-FILE-po.pdf`,
-`SEEDED-NO-FILE-pi.pdf`, `SEEDED-NO-FILE-invoice.pdf` — and recorded in the bucket
+`SEEDED-NO-FILE-pi.pdf`, `SEEDED-NO-FILE-invoice.pdf`, `SEEDED-NO-FILE-bill.pdf`,
+`SEEDED-NO-FILE-site-photo.jpg` — and recorded in the bucket
 `walkthrough-stub`, which exists nowhere. The rows are real; the objects are not. A
 download link on any of them does nothing, and the name on screen says why. (The CAD
 archive was a real, valid zip when it was validated; only the upload was skipped.)

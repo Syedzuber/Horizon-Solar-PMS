@@ -1,6 +1,7 @@
 """
 seed_walkthrough's `approvals` area (D-A26) — every material-approval state, WALK-01 ..
-WALK-14, on the synthetic walkthrough database.
+WALK-14, and every contractor-bill state, WALK-15 .. WALK-22 (4b-2), on the synthetic
+walkthrough database.
 
 What this pins, and why each earns a test:
 
@@ -9,6 +10,10 @@ What this pins, and why each earns a test:
     and its stub evidence file (WALK-05), the kept approval (WALK-07), the deputy's
     decision (WALK-10), the reassignment (WALK-09), the removed link (WALK-12), the
     pre-dispatch record and pre-order link (WALK-11);
+  * the bills went through the real views: the contractor made one through vendor_edit,
+    its site worked to Done-and-approved, every PDF and photo a stub row, the replaced PDF
+    (WALK-18), the kept confirmation (WALK-19), the shared task raised anyway (WALK-22),
+    the Site Engineer's card — and a Site Engineer's page shows none of the money;
   * the figures the walk script prints for the aging page, computed without
     approval_queries, equal approval_queries.aging_rows() — and equal the numbers the
     scenario times were chosen to give;
@@ -26,18 +31,19 @@ import re
 from datetime import timedelta
 
 from django.contrib.auth.models import User
-from django.test import TestCase, TransactionTestCase
+from django.test import Client, TestCase, TransactionTestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from projects import models as m
-from projects.approval_queries import AGING_WINDOW_DAYS, aging_rows
+from projects.approval_queries import AGING_WINDOW_DAYS, aging_rows, work_to_confirm_card
 from projects.approvals import round_snapshot
 from projects.management.commands._walkthrough_support import (
     STUB_BUCKET, STUB_FILE_PREFIX, AreaManifest,
 )
 from projects.management.commands.seed_walkthrough import (
-    APPROVAL_RECORDS, APPROVAL_USERS, WALK_AGING_WINDOW_DAYS, WALK_PASSWORD, WALK_SCRIPT,
+    APPROVAL_RECORDS, APPROVAL_USERS, BILL_CONTRACTOR, BILL_DONE_TASKS, BILL_SITE,
+    BILL_TENDER, WALK_AGING_WINDOW_DAYS, WALK_PASSWORD, WALK_SCRIPT,
     independent_aging_figures,
 )
 # Helpers only. Importing that module's TestCase classes by name would make this module
@@ -62,16 +68,40 @@ EXPECTED = {
     'WALK-12': ('material_pre_order',    'approved',  1, set()),
     'WALK-13': ('material_pre_order',    'open',      1, {('pm', 'walk.pm')}),
     'WALK-14': ('material_pre_order',    'approved',  1, set()),
+    'WALK-15': ('contractor_bill',       'open',      1, {('site_engineer', 'walk.se')}),
+    'WALK-16': ('contractor_bill',       'open',      1, {('pm', 'walk.pm')}),
+    'WALK-17': ('contractor_bill',       'approved',  1, set()),
+    'WALK-18': ('contractor_bill',       'open',      2, {('site_engineer', 'walk.se')}),
+    'WALK-19': ('contractor_bill',       'open',      2, {('pm', 'walk.pm')}),
+    'WALK-20': ('contractor_bill',       'rejected',  1, set()),
+    'WALK-21': ('contractor_bill',       'withdrawn', 1, set()),
+    'WALK-22': ('contractor_bill',       'open',      1, {('site_engineer', 'walk.se')}),
 }
 
 #: What the scenario times were chosen to give on the aging page, per assignee:
 #: (pending, oldest days, decisions, median days, proxies, decided by deputy).
-#: walk.pm's eight turnarounds are 2, 1, 0.5, 1.5, 1.25, 0.25, 1 and 3 days (median
-#: 1.125, shown 1.1); the Head's are 3, 2 and 2 — the last by the deputy.
+#: walk.pm's eight material turnarounds are 2, 1, 0.5, 1.5, 1.25, 0.25, 1 and 3 days, and
+#: its three bill turnarounds — from the Site Engineer's confirmation, the steps being
+#: sequential — 1.75 (WALK-17), 0.5 (WALK-19) and 1 (WALK-20): median 1.0. walk.se's five
+#: are 2, 0.25, 1, 0.5 and 1 (median 1.0), WALK-18's "work not done" among them. The
+#: Head's are 3, 2 and 2 — the last by the deputy.
 EXPECTED_AGING = {
-    'walk.pm':         (4, 20, 8, 1.1, 1, 0),
+    'walk.pm':         (6, 20, 11, 1.0, 1, 0),
+    'walk.se':         (3, 7, 5, 1.0, 0, 0),
     'walk.designhead': (2, 6, 3, 2.0, 0, 1),
     'walk.pm2':        (1, 5, 0, None, 0, None),
+}
+
+#: code -> (task names in the bill's order, amount) as the bill stands now.
+EXPECTED_BILLS = {
+    'WALK-15': (['AC Cable Laying'], '48500.00'),
+    'WALK-16': (['Inverter Installation'], '112000.00'),
+    'WALK-17': (['Civil Work and MMS Installation', 'Module Installation'], '235750.50'),
+    'WALK-18': (['LA and Earthing Installation', 'DC Cable Laying with Conduit'], '64000.00'),
+    'WALK-19': (['DCDB and ACDB Installation'], '86500.00'),
+    'WALK-20': (['RMS Installation'], '310000.00'),
+    'WALK-21': (['Solar Generation Meter Installation'], '22000.00'),
+    'WALK-22': (['Testing & Commissioning', 'Module Installation'], '55000.00'),
 }
 
 
@@ -92,20 +122,25 @@ class ApprovalsAreaTests(_TempManifestMixin, TestCase):
         self.assertEqual(set(AreaManifest.load(self.manifest).areas),
                          {'users', 'reference', 'approvals'})
 
-    def test_fourteen_scenarios_each_at_its_status_round_and_turn(self):
+    def test_twenty_two_scenarios_each_at_its_status_round_and_turn(self):
         self.assertEqual(sorted(self.approvals), sorted(EXPECTED))
         for code, (kind, status, current_round, waiting) in EXPECTED.items():
             with self.subTest(code=code):
                 approval = self.approvals[code]
                 self.assertEqual((approval.kind, approval.status, approval.current_round),
                                  (kind, status, current_round))
-                pending = set(self._steps(code, verdict='pending',
-                                          round=current_round)
+                # Whose turn it is: pending AND due. A bill's PM step is pending but not
+                # yet due while the Site Engineer's is open (the steps are sequential).
+                pending = set(self._steps(code, verdict='pending', round=current_round,
+                                          activated_at__isnull=False)
                               .values_list('party', 'assignee__user__username'))
                 self.assertEqual(pending, waiting)
-                # 1-3 material lines, every one on the unit vocabulary.
                 lines = m.MaterialApprovalLine.objects.filter(detail__request=approval)
-                self.assertTrue(1 <= lines.count() <= 3)
+                if kind == 'contractor_bill':
+                    self.assertFalse(lines.exists())
+                else:
+                    # 1-3 material lines, every one on the unit vocabulary.
+                    self.assertTrue(1 <= lines.count() <= 3)
 
     def test_walk_02_the_pm_approved_and_design_is_waiting(self):
         self.assertTrue(self._steps('WALK-02', party='pm', verdict='approved').exists())
@@ -213,6 +248,120 @@ class ApprovalsAreaTests(_TempManifestMixin, TestCase):
         self.assertEqual(len(set(orders.values_list('total_amount', flat=True))), 4)
         self.assertFalse(m.PaymentRequest.objects.filter(vendor_order__in=orders).exists())
 
+
+    # ---- the contractor bills (4b-2) ----------------------------------------
+    def _bill(self, code):
+        return m.ContractorBillDetail.objects.get(request=self.approvals[code])
+
+    def _page(self, username, code):
+        client = Client(SERVER_NAME='localhost')
+        client.force_login(User.objects.get(username=username))
+        response = client.get(reverse('approval_detail', args=[self.approvals[code].pk]))
+        self.assertEqual(response.status_code, 200)
+        return response.content.decode()
+
+    def test_the_contractor_was_made_one_through_vendor_edit(self):
+        vendor = m.Vendor.objects.get(name=BILL_CONTRACTOR)
+        self.assertEqual(vendor.kind, m.VENDOR_KIND_CONTRACTOR)
+        self.assertEqual(vendor.created_by.user.username, 'walk.scm')
+        for code in EXPECTED_BILLS:
+            self.assertEqual(self.approvals[code].vendor, vendor, code)
+
+    def test_the_bill_site_is_active_with_walk_se_on_its_tasks_and_ten_done_and_approved(self):
+        site = m.Project.objects.get(project_id=BILL_SITE)
+        self.assertEqual((site.status, site.program.short_tender_code,
+                          site.assigned_pm.user.username), ('Active', BILL_TENDER[0], 'walk.pm'))
+        se_tasks = m.Task.objects.filter(phase__project=site, assigned_role='Site Engineer',
+                                         is_mirror=False)
+        self.assertEqual(set(se_tasks.values_list('assigned_to__user__username', flat=True)),
+                         {'walk.se'})
+        done = se_tasks.filter(status=m.Task.DONE, approved_at__isnull=False)
+        self.assertEqual(sorted(done.values_list('task_name', flat=True)),
+                         sorted(BILL_DONE_TASKS))
+        self.assertEqual(list(se_tasks.exclude(pk__in=done).values_list('task_name', flat=True)),
+                         ['Net Meter Installation'])
+
+    def test_each_bill_names_its_tasks_and_amount_and_a_stub_pdf(self):
+        for code, (names, amount) in EXPECTED_BILLS.items():
+            with self.subTest(code=code):
+                bill = self._bill(code)
+                self.assertEqual(bill.project.project_id, BILL_SITE)
+                self.assertEqual([link.task.task_name
+                                  for link in bill.task_links.order_by('pk')], names)
+                self.assertEqual(format(bill.amount, '.2f'), amount)
+                self.assertEqual(bill.pdf_bucket, STUB_BUCKET)
+                self.assertTrue(bill.pdf_file_name.startswith(STUB_FILE_PREFIX))
+
+    def test_every_site_engineer_confirmation_carries_a_stub_photo(self):
+        confirmed = m.ApprovalStep.objects.filter(
+            request__kind='contractor_bill', party='site_engineer', verdict='approved',
+            carried_from__isnull=True)
+        self.assertEqual(set(a.title.split()[0] for a in m.ApprovalRequest.objects.filter(
+            steps__in=confirmed)), {'WALK-16', 'WALK-17', 'WALK-19', 'WALK-20'})
+        for step in confirmed:
+            photos = list(step.evidence_files.all())
+            self.assertEqual(len(photos), 1)
+            self.assertEqual(photos[0].bucket, STUB_BUCKET)
+            self.assertTrue(photos[0].file_name.startswith(STUB_FILE_PREFIX))
+            self.assertTrue(photos[0].file_name.endswith('.jpg'))
+
+    def test_walk_18_work_not_done_then_a_task_added_and_the_pdf_replaced(self):
+        not_done = self._steps('WALK-18', round=1, party='site_engineer').get()
+        self.assertEqual(not_done.verdict, 'changes_requested')
+        self.assertIsNone(self._steps('WALK-18', round=2, party='site_engineer')
+                          .get().carried_from)
+        one = round_snapshot(self.approvals['WALK-18'], 1)['bill']
+        two = round_snapshot(self.approvals['WALK-18'], 2)['bill']
+        self.assertEqual([t['task_name'] for t in one['tasks']],
+                         ['LA and Earthing Installation'])
+        self.assertEqual([t['task_name'] for t in two['tasks']],
+                         EXPECTED_BILLS['WALK-18'][0])
+        self.assertNotEqual(one['pdf']['path'], two['pdf']['path'])
+        self.assertEqual(two['pdf']['path'], self._bill('WALK-18').pdf_path)
+        self.assertEqual(one['amount'], two['amount'])
+
+    def test_walk_19_kept_the_site_engineer_and_changed_only_the_amount(self):
+        kept = self._steps('WALK-19', round=2, party='site_engineer').get()
+        self.assertIsNotNone(kept.carried_from)
+        self.assertTrue(kept.carry_reason.startswith('The work is unchanged'))
+        one = round_snapshot(self.approvals['WALK-19'], 1)['bill']
+        two = round_snapshot(self.approvals['WALK-19'], 2)['bill']
+        self.assertEqual((one['amount'], two['amount']), ('90000.00', '86500.00'))
+        self.assertEqual(one['tasks'], two['tasks'])
+        self.assertEqual(one['pdf'], two['pdf'])
+
+    def test_walk_20_rejected_and_walk_21_withdrawn(self):
+        self.assertEqual(self._steps('WALK-20', party='pm').get().verdict, 'rejected')
+        self.assertEqual(set(self._steps('WALK-21').values_list('verdict', flat=True)),
+                         {'superseded'})
+
+    def test_walk_22_shares_a_task_with_walk_17_and_draws_its_warning(self):
+        shared = set(self._bill('WALK-22').task_links.values_list('task_id', flat=True)) & set(
+            self._bill('WALK-17').task_links.values_list('task_id', flat=True))
+        self.assertEqual([m.Task.objects.get(pk=pk).task_name for pk in shared],
+                         ['Module Installation'])
+        self.assertIn('is also on bill WSW/26-27/017', self._page('walk.scm', 'WALK-22'))
+
+    def test_the_site_engineers_card_lists_their_three_bills_oldest_first(self):
+        card = work_to_confirm_card(User.objects.get(username='walk.se'))
+        self.assertEqual([row['title'].split()[0] for row in card['rows']],
+                         ['WALK-18', 'WALK-22', 'WALK-15'])
+
+    def test_the_site_engineers_pages_show_the_work_and_none_of_the_money(self):
+        money = ('WSW/26-27', '₹', 'SEEDED-NO-FILE-bill', 'File unavailable')
+        for code in ('WALK-15', 'WALK-18', 'WALK-19', 'WALK-22'):
+            with self.subTest(code=code):
+                page = self._page('walk.se', code)
+                for name in EXPECTED_BILLS[code][0]:
+                    self.assertIn(name.replace('&', '&amp;'), page)
+                for text in money + ('also on bill',):
+                    self.assertNotIn(text, page)
+        self.assertIn('No change to the work in this round.', self._page('walk.se', 'WALK-19'))
+        # SCM reads the same bill in full, its PDF row unavailable (seeded, no file).
+        page = self._page('walk.scm', 'WALK-18')
+        self.assertIn('WSW/26-27/018', page)
+        self.assertIn('File unavailable', page)
+
     # ---- the aging figures ----------------------------------------------------
     def test_the_window_is_restated_not_imported_and_agrees(self):
         self.assertEqual(WALK_AGING_WINDOW_DAYS, AGING_WINDOW_DAYS)
@@ -235,15 +384,16 @@ class ApprovalsAreaTests(_TempManifestMixin, TestCase):
 
     def test_the_figures_are_the_ones_the_scenario_times_were_chosen_to_give(self):
         figures = independent_aging_figures(timezone.now())
-        self.assertEqual(figures['total_pending'], 7)
+        self.assertEqual(figures['total_pending'], 12)
+        # Carried: WALK-07's PM approval and WALK-19's Site Engineer confirmation.
         self.assertEqual((figures['carried'], figures['fresh_approved'],
-                          figures['carry_rate']), (1, 0, 1.0))
+                          figures['carry_rate']), (2, 0, 1.0))
         got = {e['username']: (e['pending_count'], e['oldest_days'], e['decisions'],
                                e['median_days'], e['proxies'], e['by_deputy'])
                for e in figures['assignees']}
         self.assertEqual(got, EXPECTED_AGING)
         self.assertEqual([e['username'] for e in figures['assignees']],
-                         ['walk.pm', 'walk.designhead', 'walk.pm2'])
+                         ['walk.pm', 'walk.se', 'walk.designhead', 'walk.pm2'])
 
     # ---- through the chokepoint ---------------------------------------------
     def test_every_round_has_its_snapshot_and_every_ledger_ends_at_the_status(self):
@@ -290,7 +440,7 @@ class ApprovalsAreaTests(_TempManifestMixin, TestCase):
         for code, login, _text in WALK_SCRIPT:
             url = reverse('approval_detail', args=[self.approvals[code].pk])
             self.assertIn(f'{code} | {login} | {url} |', self.output)
-        self.assertIn('Total pending: 7', self.output)
+        self.assertIn('Total pending: 12', self.output)
 
     # ---- running again, and tearing down --------------------------------------
     def test_a_second_run_writes_nothing_and_prints_the_script_again(self):

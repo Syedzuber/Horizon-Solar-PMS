@@ -58,6 +58,7 @@ each reached by the fewest real actions its state needs, on the REAL clock — n
 it is backdated, so its sites age from the seed run. See `_area_fresh`.
 
 THE `approvals` AREA (D-A26) seeds every material-approval state, WALK-01 .. WALK-14, and
+every contractor-bill state, WALK-15 .. WALK-22 (4b-2, on its own site WALKB01), and
 prints a walk script — scenario, login, URL, what the page should show — with the aging
 page's expected figures, computed from the step rows without approval_queries
 (independent_aging_figures). It runs last, so every other area is unchanged by it. See
@@ -75,10 +76,11 @@ NEVER PRINTS A PASSWORD. The walkthrough password is in docs/WALKTHROUGH_DATA.md
 import io
 import uuid
 import zipfile
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import timedelta
 from decimal import Decimal
 from statistics import median
+from unittest import mock
 
 from django.contrib.auth.models import User
 from django.contrib.messages import get_messages
@@ -86,11 +88,12 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import BaseCommand, CommandError
 from django.test import Client
+from django.test.utils import override_settings
 from django.urls import reverse
 
 from projects.management.commands._walkthrough_support import (
-    AreaManifest, STUB_BUCKET, SimClock, WALK_EMAIL_DOMAIN, database_fingerprint,
-    default_manifest_path, permitted_real_email, print_db_banner,
+    AreaManifest, STUB_BUCKET, SimClock, StubSupabaseClient, WALK_EMAIL_DOMAIN,
+    database_fingerprint, default_manifest_path, permitted_real_email, print_db_banner,
     require_walkthrough_database, rows_since, seed_sandbox, stub_file_name, take_marks,
 )
 
@@ -196,6 +199,24 @@ APPROVAL_RECORDS = [
     ('WALK Structures Co', 'WALK-APO-S2', '275000', 22),
 ]
 
+#: The contractor bills' tender and site (4b-2): created, activated and worked inside the
+#: area, so `--only approvals` needs nothing from another area. The tender is passed to
+#: _program() rather than listed in TENDERS, which keys the other areas' markers.
+BILL_TENDER = ('WALKBIL', 'WALK Contractor Bills')
+BILL_SITE = 'WALKB01'
+#: Added through vendor_add (a supplier, as a blank kind saves) and then made a contractor
+#: through vendor_edit — the one way the product changes a vendor's kind.
+BILL_CONTRACTOR = 'WALK Site Works Contractor'
+#: The site's Site Engineer tasks taken to Done AND approved (task_complete_for_bill),
+#: so no bill below draws an "incomplete" warning. Net Meter Installation is left Not
+#: Started: a task the tick-list shows that no bill names.
+BILL_DONE_TASKS = [
+    'Civil Work and MMS Installation', 'Module Installation',
+    'LA and Earthing Installation', 'DC Cable Laying with Conduit',
+    'DCDB and ACDB Installation', 'Inverter Installation', 'AC Cable Laying',
+    'RMS Installation', 'Solar Generation Meter Installation', 'Testing & Commissioning',
+]
+
 #: WALK-01 is raised this many hours before the seed runs — "today", but in the past, so
 #: SimClock's millisecond steps never write a timestamp after the real now. The walk
 #: script reads the seed date back from it.
@@ -258,7 +279,86 @@ WALK_SCRIPT = [
      'aging page.'),
     ('WALK-14', 'walk.scm',
      'Approved; PM decided 99 days ago, outside the 90-day window: in no aging figure.'),
+    # --- contractor bills (4b-2), all on WALKB01 from WALK Site Works Contractor. The bill
+    # PDF row always reads "File unavailable" and every photo link opens "bucket not
+    # found" (deliberate: seeded, no file behind them). A Site Engineer-only viewer never
+    # sees the amount, bill number, bill date or PDF, any warning but an incomplete-task
+    # one, or any "what changed" line but Tasks.
+    ('WALK-15', 'walk.se',
+     'Open, round 1. Site Engineer step Pending: Walk Se\'s turn, 2 days. Site WALKB01, the '
+     'contractor, task AC Cable Laying "Done - approved", the "Confirm work done" and "Work '
+     'not done" forms. PM step not yet due. On walk.se\'s dashboard "Work to confirm" card '
+     '(WALK-18, WALK-22, WALK-15, oldest first). NOT shown: amount, bill number, bill date, '
+     'PDF.'),
+    ('WALK-16', 'walk.pm',
+     'Open, round 1. Site Engineer step "Work confirmed" by Walk Se (turnaround 1 d 23 h), '
+     'one photo. PM step Pending: Walk Pm\'s turn, 5 days (also on the "Pending approvals" '
+     'card). Amount Rs 1,12,000.00, bill WSW/26-27/016; the PDF row reads "File '
+     'unavailable".'),
+    ('WALK-17', 'walk.scm',
+     'Approved. Site Engineer "Work confirmed" (turnaround 5 h 59 min), PM Approved '
+     '(1 d 18 h); nobody\'s turn. Two tasks: Civil Work and MMS Installation, Module '
+     'Installation. Amount Rs 2,35,750.50. No warnings (an approved bill draws none).'),
+    ('WALK-18', 'walk.scm',
+     'Open, round 2. Site Engineer step Pending again: Walk Se\'s turn, 7 days; no "Kept" '
+     'badge. Round 1: Site Engineer "Work not done" with the note about the DC cable run. '
+     'Round 2 "what changed": task DC Cable Laying with Conduit added, and the bill PDF '
+     'replaced; amount unchanged at Rs 64,000.00.'),
+    ('WALK-18', 'walk.se',
+     'The same request as the Site Engineer: round 2 "what changed" shows only the added '
+     'task. NOT shown: the PDF of either round, the PDF change, the amount.'),
+    ('WALK-19', 'walk.pm',
+     'Open, round 2. Site Engineer step "Kept" from round 1 (confirmed by Walk Se, kept by '
+     'Walk Scm, reason "The work is unchanged ..."); PM step Pending: Walk Pm\'s turn, 6 '
+     'days. Round 1: PM Changes requested (the ACDB rate). Round 2 "what changed": amount '
+     'Rs 90,000.00 -> Rs 86,500.00.'),
+    ('WALK-19', 'walk.se',
+     'The same request as the Site Engineer: round 2 reads "No change to the work in this '
+     'round." NOT shown: either amount.'),
+    ('WALK-20', 'walk.pm',
+     'Rejected. Site Engineer "Work confirmed" (23 h 59 min); PM Rejected by Walk Pm (1 d) '
+     'with the note "RMS was supplied and installed by the inverter vendor ..."; nobody\'s '
+     'turn.'),
+    ('WALK-21', 'walk.scm',
+     'Withdrawn, with the note "The contractor sent this bill twice ...". Site Engineer step '
+     'Superseded; nobody\'s turn. Not on walk.se\'s "Work to confirm" card.'),
+    ('WALK-22', 'walk.scm',
+     'Open, round 1. Site Engineer step Pending: Walk Se\'s turn, 3 days. Raised with the '
+     'warnings accepted ("Raise anyway" - the request records no trace of that). Live '
+     'warning: \'Module Installation\' is also on bill WSW/26-27/017 - "WALK-17 ..." '
+     '(approved).'),
+    ('WALK-22', 'walk.se',
+     'The same request as the Site Engineer: the two tasks, and NO "also on bill" warning '
+     '(it names the other bill\'s number). NOT shown: amount, bill number, PDF.'),
 ]
+
+
+@contextmanager
+def bill_storage_stub():
+    """What the contractor-bill views need from storage, stubbed — around the bill
+    scenarios only, inside seed_sandbox().
+
+    seed_sandbox() stubs supabase_storage.get_supabase_client, but two bill paths bound
+    their client before it ran: bill_storage imports design_storage's `_client` by name,
+    and approval_views imports get_supabase_client at module load. Both are patched where
+    they are looked up. The private bills bucket is set to STUB_BUCKET, so the raise and
+    resubmit views accept a PDF and every seeded file sits in the one stub bucket.
+
+    On the walked database the PDF row reads "File unavailable": bill_pdf_url() signs
+    nothing outside the configured bills bucket, and makes no network call to find that
+    out. Photo links open "bucket not found", as WALK-05's evidence does.
+
+    TODO: this belongs in _walkthrough_support.seed_sandbox() (SECONDARY_FINDINGS, 4b-2);
+    kept here because this session could not edit that module. There it would also let
+    WALK-05's proxy evidence go through the view.
+    """
+    with ExitStack() as stack:
+        stack.enter_context(override_settings(SUPABASE_BILLS_BUCKET=STUB_BUCKET))
+        stack.enter_context(mock.patch('projects.bill_storage._client',
+                                       return_value=StubSupabaseClient()))
+        stack.enter_context(mock.patch('projects.approval_views.get_supabase_client',
+                                       return_value=StubSupabaseClient()))
+        yield
 
 
 def independent_aging_figures(now):
@@ -1711,8 +1811,8 @@ class Command(BaseCommand):
     # ============================================================== approvals
     def _area_approvals(self):
         """Every material-approval state (D-A26): WALK-01 .. WALK-14, pre-order and
-        pre-dispatch, on two new vendors and four PO/PI records. Contractor bills are not
-        here; Session 4a adds them to this area.
+        pre-dispatch, on two new vendors and four PO/PI records. Then every contractor-bill
+        state, WALK-15 .. WALK-22 (4b-2), on a site of their own: see _approval_bills.
 
         EVERY STATE GOES THROUGH THE REAL APPROVAL VIEWS, as the person the product
         requires — bar one decision. WALK-05's proxy approval carries an evidence FILE,
@@ -2029,6 +2129,260 @@ class Command(BaseCommand):
                             'Modules for the pilot sites.', [module], days=100,
                             vendor='WALK Modules Co')
         decide(s14, pm, 'walk.pm', approve, days=99)
+
+        # --- WALK-15 .. WALK-22: contractor bills -------------------------------------------
+        self._approval_bills()
+
+    def _approval_bills(self):
+        """Every contractor-bill state (4b-2), WALK-15 .. WALK-22, on the site WALKB01 of
+        tender WALKBIL, from WALK Site Works Contractor — ALL THROUGH THE REAL VIEWS, the
+        raise's two POSTs and "Raise anyway" included, with storage stubbed around them
+        (bill_storage_stub). Nothing here calls the chokepoint.
+
+        The site is created, activated and worked here, so `--only approvals` needs no
+        other area: walk.pm creates it (and so is its assigned PM, which keeps the "not
+        the assigned PM" warning away), assigns every Site Engineer task to walk.se, and
+        walk.se submits ten of them, which walk.pm approves — an OPEX task is complete
+        for a bill only when Done AND approved. walk.pm, not walk.qaqc: a Site Engineer
+        reaches only a site where they hold a task, and giving walk.qaqc one would make
+        them a second Site Engineer on the site, so the raise page would preselect nobody.
+        So no bill draws a warning but WALK-22, which names a task WALK-17 (approved)
+        already bills.
+
+        Times are (days ago, hours). A bill's steps are sequential — the Site Engineer
+        first, then the PM — so each PM turnaround runs from the Site Engineer's
+        confirmation. The aging figures they give are pinned in tests_walkthrough_approvals.
+        """
+        # Imported here as every area imports its models — not a circular import: the
+        # command module loads no product module until the guards have run.
+        from projects import models as m
+        T = m.Task
+
+        # --- the contractor: added as a supplier, made a contractor through vendor_edit ---
+        other = m.VendorCategory.objects.get(name='Other')
+        vendor_fields = {
+            'name': BILL_CONTRACTOR, 'contact_person': 'Walk Site Works Office',
+            'phone': '9800000201', 'email': f'site.works@{WALK_EMAIL_DOMAIN}',
+            'address': 'Synthetic address (walkthrough only)', 'categories': [other.pk],
+        }
+        self._post('walk.scm', 'vendor_add', data=vendor_fields,
+                   check=lambda: m.Vendor.objects.filter(
+                       name=BILL_CONTRACTOR, kind=m.VENDOR_KIND_SUPPLIER).exists(),
+                   what='contractor added (a supplier)')
+        contractor = m.Vendor.objects.get(name=BILL_CONTRACTOR)
+        self._post('walk.scm', 'vendor_edit', {'vendor_id': contractor.pk},
+                   dict(vendor_fields, kind=m.VENDOR_KIND_CONTRACTOR),
+                   check=lambda: m.Vendor.objects.filter(
+                       pk=contractor.pk, kind=m.VENDOR_KIND_CONTRACTOR).exists(),
+                   what='contractor made a contractor through vendor_edit')
+
+        # --- the site, its Site Engineer, and ten tasks Done and approved -----------------
+        program = self._program('approvals', days_ago=35, tender=BILL_TENDER, planned=1)
+        site = self._activated(program, BILL_SITE, 30)
+        pid = site.project_id
+        # The site's own Site Engineer tasks, in the order its workspace shows them.
+        for t in T.objects.filter(phase__project=site, assigned_role='Site Engineer',
+                                  is_mirror=False).order_by('phase__phase_order',
+                                                            'task_order', 'pk'):
+            self._assign(site, t, 'walk.se', 29)
+        # Every task a bill may name (no mirrors), by name — the template's names are unique.
+        tasks = {t.task_name: t for t in T.objects.filter(phase__project=site,
+                                                          is_mirror=False)}
+        for name in BILL_DONE_TASKS:
+            t = tasks[name]
+            kw = {'project_id': pid, 'task_id': t.pk}
+            with self.clock.at(26, history=f'task:{t.pk}'):
+                self._post('walk.se', 'task_status_update', kw,
+                           {'status': 'In Progress', 'due_date': self._plus_days(10)},
+                           check=lambda t=t: T.objects.get(pk=t.pk).status == T.IN_PROGRESS,
+                           what=f'{pid} start {name}')
+            with self.clock.at(22, history=f'task:{t.pk}'):
+                self._post('walk.se', 'task_submit_for_approval', kw,
+                           {'submission_remarks': 'Work complete; photos with the bill.'},
+                           check=lambda t=t: T.objects.get(pk=t.pk).submitted_at is not None,
+                           what=f'{pid} submit {name}')
+            with self.clock.at(18, history=f'task:{t.pk}'):
+                self._post('walk.pm', 'task_approve', kw,
+                           {'approval_remarks': 'Checked on site.'},
+                           check=lambda t=t: T.objects.filter(
+                               pk=t.pk, status=T.DONE, approved_at__isnull=False).exists(),
+                           what=f'{pid} approve {name}')
+
+        # --- helpers ---------------------------------------------------------------------
+        se, pm = self.p['walk.se'], self.p['walk.pm']
+        raise_query = f'kind={m.APPROVAL_KIND_CONTRACTOR_BILL}&project={site.pk}'
+
+        def at(code, days, hours=0):
+            return self.clock.at(days, history=f'approval:{code}', hours=hours)
+
+        def photo():
+            return SimpleUploadedFile(stub_file_name('site-photo', 'jpg'),
+                                      b'\xff\xd8\xff\xe0 walkthrough stub',
+                                      content_type='image/jpeg')
+
+        def raise_bill(code, title, description, names, amount, number, *, days, hours=0,
+                       warned=None):
+            """The raise page's step-2 POST (?project= in the URL). `warned`: the POST
+            must first come back with that warning and raise nothing, and is then sent
+            again with "Raise anyway" ticked — the same key, the PDF chosen again."""
+            full_title = f'{code} {title}'
+            with at(code, days, hours):
+                data = {'client_uuid': str(uuid.uuid4()), 'title': full_title,
+                        'description': description, 'vendor': contractor.pk,
+                        'task': [tasks[n].pk for n in names], 'amount': amount,
+                        'bill_number': number, 'bill_date': self._plus_days(-1),
+                        'site_engineer_assignee': se.pk, 'pm_assignee': pm.pk}
+                if warned:
+                    response = self._post(
+                        'walk.scm', 'approval_create', data=dict(data, bill_pdf=self._pdf('bill')),
+                        query=raise_query, ok=(200,),
+                        check=lambda: not m.ApprovalRequest.objects.filter(
+                            title=full_title).exists(),
+                        what=f'{code} warnings first')
+                    if warned not in response.content.decode():
+                        raise CommandError(f'{code}: the raise page did not warn "{warned}".')
+                    data['confirm_warnings'] = '1'
+                # 302 only: a 200 is the warnings page, which no other bill should draw.
+                self._post('walk.scm', 'approval_create',
+                           data=dict(data, bill_pdf=self._pdf('bill')), query=raise_query,
+                           ok=(302,), check=lambda: m.ApprovalRequest.objects.filter(
+                               title=full_title, status=m.APPROVAL_OPEN).exists(),
+                           what=f'raise {code}')
+            return m.ApprovalRequest.objects.get(title=full_title)
+
+        def decide(approval, party, who, verdict, *, days, hours=0, note='', photos=False):
+            approval.refresh_from_db()
+            step = m.ApprovalStep.objects.get(
+                request=approval, round=approval.current_round, party=party,
+                verdict=m.APPROVAL_STEP_PENDING, activated_at__isnull=False)
+            code = approval.title.split()[0]
+            data = {'verdict': verdict, 'note': note}
+            if photos:
+                data['site_photos'] = photo()
+            with at(code, days, hours):
+                self._post(who, 'approval_decide', {'step_pk': step.pk}, data,
+                           check=lambda: m.ApprovalStep.objects.filter(
+                               pk=step.pk, verdict=verdict,
+                               decided_by=self.p[who]).exists(),
+                           what=f'{code} {party} {verdict} by {who}')
+
+        def resubmit_values(approval, **changes):
+            """The resubmit form as the page draws it (revise=1), the bill's own values
+            unless changed."""
+            detail = m.ContractorBillDetail.objects.get(request=approval)
+            values = {'revise': '1', 'title': approval.title,
+                      'description': approval.description,
+                      'amount': format(detail.amount, '.2f'),
+                      'bill_number': detail.bill_number,
+                      'bill_date': detail.bill_date.isoformat(),
+                      'task': list(detail.task_links.order_by('pk')
+                                   .values_list('task_id', flat=True))}
+            values.update(changes)
+            return values
+
+        def status_is(approval, status, current_round=None):
+            def check():
+                row = m.ApprovalRequest.objects.get(pk=approval.pk)
+                return row.status == status and (current_round is None
+                                                 or row.current_round == current_round)
+            return check
+
+        approve, changes, reject = (m.APPROVAL_STEP_APPROVED,
+                                    m.APPROVAL_STEP_CHANGES_REQUESTED,
+                                    m.APPROVAL_STEP_REJECTED)
+        se_party, pm_party = m.APPROVAL_PARTY_SITE_ENGINEER, m.APPROVAL_PARTY_PM
+        # Titles and descriptions carry no money: the Site Engineer reads both.
+
+        with bill_storage_stub():
+            # --- WALK-15 (B1): raised, the Site Engineer's turn --------------------------
+            raise_bill('WALK-15', 'AC cable laying, WALKB01',
+                       'AC cable from the inverter to the ACDB.', ['AC Cable Laying'],
+                       '48500.00', 'WSW/26-27/015', days=2)
+
+            # --- WALK-16 (B2): work confirmed with a photo, the PM's turn -----------------
+            b2 = raise_bill('WALK-16', 'Inverter installation, WALKB01',
+                            'Inverter mounting and termination.', ['Inverter Installation'],
+                            '112000.00', 'WSW/26-27/016', days=7)
+            decide(b2, se_party, 'walk.se', approve, days=5, photos=True,
+                   note='Inverter mounted and terminated; photo attached.')
+
+            # --- WALK-17 (B3): approved -----------------------------------------------------
+            b3 = raise_bill('WALK-17', 'Civil, MMS and module installation, WALKB01',
+                            'Civil work, mounting structure and module installation.',
+                            ['Civil Work and MMS Installation', 'Module Installation'],
+                            '235750.50', 'WSW/26-27/017', days=12)
+            decide(b3, se_party, 'walk.se', approve, days=12, hours=6, photos=True)
+            decide(b3, pm_party, 'walk.pm', approve, days=10)
+
+            # --- WALK-18 (B4): "work not done"; resubmitted with a task added and the PDF
+            # replaced. The Site Engineer said no, so nothing can be kept: round 2 starts
+            # at the Site Engineer again.
+            b4 = raise_bill('WALK-18', 'LA and earthing, WALKB01',
+                            'Lightning arrester and earthing.', ['LA and Earthing Installation'],
+                            '64000.00', 'WSW/26-27/018', days=9)
+            decide(b4, se_party, 'walk.se', changes, days=8,
+                   note='The earthing strip runs along the DC cable route, which this bill '
+                        'does not name; bill the two together.')
+            with at('WALK-18', 7):
+                self._post('walk.scm', 'approval_resubmit', {'approval_pk': b4.pk},
+                           resubmit_values(
+                               b4, task=[tasks['LA and Earthing Installation'].pk,
+                                         tasks['DC Cable Laying with Conduit'].pk],
+                               bill_pdf=self._pdf('bill'),
+                               note='The contractor\'s revised bill names the DC cable run '
+                                    'as well.'),
+                           ok=(302,), check=status_is(b4, m.APPROVAL_OPEN, 2),
+                           what='WALK-18 resubmit')
+
+            # --- WALK-19 (B5): the PM asks for changes; resubmitted with a new amount, the
+            # Site Engineer's confirmation kept (the tasks are unchanged).
+            b5 = raise_bill('WALK-19', 'DCDB and ACDB installation, WALKB01',
+                            'DC and AC distribution boxes.', ['DCDB and ACDB Installation'],
+                            '90000.00', 'WSW/26-27/019', days=8)
+            decide(b5, se_party, 'walk.se', approve, days=8, hours=12, photos=True)
+            decide(b5, pm_party, 'walk.pm', changes, days=7,
+                   note='The ACDB rate is above the agreed rate; ask the contractor for a '
+                        'revised amount.')
+            with at('WALK-19', 6):
+                self._post('walk.scm', 'approval_resubmit', {'approval_pk': b5.pk},
+                           resubmit_values(
+                               b5, amount='86500.00',
+                               note='Amount revised by the contractor at the agreed rate.',
+                               **{f'keep_{se_party}': 'on',
+                                  f'keep_reason_{se_party}':
+                                      'The work is unchanged; only the amount was revised.'}),
+                           ok=(302,),
+                           check=lambda: m.ApprovalStep.objects.filter(
+                               request=b5, round=2, party=se_party,
+                               carried_from__isnull=False).exists(),
+                           what='WALK-19 resubmit keeping the Site Engineer')
+
+            # --- WALK-20 (B6): rejected by the PM --------------------------------------------
+            b6 = raise_bill('WALK-20', 'RMS installation, WALKB01',
+                            'Remote monitoring system.', ['RMS Installation'],
+                            '310000.00', 'WSW/26-27/020', days=5)
+            decide(b6, se_party, 'walk.se', approve, days=4, photos=True)
+            decide(b6, pm_party, 'walk.pm', reject, days=3,
+                   note='RMS was supplied and installed by the inverter vendor; this '
+                        'contractor did not do it.')
+
+            # --- WALK-21 (B7): withdrawn by SCM ----------------------------------------------
+            b7 = raise_bill('WALK-21', 'Generation meter installation, WALKB01',
+                            'Solar generation meter.', ['Solar Generation Meter Installation'],
+                            '22000.00', 'WSW/26-27/021', days=4)
+            with at('WALK-21', 3):
+                self._post('walk.scm', 'approval_withdraw', {'approval_pk': b7.pk},
+                           {'note': 'The contractor sent this bill twice; the correct copy '
+                                    'follows.'},
+                           check=status_is(b7, m.APPROVAL_WITHDRAWN), what='WALK-21 withdraw')
+
+            # --- WALK-22 (B8): raised anyway over the warning that Module Installation is
+            # already on WALK-17. Last, so WALK-17 is there to be warned about.
+            raise_bill('WALK-22', 'Testing and module touch-up, WALKB01',
+                       'Testing and commissioning, and module re-alignment.',
+                       ['Testing & Commissioning', 'Module Installation'],
+                       '55000.00', 'WSW/26-27/022', days=3,
+                       warned='is also on bill WSW/26-27/017')
 
     def _walk_script(self):
         """The walk script and the aging page's expected figures, read from the database
