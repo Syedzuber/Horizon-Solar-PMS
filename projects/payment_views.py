@@ -7,8 +7,11 @@ screen. It WRITES NOTHING OF ITS OWN. Approve, hold and reject are the O4 views 
 order_views.py, reached through payment_queue_action() so they return here; mark-paid is
 payments.mark_payment_paid(), the one writer of APPROVED -> CONFIRMED.
 
-THE PROJECT TYPE IS THE ORDER'S, NEVER THE ANCHOR'S. Each tab filters on
-`vendor_order__project_type`. `PaymentRequest.project` is a nullable display anchor (O2d):
+THE PROJECT TYPE IS THE ORDER'S (OR, SINCE 5a, THE BILL'S SITE'S), NEVER THE ANCHOR'S.
+Each tab filters through payments.payment_type_q(). A contractor bill's payment is listed
+on its site's tab beside the PO/PI payments, showing the bill where an order row shows its
+order; its approve / hold / reject arrive in 5b, so no action is drawn on it yet.
+`PaymentRequest.project` is a nullable display anchor (O2d):
 reading scope through it drops every site-less payment, which is exactly the defect
 EXECUTION_MODULE_DEFERRED.md §25 recorded against the Finance dashboard. Nothing here
 filters on a project's status or joins through `project` to decide what is listed — a
@@ -39,10 +42,13 @@ from .decorators import login_required
 from .forms import check_typed_date
 from .models import (
     PaymentRequest, PaymentRequestHold, VendorOrder, VendorOrderDocument,
-    VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE, effective_amount_sum,
+    VendorOrderProgram, VendorOrderSite, VENDOR_ORDER_DOC_INVOICE, committed_total,
+    effective_amount_sum,
 )
 from .order_views import _order_money, payment_approve, payment_hold, payment_reject
-from .payments import PaymentRefused, mark_payment_paid, payment_counts
+from .payments import (
+    PaymentRefused, mark_payment_paid, payment_counts, payment_project_type, payment_type_q,
+)
 from .permissions import (
     PAYMENT_MARK_PAID_ROLES, user_can_approve_payment, user_can_hold_payment,
     user_can_mark_paid, user_can_reject_payment, user_can_view_payment_queue,
@@ -111,7 +117,8 @@ def _invoice_awaited_orders(project_type):
 
 def _search(queryset, text):
     """Narrow to payments whose vendor, PO number, PI number, tender or site code
-    contains `text`.
+    contains `text` — or, for a contractor bill's payment (5a), whose bill number, bill
+    site code, that site's tender or the bill's contractor does.
 
     The tender arm has two halves: a tender the order NAMES (VendorOrderProgram — how a
     site-less order is found) and the tender of a site it was sized against. Matching is
@@ -123,14 +130,68 @@ def _search(queryset, text):
              | Q(vendor_order__pi_number__icontains=text)
              | Q(vendor_order__programs__program__name__icontains=text)
              | Q(vendor_order__sites__project__program__name__icontains=text)
-             | Q(vendor_order__sites__project__project_id__icontains=text))
+             | Q(vendor_order__sites__project__project_id__icontains=text)
+             | Q(contractor_bill__bill_number__icontains=text)
+             | Q(contractor_bill__project__project_id__icontains=text)
+             | Q(contractor_bill__project__program__name__icontains=text)
+             | Q(contractor_bill__request__vendor__name__icontains=text))
     return queryset.filter(pk__in=PaymentRequest.objects.filter(match).values('pk'))
+
+
+def _bill_part(payment):
+    """The bill half of a queue row for a contractor bill's payment (5a): the bill where
+    an order row shows its order, and the display-only money line "bill · paid ·
+    committed" (ruling Q7) — the bill's ceiling rule is 5b's, not this.
+
+    Reads the bill, its site, its request's contractor and its payments from the queue's
+    select_related / prefetch, so no query. The link is the bill's approval page, which
+    Finance cannot open until 5b (D-A58): they get its 403 page.
+    """
+    bill = payment.contractor_bill
+    payments = list(bill.payments.all())
+    contractor = bill.request.vendor
+    return {
+        'order':     None,
+        'bill': {
+            'site':       bill.project.project_id,
+            'contractor': contractor.name if contractor is not None else '—',
+            'number':     bill.bill_number,
+            'url':        reverse('approval_detail', args=[bill.request_id]),
+        },
+        'money': {
+            'total':     bill.amount,
+            'paid':      sum((p.effective_amount for p in payments
+                              if p.status == PaymentRequest.CONFIRMED), Decimal('0')),
+            'committed': committed_total(payments),
+        },
+        'documents': [],
+        # Approve, hold and reject on a bill's payment are 5b; _payment_for_action refuses
+        # them meanwhile, so no button is drawn that the view would turn away.
+        'can_approve': False,
+        'can_hold':    False,
+        'can_reject':  False,
+    }
 
 
 def _row(user, payment, today):
     """One queue row: the payment, its order's money, its latest hold, its documents,
     and which actions THIS viewer may take. The flags are the predicates the views
-    enforce, asked here only to decide what to draw — each is re-checked under a lock."""
+    enforce, asked here only to decide what to draw — each is re-checked under a lock.
+
+    A contractor bill's payment (5a) has no order: its bill half is _bill_part(). Mark
+    paid is asked of it as of any payment (ruling Q3 — the writer never reads the order).
+    """
+    if payment.contractor_bill_id is not None:
+        holds = list(payment.holds.all())
+        return {
+            'payment':  payment,
+            **_bill_part(payment),
+            'counted':  payment.status != PaymentRequest.REJECTED,
+            'age_days': (today - timezone.localdate(payment.requested_date)).days,
+            'hold':     holds[0] if holds and payment.status in (
+                            PaymentRequest.ON_HOLD, PaymentRequest.PENDING_APPROVAL) else None,
+            'can_mark_paid': user_can_mark_paid(user, payment),
+        }
     order = payment.vendor_order
     payments = list(order.payments.all())
     documents = list(order.documents.all())
@@ -171,10 +232,16 @@ def payment_queue(request):
         return HttpResponseForbidden()
 
     # A5: CAPEX is not operational (EXECUTION_MODULE_DEFERRED.md §28), so its tab is drawn
-    # only once a CAPEX order exists — an always-empty tab reads as "nothing to pay".
+    # only once a CAPEX order — or, since 5a, a payment on a CAPEX site's contractor bill
+    # (ruling Q1) — exists: an always-empty tab reads as "nothing to pay", and a CAPEX
+    # bill's payment must not be listed nowhere. ONE query, as the order-only exists() was:
+    # a UNION of the two arms under LIMIT 1.
+    capex_shown = (VendorOrder.objects.filter(project_type='CAPEX').values('pk')
+                   .union(PaymentRequest.objects
+                          .filter(contractor_bill__project__project_type='CAPEX')
+                          .values('pk')))
     shown_tabs = [(value, label) for value, label in QUEUE_TABS
-                  if value != 'CAPEX'
-                  or VendorOrder.objects.filter(project_type='CAPEX').exists()]
+                  if value != 'CAPEX' or capex_shown.exists()]
     tab_values = [value for value, _ in shown_tabs]
     tab = request.GET.get('tab', '')
     if tab not in tab_values:
@@ -211,18 +278,23 @@ def payment_queue(request):
               'url': '?' + _query_string(tab=tab, status=value, q=q)}
              for value, label in QUEUE_STATUS_CHIPS]
 
-    queryset = PaymentRequest.objects.filter(vendor_order__project_type=tab)
+    queryset = PaymentRequest.objects.filter(payment_type_q([tab]))
     if status:
         queryset = queryset.filter(status=status)
     if q:
         queryset = _search(queryset, q)
+    # The bill side (5a) rides the same query as joins — its site and its contractor,
+    # null on a PO/PI row — and one prefetch for its payments' money line, which runs no
+    # query at all on a page with no bill payment, so a PO/PI page costs what it did.
     queryset = (queryset
                 .select_related('vendor', 'vendor_order', 'requested_by',
-                                'approved_by__user', 'confirmed_by')
+                                'approved_by__user', 'confirmed_by',
+                                'contractor_bill__project', 'contractor_bill__request__vendor')
                 .prefetch_related(
                     Prefetch('vendor_order__documents',
                              queryset=VendorOrderDocument.objects.order_by('doc_type', 'pk')),
                     'vendor_order__payments',
+                    'contractor_bill__payments',
                     Prefetch('vendor_order__sites',
                              queryset=VendorOrderSite.objects.select_related('project')),
                     Prefetch('vendor_order__programs',
@@ -291,10 +363,14 @@ def payment_mark_paid(request, payment_pk):
     change while the page is open — the status, and whether this person approved it — is
     the service's refusal, a message and a return to the queue, never a 500.
     """
+    # The tab to return to is the payment's project type — its order's, or its bill's
+    # site's (5a); both sides are joined here so payment_project_type() costs no query.
     payment = get_object_or_404(
-        PaymentRequest.objects.select_related('vendor', 'vendor_order'), pk=payment_pk)
+        PaymentRequest.objects.select_related('vendor', 'vendor_order',
+                                              'contractor_bill__project'),
+        pk=payment_pk)
     back = _safe_queue_next(request) or (
-        f"{reverse('payment_queue')}?{_query_string(tab=payment.vendor_order.project_type)}")
+        f"{reverse('payment_queue')}?{_query_string(tab=payment_project_type(payment))}")
     if request.method != 'POST':
         return redirect(back)
     profile = getattr(request.user, 'profile', None)

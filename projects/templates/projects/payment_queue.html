@@ -99,6 +99,16 @@ single-line and the rest would render into the page.
             <div class="text-muted">{{ p.requested_by.get_full_name|default:p.requested_by.username }}</div>
           </td>
           <td>
+            {% if row.bill %}
+            {% comment %}
+            5a: a contractor bill's payment shows the bill where an order row shows its order,
+            and links to the bill's approval page (Finance gets its 403 page until 5b, D-A58).
+            {% endcomment %}
+            <div class="fw-semibold">{{ row.bill.contractor }}</div>
+            <div>Bill {{ row.bill.number }} · {{ row.bill.site }}</div>
+            <div class="text-muted">bill ₹{{ m.total|floatformat:2 }} · paid ₹{{ m.paid|floatformat:2 }} · committed{% if row.counted %} incl. this{% endif %} ₹{{ m.committed|floatformat:2 }}</div>
+            <div class="mt-1"><a href="{{ row.bill.url }}">Open bill</a></div>
+            {% else %}
             <div class="fw-semibold">{{ p.vendor.name|default:"—" }}</div>
             <div>{% if o.po_number %}PO {{ o.po_number }}{% endif %}{% if o.po_number and o.pi_number %} · {% endif %}{% if o.pi_number %}PI {{ o.pi_number }}{% endif %}</div>
             <div class="text-muted">order ₹{{ m.total|floatformat:2 }} · paid ₹{{ m.paid|floatformat:2 }} · committed{% if row.counted %} incl. this{% endif %} ₹{{ m.committed|floatformat:2 }}</div>
@@ -109,6 +119,7 @@ single-line and the rest would render into the page.
               {% endfor %}
               <a href="{% url 'vendor_order_detail' o.pk %}">Open order</a>
             </div>
+            {% endif %}
           </td>
           <td>{{ p.scope_label }}</td>
           <td class="text-end">{% include 'projects/partials/payment_amount.html' with p=p places=2 bare=True %}</td>

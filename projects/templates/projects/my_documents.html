@@ -312,19 +312,30 @@
           nullable project anchor. Status is the model's own five-state label.
           {% endcomment %}
           {% for pr in pr_list %}
-          {% with o=pr.vendor_order %}
+          {% with o=pr.vendor_order b=pr.contractor_bill %}
           <tr>
-            <td class="ps-3 fw-semibold small">{% if o.po_number %}PO {{ o.po_number }}{% elif o.pi_number %}PI {{ o.pi_number }}{% else %}Order #{{ o.pk }}{% endif %}</td>
+            {% comment %}
+            5a: a contractor bill's payment names its bill and its contractor, and opens the
+            bill's approval page, where an order's payment names and opens its order.
+            {% endcomment %}
+            <td class="ps-3 fw-semibold small">{% if b %}Bill {{ b.bill_number }}{% elif o.po_number %}PO {{ o.po_number }}{% elif o.pi_number %}PI {{ o.pi_number }}{% else %}Order #{{ o.pk }}{% endif %}</td>
             <td class="small">{{ pr.scope_label }}</td>
-            <td class="small">{{ pr.vendor.name|default:"—" }}</td>
+            <td class="small">{% if b %}{{ b.request.vendor.name|default:"—" }}{% else %}{{ pr.vendor.name|default:"—" }}{% endif %}</td>
             <td class="small fw-semibold">{% include 'projects/partials/payment_amount.html' with p=pr places=0 %}</td>
             <td class="text-muted small">{{ pr.requested_date|date:"d M Y" }}</td>
             <td class="small">{{ pr.get_status_display }}</td>
             <td class="pe-3">
+              {% if b %}
+              <a href="{% url 'approval_detail' b.request_id %}"
+                 class="btn btn-outline-secondary btn-sm">
+                Open bill
+              </a>
+              {% else %}
               <a href="{% url 'vendor_order_detail' o.pk %}#payment-{{ pr.pk }}"
                  class="btn btn-outline-secondary btn-sm">
                 Open order
               </a>
+              {% endif %}
             </td>
           </tr>
           {% endwith %}

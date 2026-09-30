@@ -1372,9 +1372,11 @@ def dashboard_finance(request):
             'milestones',
             Prefetch(
                 'payment_requests',
+                # contractor_bill (5a) is a join, null on a PO/PI payment: a bill's
+                # payment names its bill number where an order's names its PO / PI.
                 queryset=PaymentRequest.objects.filter(
                     status=PaymentRequest.APPROVED,
-                ).select_related('vendor', 'vendor_order'),
+                ).select_related('vendor', 'vendor_order', 'contractor_bill'),
                 to_attr='pending_payment_requests',
             ),
         )
@@ -1436,15 +1438,20 @@ def dashboard_finance(request):
         payment_requests = []
         for pr in project.pending_payment_requests:
             order = pr.vendor_order
+            if order is None:
+                # 5a: a contractor bill's payment has no order; it names its bill.
+                order_ref = f'Bill {pr.contractor_bill.bill_number}'
+            else:
+                # O6: the order's PO number, else its PI number, else "Order #<pk>".
+                order_ref = (f'PO {order.po_number}' if order.po_number
+                             else f'PI {order.pi_number}' if order.pi_number
+                             else f'Order #{order.pk}')
             payment_requests.append({
                 'pk':             pr.pk,
                 'vendor':         pr.vendor.name if pr.vendor else '—',
                 # The payment itself, for the amount partial's two-figure rule (A2).
                 'payment':        pr,
-                # O6: the order's PO number, else its PI number, else "Order #<pk>".
-                'order_ref':      (f'PO {order.po_number}' if order.po_number
-                                   else f'PI {order.pi_number}' if order.pi_number
-                                   else f'Order #{order.pk}'),
+                'order_ref':      order_ref,
                 'requested_date': pr.requested_date,
             })
 
@@ -12676,10 +12683,13 @@ def my_documents(request):
     # O6: read through the ORDER, never `project` (a nullable display anchor, O2d), so a
     # site-less payment is listed. Each row names its scope (scope_label) and links to
     # its order; the two prefetches are what scope_label reads.
+    # 5a: a contractor bill's payment reads its bill, site and contractor from the same
+    # query (joins, null on a PO/PI row) and links to the bill instead of an order.
     pr_list = []
     if role == 'SCM':
         pr_list = (PaymentRequest.objects.filter(requested_by=request.user)
-                   .select_related('vendor', 'vendor_order')
+                   .select_related('vendor', 'vendor_order', 'contractor_bill__project',
+                                   'contractor_bill__request__vendor')
                    .prefetch_related(
                        Prefetch('vendor_order__sites',
                                 queryset=VendorOrderSite.objects.select_related('project')),
@@ -12727,9 +12737,16 @@ def payment_request_detail(request, project_id, request_id):
     No access check here, and none is needed: the destination is the gate.
     vendor_order_detail refuses anyone user_can_view_vendor_order() refuses, so the
     redirect reveals only an order number.
+
+    A contractor bill's payment (5a) goes to the bill's approval page instead, which is
+    likewise its own gate (user_can_view_approval_request — Finance is refused until 5b).
     """
-    payment = get_object_or_404(PaymentRequest.objects.only('pk', 'vendor_order_id'),
-                                pk=request_id)
+    payment = get_object_or_404(
+        PaymentRequest.objects.select_related('contractor_bill')
+        .only('pk', 'vendor_order_id', 'contractor_bill__request_id'),
+        pk=request_id)
+    if payment.contractor_bill_id is not None:
+        return redirect('approval_detail', approval_pk=payment.contractor_bill.request_id)
     return redirect(reverse('vendor_order_detail', args=[payment.vendor_order_id])
                     + f'#payment-{payment.pk}')
 

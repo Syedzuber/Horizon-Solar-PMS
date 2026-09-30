@@ -2277,6 +2277,11 @@ class PaymentRequest(models.Model):
     still a PaymentRequest; what changes is what it is raised AGAINST (a VendorOrder, via
     `vendor_order`) and that it now has room for an approval step before Finance pays.
 
+    SINCE 5a (D-A56) A PAYMENT BELONGS TO EXACTLY ONE OF TWO THINGS: a PO/PI record
+    (`vendor_order`) or an approved contractor bill (`contractor_bill`). The CHECK
+    `payment_request_order_xor_bill` holds it. Readers that need a payment's project type
+    use payments.payment_type_q() / payment_project_type(), which read whichever is set.
+
     "No edit/cancel by design" still holds for the request's CONTENT — vendor, amount,
     order. The status moving through approval is not an edit; it is the lifecycle.
     """
@@ -2311,11 +2316,13 @@ class PaymentRequest(models.Model):
     # project_id when the order has sites, and is NULL when the order has none — a
     # central purchase sized against several tenders belongs to no one site.
     #
-    # MONEY AND SCOPE ALWAYS COME FROM `vendor_order`: its lines are what was bought, its
-    # sites are the requirement it was sized against, its programs are the tenders. No
-    # reader may treat this column as the payment's scope, and a reader that needs the
-    # payment's scope reads `scope_label` or the order itself. Nullable since O2d
-    # (migration 0095); every row written before then carries a site.
+    # MONEY AND SCOPE COME FROM WHAT THE PAYMENT BELONGS TO — `vendor_order` or, since 5a,
+    # `contractor_bill` — never from this column. For an order: its lines are what was
+    # bought, its sites the requirement it was sized against, its programs the tenders.
+    # For a bill: the bill's one site (D-A10) and the amount billed. No reader may treat
+    # this column as the payment's scope, and a reader that needs the payment's scope
+    # reads `scope_label` or the order / bill itself. Nullable since O2d (migration 0095);
+    # every row written before then carries a site.
     project  = models.ForeignKey(
         Project, on_delete=models.CASCADE, related_name='payment_requests',
         null=True, blank=True,
@@ -2325,14 +2332,22 @@ class PaymentRequest(models.Model):
         related_name='payment_requests',
     )
 
-    # The order this payment is made against. NOT NULL since O2 (migration 0093), which
-    # retired the stand-alone project-page raise — the only path that created a payment
-    # with no order (its view was deleted in O6).
+    # The order this payment is made against. NOT NULL from O2 (migration 0093), which
+    # retired the stand-alone project-page raise, until 5a (migration 0109): a payment on
+    # a contractor bill has no order. Exactly one of this and `contractor_bill` is set —
+    # see payment_request_order_xor_bill.
     # PROTECT: an order that has had money paid against it cannot disappear from under
     # the payment.
     vendor_order = models.ForeignKey(
         'VendorOrder', on_delete=models.PROTECT,
-        related_name='payments',
+        related_name='payments', null=True, blank=True,
+    )
+
+    # The approved contractor bill this payment pays (5a, D-A56). Null on every PO/PI
+    # payment. PROTECT, as for the order: a bill with money against it stays.
+    contractor_bill = models.ForeignKey(
+        'ContractorBillDetail', on_delete=models.PROTECT,
+        related_name='payments', null=True, blank=True,
     )
 
     # O6 DROPPED FIVE LEGACY COLUMNS HERE (migration 0101): boq_item, invoice_number and
@@ -2431,6 +2446,15 @@ class PaymentRequest(models.Model):
                            | models.Q(approved_amount__isnull=False)),
                 name='payment_request_approval_has_amount',
             ),
+            # 5a (D-A56): a payment belongs to a PO/PI record OR a contractor bill —
+            # never both, never neither. Every row before 0109 has an order and no bill.
+            models.CheckConstraint(
+                condition=((models.Q(vendor_order__isnull=False)
+                            & models.Q(contractor_bill__isnull=True))
+                           | (models.Q(vendor_order__isnull=True)
+                              & models.Q(contractor_bill__isnull=False))),
+                name='payment_request_order_xor_bill',
+            ),
         ]
 
     @property
@@ -2463,7 +2487,12 @@ class PaymentRequest(models.Model):
         Four forms: the site's project_id for a single-site order; "N sites" for several;
         the tender names for a site-less order sized against programs; "Order #<pk>"
         when the order names neither.
+
+        A contractor bill's payment (5a) names the bill's one site. The id test comes
+        first and costs no query, so a PO/PI payment reads exactly as before.
         """
+        if self.contractor_bill_id is not None:
+            return self.contractor_bill.project.project_id
         return self.vendor_order.scope_label
 
     @property
@@ -2481,7 +2510,12 @@ class PaymentRequest(models.Model):
         # `project` is nullable since O2d and __str__ must not raise on a site-less
         # payment. Reads the FK id, not scope_label: __str__ is called from places that
         # hold no prefetch, and scope_label walks two relations.
-        anchor = self.project.project_id if self.project_id else f'order #{self.vendor_order_id}'
+        if self.project_id:
+            anchor = self.project.project_id
+        elif self.vendor_order_id:
+            anchor = f'order #{self.vendor_order_id}'
+        else:
+            anchor = f'bill #{self.contractor_bill_id}'   # 5a: a bill payment has no order
         return f"PR-{self.pk} {anchor} — {self.vendor} ₹{self.amount}"
 
 

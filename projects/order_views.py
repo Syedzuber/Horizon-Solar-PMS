@@ -86,9 +86,10 @@ from .permissions import (
     user_can_hold_payment, user_can_raise_group_order, user_can_raise_vendor_order,
     user_can_reject_payment, user_can_request_order_payment,
     user_can_respond_to_hold, user_can_view_program_vendor_orders,
-    user_can_view_project, user_can_view_project_vendor_orders,
+    user_can_view_payment_queue, user_can_view_project, user_can_view_project_vendor_orders,
     user_can_view_vendor_order, user_is_payment_approver,
 )
+from .payments import payment_project_type
 from .submission_guard import (
     already_submitted, confirmed, document_size_kb, documents_duplicate, keyed_redirect,
     order_duplicate, payment_duplicate, url_key,
@@ -1915,16 +1916,39 @@ def _payment_for_action(request, payment_pk):
     """
     payment = get_object_or_404(
         PaymentRequest.objects
-        .select_related('vendor_order', 'vendor', 'requested_by')
+        .select_related('vendor_order', 'vendor', 'requested_by', 'contractor_bill__project')
         .prefetch_related('holds', 'vendor_order__sites__project'),
         pk=payment_pk,
     )
+    # A contractor bill's payment (5a) has no order for the checks below to read, and its
+    # approve / hold / reject / answer arrive in 5b: refused here, for every caller of
+    # this function, as a message and a redirect rather than a 500. Nothing is written.
+    if payment.contractor_bill_id is not None:
+        return None, None, _refuse_bill_payment(request, payment)
     if not user_can_view_vendor_order(request.user, payment.vendor_order):
         return None, None, HttpResponseForbidden()
     profile = getattr(request.user, 'profile', None)
     if profile is None:
         return None, None, HttpResponseForbidden()
     return payment, profile, None
+
+
+def _refuse_bill_payment(request, payment):
+    """The 5a answer to an approver or SCM action on a contractor bill's payment: says so,
+    changes nothing, and sends the person where they can see the payment.
+
+    WHERE TO: the queue tab of the payment's project type for anyone who may open the
+    queue (Finance, CEO, Admin, System Admin, approver-flag holders); anyone else — SCM,
+    who answers holds and cannot open the queue — to the bill's approval page, which SCM
+    reads. The destination remains the gate: it answers 403 to anyone it would refuse.
+    payment_queue_action still swaps a redirect for its safe `next`, as for any refusal.
+    """
+    messages.error(request, "Approving, holding or rejecting a contractor bill's payment, "
+                            "and answering its hold, are not available yet. Nothing was "
+                            "changed.")
+    if user_can_view_payment_queue(request.user):
+        return redirect(f"{reverse('payment_queue')}?tab={payment_project_type(payment)}")
+    return redirect('approval_detail', approval_pk=payment.contractor_bill.request_id)
 
 
 def _payment_redirect(order_pk):

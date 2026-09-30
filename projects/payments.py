@@ -12,6 +12,9 @@ Three things live here, and all three are here because more than one door reache
     dashboard's payment tiles and the CEO dashboard's finance tile all call it, so the
     three figures cannot disagree.
 
+  * payment_type_q() / payment_project_type() — a payment's project type, from its order
+    or (5a) its contractor bill's site. Every tab, tile and count filters through them.
+
   * ceo_payment_strip() — the CEO Tenders strip (S2): the same scope as payment_counts()
     with test-site payments dropped, in four buckets. A separate function, so the
     queue and Finance keep counting every row.
@@ -53,21 +56,45 @@ logger = logging.getLogger(__name__)
 PaymentTotals = namedtuple('PaymentTotals', 'count amount requested')
 
 
+def payment_type_q(project_types):
+    """A Q over PaymentRequest: the payment's project type is one of `project_types`.
+
+    THE ONE DEFINITION of a payment's project type (5a), which every tab, tile and count
+    filters through: the ORDER's type for a PO/PI payment, the BILL's site's type for a
+    contractor bill's payment (D-A10: one site per bill). Exactly one of the two is set
+    (payment_request_order_xor_bill), and both arms are many-to-one, so the OR can never
+    repeat a row. Never `PaymentRequest.project`, the nullable display anchor (O2d).
+    """
+    types = list(project_types)
+    return (Q(vendor_order__project_type__in=types)
+            | Q(contractor_bill__project__project_type__in=types))
+
+
+def payment_project_type(payment):
+    """payment_type_q() for one row in hand: the order's type, or the bill site's type.
+    Costs no query when the caller select_related the side it reads."""
+    if payment.contractor_bill_id is not None:
+        return payment.contractor_bill.project.project_type
+    return payment.vendor_order.project_type
+
+
 def payment_counts(project_types=None):
     """{status: PaymentTotals} for every one of the five statuses, zero-filled. ONE query.
 
-    THE SCOPE IS THE ORDER'S. `project_types` filters on `vendor_order__project_type`
-    (None = every type); nothing here joins through `PaymentRequest.project`, which is a
-    nullable display anchor (O2d), and nothing filters on a project's status. A site-less
-    payment, and a payment on a Draft OPEX site, are counted like any other — each is
-    money somebody has to approve or pay.
+    THE SCOPE IS THE ORDER'S — or, for a contractor bill's payment (5a), the bill's site's:
+    `project_types` filters through payment_type_q() (None = every type); nothing here
+    joins through `PaymentRequest.project`, which is a nullable display anchor (O2d), and
+    nothing filters on a project's status. A site-less payment, and a payment on a Draft
+    OPEX site, are counted like any other — each is money somebody has to approve or pay.
+    Test sites are NOT excluded, for orders and bills alike (audit I; only the CEO strip
+    drops them).
 
     `amount` sums effective_amount, never `amount` (O4b): an approved figure totals what
     was approved. `requested` sums what was asked for, so a screen can show both.
     """
     queryset = PaymentRequest.objects.all()
     if project_types is not None:
-        queryset = queryset.filter(vendor_order__project_type__in=list(project_types))
+        queryset = queryset.filter(payment_type_q(project_types))
     rows = (queryset.values('status')
             .annotate(n=Count('pk'), effective_sum=effective_amount_sum(),
                       requested_sum=Sum('amount'))
@@ -91,12 +118,14 @@ def ceo_payment_strip(project_types, today):
     """The CEO Tenders payment strip (S2): {'awaiting', 'on_hold', 'approved',
     'paid_month'} -> StripBucket. TWO queries.
 
-    SCOPED LIKE payment_counts() — through `vendor_order__project_type`, never through
-    `project` — PLUS ONE TERM payment_counts() does not have: a request is dropped when
-    EVERY site its order was sized against is test data (Project.is_test). A request
-    whose order names at least one real site is kept, and so is one whose order names no
-    site at all: "no project link" is not evidence of test data. payment_counts() itself
-    is left alone because the queue and Finance must keep counting every row.
+    SCOPED LIKE payment_counts() — through payment_type_q(), never through `project` —
+    PLUS ONE TERM payment_counts() does not have: a request is dropped when EVERY site its
+    order was sized against is test data (Project.is_test). A request whose order names at
+    least one real site is kept, and so is one whose order names no site at all: "no
+    project link" is not evidence of test data. A contractor bill's payment (5a) is
+    dropped when the bill's one site is test data — the same meaning, ruling Q2.
+    payment_counts() itself is left alone because the queue and Finance must keep
+    counting every row.
 
     WHICH AMOUNT EACH CARD SUMS IS A DECISION, NOT AN ACCIDENT:
       awaiting / on_hold — `amount`, what SCM asked for. A request re-awaiting after a
@@ -112,12 +141,16 @@ def ceo_payment_strip(project_types, today):
     """
     queryset = PaymentRequest.objects.all()
     if project_types is not None:
-        queryset = queryset.filter(vendor_order__project_type__in=list(project_types))
+        queryset = queryset.filter(payment_type_q(project_types))
     # Two Exists rather than a join through vendor_order__sites: a join multiplies each
     # request by its site count and every Sum below would be counted that many times.
+    # A bill's payment has no order sites, so this term never drops it; the next one does.
     order_sites = VendorOrderSite.objects.filter(order=OuterRef('vendor_order'))
     queryset = queryset.exclude(
         Exists(order_sites) & ~Exists(order_sites.filter(project__is_test=False)))
+    # A bill names one site through a many-to-one chain, so this is a join, not a
+    # multiplier; a PO/PI payment has no bill and is never dropped by it.
+    queryset = queryset.exclude(contractor_bill__project__is_test=True)
 
     month_start = today.replace(day=1)
     next_month_start = (month_start + timedelta(days=32)).replace(day=1)
@@ -318,6 +351,15 @@ def _notice(transition, payment):
     return [], ''
 
 
+def _payment_link(payment):
+    """Where a payment's notice points: its order's page, or — for a contractor bill's
+    payment (5a) — the bill's approval page. Reads the bill row the caller
+    select_related, so no query."""
+    if payment.contractor_bill_id is not None:
+        return reverse('approval_detail', args=[payment.contractor_bill.request_id])
+    return reverse('vendor_order_detail', args=[payment.vendor_order_id])
+
+
 def send_payment_notices(transition):
     """Send the in-app notices for one payment_request ledger row. Called after commit by
     the StatusTransition receiver in signals.py, so a rolled-back move tells nobody.
@@ -330,13 +372,24 @@ def send_payment_notices(transition):
     makes for its own channels.
     """
     try:
+        # contractor_bill rides the same query (a LEFT JOIN, null on a PO/PI payment) so
+        # _payment_link() reads a bill's request id without a second query.
         payment = (PaymentRequest.objects
-                   .select_related('vendor', 'project', 'requested_by__profile')
+                   .select_related('vendor', 'project', 'requested_by__profile',
+                                   'contractor_bill')
                    .filter(pk=transition.subject_id).first())
         if payment is None:
             return
         recipients, message = _notice(transition, payment)
-        link = reverse('vendor_order_detail', args=[payment.vendor_order_id])
+        # A LINK THAT CANNOT BE BUILT NEVER COSTS THE NOTICE (5a ruling). It used to sit
+        # inside this try with nothing else guarding it, so a failing reverse() logged one
+        # line and told nobody anything. The link is a convenience; the message is the
+        # notice — so the failure is logged and the notice goes out without a link.
+        try:
+            link = _payment_link(payment)
+        except Exception as exc:
+            logger.error('send_payment_notices: no link for payment %s — %s', payment.pk, exc)
+            link = ''
         for recipient in recipients:
             if recipient.pk == transition.actor_id:
                 continue
