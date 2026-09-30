@@ -10,7 +10,7 @@ payments.mark_payment_paid(), the one writer of APPROVED -> CONFIRMED.
 THE PROJECT TYPE IS THE ORDER'S (OR, SINCE 5a, THE BILL'S SITE'S), NEVER THE ANCHOR'S.
 Each tab filters through payments.payment_type_q(). A contractor bill's payment is listed
 on its site's tab beside the PO/PI payments, showing the bill where an order row shows its
-order; its approve / hold / reject arrive in 5b, so no action is drawn on it yet.
+order, with the same approve / hold / reject / mark-paid actions (5b).
 `PaymentRequest.project` is a nullable display anchor (O2d):
 reading scope through it drops every site-less payment, which is exactly the defect
 EXECUTION_MODULE_DEFERRED.md §25 recorded against the Finance dashboard. Nothing here
@@ -138,14 +138,15 @@ def _search(queryset, text):
     return queryset.filter(pk__in=PaymentRequest.objects.filter(match).values('pk'))
 
 
-def _bill_part(payment):
+def _bill_part(user, payment):
     """The bill half of a queue row for a contractor bill's payment (5a): the bill where
     an order row shows its order, and the display-only money line "bill · paid ·
-    committed" (ruling Q7) — the bill's ceiling rule is 5b's, not this.
+    committed" (ruling Q7). The ceiling itself is enforced by the writer and the approve
+    view (5b), under a lock on the bill row; this line only shows it.
 
     Reads the bill, its site, its request's contractor and its payments from the queue's
     select_related / prefetch, so no query. The link is the bill's approval page, which
-    Finance cannot open until 5b (D-A58): they get its 403 page.
+    Finance may open because this payment points at it (D-A58, 5b).
     """
     bill = payment.contractor_bill
     payments = list(bill.payments.all())
@@ -165,11 +166,15 @@ def _bill_part(payment):
             'committed': committed_total(payments),
         },
         'documents': [],
-        # Approve, hold and reject on a bill's payment are 5b; _payment_for_action refuses
-        # them meanwhile, so no button is drawn that the view would turn away.
-        'can_approve': False,
-        'can_hold':    False,
-        'can_reject':  False,
+        # The approver predicates alone, with no reader term beside them (an order row
+        # has user_can_view_vendor_order). Every flag holder reads the bill: the flag is
+        # confined to Finance and CEO (PAYMENT_APPROVER_ROLES), CEO reads every request,
+        # and Finance reads a bill a payment points at (D-A58) — this row is such a
+        # payment. So the view's reader check never refuses a button drawn here, and
+        # asking it would cost a query per row.
+        'can_approve': user_can_approve_payment(user, payment),
+        'can_hold':    user_can_hold_payment(user, payment),
+        'can_reject':  user_can_reject_payment(user, payment),
     }
 
 
@@ -185,7 +190,7 @@ def _row(user, payment, today):
         holds = list(payment.holds.all())
         return {
             'payment':  payment,
-            **_bill_part(payment),
+            **_bill_part(user, payment),
             'counted':  payment.status != PaymentRequest.REJECTED,
             'age_days': (today - timezone.localdate(payment.requested_date)).days,
             'hold':     holds[0] if holds and payment.status in (

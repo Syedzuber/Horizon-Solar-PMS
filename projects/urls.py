@@ -533,6 +533,7 @@ urlpatterns = [
          name='approval_resubmit'),
     path('approvals/<int:approval_pk>/withdraw/',    approval_views.approval_withdraw,
          name='approval_withdraw'),
+    path('approvals/<int:approval_pk>/request-payment/', approval_views.approval_bill_payment, name='approval_bill_payment'),  # Payments 5b: SCM forwards an approved bill to Finance
     path('approvals/steps/<int:step_pk>/decide/',    approval_views.approval_decide,
          name='approval_decide'),
     path('approvals/steps/<int:step_pk>/proxy/',     approval_views.approval_record_proxy,

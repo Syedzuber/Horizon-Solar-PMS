@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% comment %}
+Payments 5b — "Request payment from Finance" on an approved contractor bill
+(approval_views.approval_bill_payment). SCM only.
+
+The amount defaults to what is left of the bill (the bill amount less every payment not
+rejected); a smaller figure is allowed and the rest can be requested later (D-A57). The
+browser check below only spares a round trip: the writer re-checks the ceiling under a
+lock on the bill row.
+
+The key is in the URL and in the hidden client_uuid (submission_guard): Back and reload
+keep it, and a repeated submission is answered with the payment it already made. The
+duplicate warning is the PO/PI payment page's, with its "Create anyway" override.
+{% endcomment %}
+{% block title %}Request Payment — Bill {{ bill.bill_number }} — SolarPMS{% endblock %}
+
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-start gap-2 mb-3">
+  <div>
+    <h4 class="mb-0">Request payment from Finance</h4>
+    <small class="text-muted text-break">Bill {{ bill.bill_number }} · {{ contractor }} · {{ bill.project.project_id }} — {{ bill.project.customer_name }}</small>
+  </div>
+  <a href="{% url 'approval_detail' approval.pk %}#payments" class="btn btn-outline-secondary btn-sm flex-shrink-0">← Bill</a>
+</div>
+
+{% if site_deleted %}
+<div class="alert alert-warning small">This site has been deleted. The bill was approved, so it can still be paid.</div>
+{% endif %}
+
+{% if available > 0 %}
+<form method="post" id="bpForm" action="{% url 'approval_bill_payment' approval.pk %}"
+      data-available="{{ available|stringformat:'s' }}">
+  {% csrf_token %}
+  <input type="hidden" name="client_uuid" value="{{ client_uuid }}">
+
+  <div class="card shadow-sm mb-3">
+    <div class="card-body">
+      <p class="small mb-3">Bill ₹{{ total|floatformat:2 }} · committed ₹{{ committed|floatformat:2 }} · paid ₹{{ paid|floatformat:2 }}<br>
+        Available to request: <strong>₹{{ available|floatformat:2 }}</strong>
+        <span class="text-muted">— the bill amount less every payment not rejected.</span></p>
+      <div class="row g-2">
+        <div class="col-12 col-md-4">
+          <label class="form-label small mb-0" for="bpAmount">Amount (₹) <span class="text-danger">*</span></label>
+          <input type="number" step="0.01" min="0.01" max="{{ available|stringformat:'s' }}" inputmode="decimal"
+                 name="payment_amount" id="bpAmount" class="form-control" required
+                 value="{{ form.payment_amount|stringformat:'s' }}">
+        </div>
+        <div class="col-12 col-md-8">
+          <label class="form-label small mb-0" for="bpNote">Note (optional)</label>
+          <input type="text" name="payment_note" id="bpNote" class="form-control"
+                 value="{{ form.payment_note }}">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {% if duplicate %}
+  {# The content-match warning (submission_guard, D3): a likely repeat, named, with an override. Never a block. #}
+  <div class="alert alert-warning small" role="alert" id="bpDuplicate">
+    <div class="fw-semibold">{{ duplicate.heading }}</div>
+    {% for line in duplicate.lines %}<div>{{ line }}</div>{% endfor %}
+    <div class="mt-1"><a href="{{ duplicate.url }}" target="_blank" rel="noopener">Open it</a> to check before you continue.</div>
+    <div class="form-check mt-2">
+      <input class="form-check-input" type="checkbox" name="confirm_duplicate" value="1" id="bpConfirmDuplicate">
+      <label class="form-check-label" for="bpConfirmDuplicate">{{ duplicate.override_label }}</label>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="alert alert-danger small py-2 d-none" id="bpProblems" role="alert"></div>
+
+  <div class="d-grid d-md-flex justify-content-md-end mb-4">
+    <button type="submit" class="btn btn-brand" id="bpSubmit">Request payment</button>
+  </div>
+</form>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var form = document.getElementById('bpForm');
+  var available = parseFloat(form.dataset.available);
+  /* Only spares a round trip; the server re-checks the ceiling under a lock. */
+  form.addEventListener('submit', function (e) {
+    var box = document.getElementById('bpProblems');
+    var amt = parseFloat(document.getElementById('bpAmount').value);
+    var problem = '';
+    if (isNaN(amt) || amt <= 0) {
+      problem = 'The payment amount must be more than 0.';
+    } else if (Math.round(amt * 100) > Math.round(available * 100)) {
+      problem = "The payment (₹" + amt.toFixed(2) + ") is more than the bill's balance still available to request (₹" + available.toFixed(2) + ").";
+    }
+    box.textContent = problem;
+    box.classList.toggle('d-none', !problem);
+    if (problem) { e.preventDefault(); return; }
+    var btn = document.getElementById('bpSubmit');
+    btn.dataset.label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+
+  /* Back to this page from the one it led to: the browser can restore it exactly as it
+     was left, button disabled. Re-enable it with its own label. The form keeps its
+     client_uuid, so a resubmit is still answered as a repeat by the server. */
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    var btn = document.getElementById('bpSubmit');
+    if (btn && btn.disabled) {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  });
+});
+</script>
+{% else %}
+<div class="alert alert-info small">Nothing is left to request on this bill: every rupee of it is already requested or paid.</div>
+{% endif %}
+
+{% endblock %}

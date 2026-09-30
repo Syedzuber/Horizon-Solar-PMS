@@ -1,7 +1,9 @@
 """
 Duplicate submission on the PO / PI, purchases and payment screens (28 Sep 2026).
 
-Two guards, both shared by the five create paths and the documents append:
+Two guards, both shared by the five create paths and the documents append — and, since
+Payments 5b, by the contractor bill's "Request payment from Finance" form, through its own
+bill_payment_* pair so the PO/PI answers are untouched:
 
 1. THE URL-HELD KEY (approval_create's pattern, Approvals 2a). A form GET without a
    valid ?key= is redirected to the same URL with a fresh one, and the form's hidden
@@ -43,7 +45,7 @@ from .models import (
     PaymentRequest, VendorOrder, VendorOrderDocument, committed_total,
     VENDOR_ORDER_DOC_TYPE_CHOICES,
 )
-from .permissions import user_can_view_vendor_order
+from .permissions import user_can_view_approval_request, user_can_view_vendor_order
 
 #: How far back a content match looks. Long enough to cover a form abandoned, reopened
 #: and filled again; short enough that a genuine second order of the same size a day
@@ -104,6 +106,25 @@ def already_submitted(request, order):
         return HttpResponseForbidden(format_html('<p>{}</p>', text))
     messages.warning(request, text)
     return redirect('vendor_order_detail', order_pk=order.pk)
+
+
+def bill_payment_already_submitted(request, payment):
+    """already_submitted() for a contractor bill's payment (5b): the bill the key's
+    payment was raised against, with the same message and fresh-form link — or, for
+    anyone who cannot open that bill, the message and a 403 naming nothing about it.
+
+    Its own function rather than a branch in already_submitted(), so the PO/PI answer is
+    untouched. Reads the bill's request and its steps: two queries, on this rare path
+    only."""
+    text = format_html('{} <a href="{}">Open a fresh form</a>.',
+                       ALREADY_SUBMITTED, fresh_form_url(request))
+    # The bill page's own gate decides who may be sent there, as the order page's does
+    # in already_submitted(): anyone it would refuse gets the message and the 403.
+    approval = payment.contractor_bill.request
+    if not user_can_view_approval_request(request.user, approval):
+        return HttpResponseForbidden(format_html('<p>{}</p>', text))
+    messages.warning(request, text)
+    return redirect(reverse('approval_detail', args=[approval.pk]) + '#payments')
 
 
 def confirmed(request):
@@ -325,6 +346,34 @@ def payment_duplicate(order, amount):
                 [f'₹{payment.amount} against {_order_ref(order)}, requested by '
                  f'{_person(payment.requested_by)} {_age(payment.requested_date, now)}.'],
                 reverse('vendor_order_detail', args=[order.pk]),
+                'Create anyway')
+    return None
+
+
+def bill_payment_duplicate(bill, amount):
+    """payment_duplicate() for a contractor bill (5b): a payment request of the same
+    amount on the same bill within the window, by anyone, that still counts. None when
+    there is none.
+
+    Called OUTSIDE the bill-row lock, as its PO/PI twin is outside the order's: a warning
+    is advice, and the lock in payments.create_bill_payment is for the ceiling alone.
+    """
+    now = timezone.now()
+    # The window's payments of this amount on this bill, newest first — a handful at most.
+    rows = (PaymentRequest.objects
+            .filter(contractor_bill=bill, amount=amount,
+                    requested_date__gte=now - DUPLICATE_WINDOW)
+            .select_related('requested_by')
+            .order_by('-requested_date', '-pk'))
+    for payment in rows:
+        # committed_total()'s own rule, as in payment_duplicate(): a rejected payment is
+        # not a repeat, because raising it again is how a rejection is recovered.
+        if committed_total([payment]) > 0:
+            return _warning(
+                'This looks like a payment request already raised.',
+                [f'₹{payment.amount} against bill {bill.bill_number}, requested by '
+                 f'{_person(payment.requested_by)} {_age(payment.requested_date, now)}.'],
+                reverse('approval_detail', args=[bill.request_id]) + '#payments',
                 'Create anyway')
     return None
 

@@ -15,6 +15,9 @@ Three things live here, and all three are here because more than one door reache
   * payment_type_q() / payment_project_type() — a payment's project type, from its order
     or (5a) its contractor bill's site. Every tab, tile and count filters through them.
 
+  * raise_pending_payment() / create_bill_payment() (5b) — the write every raise path
+    ends in, and the one writer of a contractor bill's payment, under a lock on the bill.
+
   * ceo_payment_strip() — the CEO Tenders strip (S2): the same scope as payment_counts()
     with test-site payments dropped, in four buckets. A separate function, so the
     queue and Finance keep counting every row.
@@ -40,8 +43,8 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
-    PaymentRequest, PaymentRequestHold, UserProfile, VendorOrderSite,
-    effective_amount_sum, log_activity,
+    ContractorBillDetail, PaymentRequest, PaymentRequestHold, UserProfile, VendorOrderSite,
+    committed_total, effective_amount_sum, log_activity,
 )
 from .notifications import send_notification
 from .permissions import user_can_mark_paid
@@ -197,6 +200,74 @@ def ceo_payment_strip(project_types, today):
         'paid_month': StripBucket(agg['paid_n'], agg['paid_sum'] or zero, None,
                                   agg['paid_partial']),
     }
+
+
+# ---------------------------------------------------------------------------
+# Raising a payment request (5b)
+# ---------------------------------------------------------------------------
+
+def raise_pending_payment(*, project, vendor, amount, note, user, profile, client_uuid,
+                          vendor_order=None, contractor_bill=None):
+    """Create one PENDING_APPROVAL payment request and its first ledger row. Returns it.
+
+    THE SHARED TAIL OF BOTH RAISE PATHS: order_views._create_order_payment (a PO/PI
+    record) and create_bill_payment below (a contractor bill). Each caller has already
+    taken ITS OWN lock — the order row or the bill row — and checked its own balance;
+    this writes what they have in common. MUST be called inside that caller's atomic
+    block, as record_transition's contract requires. Exactly one of `vendor_order` and
+    `contractor_bill` is set (payment_request_order_xor_bill holds it in the database).
+
+    Raises IntegrityError on a repeated client_uuid; the caller answers it.
+    """
+    pr = PaymentRequest.objects.create(
+        vendor_order=vendor_order, contractor_bill=contractor_bill, project=project,
+        vendor=vendor, amount=amount, note=note, requested_by=user,
+        # PENDING_APPROVAL since O4, as on every raise page. The balance checks are
+        # unaffected: committed_total() counts every status but REJECTED, so a pending
+        # payment holds its money exactly as an approved one does.
+        status=PaymentRequest.PENDING_APPROVAL,
+        client_uuid=client_uuid,
+    )
+    record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL,
+                      from_status='', actor=profile, project=project)
+    return pr
+
+
+def create_bill_payment(bill, amount, note, user, profile, client_uuid):
+    """Forward part or all of an approved contractor bill to Finance: one PENDING_APPROVAL
+    payment request of `amount` against `bill`, if it fits what is left of the bill.
+    Returns (pr, available) — pr is None when the amount did not fit.
+
+    THE ONE WRITER of a bill's payment (5b, D-A57: a bill may be paid in several). The
+    caller (approval_views.approval_bill_payment) has checked
+    user_can_request_bill_payment() and the duplicate warning; this does the arithmetic.
+
+    VENDOR AND PROJECT COME FROM THE BILL (5a ruling Q5): the vendor is the bill's
+    contractor and the project its one site. The Finance dashboard lists payments by
+    that project, and every notice names that vendor; nothing in the database ties
+    either to the bill, so this is where it holds.
+
+    Raises IntegrityError on a repeated client_uuid.
+    """
+    pr, available = None, None
+    with transaction.atomic():
+        # THE RACE, as on an order. Two SCM tabs (or a retry with a new key) can each
+        # read the same balance and each ask for all of it; checked separately, both
+        # pass and together exceed the bill. Locking the BILL row serialises every
+        # payment on this bill: the second waits here until the first commits, then
+        # recounts and sees it. The lock comes BEFORE the read. payment_approve takes the
+        # same row first, then the request, and no path takes them the other way round.
+        locked = ContractorBillDetail.objects.select_for_update().get(pk=bill.pk)
+        # Every payment on the bill, read after the lock; committed_total() is the one
+        # rule for what is spoken for (a rejected payment frees its money).
+        available = locked.amount - committed_total(
+            PaymentRequest.objects.filter(contractor_bill=locked))
+        if amount <= available:
+            pr = raise_pending_payment(
+                contractor_bill=locked, project=bill.project, vendor=bill.request.vendor,
+                amount=amount, note=note, user=user, profile=profile,
+                client_uuid=client_uuid)
+    return pr, available
 
 
 class PaymentRefused(Exception):

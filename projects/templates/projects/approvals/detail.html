@@ -47,6 +47,10 @@ Site Engineer step reads "Work confirmed" / "Work not done", lists its site phot
 answered with two forms: "Confirm work done" (photos required) and "Work not done" (a
 note required, photos optional). A kept Site Engineer step lists "Photos from round N".
 SCM's proxy form on that step offers the same two outcomes.
+
+Payments 5b: an approved bill shows its payments (_bill_payments.html) under the Request
+card — for every full reader, never the bill's Site Engineer — with the approver's and
+SCM's actions and SCM's "Request payment from Finance".
 {% endcomment %}
 {% block title %}Approval #{{ approval.pk }} — SolarPMS{% endblock %}
 
@@ -169,6 +173,9 @@ SCM's proxy form on that step offers the same two outcomes.
 
 {# ── PO/PI records covered (Approvals 3b; approved pre-order requests only) ── #}
 {% if order_links %}{% include "projects/approvals/_order_links.html" %}{% endif %}
+
+{# ── Payments (5b; an approved contractor bill, full readers only — never the SE) ── #}
+{% if bill_payments %}{% include "projects/approvals/_bill_payments.html" with bp=bill_payments %}{% endif %}
 
 {# ── Rounds, newest first ────────────────────────────────────────────── #}
 {% for round in rounds %}

@@ -100,6 +100,7 @@ from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.contrib import messages
 from django.core.paginator import Paginator
+from django.db import IntegrityError
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -138,7 +139,8 @@ from .bill_storage import (
 from .decorators import _forbidden, login_required
 from .models import (
     ApprovalAttachment, ApprovalOrderLink, ApprovalRequest, ApprovalStep,
-    ContractorBillDetail, StatusTransition, VendorOrder,
+    ContractorBillDetail, PaymentRequest, PaymentRequestHold, StatusTransition, VendorOrder,
+    committed_total, log_activity,
     APPROVAL_APPROVED, APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED,
     APPROVAL_KIND_CHOICES, APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_DISPATCH,
     APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_OPEN,
@@ -148,18 +150,23 @@ from .models import (
     APPROVAL_STEP_PENDING, APPROVAL_STEP_REJECTED, APPROVAL_STEP_SUPERSEDED,
     REASON_CREATED, REASON_RESUBMITTED, SUBJECT_APPROVAL_REQUEST,
 )
-from .order_views import _remove_uploaded
+from .order_views import _parse_decimal, _payment_row, _remove_uploaded
+from .payments import create_bill_payment
 from .permissions import (
     APPROVAL_PORTFOLIO_ROLES, user_has_design_head_authority,
     approval_request_visibility_q, user_can_decide_approval_step,
     user_can_link_approval_order, user_can_raise_approval_request,
+    user_can_request_bill_payment, user_can_view_forwarded_bill,
     user_can_reassign_approval_step, user_can_record_proxy_decision,
     user_can_resubmit_approval_request,
     user_can_view_approval_aging, user_can_view_approval_list,
     user_can_view_approval_request, user_can_view_vendor_order,
     user_can_withdraw_approval_request, user_may_answer_approval_step,
 )
-from .submission_guard import keyed_redirect
+from .submission_guard import (
+    already_submitted, bill_payment_already_submitted, bill_payment_duplicate, confirmed,
+    keyed_redirect, url_key,
+)
 from .supabase_storage import get_supabase_client, vendor_order_document_url
 from .units import UNIT_COUNT, UNIT_LABELS, UNITS, format_quantity
 from .views import _validate_and_upload
@@ -218,6 +225,9 @@ def sees_bill(user, approval, steps):
     Site Engineer who is now a PM on the bill therefore sees it all. `steps` are the
     request's steps already in memory, so no query.
 
+    Finance, on a bill it has been asked to pay, sees it in full too (D-A58, 5b:
+    permissions.user_can_view_forwarded_bill) — one EXISTS query, Finance only.
+
     Lives here, not in permissions.py, by ruling (Q6, 4a-3); it belongs there
     (SECONDARY_FINDINGS, 4a-3)."""
     profile = getattr(user, 'profile', None)
@@ -229,8 +239,12 @@ def sees_bill(user, approval, steps):
     others = [s for s in steps if s.party != APPROVAL_PARTY_SITE_ENGINEER]
     if any(s.assignee_id == profile.pk or s.decided_by_id == profile.pk for s in others):
         return True
-    return (any(s.party == APPROVAL_PARTY_DESIGN for s in others)
-            and user_has_design_head_authority(user))
+    if (any(s.party == APPROVAL_PARTY_DESIGN for s in others)
+            and user_has_design_head_authority(user)):
+        return True
+    # Finance never holds a Site Engineer step, so a Finance reader is never "only the
+    # Site Engineer": the payer reads the amount and the PDF it is paying against.
+    return user_can_view_forwarded_bill(user, approval)
 
 # The decision buttons, in the order drawn. Plain English, never the stored value.
 _DECISIONS = [
@@ -581,7 +595,7 @@ def _work_only(block):
     number, the bill date or the PDF. The keys stay, empty, so no template can draw them by
     accident; `work_only` tells the block to leave their rows out."""
     return dict(block, bill_number=None, bill_date=None, amount=None, pdf_name=None,
-                pdf_size_kb=None, pdf_url=None, work_only=True)
+                pdf_size_kb=None, pdf_url=None, detail=None, work_only=True)
 
 
 def bill_display(bill, contractor_name, sign, full=True):
@@ -680,11 +694,63 @@ def _bill_now(approval, steps, sign, full=True):
                         for t in tasks],
         'warnings':    warnings,
         'work_only':   False,
+        # The live row, for the payments section (5b): its amount is the ceiling and its
+        # site says whether it has been deleted. Blanked by _work_only, like the amount.
+        'detail':      detail,
     }
     if not full:
         return _work_only(block)
     block['pdf_url'] = sign(detail.pdf_bucket, detail.pdf_path)
     return block
+
+
+def _bill_money(detail, payments):
+    """A bill's money as the payments section and the forward page show it (5b): the
+    amount billed, what is committed (committed_total — every payment not rejected), what
+    is paid, and what is still available to request. From rows the caller holds."""
+    committed = committed_total(payments)
+    return {
+        'total':     detail.amount,
+        'committed': committed,
+        'paid':      sum((p.effective_amount for p in payments
+                          if p.status == PaymentRequest.CONFIRMED), Decimal('0')),
+        'available': detail.amount - committed,
+    }
+
+
+def _bill_payments(user, approval, detail):
+    """The bill page's payments section (5b): every payment on the bill, newest first,
+    with its status, amounts and holds, the bill's money, and the SCM doors — "Request
+    payment from Finance" and the reply to a hold.
+
+    Each row is order_views._payment_row(), the order page's own: the same four action
+    flags (approve, hold, reject, respond), asked of the same predicates the views
+    enforce, so an approver may act here as on an order page and SCM answers a hold here
+    (ruling Q5). A PM on the bill gets rows with no flags — read-only (ruling Q4).
+
+    The CALLER decides who gets this at all: approval_detail asks only for a viewer who
+    sees the bill in full (sees_bill), so the Site Engineer never costs or sees it.
+    Two queries: the payments, and their holds with the people named on them.
+    """
+    # Payments and their holds in two queries: _payment_row's open_hold and hold panel
+    # walk the prefetched list, and the approver and payer names ride the first query.
+    payments = list(
+        PaymentRequest.objects.filter(contractor_bill=detail)
+        .select_related('requested_by', 'confirmed_by', 'approved_by__user')
+        .prefetch_related(Prefetch('holds', queryset=PaymentRequestHold.objects
+                                   .select_related('held_by__user', 'responded_by__user')))
+        .order_by('-requested_date', '-pk'))
+    money = _bill_money(detail, payments)
+    return {
+        'rows':         [_payment_row(user, p) for p in payments],
+        **money,
+        # Ruling Q3: a deleted site does not stop the bill being paid; the page says so.
+        'site_deleted': detail.project.is_deleted,
+        # Drawn only where the view would accept it, and only while something is left.
+        'can_forward':  (money['available'] > 0
+                         and user_can_request_bill_payment(user, approval)),
+        'forward_url':  reverse('approval_bill_payment', args=[approval.pk]),
+    }
 
 
 def _record_short(order):
@@ -1625,9 +1691,13 @@ def approval_detail(request, approval_pk):
     place of B-16's. A Site Engineer step shows its site photos; a kept one, the photos of
     the step it keeps.
 
+    AN APPROVED BILL HAS A PAYMENTS SECTION (5b, _bill_payments): its payments with their
+    holds, the approver's actions and SCM's reply to a hold, and SCM's "Request payment
+    from Finance". Drawn for full readers only — never for the Site Engineer.
+
     Access: user_can_view_approval_request — SCM, CEO, Admin, System Admin; the raiser;
     anyone named on or deciding any step; Design Head authority where there is a design
-    step. A CLOSED step is shown read-only to all of them, never a 403. Each action form
+    step; Finance on a bill a payment points at (D-A58). A CLOSED step is shown read-only to all of them, never a 403. Each action form
     is drawn only where its own predicate passes, and its view asks again on POST.
     """
     approval = _request_for_read(approval_pk)
@@ -1667,6 +1737,12 @@ def approval_detail(request, approval_pk):
     # amount, number, date or PDF — on the Request card and on every round (D-A53).
     full = sees_bill(user, approval, steps)
     bill = _bill_now(approval, steps, sign, full=full)
+    # The bill's payments (5b), for whoever sees the bill in full, once it is approved —
+    # nothing pays a bill before. The Site Engineer reader (full False) and every
+    # material request are never asked for it, so they pay no query and see no figure.
+    bill_payments = (_bill_payments(user, approval, bill['detail'])
+                     if bill is not None and full and approval.status == APPROVAL_APPROVED
+                     else None)
     # Each step's own files: a proxy's evidence, or a Site Engineer's site photos.
     files_of = {}
     for a in attachments:
@@ -1711,6 +1787,7 @@ def approval_detail(request, approval_pk):
         'bill':           bill,
         # B-16's note for whoever sees the bill; the Site Engineer's own note otherwise.
         'bill_note':      BILL_APPROVAL_NOTE if full else SITE_ENGINEER_WORK_NOTE,
+        'bill_payments':  bill_payments,
         'dispatch':       dispatch,
         'programs':       programs,
         'projects':       projects,
@@ -2306,3 +2383,166 @@ def approval_unlink_order(request, link_pk):
     messages.success(request, f'Removed the link to PO/PI record '
                               f'{_record_short(link.vendor_order)}.')
     return _detail(approval.pk)
+
+
+# ---------------------------------------------------------------------------
+# Payments 5b — "Request payment from Finance" on an approved contractor bill
+#
+# SCM forwards the bill as one or more PaymentRequest rows (D-A57), each written by
+# payments.create_bill_payment under a lock on the bill row, which refuses anything above
+# what is left of the bill. From there a bill's payment is a payment like any other: the
+# approvers approve, hold or reject it and Finance marks it paid, through the same
+# order_views / payment_views code as a PO/PI payment. Duplicate protection is the
+# purchases screens' (submission_guard): the key in the URL, and a content-match warning.
+# ---------------------------------------------------------------------------
+
+def _bill_for_payment(approval_pk):
+    """The contractor bill and its request, for the forward page: the request with its
+    contractor and bill (and the bill's site) in one query, its steps in a second — the
+    reader predicate walks them. 404 for a material request, which has no bill to pay."""
+    approval = get_object_or_404(
+        ApprovalRequest.objects.select_related('vendor', 'bill_detail__project')
+        .prefetch_related('steps'),
+        pk=approval_pk, kind=APPROVAL_KIND_CONTRACTOR_BILL)
+    return approval, approval.bill_detail
+
+
+def _bill_payment_context(approval, detail, money, client_uuid, post=None, duplicate=None):
+    post = post or {}
+    return {
+        'approval':     approval,
+        'bill':         detail,
+        'contractor':   approval.vendor.name if approval.vendor is not None else '—',
+        **money,
+        'site_deleted': detail.project.is_deleted,
+        'client_uuid':  client_uuid,
+        # The amount defaults to everything still left on the bill (D-A57: it may be less).
+        'form': {
+            'payment_amount': post.get('payment_amount', money['available']),
+            'payment_note':   post.get('payment_note', ''),
+        },
+        'duplicate':    duplicate,
+    }
+
+
+def _key_already_used(request, key):
+    """The answer to a key that has already made a payment, or None. A bill payment's
+    key goes back to its bill; the (practically unreachable) case of a key that made a
+    PO/PI payment goes to that order, as the order forms would send it."""
+    existing = (PaymentRequest.objects.filter(client_uuid=key)
+                .select_related('contractor_bill__request', 'vendor_order').first())
+    if existing is None:
+        return None
+    if existing.contractor_bill_id is not None:
+        return bill_payment_already_submitted(request, existing)
+    return already_submitted(request, existing.vendor_order)
+
+
+@login_required
+def approval_bill_payment(request, approval_pk):
+    """SCM forwards an approved contractor bill to Finance: "Request payment from
+    Finance". GET renders the form (amount, defaulting to what is left of the bill, and
+    an optional note); POST creates one PENDING_APPROVAL payment request against the bill.
+    A bill may be paid in several (D-A57).
+
+    Access: user_can_view_approval_request AND SCM (user_can_raise_approval_request) —
+    anyone else is 403. On a bill that is not approved, SCM gets a message and the bill,
+    not a 403: that is a fact about the bill, not about who is asking. A deleted site
+    does not refuse it (ruling Q3); the page says the site has been deleted.
+
+    ORDER OF OPERATIONS (POST), the PO/PI payment page's (_submit_order_payment): the key
+    (a used key answers with the payment it made, D2), the amount and note, the
+    content-match warning unless overridden (D3, outside any lock), then the writer —
+    payments.create_bill_payment, which locks the bill row and refuses anything above what
+    is left — and the feed line after the commit.
+    """
+    approval, detail = _bill_for_payment(approval_pk)
+    user = request.user
+    # Who is asking comes first, and both terms are 403s: a reader of the bill, and SCM
+    # (the role that raises every payment request). Everyone else is blocked because
+    # forwarding commits the company's money; user_can_request_bill_payment below adds
+    # the bill's status to this same role term.
+    if not (user_can_view_approval_request(user, approval)
+            and user_can_raise_approval_request(user)):
+        return _forbidden(request)
+    if not user_can_request_bill_payment(user, approval):
+        status = _STATUS_LABELS.get(approval.status, approval.status).lower()
+        messages.error(request, f'Only an approved bill can be sent to Finance for payment. '
+                                f'This bill is {status}. Nothing was changed.')
+        return _detail(approval.pk)
+
+    if request.method != 'POST':
+        # The key lives in the URL (submission_guard), as on the PO/PI payment page.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        used = _key_already_used(request, key)
+        if used is not None:
+            return used
+        money = _bill_money(detail, list(detail.payments.all()))
+        return render(request, 'projects/approvals/bill_payment_form.html',
+                      _bill_payment_context(approval, detail, money, key))
+
+    def refuse(errors, client_uuid, status=400, duplicate=None):
+        for error in errors:
+            messages.error(request, error)
+        # What is left is read again: another payment may have landed since the GET.
+        money = _bill_money(detail, list(detail.payments.all()))
+        return render(request, 'projects/approvals/bill_payment_form.html',
+                      _bill_payment_context(approval, detail, money, client_uuid,
+                                            request.POST, duplicate),
+                      status=status)
+
+    try:
+        client_uuid = _uuid.UUID(request.POST.get('client_uuid', ''))
+    except ValueError:
+        client_uuid = None
+    if client_uuid is not None:
+        used = _key_already_used(request, client_uuid)
+        if used is not None:
+            return used
+
+    errors = []
+    if client_uuid is None:
+        errors.append('This form expired. Check your entries and submit again.')
+    # PaymentRequest.amount is 12 digits with 2 places: at most 10 before the point.
+    amount = _parse_decimal(request.POST.get('payment_amount'), 10)
+    if amount is None:
+        errors.append('The payment amount must be more than 0.')
+    note = request.POST.get('payment_note', '').strip()
+    if errors:
+        return refuse(errors, client_uuid or _uuid.uuid4())
+
+    # The content match (D3), OUTSIDE the bill-row lock, which is for the ceiling alone.
+    if not confirmed(request):
+        duplicate = bill_payment_duplicate(detail, amount)
+        if duplicate is not None:
+            return refuse([], client_uuid, status=200, duplicate=duplicate)
+
+    profile = user.profile
+    try:
+        pr, available = create_bill_payment(detail, amount, note, user, profile, client_uuid)
+    except IntegrityError:
+        # The same key raced past the check above; the winner holds the unique index.
+        used = _key_already_used(request, client_uuid)
+        if used is not None:
+            return used
+        raise
+
+    if pr is None:
+        return refuse(
+            [f"The payment (₹{amount}) is more than the bill's balance still available to "
+             f"request (₹{available} of the ₹{detail.amount} billed)."],
+            client_uuid)
+
+    # log_activity never raises, so it sits after the commit, as on the PO/PI pages.
+    contractor = approval.vendor.name if approval.vendor is not None else 'contractor'
+    log_activity(
+        detail.project, profile,
+        f'Raised payment request to {contractor}: ₹{pr.amount} (bill {detail.bill_number})',
+        entity_type='PaymentRequest', entity_id=pr.pk,
+        action_code='payment_request_raised',
+    )
+    messages.success(request, f'Payment of ₹{pr.amount} requested against bill '
+                              f'{detail.bill_number}. It is with the approvers.')
+    return redirect(reverse('approval_detail', args=[approval.pk]) + '#payments')

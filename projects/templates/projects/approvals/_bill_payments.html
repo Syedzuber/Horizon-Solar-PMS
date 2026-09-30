@@ -1,0 +1,116 @@
+{% comment %}
+Payments 5b — an approved contractor bill's payments (approval_views._bill_payments),
+drawn from `bp`.
+
+Who sees it is the VIEW's decision: every reader who sees the bill in full (sees_bill) —
+SCM, CEO, Admin, System Admin, Finance on a forwarded bill, and the PM on the bill,
+read-only. The bill's Site Engineer is never given `bp`, so none of this is drawn for them.
+
+The money line is the bill's: billed, committed (every payment not rejected), paid, and
+what is left to request. Each payment is a stacked block, not a table row — this page is
+built for a phone first. Its actions are the order page's own (order_views._payment_row
+flags, the same views and forms): Approve / Hold / Reject for an approver, Respond for SCM
+on an open hold. Each sits behind <details>, like every other action on this page; each
+view asks its predicate again on POST and returns here (#payments).
+
+"Request payment from Finance" is SCM's, on a separate keyed page (approval_bill_payment),
+drawn only while something is left to request. A deleted site does not stop payment
+(ruling Q3); the section says so.
+{% endcomment %}
+<div class="card shadow-sm mb-3" id="payments">
+  <div class="card-header fw-semibold d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span>Payments</span>
+    {% if bp.can_forward %}
+    <a href="{{ bp.forward_url }}" class="btn btn-brand btn-sm">Request payment from Finance</a>
+    {% endif %}
+  </div>
+  <div class="card-body border-bottom small">
+    <div>Bill ₹{{ bp.total|floatformat:2 }} · committed ₹{{ bp.committed|floatformat:2 }} · paid ₹{{ bp.paid|floatformat:2 }} · <strong>still to request ₹{{ bp.available|floatformat:2 }}</strong></div>
+    {% if bp.site_deleted %}<div class="text-danger mt-1">This site has been deleted.</div>{% endif %}
+  </div>
+  {% for row in bp.rows %}
+  {% with p=row.payment %}
+  <div class="card-body border-bottom small" id="payment-{{ p.pk }}">
+    <div class="d-flex justify-content-between flex-wrap gap-1">
+      <div class="fw-semibold">{% include 'projects/partials/payment_amount.html' with p=p places=2 %}</div>
+      <span class="badge text-bg-light border">{{ p.get_status_display }}</span>
+    </div>
+    <div class="text-muted">Requested {{ p.requested_date|date:"d M Y" }} by {{ p.requested_by.get_full_name|default:p.requested_by.username }}</div>
+    {% if p.note %}<div class="text-break">{{ p.note }}</div>{% endif %}
+    {% if p.status == 'approved' and p.approved_by %}
+    <div class="text-muted">Approved by {{ p.approved_by.user.get_full_name|default:p.approved_by.user.username }}{% if p.approved_at %} · {{ p.approved_at|date:"d M Y" }}{% endif %}</div>
+    {% endif %}
+    {% if p.status == 'rejected' and p.decision_reason %}<div class="text-muted text-break">Rejected: {{ p.decision_reason }}</div>{% endif %}
+    {% if p.payment_date %}<div class="text-muted">Paid {{ p.payment_date|date:"d M Y" }}{% if p.payment_reference %} · Ref: {{ p.payment_reference }}{% endif %}</div>{% endif %}
+
+    {% if row.open_hold %}
+    <div class="alert alert-warning py-1 px-2 mt-2 mb-0 text-break">
+      <span class="fw-semibold">On hold</span> —
+      {{ row.open_hold.held_by.user.get_full_name|default:row.open_hold.held_by.user.username }},
+      {{ row.open_hold.held_at|date:"d M Y" }}: {{ row.open_hold.reason }}
+      <div class="text-muted">Awaiting a response from SCM.</div>
+    </div>
+    {% endif %}
+    {% if row.last_answered %}
+    <div class="mt-2 text-break">
+      <span class="text-muted">Earlier hold</span>
+      ({{ row.last_answered.held_by.user.get_full_name|default:row.last_answered.held_by.user.username }},
+      {{ row.last_answered.held_at|date:"d M Y" }}): {{ row.last_answered.reason }}
+      <div><span class="fw-semibold">Response</span>
+        ({{ row.last_answered.responded_by.user.get_full_name|default:"—" }},
+        {{ row.last_answered.responded_at|date:"d M Y" }}): {{ row.last_answered.response }}</div>
+    </div>
+    {% endif %}
+    {% if row.hold_count > 1 %}<div class="text-muted">{{ row.hold_count }} holds in all on this request.</div>{% endif %}
+
+    {% if row.can_approve %}
+    <details class="mt-2">
+      <summary class="btn btn-sm btn-outline-success ap-toggle">Approve<i class="bi bi-chevron-down ap-chevron"></i></summary>
+      <div class="card card-body mt-2">
+        {% url 'payment_approve' p.pk as approve_url %}
+        {% include "projects/_payment_approve_form.html" with action=approve_url %}
+      </div>
+    </details>
+    {% endif %}
+    {% if row.can_hold %}
+    <details class="mt-2">
+      <summary class="btn btn-sm btn-outline-warning ap-toggle">Hold<i class="bi bi-chevron-down ap-chevron"></i></summary>
+      <form method="post" action="{% url 'payment_hold' p.pk %}" class="card card-body mt-2">
+        {% csrf_token %}
+        <label class="form-label small mb-1" for="bp-hold-{{ p.pk }}">Why is this payment being held? SCM answers this.</label>
+        <textarea class="form-control w-100 mb-2" rows="2" required id="bp-hold-{{ p.pk }}" name="reason"></textarea>
+        <div class="d-grid"><button type="submit" class="btn btn-warning btn-sm">Hold this request</button></div>
+      </form>
+    </details>
+    {% endif %}
+    {% if row.can_reject %}
+    <details class="mt-2">
+      <summary class="btn btn-sm btn-outline-danger ap-toggle">Reject<i class="bi bi-chevron-down ap-chevron"></i></summary>
+      <form method="post" action="{% url 'payment_reject' p.pk %}" class="card card-body mt-2">
+        {% csrf_token %}
+        <label class="form-label small mb-1" for="bp-reject-{{ p.pk }}">Why is this payment being rejected? This is final.</label>
+        <textarea class="form-control w-100 mb-2" rows="2" required id="bp-reject-{{ p.pk }}" name="reason"></textarea>
+        <div class="d-grid"><button type="submit" class="btn btn-danger btn-sm">Reject this request</button></div>
+      </form>
+    </details>
+    {% endif %}
+    {% if row.can_respond %}
+    <details class="mt-2" open>
+      <summary class="btn btn-sm btn-outline-primary ap-toggle">Respond to the hold<i class="bi bi-chevron-down ap-chevron"></i></summary>
+      <form method="post" action="{% url 'payment_hold_respond' p.pk %}" class="card card-body mt-2">
+        {% csrf_token %}
+        <label class="form-label small mb-1" for="bp-respond-{{ p.pk }}">Your response to the hold. The request goes back for approval.</label>
+        <textarea class="form-control w-100 mb-2" rows="2" required id="bp-respond-{{ p.pk }}" name="response"></textarea>
+        <div class="d-grid"><button type="submit" class="btn btn-primary btn-sm">Send response</button></div>
+      </form>
+    </details>
+    {% endif %}
+    {% if row.is_own_request and not row.can_respond %}
+    <div class="text-muted mt-1">You raised this request — someone else approves it.</div>
+    {% endif %}
+  </div>
+  {% endwith %}
+  {% empty %}
+  <div class="card-body small text-muted">No payment has been requested against this bill yet.</div>
+  {% endfor %}
+</div>

@@ -102,7 +102,7 @@ single-line and the rest would render into the page.
             {% if row.bill %}
             {% comment %}
             5a: a contractor bill's payment shows the bill where an order row shows its order,
-            and links to the bill's approval page (Finance gets its 403 page until 5b, D-A58).
+            and links to the bill's approval page, which Finance may open (D-A58, 5b).
             {% endcomment %}
             <div class="fw-semibold">{{ row.bill.contractor }}</div>
             <div>Bill {{ row.bill.number }} · {{ row.bill.site }}</div>

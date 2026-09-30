@@ -41,7 +41,7 @@ from .bill_rules import format_bill_amount, task_status_label
 from .bill_storage import BILL_LINK_SECONDS, BILL_STORAGE_OFF, BillStorageError
 from .models import (
     ApprovalAttachment, ApprovalRequest, ApprovalRoundSnapshot, ApprovalStep,
-    ContractorBillDetail, Project, Task, Vendor,
+    ContractorBillDetail, PaymentRequest, Project, Task, Vendor,
     APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_OPEN, APPROVAL_PARTY_PM,
     APPROVAL_PARTY_SITE_ENGINEER, APPROVAL_STEP_APPROVED, APPROVAL_STEP_CHANGES_REQUESTED,
     VENDOR_KIND_BOTH, VENDOR_KIND_CONTRACTOR,
@@ -526,6 +526,13 @@ class DetailTests(ScreenFixture):
         for profile, status in expected.items():
             with self.subTest(user=profile.user.username):
                 self.assertEqual(self.client_for(profile).get(self.url).status_code, status)
+        # 5b (D-A58): once a payment request points at the bill, Finance may open it.
+        # Written directly: the admission reads only that a payment exists.
+        PaymentRequest.objects.create(
+            contractor_bill=self.approval.bill_detail, project=self.site,
+            vendor=self.contractor, amount=Decimal('1000'), requested_by=self.scm.user)
+        with self.subTest(user=finance.user.username, forwarded=True):
+            self.assertEqual(self.client_for(finance).get(self.url).status_code, 200)
 
 
 # ===========================================================================

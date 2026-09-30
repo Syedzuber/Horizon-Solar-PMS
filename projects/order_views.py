@@ -74,7 +74,8 @@ from .decorators import login_required
 from .design_views import aggregate_group_boq
 from .number_input import decimal_field_max, parse_decimal_input
 from .models import (
-    BOQItem, BOQItemMaster, PaymentRequest, PaymentRequestHold, Program, Project,
+    ApprovalRequest, BOQItem, BOQItemMaster, ContractorBillDetail, PaymentRequest,
+    PaymentRequestHold, Program, Project,
     SiteGroup, SiteGroupMembership, Vendor, VendorOrder, VendorOrderDocument,
     VendorOrderLine, VendorOrderProgram, VendorOrderSite, committed_total, log_activity,
     GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
@@ -85,11 +86,12 @@ from .permissions import (
     user_can_append_order_documents, user_can_approve_payment,
     user_can_hold_payment, user_can_raise_group_order, user_can_raise_vendor_order,
     user_can_reject_payment, user_can_request_order_payment,
-    user_can_respond_to_hold, user_can_view_program_vendor_orders,
-    user_can_view_payment_queue, user_can_view_project, user_can_view_project_vendor_orders,
-    user_can_view_vendor_order, user_is_payment_approver,
+    user_can_respond_to_hold, user_can_view_approval_request,
+    user_can_view_program_vendor_orders, user_can_view_project,
+    user_can_view_project_vendor_orders, user_can_view_vendor_order,
+    user_is_payment_approver,
 )
-from .payments import payment_project_type
+from .payments import raise_pending_payment
 from .submission_guard import (
     already_submitted, confirmed, document_size_kb, documents_duplicate, keyed_redirect,
     order_duplicate, payment_duplicate, url_key,
@@ -886,19 +888,13 @@ def _create_order_payment(order, project, amount, note, user, profile, client_uu
         locked = VendorOrder.objects.select_for_update().get(pk=order.pk)
         available = locked.total - locked.committed_amount
         if amount <= available:
-            pr = PaymentRequest.objects.create(
+            # The create and its ledger row, shared with a contractor bill's writer
+            # since 5b (payments.raise_pending_payment) — the same INSERTs as before,
+            # inside this lock, as record_transition's contract requires.
+            pr = raise_pending_payment(
                 vendor_order=locked, project=project, vendor=order.vendor,
-                amount=amount, note=note, requested_by=user,
-                # PENDING_APPROVAL since O4, as on both raise pages. The balance
-                # check above is unaffected: committed_total() counts every status
-                # but REJECTED, so a pending payment holds its money exactly as an
-                # approved one did.
-                status=PaymentRequest.PENDING_APPROVAL,
-                client_uuid=client_uuid,
-            )
-            # Inside the atomic block, as record_transition's contract requires.
-            record_transition(pr, to_status=PaymentRequest.PENDING_APPROVAL,
-                              from_status='', actor=profile, project=project)
+                amount=amount, note=note, user=user, profile=profile,
+                client_uuid=client_uuid)
     return pr, available
 
 
@@ -1872,8 +1868,9 @@ def program_vendor_order_list(request, program_pk):
 # draws the button; the check inside it is what decides.
 #
 # A REFUSAL IS A REFUSAL, NOT A 500 AND NOT A SILENT NO-OP. Losing the race, or arriving
-# at a status the action no longer permits, redirects to the order with a message naming
-# the status the request is actually in. Someone who was never entitled at all gets 403.
+# at a status the action no longer permits, redirects to the order (or, since 5b, the
+# contractor bill — _payment_home) with a message naming the status the request is
+# actually in. Someone who was never entitled at all gets 403.
 # The two are different answers to different questions and are not merged.
 # ---------------------------------------------------------------------------
 
@@ -1910,9 +1907,9 @@ def _payment_for_action(request, payment_pk):
     """Resolve the payment and the actor's profile, or return (None, None, response).
 
     Reads the row UNLOCKED and answers only the two questions that do not need the lock:
-    does it exist, and may this person see the order it belongs to at all. Entitlement to
-    ACT is asked afterwards — once by the caller, to choose between 403 and a message,
-    and once more inside the lock, where it decides.
+    does it exist, and may this person see what it belongs to at all — its order, or
+    (5b) its contractor bill. Entitlement to ACT is asked afterwards — once by the caller,
+    to choose between 403 and a message, and once more inside the lock, where it decides.
     """
     payment = get_object_or_404(
         PaymentRequest.objects
@@ -1920,12 +1917,19 @@ def _payment_for_action(request, payment_pk):
         .prefetch_related('holds', 'vendor_order__sites__project'),
         pk=payment_pk,
     )
-    # A contractor bill's payment (5a) has no order for the checks below to read, and its
-    # approve / hold / reject / answer arrive in 5b: refused here, for every caller of
-    # this function, as a message and a redirect rather than a 500. Nothing is written.
     if payment.contractor_bill_id is not None:
-        return None, None, _refuse_bill_payment(request, payment)
-    if not user_can_view_vendor_order(request.user, payment.vendor_order):
+        # A contractor bill's payment (5b) is readable to whoever may open the bill — the
+        # page it is shown and answered on, as an order's payment is its order's reader.
+        # That admits every person who may act on a PO/PI payment today: SCM, CEO, Admin
+        # and System Admin by role, and Finance through D-A58 (this payment points at
+        # the bill). Its steps are read here, for the bill branch only, so a PO/PI
+        # payment's queries are what they were.
+        approval = (ApprovalRequest.objects.prefetch_related('steps')
+                    .get(pk=payment.contractor_bill.request_id))
+        readable = user_can_view_approval_request(request.user, approval)
+    else:
+        readable = user_can_view_vendor_order(request.user, payment.vendor_order)
+    if not readable:
         return None, None, HttpResponseForbidden()
     profile = getattr(request.user, 'profile', None)
     if profile is None:
@@ -1933,29 +1937,28 @@ def _payment_for_action(request, payment_pk):
     return payment, profile, None
 
 
-def _refuse_bill_payment(request, payment):
-    """The 5a answer to an approver or SCM action on a contractor bill's payment: says so,
-    changes nothing, and sends the person where they can see the payment.
-
-    WHERE TO: the queue tab of the payment's project type for anyone who may open the
-    queue (Finance, CEO, Admin, System Admin, approver-flag holders); anyone else — SCM,
-    who answers holds and cannot open the queue — to the bill's approval page, which SCM
-    reads. The destination remains the gate: it answers 403 to anyone it would refuse.
-    payment_queue_action still swaps a redirect for its safe `next`, as for any refusal.
-    """
-    messages.error(request, "Approving, holding or rejecting a contractor bill's payment, "
-                            "and answering its hold, are not available yet. Nothing was "
-                            "changed.")
-    if user_can_view_payment_queue(request.user):
-        return redirect(f"{reverse('payment_queue')}?tab={payment_project_type(payment)}")
-    return redirect('approval_detail', approval_pk=payment.contractor_bill.request_id)
+def _payment_home(payment):
+    """Where every payment action returns (5b): the order's page for a PO/PI payment, the
+    bill's payments section for a contractor bill's. Reads the bill row the caller
+    select_related, so no query."""
+    if payment.contractor_bill_id is not None:
+        return (reverse('approval_detail', args=[payment.contractor_bill.request_id])
+                + '#payments')
+    return reverse('vendor_order_detail', args=[payment.vendor_order_id])
 
 
-def _payment_redirect(order_pk):
-    return redirect('vendor_order_detail', order_pk=order_pk)
+def _payment_ref(payment):
+    """What a feed line says a payment was against: "order <PO/PI>" or "bill <number>"."""
+    if payment.contractor_bill_id is not None:
+        return f'bill {payment.contractor_bill.bill_number}'
+    return f'order {_order_ref(payment.vendor_order)}'
 
 
-def _refuse_stale(request, payment, order_pk):
+def _payment_redirect(home):
+    return redirect(home)
+
+
+def _refuse_stale(request, payment, home):
     """The loser of a race, or anyone arriving at a status the action no longer permits.
 
     Names the status the request is actually in: "that is not allowed" on its own sends
@@ -1965,7 +1968,7 @@ def _refuse_stale(request, payment, order_pk):
         request,
         f'This payment request is now "{payment.get_status_display()}", and that action '
         f'is no longer available on it.')
-    return _payment_redirect(order_pk)
+    return _payment_redirect(home)
 
 
 def _log_payment(payment, profile, action, sentence):
@@ -1988,8 +1991,8 @@ def _approver_entry(request, payment_pk):
     """The three checks the three APPROVER actions share, in the order their answers
     differ: exists and readable, POST, holds the flag and is not the requester.
 
-    Returns (payment, profile, order_pk, response). A non-None response is the answer;
-    everything else is None in that case.
+    Returns (payment, profile, home, response) — `home` is where the action returns
+    (_payment_home). A non-None response is the answer; everything else is None then.
 
     THE FLAG AND THE SAME-PERSON TERM ANSWER 403 HERE, NOT A MESSAGE, because neither can
     change while the person looks at the page — they are facts about who is asking, not
@@ -1999,9 +2002,9 @@ def _approver_entry(request, payment_pk):
     payment, profile, refusal = _payment_for_action(request, payment_pk)
     if refusal is not None:
         return None, None, None, refusal
-    order_pk = payment.vendor_order_id
+    home = _payment_home(payment)
     if request.method != 'POST':
-        return None, None, None, _payment_redirect(order_pk)
+        return None, None, None, _payment_redirect(home)
     if not user_is_payment_approver(request.user):
         return None, None, None, HttpResponseForbidden()
     if payment.requested_by_id == request.user.pk:
@@ -2009,7 +2012,7 @@ def _approver_entry(request, payment_pk):
         # rather than WHAT: design_views._other_gate_actor_conflict refuses exactly this
         # shape at the design gates, per artifact rather than per user.
         return None, None, None, HttpResponseForbidden()
-    return payment, profile, order_pk, None
+    return payment, profile, home, None
 
 
 @login_required
@@ -2043,8 +2046,14 @@ def payment_approve(request, payment_pk):
     one every other payment action takes. No other path takes the two in the opposite
     order — vendor_order_add_payment locks the order and inserts a request, and hold,
     reject, respond and mark-paid lock the request alone — so no cycle can form.
+
+    A CONTRACTOR BILL'S PAYMENT (5b) is the same rule with the bill in the order's place:
+    the ContractorBillDetail row is locked first, and every other payment on the bill plus
+    this approval may not exceed the bill's amount. payments.create_bill_payment locks the
+    same row and inserts; nothing locks a request and then its bill. The PO/PI branch
+    reads and says exactly what it did before (tests_bill_payment_forward pins it).
     """
-    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    payment, profile, home, refusal = _approver_entry(request, payment_pk)
     if refusal is not None:
         return refusal
 
@@ -2057,38 +2066,49 @@ def payment_approve(request, payment_pk):
         messages.error(request,
                        f'The approved amount must be more than 0 and at most the '
                        f'₹{payment.amount} requested. Nothing was changed.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
     partial = approved_amount < payment.amount
     if partial and not remark:
         messages.error(request,
                        f'Approving ₹{approved_amount} of the ₹{payment.amount} requested '
                        f'needs a reason. Nothing was changed.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
     if partial:
         remark = f'approved ₹{approved_amount} of ₹{payment.amount}: {remark}'
 
     with transaction.atomic():
-        # The order first, then the request — see LOCK ORDER above. No join: the
-        # order row alone.
-        order  = VendorOrder.objects.select_for_update().get(pk=order_pk)
+        # The parent first — the order, or (5b) the bill — then the request: see LOCK
+        # ORDER above. No join: the parent row alone. `total` is what the parent is
+        # worth, `siblings` its other payments.
+        if payment.contractor_bill_id is None:
+            order    = VendorOrder.objects.select_for_update().get(pk=payment.vendor_order_id)
+            total    = order.total_amount
+            siblings = Q(vendor_order_id=order.pk)
+            of_total = 'the order total'
+        else:
+            bill     = (ContractorBillDetail.objects.select_for_update()
+                        .get(pk=payment.contractor_bill_id))
+            total    = bill.amount
+            siblings = Q(contractor_bill_id=bill.pk)
+            of_total = 'the bill amount'
         locked = _locked_payment(payment_pk)
         if not user_can_approve_payment(request.user, locked):
-            return _refuse_stale(request, locked, order_pk)
+            return _refuse_stale(request, locked, home)
         ceiling = locked.approved_amount
         if ceiling is not None and approved_amount > ceiling:
             messages.error(request,
                            f'This request was previously approved for ₹{ceiling}; a new '
                            f'approval cannot be for more. Nothing was changed.')
-            return _payment_redirect(order_pk)
+            return _payment_redirect(home)
         others = committed_total(
-            PaymentRequest.objects.filter(vendor_order_id=order_pk).exclude(pk=payment_pk))
-        if others + approved_amount > order.total_amount:
+            PaymentRequest.objects.filter(siblings).exclude(pk=payment_pk))
+        if others + approved_amount > total:
             messages.error(request,
                            f'Approving ₹{approved_amount} would commit '
-                           f'₹{others + approved_amount} against the order total of '
-                           f'₹{order.total_amount}; at most ₹{order.total_amount - others} '
+                           f'₹{others + approved_amount} against {of_total} of '
+                           f'₹{total}; at most ₹{total - others} '
                            f'can be approved. Nothing was changed.')
-            return _payment_redirect(order_pk)
+            return _payment_redirect(home)
         from_status = locked.status
         locked.status          = PaymentRequest.APPROVED
         locked.approved_by     = profile
@@ -2104,10 +2124,10 @@ def payment_approve(request, payment_pk):
     of_requested = f'₹{approved_amount} of ' if partial else ''
     _log_payment(payment, profile, 'approve',
                  f'Approved {of_requested}payment request of ₹{payment.amount} to '
-                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)})')
+                 f'{_vendor_name(payment)} ({_payment_ref(payment)})')
     messages.success(request, f'Payment request of ₹{payment.amount} approved'
                               f'{f" for ₹{approved_amount}" if partial else ""}.')
-    return _payment_redirect(order_pk)
+    return _payment_redirect(home)
 
 
 @login_required
@@ -2122,20 +2142,20 @@ def payment_hold(request, payment_pk):
     unique index refuses a second OPEN hold — the database saying what the predicate
     already said, reachable only by a race and handled as one.
     """
-    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    payment, profile, home, refusal = _approver_entry(request, payment_pk)
     if refusal is not None:
         return refusal
 
     reason = request.POST.get('reason', '').strip()
     if not reason:
         messages.error(request, 'A hold must say why — the reason is what SCM answers.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
 
     try:
         with transaction.atomic():
             locked = _locked_payment(payment_pk)
             if not user_can_hold_payment(request.user, locked):
-                return _refuse_stale(request, locked, order_pk)
+                return _refuse_stale(request, locked, home)
             from_status = locked.status
             locked.status = PaymentRequest.ON_HOLD
             locked.save(update_fields=['status'])
@@ -2148,14 +2168,14 @@ def payment_hold(request, payment_pk):
         # uniq_open_hold_per_payment_request: two approvers held one request in the same
         # instant. The winner's hold stands; this transaction recorded nothing.
         messages.error(request, 'This payment request is already on hold.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
 
     _log_payment(payment, profile, 'hold',
                  f'Held payment request of ₹{payment.amount} to '
-                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)}): '
+                 f'{_vendor_name(payment)} ({_payment_ref(payment)}): '
                  f'{reason}')
     messages.success(request, 'Payment request held. SCM has been asked to respond.')
-    return _payment_redirect(order_pk)
+    return _payment_redirect(home)
 
 
 @login_required
@@ -2171,19 +2191,19 @@ def payment_reject(request, payment_pk):
     THE OPEN HOLD, IF THERE IS ONE, IS LEFT OPEN. It was not answered, it was overruled,
     and marking it answered would put words in SCM's mouth.
     """
-    payment, profile, order_pk, refusal = _approver_entry(request, payment_pk)
+    payment, profile, home, refusal = _approver_entry(request, payment_pk)
     if refusal is not None:
         return refusal
 
     reason = request.POST.get('reason', '').strip()
     if not reason:
         messages.error(request, 'A rejection must say why. Nothing was changed.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
 
     with transaction.atomic():
         locked = _locked_payment(payment_pk)
         if not user_can_reject_payment(request.user, locked):
-            return _refuse_stale(request, locked, order_pk)
+            return _refuse_stale(request, locked, home)
         from_status = locked.status
         locked.status          = PaymentRequest.REJECTED
         locked.decision_reason = reason
@@ -2194,10 +2214,10 @@ def payment_reject(request, payment_pk):
 
     _log_payment(payment, profile, 'reject',
                  f'Rejected payment request of ₹{payment.amount} to '
-                 f'{_vendor_name(payment)} (order {_order_ref(payment.vendor_order)}): '
+                 f'{_vendor_name(payment)} ({_payment_ref(payment)}): '
                  f'{reason}')
     messages.success(request, 'Payment request rejected.')
-    return _payment_redirect(order_pk)
+    return _payment_redirect(home)
 
 
 @login_required
@@ -2224,16 +2244,16 @@ def payment_hold_respond(request, payment_pk):
     payment, profile, refusal = _payment_for_action(request, payment_pk)
     if refusal is not None:
         return refusal
-    order_pk = payment.vendor_order_id
+    home = _payment_home(payment)
     if request.method != 'POST':
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
     if not user_can_respond_to_hold(request.user, payment):
         return HttpResponseForbidden()
 
     response = request.POST.get('response', '').strip()
     if not response:
         messages.error(request, 'A response must say something. Nothing was changed.')
-        return _payment_redirect(order_pk)
+        return _payment_redirect(home)
 
     with transaction.atomic():
         locked = _locked_payment(payment_pk)
@@ -2241,7 +2261,7 @@ def payment_hold_respond(request, payment_pk):
         # rejected this request between the page being drawn and this POST arriving,
         # and either would close the hold this answer belongs to.
         if not user_can_respond_to_hold(request.user, locked):
-            return _refuse_stale(request, locked, order_pk)
+            return _refuse_stale(request, locked, home)
         hold = locked.open_hold
         hold.response     = response
         hold.responded_by = profile
@@ -2258,6 +2278,6 @@ def payment_hold_respond(request, payment_pk):
 
     _log_payment(payment, profile, 'respond',
                  f'Responded to the hold on the ₹{payment.amount} payment request '
-                 f'(order {_order_ref(payment.vendor_order)}): {response}')
+                 f'({_payment_ref(payment)}): {response}')
     messages.success(request, 'Response recorded. The request is back with the approver.')
-    return _payment_redirect(order_pk)
+    return _payment_redirect(home)

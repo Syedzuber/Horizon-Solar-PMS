@@ -2352,7 +2352,9 @@ def user_can_view_approval_request(user, request):
         included: a PM whose step was reassigned away can still read what they were
         asked (D-A15);
       * anyone who DECIDED any step — a deputy who decided the Head's step;
-      * anyone with Design Head authority, on a request that has a design step (D-A16).
+      * anyone with Design Head authority, on a request that has a design step (D-A16);
+      * Finance, on a contractor bill it has been asked to pay
+        (user_can_view_forwarded_bill, D-A58, 5b) — one EXISTS query, Finance only.
 
     SCOPE GRANTS NOTHING (D-A2): a PM who can see a site named in the scope, but who is
     named on no step, is not admitted. Reads `request.steps.all()`, so a caller that
@@ -2371,8 +2373,11 @@ def user_can_view_approval_request(user, request):
     if any(step.assignee_id == profile.pk or step.decided_by_id == profile.pk
            for step in steps):
         return True
-    return (any(step.party == 'design' for step in steps)
-            and user_has_design_head_authority(user))
+    if (any(step.party == 'design' for step in steps)
+            and user_has_design_head_authority(user)):
+        return True
+    # Payments 5b (D-A58): Finance reads a contractor bill it has been asked to pay.
+    return user_can_view_forwarded_bill(user, request)
 
 
 def approval_request_visibility_q(user):
@@ -2393,7 +2398,77 @@ def approval_request_visibility_q(user):
          | Q(steps__decided_by=profile))
     if user_has_design_head_authority(user):
         q |= Q(steps__party='design')
+    # user_can_view_forwarded_bill() as a Q (5b, ruling Q6). Finance cannot open the list
+    # (user_can_view_approval_list), so this shows nothing today; it keeps the two rules
+    # in step, as the note above asks.
+    if profile.role in BILL_PAYER_ROLES:
+        q |= Q(kind='contractor_bill', bill_detail__payments__isnull=False)
     return q
+
+
+# ---------------------------------------------------------------------------
+# Payments 5b — a contractor bill forwarded to Finance
+#
+# An approved bill is paid through PaymentRequest rows that point at it (5a, D-A56). SCM
+# forwards it ("Request payment from Finance"); Finance approves, holds, rejects and pays
+# those rows exactly as it does PO/PI payments. Finance was never a reader of approvals
+# (APPROVAL_PORTFOLIO_ROLES leaves it out), so it needs one admission to open the bill it
+# is paying — and only that bill.
+# ---------------------------------------------------------------------------
+
+# Who reads a bill because it is being paid (D-A58). Finance only: CEO, Admin and System
+# Admin already read every request (APPROVAL_PORTFOLIO_ROLES). Its own set, so widening
+# who pays never silently widens who reads approvals.
+BILL_PAYER_ROLES = frozenset({'Finance'})
+
+
+def user_can_view_forwarded_bill(user, request):
+    """Return True if `user` may read `request` because they are asked to pay it (D-A58).
+
+    Finance, on a CONTRACTOR BILL that at least one PaymentRequest points to — of any
+    status, a rejected one included: Finance saw the bill when it acted, and a rejection
+    does not unsee it. The full bill: amount, PDF, the Site Engineer's photos
+    (approval_views.sees_bill asks this too).
+
+    NEVER a bill nobody has forwarded, never a material approval, and never the approvals
+    list or aging page — those keep their own role sets, which leave Finance out.
+
+    One EXISTS query, and only for a Finance user on a contractor bill: every other role,
+    and every material request, is answered without one. Reached through the request's
+    own class, so this module still imports no model.
+    """
+    if request is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in BILL_PAYER_ROLES:
+        return False
+    if request.kind != 'contractor_bill':
+        return False
+    return (type(request).objects
+            .filter(pk=request.pk, bill_detail__payments__isnull=False).exists())
+
+
+def user_can_request_bill_payment(user, request):
+    """Return True if `user` may forward `request` to Finance for payment ("Request
+    payment from Finance").
+
+    SCM (VENDOR_ORDER_RAISE_ROLES — the role that raises every payment request), on an
+    APPROVED contractor bill. Approval is final: nothing moves a request out of
+    `approved`, so this term cannot go stale while the form is open.
+
+    NOT REFUSED ON A DELETED SITE (ruling Q3), unlike user_can_request_order_payment():
+    the work on a bill was confirmed and approved, and the contractor is still owed. The
+    screens say the site has been deleted instead.
+
+    Whether any of the bill is left to request is NOT asked here — that is the writer's
+    check, made under a lock on the bill row (payments.create_bill_payment).
+    """
+    if request is None:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None or profile.role not in VENDOR_ORDER_RAISE_ROLES:
+        return False
+    return request.kind == 'contractor_bill' and request.status == 'approved'
 
 
 def user_may_answer_approval_step(user, step):

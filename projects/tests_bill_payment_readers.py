@@ -9,10 +9,11 @@ What this file pins, and why each matters:
     drawn for a CAPEX bill's payment even with no CAPEX order (ruling Q1).
   * EVERY FINANCE PAGE RENDERS WITH ONE PRESENT and shows the bill — site code, contractor,
     bill number — where an order row shows its order, linking to the bill's approval page.
-    Finance following that link gets a 403 until 5b (D-A58); that is pinned here so 5b
-    changes it on purpose.
-  * APPROVE, HOLD, REJECT AND ANSWER ARE 5b: in 5a each is a message and a redirect, and
-    writes nothing.
+    Finance following that link opens the bill since 5b (D-A58); 5a pinned the 403 so 5b
+    changed it on purpose.
+  * APPROVE, HOLD, REJECT AND ANSWER ARRIVED IN 5b: each acts on a bill's payment and
+    returns to the bill's payments section (5a refused them). tests_bill_payment_forward
+    pins the rest of 5b.
   * NOTICES on a bill's payment link to the bill; a link that cannot be built is logged
     and the notice still goes out without it — for PO/PI payments too.
   * TEST SITES: payment_counts() still counts them for bills as for orders (audit I);
@@ -229,14 +230,15 @@ class PageTests(BillPaymentFixture):
                 self.assertContains(page, 'Civil Works Co')
                 self.assertContains(page, f'href="{self.bill_url(bill)}"')
 
-    def test_a_bill_row_shows_its_money_line_and_no_approver_buttons(self):
+    def test_a_bill_row_shows_its_money_line_and_the_approver_buttons(self):
         row = next(r for r in self.queue(self.approver, tab='Residential').context['rows']
                    if r['payment'].pk == self.res_bill_pay.pk)
         self.assertIsNone(row['order'])
         self.assertEqual(row['money'], {'total': Decimal('30000'), 'paid': Decimal('0'),
                                         'committed': Decimal('10000')})
+        # 5b: a pending bill payment is approved or held from the queue like any other.
         self.assertEqual((row['can_approve'], row['can_hold'], row['can_reject']),
-                         (False, False, False))
+                         (True, True, False))
 
     def test_the_finance_dashboard_names_the_bill(self):
         for context in ('', 'residential', 'tenders'):
@@ -267,10 +269,10 @@ class PageTests(BillPaymentFixture):
         self.assertRedirects(response, self.bill_url(self.res_bill),
                              fetch_redirect_response=False)
 
-    def test_finance_following_the_bill_link_gets_403_until_5b(self):
-        # D-A58 is 5b's. Pinned so 5b changes it on purpose.
+    def test_finance_following_the_bill_link_opens_the_bill(self):
+        # D-A58, 5b: a payment points at the bill, so Finance may open it (5a: 403).
         response = _client(self.finance).get(self.bill_url(self.res_bill))
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
 
     def test_mark_paid_on_a_bill_payment_returns_to_its_sites_tab(self):
         response = self.mark_paid(self.fin_b, self.opex_bill_pay)
@@ -281,10 +283,13 @@ class PageTests(BillPaymentFixture):
 
 
 # ---------------------------------------------------------------------------
-# Approve / hold / reject / answer are 5b: refused cleanly, nothing written
+# Approve / hold / reject / answer act on a bill's payment since 5b (5a refused them)
 # ---------------------------------------------------------------------------
 
-class ActionRefusalTests(BillPaymentFixture):
+class BillPaymentActionTests(BillPaymentFixture):
+    """5a's four refusal scenarios (ActionRefusalTests), turned round by 5b: each action
+    now happens and returns to the bill's payments section, or to the queue view it came
+    from."""
 
     def snapshot(self, payment):
         payment.refresh_from_db()
@@ -293,41 +298,53 @@ class ActionRefusalTests(BillPaymentFixture):
                 StatusTransition.objects.filter(subject_type=SUBJECT_PAYMENT_REQUEST,
                                                 subject_id=payment.pk).count())
 
-    def assertRefused(self, profile, url, data, payment, location):
-        before = self.snapshot(payment)
+    def assertActed(self, profile, url, data, payment, location, status):
         response = _client(profile).post(url, data)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response['Location'], location)
-        self.assertIn('not available yet', ' '.join(_messages(response)))
-        self.assertEqual(self.snapshot(payment), before)
+        self.assertNotIn('not available yet', ' '.join(_messages(response)))
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, status)
 
-    def test_approver_actions_go_back_to_the_queue_tab(self):
-        pay, tab = self.res_bill_pay, f"{reverse('payment_queue')}?tab=Residential"
-        for name, data in (('payment_approve', {'approved_amount': '10000'}),
-                           ('payment_hold', {'reason': 'Check'}),
-                           ('payment_reject', {'reason': 'No'})):
+    def test_approver_actions_act_and_go_back_to_the_bill(self):
+        pay, bill = self.res_bill_pay, f'{self.bill_url(self.res_bill)}#payments'
+        for name, data, status in (
+                ('payment_hold', {'reason': 'Check'}, PaymentRequest.ON_HOLD),
+                ('payment_reject', {'reason': 'No'}, PaymentRequest.REJECTED)):
             with self.subTest(view=name):
-                self.assertRefused(self.approver, reverse(name, args=[pay.pk]), data, pay, tab)
+                self.assertActed(self.approver, reverse(name, args=[pay.pk]), data, pay,
+                                 bill, status)
+        pay = self.capex_bill_pay
+        with self.subTest(view='payment_approve'):
+            self.assertActed(self.approver, reverse('payment_approve', args=[pay.pk]),
+                             {'approved_amount': '10000'}, pay,
+                             f'{self.bill_url(self.capex_bill)}#payments',
+                             PaymentRequest.APPROVED)
 
     def test_the_queue_action_comes_back_to_the_queue_view_it_came_from(self):
         here = f"{reverse('payment_queue')}?tab=OPEX&status=approved"
-        self.assertRefused(
+        self.assertActed(
             self.approver,
             reverse('payment_queue_action', args=[self.opex_bill_pay.pk, 'hold']),
-            {'reason': 'Check', 'next': here}, self.opex_bill_pay, here)
+            {'reason': 'Check', 'next': here}, self.opex_bill_pay, here,
+            PaymentRequest.ON_HOLD)
 
     def test_scm_answering_a_hold_goes_to_the_bill(self):
         pay = self.res_bill_pay
         PaymentRequest.objects.filter(pk=pay.pk).update(status=PaymentRequest.ON_HOLD)
         PaymentRequestHold.objects.create(payment_request=pay, reason='Why',
                                           held_by=self.approver)
-        self.assertRefused(self.scm, reverse('payment_hold_respond', args=[pay.pk]),
-                           {'response': 'Because'}, pay, self.bill_url(self.res_bill))
+        self.assertActed(self.scm, reverse('payment_hold_respond', args=[pay.pk]),
+                         {'response': 'Because'}, pay,
+                         f'{self.bill_url(self.res_bill)}#payments',
+                         PaymentRequest.PENDING_APPROVAL)
 
-    def test_a_get_is_refused_the_same_way(self):
+    def test_a_get_goes_to_the_bill_and_writes_nothing(self):
+        before = self.snapshot(self.capex_bill_pay)
         response = _client(self.approver).get(
             reverse('payment_approve', args=[self.capex_bill_pay.pk]))
-        self.assertEqual(response['Location'], f"{reverse('payment_queue')}?tab=CAPEX")
+        self.assertEqual(response['Location'], f'{self.bill_url(self.capex_bill)}#payments')
+        self.assertEqual(self.snapshot(self.capex_bill_pay), before)
 
 
 # ---------------------------------------------------------------------------
