@@ -31,6 +31,7 @@ THE THREE COUNTS:
   No due date   due_date is null
 
 WHO GETS WHICH SCOPE. Each person gets exactly ONE, the first rule that matches:
+  0. role in MORNING_REPORT_EXCLUDED_ROLES  -> no report at all (System Admin)
   1. role CEO / Admin / System Admin       -> "all active projects"
   2. manages a project (PM or coordinator,  -> "your projects and tasks": every
      via permissions.managed_project_ids_      in-scope task on those projects, PLUS
@@ -59,6 +60,12 @@ from .utils import applicable_tasks_q
 #: same three permissions.CEO_DASHBOARD_ROLES names), so "your tasks" would tell them
 #: nothing about the company.
 ALL_PROJECTS_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
+
+#: Roles that never RECEIVE the morning report, in any scope, even when they hold tasks
+#: or manage projects. This governs who is sent a report, NOT which tasks are counted: a
+#: System Admin's own tasks still count in their PM's "your projects and tasks" and in
+#: management's "all active projects". The stored UserProfile.ROLE_CHOICES value.
+MORNING_REPORT_EXCLUDED_ROLES = frozenset({'System Admin'})
 
 #: The project statuses a task must be on. The stat blocks' and tasks_drill_down's set.
 REPORT_PROJECT_STATUSES = ('Active', 'In Progress')
@@ -158,11 +165,14 @@ def build_task_reports(report_date):
 
     Five queries in total, whatever the number of users (see the module docstring).
     """
-    # 1. Everyone who can receive anything: active profile of an active user. The user
-    #    is joined for the name and the username the command filters --only-user on.
+    # 1. Everyone who can receive anything: active profile of an active user, minus the
+    #    excluded roles. Excluded HERE, on the recipient list only, so their tasks stay in
+    #    queries 4 and 5 and still count for everyone else. The user is joined for the
+    #    name and the username the command filters --only-user on.
     recipients = list(
         UserProfile.objects
         .filter(is_active=True, user__is_active=True)
+        .exclude(role__in=MORNING_REPORT_EXCLUDED_ROLES)
         .select_related('user')
         .order_by('user__username')
     )

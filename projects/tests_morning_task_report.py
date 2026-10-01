@@ -18,6 +18,9 @@ THE RULES, each by a test class named for it
                               own task on a project they do manage is not counted twice.
     ListTests                 delayed oldest first, both lists capped at 20 rows while
                               the counts are not; the link path follows the counts.
+    SystemAdminExclusionTests a System Admin never receives a report, whatever they hold
+                              or manage, but their tasks still count for their project's
+                              manager and for management; CEO and Admin are unchanged.
     MirrorTests               an ASSIGNED mirror task is counted like any other: for its
                               assignee, for a manager of its project and for management;
                               a person whose only open tasks are mirrors gets a report.
@@ -48,7 +51,8 @@ from .management.commands import send_morning_task_report as command_module
 from .models import NotificationLog, Project, ProjectPhase, SystemSettings, Task, UserProfile
 from .permissions import managed_project_ids_by_profile, manageable_projects_q
 from .task_report import (
-    CHECK_DATE, LIST_LIMIT, SCOPE_ALL, SCOPE_PROJECTS, SCOPE_TASKS, build_task_reports,
+    CHECK_DATE, LIST_LIMIT, MORNING_REPORT_EXCLUDED_ROLES, SCOPE_ALL, SCOPE_PROJECTS,
+    SCOPE_TASKS, build_task_reports,
 )
 
 #: A statement that changes data. SAVEPOINT / RELEASE (the TestCase wrapper) are not.
@@ -289,7 +293,7 @@ class ScopePrecedenceTests(_Dates, TestCase):
         by = _by_user(reports)
         self.assertEqual(by['ceo']['scope'], SCOPE_ALL)
         self.assertEqual(by['admin']['scope'], SCOPE_ALL)
-        self.assertEqual(by['sysadmin']['scope'], SCOPE_ALL)
+        self.assertNotIn('sysadmin', by)              # never a recipient (SystemAdminExclusionTests)
         self.assertEqual(by['pm']['scope'], SCOPE_PROJECTS)
         self.assertEqual(by['coord']['scope'], SCOPE_PROJECTS)
         self.assertEqual(by['se']['scope'], SCOPE_TASKS)
@@ -393,6 +397,49 @@ class ManagerOwnTasksTests(_Dates, TestCase):
         self.assertEqual(_counts(self._report('pm')), (2, 0, 1))
 
 
+class SystemAdminExclusionTests(_Dates, TestCase):
+    """MORNING_REPORT_EXCLUDED_ROLES decides who RECEIVES a report, not what is counted."""
+
+    def setUp(self):
+        super().setUp()
+        self.ceo = _person('ceo', 'CEO')
+        self.admin = _person('admin', 'Admin')
+        self.pm = _person('pm', 'PM')
+        self.sysadmin = _person('sysadmin', 'System Admin')
+        _, self.phase = _project('PM project', pm=self.pm)
+        _task(self.phase, self.sysadmin, due=self.yesterday, name='Sysadmin late')
+        _task(self.phase, self.sysadmin, due=self.today, name='Sysadmin today')
+        _task(self.phase, self.sysadmin, name='Sysadmin undated')
+
+    def test_the_constant_is_the_stored_role_value(self):
+        self.assertEqual(MORNING_REPORT_EXCLUDED_ROLES, frozenset({'System Admin'}))
+        stored = {value for value, _ in UserProfile.ROLE_CHOICES}
+        self.assertLessEqual(MORNING_REPORT_EXCLUDED_ROLES, stored)
+
+    def test_a_system_admin_with_tasks_gets_no_report(self):
+        self.assertNotIn('sysadmin', _by_user(build_task_reports(self.today)))
+
+    def test_a_system_admin_who_manages_a_project_gets_no_report(self):
+        _project('Sysadmin project', pm=self.sysadmin)
+        self.assertNotIn('sysadmin', _by_user(build_task_reports(self.today)))
+
+    def test_their_tasks_still_count_for_the_manager_and_management(self):
+        by = _by_user(build_task_reports(self.today))
+        for username, scope in (('pm', SCOPE_PROJECTS), ('ceo', SCOPE_ALL),
+                                ('admin', SCOPE_ALL)):
+            self.assertEqual(by[username]['scope'], scope, username)
+            self.assertEqual(_counts(by[username]), (1, 1, 1), username)
+            self.assertEqual([r['task'] for r in by[username]['delayed_tasks']],
+                             ['Sysadmin late'], username)
+            self.assertEqual([r['assigned_to'] for r in by[username]['due_today_tasks']],
+                             ['Sysadmin Test'], username)
+
+    def test_ceo_and_admin_still_receive_all_active_projects(self):
+        by = _by_user(build_task_reports(self.today))
+        self.assertEqual(by['ceo']['scope'], SCOPE_ALL)
+        self.assertEqual(by['admin']['scope'], SCOPE_ALL)
+
+
 class MirrorTests(_Dates, TestCase):
     """Production assigns delivery mirror tasks to people and the task table shows them
     as delayed under that person's name, so the report counts them too."""
@@ -474,6 +521,29 @@ class QueryCountTests(_Dates, TestCase):
         self.assertTrue(all(_counts(r) == (2, 1, 0) for r in pms))
         self.assertTrue(all(_counts(r) == (1, 1, 1) for r in coords))
         self.assertTrue(all(_counts(r) == (1, 1, 0) for r in ses))
+
+    def _add_sysadmin_group(self, tag):
+        pm = _person(f'{tag}pm', 'PM')
+        se = _person(f'{tag}se', 'Site Engineer')
+        sysadmin = _person(f'{tag}sa', 'System Admin')
+        _, managed = _project(f'{tag} managed', pm=pm)
+        _project(f'{tag} sysadmin managed', pm=sysadmin)
+        _task(managed, sysadmin, due=self.yesterday)
+        _task(managed, se, due=self.today)
+
+    def test_same_query_count_at_three_and_thirty_users_with_system_admins(self):
+        self._add_sysadmin_group('s0')
+        self.assertEqual(UserProfile.objects.count(), 3)
+        small_queries, small = self._queries()
+        for n in range(1, 10):
+            self._add_sysadmin_group(f's{n}')
+        self.assertEqual(UserProfile.objects.count(), 30)
+        large_queries, large = self._queries()
+        self.assertEqual((small_queries, large_queries), (5, 5))
+        # 1 and 10 System Admins left out of the recipients; their tasks still counted.
+        self.assertEqual((len(small), len(large)), (2, 20))
+        self.assertFalse(any(r['role'] == 'System Admin' for r in large))
+        self.assertTrue(all(_counts(r) == (1, 1, 0) for r in large if r['role'] == 'PM'))
 
 
 # ---------------------------------------------------------------------------
