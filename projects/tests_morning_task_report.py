@@ -13,9 +13,12 @@ THE RULES, each by a test class named for it
     ScopePrecedenceTests      one scope per person, the first rule that matches; a PM
                               gets one report with their own tasks inside it; all-zero
                               people are not in the result.
+    ManagerOwnTasksTests      "your projects and tasks" is a union: a manager's own task
+                              on a project they do not manage is counted once, and their
+                              own task on a project they do manage is not counted twice.
     ListTests                 delayed oldest first, both lists capped at 20 rows while
                               the counts are not; the link path follows the counts.
-    QueryCountTests           five queries, with three users or thirty.
+    QueryCountTests           five queries, with exactly three users or thirty.
     CommandSendTests          the seven WhatsApp parameters in order, the email subject
                               and columns, a second run sends nothing, a failed WhatsApp
                               is retried without repeating the email.
@@ -295,9 +298,9 @@ class ScopePrecedenceTests(_Dates, TestCase):
     def test_counts_per_scope(self):
         by = _by_user(build_task_reports(self.today))
         self.assertEqual(_counts(by['ceo']), (3, 1, 0))
-        # Every in-scope task on the PM's project, their own included. Their task on a
-        # project they do not manage is not in "your projects" (the first rule wins).
-        self.assertEqual(_counts(by['pm']), (1, 1, 0))
+        # Every in-scope task on the PM's project (their own included), plus their own
+        # task on the project they do not manage. The SE's task there is not theirs.
+        self.assertEqual(_counts(by['pm']), (2, 1, 0))
         self.assertEqual(_counts(by['coord']), (1, 1, 0))
         self.assertEqual(_counts(by['se']), (1, 1, 0))
 
@@ -348,27 +351,88 @@ class ListTests(_Dates, TestCase):
                          '/tasks/overdue/')
 
 
+class ManagerOwnTasksTests(_Dates, TestCase):
+    """A manager's scope is the projects they manage UNION their own tasks elsewhere."""
+
+    def setUp(self):
+        super().setUp()
+        self.pm = _person('pm', 'PM')
+        self.coord = _person('coord', 'Project Coordinator')
+        self.se = _person('se', 'Site Engineer')
+        _, self.managed = _project('Managed', pm=self.pm, coordinators=[self.coord])
+        _, self.elsewhere = _project('Elsewhere')
+
+    def _report(self, username):
+        return _by_user(build_task_reports(self.today))[username]
+
+    def test_own_task_on_a_project_they_do_not_manage_is_counted_once(self):
+        _task(self.elsewhere, self.pm, due=self.yesterday, name='PM elsewhere')
+        _task(self.elsewhere, self.coord, due=self.today, name='Coord elsewhere')
+        _task(self.elsewhere, self.se, due=self.yesterday, name='SE elsewhere')
+        pm = self._report('pm')
+        self.assertEqual(pm['scope'], SCOPE_PROJECTS)
+        self.assertEqual(SCOPE_PROJECTS, 'your projects and tasks')
+        self.assertEqual(_counts(pm), (1, 0, 0))
+        self.assertEqual([r['task'] for r in pm['delayed_tasks']], ['PM elsewhere'])
+        coord = self._report('coord')
+        self.assertEqual(_counts(coord), (0, 1, 0))
+        self.assertEqual([r['task'] for r in coord['due_today_tasks']], ['Coord elsewhere'])
+
+    def test_own_task_on_a_managed_project_is_not_counted_twice(self):
+        _task(self.managed, self.pm, due=self.yesterday, name='PM own, managed')
+        _task(self.managed, self.pm, name='PM undated, managed')
+        _task(self.managed, self.se, due=self.today, name='SE on managed')
+        pm = self._report('pm')
+        self.assertEqual(_counts(pm), (1, 1, 1))
+        self.assertEqual([r['task'] for r in pm['delayed_tasks']], ['PM own, managed'])
+        self.assertEqual([r['task'] for r in pm['due_today_tasks']], ['SE on managed'])
+
+    def test_own_tasks_both_sides_add_up_once_each(self):
+        _task(self.managed, self.pm, due=self.yesterday)
+        _task(self.elsewhere, self.pm, due=self.yesterday)
+        _task(self.elsewhere, self.pm)
+        self.assertEqual(_counts(self._report('pm')), (2, 0, 1))
+
+
 class QueryCountTests(_Dates, TestCase):
+    """Exactly 3 users, then exactly 30, each group being a PM and a coordinator who both
+    hold a task on a project they do not manage (the union's second half) and a Site
+    Engineer on the managed project."""
 
-    def _add_people(self, n, tag):
+    def _add_group(self, tag):
         pm = _person(f'{tag}pm', 'PM')
-        _, phase = _project(f'{tag} project', pm=pm,
-                            coordinators=[_person(f'{tag}co', 'Project Coordinator')])
-        for i in range(n):
-            se = _person(f'{tag}se{i}', 'Site Engineer')
-            _task(phase, se, due=self.yesterday)
-            _task(phase, se, due=self.today)
-            _task(phase, se)
+        coord = _person(f'{tag}co', 'Project Coordinator')
+        se = _person(f'{tag}se', 'Site Engineer')
+        _, managed = _project(f'{tag} managed', pm=pm, coordinators=[coord])
+        _, elsewhere = _project(f'{tag} elsewhere')
+        _task(managed, se, due=self.yesterday)
+        _task(managed, se, due=self.today)
+        _task(elsewhere, pm, due=self.yesterday)
+        _task(elsewhere, coord)
 
-    def test_five_queries_with_three_users_or_thirty(self):
-        _person('ceo', 'CEO')
-        self._add_people(1, 'a')
-        with self.assertNumQueries(5):
-            small = build_task_reports(self.today)
-        self._add_people(27, 'b')
-        with self.assertNumQueries(5):
-            large = build_task_reports(self.today)
-        self.assertLess(len(small), len(large))
+    def _queries(self):
+        with CaptureQueriesContext(connection) as captured:
+            reports = build_task_reports(self.today)
+        return len(captured), reports
+
+    def test_same_query_count_at_three_users_and_thirty(self):
+        self._add_group('g0')
+        self.assertEqual(UserProfile.objects.count(), 3)
+        small_queries, small = self._queries()
+        for n in range(1, 10):
+            self._add_group(f'g{n}')
+        self.assertEqual(UserProfile.objects.count(), 30)
+        large_queries, large = self._queries()
+        self.assertEqual(small_queries, large_queries)
+        self.assertEqual(large_queries, 5)
+        self.assertEqual((len(small), len(large)), (3, 30))
+        # The union really ran at scale: each PM's 2 delayed are the SE's on their
+        # project plus their own from elsewhere; each coordinator's 1 undated is theirs.
+        pms = [r for r in large if r['role'] == 'PM']
+        coords = [r for r in large if r['role'] == 'Project Coordinator']
+        self.assertEqual(len(pms), 10)
+        self.assertTrue(all(_counts(r) == (2, 1, 0) for r in pms))
+        self.assertTrue(all(_counts(r) == (1, 1, 1) for r in coords))
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +496,7 @@ class CommandSendTests(_CommandFixture):
         params = kwargs['template_params']
         self.assertEqual(len(params), 7)
         self.assertEqual(params, [
-            self.today.strftime('%d %b %Y'), 'Pm', 'your projects', '1', '1', '1',
+            self.today.strftime('%d %b %Y'), 'Pm', 'your projects and tasks', '1', '1', '1',
             'https://pms.example.com/tasks/overdue/'])
         self.assertTrue(all(isinstance(p, str) for p in params))
         self.assertEqual(kwargs['subject'],

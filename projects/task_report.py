@@ -9,7 +9,7 @@ the figures here means a test can assert them without sending anything.
 WHICH TASKS (report_tasks_q):
   - assigned to an ACTIVE person (UserProfile.is_active and User.is_active). A task
     held by someone who has left is nobody's morning task; it is not in any count,
-    including a PM's "your projects" figure.
+    including a PM's "your projects and tasks" figure.
   - open: status in task_health.OPEN_STATUSES (every status but Done; Blocked counts)
   - not Not Applicable (Task.is_not_applicable is a flag, not a status)
   - not a mirror (utils.human_owned_tasks_q), as build_user_status_rows does: a mirror
@@ -29,9 +29,10 @@ THE THREE COUNTS:
 
 WHO GETS WHICH SCOPE. Each person gets exactly ONE, the first rule that matches:
   1. role CEO / Admin / System Admin       -> "all active projects"
-  2. manages a project (PM or coordinator,  -> "your projects": every in-scope task
-     via permissions.managed_project_ids_      on those projects, their own included
-     by_profile)
+  2. manages a project (PM or coordinator,  -> "your projects and tasks": every
+     via permissions.managed_project_ids_      in-scope task on those projects, PLUS
+     by_profile)                               their own in-scope tasks on any other
+                                               counted project. Each task once.
   3. holds at least one in-scope task       -> "your tasks"
 A person whose three counts are all zero is not in the result at all.
 
@@ -60,7 +61,9 @@ ALL_PROJECTS_ROLES = frozenset({'CEO', 'Admin', 'System Admin'})
 REPORT_PROJECT_STATUSES = ('Active', 'In Progress')
 
 SCOPE_ALL = 'all active projects'
-SCOPE_PROJECTS = 'your projects'
+#: A manager's scope: the projects they manage, and their own tasks anywhere else. The
+#: words are sent as they are, in the email and as a WhatsApp parameter.
+SCOPE_PROJECTS = 'your projects and tasks'
 SCOPE_TASKS = 'your tasks'
 
 #: Rows in each of the two lists. The counts above them are never capped.
@@ -114,7 +117,11 @@ def _in_scope(scope, profile_pk, projects, project_pk, assignee_pk):
     if scope == SCOPE_ALL:
         return True
     if scope == SCOPE_PROJECTS:
-        return project_pk in projects
+        # A UNION, so a manager's own task on a project they do not manage is still
+        # theirs this morning. Each task is one row (or one grouped cell), and the test
+        # is an OR on that row, so a task that is both on their project and their own is
+        # counted once.
+        return project_pk in projects or assignee_pk == profile_pk
     return assignee_pk == profile_pk
 
 
@@ -191,7 +198,7 @@ def build_task_reports(report_date):
     reports = []
     for profile in recipients:
         # Scope precedence: the first rule that matches, so a PM who also holds tasks
-        # gets one report ("your projects", their own tasks included), never two.
+        # gets one report ("your projects and tasks"), never two.
         projects = managed.get(profile.pk, frozenset())
         if profile.role in ALL_PROJECTS_ROLES:
             scope = SCOPE_ALL
