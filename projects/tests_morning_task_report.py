@@ -5,7 +5,7 @@ command, and permissions.managed_project_ids_by_profile().
 THE RULES, each by a test class named for it
     ManagedProjectIdsTests    the bulk helper equals manageable_projects_q() for every
                               active profile, drops inactive people, costs two queries.
-    ScopeExclusionTests       Done, Not Applicable, unassigned, inactive-assignee, mirror,
+    ScopeExclusionTests       Done, Not Applicable, unassigned, inactive-assignee,
                               test-project, deleted, Draft, On Hold and Commissioned work
                               is in no count; External work is.
     BoundaryDateTests         yesterday is delayed, today is due today, tomorrow is
@@ -18,6 +18,9 @@ THE RULES, each by a test class named for it
                               own task on a project they do manage is not counted twice.
     ListTests                 delayed oldest first, both lists capped at 20 rows while
                               the counts are not; the link path follows the counts.
+    MirrorTests               an ASSIGNED mirror task is counted like any other: for its
+                              assignee, for a manager of its project and for management;
+                              a person whose only open tasks are mirrors gets a report.
     QueryCountTests           five queries, with exactly three users or thirty.
     CommandSendTests          the seven WhatsApp parameters in order, the email subject
                               and columns, a second run sends nothing, a failed WhatsApp
@@ -206,10 +209,6 @@ class ScopeExclusionTests(_Dates, TestCase):
         self.assertNotIn('pm', reports)       # their project's only tasks are excluded
         self.assertNotIn('boss', reports)
 
-    def test_mirror_is_not_counted(self):
-        _task(self.phase, self.se, due=self.yesterday, is_mirror=True)
-        self.assertEqual(self._se_counts(), (0, 0, 0))
-
     def test_projects_outside_the_live_set_are_not_counted(self):
         for kwargs in ({'is_test': True}, {'is_deleted': True},
                        {'status': 'Draft', 'activated': False},
@@ -394,10 +393,49 @@ class ManagerOwnTasksTests(_Dates, TestCase):
         self.assertEqual(_counts(self._report('pm')), (2, 0, 1))
 
 
+class MirrorTests(_Dates, TestCase):
+    """Production assigns delivery mirror tasks to people and the task table shows them
+    as delayed under that person's name, so the report counts them too."""
+
+    def setUp(self):
+        super().setUp()
+        self.ceo = _person('ceo', 'CEO')
+        self.pm = _person('pm', 'PM')
+        self.se = _person('se', 'Site Engineer')
+        _, self.phase = _project('Delivery site', pm=self.pm)
+
+    def test_an_assigned_late_mirror_is_delayed_for_assignee_manager_and_management(self):
+        _task(self.phase, self.se, due=self.yesterday, is_mirror=True,
+              name='Delivery of Module')
+        by = _by_user(build_task_reports(self.today))
+        self.assertEqual(by['se']['scope'], SCOPE_TASKS)
+        self.assertEqual(by['pm']['scope'], SCOPE_PROJECTS)
+        self.assertEqual(by['ceo']['scope'], SCOPE_ALL)
+        for username in ('se', 'pm', 'ceo'):
+            self.assertEqual(_counts(by[username]), (1, 0, 0), username)
+            self.assertEqual([r['task'] for r in by[username]['delayed_tasks']],
+                             ['Delivery of Module'], username)
+
+    def test_a_person_whose_only_open_tasks_are_mirrors_gets_a_report(self):
+        only_mirrors = _person('mirrorman', 'SCM')
+        _task(self.phase, only_mirrors, due=self.yesterday, is_mirror=True)
+        _task(self.phase, only_mirrors, due=self.today, is_mirror=True)
+        _task(self.phase, only_mirrors, is_mirror=True)
+        _task(self.phase, only_mirrors, due=self.yesterday, is_mirror=True,
+              status=Task.DONE)                       # Done: still not counted
+        report = _by_user(build_task_reports(self.today))['mirrorman']
+        self.assertEqual(report['scope'], SCOPE_TASKS)
+        self.assertEqual(_counts(report), (1, 1, 1))
+
+    def test_an_unassigned_mirror_is_still_not_counted(self):
+        _task(self.phase, None, due=self.yesterday, is_mirror=True)
+        self.assertEqual(build_task_reports(self.today), [])
+
+
 class QueryCountTests(_Dates, TestCase):
     """Exactly 3 users, then exactly 30, each group being a PM and a coordinator who both
     hold a task on a project they do not manage (the union's second half) and a Site
-    Engineer on the managed project."""
+    Engineer on the managed project, whose late task there is an assigned mirror."""
 
     def _add_group(self, tag):
         pm = _person(f'{tag}pm', 'PM')
@@ -405,7 +443,7 @@ class QueryCountTests(_Dates, TestCase):
         se = _person(f'{tag}se', 'Site Engineer')
         _, managed = _project(f'{tag} managed', pm=pm, coordinators=[coord])
         _, elsewhere = _project(f'{tag} elsewhere')
-        _task(managed, se, due=self.yesterday)
+        _task(managed, se, due=self.yesterday, is_mirror=True)
         _task(managed, se, due=self.today)
         _task(elsewhere, pm, due=self.yesterday)
         _task(elsewhere, coord)
@@ -426,13 +464,16 @@ class QueryCountTests(_Dates, TestCase):
         self.assertEqual(small_queries, large_queries)
         self.assertEqual(large_queries, 5)
         self.assertEqual((len(small), len(large)), (3, 30))
-        # The union really ran at scale: each PM's 2 delayed are the SE's on their
-        # project plus their own from elsewhere; each coordinator's 1 undated is theirs.
+        # The union and the mirror really ran at scale: each PM's 2 delayed are the SE's
+        # mirror on their project plus their own from elsewhere; each coordinator's 1
+        # undated is theirs; each SE's 1 delayed is the mirror.
         pms = [r for r in large if r['role'] == 'PM']
         coords = [r for r in large if r['role'] == 'Project Coordinator']
-        self.assertEqual(len(pms), 10)
+        ses = [r for r in large if r['role'] == 'Site Engineer']
+        self.assertEqual((len(pms), len(coords), len(ses)), (10, 10, 10))
         self.assertTrue(all(_counts(r) == (2, 1, 0) for r in pms))
         self.assertTrue(all(_counts(r) == (1, 1, 1) for r in coords))
+        self.assertTrue(all(_counts(r) == (1, 1, 0) for r in ses))
 
 
 # ---------------------------------------------------------------------------

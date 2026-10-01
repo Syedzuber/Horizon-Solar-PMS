@@ -12,8 +12,11 @@ WHICH TASKS (report_tasks_q):
     including a PM's "your projects and tasks" figure.
   - open: status in task_health.OPEN_STATUSES (every status but Done; Blocked counts)
   - not Not Applicable (Task.is_not_applicable is a flag, not a status)
-  - not a mirror (utils.human_owned_tasks_q), as build_user_status_rows does: a mirror
-    is moved by another team's object, so it is nobody's to-do
+  - mirrors INCLUDED. Production assigns delivery mirror tasks to people, and the
+    task table shows them as delayed under that person's name; leaving them out
+    dropped a person whose open tasks are all mirrors from the report entirely. This
+    deliberately differs from reports.build_user_status_rows, which excludes them
+    (utils.human_owned_tasks_q); SECONDARY_FINDINGS records that difference.
   - Internal AND External: a DISCOM follow-up is still somebody's task this morning.
     The email says this makes the counts higher than the CEO Tasks card's (Internal).
   - on a project that is live: not deleted, activated, status Active or In Progress,
@@ -49,7 +52,7 @@ from .forms import TYPED_DATE_FLOOR
 from .models import Task, UserProfile
 from .permissions import managed_project_ids_by_profile
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
-from .utils import applicable_tasks_q, human_owned_tasks_q
+from .utils import applicable_tasks_q
 
 
 #: Roles whose report covers every live project. They are portfolio-wide by remit (the
@@ -88,7 +91,6 @@ def report_tasks_q():
             phase__project__status__in=REPORT_PROJECT_STATUSES,
             phase__project__is_test=False,
         )
-        & human_owned_tasks_q()
         & applicable_tasks_q()
     )
 
