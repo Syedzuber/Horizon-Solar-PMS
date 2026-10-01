@@ -1,0 +1,158 @@
+{% autoescape on %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Horizon Solar — Task report</title>
+</head>
+{% comment %}
+  Email HTML, the rules eod_digest.html states: table-based layout and inline styles
+  only, 600px wide, no flex/grid, no <style> block, no external CSS. Email clients
+  (Outlook, Gmail) strip <style> and do not support modern layout. Fixed light palette:
+  email clients have no reliable dark-mode signal. A Django comment, not an HTML
+  one, so it is not sent to every recipient.
+{% endcomment %}
+<body style="margin:0; padding:0; background-color:#f4f6f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px; max-width:600px; background-color:#ffffff; border-radius:10px; overflow:hidden; border:1px solid #e5e9ee;">
+          {# Header #}
+          <tr>
+            <td style="background-color:#0f4c81; padding:24px 28px;">
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:20px; font-weight:bold; color:#ffffff;">Horizon Solar</div>
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#cfe0f0; margin-top:4px;">Morning task report &middot; {{ date_str }}</div>
+            </td>
+          </tr>
+
+          {# Greeting #}
+          <tr>
+            <td style="padding:24px 28px 8px 28px; font-family:Arial,Helvetica,sans-serif; font-size:15px; color:#22303c;">
+              Good morning {{ report.first_name }},<br>
+              <span style="font-size:14px; color:#5a6b7b;">Open tasks on {{ report.scope }}, as of this morning.</span>
+            </td>
+          </tr>
+
+          {# The three counts: one row of three fixed-width cells #}
+          <tr>
+            <td style="padding:12px 22px 4px 22px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td width="33%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf0ef; border:1px solid #f3d6d3; border-radius:8px;">
+                      <tr><td align="center" style="padding:16px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:28px; font-weight:bold; color:#c0392b;">{{ report.delayed }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:4px;">Delayed</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                  <td width="33%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#fdf5f0; border:1px solid #f3e2d6; border-radius:8px;">
+                      <tr><td align="center" style="padding:16px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:28px; font-weight:bold; color:#c05621;">{{ report.due_today }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:4px;">Due today</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                  <td width="34%" style="padding:6px;">
+                    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef4fb; border:1px solid #dbe6f2; border-radius:8px;">
+                      <tr><td align="center" style="padding:16px 8px; font-family:Arial,Helvetica,sans-serif;">
+                        <div style="font-size:28px; font-weight:bold; color:#0f4c81;">{{ report.no_due_date }}</div>
+                        <div style="font-size:13px; color:#5a6b7b; margin-top:4px;">No due date</div>
+                      </td></tr>
+                    </table>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          {% comment %}
+          Delayed table. "Assigned to" is drawn only when the tasks can be someone else's
+          (your projects / all active projects); on "your tasks" every row would name the
+          reader. Days late says "check date" for a due date before 2020 (a mistyped year).
+          {% endcomment %}
+          {% if report.delayed_tasks %}
+          <tr>
+            <td style="padding:18px 28px 0 28px; font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:12px; font-weight:bold; color:#c0392b; letter-spacing:.06em; text-transform:uppercase; border-top:1px solid #eef1f4; padding-top:16px;">Delayed{% if report.delayed > report.delayed_tasks|length %} &middot; oldest {{ report.delayed_tasks|length }} of {{ report.delayed }}{% endif %}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 28px 0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; font-family:Arial,Helvetica,sans-serif; font-size:12px;">
+                <tr>
+                  <th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Project</th>
+                  <th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Task</th>
+                  {% if report.show_assignee %}<th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Assigned to</th>{% endif %}
+                  <th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Due date</th>
+                  <th align="right" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Days late</th>
+                </tr>
+                {% for row in report.delayed_tasks %}
+                <tr>
+                  <td align="left" style="padding:6px 4px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.project }}</td>
+                  <td align="left" style="padding:6px 4px; color:#22303c; border-bottom:1px solid #eef1f4;">{{ row.task }}</td>
+                  {% if report.show_assignee %}<td align="left" style="padding:6px 4px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.assigned_to }}</td>{% endif %}
+                  <td align="left" style="padding:6px 4px; color:#5a6b7b; border-bottom:1px solid #eef1f4; white-space:nowrap;">{{ row.due_date|date:"d M Y" }}</td>
+                  <td align="right" style="padding:6px 4px; color:#c0392b; font-weight:bold; border-bottom:1px solid #eef1f4; white-space:nowrap;">{{ row.days_late }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+            </td>
+          </tr>
+          {% endif %}
+
+          {% if report.due_today_tasks %}
+          <tr>
+            <td style="padding:18px 28px 0 28px; font-family:Arial,Helvetica,sans-serif;">
+              <div style="font-size:12px; font-weight:bold; color:#c05621; letter-spacing:.06em; text-transform:uppercase; border-top:1px solid #eef1f4; padding-top:16px;">Due today{% if report.due_today > report.due_today_tasks|length %} &middot; {{ report.due_today_tasks|length }} of {{ report.due_today }}{% endif %}</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:10px 28px 0 28px;">
+              <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%; border-collapse:collapse; font-family:Arial,Helvetica,sans-serif; font-size:12px;">
+                <tr>
+                  <th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Project</th>
+                  <th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Task</th>
+                  {% if report.show_assignee %}<th align="left" style="padding:6px 4px; background-color:#eef4fb; color:#0f4c81; font-size:10px; text-transform:uppercase; border-bottom:1px solid #dbe6f2;">Assigned to</th>{% endif %}
+                </tr>
+                {% for row in report.due_today_tasks %}
+                <tr>
+                  <td align="left" style="padding:6px 4px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.project }}</td>
+                  <td align="left" style="padding:6px 4px; color:#22303c; border-bottom:1px solid #eef1f4;">{{ row.task }}</td>
+                  {% if report.show_assignee %}<td align="left" style="padding:6px 4px; color:#5a6b7b; border-bottom:1px solid #eef1f4;">{{ row.assigned_to }}</td>{% endif %}
+                </tr>
+                {% endfor %}
+              </table>
+            </td>
+          </tr>
+          {% endif %}
+
+          {# Link #}
+          <tr>
+            <td style="padding:22px 28px 0 28px; font-family:Arial,Helvetica,sans-serif;">
+              <table role="presentation" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background-color:#1a7a4a; border-radius:6px;">
+                    <a href="{{ link }}" style="display:inline-block; padding:10px 18px; font-family:Arial,Helvetica,sans-serif; font-size:14px; font-weight:bold; color:#ffffff; text-decoration:none;">Open Horizon Solar</a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          {# Footer: the two definitions, then the two caveats #}
+          <tr>
+            <td style="padding:22px 28px 24px 28px; font-family:Arial,Helvetica,sans-serif; font-size:11px; color:#9aa7b4; line-height:1.5;">
+              Delayed: the due date is before today ({{ date_str }}) and the task is not Done.<br>
+              Due today: the due date is today and the task is not Done.<br>
+              Counts include external steps such as DISCOM, so they can be higher than the CEO dashboard's task card.<br>
+              The linked page may show a slightly different set of tasks from the counts above.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>{% endautoescape %}

@@ -94,6 +94,52 @@ def manageable_projects_q(profile, prefix=''):
             | Q(**{f'{prefix}coordinators': profile}))
 
 
+def managed_project_ids_by_profile():
+    """Return {profile pk: set of project pks} for every ACTIVE profile that manages at
+    least one project — the BULK form of manageable_projects_q(), in two queries
+    whatever the number of users. A profile that manages nothing is absent.
+
+    ACTIVE means UserProfile.is_active AND User.is_active, the same pair every
+    notification recipient query uses. An inactive coordinator is therefore never here,
+    which is what project_managers() means by "active coordinator"; an inactive PM is
+    not here either, because they are not anybody's recipient.
+
+    WHY THIS EXISTS. manageable_projects_q() takes one profile, so resolving every
+    manager's projects through it costs one query per manager. A daily report that
+    covers the whole company (task_report.py) must not grow with the user count.
+
+    No project filter is applied: like manageable_projects_q(), this is ownership only.
+    A caller narrows by project state (deleted, activated, status, is_test) itself.
+
+    INVARIANT: for every active profile, the set here equals the pks of
+    Project.objects.filter(manageable_projects_q(profile)). It reads the same two
+    relations (assigned_pm, coordinators) as that Q; if one changes, change the other in
+    the same edit. tests_morning_task_report.ManagedProjectIdsTests pins the two equal.
+    """
+    # Imported at call time, not at the top: this module keeps its single `Q` import so
+    # it never imports models (see the note at the top), which is what keeps it free of
+    # circular imports. Same precedent as reserved_task_names().
+    from .models import Project
+
+    managed = {}
+    # The assigned-PM leg: one row per project with an active PM.
+    for profile_pk, project_pk in (
+        Project.objects
+        .filter(assigned_pm__is_active=True, assigned_pm__user__is_active=True)
+        .values_list('assigned_pm_id', 'pk')
+    ):
+        managed.setdefault(profile_pk, set()).add(project_pk)
+    # The coordinator leg, read from the M2M's join table so it is one query and one
+    # row per (coordinator, project) pair, with no fan-out to de-duplicate.
+    for profile_pk, project_pk in (
+        Project.coordinators.through.objects
+        .filter(userprofile__is_active=True, userprofile__user__is_active=True)
+        .values_list('userprofile_id', 'project_id')
+    ):
+        managed.setdefault(profile_pk, set()).add(project_pk)
+    return managed
+
+
 def user_can_view_project(user, project):
     """
     Return True if `user` may SEE `project`. This is visibility only — it confers no

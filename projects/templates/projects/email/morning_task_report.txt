@@ -1,0 +1,22 @@
+{% autoescape off %}Horizon Solar — Morning task report ({{ date_str }})
+
+Good morning {{ report.first_name }},
+
+Open tasks on {{ report.scope }}, as of this morning:
+- Delayed     : {{ report.delayed }}
+- Due today   : {{ report.due_today }}
+- No due date : {{ report.no_due_date }}
+{% if report.delayed_tasks %}
+Delayed{% if report.delayed > report.delayed_tasks|length %} (oldest {{ report.delayed_tasks|length }} of {{ report.delayed }}){% endif %}:
+{% for row in report.delayed_tasks %}- {{ row.project }} | {{ row.task }}{% if report.show_assignee %} | {{ row.assigned_to }}{% endif %} | due {{ row.due_date|date:"d M Y" }} | {% if row.days_late == "check date" %}check date{% else %}{{ row.days_late }} day{{ row.days_late|pluralize }} late{% endif %}
+{% endfor %}{% endif %}{% if report.due_today_tasks %}
+Due today{% if report.due_today > report.due_today_tasks|length %} ({{ report.due_today_tasks|length }} of {{ report.due_today }}){% endif %}:
+{% for row in report.due_today_tasks %}- {{ row.project }} | {{ row.task }}{% if report.show_assignee %} | {{ row.assigned_to }}{% endif %}
+{% endfor %}{% endif %}
+Open Horizon Solar: {{ link }}
+
+Delayed: the due date is before today ({{ date_str }}) and the task is not Done.
+Due today: the due date is today and the task is not Done.
+Counts include external steps such as DISCOM, so they can be higher than the CEO dashboard's task card.
+The linked page may show a slightly different set of tasks from the counts above.
+{% endautoescape %}

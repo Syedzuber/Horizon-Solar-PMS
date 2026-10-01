@@ -338,3 +338,20 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 - **`show_aging_link` is computed on every request, and one template reads it.** It rides on `approvals_nav`, which already runs for every page. It costs no query: `request.user.profile` is already loaded by the `notifications` processor.
 - **`dashboard/ceo.html` was not changed (ruling Q3).** Its two links to the aging list have no check of either kind. Only CEO, Admin and System Admin reach `dashboard_ceo`, and all three are in both sets, so the S6 entry above ("View all approvals → has no permission check, by ruling") stands as written. If a role is ever added to `dashboard_ceo` it must be checked against both sets.
 - **`approval_list` still passes `can_view_aging` (ruling Q4).** It is now half of the button's condition rather than all of it.
+
+## From the morning task report (2026-10-01)
+
+- **Five "due today" versions disagree (ruling 2: recorded, none fixed).** `task_health` has an overdue rule but no due-today form, so each reader spells its own:
+  1. `dashboard_ceo`'s `due_today_count`: Internal only; Not Started / In Progress / Blocked written as a literal list; N/A and mirrors excluded by `_ceo_task_base`.
+  2. The PM / SE / Design / SCM stat blocks (`_pm_task_base` and its three siblings), `tasks_drill_down`'s due-today window, and `dashboard_pm`'s per-card `due_today_for_project`: Not Started / In Progress / Blocked, Internal and External, N/A and mirrors excluded.
+  3. `dashboard_pm`'s `due_today_tasks` list: Internal; Not Started / In Progress only, so a Blocked task due today is left out; **N/A not excluded**; mirrors not excluded.
+  4. `dashboard_pm`'s `team_due_today`: Not Started / In Progress only; PM-role tasks left out; **N/A not excluded**; mirrors not excluded.
+  5. `views._attach_due_health` (`task.due_today`, the task table's "Due Today" label): status in `task_health.OPEN_STATUSES` and not N/A.
+  The morning report's `task_report.due_today_q()` is rule 5. The fix is a due-today form in `task_health` with these five routed through it; deferred.
+- **The morning report and the CEO daily report count different projects (ruling 5).** The morning report takes Active / In Progress, activated, not deleted, not `is_test`, the stat blocks' set, which is the page its link opens. `reports._active_project_filter` (the daily report, the EOD digest) also admits On Hold and Commissioned, and does not exclude `is_test`. A late task on an On Hold project is in the daily report's Overdue column and not in the morning report.
+- **The link does not open a list of exactly what the email counted (ruling 6).** No page was built. `/tasks/overdue/` and `/tasks/due-today/` (`tasks_drill_down`) show the whole portfolio to Finance, SCM, BD, CEO, Admin and System Admin, and Design's project-plus-task union; they keep `is_test` projects and include unassigned tasks. The email's footer says the linked page may differ.
+- **"Your projects" leaves out a manager's own tasks on projects they do not manage.** Scope is the first rule that matches, so a PM or coordinator is reported on their managed projects only. Locally one PM (siddharth) holds 3 undated open tasks on projects he does not manage; they are in no report of his.
+- **The duplicate check is not a lock.** It reads today's 'sent' `NotificationLog` rows per channel before sending. Two runs started together could both send. The cron fires once a day.
+- **Both channels log under `daily_task_report`, the Interakt template name.** `send_notification` takes one `template` argument for the WhatsApp template and the log's `template_name`, so the email row carries it too. The duplicate check depends on that name staying the same.
+- **`--to` sends are not in `NotificationLog`.** They go through `send_aggregate_email` with no log recipient (ruling 8), so they land in the application log only, and a test send never stops the person's real report that day.
+- **Most of the report is "No due date" until due dates are filled.** Locally 538 of 570 open in-scope tasks have no due date; 32 are delayed and none is due today.
