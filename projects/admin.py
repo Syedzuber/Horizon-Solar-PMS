@@ -1,10 +1,11 @@
 from django import forms
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.utils import timezone
 from .models import (
     Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile,
     NotificationLog, SystemSettings,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
+    checklist_answer_counts, checklist_delete_refusal,
     Program,
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
@@ -363,13 +364,34 @@ class NotificationLogAdmin(admin.ModelAdmin):
         return False
 
 
+class _ChecklistItemInlineFormSet(forms.models.BaseInlineFormSet):
+    """G42: refuses deleting an answered item as a form error, not a 500.
+
+    has_delete_permission() on an inline is asked about the PARENT checklist, never the
+    row, so it cannot spare one answered item on a draft. ChecklistItem.delete() would
+    raise ChecklistHasAnswers when the formset reached it; this stops it one step
+    earlier, with the message on the form."""
+
+    def clean(self):
+        super().clean()
+        for form in self.forms:
+            if form.instance.pk and self._should_delete_form(form):
+                refusal = checklist_delete_refusal(form.instance)
+                if refusal:
+                    raise forms.ValidationError(refusal)
+
+
 class ChecklistItemInline(admin.TabularInline):
     """Items are CONTENT of a checklist version (R-7) — editable only while it is a
     draft. Same rule, and the same reason, as TaskTemplatePhase/TaskTemplateTask: the
     model's save() already raises, and these hooks stop the admin offering the form at
-    all so a user gets "you may not change this" rather than a 500 on save."""
+    all so a user gets "you may not change this" rather than a 500 on save.
+
+    There is no standalone ChecklistItemAdmin; this inline is the only Django admin
+    surface that deletes an item."""
 
     model = ChecklistItem
+    formset = _ChecklistItemInlineFormSet
     extra = 1
     fields = ['order', 'label']
 
@@ -427,6 +449,39 @@ class ChecklistAdmin(admin.ModelAdmin):
         if obj is not None and not obj.is_editable:
             return False
         return super().has_change_permission(request, obj)
+
+    def has_delete_permission(self, request, obj=None):
+        # G42: nobody may delete a version that holds answers — deleting it nulls their
+        # item and hides them from their tasks; archiving is the way to retire it. A
+        # version with no answers keeps Django's ordinary permission check. With obj=None
+        # (the changelist, the action menu) there is no row to ask about yet; the bulk
+        # action asks per row through get_deleted_objects() below.
+        if obj is not None and checklist_answer_counts(obj)[0]:
+            return False
+        return super().has_delete_permission(request, obj)
+
+    def get_deleted_objects(self, objs, request):
+        # G42: the bulk "delete selected" confirmation page calls has_delete_permission()
+        # per row through this, and on a refusal shows only "your account doesn't have
+        # permission to delete: checklist" — true but unhelpful. Messages queued here
+        # render on that same page and name the answers and tasks behind each refusal.
+        # The confirm POST is then a PermissionDenied for the whole batch, so nothing in
+        # it is deleted; the admin unticks the answered version and runs it again.
+        for obj in objs:
+            refusal = checklist_delete_refusal(obj)
+            if refusal:
+                self.message_user(request, refusal, messages.ERROR)
+        return super().get_deleted_objects(objs, request)
+
+    def delete_queryset(self, request, queryset):
+        # G42 BACKSTOP. QuerySet.delete() runs in SQL and never calls Checklist.delete(),
+        # so whatever reaches this — today only the bulk action, which the permission
+        # check above already stops — still cannot delete an answered version. Kept
+        # rather than trusting that one caller, because the model guard cannot cover it.
+        answered = [c.pk for c in queryset if checklist_answer_counts(c)[0]]
+        for c in queryset.filter(pk__in=answered):
+            self.message_user(request, checklist_delete_refusal(c), messages.ERROR)
+        queryset.exclude(pk__in=answered).delete()
 
 
 @admin.register(ChecklistTaskLink)

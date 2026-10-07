@@ -47,7 +47,9 @@ from .models import (
     VendorOrder, VendorOrderDocument, VendorOrderProgram, VendorOrderSite,
     VENDOR_ORDER_DOC_INVOICE,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
-    # 2.4 - the checklist picker resolves its POST back to a concrete template row.
+    # G42 - every checklist delete path asks the one predicate.
+    checklist_delete_refusal,
+    # 2.4 -the checklist picker resolves its POST back to a concrete template row.
     TaskTemplateTask,
     Program, program_rollup_annotations, get_program_rollup,
     DesignAssignment,
@@ -14088,23 +14090,31 @@ def admin_checklist_update(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_delete(request, checklist_id):
-    """Delete a Checklist version. Cascades to its items and task links.
+    """Delete a Checklist version that holds no answers. Cascades to its items and task links.
 
-    IT NO LONGER DESTROYS COMPLETION HISTORY. ChecklistItemCompletion.item is SET_NULL,
-    so every tick, photo, checker and timestamp survives with the answered text held in
-    item_text_snapshot. That is the point of 0.5: an admin tidying up a checklist used
-    to erase the inspection record of every site that had ever answered it.
+    G42: A VERSION THAT HOLDS ANY ANSWER IS REFUSED, at any status, with a message
+    naming how many answers on how many tasks. Deleting it would null those answers'
+    item (SET_NULL) and un-pin their tasks, which then show the active version and hide
+    the answers. Archiving is the way to retire a version. Drafts with no answers delete
+    as before.
 
     Access: Admin only. POST only."""
     if request.method != 'POST':
         return redirect('admin_checklists')
 
     checklist = get_object_or_404(Checklist, pk=checklist_id)
+    # Asked here as well as in Checklist.delete() so the refusal is a message on the
+    # screen the admin is standing on, not a 500 from ChecklistHasAnswers.
+    refusal = checklist_delete_refusal(checklist)
+    if refusal:
+        messages.error(request, refusal)
+        return redirect('admin_checklist_edit', checklist_id=checklist.pk)
+
     name = checklist.name
-    checklist.delete()  # CASCADE: items and task_links. Completions survive, item=NULL.
+    checklist.delete()  # CASCADE: items and task_links. No completions exist to orphan.
 
     log_activity(None, request.user.profile,
-                 f"Deleted checklist '{name}' (its items and links; completion records kept)",
+                 f"Deleted checklist '{name}' (its items and links; it held no answers)",
                  entity_type='Checklist', entity_id=None)
     messages.success(request, f'Checklist "{name}" deleted.')
     return redirect('admin_checklists')
@@ -14176,8 +14186,8 @@ def admin_checklist_item_edit(request, checklist_id, item_id):
 def admin_checklist_item_delete(request, checklist_id, item_id):
     """Delete one item from a DRAFT Checklist. Access: Admin only. POST only.
 
-    It does NOT cascade to completions any more — the FK is SET_NULL and each completion
-    keeps its tick, photo, checker, timestamp and the text it answered."""
+    G42: an item that holds any answer is refused even on a draft — nulling its
+    completions' item would hide them from their tasks."""
     if request.method != 'POST':
         return redirect('admin_checklist_edit', checklist_id=checklist_id)
 
@@ -14187,6 +14197,12 @@ def admin_checklist_item_delete(request, checklist_id, item_id):
         return locked
 
     item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+    # Message rather than ChecklistItem.delete()'s ChecklistHasAnswers 500.
+    refusal = checklist_delete_refusal(item)
+    if refusal:
+        messages.error(request, refusal)
+        return redirect('admin_checklist_edit', checklist_id=checklist_id)
+
     label = item.label
     item.delete()
 
