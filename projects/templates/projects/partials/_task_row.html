@@ -17,7 +17,7 @@ Expected context:
                                   option below and the compact approval block
   oob                          — when True, mark the <tr> for out-of-band swap
 {% endcomment %}
-{% load duplicate_tags %}
+{% load duplicate_tags mirror_tags %}
 {% comment %}An N/A row is DE-EMPHASISED, NEVER HIDDEN. The work was ruled out of scope,
    not deleted, and a PM has to be able to see what they excluded in order to reverse
    it — a hidden row is an un-auditable one. Opacity only: the row keeps its position,
@@ -75,10 +75,14 @@ Expected context:
     {% if task.is_mirror %}
       {% comment %}A MIRROR SAYS WHY IT CANNOT BE EDITED, not merely that it is special.
 
-         Eight rows on an OPEX site never change status and, until this, the page gave
-         no reason — the first PM to notice files it as a bug. The badge names the cause
-         (the status is derived elsewhere) rather than the symptom (it is disabled),
-         because "Derived" is answerable and "Read-only" invites "by whom?".
+         Eight rows on an OPEX site never take a status from a person: Design and the
+         four Delivery rows move when their source records do, and COD, As-Built
+         Drawings and HOTO have no source record yet, so they stay where they were seeded.
+         Without a reason on screen the first PM to notice files it as a bug. The badge
+         names the cause (the status is derived elsewhere) rather than the symptom (it is
+         disabled), because "Derived" is answerable and "Read-only" invites "by whom?".
+         The tooltip names THIS row's source, from mirror_tags.MIRROR_SOURCE_TEXT — the
+         one mapping, which task detail's chip reads too.
 
          PRESENTATION ONLY. The guarantee is B22's check at rung 0 of
          `_apply_task_status_change()`, which refuses a human write on is_mirror for both
@@ -86,7 +90,7 @@ Expected context:
          in the view — if this badge were deleted the refusal would be unchanged.{% endcomment %}
       <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-1"
             style="font-size:.62rem;font-weight:500;vertical-align:middle;"
-            title="Derived from the workspace that owns this work — its status updates itself and cannot be set here.">
+            title="{{ task|mirror_source }}">
         <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
       </span>
     {% endif %}

@@ -510,15 +510,102 @@ class TheTrapTests(MirrorReadOnlyFixture):
         task.refresh_from_db()
         self.assertEqual(task.status, Task.NOT_STARTED)
 
-    def test_assigning_a_mirror_is_still_permitted_and_still_pointless(self):
-        """Recorded, not endorsed.
+    def test_assigning_a_mirror_is_permitted(self):
+        """Intended, and pinned as such (closeout 1b ruling).
 
-        `task_assign` filters candidates by role and never looks at `is_mirror`, so a
-        mirror can be handed to a person who then cannot act on it. That is now a
-        harmless inconsistency rather than a hole, because the status write is refused
-        either way — but it is an inconsistency, and it is open in
-        EXECUTION_MODULE_DEFERRED.md §B. If a later prompt makes the chokepoint refuse
-        a mirror, THIS TEST SHOULD FAIL and be replaced by its opposite.
+        `task_assign` filters candidates by role and never looks at `is_mirror`, and
+        that is wanted: production assigns delivery mirrors to people, and the morning
+        task report (task_report.report_tasks_q) lists assigned mirrors to their
+        holders. The assignee still cannot set the status — rung 0 refuses that, and
+        task detail offers no select on a mirror — so assignment gives a mirror an
+        owner to watch it, never a way to move it. If a later change makes the
+        assignment chokepoint refuse a mirror, this test fails, and that change breaks
+        the morning report's delivery rows.
         """
         task = self._assign_mirror('HOTO')
         self.assertEqual(task.assigned_to, self.pm)
+
+
+# ---------------------------------------------------------------------------
+# Closeout 1b — what task detail SHOWS for a mirror (presentation, not the refusal)
+# ---------------------------------------------------------------------------
+
+# Transcribed from the closeout 1b prompt rather than imported from mirror_tags, for the
+# reason EXPECTED_MIRROR_NAMES gives: a test reading the module's own dict agrees with
+# any typo in it.
+_CANNOT_SET = ' Its status cannot be set here.'
+EXPECTED_SOURCE_TEXT = {
+    'DESIGN':                'Updates from the design workspace.' + _CANNOT_SET,
+    'DELIVERY_SOLAR_PANELS': 'Updates from delivery challans and GRN.' + _CANNOT_SET,
+    'DELIVERY_INVERTERS':    'Updates from delivery challans and GRN.' + _CANNOT_SET,
+    'DELIVERY_BOS_KIT':      'Updates from delivery challans and GRN.' + _CANNOT_SET,
+    'DELIVERY_MMS':          'Updates from delivery challans and GRN.' + _CANNOT_SET,
+    'COD':               'Will update from the commissioning record (not built yet).' + _CANNOT_SET,
+    'AS_BUILT_DRAWINGS': 'Will update from the As-Built record (not built yet).' + _CANNOT_SET,
+    'HOTO':              'Will update from Final Acceptance (not built yet).' + _CANNOT_SET,
+}
+
+
+class MirrorTaskDetailPresentationTests(MirrorReadOnlyFixture):
+    """Task detail offers a mirror's assignee no status select and shows the Derived
+    chip naming the mirror's source. Rung 0 (the classes above) is the guarantee; these
+    pin what the page offers, which until 1b was a select that could only be refused."""
+
+    def _detail(self, task, profile=None):
+        return _client_for(profile or self.pm).get(
+            reverse('task_detail', args=[self.site.project_id, task.pk]))
+
+    def _status_form_url(self, task):
+        return reverse('task_detail_status_update', args=[self.site.project_id, task.pk])
+
+    def test_an_assigned_mirrors_assignee_gets_no_select_and_the_sourced_chip(self):
+        for name, code in (('Delivery — Solar Panels', 'DELIVERY_SOLAR_PANELS'),
+                           ('COD', 'COD'), ('Design', 'DESIGN')):
+            with self.subTest(mirror=name):
+                task = self._assign_mirror(name)
+                self.assertEqual(task.assigned_to, self.pm)   # the assignee is viewing
+                content = self._detail(task).content.decode()
+                self.assertNotIn(self._status_form_url(task), content,
+                                 f'{name}: the assignee is still offered a status form')
+                self.assertIn('> Derived', content)
+                self.assertIn(f'title="{EXPECTED_SOURCE_TEXT[code]}"', content)
+
+    def test_the_htmx_rerender_after_a_refused_post_offers_no_select_either(self):
+        """The status block is re-rendered by _render_task_status_hx after a POST; it
+        must not bring the select back."""
+        task = self._assign_mirror('Delivery — MMS')
+        response = _client_for(self.pm).post(
+            self._status_form_url(task), {'status': Task.DONE}, HTTP_HX_REQUEST='true')
+        content = response.content.decode()
+        self.assertNotIn('<select name="status"', content)
+        self.assertIn(EXPECTED_SOURCE_TEXT['DELIVERY_MMS'], content)
+
+    def test_a_non_mirror_task_detail_is_unchanged_for_its_assignee(self):
+        task = self._control_task()
+        content = self._detail(task).content.decode()
+        self.assertIn(self._status_form_url(task), content)
+        self.assertIn('<select name="status"', content)
+        self.assertNotIn('> Derived', content)
+
+    def test_the_overview_row_chip_reads_the_same_mapping(self):
+        content = _client_for(self.pm).get(
+            reverse('project_overview', args=[self.site.project_id])).content.decode()
+        for code in ('DESIGN', 'DELIVERY_BOS_KIT', 'HOTO'):
+            with self.subTest(code=code):
+                self.assertIn(f'title="{EXPECTED_SOURCE_TEXT[code]}"', content)
+
+    def test_each_of_the_eight_mirror_codes_resolves_to_its_intended_text(self):
+        from .templatetags.mirror_tags import mirror_source_text
+        site_codes = set(self._mirrors().values_list('template_task__code', flat=True))
+        self.assertEqual(site_codes, set(EXPECTED_SOURCE_TEXT),
+                         'the attach produced mirror codes this mapping does not cover')
+        for code, text in EXPECTED_SOURCE_TEXT.items():
+            with self.subTest(code=code):
+                self.assertEqual(mirror_source_text(code), text)
+
+    def test_an_unknown_code_gets_the_generic_text(self):
+        from .templatetags.mirror_tags import mirror_source_text
+        generic = ('Derived from the workspace that owns this work — its status updates '
+                   'itself.' + _CANNOT_SET)
+        self.assertEqual(mirror_source_text('SOMETHING_NEW'), generic)
+        self.assertEqual(mirror_source_text(None), generic)

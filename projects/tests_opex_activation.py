@@ -243,7 +243,10 @@ class MirrorsSurviveTheAttachTests(OpexActivationBase):
     by hand, which is the whole difference from tests_mirror_metrics.py.
     """
 
-    def test_five_mirrors_are_created_asserted_by_name(self):
+    def test_eight_mirrors_are_created_asserted_by_name(self):
+        """All eight OPEX mirrors, by name: Design, the four Delivery rows (Material
+        Delivery split four ways in spec v1.4), COD, As-Built Drawings and HOTO. Named
+        "five" until closeout 1b; the set it asserts was already the eight."""
         self._activate()
         self.assertEqual(
             {t.task_name for t in self._tasks(self.site).filter(is_mirror=True)},

@@ -5807,11 +5807,13 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # belongs nowhere else (R-18, R-20; OPEX spec §2.2). Prompt B22.
     #
     # A mirror (Task.is_mirror) does not hold a status somebody types — it REPORTS the
-    # status of another object: the Design mirror follows its DesignAssignment, Material
-    # Delivery follows accepted delivery quantities, COD and HOTO follow the commissioning
-    # and handover records. A mirror a human can move can disagree with its source, and
-    # then neither number means anything. Five OPEX tasks carry the flag today (Design,
-    # Material Delivery, COD, As-Built Drawings, HOTO); the Residential template has none.
+    # status of another object: the Design mirror follows its DesignAssignment, the four
+    # Delivery mirrors follow delivery challans and GRN, and COD, As-Built Drawings and
+    # HOTO will follow the commissioning, As-Built and Final Acceptance records. A mirror
+    # a human can move can disagree with its source, and then neither number means
+    # anything. Eight OPEX tasks carry the flag (Design; Delivery — Solar Panels,
+    # Inverters, BOS Kit, MMS; COD; As-Built Drawings; HOTO); the Residential template
+    # has none.
     #
     # WHY ABOVE THE TRANSITION TABLE, and not inside it. "May a human write this task at
     # all" is a question about the TASK and has the same answer for every new_status, so
@@ -5830,12 +5832,15 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # NOTHING IS WRITTEN HERE — no StatusTransition, no ActivityLog, no notification.
     # A refused move is not an event.
     #
-    # NOT THE WHOLE FEATURE. The derivation hooks that will WRITE these statuses are
-    # unbuilt. They belong to the source objects (phases 3-5), go through
-    # record_transition() like every other status change, and carry the SOURCE EVENT's
-    # actor (spec §2.4, §2.8) — they will not call this function, which exists to say no
-    # to people. Until they are wired a mirror sits at its seeded status, which is known
-    # and accepted.
+    # NOT THE WHOLE FEATURE. The derivations that WRITE these statuses belong to the
+    # source objects and go through the single mirror writer in design_views.py, which
+    # calls record_transition() like every other status change and carries the SOURCE
+    # EVENT's actor (spec §2.4, §2.8) — they never call this function, which exists to
+    # say no to people. Two derivations are built, both in design_views.py: Design and
+    # the four Delivery mirrors. COD, As-Built Drawings and HOTO have no writer yet, so
+    # they sit at their seeded status, which is known and accepted. (The writer is not
+    # named here on purpose: tests_design_mirror_derivation reads this file's source and
+    # treats any mention of it as views.py reaching into the derivation path.)
     if task.is_mirror:
         messages.error(
             request,

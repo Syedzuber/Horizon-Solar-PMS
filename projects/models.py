@@ -438,20 +438,21 @@ class Task(models.Model):
     # marks which rows it applies to. A mirror is excluded from overdue and workload
     # counts, and that exclusion SHIPPED IN PROMPT 1.3b.
     #
-    # STATE OF PLAY, corrected by prompt 1.3c. The counter exclusions are live and, since
-    # the snapshot below is copied, are no longer inert: an activated OPEX site really
-    # does carry five is_mirror=True rows and every metric really does drop them.
-    # THE HUMAN-WRITE REFUSAL IS STILL NOT BUILT — 1.3c's remit was the opening
-    # transition, not the status path. Until it lands, a mirror is protected only by
-    # having no assignee (both status views refuse an unassigned task first), which is
-    # protection by accident. See EXECUTION_MODULE_DEFERRED.md §B.
+    # STATE OF PLAY. The counter exclusions are live: an activated OPEX site carries
+    # eight is_mirror=True rows, and the human-owned counters drop them (some readers
+    # include them on purpose — see apply_mirror_status()'s docstring). THE HUMAN-WRITE
+    # REFUSAL IS BUILT: rung 0 of `_apply_task_status_change()` (B22) refuses every
+    # human status write on a mirror, assigned or not, through both status views.
+    # Assigning a mirror to a person is allowed and used — production assigns delivery
+    # mirrors, and the morning task report lists them.
     #
     # What it is NOT: it is not "has a source object". COD, HOTO and As-Built are
     # mirrors with no source object in existence today, and they must still be
-    # unwritable. That is why this is a boolean and not a nullable derivation_source
-    # enum — under `source IS NOT NULL ⇒ read-only`, those three would be NULL and
-    # therefore writable by anyone. `derivation_source` is added BESIDE this in phases
-    # 3–5, under a check constraint `derivation_source IS NULL OR is_mirror`.
+    # unwritable. That is why this is a boolean and not a nullable source enum — under
+    # `source IS NOT NULL ⇒ read-only`, those three would be NULL and therefore writable
+    # by anyone. WHICH mirror a row is comes from `template_task.code` (DESIGN,
+    # DELIVERY_*, COD, AS_BUILT_DRAWINGS, HOTO): every mirror writer looks its row up by
+    # that code, and no separate source column is planned.
     #
     # A trap for 1.3c's refusal test, from the A-1.3 audit: BOTH status views refuse an
     # unassigned task BEFORE `_apply_task_status_change()` runs. A mirror seeded with no
@@ -827,13 +828,17 @@ class UserProfile(models.Model):
     # is still a site engineer and must keep every task his role gives him. A boolean
     # beside the role says exactly that and costs none of the above.
     #
-    # NOTHING READS THESE YET, AND THAT IS THE DECISION, NOT AN OVERSIGHT. Consumers
-    # arrive with 2.2 (is_hse), 2.3 (is_qaqc) and 4.1 (is_warehouse_keeper); until then
-    # they are set from the shell or Django admin and there is no UI for them. No
-    # permission helper ships here either — an unconsumed predicate is written against an
-    # imagined call site (R-12), so `user_is_keeper_of()` and its kind belong with their
-    # first caller. On its own a capability flag grants NOTHING: it changes no role, no
-    # queryset and no existing permission check.
+    # EACH FLAG IS READ ONLY BY THE CONSUMER THAT ARRIVED WITH IT (R-12), and one has
+    # not arrived yet:
+    #   is_qaqc             — read by permissions.user_can_approve_task() and
+    #                         task_has_independent_approver() (2.1/2.3 two-step approval).
+    #   is_warehouse_keeper — read by StockLocationForm (who may be named keeper) and the
+    #                         stock-locations screen.
+    #   is_hse              — NOT READ ANYWHERE YET; its consumer is the HSE clearance.
+    # is_qaqc and is_warehouse_keeper are set on the Admin Panel's user edit screen
+    # (AdminUserEditForm / admin_user_edit); is_hse only from the shell or Django admin.
+    # On its own a capability flag grants NOTHING: it changes no role, and each reader
+    # pairs it with its own further terms (project visibility, the keeper link).
     is_qaqc                 = models.BooleanField(default=False)  # May record a QA/QC verdict on a site's work, and raise a punch point against it
     is_hse                  = models.BooleanField(default=False)  # May grant a site its HSE mobilisation clearance, without which execution may not start
     is_warehouse_keeper     = models.BooleanField(default=False)  # Runs a StockLocation — receives, holds and issues the material in it; see StockLocation.keeper

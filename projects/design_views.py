@@ -638,11 +638,18 @@ def apply_mirror_status(task, new_status, actor, reason_code):
       * NO `Issue`. The human Blocked branch auto-creates one; a derived Blocked writes
         only the status. Conflating a Design Hold with the project issue log is exactly
         what OPEX_task_template_spec.md:197 dropped the Punch Points mirror to avoid.
-      * NO `due_date`, ever, in either direction. Mirrors seed with due_date NULL,
-        calculate_due_dates() is deliberately not called for OPEX (B18), and R-20 keeps
-        mirrors out of every overdue count. The human path's "In Progress requires a due
-        date" guard is a rule about PEOPLE, not about rows, and carrying it across would
-        make an undated mirror unable to follow its source.
+      * NO `due_date`, ever, in either direction. Mirrors seed with due_date NULL, and
+        calculate_due_dates() is deliberately not called for OPEX (B18). R-20 keeps
+        mirrors out of the human-owned overdue counts (the ones built on
+        human_owned_tasks_q()), but NOT out of every overdue reader. Four include them:
+        task_report.report_tasks_q() (the morning report) and views._attach_due_health()
+        (the Delayed / Due Today row label) on purpose, because a mirror assigned to a
+        person with a date can be late; dashboard_site_engineer's next task /
+        next_overdue and _get_ceo_dashboard_context()'s at_risk_subq as known gaps
+        (DEFERRED G33). A PM may still date a mirror through task_set_due_date; this
+        writer just never does. The human path's "In Progress requires a due date" guard
+        is a rule about PEOPLE, not about rows, and carrying it across would make an
+        undated mirror unable to follow its source.
       * NO notification. The payment-milestone notification is keyed on
         `is_payment_milestone`, which no mirror carries. Notifying on a derived state is
         a separate product decision.

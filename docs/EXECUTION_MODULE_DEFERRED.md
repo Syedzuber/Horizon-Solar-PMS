@@ -1309,6 +1309,13 @@ rather than guessed. `tests_mirror_readonly.TheTrapTests::`
 `test_assigning_a_mirror_is_still_permitted_and_still_pointless` pins today's behaviour
 and says in its own docstring that it should be replaced by its opposite when this closes.
 
+**Ruled 7 Oct 2026 (closeout 1b): assigning a mirror is intended**, neither refused nor
+filtered — production assigns delivery mirrors and the morning task report lists them.
+The test is renamed `test_assigning_a_mirror_is_permitted` and its docstring now pins
+assignment as intended. Task detail no longer offers a mirror's assignee a status select
+(it was refused by rung 0 anyway). **Still open here:** the `assign_design` bulk row —
+one click assigns both Design mirrors and logs an inflated N.
+
 ---
 
 ### ~~B26 — `TaskAdmin` leaves `is_mirror` editable, which is the one way a Finance sync could reach a mirror~~ — **CLOSED by prompt B18/B23/B26**
@@ -4374,6 +4381,37 @@ it starts a new family at v1), but Django admin's `ChecklistAdmin` add form expo
 `version_no` and the items inline, and the portal's **Publish** button
 (`admin_checklist_update`, `action=publish`) then calls `activate()` on that draft, archiving
 the live version. So a revision is "Django admin draft, portal publish" — no shell needed.
+
+### G44 — audit §1c and §2 call `fix_fixtures.py` tracked
+
+Recorded 7 Oct 2026 by closeout 1b. Audit §1c and §2 call fix_fixtures.py tracked; it was
+never tracked or committed, so no third tracked sync_design_mirror caller exists.
+`git log --all -- fix_fixtures.py` is empty and `.gitignore:9` has ignored it since
+`ba5b597`. It was a local 18-line script that set `assigned_design` and called
+`sync_design_mirror` on the SCMPILOT sites (the six one-step `demo.designhead` DESIGN
+transitions in audit §490 are its output). Deleted locally by closeout 1b; the
+`.gitignore` line is kept. The audit file itself is not edited.
+
+### G45 — `Task.template_task`'s comment says nothing reads it back to decide behaviour
+
+Found by closeout 1b, outside its MODE. The field comment reads "PROVENANCE ONLY … Nothing
+reads it back to decide behaviour". Several readers decide behaviour by
+`template_task__code`: `sync_design_mirror` and `sync_delivery_mirrors` (which row is the
+mirror), `_checklist_task_link_for()` (which checklist), `mirror_tags.mirror_source` (which
+source text), and duplicate-for-locations (copies share it). The code is right; the
+comment is out of date.
+
+### G46 — three more stale mirror-adjacent texts, outside closeout 1b's list
+
+Found by closeout 1b, not fixed (R-12):
+- `seed_opex_test_data`'s module docstring, item 1: "StockLocation — no view, form or
+  admin registration". The warehouse screens (`stock_locations`, `stock_location_create`,
+  `stock_location_edit`, `StockLocationForm`) now exist.
+- `tests_mirror_readonly`'s module docstring still says the delivery mirrors "follow
+  accepted delivery quantities", COD and HOTO "follow the commissioning and handover
+  records" (no writer exists), and "Until this session" about B22.
+- `apply_mirror_status()`'s docstring and body cite `views.py:4240`, `views.py:4325-4332`
+  and `views.py:2153`; views.py has moved by ~1,500 lines. Should name functions instead.
 
 ---
 

@@ -84,8 +84,10 @@ MIRROR_ONLY_PHASES = {'Design', 'Procurement & Delivery'}
 
 # The badge's title attribute, which is unique to it in the rendered page. Matching on
 # the title rather than the word "Derived" keeps the count honest — "Derived" could
-# plausibly appear in a task name or another tooltip later.
-MIRROR_BADGE = 'Derived from the workspace that owns this work'
+# plausibly appear in a task name or another tooltip later. Since closeout 1b each
+# mirror's title names its own source, so the match is on the sentence every one of
+# them ends with (mirror_tags.MIRROR_CANNOT_SET), not on the old shared title.
+MIRROR_BADGE = 'Its status cannot be set here.'
 
 # The card's own heading. Matching the heading rather than the Create button is the
 # point of the change: hiding only the button would leave a card reading "No milestones

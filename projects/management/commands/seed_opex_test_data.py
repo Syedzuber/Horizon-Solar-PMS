@@ -51,7 +51,9 @@ EXECUTION_MODULE_DEFERRED.md §B. Nobody should read their existence here as evi
 that the corresponding workflow works, because there is no workflow:
 
   1. StockLocation                      — no view, form or admin registration
-  2. is_qaqc / is_hse / is_warehouse_keeper — no writer anywhere, not even in admin
+  2. is_hse — no product writer (shell / Django admin only). is_qaqc and
+     is_warehouse_keeper DO have one now (the Admin Panel's user edit screen), but
+     this seed sets all three directly so the demo users exist in one step
   3. A group_type='execution' SiteGroup — site_group_create hardcodes procurement
   4. DeliveryChallan + DCLineItem       — creation is inline in the view
   5. The activation status writes       — inline in opex_site_activate / project_activate
@@ -291,12 +293,13 @@ class Command(BaseCommand):
             profile.phone_number = cd['phone_number']
             profile.is_active    = cd['is_active']
 
-            # NO PRODUCT PATH — the three execution capability flags have no writer
-            # anywhere: not on UserCreateForm, not on UserEditForm, and not in
-            # UserProfileAdmin's list_display or list_filter. Their consumers arrive
-            # with 2.2 (is_hse), 2.3 (is_qaqc) and 4.1 (is_warehouse_keeper), each
-            # bringing its own permission helper (R-12). Setting one here changes the
-            # user's authority nowhere, which is R-15's whole point.
+            # Set directly rather than through a screen. is_qaqc and is_warehouse_keeper
+            # have a product writer now (AdminUserEditForm, the Admin Panel's user edit
+            # screen) but not on UserCreateForm, so creating the user and flagging it
+            # would be two requests; is_hse has no product writer at all. Each flag's
+            # consumer brings its own permission helper (R-12): is_qaqc is read by the
+            # two-step approval predicates, is_warehouse_keeper by StockLocationForm,
+            # and is_hse by nothing yet. On its own a flag grants nothing (R-15).
             for flag in flags:
                 setattr(profile, flag, True)
 

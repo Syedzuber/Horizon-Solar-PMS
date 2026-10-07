@@ -4,8 +4,21 @@ included on the initial full-page render. Expected context:
   is_assignee, task, project, task_status_choices
 The Blocked transition still routes through the shared base.html block modal
 (native submit → full reload); all other transitions swap this block via HTMX.
+
+A MIRROR GETS NO SELECT, FOR EVERY VIEWER, ITS ASSIGNEE INCLUDED (closeout 1b).
+`not task.is_mirror` is asked BEFORE is_assignee, so a mirror always falls through to
+the read-only badge below and gets the Derived chip beside it, with the tooltip naming
+its source (mirror_tags.MIRROR_SOURCE_TEXT, the mapping the task row reads too).
+Assigning a mirror stays allowed — production assigns delivery mirrors and the morning
+report lists them — so the assignee is exactly who used to be offered a select that
+could only be refused.
+
+PRESENTATION ONLY. Rung 0 of `_apply_task_status_change()` is the guarantee: it
+refuses every human write on a mirror through both status views. Nothing here is a
+permission check, and deleting this branch would change no refusal.
 {% endcomment %}
-{% if is_assignee %}
+{% load mirror_tags %}
+{% if not task.is_mirror and is_assignee %}
   <form method="post"
         action="{% url 'task_detail_status_update' project.project_id task.pk %}"
         class="d-inline"
@@ -40,5 +53,12 @@ The Blocked transition still routes through the shared base.html block modal
     <span class="badge bg-danger">Blocked</span>
   {% else %}
     <span class="badge bg-secondary">Not Started</span>
+  {% endif %}
+  {% if task.is_mirror %}
+    <span class="badge bg-secondary-subtle text-secondary-emphasis border ms-1"
+          style="font-size:.62rem;font-weight:500;vertical-align:middle;"
+          title="{{ task|mirror_source }}">
+      <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
+    </span>
   {% endif %}
 {% endif %}
