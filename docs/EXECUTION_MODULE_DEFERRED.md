@@ -4338,6 +4338,43 @@ page says "Showing the first 500 of N tasks" and the title still carries the tru
 the count is right and the list is short. No pagination was asked for. Locally the list
 holds 39 rows; the production figure is not known here.
 
+### G40 — relinking a task to another checklist family hides the earlier family's answers
+
+Recorded 7 Oct 2026 by closeout 1a (checklist version pinning), ruling Q3. `_checklist_for_task()`
+pins a task to the version its answers are on **within the family its link names**. If an
+admin moves a template task's link from family A to family B, a task answered under A is
+served B (active) and A's answers stay in `ChecklistItemCompletion`, unshown — exactly as
+before 1a. Pinning across families was considered and not chosen: a relink is a
+reassignment, not a revision. Locally no task holds answers on two families.
+
+### G41 — the portal archive action says "no longer shown on any task", which is now untrue for answered tasks
+
+Recorded 7 Oct 2026 by closeout 1a, ruling Q4. `admin_checklist_update`'s `archive` action
+(active → archived, no successor) still flashes "Checklist archived. It is no longer shown on
+any task.", and `checklist_edit.html`'s confirm dialog says the same. Since 1a a task with
+answers on that version keeps showing it (as history), and an open one may finish answering
+it. Only unanswered tasks lose it. The behaviour is the ruling; the wording is out of date.
+Portal views were outside 1a's MODE.
+
+### G42 — deleting a pinned checklist version un-pins its tasks and hides their answers
+
+Recorded 7 Oct 2026 by closeout 1a. `admin_checklist_delete` cascades a version's items, and
+`ChecklistItemCompletion.item` is SET_NULL, so the answers survive with `item=NULL` and their
+R-8 snapshot. But a null-item completion pins nothing and is not rendered by
+`_checklist_context()` (it reads `item__in=items`), so the task falls back to the active
+version and its answers vanish from the page again — the 1a defect by another route.
+Proposed: `admin_checklist_delete` refuses a version that holds completions. Separate session.
+
+### G43 — audit §4e correction: version N+1 is publishable from the portal
+
+Recorded 7 Oct 2026 by closeout 1a's pre-flight. `CLOSEOUT_MIRROR_AUDIT.md` §4e says a
+revision "needs the shell or the Django admin". Half true: the portal cannot **create** a
+draft N+1 of an existing family (`admin_checklist_create` always derives a fresh `code`, so
+it starts a new family at v1), but Django admin's `ChecklistAdmin` add form exposes `code`,
+`version_no` and the items inline, and the portal's **Publish** button
+(`admin_checklist_update`, `action=publish`) then calls `activate()` on that draft, archiving
+the live version. So a revision is "Django admin draft, portal publish" — no shell needed.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

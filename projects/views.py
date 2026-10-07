@@ -4108,7 +4108,11 @@ def _location_panel_context(project, source, error='', selected=(), new_text='',
                             assignee_pk=None):
     site_labels = _site_location_labels(project)
     added       = _locations_added_for(source)
-    checklist   = _checklist_for_task(source, project)
+    # The ACTIVE version, not the source's own: the panel says what the NEW copies get,
+    # and a copy starts with no answers, so it is served the active version even when
+    # the source is pinned to an older one by its answers (closeout 1a, ruling Q2).
+    link        = _checklist_task_link_for(source, project)
+    checklist   = _active_checklist_for_link(link) if link is not None else None
     chosen      = {_normalise_location_label(s).casefold() for s in selected}
     return {
         'project':   project,
@@ -5550,24 +5554,20 @@ def _checklist_task_link_for(task, project):
     return link
 
 
-def _checklist_for_task(task, project):
-    """Resolve the ACTIVE version of the Checklist assigned to this task, or None. A draft
-    or archived checklist is treated as unassigned — exactly as is_active=False was.
+def _active_checklist_for_link(link):
+    """The ACTIVE version of the checklist family `link` assigns, or None when the family
+    has no active version (every version is a draft or archived).
 
-    WHICH TASK the link covers is `_checklist_task_link_for()`'s question (2.4); WHICH
-    VERSION of the linked checklist is live is this function's, and the two are
-    deliberately separate.
+    This is the version a task WITH NO ANSWERS is served, and so the version a task
+    created now would get. Two readers, both through here: `_checklist_for_task()`'s
+    fallback, and `_location_panel_context()`, which describes what new location copies
+    will carry — copies start with no answers, so they get this version even when their
+    source task is pinned to an older one.
 
     RESOLUTION IS THROUGH THE FAMILY, NOT THE LINKED ROW. The link records which
     checklist family is assigned to this task; `status='active'` records which
-    version of that family is live. Before versioning existed every family had exactly
-    one version, so for every task that exists today this returns the same row
-    link.checklist.is_active returned, and None wherever it returned None. Without the
-    family lookup, activating v2 would leave the link pointing at the archived v1 and
-    the checklist would vanish from the task."""
-    link = _checklist_task_link_for(task, project)
-    if link is None:
-        return None
+    version of that family is live. Without the family lookup, activating v2 would leave
+    the link pointing at the archived v1 and the checklist would vanish from the task."""
     if link.checklist.status == Checklist.ACTIVE:
         return link.checklist              # fast path: the linked row IS the live version
     return (Checklist.objects
@@ -5575,10 +5575,68 @@ def _checklist_for_task(task, project):
             .first())
 
 
+def _checklist_for_task(task, project):
+    """Resolve the version of the Checklist this task is answering, or None.
+
+    THE RULE (closeout 1a): A TASK KEEPS THE VERSION IT STARTED ON.
+      - If the task holds ANY ChecklistItemCompletion on an item of the linked family,
+        it is served the version those items belong to, whatever that version's status:
+        active, or archived because a newer version went live, or archived with no
+        successor. An open task pinned this way may still finish answering it.
+      - If it holds none, it is served the family's active version
+        (`_active_checklist_for_link()`), or None if the family has none.
+      - A draft version is never served, pinned or not.
+
+    WHY. R-8's snapshot keeps the TEXT of an answer; this keeps the VERSION. A new
+    version is a new Checklist row with new ChecklistItem rows, and `_checklist_context()`
+    reads only completions on the served version's items. Serving the active version
+    regardless meant that the moment v2 went live, every task answered under v1 showed
+    v2's items blank — and a Done task could not answer them again, because
+    checklist_answers_open() is False. The answers still existed; they were simply not
+    shown. One resolver serves every reader (the task page, the HTMX swap, the answer
+    POST's item check), so the page and the write path cannot disagree on the version.
+
+    PINNED WITHIN THE LINKED FAMILY ONLY (ruling Q3). If the task's link now names a
+    different family, answers on the earlier family are not looked for and stay hidden,
+    as they were before this rule. Recorded as DEFERRED §G40.
+
+    COMPLETIONS SPANNING TWO VERSIONS pin to the version holding the most recent
+    completion (`checked_at`, then pk as the tiebreak). The answer view can no longer
+    create a span, because it validates against this function; spans recorded before
+    this rule shipped resolve this way and nothing new is logged about them.
+
+    A completion whose item was deleted has item=NULL and pins nothing: deleting a pinned
+    version un-pins the task (DEFERRED §G42).
+
+    WHICH TASK the link covers is `_checklist_task_link_for()`'s question (2.4); WHICH
+    VERSION is this function's, and the two are deliberately separate.
+
+    COST: the link lookup, then ONE query for the pin, then at most one more for the
+    active version when there is no pin — never one per item."""
+    link = _checklist_task_link_for(task, project)
+    if link is None:
+        return None
+    # The pinned version: the non-draft version of this family that holds this task's
+    # completions, latest-answered first. filter() BEFORE annotate() on the same relation
+    # is deliberate — Django then aggregates only the rows the filter kept, so the Max is
+    # over THIS task's completions and not every site's.
+    pinned = (Checklist.objects
+              .filter(code=link.checklist.code, items__completions__task=task)
+              .exclude(status=Checklist.DRAFT)
+              .annotate(last_answered_at=Max('items__completions__checked_at'),
+                        last_answer_pk=Max('items__completions__pk'))
+              .order_by(F('last_answered_at').desc(nulls_last=True), '-last_answer_pk')
+              .first())
+    if pinned is not None:
+        return pinned
+    return _active_checklist_for_link(link)
+
+
 def _checklist_context(request, project, task):
     """Build the shared context for the checklist section — used by the full task-detail
     render, the HTMX response partial, and any view that swaps #checklistSection. Items come
-    from the Checklist linked to this (task_name, project_type); per-item completion state is
+    from the version `_checklist_for_task()` resolves — the one the task's answers are on
+    once it has any (closeout 1a), the active one before that; per-item completion state is
     looked up per (item, task) so each task instance completes independently. Keeps the
     permission flag computed in exactly one place.
 
@@ -5589,6 +5647,9 @@ def _checklist_context(request, project, task):
     items = list(checklist.items.all()) if checklist else []
     completions = {}
     if items:
+        # `item__in=items` is the served version's items only. That is correct because the
+        # resolver above pins an answered task to the version its answers are on; before
+        # it did, this filter is what hid a v1 task's answers the moment v2 went live.
         completions = {
             c.item_id: c
             for c in ChecklistItemCompletion.objects.filter(task=task, item__in=items)
@@ -11085,7 +11146,8 @@ def _checklist_error(request, project, task, msg):
 def checklist_item_complete(request, project_id, task_id, item_id):
     """Answer one checklist item on this task as one atomic action, writing a
     ChecklistItemCompletion row keyed by (item, task). The item must belong to the
-    Checklist assigned to this task. Access: role-match OR PM/coordinator
+    version of the Checklist this task is answering (_checklist_for_task; a task keeps
+    the version it started on). Access: role-match OR PM/coordinator
     (_user_can_complete_checklist_item). POST only.
 
     THREE RULES, AND THE ORDER THEY ARE APPLIED IN:
@@ -11123,12 +11185,26 @@ def checklist_item_complete(request, project_id, task_id, item_id):
 
     task    = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # The item must belong to the checklist currently linked to this task — never trust a
-    # raw item_id. _checklist_for_task enforces the (task_name, project_type) link + active.
+    # The item must belong to the version this task is answering — never trust a raw
+    # item_id. _checklist_for_task() resolves it: the version the task's answers are on
+    # once it has any (closeout 1a), the active one before that. Validating against the
+    # ACTIVE version instead would 404 every remaining item of a task pinned to v1.
     checklist = _checklist_for_task(task, project)
     if checklist is None:
         return _checklist_error(request, project, task, 'No checklist is assigned to this task.')
-    item = get_object_or_404(ChecklistItem, pk=item_id, checklist=checklist)
+    # Looked up across the whole family so the two refusals can differ: an item from an
+    # unrelated checklist is a forged id and stays a 404, while an item from another
+    # version of THIS family is what a stale page posts (the form was rendered before the
+    # task pinned or before a version went live), so it is refused with a reason and
+    # nothing is written.
+    item = get_object_or_404(ChecklistItem.objects.select_related('checklist'),
+                             pk=item_id, checklist__code=checklist.code)
+    if item.checklist_id != checklist.pk:
+        return _checklist_error(
+            request, project, task,
+            f'That item is from version {item.checklist.version_no} of this checklist, '
+            f'but this task is answering version {checklist.version_no}. Nothing was '
+            f'recorded; the items this task is answering are shown below.')
 
     # Answers close at submission and at Done. _user_can_complete_checklist_item()
     # below refuses a closed task too; this is asked first only so the refusal names
