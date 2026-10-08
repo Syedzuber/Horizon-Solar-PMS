@@ -199,8 +199,8 @@
   </div>
 </div>
 
-{# ── SE GRN confirmation form — SE only, not Received status ─────────────── #}
-{% if role == 'Site Engineer' and challan.status != 'Received' %}
+{# ── SE GRN confirmation form — an SE working on this site, not Received status. can_confirm_grn excludes the site's QA/QC engineer (closeout step 3) ── #}
+{% if can_confirm_grn and challan.status != 'Received' %}
 <div class="card shadow-sm mb-4">
   <div class="card-header fw-semibold d-flex align-items-center gap-2">
     <span>Confirm Receipt (GRN)</span>

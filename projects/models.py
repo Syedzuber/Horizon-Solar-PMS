@@ -6180,6 +6180,103 @@ class PunchPoint(models.Model):
         return self.status == self.OPEN
 
 
+class SiteQaqcAssignment(models.Model):
+    """The Site Engineer named as one OPEX site's QA/QC engineer, for a dated span
+    (closeout step 3, CL-9).
+
+    THE ASSIGNMENT IS THE AUTHORITY (CL-D). permissions.user_is_site_qaqc() reads the
+    site's active row and grants that engineer view of the site and the right to
+    approve or reject its submitted tasks — nothing else. `UserProfile.is_qaqc` is a
+    separate, legacy flag and is not consulted to create or read a row here.
+
+    ONE ACTIVE ROW PER SITE, HISTORY KEPT. Assigning a new engineer ends the current
+    row (end_reason `replaced`) and inserts a new one; ending without a successor
+    stamps `ended`. Rows are never deleted or re-pointed, so "who was QA/QC on this
+    site in March" stays answerable — Final Acceptance (step 8) names the engineer as
+    signatory and the dossier (step 9) will read the history.
+
+    WRITTEN BY qaqc_views.assign_site_qaqc() and end_site_qaqc() only. Ending is that
+    module's single filter().update(); save() on an existing row and delete() both
+    raise. The rules that depend on other rows — OPEX site, an active Site Engineer,
+    no task held on the site (CL-A) — are the writer's; the database holds the three
+    below.
+    """
+
+    END_REPLACED = 'replaced'
+    END_ENDED    = 'ended'
+    END_REASON_CHOICES = [
+        (END_REPLACED, 'Replaced by another engineer'),
+        (END_ENDED,    'Ended'),
+    ]
+
+    # PROTECT throughout: this is an accountability record. Projects soft-delete, so
+    # the project FK never fires in normal operation; a UserProfile named here cannot
+    # be hard-deleted without first deciding what happens to the record.
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='qaqc_assignments',
+    )
+    engineer = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='qaqc_site_assignments',
+    )
+    assigned_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='qaqc_assignments_made',
+    )
+    assigned_at = models.DateTimeField(default=timezone.now)  # the "from" of the span
+
+    ended_at = models.DateTimeField(null=True, blank=True)  # the "to"; NULL = the active row
+    ended_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='qaqc_assignments_ended',
+    )
+    end_reason = models.CharField(  # replaced (a successor was assigned) or ended (none was)
+        max_length=10, choices=END_REASON_CHOICES, blank=True, default='',
+    )
+
+    class Meta:
+        ordering = ['project', '-assigned_at', '-pk']
+        constraints = [
+            # One ACTIVE assignment per site. Ended rows are history and unlimited.
+            # Backstop for two managers assigning at once: the writer also locks the
+            # project row, so this fires only if that lock is ever bypassed.
+            models.UniqueConstraint(
+                fields=['project'],
+                condition=models.Q(ended_at__isnull=True),
+                name='uniq_site_qaqc_active'),
+            # Ending is when, who and why together, or none of them.
+            models.CheckConstraint(
+                condition=((models.Q(ended_at__isnull=True)
+                            & models.Q(ended_by__isnull=True)
+                            & models.Q(end_reason=''))
+                           | (models.Q(ended_at__isnull=False)
+                              & models.Q(ended_by__isnull=False)
+                              & ~models.Q(end_reason=''))),
+                name='site_qaqc_end_fields'),
+            # A span cannot end before it began.
+            models.CheckConstraint(
+                condition=(models.Q(ended_at__isnull=True)
+                           | models.Q(ended_at__gte=models.F('assigned_at'))),
+                name='site_qaqc_ends_after_start'),
+        ]
+
+    def __str__(self):
+        return f"{self.project.project_id} — QA/QC {self.engineer}"
+
+    @property
+    def is_active(self):
+        return self.ended_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'SiteQaqcAssignment is append-only — an assignment is ended through '
+                'qaqc_views.end_site_qaqc(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'SiteQaqcAssignment is append-only — an ended assignment stays in history.')
+
+
 # ---------------------------------------------------------------------------
 # Approvals S1 — the shared approval primitive (26 Sep 2026, D-A1)
 #

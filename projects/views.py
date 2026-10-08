@@ -131,6 +131,11 @@ from .permissions import (
     user_can_raise_group_order,
     # O6 - card 4b links to the site's order list and to the payments queue.
     user_can_view_project_vendor_orders, user_can_view_payment_queue,
+    # Closeout step 3 - the role-match gates (status, due date, checklist, GRN) also
+    # require a working relationship with the site, so the QA/QC engineer's view grant
+    # never becomes a right to do the site's work. The refusal names the CL-A rule for
+    # the task-assignment paths; the engineer id excludes them from candidate lists.
+    user_works_on_site, qaqc_engineer_assignment_refusal, site_qaqc_engineer_id,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -1222,7 +1227,18 @@ def dashboard_site_engineer(request):
         # 4b-1: the contractor bills waiting for this Site Engineer to confirm the work.
         # One query; no amount, bill number or PDF reaches the page (D-A53).
         'work_to_confirm':   work_to_confirm_card(request.user),
+        # Closeout step 3: sites this engineer checks as QA/QC engineer, each with its
+        # awaiting-approval count. Two queries whatever the number of sites.
+        'qaqc_sites':        _qaqc_sites_for(se_profile),
     })
+
+
+def _qaqc_sites_for(profile):
+    """The SE dashboard's "QA/QC sites" rows (qaqc_views.qaqc_sites_for_engineer)."""
+    # Import inside the function to avoid a circular import: qaqc_views imports this
+    # module for _active_project.
+    from .qaqc_views import qaqc_sites_for_engineer
+    return qaqc_sites_for_engineer(profile)
 
 
 @login_required
@@ -3405,6 +3421,13 @@ def _user_can_complete_checklist_item(user, task, project):
     item on it. Asked FIRST, before the role test, so the closure cannot be bypassed
     by PM authority — and asked here rather than only in the view so the template's
     can_complete_items flag drops the answer controls from the same rule.
+
+    THE ROLE MATCH ALSO NEEDS A WORKING RELATIONSHIP WITH THE SITE (closeout step 3).
+    The site's QA/QC engineer is a Site Engineer who can see the site without holding
+    a task there, so the role match alone would let them answer the execution
+    checklist on the work they are about to check. user_works_on_site() is the view
+    rule minus that one grant: identical to before for every other user, refused for
+    the engineer. Their own independent answers are step 7's table, not this one.
     """
     if not checklist_answers_open(task):
         return False
@@ -3415,7 +3438,11 @@ def _user_can_complete_checklist_item(user, task, project):
         return True
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
-    return normalised_user_role == task.assigned_role
+    if normalised_user_role != task.assigned_role:
+        return False
+    # Role match is not enough on its own: the answerer must also work on this site.
+    # Admits everyone it admitted before; refuses only the site's QA/QC engineer.
+    return user_works_on_site(user, project)
 
 
 @login_required
@@ -4067,10 +4094,18 @@ def _locations_added_for(source):
 
 def _location_assignee_candidates(source):
     """task_assign's rule, which TaskAddForm.clean() also enforces: an active profile
-    whose role is the task's role. Through the one _TASK_TO_PROFILE_ROLE mapping."""
+    whose role is the task's role. Through the one _TASK_TO_PROFILE_ROLE mapping.
+
+    The site's QA/QC engineer is left out (CL-A, closeout step 3): they may not hold a
+    task on the site they check. task_duplicate_locations_create names the reason when
+    a POST names them anyway."""
     profile_role = _TASK_TO_PROFILE_ROLE.get(source.assigned_role, source.assigned_role)
-    return (UserProfile.objects.filter(role=profile_role, is_active=True)
-            .select_related('user').order_by('user__first_name', 'user__username'))
+    candidates = (UserProfile.objects.filter(role=profile_role, is_active=True)
+                  .select_related('user').order_by('user__first_name', 'user__username'))
+    qaqc_engineer_id = site_qaqc_engineer_id(source.phase.project)
+    if qaqc_engineer_id is not None:
+        candidates = candidates.exclude(pk=qaqc_engineer_id)
+    return candidates
 
 
 def _resolve_location_labels(selected, free_text, site_labels, added):
@@ -4190,6 +4225,15 @@ def task_duplicate_locations_create(request, project_id, task_id):
                                                   assignee_pk=assignee_pk))
         messages.error(request, message)
         return redirect('project_overview', project_id=project.project_id)
+
+    # CL-A, the other end: the candidate list below already leaves the site's QA/QC
+    # engineer out, so a POST naming them would fall into the generic refusal. Asked
+    # first so the PM is told the actual reason and which assignment to end.
+    if assignee_raw.isdigit():
+        named = UserProfile.objects.select_related('user').filter(pk=assignee_raw).first()
+        refusal = qaqc_engineer_assignment_refusal(named, project)
+        if refusal:
+            return refuse(refusal, assignee_pk='')
 
     assignee = (_location_assignee_candidates(source).filter(pk=assignee_raw).first()
                 if assignee_raw.isdigit() else None)
@@ -5335,14 +5379,31 @@ def _task_row_context(request, project):
     these values for more than the rows) but spreads the same flag builder."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
+    is_pm   = _pm_owns_project(request, project)
     return {
         'role':                role,
-        'user_task_role':      _PROFILE_TO_TASK_ROLE.get(role, role),
-        'is_assigned_pm':      _pm_owns_project(request, project),
+        'user_task_role':      _row_task_role(request, project, role, is_pm),
+        'is_assigned_pm':      is_pm,
         'task_status_choices': Task.STATUS_CHOICES,
         'gate_task_pk':        _gate_task_pk(project),
         **_phase_list_two_step(project, request),
     }
+
+
+def _row_task_role(request, project, role, is_pm):
+    """The task role `_task_row.html` matches against `task.assigned_role` to draw the
+    status select and the due-date editor, or None to draw neither by role.
+
+    None for a viewer who does not work on the site (closeout step 3) — today only the
+    site's QA/QC engineer, who sees the site but must not be offered the role-matched
+    controls task_status_update and task_set_due_date refuse them. The PM's own
+    controls are drawn from `is_assigned_pm`, not from this, so a manager skips the
+    query. Shared by project_overview and _task_row_context so the full page and the
+    HTMX redraw cannot disagree."""
+    mapped = _PROFILE_TO_TASK_ROLE.get(role, role)
+    if is_pm or user_works_on_site(request.user, project):
+        return mapped
+    return None
 
 
 def _attach_delivery_consignments(tasks):
@@ -6185,7 +6246,12 @@ def task_status_update(request, project_id, task_id):
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
     normalised_user_role = _PROFILE_TO_TASK_ROLE.get(user_role, user_role)
 
-    if normalised_user_role != task.assigned_role and not is_pm:
+    # The task's role or the project's PM may move it; a role match also needs a working
+    # relationship with the site (closeout step 3). user_works_on_site() is the view
+    # gate above minus the QA/QC engineer's grant, so it changes nothing for anyone who
+    # passed before and refuses the one viewer whose job is to check this work, not do it.
+    if not is_pm and (normalised_user_role != task.assigned_role
+                      or not user_works_on_site(request.user, project)):
         if _is_hx(request):
             messages.error(request, 'You do not have permission to change this task.')
             return _render_task_row_hx(request, project, task)
@@ -6526,8 +6592,8 @@ def task_approve(request, project_id, task_id):
     completable later by anyone, which is the two-step rule defeated by its own
     implementation.
 
-    Access: PM-level authority on the project, or the QA/QC capability with sight of
-    it (user_can_approve_task). POST only.
+    Access: PM-level authority on the project, the site's assigned QA/QC engineer, or
+    the legacy QA/QC flag with sight of it (user_can_approve_task). POST only.
     """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
@@ -6662,8 +6728,9 @@ def task_reject(request, project_id, task_id):
     are left null - a rejected task has no approver, which is what keeps
     `approved_at` usable as the Done gate.
 
-    Access: PM-level authority on the project, or QA/QC with sight of it - the same
-    people who may approve. POST only.
+    Access: PM-level authority on the project, the site's assigned QA/QC engineer, or
+    the legacy QA/QC flag with sight of it - the same people who may approve
+    (user_can_approve_task). POST only.
     """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
@@ -7010,14 +7077,32 @@ def task_assign(request, project_id, task_id):
     # constant since K5; was a local copy of the same dict here and in project_overview
     profile_role = _TASK_TO_PROFILE_ROLE.get(task.assigned_role, task.assigned_role)
 
-    # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task
+    # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task.
+    # The site's QA/QC engineer is left out (CL-A): they may not hold a task on the site
+    # they check, so they are not offered as a choice; the POST below refuses them too.
     candidates = UserProfile.objects.filter(role=profile_role, is_active=True)
+    qaqc_engineer_id = site_qaqc_engineer_id(project)
+    if qaqc_engineer_id is not None:
+        candidates = candidates.exclude(pk=qaqc_engineer_id)
 
     if request.method == 'POST':
         prev_assignee = task.assigned_to  # captured before the update, for assignment logging
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
             assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
+            # CL-A, the other end: the site's QA/QC engineer may not be given a task here.
+            # Refused with a message rather than the 404 above, because the person and the
+            # role are both valid — it is the site's assignment that stands in the way,
+            # and the PM needs to be told which one to end. HTMX: the row is redrawn with
+            # the message and the shared modal is closed, as on success.
+            refusal = qaqc_engineer_assignment_refusal(assignee, project)
+            if refusal:
+                messages.error(request, refusal)
+                if _is_hx(request):
+                    resp = _render_task_row_hx(request, project, task)
+                    resp['HX-Trigger'] = 'taskAssigned'
+                    return resp
+                return redirect('project_overview', project_id=project.project_id)
             # The chokepoint owns the write and the notification decision, including
             # the per-recipient/per-project 1-hour cooldown. Its no-op-when-unchanged
             # rule replaces the old 10-second double-submit guard: a resubmitted form
@@ -7127,6 +7212,12 @@ def task_set_due_date(request, project_id, task_id):
         user_task_role = _PROFILE_TO_TASK_ROLE.get(profile.role, profile.role)
 
         if task.assigned_role != user_task_role:
+            raise PermissionDenied
+
+        # A role match must also work on this site (closeout step 3): refuses the site's
+        # QA/QC engineer, who can see it but holds no task there (CL-A), and nobody
+        # else — user_works_on_site() is the view gate above minus that one grant.
+        if not user_works_on_site(request.user, project):
             raise PermissionDenied
 
         if project.cascade_scheduling:
@@ -10429,12 +10520,23 @@ def project_overview(request, project_id):
     # Design assignment candidates (PM only, for assign-design dropdown)
     # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile.role stores 'BD' — module-level
     # constant since K5; was a local copy of the same dict here and in task_assign
+    # Closeout step 3 — the site's QA/QC engineer card (OPEX only; no query elsewhere).
+    # Import inside the function to avoid a circular import: qaqc_views imports this
+    # module for _active_project.
+    from .qaqc_views import site_qaqc_card_context
+    qaqc_context = site_qaqc_card_context(project, is_assigned_pm)
+    qaqc_assignment = qaqc_context['qaqc_assignment']
+
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
         for role_key, _ in Task.ROLE_CHOICES:
             profile_role = _TASK_TO_PROFILE_ROLE.get(role_key, role_key)
             qs = UserProfile.objects.filter(role=profile_role, is_active=True).select_related('user')
+            # CL-A: the site's QA/QC engineer is never offered as a task assignee here;
+            # task_assign refuses them on POST as well.
+            if qaqc_assignment is not None:
+                qs = qs.exclude(pk=qaqc_assignment.engineer_id)
             candidates_by_role[role_key] = [
                 {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
                 for p in qs
@@ -10443,8 +10545,9 @@ def project_overview(request, project_id):
 
     dc_vendors = Vendor.objects.filter(is_active=True).order_by('name') if role == 'SCM' else []
 
-    # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons
-    user_task_role = _PROFILE_TO_TASK_ROLE.get(role, role)
+    # Normalise UserProfile role → Task.ROLE_CHOICES value for template comparisons;
+    # None for the site's QA/QC engineer, so their rows draw no role-matched controls.
+    user_task_role = _row_task_role(request, project, role, is_assigned_pm)
 
     # Cascade scheduling context — PM-only feature gate check.
     #
@@ -10520,6 +10623,8 @@ def project_overview(request, project_id):
         'user_role':                   role,
         'user_task_role':              user_task_role,
         'user_profile':                profile,
+        # show_qaqc_card / qaqc_assignment / qaqc_stale / can_manage_qaqc
+        **qaqc_context,
         'documents':                   documents,
         'project_issues':              project_issues,
         'all_profiles':                all_profiles,
@@ -12657,6 +12762,11 @@ def delivery_challan_detail(request, project_id, dc_id):
 
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
+        # The GRN form is offered to a Site Engineer who works on this site — the same
+        # two terms confirm_grn enforces — so the site's QA/QC engineer, who can read
+        # this page, is not shown a form the endpoint would refuse (closeout step 3).
+        'can_confirm_grn':   (profile.role == 'Site Engineer'
+                              and user_works_on_site(request.user, project)),
         'issue_draft':       _pop_issue_draft(request, f'dc:{challan.pk}'),
         'challan':           challan,
         'line_items':        line_items,
@@ -12750,14 +12860,19 @@ def confirm_grn(request, project_id, dc_id):
     # The role gate is KEPT and this is added beside it: two independent questions, two
     # independent answers. This one is scope.
     #
-    # user_can_view_project() IS the task-holding test here, not merely the minimum. This
-    # endpoint is Site-Engineer-only, and that helper's Site Engineer branch is exactly
-    # `project.phases.filter(tasks__assigned_to=profile).exists()` -- the same relationship
-    # dashboard_site_engineer scopes on. Routing through the canonical helper gives the
-    # stricter rule without a second copy of it here, and the legitimate case pinned by
-    # DeliveryGRNWorkflowTests (the SE holding tasks on this project) is unaffected.
+    # user_works_on_site() IS the task-holding test here. This endpoint is
+    # Site-Engineer-only, and for a Site Engineer that helper is exactly "manages the
+    # project or holds a task on it" -- the same relationship dashboard_site_engineer
+    # scopes on. It used to be user_can_view_project(), which meant the same thing until
+    # closeout step 3 let the site's QA/QC engineer SEE a site without holding a task;
+    # receipt of materials is site work, not inspection, so they are refused here.
+    # The view gate stays first so a site you cannot see still answers 404, not 403;
+    # the legitimate case pinned by DeliveryGRNWorkflowTests (the SE holding tasks on
+    # this project) passes both.
     if not user_can_view_project(request.user, project):
         raise Http404
+    if not user_works_on_site(request.user, project):
+        return HttpResponseForbidden()
 
     # Cross-project guard
     challan = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)

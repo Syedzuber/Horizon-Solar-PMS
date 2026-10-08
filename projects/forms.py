@@ -7,7 +7,9 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
-from .permissions import PAYMENT_APPROVER_ROLES
+from .permissions import (
+    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal, site_qaqc_engineer_id,
+)
 
 
 class UserCreateForm(forms.Form):
@@ -607,6 +609,7 @@ class TaskAddForm(forms.Form):
 
     def __init__(self, *args, project=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.project = project
         if project is not None:
             self.fields['phase'].queryset = ProjectPhase.objects.filter(project=project)
 
@@ -629,6 +632,10 @@ class TaskAddForm(forms.Form):
             .select_related('user')
             if self.selected_role else UserProfile.objects.none()
         )
+        # CL-A: the site's QA/QC engineer is not offered; clean() refuses them as well.
+        qaqc_engineer_id = site_qaqc_engineer_id(project) if self.selected_role else None
+        if qaqc_engineer_id is not None:
+            self.assignee_options = self.assignee_options.exclude(pk=qaqc_engineer_id)
 
     def _raw(self, name):
         source = self.data if self.is_bound else self.initial
@@ -667,6 +674,14 @@ class TaskAddForm(forms.Form):
                 f"{assignee.role}, not {dict(Task.ROLE_CHOICES).get(role, role)}. "
                 f"Choose someone in the task's role."
             ))
+            return cleaned
+
+        # CL-A, the other end: the site's QA/QC engineer may not hold a task on it.
+        # Refused, not warned — the PM ends or replaces that assignment first.
+        if self.project is not None:
+            refusal = qaqc_engineer_assignment_refusal(assignee, self.project)
+            if refusal:
+                self.add_error('assigned_to', refusal)
         return cleaned
 
 

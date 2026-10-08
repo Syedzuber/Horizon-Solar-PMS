@@ -174,6 +174,28 @@
           <a href="{% url 'assign_coordinators' project.project_id %}" class="ms-1 text-decoration-none" title="Manage coordinators"><i class="bi bi-pencil"></i></a>
         {% endif %}
       </span>
+      {% comment %}Closeout step 3: the site's QA/QC engineer, RESCO (OPEX) sites only
+         (show_qaqc_card). Every viewer sees the name; the site's PM and coordinators
+         (can_manage_qaqc) get the link to assign, replace or end. qaqc_stale flags a
+         row whose engineer is no longer an active site engineer — their access has
+         already stopped, and the PM should replace or end the assignment.{% endcomment %}
+      {% if show_qaqc_card %}
+        <span class="info-pill" id="qaqc-engineer-pill">
+          <i class="bi bi-clipboard-check"></i>QA/QC:
+          {% if qaqc_assignment %}
+            {{ qaqc_assignment.engineer.user.get_full_name|default:qaqc_assignment.engineer.user.username }}
+            <span class="text-muted ms-1">since {{ qaqc_assignment.assigned_at|date:"d M Y" }}</span>
+            {% if qaqc_stale %}
+              <span class="badge bg-warning text-dark ms-1" title="This engineer is no longer an active site engineer and has lost access to the site.">No longer an active site engineer — replace or end</span>
+            {% endif %}
+          {% else %}
+            <em>Not assigned</em>
+          {% endif %}
+          {% if can_manage_qaqc %}
+            <a href="{% url 'site_qaqc' project.project_id %}" class="ms-1 text-decoration-none" title="Assign, replace or end the QA/QC engineer"><i class="bi bi-pencil"></i></a>
+          {% endif %}
+        </span>
+      {% endif %}
       <span class="info-pill">
         <i class="bi bi-pen-fill"></i>Design:
         {% comment %}show_design_selector is False on OPEX (RESCO) sites: there the field

@@ -396,6 +396,23 @@ vestigial role string [permissions.py:118](projects/permissions.py#L118).
     **Done**, which is the payment-milestone (M3) notification trigger.
   - `task_set_due_date`, `checklist_item_complete`, all Issue writes, both upload endpoints.
 
+> **Amendment, 8 Oct 2026 — closeout step 3 (QA/QC engineer per site).** The rows above are
+> the audit as it stood at `bb0f905`; 0.2 closed the unassigned-project writes. Since step 3,
+> `user_can_view_project()` has a **second Site Engineer route**: the site's active
+> `SiteQaqcAssignment` (`permissions.user_is_site_qaqc`, OPEX sites only, role and profile
+> still active). It grants that one engineer **view** of that one site, and
+> `user_can_approve_task()` admits them to **approve / reject** its submitted tasks. Nothing
+> else: the role-match gates (`task_status_update`, `task_set_due_date`,
+> `_user_can_complete_checklist_item`, `confirm_grn`, and the row / GRN-form flags) also
+> require `user_works_on_site()` — view minus this grant — so the engineer cannot change
+> status, set dates, answer checklists or confirm a GRN, and waive, Not Applicable, task
+> assignment and BOQ stay refused by their own predicates. Raising and commenting on issues,
+> uploads and vendor-order reads stay open, as for any viewer (ruling Q-B; see
+> `EXECUTION_MODULE_DEFERRED.md` §G52 for issue resolution). For every other Site Engineer
+> the answer is unchanged: visible only by holding a task. Pinned by
+> `tests_access_isolation.QaqcAssignmentIsolationTests` (unassigned site, ended / replaced
+> assignment, the tripwire) and `WorksOnSiteMatchesViewTests`.
+
 #### Design
 - **Lands on:** `/dashboard/design/`. Queries: `assigned_design=me OR
   phases__tasks__assigned_to=me`, with OPEX exempt from the status filter
@@ -498,6 +515,17 @@ vestigial role string [permissions.py:118](projects/permissions.py#L118).
 | BD | No (portfolio) | Yes | No | Yes | No | No | Yes | `set_milestone_amounts`; BD task; issues; uploads |
 | *(flag)* Design Head | n/a | Yes | Yes | via role | via role | via role | Yes + all design actions | Design workflow |
 | *(flag)* Design QC | n/a | via role | **Yes** | via role | via role | via role | Yes | Gate-1 verdicts |
+
+> **Amendment, 8 Oct 2026 — closeout step 3.** One row is added to what the table above
+> describes, for the **site's assigned QA/QC engineer** (a Site Engineer named on an OPEX
+> site's active `SiteQaqcAssignment`, holding no task there by CL-A):
+>
+> | Role | Dashboard scoped? | Any project by URL? | BOQ | Issue | DC | PaymentRequest | Design read | Writes on the assigned site |
+> |---|---|---|---|---|---|---|---|---|
+> | Site Engineer as site QA/QC | Yes ("QA/QC sites" section) | **Assigned site only** | No | Raise / comment (resolve: §G52) | Read; **no GRN** | No | Yes (via view) | **Approve / reject** submitted tasks; uploads; issues. No status, dates, checklist answers, GRN, waive, N/A, assign, BOQ |
+>
+> The grant ends the moment the assignment is ended or replaced, or the engineer's role or
+> profile status changes.
 
 ---
 

@@ -13,8 +13,10 @@ from .models import (
     ApprovalRequest, ApprovalStep, ApprovalAttachment, MaterialApprovalDetail,
     ApprovalRoundSnapshot, ApprovalOrderLink, MaterialApprovalLine,
     ContractorBillDetail, ContractorBillTask,
+    SiteQaqcAssignment,
 )
 from .forms import check_typed_date
+from .permissions import qaqc_engineer_assignment_refusal
 from .utils import assign_task_to
 
 
@@ -227,6 +229,23 @@ class TaskAdminForm(forms.ModelForm):
         _, error = check_typed_date(value)
         if error:
             raise forms.ValidationError(error)
+        return value
+
+    def clean_assigned_to(self):
+        """CL-A, the other end (closeout step 3): the admin may not hand a task to its
+        site's QA/QC engineer, exactly as task_assign may not. Only a CHANGE of assignee
+        is checked, so a row that already holds a value (none should) still saves when
+        another field is edited."""
+        value = self.cleaned_data.get('assigned_to')
+        if value is None or value.pk == self.instance.assigned_to_id:
+            return value
+        # `phase` is declared before `assigned_to` on Task, so it is cleaned first; the
+        # instance's phase covers a form posted without it.
+        phase = self.cleaned_data.get('phase') or getattr(self.instance, 'phase', None)
+        if phase is not None:
+            refusal = qaqc_engineer_assignment_refusal(value, phase.project)
+            if refusal:
+                raise forms.ValidationError(refusal)
         return value
 
 
@@ -880,3 +899,15 @@ class ContractorBillDetailAdmin(_ApprovalRecordAdmin):
     list_display  = ['request', 'project', 'bill_number', 'bill_date', 'amount']
     search_fields = ['bill_number']
     inlines       = [ContractorBillTaskInline]
+
+
+# Closeout step 3. Read-only like the approval records: qaqc_views.assign_site_qaqc() and
+# end_site_qaqc() are the only writers. A row added or edited here would skip CL-A (no
+# task held on the site) and the one-active-per-site lock, and ending one here would cut
+# an engineer's access without telling them.
+@admin.register(SiteQaqcAssignment)
+class SiteQaqcAssignmentAdmin(_ApprovalRecordAdmin):
+    list_display  = ['project', 'engineer', 'assigned_by', 'assigned_at', 'ended_at',
+                     'ended_by', 'end_reason']
+    list_filter   = ['end_reason']
+    search_fields = ['project__project_id', 'engineer__user__username']

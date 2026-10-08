@@ -4454,6 +4454,79 @@ so on purpose (ruling, 8 Oct 2026): a point leaves Open only by approval (CL-1) 
 (B-12), and an admin form would be a third way around both. If one is ever added, every
 status and closure field must be read-only.
 
+### G50 — the site's QA/QC engineer cannot be assigned an issue on their site
+
+Recorded 8 Oct 2026 by closeout step 3. `_issue_assignable_profiles()` (views.py) builds the
+assignee list from the PM, coordinators, `assigned_design` and **task holders**
+(`assigned_tasks__phase__project`). Under CL-A the QA/QC engineer holds no task on the site,
+so `assign_issue` refuses them and the `issue_detail` dropdown leaves them out. They *can*
+raise issues there (Q-B); they cannot be handed one. Fix: add `qaqc_site_assignments` (active
+rows) as a fifth source, beside the other four. Not closeout scope.
+
+### G51 — task-derived "projects" counts do not include a QA/QC engineer's sites
+
+Recorded 8 Oct 2026 by closeout step 3. Three readers count a Site Engineer's sites from held
+tasks only, so a QA/QC site is missing from each:
+- `reports.py` user status report ("Projects Assigned");
+- `task_report.py` morning report (`SCOPE_TASKS` for an SE);
+- `send_eod_digest`.
+
+The SE dashboard has its own "QA/QC sites" section (step 3), so the engineer is not left
+without a way in. Whether these reports should list QA/QC sites — and what they would count
+there (awaiting approvals?) — is a product question for step 7, when visits exist.
+
+### G52 — `resolve_issue` / `update_issue_status` are open to any viewer of the site
+
+Recorded 8 Oct 2026 by closeout step 3. Pre-existing: both views gate on
+`user_can_view_project()` alone, with no assignee, raiser or role term, so CEO, Finance, SCM,
+BD and every task-holding engineer can start or resolve any issue on a site they can see.
+**The site's QA/QC engineer is now one more such viewer** and can resolve issues on their
+site (ruling Q-B kept raising and commenting open; resolving rides along). Separately, the
+three `create_*_issue` views take the assignee pk with `UserProfile.objects.get(pk=...)` and
+no narrowing, unlike `assign_issue`. Fix both in one issue-permissions session.
+
+### G53 — `User.is_active` and `UserProfile.is_active` disagree, and candidate lists read only one
+
+Recorded 8 Oct 2026 by closeout step 3 (ruling: its own item). The deactivate actions in
+`admin_departments`, `admin_user_management` and `subadmin_departments` set only
+`User.is_active=False`; only `user_edit` sets both. **Every** assignment candidate filter
+reads `UserProfile.is_active` alone — `task_assign`, `TaskAddForm`, duplicate-for-locations,
+`project_overview`'s `candidates_by_role` and `design_candidates`, `task_assign_design_head`
+— so a person deactivated from those three screens is still offered and accepted as an
+assignee, and deactivation never reassigns their tasks. The QA/QC eligibility list and
+`task_has_independent_approver()` check both flags, so they are not affected. See also the
+root `EXECUTION_MODULE_DEFERRED.md` §8 (one production account already in that state). Fix:
+make the three deactivate actions set both flags, then decide whether a deactivated person's
+open tasks are unassigned.
+
+### G54 — retire the "QA/QC person holds a task to see the site" workaround
+
+Recorded 8 Oct 2026 by closeout step 3 (ruling: leave unchanged this session). Where it lives:
+- `seed_walkthrough._area_execution`: `walk.qaqc` (Site Engineer, `is_qaqc=True`) is given
+  **Net Meter Installation on WALKE01** so it can see the site (`WALKTHROUGH_DATA.md:130`), then
+  approves Civil Work and rejects LA & Earthing and DC Cable there.
+- `tests_two_step_completion.TwoStepFixture` (reused by `tests_punch_point`,
+  `tests_punch_point_closure`, `tests_task_health`) and `tests_row_render_flags` give their
+  QA/QC holder one task for the same reason.
+
+Retirement steps: (1) reassign Net Meter Installation on WALKE01 to `walk.se` — CL-A refuses
+the next step otherwise; (2) assign `walk.qaqc` as WALKE01's QA/QC engineer through
+`site_qaqc` (the seed already drives real views); (3) update `WALKTHROUGH_DATA.md` and
+`tests_walkthrough_seed` counts; (4) move the fixtures to an assignment, keeping one test on
+the `is_qaqc` arm until that flag is retired or repurposed (§6 of `CLOSEOUT_SPEC.md`).
+
+### G55 — QA/QC assignment notices: email has no link; PROTECT blocks hard-deleting a named profile
+
+Recorded 8 Oct 2026 by closeout step 3.
+- The assign / no-longer notices go out as one line on in-app and email. `send_notification()`
+  sends the same `message` as the email body and puts `link` only on the in-app row, so the
+  email carries no URL to the site. Same limitation as every other single-call notice; the
+  approval notices work around it with a second call (`approval_notices._send`).
+- `SiteQaqcAssignment` FKs are PROTECT. Once a profile is named on any row (active or ended),
+  hard-deleting that `UserProfile` — the admin delete page, or a seed teardown sweeping
+  manifest users — is refused. Intended for an accountability record; teardowns that will
+  meet these rows (`teardown_walkthrough`, after G54) must delete the assignment rows first.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

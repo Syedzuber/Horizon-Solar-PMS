@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}QA/QC Engineer — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+{% comment %}Closeout step 3 (CL-9, CL-A). Reached only by the site's PM and coordinators
+   on a RESCO (OPEX) site — qaqc_views.site_qaqc refuses everyone else. The eligible
+   list is already filtered to active site engineers holding no task on the site; the
+   writer re-checks both under a lock and names any task held if it refuses.{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+</div>
+
+<div class="card shadow-sm mb-4" style="max-width:640px;">
+  <div class="card-header">
+    <h5 class="mb-0">QA/QC Engineer</h5>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small">
+      The QA/QC engineer can view this site and approve or reject its submitted tasks.
+      They cannot change task status, edit dates, answer checklists, assign tasks or waive
+      punch points, and they may not hold a task on this site.
+    </p>
+
+    <div class="mb-3">
+      <div class="small text-muted">Current</div>
+      {% if current %}
+        <div class="fw-semibold">
+          {{ current.engineer.user.get_full_name|default:current.engineer.user.username }}
+          <span class="text-muted fw-normal small">since {{ current.assigned_at|date:"d M Y, H:i" }}</span>
+        </div>
+        {% if stale %}
+          <div class="alert alert-warning py-2 small mt-2 mb-0">
+            This engineer is no longer an active site engineer and has already lost access
+            to the site. Replace or end the assignment.
+          </div>
+        {% endif %}
+      {% else %}
+        <div><em>Not assigned</em></div>
+      {% endif %}
+    </div>
+
+    <form method="post" class="mb-3">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="assign">
+      <label for="qaqcEngineer" class="form-label small">{% if current %}Replace with{% else %}Assign{% endif %}</label>
+      <div class="d-flex gap-2">
+        <select name="engineer_id" id="qaqcEngineer" class="form-select form-select-sm" required>
+          <option value="">— Choose a site engineer —</option>
+          {% for engineer in eligible %}
+            <option value="{{ engineer.pk }}">{{ engineer.user.get_full_name|default:engineer.user.username }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-brand btn-sm text-nowrap" {% if not eligible %}disabled{% endif %}>
+          {% if current %}Replace{% else %}Assign{% endif %}
+        </button>
+      </div>
+      {% if not eligible %}
+        <div class="form-text">No active site engineer is free to assign: every one holds a task on this site.</div>
+      {% else %}
+        <div class="form-text">Site engineers holding a task on this site are not listed.</div>
+      {% endif %}
+    </form>
+
+    {% if current %}
+      <form method="post" onsubmit="return confirm('End this QA/QC assignment? The engineer loses access to the site at once.');">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="end">
+        <button type="submit" class="btn btn-outline-danger btn-sm">End assignment</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card shadow-sm" style="max-width:640px;">
+  <div class="card-header">
+    <h6 class="mb-0">History</h6>
+  </div>
+  <div class="card-body p-0">
+    {% if history %}
+      <table class="table table-sm mb-0 small">
+        <thead>
+          <tr><th>Engineer</th><th>From</th><th>To</th><th>Ended</th></tr>
+        </thead>
+        <tbody>
+          {% for row in history %}
+            <tr>
+              <td>{{ row.engineer.user.get_full_name|default:row.engineer.user.username }}</td>
+              <td>{{ row.assigned_at|date:"d M Y" }}<br><span class="text-muted">by {{ row.assigned_by.user.get_full_name|default:row.assigned_by.user.username }}</span></td>
+              <td>{% if row.ended_at %}{{ row.ended_at|date:"d M Y" }}<br><span class="text-muted">by {{ row.ended_by.user.get_full_name|default:row.ended_by.user.username }}</span>{% else %}<span class="badge bg-success">Active</span>{% endif %}</td>
+              <td>{% if row.end_reason %}{{ row.get_end_reason_display }}{% else %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="text-muted small m-3">No QA/QC engineer has been assigned to this site yet.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

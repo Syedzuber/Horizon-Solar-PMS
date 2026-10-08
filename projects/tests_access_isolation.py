@@ -55,9 +55,17 @@ from django.test import Client, TestCase
 from django.urls import reverse
 
 from .models import (
-    DCLineItem, DeliveryChallan, Issue, PaymentRequest, Project, Task, UserProfile,
-    Vendor, VendorOrder, VendorOrderSite,
+    Checklist, ChecklistItem, ChecklistItemCompletion, ChecklistTaskLink,
+    DCLineItem, DeliveryChallan, Issue, PaymentRequest, Project, PunchPoint, Task,
+    UserProfile, Vendor, VendorOrder, VendorOrderSite,
 )
+from .permissions import (
+    user_can_approve_task, user_can_edit_project_boq, user_can_view_project,
+    user_can_view_project_boq, user_works_on_site,
+)
+# Closeout step 3: two activated OPEX sites and the QA/QC cast, shared with the positive
+# suite. The fixture class holds no test methods, so importing it here runs nothing twice.
+from .tests_qaqc_assignment import QaqcFixture
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to
 
 
@@ -630,4 +638,161 @@ class SystemAdminUnrestrictedTests(AccessIsolationBase):
         never widen BOQ access as a side effect."""
         response = _client_for(self.sysadmin).get(
             reverse('boq_detail', args=[self.project_a.project_id]))
+        self.assertEqual(response.status_code, 403)
+
+
+# ---------------------------------------------------------------------------
+# Closeout step 3 — the site QA/QC engineer's grant, and its edges
+# ---------------------------------------------------------------------------
+
+class WorksOnSiteMatchesViewTests(AccessIsolationBase):
+    """THE Q-A PROOF ON THIS FILE'S OWN FIXTURE. The role-match gates now also ask
+    user_works_on_site(); that adds no refusal for anyone this suite already pins only
+    if, with no QA/QC assignment anywhere, it answers exactly as user_can_view_project()
+    does — for every actor here and both projects. Every other test in this file runs
+    unchanged against the new gates; this one says why they can."""
+
+    def test_every_actor_on_both_projects(self):
+        actors = [self.finance, self.pm_a, self.coord_a, self.se_a, self.design_a,
+                  self.pm_b, self.coord_b, self.se_b, self.design_b, self.scm, self.ceo,
+                  self.admin, self.sysadmin]
+        for actor in actors:
+            for project in (self.project_a, self.project_b):
+                with self.subTest(actor=actor.user.username, project=project.project_id):
+                    self.assertEqual(user_works_on_site(actor.user, project),
+                                     user_can_view_project(actor.user, project))
+
+
+class QaqcAssignmentIsolationTests(QaqcFixture):
+    """The negative half of closeout step 3 (tests_qaqc_assignment holds the positive).
+
+    The assignment grants the engineer VIEW and APPROVE/REJECT on ONE site. Pinned here:
+    nothing on any other site (test 2), nothing the moment the assignment ends or is
+    replaced (test 3), and — the tripwire — a refusal on every endpoint that does the
+    site's work rather than checking it, on the very site they are assigned to.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._assign(self.site_a, self.qaqc)
+        self.client_q = _client_for(self.qaqc)
+        self.task = self._se_task(self.site_a)
+
+    def _url(self, name, site=None, *extra):
+        return reverse(name, args=[(site or self.site_a).project_id, *extra])
+
+    # -- test 2: another site ------------------------------------------------
+
+    def _refused_everywhere_on(self, site, task):
+        for url, method in (
+            (self._url('project_overview', site), 'get'),
+            (self._url('task_detail', site, task.pk), 'get'),
+            (self._url('task_approve', site, task.pk), 'post'),
+            (self._url('task_reject', site, task.pk), 'post'),
+        ):
+            with self.subTest(url=url):
+                response = getattr(self.client_q, method)(url, {'approval_remarks': 'x'})
+                self.assertEqual(response.status_code, 404)
+
+    def test_an_unassigned_site_is_invisible(self):
+        self._refused_everywhere_on(self.site_b, self._se_task(self.site_b))
+
+    def test_the_approval_predicate_is_scoped_to_the_assigned_site(self):
+        self.assertTrue(user_can_approve_task(self.qaqc.user, self.site_a))
+        self.assertFalse(user_can_approve_task(self.qaqc.user, self.site_b))
+        self.assertFalse(user_can_view_project(self.qaqc.user, self.site_b))
+
+    # -- test 3: ended / replaced -------------------------------------------
+
+    def test_access_is_gone_the_moment_the_assignment_ends(self):
+        self._end(self.site_a)
+        self._refused_everywhere_on(self.site_a, self.task)
+
+    def test_access_is_gone_the_moment_the_engineer_is_replaced(self):
+        self._assign(self.site_a, self.spare)
+        self._refused_everywhere_on(self.site_a, self.task)
+
+    # -- the tripwire: the assigned site, every do-the-work endpoint ----------
+
+    def test_cannot_change_task_status_from_either_screen(self):
+        for name in ('task_status_update', 'task_detail_status_update'):
+            with self.subTest(endpoint=name):
+                response = self.client_q.post(
+                    self._url(name, None, self.task.pk),
+                    {'status': Task.IN_PROGRESS,
+                     'due_date': (date.today() + timedelta(days=7)).isoformat()})
+                self.assertEqual(response.status_code, 403)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.status, Task.NOT_STARTED)
+
+    def test_cannot_edit_a_due_date(self):
+        response = self.client_q.post(
+            self._url('task_set_due_date', None, self.task.pk),
+            {'due_date': (date.today() + timedelta(days=9)).isoformat()})
+        self.assertEqual(response.status_code, 403)
+        self.task.refresh_from_db()
+        self.assertIsNone(self.task.due_date)
+
+    def test_cannot_answer_a_checklist(self):
+        checklist = Checklist.objects.create(name='Earthing', code='qq-earthing', version_no=1)
+        item = ChecklistItem.objects.create(checklist=checklist, label='Pit depth OK', order=1)
+        checklist.activate()
+        ChecklistTaskLink.objects.create(checklist=checklist, task_name=self.task.task_name,
+                                         project_type='OPEX')
+        response = self.client_q.post(
+            self._url('checklist_item_complete', None, self.task.pk, item.pk),
+            {'answer': 'yes', 'photo': _photo()})
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(ChecklistItemCompletion.objects.filter(item=item).exists())
+        page = self.client_q.get(self._url('task_detail', None, self.task.pk))
+        self.assertFalse(page.context['can_complete_items'])
+
+    def test_cannot_confirm_a_grn_and_is_not_shown_the_form(self):
+        challan = DeliveryChallan.objects.create(
+            project=self.site_a, dc_number='DC-QQ-1', dc_date=date.today(),
+            status=DeliveryChallan.EXPECTED, created_by=self.scm)
+        response = self.client_q.post(self._url('confirm_grn', None, challan.pk), {})
+        self.assertEqual(response.status_code, 403)
+        page = self.client_q.get(self._url('delivery_challan_detail', None, challan.pk))
+        self.assertEqual(page.status_code, 200)
+        self.assertFalse(page.context['can_confirm_grn'])
+        self.assertNotContains(page, 'closeout step 3')   # template comment did not leak
+        worker_page = _client_for(self.worker).get(
+            self._url('delivery_challan_detail', None, challan.pk))
+        self.assertTrue(worker_page.context['can_confirm_grn'])
+
+    def test_cannot_assign_a_task(self):
+        url = self._url('task_assign', None, self.task.pk)
+        self.assertEqual(self.client_q.get(url).status_code, 403)
+        self.assertEqual(self.client_q.post(url, {'assigned_to': self.spare.pk}).status_code,
+                         403)
+        self.task.refresh_from_db()
+        self.assertEqual(self.task.assigned_to, self.worker)
+
+    def test_cannot_waive_a_punch_point(self):
+        point = PunchPoint.objects.create(task=self.task, reason='Gap in conduit',
+                                          raised_by=self.qaqc)
+        response = self.client_q.post(self._url('punch_point_waive', None, point.pk),
+                                      {'waiver_reason': 'Accept'})
+        self.assertEqual(response.status_code, 403)
+        point.refresh_from_db()
+        self.assertEqual(point.status, PunchPoint.OPEN)
+
+    def test_cannot_mark_a_task_not_applicable(self):
+        response = self.client_q.post(
+            self._url('task_set_not_applicable', None, self.task.pk),
+            {'not_applicable': '1', 'reason': 'Out of scope'})
+        self.assertEqual(response.status_code, 403)
+        self.task.refresh_from_db()
+        self.assertFalse(self.task.is_not_applicable)
+
+    def test_cannot_touch_the_boq(self):
+        self.assertFalse(user_can_edit_project_boq(self.qaqc.user, self.site_a))
+        self.assertFalse(user_can_view_project_boq(self.qaqc.user, self.site_a))
+        self.assertEqual(self.client_q.post(self._url('opex_boq_entry'), {}).status_code, 403)
+
+    def test_cannot_submit_a_task_for_approval(self):
+        response = self.client_q.post(
+            self._url('task_submit_for_approval', None, self.task.pk),
+            {'submission_remarks': 'x'})
         self.assertEqual(response.status_code, 403)
