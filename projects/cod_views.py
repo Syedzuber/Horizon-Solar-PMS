@@ -66,6 +66,10 @@ COD_PATH_KIND = 'cod'
 TESTING_COMMISSIONING_CODE = 'TESTING_COMMISSIONING'
 
 COD_NOT_ACTIVATED = 'COD can be recorded once the site is activated.'
+
+# The Project.status values a COD may be recorded in (closeout 4b, Q3). Recording COD
+# does not change the status: COD is read from the record (tender_stages.has_active_cod).
+COD_RECORDABLE_STATUSES = ('Active', 'In Progress')
 COD_OPEX_ONLY = 'COD is recorded on RESCO sites only.'
 COD_ALREADY_RECORDED = ('This site already has a COD on record. Withdraw it first to '
                         'record a different one.')
@@ -146,13 +150,20 @@ def tc_warning(project):
 
 def record_refusal(project):
     """Raise CodRefused if COD cannot be recorded on `project` as it stands now: not an
-    OPEX site, not activated (no COD mirror, go-ahead Q1), a COD already on record, or
-    open punch points (CL-2). Asked by the screen before anything is uploaded, and again
-    by record_cod() under its lock."""
+    OPEX site, not activated (no COD mirror, go-ahead Q1), not in a working status (4b),
+    a COD already on record, or open punch points (CL-2). Asked by the screen before
+    anything is uploaded, and again by record_cod() under its lock."""
     if project.project_type != 'OPEX' or project.is_deleted:
         raise CodRefused(COD_OPEX_ONLY)
     if cod_mirror_task(project) is None:
         raise CodRefused(COD_NOT_ACTIVATED)
+    # Only a site being worked on can reach COD (closeout 4b, Q3). On Hold, Cancelled
+    # and Commissioned are refused by name. None of them has a writer today (B-3), so
+    # this is inert now; it stops a COD being recorded on a held or cancelled site once
+    # one exists. Draft never gets here: it has no COD mirror, refused just above.
+    if project.status not in COD_RECORDABLE_STATUSES:
+        article = 'an' if project.status[:1] in 'AEIOU' else 'a'   # "an On Hold site"
+        raise CodRefused(f'COD cannot be recorded on {article} {project.status} site.')
     if CodRecord.objects.filter(project=project, withdrawn_at__isnull=True).exists():
         raise CodRefused(COD_ALREADY_RECORDED)
     rows = open_point_rows(project)

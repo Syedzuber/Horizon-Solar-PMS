@@ -4527,7 +4527,24 @@ Recorded 8 Oct 2026 by closeout step 3.
   manifest users — is refused. Intended for an accountability record; teardowns that will
   meet these rows (`teardown_walkthrough`, after G54) must delete the assignment rows first.
 
-### G56 — closeout step 4b: COD sets the site to Commissioned
+### ~~G56 — closeout step 4b: COD sets the site to Commissioned~~ — **CLOSED 8 Oct 2026, resolved by design: "COD shows on the CEO pipeline and site page; status unchanged (closeout 4b)"**
+
+Resolved by design, not as written below. COD is shown from the record and `Project.status`
+does not change. The reason: in this codebase Commissioned already means "work over".
+About 30 readers drop it from working lists, which are the PM, SE, SCM, CEO and Finance
+dashboards, `tasks_drill_down`, the morning report and the task_add/rename/duplicate/
+reorder gates. A site with a COD still has HOTO, As-Built and Final Acceptance open.
+4b therefore made these changes:
+- `tender_stages.has_active_cod()` is the one definition, an Exists() on an active
+  CodRecord. The pipeline's "Commissioned" row counts a site with an active record, or
+  with status Commissioned for when step 8 lands. The S7 stuck rule skips a site with an
+  active record.
+- The site overview shows a "COD recorded <date>" pill beside the status badge.
+- `record_refusal` refuses COD unless the site is Active or In Progress.
+- Nothing writes `commissioned_at` or a project ledger row. Setting status Commissioned
+  moves to step 8 (G59).
+
+The original text follows.
 
 Recorded 8 Oct 2026 by closeout step 4 (go-ahead Q3: kept out of step 4, next step). Recording
 a COD moves only the COD mirror; `Project.status` stays Active and `commissioned_at` stays
@@ -4564,6 +4581,39 @@ Recorded 8 Oct 2026 by closeout step 4.
 - The record form's warning (go-ahead Q4) reads the first task with template code
   `TESTING_COMMISSIONING`. If that task is ever duplicated per location, the copies are not
   read. Non-blocking by ruling, so not fixed here.
+
+### G59 — step 8 decides whether HOTO sets Commissioned; the open-work status set waits on it
+
+Recorded 8 Oct 2026 by closeout 4b, which closed G56 by design.
+- No code writes `Project.status = 'Commissioned'` or `commissioned_at` (B-3 still
+  stands). Closeout step 8 (Final Acceptance + HOTO) decides whether HOTO turning Done sets
+  them. If it does, the writer goes through `record_transition` (SUBJECT_PROJECT) inside
+  the HOTO writer's atomic block, with a named reason, as `opex_site_activate` does.
+  `tender_stages.activated_progress` already counts status Commissioned beside an active
+  COD record.
+- **A shared "status still has open work" set (Active, In Progress, Commissioned) is
+  needed only if Commissioned is ever set before work is over.** The 4b pre-flight found
+  about 30 readers filtering `['Active', 'In Progress']`, grouped as R1–R10. Today a
+  Commissioned site drops out of all of them:
+  - R1 `tasks_drill_down`;
+  - R2 `dashboard_pm`;
+  - R3 `dashboard_site_engineer`;
+  - R4 the SCM task stat block;
+  - R5 `task_report.REPORT_PROJECT_STATUSES`;
+  - R6 `CEO_ACTIVE_PROJECT_STATUSES`;
+  - R7 `landing`;
+  - R8 the Finance and CEO money figures;
+  - R9 the SCM delivery reads;
+  - R10 the `!= 'Active'` gates in `task_add`, `can_duplicate_task_for_locations`,
+    `can_rename_task` and `can_reorder_phase`.
+
+  If HOTO sets Commissioned only once all work is done, none of them needs to change.
+  Tests pin the current membership: `tests_morning_task_report`
+  (`test_projects_outside_the_live_set_are_not_counted`) and `tests_tender_cards`
+  (Commissioned has no badge).
+- The S7 stuck footer (`stuck_limit_lines`, golden-pinned in `tests_ceo_tender_sites`)
+  still says "In execution: …" and does not mention that a site with COD on record is
+  skipped. It was left unchanged so the golden copy holds.
 
 ---
 

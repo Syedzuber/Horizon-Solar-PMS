@@ -2269,7 +2269,7 @@ PIPELINE_PROGRESS_ROWS = [
      'All delivery mirror tasks Done — from recorded delivery challans'),
     ('installation_complete', 'Installation complete',
      'All installation-phase template tasks Done'),
-    ('commissioned', 'Commissioned', 'Project status Commissioned'),
+    ('commissioned', 'Commissioned', 'COD on record (or project status Commissioned)'),
 ]
 
 

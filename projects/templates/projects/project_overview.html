@@ -97,6 +97,8 @@
         {% elif project.status == 'On Hold' %}<span class="badge bg-warning text-dark">On Hold</span>
         {% elif project.status == 'Cancelled' %}<span class="badge bg-danger">Cancelled</span>
         {% else %}<span class="badge bg-secondary">{{ project.status }}</span>{% endif %}
+        {# Closeout 4b: COD is shown from the active record, never by changing the status. cod_active is set on OPEX sites only (cod_card_context). #}
+        {% if cod_active %}<a href="#cod-card" class="badge rounded-pill bg-info text-dark text-decoration-none" id="cod-recorded-pill">COD recorded {{ cod_active.cod_date|date:"d M Y" }}</a>{% endif %}
       </div>
       <div class="d-flex gap-2 flex-wrap">
         {% if is_assigned_pm %}

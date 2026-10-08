@@ -70,7 +70,7 @@ from .models import (
     DESIGN_QC_FAILED, DESIGN_RELEASED, DESIGN_SURVEY_RETURNED,
     DESIGN_WORK_FINISHED_STATUSES,
     GROUP_TYPE_PROCUREMENT, SITE_GROUP_LOCKED,
-    ArkaSubmission, DesignAssignment, DesignAttempt, DesignChangeRequest, DueDateCommitment,
+    ArkaSubmission, CodRecord, DesignAssignment, DesignAttempt, DesignChangeRequest, DueDateCommitment,
     SiteGroupMembership, Task, UserProfile, VendorOrderSite,
 )
 # The TASK overdue rule, for the S7 stuck term. Imported as a module because is_overdue /
@@ -266,6 +266,23 @@ def stage_summary(sites_qs):
     return [summary[key] for key, _ in STAGES]
 
 
+def has_active_cod(outer_ref='pk'):
+    """Exists(): the site at `outer_ref` has an active (not withdrawn) CodRecord.
+
+    THE ONE DEFINITION of "COD on record" for a queryset of sites. An expression, not a
+    filter, so the pipeline and the stuck list carry it as a column on the query they
+    already run and spend no query of their own. Active is `withdrawn_at IS NULL`, the
+    condition of the model's uniq_cod_record_active constraint.
+
+    WHY THE RECORD AND NOT Project.status (closeout 4b go-ahead): Commissioned already
+    means "work over" to ~30 readers that drop it from working lists, while a site with a
+    COD still has HOTO, As-Built and Final Acceptance open. So COD leaves the status
+    alone and is read from the record; status Commissioned moves to HOTO (step 8, G59).
+    """
+    return Exists(CodRecord.objects.filter(project=OuterRef(outer_ref),
+                                           withdrawn_at__isnull=True))
+
+
 def activated_progress(sites_qs):
     """How far the S7 (activated) sites have got, in one query:
 
@@ -273,7 +290,9 @@ def activated_progress(sites_qs):
         material_delivered     every applicable DELIVERY_* mirror task is Done
         installation_complete  every applicable task from the template's INSTALLATION
                                phase is Done
-        commissioned           Project.status is Commissioned
+        commissioned           an active COD record (has_active_cod), or Project.status
+                               Commissioned — no writer sets that status yet; step 8
+                               (HOTO) decides whether one will (G59)
 
     A site with NO task of a kind is not counted as complete for it: no tasks is no
     evidence. Two known gaps (SECONDARY_FINDINGS, S3): hand-added tasks with no
@@ -290,9 +309,10 @@ def activated_progress(sites_qs):
     done_q = Q(phases__tasks__status=Task.DONE)
 
     # All four counts ride ONE phases__tasks join; template_task and its phase are
-    # single-valued FKs off Task, so the extra joins add no rows.
+    # single-valued FKs off Task, so the extra joins add no rows. has_cod is a correlated
+    # EXISTS on the same row, so it adds a column, not a query.
     rows = (sites_qs.filter(activated_at__isnull=False).order_by()
-            .values('pk', 'status')
+            .values('pk', 'status', has_cod=has_active_cod())
             .annotate(delivery_total=Count('phases__tasks', filter=delivery_q),
                       delivery_done=Count('phases__tasks', filter=delivery_q & done_q),
                       install_total=Count('phases__tasks', filter=install_q),
@@ -306,7 +326,7 @@ def activated_progress(sites_qs):
             progress['material_delivered'] += 1
         if row['install_total'] and row['install_done'] == row['install_total']:
             progress['installation_complete'] += 1
-        if row['status'] == 'Commissioned':
+        if row['has_cod'] or row['status'] == 'Commissioned':
             progress['commissioned'] += 1
     return progress
 
@@ -573,7 +593,8 @@ STUCK_SUMMARY_LABELS = {
 STUCK_GROUP_MIN = 5
 
 # The Blocked Tasks card counts tasks on Active and In Progress projects only (its
-# `active_statuses`); an S7 site On Hold or Commissioned is not stuck (ruling 3).
+# `active_statuses`); an S7 site On Hold or Commissioned is not stuck (ruling 3). Nor is
+# one with a COD on record (has_active_cod, closeout 4b): see _stuck_entry.
 STUCK_EXECUTION_STATUSES = ['Active', 'In Progress']
 
 # Every `rule` a stuck entry can carry, and the word the S9 list's filter chip puts before
@@ -671,6 +692,8 @@ def _stuck_reads(sites_qs, today, aged_block_cutoff):
                           group__created_by__user__is_active=True)
             .values('group__created_by')[:1]),
         has_order=Exists(VendorOrderSite.objects.filter(project=OuterRef('pk'))),
+        # Read by _stuck_entry's S7 branch: a site with a COD on record is not stuck.
+        has_cod=has_active_cod(),
     )}
 
     # The Head's three reads (tender_metrics()), scoped by the site subquery. EVERY
@@ -807,6 +830,12 @@ def _stuck_entry(reads, pk, info, today):
     if stage == STAGE_ACTIVATED:
         if row['status'] not in STUCK_EXECUTION_STATUSES:
             return None
+        # A COD on record ends "in execution" for the stuck list (closeout 4b), though
+        # the status stays Active. Skipped here rather than dropped from query 6, so
+        # task_counts still equal the CEO Blocked Tasks and Tasks cards, which keep
+        # counting the site's open HOTO / As-Built work.
+        if row['has_cod']:
+            return None
         tasks = reads['tasks_by_site'].get(pk, [])
         if not tasks:
             return None
@@ -879,7 +908,8 @@ def stuck_sites(sites_qs, today, aged_block_cutoff):
                       the ledger date of the rejection, waiting on the Design Head.
       S7              the CEO page's Blocked Tasks "Aged >= 7 days" and Tasks "Overdue"
                       terms, restated on the same human-owned, applicable tasks, with the
-                      page's own `aged_block_cutoff` passed in. Active / In Progress only.
+                      page's own `aged_block_cutoff` passed in. Active / In Progress only,
+                      and never a site with a COD on record (has_active_cod).
                       "Overdue" is task_health.overdue_q() scoped to Internal, so a
                       Blocked task past its due date is late too.
       S0              never.
