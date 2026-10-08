@@ -13,7 +13,10 @@ THE RULE PINNED HERE
     Any ChecklistItemCompletion on a version or item → it cannot be deleted, by the
     portal, by the Django admin change/delete view, by the inline, or by the bulk
     "delete selected" action. The refusal names how many answers on how many tasks.
-    No answers                                       → deletes as before.
+    No answers                                       → a DRAFT deletes as before.
+    Active or archived version (G42b)                → refused at every path, answered or
+                                                       not; retiring is archiving.
+    ChecklistItemCompletion in the admin (G42b)      → no delete, no bulk delete action.
     Archiving                                        → still the way to retire a version;
                                                        answered tasks keep showing it.
 
@@ -120,7 +123,7 @@ class PortalVersionDeleteTests(DeleteGuardFixture):
         flash = self._flash(response)
         self.assertEqual(len(flash), 1)
         self.assertIn('3 answers on 1 task', flash[0])
-        self.assertIn('Archive it instead', flash[0])
+        self.assertIn('Retire it by archiving instead', flash[0])   # G42b wording
 
     def test_1b_archived_version_with_answers_is_refused_too(self):
         Checklist.objects.filter(pk=self.v1.pk).update(status=Checklist.ARCHIVED)
@@ -280,4 +283,110 @@ class ArchiveStillWorksTests(DeleteGuardFixture):
 
         # And an archived version with answers is still not deletable.
         client.post(reverse('admin_checklist_delete', args=[self.v1.pk]))
+        self.assertEqual(self._v1_rows(), (1, 5, 3))
+
+
+# ---------------------------------------------------------------------------
+# G42b — only a draft can be deleted; answers cannot be deleted in the admin
+# ---------------------------------------------------------------------------
+
+class OnlyDraftsDeleteTests(DeleteGuardFixture):
+    """A version with NO answers, active or archived, is refused at every path G42
+    covers: the portal, Checklist.delete(), the admin permission and the bulk backstop."""
+
+    def _unanswered_active(self):
+        active, _items = _publish('GUARD-LIVE', 'Guard Live', 1, ['Live line'])
+        self.assertEqual(checklist_answer_counts(active), (0, 0))
+        return active
+
+    def _unanswered_archived(self):
+        old = self._unanswered_active()
+        _publish('GUARD-LIVE', 'Guard Live', 2, ['Live line v2'])   # archives v1
+        old.refresh_from_db()
+        self.assertEqual(old.status, Checklist.ARCHIVED)
+        return old
+
+    def _assert_refused_everywhere(self, version, wording):
+        response = _client_for(self.admin_profile).post(
+            reverse('admin_checklist_delete', args=[version.pk]))
+        self.assertRedirects(response, reverse('admin_checklist_edit', args=[version.pk]),
+                             fetch_redirect_response=False)
+        flash = self._flash(response)
+        self.assertEqual(len(flash), 1)
+        self.assertIn('only a draft can be', flash[0])
+        self.assertIn(wording, flash[0])
+        self.assertNotIn('answer', flash[0])          # it holds none; says nothing of them
+
+        with self.assertRaises(ChecklistHasAnswers):
+            version.delete()
+
+        model_admin = admin_site.get_model_admin(Checklist)
+        request = self._admin_request()
+        self.assertFalse(model_admin.has_delete_permission(request, version))
+        model_admin.delete_queryset(request, Checklist.objects.filter(pk=version.pk))
+
+        self.assertTrue(Checklist.objects.filter(pk=version.pk).exists())
+        self.assertEqual(ChecklistItem.objects.filter(checklist=version).count(), 1)
+
+    def test_g42b_1_active_version_with_no_answers_is_refused(self):
+        self._assert_refused_everywhere(self._unanswered_active(),
+                                        'Retire it by archiving instead')
+
+    def test_g42b_2_archived_version_with_no_answers_is_refused(self):
+        self._assert_refused_everywhere(self._unanswered_archived(), 'already retired')
+
+    def test_g42b_3_active_answered_version_names_both_reasons(self):
+        response = _client_for(self.admin_profile).post(
+            reverse('admin_checklist_delete', args=[self.v1.pk]))
+        flash = self._flash(response)[0]
+        self.assertIn('only a draft can be', flash)
+        self.assertIn('3 answers on 1 task', flash)
+
+    def test_g42b_4_draft_deletes_through_the_django_admin(self):
+        client = _client_for(self.superuser)
+        response = client.post(
+            reverse('admin:projects_checklist_delete', args=[self.draft.pk]), {'post': 'yes'})
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(Checklist.objects.filter(pk=self.draft.pk).exists())
+
+    def test_g42b_5_bulk_delete_with_an_unanswered_active_version_deletes_nothing(self):
+        active = self._unanswered_active()
+        client = _client_for(self.superuser)
+        changelist = reverse('admin:projects_checklist_changelist')
+        selected = [active.pk, self.draft.pk]
+
+        confirm = client.post(changelist, {'action': 'delete_selected',
+                                           '_selected_action': selected})
+        self.assertContains(confirm, 'Retire it by archiving instead')
+        response = client.post(changelist, {'action': 'delete_selected',
+                                            '_selected_action': selected, 'post': 'yes'})
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Checklist.objects.filter(pk=active.pk).exists())
+        self.assertTrue(Checklist.objects.filter(pk=self.draft.pk).exists())
+
+
+class CompletionAdminOffersNoDeleteTests(DeleteGuardFixture):
+
+    def test_g42b_6_completion_admin_offers_no_delete(self):
+        completion = ChecklistItemCompletion.objects.filter(task=self.task).first()
+        model_admin = admin_site.get_model_admin(ChecklistItemCompletion)
+        request = self._admin_request()
+        self.assertFalse(model_admin.has_delete_permission(request))
+        self.assertFalse(model_admin.has_delete_permission(request, completion))
+        self.assertNotIn('delete_selected', model_admin.get_actions(request))
+
+        client = _client_for(self.superuser)
+        change = client.get(reverse('admin:projects_checklistitemcompletion_change',
+                                    args=[completion.pk]))
+        self.assertEqual(change.status_code, 200)
+        self.assertFalse(change.context['has_delete_permission'])
+
+        response = client.post(reverse('admin:projects_checklistitemcompletion_delete',
+                                       args=[completion.pk]), {'post': 'yes'})
+        self.assertEqual(response.status_code, 403)
+
+        changelist = reverse('admin:projects_checklistitemcompletion_changelist')
+        client.post(changelist, {'action': 'delete_selected',
+                                 '_selected_action': [completion.pk], 'post': 'yes'})
+        self.assertTrue(ChecklistItemCompletion.objects.filter(pk=completion.pk).exists())
         self.assertEqual(self._v1_rows(), (1, 5, 3))

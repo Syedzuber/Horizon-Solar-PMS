@@ -4363,7 +4363,21 @@ answers on that version keeps showing it (as history), and an open one may finis
 it. Only unanswered tasks lose it. The behaviour is the ruling; the wording is out of date.
 Portal views were outside 1a's MODE.
 
-### G42 — deleting a pinned checklist version un-pins its tasks and hides their answers
+### ~~G42 — deleting a pinned checklist version un-pins its tasks and hides their answers~~ — **CLOSED 8 Oct 2026 by G42 + G42b**
+
+**Closed** in two commits:
+- `745f443` "Refuse deleting a checklist version or item that holds answers (G42)" — a
+  version or item with ANY `ChecklistItemCompletion` cannot be deleted by the portal, the
+  Django admin (change/delete view, item inline, bulk "delete selected") or the model
+  `delete()` overrides. Tests: `projects/tests_checklist_delete_guard.py`.
+- "Only draft checklists can be deleted; answers cannot be deleted in admin (G42b)" (the
+  commit that carries this note) — only a DRAFT version can be deleted at all; active and
+  archived versions are refused, answered or not, and retiring is archiving.
+  `ChecklistItemCompletionAdmin` has no delete permission and no bulk delete action.
+
+Every path asks one refusal point, `checklist_delete_refusal()` in `projects/models.py`.
+Shell `QuerySet.delete()` still bypasses the model guards — the same stated limit as R-7.
+Local count before G42: 0 completions with `item=NULL`; production not checked.
 
 Recorded 7 Oct 2026 by closeout 1a. `admin_checklist_delete` cascades a version's items, and
 `ChecklistItemCompletion.item` is SET_NULL, so the answers survive with `item=NULL` and their

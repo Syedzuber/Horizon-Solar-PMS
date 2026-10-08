@@ -14090,13 +14090,14 @@ def admin_checklist_update(request, checklist_id):
 @login_required
 @role_required(['Admin'])
 def admin_checklist_delete(request, checklist_id):
-    """Delete a Checklist version that holds no answers. Cascades to its items and task links.
+    """Delete a DRAFT Checklist version that holds no answers. Cascades to its items and
+    task links.
 
-    G42: A VERSION THAT HOLDS ANY ANSWER IS REFUSED, at any status, with a message
-    naming how many answers on how many tasks. Deleting it would null those answers'
-    item (SET_NULL) and un-pin their tasks, which then show the active version and hide
-    the answers. Archiving is the way to retire a version. Drafts with no answers delete
-    as before.
+    G42b: AN ACTIVE OR ARCHIVED VERSION IS REFUSED, answered or not — retiring a
+    version is archiving it. G42: a version that holds any answer is refused too, with
+    a message naming how many answers on how many tasks; deleting it would null those
+    answers' item (SET_NULL) and un-pin their tasks. Both rules are
+    checklist_delete_refusal()'s, so this view and the Django admin cannot disagree.
 
     Access: Admin only. POST only."""
     if request.method != 'POST':
@@ -14114,7 +14115,7 @@ def admin_checklist_delete(request, checklist_id):
     checklist.delete()  # CASCADE: items and task_links. No completions exist to orphan.
 
     log_activity(None, request.user.profile,
-                 f"Deleted checklist '{name}' (its items and links; it held no answers)",
+                 f"Deleted draft checklist '{name}' (its items and links; it held no answers)",
                  entity_type='Checklist', entity_id=None)
     messages.success(request, f'Checklist "{name}" deleted.')
     return redirect('admin_checklists')

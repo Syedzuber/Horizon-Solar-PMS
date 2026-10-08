@@ -5,7 +5,7 @@ from .models import (
     Project, Milestone, ProjectDocument, ProjectPhase, Task, UserProfile,
     NotificationLog, SystemSettings,
     Checklist, ChecklistItem, ChecklistTaskLink, ChecklistItemCompletion,
-    checklist_answer_counts, checklist_delete_refusal,
+    checklist_delete_refusal,
     Program,
     DesignAssignment, DueDateCommitment, DesignAttempt, ArkaSubmission,
     DesignFile, DesignChangeRequest,
@@ -451,12 +451,13 @@ class ChecklistAdmin(admin.ModelAdmin):
         return super().has_change_permission(request, obj)
 
     def has_delete_permission(self, request, obj=None):
-        # G42: nobody may delete a version that holds answers — deleting it nulls their
-        # item and hides them from their tasks; archiving is the way to retire it. A
-        # version with no answers keeps Django's ordinary permission check. With obj=None
-        # (the changelist, the action menu) there is no row to ask about yet; the bulk
-        # action asks per row through get_deleted_objects() below.
-        if obj is not None and checklist_answer_counts(obj)[0]:
+        # G42/G42b: nobody may delete a version that is not a draft (retiring is
+        # archiving) or that holds answers (deleting nulls their item and hides them from
+        # their tasks). checklist_delete_refusal() decides both. A deletable draft keeps
+        # Django's ordinary permission check. With obj=None (the changelist, the action
+        # menu) there is no row to ask about yet; the bulk action asks per row through
+        # get_deleted_objects() below.
+        if obj is not None and checklist_delete_refusal(obj):
             return False
         return super().has_delete_permission(request, obj)
 
@@ -464,9 +465,9 @@ class ChecklistAdmin(admin.ModelAdmin):
         # G42: the bulk "delete selected" confirmation page calls has_delete_permission()
         # per row through this, and on a refusal shows only "your account doesn't have
         # permission to delete: checklist" — true but unhelpful. Messages queued here
-        # render on that same page and name the answers and tasks behind each refusal.
+        # render on that same page and say why each version is refused.
         # The confirm POST is then a PermissionDenied for the whole batch, so nothing in
-        # it is deleted; the admin unticks the answered version and runs it again.
+        # it is deleted; the admin unticks the refused versions and runs it again.
         for obj in objs:
             refusal = checklist_delete_refusal(obj)
             if refusal:
@@ -476,12 +477,16 @@ class ChecklistAdmin(admin.ModelAdmin):
     def delete_queryset(self, request, queryset):
         # G42 BACKSTOP. QuerySet.delete() runs in SQL and never calls Checklist.delete(),
         # so whatever reaches this — today only the bulk action, which the permission
-        # check above already stops — still cannot delete an answered version. Kept
-        # rather than trusting that one caller, because the model guard cannot cover it.
-        answered = [c.pk for c in queryset if checklist_answer_counts(c)[0]]
-        for c in queryset.filter(pk__in=answered):
-            self.message_user(request, checklist_delete_refusal(c), messages.ERROR)
-        queryset.exclude(pk__in=answered).delete()
+        # check above already stops — still deletes only what checklist_delete_refusal()
+        # allows. Kept rather than trusting that one caller, because the model guard
+        # cannot cover it.
+        refused = []
+        for c in queryset:
+            refusal = checklist_delete_refusal(c)
+            if refusal:
+                refused.append(c.pk)
+                self.message_user(request, refusal, messages.ERROR)
+        queryset.exclude(pk__in=refused).delete()
 
 
 @admin.register(ChecklistTaskLink)
@@ -516,6 +521,22 @@ class ChecklistItemCompletionAdmin(admin.ModelAdmin):
     list_filter   = ['is_checked']
     readonly_fields = ['item', 'item_text_snapshot', 'task', 'checked_by', 'checked_at',
                        'created_at']
+
+    def has_delete_permission(self, request, obj=None):
+        # G42b: nobody deletes an answer here, Admin or superuser. An answer is the
+        # inspection record of a site — the tick, photo, checker and time — not data to
+        # tidy. A Django admin delete that would cascade to completions (a phase, a
+        # project) was already refused on its confirm page by TaskAdmin's own False,
+        # since completions only exist under tasks; this adds no new refusal there.
+        return False
+
+    def get_actions(self, request):
+        # G42b: the bulk "delete selected" action is removed. has_delete_permission()
+        # above already hides it, but that is Django's wiring rather than a statement —
+        # popped explicitly, matching TaskAdmin and ProjectAdmin.
+        actions = super().get_actions(request)
+        actions.pop('delete_selected', None)
+        return actions
 
     @admin.display(description='Answered text')
     def answered_text(self, obj):

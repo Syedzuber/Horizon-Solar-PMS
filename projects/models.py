@@ -3659,7 +3659,8 @@ def derive_checklist_code(name, checklist_model, exclude_pk=None):
 
 
 class ChecklistHasAnswers(Exception):
-    """Raised when something tries to delete a checklist version or item that holds answers (G42)."""
+    """Raised when checklist_delete_refusal() refuses a delete: a version or item that holds
+    answers (G42), or a version that is not a draft (G42b). The name predates G42b."""
 
 
 def checklist_answer_counts(target):
@@ -3687,20 +3688,38 @@ def checklist_answer_counts(target):
 
 
 def checklist_delete_refusal(target):
-    """The refusal message for deleting `target`, or None when it holds no answers.
+    """The refusal message for deleting `target`, or None when it may be deleted.
 
-    One wording for every path, built from checklist_answer_counts(), so the portal, the
-    Django admin and a shell traceback all say the same thing."""
+    THE SINGLE REFUSAL POINT for every checklist delete path — the portal views, the
+    Django admin (single, inline, bulk) and the model delete() guards all ask this and
+    nothing else, so they cannot disagree. Two rules:
+
+      G42b — only a DRAFT version may be deleted. An active version is live and an
+             archived one is the record of what was asked; retiring is archiving.
+             (An item's status rule is R-7's, enforced by _require_draft_template.)
+      G42  — a version or item that holds any answer may never be deleted, draft or not.
+
+    The answer count is always named when there is one, so a refused admin knows what
+    the version is holding."""
     answers, tasks = checklist_answer_counts(target)
-    if not answers:
-        return None
     held = (f"{answers} answer{'s' if answers != 1 else ''} on "
             f"{tasks} task{'s' if tasks != 1 else ''}")
     if isinstance(target, Checklist):
-        return (f'"{target.name}" v{target.version_no} cannot be deleted: it holds {held}, '
-                f'and deleting it would hide them from those tasks. Archive it instead.')
-    return (f'Checklist item "{target.label[:40]}" cannot be deleted: it holds {held}, '
-            f'and deleting it would hide them from those tasks.')
+        label = f'"{target.name}" v{target.version_no}'
+        if target.status != Checklist.DRAFT:
+            holding = f' It holds {held}.' if answers else ''
+            retire = (' Retire it by archiving instead.' if target.status == Checklist.ACTIVE
+                      else ' It is already retired; archived versions are kept as the record.')
+            return (f'{label} is {target.get_status_display().lower()} and cannot be '
+                    f'deleted: only a draft can be.{holding}{retire}')
+        if answers:
+            return (f'{label} cannot be deleted: it holds {held}, and deleting it would '
+                    f'hide them from those tasks.')
+        return None
+    if answers:
+        return (f'Checklist item "{target.label[:40]}" cannot be deleted: it holds {held}, '
+                f'and deleting it would hide them from those tasks.')
+    return None
 
 
 class Checklist(models.Model):
@@ -3728,9 +3747,9 @@ class Checklist(models.Model):
     from deleting a Checklist all operate in SQL and bypass them entirely — the same
     honest half-measure as TaskTemplate's and StatusTransition's.
 
-    G42: a version that holds answers cannot be deleted (delete() below). Same limit —
-    QuerySet.delete() bypasses it, which is why ChecklistAdmin.delete_queryset() asks
-    checklist_answer_counts() itself rather than trusting this override.
+    G42/G42b: only a draft that holds no answers can be deleted (delete() below). Same
+    limit — QuerySet.delete() bypasses it, which is why ChecklistAdmin.delete_queryset()
+    asks checklist_delete_refusal() itself rather than trusting this override.
     """
 
     DRAFT    = 'draft'
@@ -3865,14 +3884,17 @@ class Checklist(models.Model):
         return self
 
     def delete(self, *args, **kwargs):
-        # G42: a version that holds answers is what those tasks are pinned to (closeout
-        # 1a). Deleting it would null their items and hide the answers, so it is refused
-        # at ANY status — archiving is the way to retire it. The items' own delete() is
+        # G42b: only a draft may be deleted — an active version is live, an archived one
+        # is the record of what was asked, and retiring either is archiving. G42: not
+        # even a draft, if it holds answers, because answered tasks are pinned to it
+        # (closeout 1a) and deleting it would null their items and hide the answers.
+        # Both rules come from checklist_delete_refusal(). The items' own delete() is
         # never reached here (the cascade runs in SQL), so this checks the whole version.
         #
-        # Check-then-delete is not atomic: an answer recorded between the count and the
-        # DELETE is not seen here. Postgres FKs Django creates are DEFERRABLE INITIALLY
-        # DEFERRED, so one of the two commits fails rather than orphaning the answer.
+        # Check-then-delete is not atomic, but since G42b the window is nearly closed: a
+        # draft is never served to a task, so the completion view cannot answer it
+        # mid-delete. Anything else that slips in still meets Django's DEFERRABLE
+        # INITIALLY DEFERRED Postgres FK, so one commit fails rather than orphaning it.
         refusal = checklist_delete_refusal(self)
         if refusal:
             raise ChecklistHasAnswers(refusal)

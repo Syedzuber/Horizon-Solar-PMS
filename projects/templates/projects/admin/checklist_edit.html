@@ -120,7 +120,7 @@ editable only while it is a draft (R-7).
         <button type="submit" class="text-gray-400 hover:text-gray-700 px-1" title="Move down" {% if forloop.last %}disabled{% endif %}>↓</button>
       </form>
       <form method="POST" action="{% url 'admin_checklist_item_delete' checklist.pk item.pk %}" class="inline"
-            onsubmit="return confirm('Delete this item? Completions already recorded against it are kept, with the text that was answered.');">
+            onsubmit="return confirm('Delete this item? Only items on a draft can be deleted, and an item that holds answers never can.');">
         {% csrf_token %}
         <button type="submit" class="text-gray-400 hover:text-red-600 px-1" title="Delete">
           <i data-lucide="trash-2" class="w-4 h-4"></i>
@@ -219,7 +219,7 @@ editable only while it is a draft (R-7).
 {# ── Danger zone ───────────────────────────────────────────────────────────── #}
 <div class="mt-6 flex justify-end">
   <form method="POST" action="{% url 'admin_checklist_delete' checklist.pk %}"
-        onsubmit="return confirm('Delete this checklist version? Its items and task assignments are removed. Completion records are KEPT, each holding the text it answered.');">
+        onsubmit="return confirm('Delete this checklist version? Only a draft can be deleted, and a version that holds answers never can. Its items and task assignments are removed with it. To retire a published version, archive it.');">
     {% csrf_token %}
     <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-red-600 border border-red-200 hover:bg-red-50">
       <i data-lucide="trash-2" class="w-4 h-4"></i> Delete checklist
