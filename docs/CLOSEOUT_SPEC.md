@@ -1,7 +1,7 @@
-# Closeout Spec v2 — COD, As-Built, HOTO, QA/QC verification
+# Closeout Spec v2.2 — COD, As-Built, HOTO, QA/QC verification
 
 Horizon Solar PMS · OPEX/RESCO sites · 7 Oct 2026
-Status: **decisions closed with the product owner, Nirankar Mishra and the PMs. Not built.**
+Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
 Supersedes: §4 of `docs/OPEX_task_template_spec.md` (stale: it says no mirror derives; Design and the four deliveries do).
 Evidence base: `docs/CLOSEOUT_MIRROR_AUDIT.md` (6 Oct 2026, HEAD `203ab65`). Every factual claim about the code below comes from that audit and must be re-verified by each build session before it is built on.
 
@@ -35,6 +35,8 @@ No mirror converts to an entered task. No template version change is required fo
 | CL-C | **At least one QA/QC visit** before HOTO. Coverage % shown; no coverage threshold. |
 | CL-D | The assigned QA/QC engineer **approves tasks on their assigned sites only**. Authority comes from the assignment, not from a flag. `is_qaqc` is left unchanged until audited (Prompt Q-0). |
 | CL-E | The assigned QA/QC engineer is automatically the **"QA/QC Engineer" signatory** on Final Acceptance. |
+| CL-F | (8 Oct 2026) **COD does not change `Project.status`.** In this codebase Commissioned means "work over": ~30 readers drop it from working lists, while HOTO, As-Built and Completion Certificates are still open after COD. COD is shown from the active COD record instead — CEO pipeline "Commissioned" row, stuck-site rules, and a "COD recorded <date>" pill. COD is refused unless the site is Active or In Progress. Whether HOTO sets Commissioned is decided in step 8 (G59). |
+| CL-G | (8 Oct 2026) **Site-scoped work gates** (status, due date, checklist answers, GRN) require `user_works_on_site` — `user_can_view_project` minus view-only grants — on top of their role match. A view-only grant (the QA/QC engineer today; any future HSE / O&M viewer) never opens a work gate. |
 
 ---
 
@@ -42,20 +44,21 @@ No mirror converts to an entered task. No template version change is required fo
 
 Order is by dependency. Every step is audit → build → commit, one concern per session.
 
-| Step | What | Days | Needs |
-|---|---|---|---|
-| 1 | Safety fixes | ~2 | — |
-| 2 | Punch points close on re-approval; project-level open-points query | ~1 | — |
-| 3 | QA/QC engineer assignment | ~2 | Q-0 result |
-| 4 | COD record | ~2 | 2 |
-| 5 | T&C checklist (QMS-01 §14–16) | ~1 | — |
-| 6 | As-Built record | ~1 | — |
-| 7 | QA/QC verification visits | 3–4 | 2, 3, 5 |
-| 8 | Final Acceptance + HOTO + override | 4–5 | 2, 3, 6, 7 |
-| 9 | Per-site QA/QC dossier | 3–4 | all above |
-| | **Total** | **19–22** | ±30% until each step's audit |
+| Step | What | Days | Needs | State (8 Oct) |
+|---|---|---|---|---|
+| 1 | Safety fixes (1a pinning, 1b mirror presentation, G42/G42b deletion guards) | ~2 | — | live |
+| 2 | Punch points close on re-approval; project-level open-points query | ~1 | — | `e49b89c`, migrations 0110–0111 |
+| 3 | QA/QC engineer assignment | ~2 | Q-0 result | `ddddff2`, migration 0112 |
+| 4 | COD record | ~2 | 2 | `cbd78a1`, migration 0113 |
+| 4b | COD on CEO pipeline, stuck rules and site pill (CL-F) | ~0.5 | 4 | `c2a9acb`, no migration |
+| 5 | T&C checklist (QMS-01 §14–16) | ~1 | — | |
+| 6 | As-Built record | ~1 | — | |
+| 7 | QA/QC verification visits | 3–4 | 2, 3 (5 optional) | |
+| 8 | Final Acceptance + HOTO + override; decides project status at HOTO (G59) | 4–5 | 2, 3, 6, 7 | |
+| 9 | Per-site QA/QC dossier | 3–4 | all above | |
+| | **Total** | **19–22** | | ±30% until each step's audit |
 
-Steps 4, 5 and 6 are independent of each other and may be reordered.
+Steps 5, 6 and 7 are independent of each other and may be reordered. Step 7 can run before 5: visits cover installation checklists first and pick up T&C points when step 5 lands.
 
 ---
 
@@ -128,6 +131,21 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 - A "No" raises a punch point on that point's task (CL-B).
 - PM dashboard: "Last QA/QC visit: N days ago" per site.
 
+**Step 7 decisions (8 Oct 2026, product owner):**
+
+| # | Decision |
+|---|---|
+| V-1 | A visit belongs to one OPEX site, is made by that site's currently assigned QA/QC engineer, and is dated (IST). **At most one visit per site per day** (database-enforced). States: open → submitted. Only the assigned engineer starts, answers and submits. |
+| V-2 | Points come from the site's existing checklists: for each task with a checklist, the version that task resolves to via `_checklist_for_task` (pinned, 1a). A point = (task, checklist item). The engineer chooses which points to check. |
+| V-3 | Each checked point: Yes / No / NA, a remark (required on No), and **a photo required on every answer**. Item text snapshotted at answer time. Answers save point by point and are editable while the visit is open; immutable once submitted. |
+| V-4 | Own tables, never `ChecklistItemCompletion` — execution and verification answers must both survive (CL-5). |
+| V-5 | **On submit**, every "No" raises a `PunchPoint` on that point's task (CL-B), raised_by = engineer, reason = item text + remark. Raised at submit, not at answer time. A "No" on an already-approved task still raises the point; until G48 is decided it can only be waived. |
+| V-6 | Coverage = distinct points ever verified on a submitted visit ÷ total points across the site's pinned checklists. |
+| V-7 | Every viewer of the site sees submitted visits and their photos. Open visits: the engineer and `user_can_manage_project` holders. |
+| V-8 | On submit, notify the site's PM and coordinators (in-app + email): points checked, how many No, punch points raised, link to the visit. |
+| V-9 | One helper `site_has_submitted_qaqc_visit(project)`; step 8's HOTO gate (CL-C) calls it. |
+| V-10 | PM dashboard: each OPEX site card shows "Last QA/QC visit: N days ago" or "No QA/QC visit yet" (when an engineer is assigned or a visit exists). |
+
 ### Step 8 — Final Acceptance + HOTO
 
 - One Final Acceptance record per site, covering QMS-01 §18–20:
@@ -170,6 +188,11 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 - **O&M access** to the dossier beyond PDF: future role decision.
 - **`is_qaqc` future**: retire, or keep for a company-wide QA/QC lead with cross-site approval. Decide after Q-0 and step 3.
 - **Delivery mirrors reconcile at activation** (audit Q26): half-day fix, when real tender sites activate.
+- **G48 — step 7 question**: a spot-check punch point raised on an already-approved task can only be waived today. Proposal (not decided): the QA/QC engineer re-verifying the same point as "Yes" closes it with method "re-verified".
+- **G59 — step 8 question**: does HOTO set `Project.status = Commissioned` (and `commissioned_at` = COD date)? If Commissioned is ever set before work is over, the R1–R10 readers need a shared "open work" status set first.
+- **View-grant switch** (follow-up to CL-G): name the switch in `user_works_on_site` generically ("view-only grants"), state the rule in its docstring, and add a test that fails if a new view grant opens a work gate.
+- **Small UI follow-ups**: G41 archive wording; Delete button shown on active/archived checklists; G55/G57 assignment and COD emails carry no site link.
+- **Adoption**: production had 0 punch points and 0 QA/QC holders on 8 Oct 2026. The closeout chain only works once PMs reject in the system and name QA/QC engineers.
 
 ---
 
