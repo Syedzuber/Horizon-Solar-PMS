@@ -1,7 +1,11 @@
-"""Punch points leave Open by approval, and the one site-level open-points query.
-Closeout step 2 (docs/CLOSEOUT_SPEC.md: CL-1, CL-2, CL-B).
+"""Punch points are raised here, leave Open by approval, and the one site-level
+open-points query. Closeout steps 2 and 7 (docs/CLOSEOUT_SPEC.md: CL-1, CL-2, CL-B).
 
-TWO FUNCTIONS, ONE PLACE EACH.
+`raise_punch_point()` is the only code that creates a PunchPoint (closeout step 7,
+go-ahead Q6). Two callers: `task_reject`, and `qaqc_views.submit_qaqc_visit()` once
+per "No". tests_qaqc_visit pins that `PunchPoint.objects.create` appears nowhere else.
+
+TWO MORE FUNCTIONS, ONE PLACE EACH.
 
 `close_punch_points_on_approval()` is the only runtime writer of `PunchPoint.CLOSED`
 (migration 0111 wrote it once, for points that predate this rule). Two views call it: `task_approve`, and the self-certified branch of
@@ -21,6 +25,21 @@ reads `raised_by` or the reason.
 from django.db import transaction
 
 from .models import PunchPoint, log_activity
+
+
+def raise_punch_point(task, reason, raised_by):
+    """Create one Open punch point on `task` and return it.
+
+    THE ONE CREATION PATH. A rejection raises one (`task_reject`, with the rejection
+    reason) and a QA/QC visit raises one per "No" at submit (CL-B, V-5). Both callers
+    run inside their own transaction, so a refused submit leaves no point behind.
+
+    `reason` must be non-blank — the model says why. `raised_by` is the UserProfile
+    who found the defect: the approver who rejected, or the QA/QC engineer.
+    """
+    if not (reason or '').strip():
+        raise ValueError('raise_punch_point needs a reason')
+    return PunchPoint.objects.create(task=task, reason=reason, raised_by=raised_by)
 
 
 def close_punch_points_on_approval(task, actor, method, project):

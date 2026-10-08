@@ -167,6 +167,8 @@ dashboard looks exactly as it did before. Label only: no collapse/expand control
         {% if row.project.activated_at %}
           <span class="text-muted ms-2" style="font-size:.7rem;">· Activated {{ row.project.activated_at|date:"d M Y" }}</span>
         {% endif %}
+        {# Closeout step 7 (V-10): only on an OPEX site with a QA/QC engineer or a submitted visit (views.dashboard_pm, qaqc_views.last_visit_lines). #}
+        {% if row.has_qaqc_line %}<span class="text-muted ms-2 qaqc-visit-line" style="font-size:.7rem;">· {% if row.qaqc_visit_days is None %}No QA/QC visit yet{% elif row.qaqc_visit_days == 0 %}Last QA/QC visit: today{% else %}Last QA/QC visit: {{ row.qaqc_visit_days }} day{{ row.qaqc_visit_days|pluralize }} ago{% endif %}</span>{% endif %}
       </span>
 
       {# Urgency indicator — after project name #}

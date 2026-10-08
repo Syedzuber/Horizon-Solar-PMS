@@ -138,6 +138,22 @@
         <a href="{% url 'project_overview' s.project.project_id %}" class="fw-semibold text-decoration-none">{{ s.project.project_id }}</a>
         {% if s.project.customer_name and s.project.customer_name != s.project.project_id %}<span class="text-muted small ms-1">{{ s.project.customer_name }}</span>{% endif %}
         <div class="text-muted small">QA/QC since {{ s.assigned_at|date:"d M Y" }}</div>
+        {% comment %}Closeout step 7: the site's visit. An open visit shows "open since" so a
+           forgotten one is visible (Q3) — there is at most one per site. Otherwise Start,
+           unless a visit was already submitted today (one per site per day, V-1).{% endcomment %}
+        <div class="mt-1">
+          {% if s.open_visit %}
+            <a href="{% url 'qaqc_visit_detail' s.project.project_id s.open_visit.pk %}" class="btn btn-sm btn-outline-primary">Continue visit</a>
+            <span class="badge bg-warning text-dark ms-1">Open since {{ s.open_visit.visit_date|date:"d M Y" }}</span>
+          {% elif s.visited_today %}
+            <span class="badge bg-success">Visited today</span>
+          {% else %}
+            <form method="post" action="{% url 'qaqc_visit_start' s.project.project_id %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-brand">Start today's visit</button>
+            </form>
+          {% endif %}
+        </div>
       </div>
       <span class="badge {% if s.awaiting_count %}bg-warning text-dark{% else %}bg-light text-muted border{% endif %}">
         {{ s.awaiting_count }} awaiting approval

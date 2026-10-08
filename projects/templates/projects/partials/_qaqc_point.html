@@ -1,0 +1,78 @@
+{% comment %}Closeout step 7 — one point (task, checklist item) on a QA/QC visit, swapped whole
+   (outerHTML) by qaqc_visit_point. Three shapes:
+     show_form  — the answer form: Yes / No / NA, a remark (required on No; the server
+                  refuses without one, so the field is not `required` here — it is
+                  conditional on another control), and a photo. The photo is required on
+                  a first answer; on an edit an empty file keeps the current photo (Q9).
+     answer     — the recorded answer, its photo (through qaqc_visit_photo, which signs at
+                  the click), the EXIF time if one was read, and any punch point it raised.
+     neither    — a Check button for the engineer.
+   `capture="environment"` opens the rear camera on a phone, as on the site engineer's
+   checklist. The visit page's script downscales the photo and reads its EXIF time before
+   upload; if it cannot, the original goes up as chosen (Q5).
+   The number and "verified before" badge sit OUTSIDE this block on the visit page, so a
+   swap never has to recompute them.{% endcomment %}
+<div id="pt-{{ task.pk }}-{{ item.pk }}" class="qaqc-point">
+  <div class="mb-1">{% if answer %}{{ answer.item_text_snapshot }}{% else %}{{ item.label }}{% endif %}</div>
+  {% if error %}<div class="alert alert-danger py-1 px-2 small mb-2">{{ error }}</div>{% endif %}
+
+  {% if show_form %}
+    <form method="post" enctype="multipart/form-data"
+          action="{% url 'qaqc_visit_point' project.project_id visit.pk task.pk item.pk %}"
+          hx-post="{% url 'qaqc_visit_point' project.project_id visit.pk task.pk item.pk %}"
+          hx-encoding="multipart/form-data"
+          hx-target="#pt-{{ task.pk }}-{{ item.pk }}" hx-swap="outerHTML"
+          class="d-flex flex-column gap-2">
+      {% csrf_token %}
+      <div class="btn-group w-100" role="group" aria-label="Answer">
+        <input type="radio" class="btn-check" name="answer" value="yes" id="ans-{{ task.pk }}-{{ item.pk }}-yes" autocomplete="off" required {% if selected_answer == 'yes' %}checked{% endif %}>
+        <label class="btn btn-outline-success" for="ans-{{ task.pk }}-{{ item.pk }}-yes">Yes</label>
+        <input type="radio" class="btn-check" name="answer" value="no" id="ans-{{ task.pk }}-{{ item.pk }}-no" autocomplete="off" {% if selected_answer == 'no' %}checked{% endif %}>
+        <label class="btn btn-outline-danger" for="ans-{{ task.pk }}-{{ item.pk }}-no">No</label>
+        <input type="radio" class="btn-check" name="answer" value="na" id="ans-{{ task.pk }}-{{ item.pk }}-na" autocomplete="off" {% if selected_answer == 'na' %}checked{% endif %}>
+        <label class="btn btn-outline-secondary" for="ans-{{ task.pk }}-{{ item.pk }}-na">NA</label>
+      </div>
+      <textarea name="remark" rows="2" class="form-control form-control-sm"
+                placeholder="Remark (required if the answer is No)">{{ remark_value }}</textarea>
+      <input type="file" name="photo" accept=".jpg,.jpeg,.png,image/jpeg,image/png" capture="environment"
+             class="form-control form-control-sm" data-qaqc-photo {% if not answer %}required{% endif %}>
+      {% if answer %}<div class="text-muted small">Leave the photo empty to keep the current one.</div>{% endif %}
+      <input type="hidden" name="photo_taken_at" value="">
+      <div class="text-muted small qaqc-photo-status"></div>
+      <div class="d-flex gap-2">
+        <button type="submit" class="btn btn-success btn-sm flex-grow-1">Save</button>
+        <button type="button" class="btn btn-outline-secondary btn-sm"
+                hx-get="{% url 'qaqc_visit_point' project.project_id visit.pk task.pk item.pk %}?row=1"
+                hx-target="#pt-{{ task.pk }}-{{ item.pk }}" hx-swap="outerHTML">Cancel</button>
+      </div>
+    </form>
+
+  {% elif answer %}
+    <div class="d-flex flex-wrap align-items-start gap-2">
+      <span class="badge {% if answer.answer == 'yes' %}bg-success{% elif answer.answer == 'no' %}bg-danger{% else %}bg-secondary{% endif %}">{{ answer.get_answer_display }}</span>
+      <a href="{% url 'qaqc_visit_photo' project.project_id answer.pk %}" target="_blank" rel="noopener">
+        <img src="{% url 'qaqc_visit_photo' project.project_id answer.pk %}" alt="Photo for this point" loading="lazy"
+             style="max-height:96px; max-width:128px; object-fit:cover;" class="rounded border">
+      </a>
+      <div class="small flex-grow-1">
+        {% if answer.remark %}<div style="white-space:pre-line;">{{ answer.remark }}</div>{% endif %}
+        <div class="text-muted">
+          Answered {{ answer.answered_at|date:"d M Y, H:i" }}{% if answer.photo_taken_at %} · photo taken {{ answer.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
+        </div>
+        {% if answer.punch_point %}
+          <div><span class="badge bg-warning text-dark">Punch point {{ answer.punch_point.get_status_display|lower }}</span></div>
+        {% endif %}
+      </div>
+      {% if can_answer and visit.status == 'open' %}
+        <button type="button" class="btn btn-outline-primary btn-sm"
+                hx-get="{% url 'qaqc_visit_point' project.project_id visit.pk task.pk item.pk %}"
+                hx-target="#pt-{{ task.pk }}-{{ item.pk }}" hx-swap="outerHTML">Edit</button>
+      {% endif %}
+    </div>
+
+  {% elif can_answer %}
+    <button type="button" class="btn btn-outline-primary btn-sm"
+            hx-get="{% url 'qaqc_visit_point' project.project_id visit.pk task.pk item.pk %}"
+            hx-target="#pt-{{ task.pk }}-{{ item.pk }}" hx-swap="outerHTML">Check this point</button>
+  {% endif %}
+</div>

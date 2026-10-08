@@ -6395,6 +6395,208 @@ class CodRecord(models.Model):
             'CodRecord is append-only — a withdrawn COD stays in history.')
 
 
+class QaqcVisit(models.Model):
+    """One QA/QC spot-check visit to an OPEX site by its assigned QA/QC engineer
+    (closeout step 7, CL-5, CL-B, CL-C; decisions V-1 to V-10).
+
+    A VISIT IS THE SECOND RECORD OF A CHECK (CL-5). The site engineer answers the
+    checklist while doing the work (ChecklistItemCompletion); the QA/QC engineer comes
+    later and answers chosen points again, here. Neither ever writes the other's table,
+    so the dossier (step 9) can put the two answers side by side.
+
+    THREE STATES. `open` while the engineer works through points; `submitted` once they
+    submit (every "No" then raises a punch point, V-5); `lapsed` when the site's QA/QC
+    assignment is replaced or ended while the visit is open (go-ahead Q2). A lapsed
+    visit keeps its answers and photos, raises nothing, counts toward nothing, and never
+    satisfies site_has_submitted_qaqc_visit().
+
+    ONE VISIT PER SITE PER DAY (V-1), AND ONE OPEN VISIT PER SITE (Q3) — both partial
+    unique constraints below. `visit_date` is the IST day the visit was started; an open
+    visit may be continued and submitted on a later day and keeps that date.
+
+    WRITTEN BY qaqc_views only: start_qaqc_visit() inserts; submit_qaqc_visit() and the
+    lapse in assign_site_qaqc() / end_site_qaqc() move the status with filter().update().
+    save() on an existing row and delete() both raise.
+    """
+
+    OPEN      = 'open'
+    SUBMITTED = 'submitted'
+    LAPSED    = 'lapsed'
+    STATUS_CHOICES = [
+        (OPEN,      'Open'),
+        (SUBMITTED, 'Submitted'),
+        (LAPSED,    'Lapsed'),
+    ]
+
+    LAPSE_REPLACED = 'replaced'
+    LAPSE_ENDED    = 'ended'
+    LAPSE_REASON_CHOICES = [
+        (LAPSE_REPLACED, 'QA/QC engineer replaced'),
+        (LAPSE_ENDED,    'QA/QC engineer ended'),
+    ]
+
+    # PROTECT throughout: an accountability record, the SiteQaqcAssignment reasoning.
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='qaqc_visits',
+    )
+    engineer = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='qaqc_visits',
+    )
+    assignment = models.ForeignKey(  # the assignment span that authorised this visit
+        SiteQaqcAssignment, on_delete=models.PROTECT, related_name='visits',
+    )
+    visit_date = models.DateField()  # IST day the visit was started (V-1); kept if submitted later
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default=OPEN)
+    started_at = models.DateTimeField(default=timezone.now)
+    submitted_at = models.DateTimeField(null=True, blank=True)  # set only with status=submitted
+    lapsed_at = models.DateTimeField(null=True, blank=True)     # set only with status=lapsed
+    lapse_reason = models.CharField(  # why the visit lapsed; blank unless lapsed
+        max_length=10, choices=LAPSE_REASON_CHOICES, blank=True, default='',
+    )
+
+    class Meta:
+        ordering = ['project', '-visit_date', '-pk']
+        constraints = [
+            # V-1: at most one visit per site per day. A lapsed visit is excluded, so the
+            # engineer who replaces a mid-visit engineer can start one the same day (Q2).
+            models.UniqueConstraint(
+                fields=['project', 'visit_date'],
+                condition=~models.Q(status='lapsed'),
+                name='uniq_qaqc_visit_site_day'),
+            # Q3: at most one open visit per site, so a forgotten visit must be submitted
+            # before another starts. Backstop for start_qaqc_visit()'s project lock.
+            models.UniqueConstraint(
+                fields=['project'],
+                condition=models.Q(status='open'),
+                name='uniq_qaqc_visit_open_per_site'),
+            models.CheckConstraint(
+                condition=models.Q(status__in=['open', 'submitted', 'lapsed']),
+                name='qaqc_visit_status_valid'),
+            # The state columns move with the status, all or nothing.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(status='open') & models.Q(submitted_at__isnull=True)
+                     & models.Q(lapsed_at__isnull=True) & models.Q(lapse_reason=''))
+                    | (models.Q(status='submitted') & models.Q(submitted_at__isnull=False)
+                       & models.Q(lapsed_at__isnull=True) & models.Q(lapse_reason=''))
+                    | (models.Q(status='lapsed') & models.Q(submitted_at__isnull=True)
+                       & models.Q(lapsed_at__isnull=False) & ~models.Q(lapse_reason=''))),
+                name='qaqc_visit_state_columns'),
+        ]
+
+    def __str__(self):
+        return f"{self.project.project_id} — QA/QC visit {self.visit_date} ({self.status})"
+
+    @property
+    def is_open(self):
+        return self.status == self.OPEN
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'QaqcVisit is append-only — its status moves through qaqc_views '
+                '(submit, lapse), never by editing the row.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'QaqcVisit is append-only — a visit stays in history, lapsed or submitted.')
+
+
+class QaqcVisitAnswer(models.Model):
+    """The QA/QC engineer's answer to one checklist point on one visit (V-3, V-4).
+
+    A POINT IS (task, checklist item): the item comes from the version that task
+    resolves to (closeout 1a pinning, via qaqc_views.site_checklist_points() and, on
+    write, views._checklist_for_task()). One answer per point per visit.
+
+    NEVER ChecklistItemCompletion (V-4). That table holds one answer per (item, task) —
+    the site engineer's — and a second, independent answer cannot live beside it there.
+
+    Yes / No / NA, a remark required on No, a photo required on every answer, and the
+    item's text snapshotted when answered (R-8's reasoning). Editable while the visit is
+    open — an edit keeps the existing photo unless a new one is uploaded (Q9) — and
+    immutable once the visit is not open: save() refuses, delete() always refuses.
+
+    THE PHOTO IS PRIVATE (go-ahead Q4): bills bucket, no URL stored; qaqc_views signs a
+    link at the click. `punch_point` is set by submit_qaqc_visit() on a "No" (V-5).
+    """
+
+    YES = 'yes'
+    NO  = 'no'
+    NA  = 'na'
+    ANSWER_CHOICES = [
+        (YES, 'Yes'),
+        (NO,  'No'),
+        (NA,  'Not Applicable'),
+    ]
+
+    # PROTECT throughout. Tasks are never deleted (projects soft-delete) and an active
+    # or archived checklist item cannot be deleted (R-7); drafts are never served, so
+    # no visit can answer one.
+    visit = models.ForeignKey(QaqcVisit, on_delete=models.PROTECT, related_name='answers')
+    task = models.ForeignKey(Task, on_delete=models.PROTECT, related_name='qaqc_answers')
+    item = models.ForeignKey(ChecklistItem, on_delete=models.PROTECT, related_name='qaqc_answers')
+    answer = models.CharField(max_length=3, choices=ANSWER_CHOICES)
+    remark = models.TextField(blank=True, default='')  # required on No (CHECK below)
+    item_text_snapshot = models.TextField()  # the item's label when answered (R-8)
+    photo_file_name = models.CharField(max_length=255)  # original filename, as uploaded
+    photo_bucket = models.CharField(max_length=100)     # the private bills bucket at write time
+    photo_path = models.CharField(max_length=500)       # path within `photo_bucket`
+    photo_size_kb = models.PositiveIntegerField(default=0)
+    # EXIF DateTimeOriginal read in the browser (go-ahead Q5), shown beside the photo as
+    # evidence only. NULL when the image carried none. answered_at is the authority.
+    photo_taken_at = models.DateTimeField(null=True, blank=True)
+    answered_at = models.DateTimeField(default=timezone.now)  # server time of the latest write
+    punch_point = models.OneToOneField(  # the point this "No" raised at submit (V-5)
+        PunchPoint, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='qaqc_answer',
+    )
+
+    class Meta:
+        ordering = ['visit', 'pk']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['visit', 'task', 'item'], name='uniq_qaqc_answer_point'),
+            models.CheckConstraint(
+                condition=models.Q(answer__in=['yes', 'no', 'na']),
+                name='qaqc_answer_valid'),
+            # V-3: a "No" says why. The writer strips the remark first.
+            models.CheckConstraint(
+                condition=~models.Q(answer='no') | ~models.Q(remark=''),
+                name='qaqc_answer_remark_on_no'),
+            # V-3: a photo on every answer, Yes and NA included.
+            models.CheckConstraint(
+                condition=(~models.Q(photo_file_name='') & ~models.Q(photo_bucket='')
+                           & ~models.Q(photo_path='')),
+                name='qaqc_answer_photo_required'),
+            models.CheckConstraint(
+                condition=~models.Q(item_text_snapshot=''),
+                name='qaqc_answer_snapshot_required'),
+            # Only a "No" raises a punch point.
+            models.CheckConstraint(
+                condition=models.Q(punch_point__isnull=True) | models.Q(answer='no'),
+                name='qaqc_answer_punch_point_only_on_no'),
+        ]
+
+    def __str__(self):
+        return f"Visit {self.visit_id} — {self.get_answer_display()}: {self.item_text_snapshot[:40]}"
+
+    def save(self, *args, **kwargs):
+        # V-3: answers are editable only while their visit is open. Read from the
+        # database, not from self.visit, so a stale in-memory visit cannot let an edit
+        # through after another request submitted it.
+        if not QaqcVisit.objects.filter(pk=self.visit_id, status=QaqcVisit.OPEN).exists():
+            raise AppendOnlyViolation(
+                'A QA/QC visit answer can be changed only while its visit is open.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'QaqcVisitAnswer is never deleted — an answer is edited while the visit is '
+            'open and kept once it is submitted.')
+
+
 # ---------------------------------------------------------------------------
 # Approvals S1 — the shared approval primitive (26 Sep 2026, D-A1)
 #

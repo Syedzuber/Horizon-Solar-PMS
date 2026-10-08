@@ -15,6 +15,7 @@ from .models import (
     ContractorBillDetail, ContractorBillTask,
     SiteQaqcAssignment,
     CodRecord,
+    QaqcVisit, QaqcVisitAnswer,
 )
 from .forms import check_typed_date
 from .permissions import qaqc_engineer_assignment_refusal
@@ -924,3 +925,24 @@ class CodRecordAdmin(_ApprovalRecordAdmin):
                      'withdrawn_at', 'withdrawn_by']
     list_filter   = ['evidence_type']
     search_fields = ['project__project_id']
+
+
+# Closeout step 7. Read-only like the approval records: qaqc_views' start, answer and
+# submit writers (and the lapse in the assignment writers) are the only writers. A visit
+# submitted here would raise no punch points for its "No" answers, and an answer edited
+# here would rewrite a finding after the engineer signed it off. Photos show as bucket
+# and path only — the admin mints no signed link.
+@admin.register(QaqcVisit)
+class QaqcVisitAdmin(_ApprovalRecordAdmin):
+    list_display  = ['project', 'visit_date', 'engineer', 'status', 'started_at',
+                     'submitted_at', 'lapsed_at']
+    list_filter   = ['status']
+    search_fields = ['project__project_id', 'engineer__user__username']
+
+
+@admin.register(QaqcVisitAnswer)
+class QaqcVisitAnswerAdmin(_ApprovalRecordAdmin):
+    list_display  = ['visit', 'task', 'answer', 'item_text_snapshot', 'answered_at',
+                     'punch_point']
+    list_filter   = ['answer']
+    search_fields = ['visit__project__project_id', 'item_text_snapshot']

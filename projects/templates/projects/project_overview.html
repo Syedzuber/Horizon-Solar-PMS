@@ -832,6 +832,67 @@ label (get_status_display) — never a two-state branch.
 </div>
 {% endif %}
 
+{% comment %}Closeout step 7 — the QA/QC visits card, RESCO (OPEX) sites only
+   (show_qaqc_visit_card). Every viewer sees coverage (V-6) and the submitted visits,
+   each linking to its read-only page. The open visit is in the context only for its
+   engineer and the site's managers (V-7), shown "open since" so a forgotten one is
+   visible (Q3). Start / Continue are drawn for the assigned QA/QC engineer only;
+   qaqc_views refuses everyone else.{% endcomment %}
+{% if show_qaqc_visit_card %}
+<div class="card shadow-sm mb-4" id="qaqc-visits-card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold small"><i data-lucide="clipboard-check" class="lucide-icon me-1"></i>QA/QC visits</span>
+    {% if qaqc_visit_open and qaqc_open_is_mine and qaqc_can_conduct %}
+      <a href="{% url 'qaqc_visit_detail' project.project_id qaqc_visit_open.pk %}" class="btn btn-outline-primary btn-sm">Continue visit</a>
+    {% elif qaqc_can_conduct and not qaqc_visit_open and not qaqc_visited_today and qaqc_storage_ready %}
+      <form method="post" action="{% url 'qaqc_visit_start' project.project_id %}" class="d-inline">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-brand btn-sm">Start today's visit</button>
+      </form>
+    {% endif %}
+  </div>
+  <div class="card-body small">
+    <div class="row g-2 mb-2">
+      <div class="col-6 col-md-3">
+        <div class="text-muted">Coverage</div>
+        <div class="fw-semibold" id="qaqc-coverage">
+          {% if qaqc_visit_coverage.total %}{{ qaqc_visit_coverage.verified }} of {{ qaqc_visit_coverage.total }} points ({{ qaqc_visit_coverage.percent }}%){% else %}No checklist points yet{% endif %}
+        </div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="text-muted">Last visit</div>
+        <div class="fw-semibold">{% if qaqc_visit_last %}{{ qaqc_visit_last.visit_date|date:"d M Y" }}{% else %}No QA/QC visit yet{% endif %}</div>
+      </div>
+    </div>
+    {% if qaqc_visit_open %}
+      <div class="alert alert-warning py-2 mb-2">
+        Open visit by {{ qaqc_visit_open.engineer.user.get_full_name|default:qaqc_visit_open.engineer.user.username }},
+        open since {{ qaqc_visit_open.visit_date|date:"d M Y" }} —
+        <a href="{% url 'qaqc_visit_detail' project.project_id qaqc_visit_open.pk %}">view</a>
+      </div>
+    {% endif %}
+    {% if qaqc_can_conduct and not qaqc_storage_ready %}
+      <div class="text-muted mb-2">Visits cannot be started yet: the private store for visit photos is not configured.</div>
+    {% endif %}
+    {% if qaqc_visits_recent %}
+      <table class="table table-sm mb-0">
+        <thead><tr><th>Date</th><th>Engineer</th><th>Points</th><th>No</th></tr></thead>
+        <tbody>
+          {% for v in qaqc_visits_recent %}
+            <tr>
+              <td><a href="{% url 'qaqc_visit_detail' project.project_id v.pk %}">{{ v.visit_date|date:"d M Y" }}</a></td>
+              <td>{{ v.engineer.user.get_full_name|default:v.engineer.user.username }}</td>
+              <td>{{ v.points_checked }}</td>
+              <td>{% if v.no_count %}<span class="badge bg-danger">{{ v.no_count }}</span>{% else %}0{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── 5. Project Documents ─────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

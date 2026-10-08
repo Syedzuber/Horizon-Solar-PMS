@@ -4447,6 +4447,11 @@ decided:** the QA/QC engineer re-verifying the same checklist point as "Yes" clo
 closure method "re-verified" (a new `PunchPoint.CLOSURE_METHOD_CHOICES` value, written through
 `punch_points.py` like the others). Decide in step 7's audit.
 
+**Still open after step 7 (8 Oct 2026).** Step 7 built V-5 as decided: a "No" on an approved
+task raises the point, and until G48 is decided it can only be waived. The proposal above is
+ready to build on: `QaqcVisitAnswer.punch_point` links each "No" to the point it raised, so a
+later "Yes" on the same (task, item) can find the point to close.
+
 ### G49 — no Django admin registration for `PunchPoint`
 
 Recorded 8 Oct 2026 by closeout step 2. `PunchPoint` is not registered in `admin.py`. Left
@@ -4614,6 +4619,38 @@ Recorded 8 Oct 2026 by closeout 4b, which closed G56 by design.
 - The S7 stuck footer (`stuck_limit_lines`, golden-pinned in `tests_ceo_tender_sites`)
   still says "In execution: …" and does not mention that a site with COD on record is
   skipped. It was left unchanged so the golden copy holds.
+
+### G60 — QA/QC visit notices: email has no link; visit photos share the bills bucket
+
+Recorded 8 Oct 2026 by closeout step 7.
+- `qaqc_visit_submitted` goes out as one `send_notification()` call per recipient, so the
+  email carries the counts but not the link to the visit (same limitation as G55 / G57).
+  The in-app notice links to the visit page.
+- Visit photos go to `SUPABASE_BILLS_BUCKET` under `{project_id}/qaqc-visit/…` (go-ahead
+  Q4), beside the COD PDFs. With the setting empty no visit can be started — the card and
+  the writer both say so. **Check it is set on Railway before announcing the feature.**
+- Storage is not transactional. A photo is uploaded before the answer row is written; the
+  view deletes it when the writer refuses, and deletes a photo an edit replaced. A process
+  that dies between the upload and the commit still leaves an orphan object (the COD and
+  bill PDFs have the same gap).
+
+### G61 — a lapsed QA/QC visit tells nobody that it lapsed
+
+Recorded 8 Oct 2026 by closeout step 7 (go-ahead Q2). When the PM replaces or ends the
+site's QA/QC engineer, an open visit lapses in the same transaction and an ActivityLog line
+(`qaqc_visit_lapsed`) is written. The outgoing engineer already receives "You are no longer
+the QA/QC engineer for …", which does not mention the unfinished visit, and the PM is told
+nothing extra because they made the change. If engineers report losing work they thought
+was saved, add the visit to the removal notice.
+
+### G62 — no ActivityLog line per QA/QC visit answer
+
+Recorded 8 Oct 2026 by closeout step 7. The site engineer's checklist logs every answer;
+the visit logs only start, submit and lapse. Each answer is its own row with
+`answered_at`, the snapshot and the photo, and an edit overwrites it while the visit is
+open — so the trail of edits during an open visit is not kept. The dossier (step 9) reads
+the submitted answers, which are immutable. If an edit history is wanted, it is a log line
+in `answer_qaqc_point()`.
 
 ---
 

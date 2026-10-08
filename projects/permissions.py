@@ -1778,6 +1778,30 @@ def user_can_record_cod(user, project):
     return user_can_manage_project(user, project)
 
 
+def user_can_conduct_qaqc_visit(user, project):
+    """
+    Return True if `user` may start, answer and submit QA/QC visits on `project`
+    (closeout step 7, V-1). Who may READ a visit is a different question, answered in
+    qaqc_views: every viewer of the site sees submitted visits; open and lapsed ones
+    only the engineer and user_can_manage_project holders (V-7).
+
+    THE SITE'S ASSIGNED QA/QC ENGINEER ONLY, on an OPEX site: user_is_site_qaqc(), which
+    re-checks the assignment, the Site Engineer role and the active profile. A visit is
+    the independent second check of the site's work (CL-5), so the people whose work or
+    site it is — the PM, coordinators, the site engineers holding its tasks — are
+    refused, as are another site's QA/QC engineer and an engineer whose assignment has
+    ended. The legacy `is_qaqc` flag grants nothing here (CL-D).
+
+    The visit-state rules (open, this engineer's own visit, one per day) are not here:
+    they are the writers', re-checked under their locks.
+    """
+    # OPEX only: user_is_site_qaqc() already answers False elsewhere (no assignment can
+    # exist), but the visit rule is stated here rather than inherited by accident.
+    if project is None or project.project_type != 'OPEX' or project.is_deleted:
+        return False
+    return user_is_site_qaqc(user, project)
+
+
 def user_can_mark_task_not_applicable(user, task, project):
     """Return True if `user` may mark `task` Not Applicable on `project`, or undo it.
 

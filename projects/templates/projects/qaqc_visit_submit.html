@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Submit QA/QC visit — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+{% comment %}Closeout step 7 — the summary the engineer confirms before submitting
+   (qaqc_views.qaqc_visit_submit). Reached only by the visit's own engineer while it is
+   open. Every "No" listed here raises one punch point on its task when submitted (V-5);
+   those block COD and HOTO until the task is re-approved or the PM waives them.{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'qaqc_visit_detail' project.project_id visit.pk %}" class="text-decoration-none text-muted">&larr; Back to the visit</a>
+</div>
+
+<div class="card shadow-sm mb-4" style="max-width:720px;">
+  <div class="card-header fw-semibold">Submit QA/QC visit — {{ visit.visit_date|date:"d M Y" }}, {{ project.project_id }}</div>
+  <div class="card-body">
+    <p class="mb-2">{{ answers|length }} point{{ answers|length|pluralize }} checked.</p>
+    {% if no_answers %}
+      <p class="mb-2 text-danger fw-semibold">{{ no_answers|length }} "No" answer{{ no_answers|length|pluralize }} — each raises a punch point on its task:</p>
+      <ul class="small">
+        {% for a in no_answers %}
+          <li><strong>{{ a.task.task_name }}</strong> — {{ a.item_text_snapshot }}: {{ a.remark }}</li>
+        {% endfor %}
+      </ul>
+      <p class="small text-muted">A punch point blocks COD and HOTO until its task is approved again or the PM waives it.</p>
+    {% else %}
+      <p class="text-muted small">No "No" answers: no punch points will be raised.</p>
+    {% endif %}
+    <p class="small text-muted">Once submitted, the answers cannot be changed.</p>
+    {% if answers %}
+      <form method="post" action="{% url 'qaqc_visit_submit' project.project_id visit.pk %}" class="d-flex gap-2">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-brand">Submit visit</button>
+        <a href="{% url 'qaqc_visit_detail' project.project_id visit.pk %}" class="btn btn-outline-secondary">Keep checking</a>
+      </form>
+    {% else %}
+      <p class="text-muted">Check at least one point before submitting the visit.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

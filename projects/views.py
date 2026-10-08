@@ -68,7 +68,7 @@ from .payments import ceo_payment_strip, payment_counts
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 # Closeout step 2 (CL-1): the one writer of a Closed punch point, called by both
 # approval paths below.
-from .punch_points import close_punch_points_on_approval
+from .punch_points import close_punch_points_on_approval, raise_punch_point
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -934,6 +934,18 @@ def dashboard_pm(request):
         row['can_request_design_change'] = row['project'].pk in _cr_targets
     for dp in draft_projects:
         dp.can_request_design_change = dp.pk in _cr_targets
+
+    # Closeout step 7 (V-10): "Last QA/QC visit: N days ago" / "No QA/QC visit yet" on
+    # each OPEX card with an assigned QA/QC engineer or a submitted visit. Two queries for
+    # the whole list, never one per card. Draft sites are not annotated: they have no
+    # tasks until activation, so nothing on them can be checked.
+    # Import inside the function to avoid a circular import: qaqc_views imports this
+    # module for _active_project.
+    from .qaqc_views import last_visit_lines
+    _qaqc_lines = last_visit_lines([row['project'] for row in projects_with_progress], today)
+    for row in projects_with_progress:
+        row['has_qaqc_line'] = row['project'].pk in _qaqc_lines
+        row['qaqc_visit_days'] = _qaqc_lines.get(row['project'].pk)
 
     # Group into Tenders / EPC Residential for display. Runs last, after every
     # per-row annotation and the sort above, so within-section order is exactly
@@ -5708,7 +5720,9 @@ def _checklist_for_task(task, project):
     VERSION is this function's, and the two are deliberately separate.
 
     COST: the link lookup, then ONE query for the pin, then at most one more for the
-    active version when there is no pin — never one per item."""
+    active version when there is no pin — never one per item.
+
+    BATCH TWIN: qaqc_views.resolve_checklists_for_tasks() — tests_qaqc_visit.BatchResolverEquivalenceTests; edit both or neither."""
     link = _checklist_task_link_for(task, project)
     if link is None:
         return None
@@ -6792,7 +6806,7 @@ def task_reject(request, project_id, task_id):
     # rejection overwrites that column but creates a second PunchPoint beside the
     # first, so the account of what was wrong each round survives - which is the
     # whole reason this model exists (models.PunchPoint).
-    PunchPoint.objects.create(task=task, reason=remarks, raised_by=profile)
+    raise_punch_point(task, remarks, profile)
 
     # Almost always already true - see the docstring. Routed through the chokepoint
     # rather than written directly, so that if it ever does fire it is a status
@@ -10531,6 +10545,10 @@ def project_overview(request, project_id):
     # module for _active_project.
     from .cod_views import cod_card_context
     cod_context = cod_card_context(project, request.user)
+    # Closeout step 7 — the QA/QC visits card (OPEX only; no query elsewhere). Lazy for
+    # the same circular-import reason as site_qaqc_card_context above.
+    from .qaqc_views import qaqc_visit_card_context
+    qaqc_visit_context = qaqc_visit_card_context(project, request.user)
 
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
@@ -10632,6 +10650,8 @@ def project_overview(request, project_id):
         **qaqc_context,
         # show_cod_card / cod_active / cod_history / cod_activated / can_record_cod
         **cod_context,
+        # show_qaqc_visit_card / qaqc_visits_recent / qaqc_visit_open / qaqc_visit_coverage ...
+        **qaqc_visit_context,
         'documents':                 documents,
         'project_issues':              project_issues,
         'all_profiles':                all_profiles,

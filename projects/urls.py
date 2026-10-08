@@ -233,6 +233,15 @@ urlpatterns = [
     # site_qaqc — the site's PM and coordinators; RESCO (OPEX) sites only. Assign,
     # replace or end the site's QA/QC engineer (closeout step 3).
     path('projects/<str:project_id>/qaqc/', qaqc_views.site_qaqc, name='site_qaqc'),
+    # QA/QC visits (closeout step 7) — RESCO (OPEX) sites only; 404 elsewhere. Start,
+    # answer and submit: the site's assigned QA/QC engineer, on their own open visit.
+    # Read: every viewer of the site once submitted; the engineer and the site's
+    # managers while open or lapsed. Photos: a redirect to a link signed at the click.
+    path('projects/<str:project_id>/qaqc/visits/start/', qaqc_views.qaqc_visit_start, name='qaqc_visit_start'),
+    path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/', qaqc_views.qaqc_visit_detail, name='qaqc_visit_detail'),
+    path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/points/<int:task_id>/<int:item_id>/', qaqc_views.qaqc_visit_point, name='qaqc_visit_point'),
+    path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/submit/', qaqc_views.qaqc_visit_submit, name='qaqc_visit_submit'),
+    path('projects/<str:project_id>/qaqc/visit-answers/<int:answer_pk>/photo/', qaqc_views.qaqc_visit_photo, name='qaqc_visit_photo'),
     # COD record (closeout step 4) — RESCO (OPEX) sites only; 404 elsewhere. Record and
     # withdraw: the site's PM and coordinators. The PDF: every viewer of the site, as a
     # redirect to a link signed at the click.
