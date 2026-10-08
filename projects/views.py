@@ -66,6 +66,9 @@ from .payments import ceo_payment_strip, payment_counts
 # The one overdue rule. Every overdue count, list and flag in this module takes it from
 # here and adds only its own scope (type, mirror, assignee, project).
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
+# Closeout step 2 (CL-1): the one writer of a Closed punch point, called by both
+# approval paths below.
+from .punch_points import close_punch_points_on_approval
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -5452,6 +5455,26 @@ def _task_approval_context(request, project, task):
     }
 
 
+def _punch_point_context(request, project, task):
+    """The punch-points card's context, shared by task_detail and the approval HTMX
+    response so the card swapped in after an approve or reject is built exactly as
+    the full page builds it.
+
+    A SEPARATE query on a SEPARATE model (2.3a): the task-detail Issues panel reads
+    `task_issues` and cannot move when a rejection raises a punch point.
+    """
+    return {
+        'task_punch_points': (
+            PunchPoint.objects.filter(task=task)
+            .select_related('raised_by__user', 'waived_by__user', 'closed_by__user')
+        ),
+        # The waive control renders only for the project's PM-level authority — the
+        # same predicate the endpoint enforces, so the button offered and the button
+        # accepted cannot disagree.
+        'can_waive_punch_point': user_can_waive_punch_point(request.user, project),
+    }
+
+
 def _render_task_approval_hx(request, project, task):
     """Render the HTMX response for the three approval actions (2.1).
 
@@ -5459,6 +5482,13 @@ def _render_task_approval_hx(request, project, task):
     approval moves the task to Done, and a status select still reading 'In Progress'
     beside a panel saying the task is approved would be two answers to one question
     on the same screen.
+
+    The punch-points card is swapped out of band too (closeout step 2), because an
+    approval closes points and a rejection raises one. ONLY when the swap target is
+    task_detail's `#taskApprovalBlock`: the project overview's submit modal receives
+    this same response, has no punch-points card, and pulls the state badge out of
+    it with hx-select on the rule that the approval card is the only card in the
+    fragment. Leaving the punch-points card out there keeps that rule true.
     """
     ctx = {
         'project':             project,
@@ -5466,8 +5496,11 @@ def _render_task_approval_hx(request, project, task):
         'is_assignee':         task.assigned_to is not None
                                and task.assigned_to == getattr(request.user, 'profile', None),
         'task_status_choices': Task.STATUS_CHOICES,
+        'swap_punch_points':   request.headers.get('HX-Target') == 'taskApprovalBlock',
     }
     ctx.update(_task_approval_context(request, project, task))
+    if ctx['swap_punch_points']:
+        ctx.update(_punch_point_context(request, project, task))
     return render(request, 'projects/partials/_task_approval_response.html', ctx)
 
 
@@ -6454,6 +6487,13 @@ def task_submit_for_approval(request, project_id, task_id):
                 # The helper has already told the user why; unwind so nothing is
                 # left written against a task that never completed.
                 raise _ApprovalRolledBack
+            # CL-1: a self-certification is an approval, so it closes the task's
+            # Open punch points exactly as task_approve does, recorded with its own
+            # method. Inside the block, after Done is accepted, for the reason
+            # task_approve gives.
+            close_punch_points_on_approval(
+                task, profile, PunchPoint.CLOSED_ON_SELF_CERTIFIED, project,
+            )
     except _ApprovalRolledBack:
         return _approval_response(request, project, task)
 
@@ -6585,6 +6625,12 @@ def task_approve(request, project_id, task_id):
                 # unwinding the transaction; its message survives, because
                 # `messages` is not part of it.
                 raise _ApprovalRolledBack
+            # CL-1: the approval closes every Open punch point on this task,
+            # whatever raised it (CL-B). Inside the block and after Done is
+            # accepted, so a refused completion closes nothing.
+            close_punch_points_on_approval(
+                task, profile, PunchPoint.CLOSED_ON_APPROVAL, project,
+            )
     except _ApprovalRolledBack:
         return _approval_response(request, project, task)
 
@@ -6715,8 +6761,10 @@ def punch_point_waive(request, project_id, punch_point_id):
     `user_can_waive_punch_point`. A user holding only `is_qaqc` gets 403 here even
     on a project whose tasks they may reject.
 
-    Already-waived points are refused rather than re-waived, so `waived_by` and
-    `waived_at` keep naming the person and moment the decision was actually taken.
+    Points that are no longer Open - already waived, or closed by an approval
+    (closeout step 2) - are refused rather than re-waived, so `waived_by` and
+    `waived_at` keep naming the person and moment the decision was actually taken,
+    and a Closed point is never relabelled Waived.
 
     Access: PM-level authority on the project. POST only.
     """
@@ -6744,8 +6792,11 @@ def punch_point_waive(request, project_id, punch_point_id):
 
     back = redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
+    # Closeout step 2: a point can now leave Open two ways (approval closes it, a PM
+    # waives it), so the refusal names both rather than guessing which one happened.
+    already_done = 'This punch point is already closed or waived.'
     if punch_point.status != PunchPoint.OPEN:
-        messages.error(request, 'That punch point has already been waived.')
+        messages.error(request, already_done)
         return back
 
     reason = request.POST.get('waiver_reason', '').strip()
@@ -6758,12 +6809,21 @@ def punch_point_waive(request, project_id, punch_point_id):
         return back
 
     waived_at = timezone.now()
-    PunchPoint.objects.filter(pk=punch_point.pk).update(
+    # Race: `status=OPEN` in the UPDATE's own WHERE, not only the check above. Since
+    # closeout step 2 an approval can close this point between that check and this
+    # write; without the guard the waiver would overwrite Closed with Waived. Zero
+    # rows matched means the other write won, and the user is told so.
+    waived = PunchPoint.objects.filter(
+        pk=punch_point.pk, status=PunchPoint.OPEN,
+    ).update(
         status=PunchPoint.WAIVED,
         waived_by=profile,
         waived_at=waived_at,
         waiver_reason=reason,
     )
+    if not waived:
+        messages.error(request, already_done)
+        return back
 
     log_activity(
         project, profile,
@@ -10790,25 +10850,12 @@ def task_detail(request, project_id, task_id):
 
     is_assignee = task.assigned_to is not None and task.assigned_to == profile
 
-    # 2.3a - punch points. A SEPARATE query on a SEPARATE model: `task_issues` above
-    # is untouched, so the Issues panel shows exactly what it showed before and its
-    # count cannot move when a rejection raises a punch point.
-    task_punch_points = (
-        PunchPoint.objects.filter(task=task)
-        .select_related('raised_by__user', 'waived_by__user')
-    )
-
     context = {
         'project':            project,
         'task':               task,
         'attachments':        attachments,
         'user_profile':       profile,
         'task_issues':        task_issues,
-        'task_punch_points':  task_punch_points,
-        # The waive control renders only for the project's PM-level authority — the
-        # same predicate the endpoint enforces, so the button offered and the button
-        # accepted cannot disagree.
-        'can_waive_punch_point': user_can_waive_punch_point(request.user, project),
         'all_profiles':       all_profiles,
         'task_comments':      task_comments,
         'is_assignee':        is_assignee,
@@ -10817,6 +10864,9 @@ def task_detail(request, project_id, task_id):
     # Two-step approval panel (2.1). Built by the same helper the HTMX swap uses, so
     # the buttons offered on this render and on the next one cannot disagree.
     context.update(_task_approval_context(request, project, task))
+    # Punch points (2.3a, closeout step 2). Shared with the approval HTMX response,
+    # which re-renders the card out of band after an approve or reject.
+    context.update(_punch_point_context(request, project, task))
     # Checklist — items come from the Checklist linked to this (task_name, project_type);
     # completion is per-(item, task). Shared with the HTMX swap via _checklist_context().
     context.update(_checklist_context(request, project, task))

@@ -4427,6 +4427,33 @@ Found by closeout 1b, not fixed (R-12):
 - `apply_mirror_status()`'s docstring and body cite `views.py:4240`, `views.py:4325-4332`
   and `views.py:2153`; views.py has moved by ~1,500 lines. Should name functions instead.
 
+### G47 — `TaskAdmin` lets `approved_at` / `approved_by` be typed by hand
+
+Recorded 8 Oct 2026 by closeout step 2. `TaskAdminForm` uses `fields = '__all__'` and
+`TaskAdmin.readonly_fields` freezes only `status` and `is_mirror`. Anyone with Django admin
+access can therefore write an approval date and an approver onto an OPEX task with no
+submission, no second signature and no punch-point closure. Rung 1 then accepts Done for that
+task through the status screens. It is also the only way to clear an approval, which is how
+`tests_punch_point_closure` reaches its reject-after-approval case. Fix: add the approval and
+submission columns to `readonly_fields`. Separate session; not closeout scope.
+
+### G48 — step-7 question: how does a spot-check punch point on an approved task close?
+
+Recorded 8 Oct 2026 by closeout step 2. Under CL-1 a punch point closes only when its task is
+approved. Nothing in the app clears `approved_at`, and `task_reject` refuses an approved task.
+So a point that a QA/QC spot check raises (CL-B) on a task that is already approved can never
+close by re-approval. Today the PM's waiver is the only way out. **Proposal for step 7, NOT
+decided:** the QA/QC engineer re-verifying the same checklist point as "Yes" closes it, with
+closure method "re-verified" (a new `PunchPoint.CLOSURE_METHOD_CHOICES` value, written through
+`punch_points.py` like the others). Decide in step 7's audit.
+
+### G49 — no Django admin registration for `PunchPoint`
+
+Recorded 8 Oct 2026 by closeout step 2. `PunchPoint` is not registered in `admin.py`. Left
+so on purpose (ruling, 8 Oct 2026): a point leaves Open only by approval (CL-1) or a PM waiver
+(B-12), and an admin form would be a third way around both. If one is ever added, every
+status and closure field must be read-only.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

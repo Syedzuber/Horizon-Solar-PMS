@@ -7,9 +7,23 @@ THE STATUS CONTROL IS RE-RENDERED HERE FOR ONE REASON: approving moves the task
 to Done. Without the out-of-band swap the select beside the panel would still
 read 'In Progress' until the next full page load, which is the one place on this
 screen where two elements can contradict each other about the same row.
+
+THE PUNCH-POINTS CARD IS RE-RENDERED FOR THE SAME REASON (closeout step 2): an
+approval closes the task's Open points and a rejection raises a new one, so the
+card would otherwise read Open after an approve, or be missing after a first
+reject. `swap_punch_points` is True only when the swap target is task_detail's
+#taskApprovalBlock (views._render_task_approval_hx). The project overview's submit
+modal gets this same response and selects its badge with
+hx-select=".card-header .badge", which relies on the approval card being the only
+card here. So the punch-points card is left out of that response.
 {% endcomment %}
 {% include 'projects/partials/_task_approval.html' %}
 <div id="taskStatusBlock" hx-swap-oob="true">
   {% include 'projects/partials/_task_detail_status.html' %}
 </div>
+{% if swap_punch_points %}
+<div id="punchPointsBlock" hx-swap-oob="true">
+  {% include 'projects/partials/_punch_points.html' %}
+</div>
+{% endif %}
 {% include 'projects/partials/_hx_messages.html' %}

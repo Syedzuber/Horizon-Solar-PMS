@@ -6052,9 +6052,11 @@ class PunchPoint(models.Model):
     the per-project counts, the task-detail Issues panel and the CEO report, and its
     status vocabulary (Open / In Progress / Resolved / Closed) is written to by an
     assignment-and-resolution workflow those screens assume. A punch point is a
-    different object with a different life: it is raised only by a rejection, it is
-    never assigned to anyone, and it is closed by exactly one act (a PM waiver) that
-    has no analogue in the issue workflow. Putting punch points into `Issue` would
+    different object with a different life: it is raised by a rejection (and, from
+    closeout step 7, by a QA/QC spot-check "No" - CL-B), it is never assigned to
+    anyone, and it leaves Open in exactly two ways - the task's approval closes it
+    (CL-1) or a PM waives it - neither of which has an analogue in the issue
+    workflow. Putting punch points into `Issue` would
     have meant every one of those existing readers deciding, at every call site,
     whether the row in front of it was a blocker or a punch point - which is a
     discriminator on a shared table, i.e. the option this model was chosen over. A
@@ -6072,20 +6074,41 @@ class PunchPoint(models.Model):
     is a row here. Three rejections mean three rows, in order, each with its own
     reason. That is why `task` is a plain FK with no uniqueness on it.
 
-    WHY THE STATUS ENUM IS ITS OWN AND ONLY HAS TWO VALUES. There is no "resolved"
-    state and that is deliberate: a punch point is not closed by someone declaring
-    the work fixed, it is closed by the work being re-submitted and approved, which
-    is a fact about the TASK. The only thing a person may do to a punch point
-    directly is WAIVE it - accept the defect and let the site proceed with it - and
-    B-12 puts that in the PM's hands alone. `Issue.status` is untouched by this
-    model; the two enums do not share a value or a code path.
+    WHY THE STATUS ENUM IS ITS OWN, AND WHY NO PERSON CAN SET "CLOSED". There is no
+    state a person reaches by declaring the work fixed, and that is deliberate: a
+    punch point is closed by the work being re-submitted and approved, which is a
+    fact about the TASK. `Closed` (closeout step 2, CL-1) is that fact recorded on
+    the row - written ONLY by `punch_points.close_punch_points_on_approval()`, from
+    the two approval paths, never by a form or a button of its own (migration 0111
+    also wrote it once, retroactively, for points that predate the rule). The only thing a
+    person may do to a punch point directly is WAIVE it - accept the defect and let
+    the site proceed with it - and B-12 puts that in the PM's hands alone.
+
+    THREE VALUES, TWO SHARED WITH `Issue` BY SPELLING ONLY. `Open` and `Closed` are
+    also `Issue.status` values; `Waived` is not. The tables are separate and no code
+    path reads both, so the shared spelling cannot route a row into the wrong branch
+    (tests_punch_point.test_punch_point_states_are_three_and_share_only_spelling_with_issue).
     """
 
     OPEN   = 'Open'
     WAIVED = 'Waived'
+    CLOSED = 'Closed'
     STATUS_CHOICES = [
         (OPEN,   'Open'),
         (WAIVED, 'Waived'),
+        (CLOSED, 'Closed'),
+    ]
+
+    # HOW a Closed point was closed. Stored, not derived from the task, because the
+    # task's approval columns describe its CURRENT approval and the ledger must keep
+    # saying how THIS point was closed even if those columns are later changed.
+    CLOSED_ON_APPROVAL       = 'approval'
+    CLOSED_ON_SELF_CERTIFIED = 'self_certified'
+    CLOSED_RETROACTIVELY     = 'retroactive'
+    CLOSURE_METHOD_CHOICES = [
+        (CLOSED_ON_APPROVAL,       'Closed on approval'),
+        (CLOSED_ON_SELF_CERTIFIED, 'Closed on self-certified approval'),
+        (CLOSED_RETROACTIVELY,     'Closed retroactively (CL-1)'),
     ]
 
     # CASCADE, not SET_NULL: a punch point is a statement ABOUT one task's work and
@@ -6114,10 +6137,40 @@ class PunchPoint(models.Model):
     waived_at   = models.DateTimeField(null=True, blank=True)
     waiver_reason = models.TextField(blank=True, default='')
 
+    # The three closure columns (CL-1) are set together, only with status=Closed -
+    # the CHECK below holds that. closed_by is the approver; it stays nullable
+    # because a retroactive closure (migration 0111) may find no approver recorded.
+    closed_by   = models.ForeignKey(
+        'UserProfile', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='closed_punch_points',
+    )
+    closed_at   = models.DateTimeField(null=True, blank=True)  # the approval instant, not the wall clock of the write
+    closure_method = models.CharField(
+        max_length=20, choices=CLOSURE_METHOD_CHOICES, blank=True, default='',
+    )
+
     class Meta:
         # Oldest first: a task's punch points read as the history they are, in the
         # order the defects were found.
         ordering = ['created_at', 'pk']
+        constraints = [
+            # A Closed point always says when and how it was closed, and a point
+            # that is not Closed carries no closure columns at all. Without this a
+            # waiver racing an approval could leave a row reading Waived with a
+            # closer on it - two answers to "why is this no longer open". closed_by
+            # is only required to be NULL off Closed: see the field comment.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status='Closed', closed_at__isnull=False)
+                    & ~models.Q(closure_method='')
+                ) | (
+                    ~models.Q(status='Closed')
+                    & models.Q(closed_at__isnull=True, closed_by__isnull=True,
+                               closure_method='')
+                ),
+                name='punchpoint_closure_columns_match_status',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.task.task_name} — {self.get_status_display()}: {self.reason[:60]}"

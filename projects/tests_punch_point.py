@@ -227,7 +227,8 @@ class WaiverTests(PunchPointFixture):
         point.refresh_from_db()
         self.assertEqual(point.waiver_reason, 'First and only decision.')
         self.assertEqual(point.waived_at, first_at)
-        self.assertIn('already been waived',
+        # Closeout step 2: the refusal names both ways a point leaves Open.
+        self.assertIn('already closed or waived',
                       ' '.join(self._messages(response)).lower())
 
     def test_waiving_one_point_leaves_the_others_open(self):
@@ -422,15 +423,18 @@ class PunchPointIsolationTests(PunchPointFixture):
         self.assertEqual([p.reason for p in response.context['task_punch_points']],
                          ['Earthing not tested.'])
 
-    def test_the_two_status_vocabularies_do_not_overlap(self):
-        """`Issue.status` is untouched by 2.3a. A punch point's states are its own
-        two, and neither is an issue state — so no code that switches on one can be
-        handed the other and quietly take a branch."""
+    def test_punch_point_states_are_three_and_share_only_spelling_with_issue(self):
+        """`Issue.status` is untouched by 2.3a and by closeout step 2. A punch
+        point has exactly three states. `Open` and `Closed` are spelt like Issue
+        states, but the tables are separate and no code path reads both, so the
+        shared spelling cannot route a row into the wrong branch. `Waived` is
+        punch-point only. A fourth value, or a wider overlap, is a change to the
+        model docstring's argument and must fail here first."""
         issue_states = {value for value, _ in Issue.STATUS_CHOICES}
         punch_states = {value for value, _ in PunchPoint.STATUS_CHOICES}
-        self.assertEqual(punch_states, {'Open', 'Waived'})
+        self.assertEqual(punch_states, {'Open', 'Waived', 'Closed'})
         self.assertEqual(
-            punch_states & issue_states, {'Open'},
+            punch_states & issue_states, {'Open', 'Closed'},
             'the two enums drifted — see the note in models.PunchPoint')
         self.assertNotIn('Waived', issue_states)
 
