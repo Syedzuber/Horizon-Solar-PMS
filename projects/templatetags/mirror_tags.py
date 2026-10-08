@@ -5,7 +5,7 @@ A mirror task (Task.is_mirror) never takes a status from a person: rung 0 of
 `views._apply_task_status_change()` refuses every human write. The "Derived" chip on
 the task row and on task detail says so, and its tooltip names WHERE the status comes
 from. Before this module the tooltip was one generic sentence for all eight mirrors, so
-a reader could not tell a Delivery row (it moves when a challan is received) from COD
+a reader could not tell a Delivery row (it moves when a challan is received) from HOTO
 (nothing writes it yet).
 
 ONE MAPPING, DEFINED HERE ONCE. Both templates read it through the `mirror_source`
@@ -14,15 +14,16 @@ task_name — the label is content and can be reworded by a template version; th
 is what the mirror writers themselves look rows up by.
 
 The keys come from the constants the writers use where one exists:
-DESIGN_MIRROR_CODE (sync_design_mirror) and DC_CATEGORY_TO_MIRROR_CODE's values
-(sync_delivery_mirrors). COD, AS_BUILT_DRAWINGS and HOTO have no writer and therefore
-no constant anywhere, so they are spelled out here and only here.
+DESIGN_MIRROR_CODE (sync_design_mirror), DC_CATEGORY_TO_MIRROR_CODE's values
+(sync_delivery_mirrors) and COD_MIRROR_CODE (sync_cod_mirror, closeout step 4).
+AS_BUILT_DRAWINGS and HOTO have no writer and therefore no constant anywhere, so they
+are spelled out here and only here.
 
 PRESENTATION ONLY. Nothing here decides whether a status may be written.
 """
 from django import template
 
-from projects.design_views import DESIGN_MIRROR_CODE
+from projects.design_views import COD_MIRROR_CODE, DESIGN_MIRROR_CODE
 from projects.models import DC_CATEGORY_TO_MIRROR_CODE
 
 register = template.Library()
@@ -42,10 +43,12 @@ _DELIVERY_SOURCE = 'Updates from delivery challans and GRN.'
 MIRROR_SOURCE_TEXT = {
     DESIGN_MIRROR_CODE: 'Updates from the design workspace.',
     **{code: _DELIVERY_SOURCE for code in DC_CATEGORY_TO_MIRROR_CODE.values()},
-    # "not built yet" is part of the text on purpose: these three sit at their seeded
+    # Closeout step 4: the COD record (cod_views) drives this mirror through
+    # sync_cod_mirror.
+    COD_MIRROR_CODE:     'Updates from the COD record.',
+    # "not built yet" is part of the text on purpose: these two sit at their seeded
     # status until their source records exist, and the tooltip must not imply a
     # derivation that does not run.
-    'COD':               'Will update from the commissioning record (not built yet).',
     'AS_BUILT_DRAWINGS': 'Will update from the As-Built record (not built yet).',
     'HOTO':              'Will update from Final Acceptance (not built yet).',
 }

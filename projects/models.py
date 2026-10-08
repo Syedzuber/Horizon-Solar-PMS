@@ -6277,6 +6277,124 @@ class SiteQaqcAssignment(models.Model):
             'SiteQaqcAssignment is append-only — an ended assignment stays in history.')
 
 
+class CodRecord(models.Model):
+    """One OPEX site's COD (commercial operation date) as recorded by its PM or a
+    coordinator, with the evidence for it (closeout step 4, CL-3).
+
+    THE RECORD DRIVES THE COD MIRROR. An active row reads Done on the site's COD task
+    (template code 'COD'); no active row reads Not Started. design_views.sync_cod_mirror()
+    derives that from the stored rows and writes it through the single mirror writer —
+    nothing else moves the COD task.
+
+    ONE ACTIVE ROW PER SITE, HISTORY KEPT. Withdrawing stamps withdrawn_at / _by / reason
+    on the row; a new COD can then be recorded as a new row. Rows are never deleted or
+    edited, so "what COD did we tell the client in March, and why was it withdrawn"
+    stays answerable for the dossier (step 9).
+
+    WRITTEN BY cod_views.record_cod() and withdraw_cod() only. Withdrawing is that
+    module's single filter().update(); save() on an existing row and delete() both
+    raise. The rules that depend on other rows — OPEX site, activated (a COD mirror
+    exists), no open punch point on the site (CL-2), a manager acting — are the
+    writer's; the database holds the constraints below.
+
+    THE PDF IS IN A PRIVATE BUCKET (D-A40, the contractor-bill precedent) and no URL is
+    stored: cod_views.cod_record_pdf signs a short-lived link at the moment of the click.
+    """
+
+    EVIDENCE_DISCOM_LETTER        = 'discom_letter'
+    EVIDENCE_NET_METER            = 'net_meter_installation'
+    EVIDENCE_COMMISSIONING_REPORT = 'commissioning_report'
+    # CL-3: exactly one of these three. "Commissioning report" is HRPPL's own report.
+    EVIDENCE_TYPE_CHOICES = [
+        (EVIDENCE_DISCOM_LETTER,        'DISCOM letter'),
+        (EVIDENCE_NET_METER,            'Net-meter installation'),
+        (EVIDENCE_COMMISSIONING_REPORT, 'Commissioning report'),
+    ]
+
+    # PROTECT throughout: an accountability record, the SiteQaqcAssignment reasoning.
+    # Projects soft-delete, so the project FK never fires in normal operation.
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='cod_records',
+    )
+    cod_date = models.DateField()  # the COD itself; never after the day it was recorded (writer rule)
+    evidence_type = models.CharField(max_length=30, choices=EVIDENCE_TYPE_CHOICES)
+    pdf_file_name = models.CharField(max_length=255)   # Original filename, as uploaded
+    pdf_bucket    = models.CharField(max_length=100)   # The private SUPABASE_BILLS_BUCKET at write time
+    pdf_path      = models.CharField(max_length=500)   # Path within `pdf_bucket`
+    pdf_size_kb   = models.PositiveIntegerField(default=0)
+    note = models.TextField()  # the PM's mandatory note (CL-3); stored stripped, never blank
+    recorded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='cod_records_made',
+    )
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    withdrawn_at = models.DateTimeField(null=True, blank=True)  # NULL = the active row
+    withdrawn_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='cod_records_withdrawn',
+    )
+    withdraw_reason = models.TextField(blank=True, default='')  # mandatory once withdrawn
+
+    class Meta:
+        ordering = ['project', '-recorded_at', '-pk']
+        constraints = [
+            # One ACTIVE record per site. Withdrawn rows are history and unlimited.
+            # Backstop for two managers recording at once: the writer also locks the
+            # project row, so this fires only if that lock is ever bypassed.
+            models.UniqueConstraint(
+                fields=['project'],
+                condition=models.Q(withdrawn_at__isnull=True),
+                name='uniq_cod_record_active'),
+            # Withdrawal is when, who and why together, or none of them.
+            models.CheckConstraint(
+                condition=((models.Q(withdrawn_at__isnull=True)
+                            & models.Q(withdrawn_by__isnull=True)
+                            & models.Q(withdraw_reason=''))
+                           | (models.Q(withdrawn_at__isnull=False)
+                              & models.Q(withdrawn_by__isnull=False)
+                              & ~models.Q(withdraw_reason=''))),
+                name='cod_record_withdraw_fields'),
+            # A record cannot be withdrawn before it was made.
+            models.CheckConstraint(
+                condition=(models.Q(withdrawn_at__isnull=True)
+                           | models.Q(withdrawn_at__gte=models.F('recorded_at'))),
+                name='cod_record_withdrawn_after_recorded'),
+            # CL-3: the note is mandatory. The writer strips it first, so whitespace
+            # alone arrives here as '' and is refused.
+            models.CheckConstraint(
+                condition=~models.Q(note=''),
+                name='cod_record_note_required'),
+            models.CheckConstraint(
+                condition=models.Q(evidence_type__in=[
+                    'discom_letter', 'net_meter_installation', 'commissioning_report']),
+                name='cod_record_evidence_type_valid'),
+            models.CheckConstraint(
+                condition=(~models.Q(pdf_file_name='') & ~models.Q(pdf_bucket='')
+                           & ~models.Q(pdf_path='')),
+                name='cod_record_pdf_required'),
+            # "Not in the future" is NOT here: a CHECK against the current date is
+            # non-deterministic (SQLite refuses it outright), so the writer holds it.
+        ]
+
+    def __str__(self):
+        return f"{self.project.project_id} — COD {self.cod_date}"
+
+    @property
+    def is_active(self):
+        return self.withdrawn_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'CodRecord is append-only — a COD is withdrawn through '
+                'cod_views.withdraw_cod(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'CodRecord is append-only — a withdrawn COD stays in history.')
+
+
 # ---------------------------------------------------------------------------
 # Approvals S1 — the shared approval primitive (26 Sep 2026, D-A1)
 #

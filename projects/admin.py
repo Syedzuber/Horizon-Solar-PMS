@@ -14,6 +14,7 @@ from .models import (
     ApprovalRoundSnapshot, ApprovalOrderLink, MaterialApprovalLine,
     ContractorBillDetail, ContractorBillTask,
     SiteQaqcAssignment,
+    CodRecord,
 )
 from .forms import check_typed_date
 from .permissions import qaqc_engineer_assignment_refusal
@@ -911,3 +912,15 @@ class SiteQaqcAssignmentAdmin(_ApprovalRecordAdmin):
                      'ended_by', 'end_reason']
     list_filter   = ['end_reason']
     search_fields = ['project__project_id', 'engineer__user__username']
+
+
+# Closeout step 4. Read-only like the approval records: cod_views.record_cod() and
+# withdraw_cod() are the only writers. A row added or withdrawn here would skip CL-2 (open
+# punch points) and the project lock, and would leave the COD mirror disagreeing with its
+# source. The PDF shows as its bucket and path only — the admin mints no signed link.
+@admin.register(CodRecord)
+class CodRecordAdmin(_ApprovalRecordAdmin):
+    list_display  = ['project', 'cod_date', 'evidence_type', 'recorded_by', 'recorded_at',
+                     'withdrawn_at', 'withdrawn_by']
+    list_filter   = ['evidence_type']
+    search_fields = ['project__project_id']

@@ -4527,6 +4527,44 @@ Recorded 8 Oct 2026 by closeout step 3.
   manifest users — is refused. Intended for an accountability record; teardowns that will
   meet these rows (`teardown_walkthrough`, after G54) must delete the assignment rows first.
 
+### G56 — closeout step 4b: COD sets the site to Commissioned
+
+Recorded 8 Oct 2026 by closeout step 4 (go-ahead Q3: kept out of step 4, next step). Recording
+a COD moves only the COD mirror; `Project.status` stays Active and `commissioned_at` stays
+NULL, because nothing in the codebase writes either (B-3). Until 4b:
+- the CEO Tenders pipeline row "Commissioned — Project status Commissioned"
+  (`tender_stages.activated_progress`) reads 0 on sites with a COD on record;
+- `STUCK_EXECUTION_STATUSES = ['Active', 'In Progress']` still lets an S7 site with COD
+  recorded appear in the stuck list;
+- the project badges keep reading Active.
+
+4b: the COD writer (`cod_views.record_cod`) sets Commissioned and `commissioned_at` from the
+record's `cod_date` inside the same atomic block; withdrawal must decide what it restores
+(Active, or the status before COD). The CEO pipeline's "Commissioned" row then reads it.
+`Project.status` writers need the ledger (`record_transition`, SUBJECT_PROJECT).
+
+### G57 — COD notices: email has no link; COD PDFs share the bills bucket
+
+Recorded 8 Oct 2026 by closeout step 4.
+- `cod_recorded` / `cod_withdrawn` go out as one `send_notification()` call each, so the
+  email carries the message but not the site link (same limitation as G55).
+- COD evidence PDFs are stored in `SUPABASE_BILLS_BUCKET` under `{project_id}/cod/…`
+  (go-ahead Q6). The bucket's name says bills; if a separate closeout bucket is wanted later,
+  the `cod` segment lets the objects be moved by prefix and `CodRecord.pdf_bucket` records
+  where each one is. With the setting empty (the default), COD cannot be recorded anywhere —
+  the record page says so. **Check it is set on Railway before announcing the feature.**
+
+### G58 — the COD mirror has no reconcile, and the T&C warning reads one task
+
+Recorded 8 Oct 2026 by closeout step 4.
+- `sync_cod_mirror` runs only from the two writers. No reconcile exists (the Design mirror
+  has one in `attach_opex_template`). Not needed today: a COD cannot be recorded before the
+  site has a COD mirror (go-ahead Q1), so the two cannot disagree at activation. A future
+  template version that re-mints tasks on an activated site would need one.
+- The record form's warning (go-ahead Q4) reads the first task with template code
+  `TESTING_COMMISSIONING`. If that task is ever duplicated per location, the copies are not
+  read. Non-blocking by ruling, so not fixed here.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

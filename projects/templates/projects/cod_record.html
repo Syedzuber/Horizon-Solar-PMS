@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Record COD — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+{% comment %}Closeout step 4 (CL-2, CL-3). Reached only by the site's PM and coordinators
+   on a RESCO (OPEX) site — cod_views.cod_record refuses everyone else. While the site
+   cannot take a COD (not activated, already recorded, or open punch points) the form is
+   not drawn and `refusal` says why; for CL-2 `open_points` names each point and its
+   task. `warning` is the one non-blocking note (Testing & Commissioning not Done).{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'project_overview' project.project_id %}#cod-card" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+</div>
+
+<div class="card shadow-sm mb-4" style="max-width:720px;">
+  <div class="card-header">
+    <h5 class="mb-0">Record COD</h5>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small">
+      Recording the COD marks this site's COD task Done. The PM, coordinators and the CEO
+      are told. A recorded COD can be withdrawn later, with a reason; it stays in the
+      history.
+    </p>
+
+    {% if refusal %}
+      <div class="alert alert-danger small" id="cod-refusal">
+        {{ refusal }}
+        {% if open_points %}
+          <ul class="mb-0 mt-2">
+            {% for p in open_points %}
+              <li><strong>{{ p.task }}</strong> — {{ p.reason }} <span class="text-muted">(raised {{ p.raised_at|date:"d M Y" }})</span></li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </div>
+    {% else %}
+      {% if errors %}
+        <div class="alert alert-danger small">
+          <ul class="mb-0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+        </div>
+      {% endif %}
+    {% if not storage_ready %}
+      {% if not errors %}
+        <div class="alert alert-warning small" id="cod-storage-off">COD cannot be recorded yet: the private store for COD evidence PDFs is not configured.</div>
+      {% endif %}
+    {% else %}
+      {% if warning %}
+        <div class="alert alert-warning small py-2" id="cod-tc-warning">{{ warning }} You can still record the COD.</div>
+      {% endif %}
+
+      <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+        <div class="row g-3">
+          <div class="col-12 col-md-5">
+            <label for="codDate" class="form-label small fw-semibold">COD date <span class="text-danger">*</span></label>
+            <input type="date" name="cod_date" id="codDate" class="form-control form-control-sm"
+                   max="{{ today|date:'Y-m-d' }}" value="{{ values.cod_date }}" required>
+          </div>
+          <div class="col-12 col-md-7">
+            <label for="codEvidence" class="form-label small fw-semibold">Evidence <span class="text-danger">*</span></label>
+            <select name="evidence_type" id="codEvidence" class="form-select form-select-sm" required>
+              <option value="">— Choose one —</option>
+              {% for value, label in evidence_choices %}
+                <option value="{{ value }}" {% if values.evidence_type == value %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="col-12">
+            <label for="codPdf" class="form-label small fw-semibold">Evidence PDF <span class="text-danger">*</span></label>
+            <input type="file" name="cod_pdf" id="codPdf" class="form-control form-control-sm" accept="application/pdf,.pdf" required>
+            <div class="form-text">One PDF, up to 20 MB. Stored privately; links to it expire.</div>
+          </div>
+          <div class="col-12">
+            <label for="codNote" class="form-label small fw-semibold">Note <span class="text-danger">*</span></label>
+            <textarea name="note" id="codNote" rows="3" class="form-control form-control-sm" required>{{ values.note }}</textarea>
+          </div>
+        </div>
+        <div class="mt-3">
+          <button type="submit" class="btn btn-brand btn-sm">Record COD</button>
+        </div>
+      </form>
+    {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

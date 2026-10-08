@@ -8,6 +8,7 @@ from . import payment_views  # O5 Finance payments queue — separate module, sa
 from . import purchases_views  # O8a purchases & payments workspace — separate module, same pattern
 from . import approval_views  # Approvals S2a material approval screens — separate module, same pattern
 from . import qaqc_views     # Closeout step 3 site QA/QC engineer screen — separate module, same pattern
+from . import cod_views      # Closeout step 4 COD record screens — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -232,6 +233,12 @@ urlpatterns = [
     # site_qaqc — the site's PM and coordinators; RESCO (OPEX) sites only. Assign,
     # replace or end the site's QA/QC engineer (closeout step 3).
     path('projects/<str:project_id>/qaqc/', qaqc_views.site_qaqc, name='site_qaqc'),
+    # COD record (closeout step 4) — RESCO (OPEX) sites only; 404 elsewhere. Record and
+    # withdraw: the site's PM and coordinators. The PDF: every viewer of the site, as a
+    # redirect to a link signed at the click.
+    path('projects/<str:project_id>/cod/record/', cod_views.cod_record, name='cod_record'),
+    path('projects/<str:project_id>/cod/<int:record_pk>/withdraw/', cod_views.cod_withdraw, name='cod_withdraw'),
+    path('projects/<str:project_id>/cod/<int:record_pk>/pdf/', cod_views.cod_record_pdf, name='cod_record_pdf'),
     path('projects/<str:project_id>/tasks/<int:task_id>/assign-design/', views.task_assign_design_head, name='task_assign_design_head'),  # Design Head only (is_design_head flag)
     path('projects/<str:project_id>/tasks/<int:task_id>/due-date/', views.task_set_due_date,         name='task_set_due_date'),         # PM + role-owners, triggers cascade recalculation for PM only
     path('projects/<str:project_id>/enable-cascade/',              views.enable_cascade_scheduling,  name='enable_cascade_scheduling'), # PM only, irreversible, POST only

@@ -63,7 +63,7 @@ from . import design_views
 from .design_views import (
     DESIGN_MIRROR_CODE, DESIGN_MIRROR_STATE_MAP, _design_mirror_task,
     apply_design_status, apply_mirror_status, derive_design_mirror_state,
-    sync_design_mirror, sync_delivery_mirrors,
+    sync_cod_mirror, sync_design_mirror, sync_delivery_mirrors,
 )
 from .models import (
     ACTOR_ROLE_SYSTEM, DesignAssignment, Issue, Program, Project, StatusTransition,
@@ -1009,7 +1009,9 @@ class CallerDisciplineTests(TestCase):
     # The closed list of compositions permitted to write a mirror. ADDING A NAME HERE
     # IS THE WHOLE DECISION — it is meant to be a deliberate, reviewed act, which is
     # why the list is a literal and not computed from anything.
-    MIRROR_WRITER_CALLERS = ('sync_design_mirror', 'sync_delivery_mirrors')
+    # Closeout step 4 added sync_cod_mirror, deliberately (go-ahead Q12).
+    MIRROR_WRITER_CALLERS = ('sync_design_mirror', 'sync_delivery_mirrors',
+                             'sync_cod_mirror')
 
     def test_01_apply_mirror_status_is_called_only_by_named_compositions(self):
         """The two named derivations and nothing else.
@@ -1073,6 +1075,28 @@ class CallerDisciplineTests(TestCase):
         self.assertEqual(len(callers), 2,
                          'sync_delivery_mirrors() is called more than twice:\n'
                          + '\n'.join(callers))
+
+    def test_01c_sync_cod_mirror_is_called_only_by_the_cod_writers(self):
+        """record_cod() and withdraw_cod(), both in cod_views.py. Both are named.
+
+        The COD analogue of test_01b: the COD record is the mirror's only source, so the
+        composition is reached from the two functions that write that record and from
+        nowhere else — not from a view, not from a test helper standing in for one.
+        """
+        from . import cod_views
+        callers = self._call_sites(
+            'sync_cod_mirror',
+            exclude_files=('tests_design_mirror_derivation.py',))
+        files = sorted({c.split(':')[0] for c in callers})
+        self.assertEqual(files, ['cod_views.py'],
+                         'sync_cod_mirror() gained a caller:\n' + '\n'.join(callers))
+        self.assertEqual(len(callers), 2,
+                         'sync_cod_mirror() is not called exactly twice:\n'
+                         + '\n'.join(callers))
+        for name in ('record_cod', 'withdraw_cod'):
+            self.assertIn('sync_cod_mirror(',
+                          inspect.getsource(getattr(cod_views, name)),
+                          f'cod_views.{name}() does not call sync_cod_mirror()')
 
     def test_02_sync_design_mirror_has_exactly_two_production_callers(self):
         """The hook and the reconcile. Both are named, so a third fails here."""

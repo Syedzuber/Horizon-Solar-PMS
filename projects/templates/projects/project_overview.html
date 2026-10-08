@@ -776,6 +776,60 @@ label (get_status_display) — never a two-state branch.
 </div>
 {% endif %}
 
+{% comment %}Closeout step 4 — the COD card, RESCO (OPEX) sites only (show_cod_card).
+   Every viewer of the site sees the active record and the history, and may open each
+   PDF through cod_record_pdf, which signs the link at the click (nothing is signed on
+   this page). Record / Withdraw are drawn for the site's PM and coordinators only
+   (can_record_cod); cod_views refuses everyone else on GET and POST.{% endcomment %}
+{% if show_cod_card %}
+<div class="card shadow-sm mb-4" id="cod-card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold small"><i data-lucide="flag" class="lucide-icon me-1"></i>COD</span>
+    {% if can_record_cod %}
+      {% if cod_active %}
+        <a href="{% url 'cod_withdraw' project.project_id cod_active.pk %}" class="btn btn-outline-danger btn-sm">Withdraw</a>
+      {% elif cod_activated %}
+        <a href="{% url 'cod_record' project.project_id %}" class="btn btn-brand btn-sm">Record COD</a>
+      {% endif %}
+    {% endif %}
+  </div>
+  <div class="card-body small">
+    {% if cod_active %}
+      <div class="row g-2">
+        <div class="col-6 col-md-3"><div class="text-muted">COD date</div><div class="fw-semibold">{{ cod_active.cod_date|date:"d M Y" }}</div></div>
+        <div class="col-6 col-md-3"><div class="text-muted">Evidence</div><div>{{ cod_active.get_evidence_type_display }}</div></div>
+        <div class="col-12 col-md-6"><div class="text-muted">Evidence PDF</div><div><a href="{% url 'cod_record_pdf' project.project_id cod_active.pk %}" target="_blank" rel="noopener">{{ cod_active.pdf_file_name }}</a></div></div>
+        <div class="col-12"><div class="text-muted">Note</div><div style="white-space:pre-line;">{{ cod_active.note }}</div></div>
+        <div class="col-12 text-muted">Recorded by {{ cod_active.recorded_by.user.get_full_name|default:cod_active.recorded_by.user.username }} on {{ cod_active.recorded_at|date:"d M Y, H:i" }}</div>
+      </div>
+    {% elif cod_activated %}
+      <em>Not recorded</em>
+    {% else %}
+      <em>Not recorded.</em> <span class="text-muted">COD can be recorded once the site is activated.</span>
+    {% endif %}
+
+    {% if cod_history|length > 1 or cod_history and not cod_active %}
+      <div class="mt-3">
+        <div class="text-muted mb-1">History</div>
+        <table class="table table-sm mb-0">
+          <thead><tr><th>COD date</th><th>Evidence</th><th>Recorded</th><th>Withdrawn</th></tr></thead>
+          <tbody>
+            {% for r in cod_history %}
+              <tr>
+                <td>{{ r.cod_date|date:"d M Y" }}{% if not r.withdrawn_at %} <span class="badge bg-success">Active</span>{% endif %}</td>
+                <td>{{ r.get_evidence_type_display }} · <a href="{% url 'cod_record_pdf' project.project_id r.pk %}" target="_blank" rel="noopener">PDF</a></td>
+                <td>{{ r.recorded_by.user.get_full_name|default:r.recorded_by.user.username }}, {{ r.recorded_at|date:"d M Y" }}</td>
+                <td>{% if r.withdrawn_at %}{{ r.withdrawn_by.user.get_full_name|default:r.withdrawn_by.user.username }}, {{ r.withdrawn_at|date:"d M Y" }} — {{ r.withdraw_reason }}{% else %}—{% endif %}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+
 {# ── 5. Project Documents ─────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">

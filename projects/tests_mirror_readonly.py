@@ -540,7 +540,7 @@ EXPECTED_SOURCE_TEXT = {
     'DELIVERY_INVERTERS':    'Updates from delivery challans and GRN.' + _CANNOT_SET,
     'DELIVERY_BOS_KIT':      'Updates from delivery challans and GRN.' + _CANNOT_SET,
     'DELIVERY_MMS':          'Updates from delivery challans and GRN.' + _CANNOT_SET,
-    'COD':               'Will update from the commissioning record (not built yet).' + _CANNOT_SET,
+    'COD':               'Updates from the COD record.' + _CANNOT_SET,   # closeout step 4
     'AS_BUILT_DRAWINGS': 'Will update from the As-Built record (not built yet).' + _CANNOT_SET,
     'HOTO':              'Will update from Final Acceptance (not built yet).' + _CANNOT_SET,
 }

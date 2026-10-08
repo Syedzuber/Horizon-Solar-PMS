@@ -58,6 +58,10 @@ from .models import (
     # apply_mirror_status() below, never by a view in this module: the design workspace
     # has no business touching execution rows and this import is not a licence to start.
     Task, REASON_MIRROR_DERIVED,
+    # Closeout step 4 — the COD mirror derivation. `CodRecord` is READ here and never
+    # written; cod_views.record_cod() / withdraw_cod() write it and then call
+    # sync_cod_mirror() below.
+    CodRecord,
     # The delivery mirror derivation. `DCLineItem` is READ here and never written —
     # sync_delivery_mirrors() derives task state FROM delivery, never the reverse, and
     # no DC or GRN behaviour is reachable from this module. `_dc_item_severity` is
@@ -1001,6 +1005,92 @@ DELIVERY_MIRROR_CODE_TO_CATEGORIES = {}
 for _category, _code in DC_CATEGORY_TO_MIRROR_CODE.items():
     DELIVERY_MIRROR_CODE_TO_CATEGORIES.setdefault(_code, []).append(_category)
 del _category, _code
+
+
+# ---------------------------------------------------------------------------
+# The COD mirror — the THIRD derivation, and the third caller of the writer
+# (closeout step 4, docs/CLOSEOUT_SPEC.md CL-3)
+# ---------------------------------------------------------------------------
+#
+# Here, not in cod_views.py, for the reason the delivery block gives above: every
+# mirror write goes through apply_mirror_status(), and every caller of that writer is a
+# named composition in this module (tests_design_mirror_derivation pins the list). The
+# COD screens and their record/withdraw writers live in cod_views.py, which calls the
+# composition below and never the writer.
+
+# The COD mirror's stable identity: `template_task.code`, never `task_name` — see
+# DESIGN_MIRROR_CODE for why a label is not an identity.
+COD_MIRROR_CODE = 'COD'
+
+
+def cod_mirror_task(project):
+    """The COD mirror `Task` on one site, or None.
+
+    The same lookup shape as `_design_mirror_task()`, and it is the project-type guard
+    for the same reasons: `phase__project` scopes to one template, and the Residential
+    template has no mirrors, so a Residential or CAPEX site returns None without the
+    function asking what type it is. None is also the answer for an OPEX site still in
+    Draft — it has no tasks yet. Public, because cod_views refuses a COD on a site whose
+    mirror does not exist (go-ahead Q1) and must ask the same question this does.
+    """
+    return (Task.objects
+            .filter(phase__project=project,
+                    is_mirror=True,
+                    template_task__code=COD_MIRROR_CODE)
+            .first())
+
+
+def derive_cod_mirror_state(project):
+    """The COD mirror's status: Done while the site has an active `CodRecord`, Not
+    Started otherwise.
+
+    A function of the STORED rows, not of the action that just happened, for the reason
+    the Design block states: the mapping must give the same answer to anyone who asks,
+    including a future reconcile that has no action to read. Two states only — a COD is
+    either on record or it is not; "being recorded" is not a state anybody waits in.
+    """
+    active = CodRecord.objects.filter(project=project, withdrawn_at__isnull=True).exists()
+    return Task.DONE if active else Task.NOT_STARTED
+
+
+def sync_cod_mirror(project, actor):
+    """Bring one OPEX site's COD mirror into line with its `CodRecord` rows.
+
+    THE COMPOSITION: resolve the row, derive the state, hand both to
+    `apply_mirror_status()`. Two callers, both in cod_views.py: record_cod() and
+    withdraw_cod(), each inside its own atomic block after writing the record — the
+    mirror and its source commit together or not at all.
+
+    `actor` is the person who recorded or withdrew the COD (OPEX spec §2.8, as in
+    `sync_design_mirror()`): one person moved the source, so the ledger names them. The
+    reason is REASON_MIRROR_DERIVED like every mirror row; the human reason — the PM's
+    note, the withdrawal reason — lives on the CodRecord row and in the ActivityLog,
+    because the writer takes no remark (go-ahead Q11).
+
+    Caller owns the atomic block, matching `apply_mirror_status()`.
+
+    Returns True if the mirror was written, False if it already read the derived state
+    or the site has no COD mirror. A missing mirror on a site WITH tasks is logged as a
+    defect, the three-way the other two compositions make; the writers refuse before
+    reaching here in that case, so the log line means something changed underneath them.
+    """
+    task = cod_mirror_task(project)
+    if task is None:
+        if Task.objects.filter(phase__project=project).exists():
+            logger.warning(
+                'COD mirror NOT FOUND on %s, which has tasks: no Task with '
+                'is_mirror=True and template_task__code=%r. The COD mirror has '
+                'stopped following its COD record on this site.',
+                project.project_id, COD_MIRROR_CODE,
+            )
+        return False
+
+    return apply_mirror_status(
+        task,
+        derive_cod_mirror_state(project),
+        actor,
+        REASON_MIRROR_DERIVED,
+    )
 
 
 def delivery_detail_for_task(task):

@@ -1756,6 +1756,28 @@ def user_can_waive_punch_point(user, project):
     return user_can_manage_project(user, project)
 
 
+def user_can_record_cod(user, project):
+    """
+    Return True if `user` may record or withdraw `project`'s COD (closeout step 4,
+    cod_views). Who may OPEN the evidence PDF is a different question — every viewer of
+    the site (user_can_view_project, go-ahead Q10).
+
+    PM-LEVEL AUTHORITY ONLY: the site's PM and its active coordinators, through
+    `user_can_manage_project()` like every other PM-ownership check here. COD is the
+    PM's declaration to the client that the plant is commercially operating, with the
+    PM's own note (CL-3); the Site Engineer who commissioned it, the site's QA/QC
+    engineer, SCM, Design, Finance and the CEO see the record and cannot make one.
+
+    The site-type and site-state rules (OPEX only, activated, no open punch point) are
+    not here: they are the writer's, re-checked under its lock, because they depend on
+    rows that can change between the screen and the POST.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return user_can_manage_project(user, project)
+
+
 def user_can_mark_task_not_applicable(user, task, project):
     """Return True if `user` may mark `task` Not Applicable on `project`, or undo it.
 

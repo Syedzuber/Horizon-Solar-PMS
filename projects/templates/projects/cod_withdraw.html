@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Withdraw COD — {{ project.project_id }}{% endblock %}
+
+{% block content %}
+{% comment %}Closeout step 4. Reached only by the site's PM and coordinators on a RESCO
+   (OPEX) site — cod_views.cod_withdraw refuses everyone else. A reason is mandatory;
+   open punch points never block a withdrawal. An already-withdrawn record shows as such
+   and offers no form.{% endcomment %}
+<div class="mb-3">
+  <a href="{% url 'project_overview' project.project_id %}#cod-card" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
+</div>
+
+<div class="card shadow-sm mb-4" style="max-width:640px;">
+  <div class="card-header">
+    <h5 class="mb-0">Withdraw COD</h5>
+  </div>
+  <div class="card-body small">
+    <div class="mb-3">
+      <div><span class="text-muted">COD date:</span> <span class="fw-semibold">{{ record.cod_date|date:"d M Y" }}</span></div>
+      <div><span class="text-muted">Evidence:</span> {{ record.get_evidence_type_display }}</div>
+      <div><span class="text-muted">Recorded by:</span> {{ record.recorded_by.user.get_full_name|default:record.recorded_by.user.username }}, {{ record.recorded_at|date:"d M Y, H:i" }}</div>
+    </div>
+
+    {% if errors %}
+      <div class="alert alert-danger">
+        <ul class="mb-0">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+      </div>
+    {% endif %}
+
+    {% if record.withdrawn_at %}
+      <div class="alert alert-secondary mb-0">This COD was withdrawn on {{ record.withdrawn_at|date:"d M Y" }}: {{ record.withdraw_reason }}</div>
+    {% else %}
+      <p class="text-muted">Withdrawing returns this site's COD task to Not Started. The record stays in the history, and a new COD can be recorded afterwards. The PM, coordinators and the CEO are told.</p>
+      <form method="post">
+        {% csrf_token %}
+        <label for="codWithdrawReason" class="form-label fw-semibold">Reason <span class="text-danger">*</span></label>
+        <textarea name="reason" id="codWithdrawReason" rows="3" class="form-control form-control-sm" required>{{ reason }}</textarea>
+        <button type="submit" class="btn btn-outline-danger btn-sm mt-3">Withdraw COD</button>
+      </form>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

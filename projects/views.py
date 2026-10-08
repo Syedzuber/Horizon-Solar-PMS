@@ -10526,6 +10526,11 @@ def project_overview(request, project_id):
     from .qaqc_views import site_qaqc_card_context
     qaqc_context = site_qaqc_card_context(project, is_assigned_pm)
     qaqc_assignment = qaqc_context['qaqc_assignment']
+    # Closeout step 4 — the COD card (OPEX only; no query elsewhere).
+    # Import inside the function to avoid a circular import: cod_views imports this
+    # module for _active_project.
+    from .cod_views import cod_card_context
+    cod_context = cod_card_context(project, request.user)
 
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
@@ -10625,7 +10630,9 @@ def project_overview(request, project_id):
         'user_profile':                profile,
         # show_qaqc_card / qaqc_assignment / qaqc_stale / can_manage_qaqc
         **qaqc_context,
-        'documents':                   documents,
+        # show_cod_card / cod_active / cod_history / cod_activated / can_record_cod
+        **cod_context,
+        'documents':                 documents,
         'project_issues':              project_issues,
         'all_profiles':                all_profiles,
         'delivery_challans':           delivery_challans,
