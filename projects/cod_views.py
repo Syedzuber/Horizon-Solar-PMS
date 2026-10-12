@@ -45,7 +45,10 @@ from .forms import check_typed_date
 from .models import CodRecord, Project, Task, UserProfile, log_activity
 from .notifications import send_notification
 from .permissions import project_managers, user_can_record_cod, user_can_view_project
-from .punch_points import open_punch_points_for_project
+from .punch_points import (
+    effective_qaqc_engineer, latest_rectify_prefetch, next_action,
+    open_punch_points_for_project,
+)
 from .views import _active_project
 
 logger = logging.getLogger(__name__)
@@ -120,20 +123,34 @@ def active_cod_record(project):
 
 
 def open_point_rows(project):
-    """CL-2's open points as the refusal shows them: the task and the defect, oldest
-    first. Reads open_punch_points_for_project() and nothing else — the one definition."""
+    """CL-2's open points as the refusal shows them: the task, the defect and its next
+    action (punch_points.next_action, closeout 7c), oldest first. Reads
+    open_punch_points_for_project() and nothing else — the one definition.
+
+    Four queries whatever the number of points: the points with their source answer and
+    assignee joined, their rectify rounds, and the site's effective QA/QC engineer, asked
+    once for the whole list — so next_action() adds nothing per point.
+    """
+    points = list(open_punch_points_for_project(project)
+                  .select_related('qaqc_answer', 'task__assigned_to__user')
+                  .prefetch_related(latest_rectify_prefetch()))
+    if not points:
+        return []
+    engineer = effective_qaqc_engineer(project)
     return [
         {'task': _task_label(point.task), 'reason': point.reason,
-         'raised_at': point.created_at}
-        for point in open_punch_points_for_project(project)
+         'raised_at': point.created_at,
+         'next': next_action(point, engineer=engineer).line}
+        for point in points
     ]
 
 
 def open_points_message(rows):
+    """The CL-2 refusal's headline. What each point needs next is on its own row
+    (`next`), because a rejection's point and a QA/QC visit's point leave differently."""
     count = len(rows)
     return (f"COD cannot be recorded while {count} punch point"
-            f"{'s are' if count != 1 else ' is'} open on this site. Each must be closed "
-            f"(by re-approving its task) or waived first.")
+            f"{'s are' if count != 1 else ' is'} open on this site.")
 
 
 def tc_warning(project):

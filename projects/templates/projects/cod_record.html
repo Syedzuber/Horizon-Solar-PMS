@@ -5,8 +5,8 @@
 {% comment %}Closeout step 4 (CL-2, CL-3). Reached only by the site's PM and coordinators
    on a RESCO (OPEX) site — cod_views.cod_record refuses everyone else. While the site
    cannot take a COD (not activated, already recorded, or open punch points) the form is
-   not drawn and `refusal` says why; for CL-2 `open_points` names each point and its
-   task. `warning` is the one non-blocking note (Testing & Commissioning not Done).{% endcomment %}
+   not drawn and `refusal` says why; for CL-2 `open_points` names each point, its
+   task and its next action (`p.next`, from punch_points.next_action — closeout 7c). `warning` is the one non-blocking note (Testing & Commissioning not Done).{% endcomment %}
 <div class="mb-3">
   <a href="{% url 'project_overview' project.project_id %}#cod-card" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
 </div>
@@ -29,7 +29,10 @@
         {% if open_points %}
           <ul class="mb-0 mt-2">
             {% for p in open_points %}
-              <li><strong>{{ p.task }}</strong> — {{ p.reason }} <span class="text-muted">(raised {{ p.raised_at|date:"d M Y" }})</span></li>
+              <li>
+                <strong>{{ p.task }}</strong> — {{ p.reason }} <span class="text-muted">(raised {{ p.raised_at|date:"d M Y" }})</span>
+                <div class="punch-next-action">{{ p.next }}</div>
+              </li>
             {% endfor %}
           </ul>
         {% endif %}

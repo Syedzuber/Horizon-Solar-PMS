@@ -71,7 +71,8 @@ from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
 # task card, the task-row badge and the PM / SE dashboard lists (PP-6).
 from .punch_points import (
     approval_blockers, approval_refusal_message, awaiting_reverification,
-    close_punch_points_on_approval, latest_rectifier_id, open_points_on_my_tasks,
+    close_punch_points_on_approval, effective_qaqc_engineer, latest_rectifier_id,
+    latest_rectify_prefetch, next_action, open_points_on_my_tasks,
     open_punch_point_counts, open_punch_point_counts_by_task, raise_punch_point,
     source_answer, task_punch_points,
 )
@@ -1254,6 +1255,21 @@ def dashboard_site_engineer(request):
     se_tasks_due_soon  = _se_task_base.filter(due_date__gt=today, due_date__lte=_se_soon, status__in=_se_active).count()
     se_tasks_overdue   = _se_task_base.filter(overdue_q(today)).count()
 
+    # Closeout 7c: the QA/QC sites, then the Rectified points on them that this engineer
+    # may re-verify - the PM's awaiting list (awaiting_reverification, same filter, three
+    # queries whatever its length) narrowed by the two terms the re-verify writer asks of
+    # an engineer: they are the site's effective engineer (`site_has_engineer`: at most
+    # one active assignment per site, and it is theirs), and they did not record the
+    # latest rectify round (Q5).
+    qaqc_sites = _qaqc_sites_for(se_profile)
+    awaiting_my_reverification = []
+    for point in awaiting_reverification([s['project'].pk for s in qaqc_sites]):
+        rounds = point.rectify_rounds
+        point.latest_round = rounds[0] if rounds else None
+        if point.site_has_engineer and (point.latest_round is None
+                                        or point.latest_round.actor_id != se_profile.pk):
+            awaiting_my_reverification.append(point)
+
     return render(request, 'dashboard/site-engineer.html', {
         'projects':          projects_data,
         'se_first_name':     request.user.first_name or request.user.username,
@@ -1271,7 +1287,9 @@ def dashboard_site_engineer(request):
         'work_to_confirm':   work_to_confirm_card(request.user),
         # Closeout step 3: sites this engineer checks as QA/QC engineer, each with its
         # awaiting-approval count. Two queries whatever the number of sites.
-        'qaqc_sites':        _qaqc_sites_for(se_profile),
+        'qaqc_sites':        qaqc_sites,
+        # Closeout 7c: Rectified QA/QC points on those sites waiting for this engineer.
+        'awaiting_my_reverification': awaiting_my_reverification,
         # Closeout 7b (PP-6, go-ahead Q6): outstanding QA/QC-raised punch points on this
         # engineer's own tasks. One query; Rectify links to the form on the task page.
         'my_open_punch_points': open_points_on_my_tasks(se_profile),
@@ -5582,9 +5600,24 @@ def _task_approval_context(request, project, task):
         # PP-2: the QA/QC-raised points that would refuse an approval right now. The
         # panel names them and offers no Approve button while any is outstanding; the
         # endpoints ask approval_blockers() again under the project lock. One query, on
-        # OPEX non-mirror tasks only.
-        'approval_blockers': list(approval_blockers(task)) if eligible else [],
+        # OPEX non-mirror tasks only; two more only when there is a blocker (7c).
+        'approval_blockers': _blockers_with_next_action(task, project) if eligible else [],
     }
+
+
+def _blockers_with_next_action(task, project):
+    """approval_blockers(task), each carrying `next_action` (punch_points.next_action,
+    closeout 7c) for the panel's line. The same query the endpoints refuse on, with the
+    source answer and assignee joined and the rectify rounds prefetched, and the site's
+    engineer asked once, so the panel pays nothing per point."""
+    blockers = list(approval_blockers(task)
+                    .select_related('qaqc_answer', 'task__assigned_to__user')
+                    .prefetch_related(latest_rectify_prefetch()))
+    if blockers:
+        engineer = effective_qaqc_engineer(project)
+        for point in blockers:
+            point.next_action = next_action(point, engineer=engineer)
+    return blockers
 
 
 def _punch_point_context(request, project, task):

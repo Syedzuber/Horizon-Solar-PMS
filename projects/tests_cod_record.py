@@ -280,6 +280,9 @@ class CodPunchPointGateTests(CodFixture):
         self.assertIn('COD cannot be recorded while 1 punch point is open', body)
         self.assertIn(point.task.task_name, body)
         self.assertIn('Earthing clamp loose on string 3', body)
+        # Closeout 7c: each point says who acts next (punch_points.next_action).
+        self.assertIn('fixes and resubmits the task, or the PM waives it', body)
+        self.assertNotIn('re-approving its task', body)
         self.assertFalse(CodRecord.objects.exists())
         self.assertEqual(self._mirror_status(), Task.NOT_STARTED)
         self.assertFalse(self._transitions().exists())

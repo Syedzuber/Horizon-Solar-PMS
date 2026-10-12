@@ -22,9 +22,14 @@ Re-completing an already-approved task through the status screens (Done -> Block
 In Progress -> Done) is not an approval and closes nothing (DEFERRED G63: nor does it
 ask PP-2's question).
 
+`next_action()` is the one place that says, in words, who acts next on a point and
+what they do (closeout 7c). Screens read it; none spells its own.
+
 `open_punch_points_for_project()` is the CL-2 query. The COD and HOTO gates read it, and
 must not spell their own. Rectified counts: it is a claim, not yet a re-verification.
 """
+from typing import NamedTuple
+
 from django.db import transaction
 from django.db.models import Count, Prefetch, Q
 from django.urls import reverse
@@ -269,9 +274,10 @@ def open_punch_point_counts_by_task(task_ids):
         .values_list('task_id', 'n'))
 
 
-def _latest_rectify_prefetch():
+def latest_rectify_prefetch():
     """Each point's rectify rounds, newest first, as `point.rectify_rounds`, so the latest
-    is `[0]`. One query for the whole list."""
+    is `[0]`. One query for the whole list. Also what a batch caller of next_action()
+    prefetches (the COD refusal, the approval panel)."""
     return Prefetch(
         'events',
         queryset=(PunchPointEvent.objects.filter(action=PunchPointEvent.RECTIFIED)
@@ -312,7 +318,7 @@ def awaiting_reverification(project_ids):
         .filter(task__phase__project_id__in=project_ids, status=PunchPoint.RECTIFIED,
                 task__phase__project__is_deleted=False)
         .select_related('task__phase__project', 'qaqc_answer__visit')
-        .prefetch_related(_latest_rectify_prefetch())
+        .prefetch_related(latest_rectify_prefetch())
         .order_by('created_at', 'pk'))
     if not points:
         return []
@@ -341,6 +347,126 @@ def task_punch_points(task):
             queryset=PunchPointEvent.objects.select_related('actor__user')
             .order_by('acted_at', 'pk'),
             to_attr='rounds')))
+
+
+# ---------------------------------------------------------------------------
+# Next action — who acts next on a point, in words (closeout 7c)
+# ---------------------------------------------------------------------------
+
+class NextAction(NamedTuple):
+    """What `next_action()` answers. `line` is the sentence every screen shows; the
+    other three are its parts, for a caller that lays them out itself."""
+    state: str   # the point's status as shown: Open / Rectified / Closed / Waived
+    who: str     # display name of whoever acts next; '' once nobody has to
+    does: str    # what they do; '' once nobody has to
+    line: str
+
+
+WAIVER_TAIL = 'or the PM waives it'
+
+
+def _name(profile):
+    return profile.user.get_full_name() or profile.user.username
+
+
+def effective_qaqc_engineer(project):
+    """`project`'s QA/QC engineer who can act right now (UserProfile with user), or None.
+
+    The "who" form of permissions.site_has_effective_qaqc(): the same three terms - an
+    active assignment, the engineer still a Site Engineer, their profile active. Keep
+    the two in step, or next_action() would name someone the re-verify writer refuses.
+    One query; none for a non-OPEX site, as there.
+    """
+    if project is None or project.project_type != 'OPEX':
+        return None
+    assignment = (SiteQaqcAssignment.objects
+                  .filter(project=project, ended_at__isnull=True,
+                          engineer__role='Site Engineer', engineer__is_active=True)
+                  .select_related('engineer__user').first())
+    return assignment.engineer if assignment is not None else None
+
+
+def _latest_rectify_round(point):
+    """`point`'s latest RECTIFIED PunchPointEvent, or None. Reads whichever list the
+    caller prefetched - `rounds` (oldest first, task_punch_points) or `rectify_rounds`
+    (newest first, awaiting_reverification) - else one query."""
+    rounds = getattr(point, 'rounds', None)
+    if rounds is not None:
+        return next((e for e in reversed(rounds)
+                     if e.action == PunchPointEvent.RECTIFIED), None)
+    rectify_rounds = getattr(point, 'rectify_rounds', None)
+    if rectify_rounds is not None:
+        return rectify_rounds[0] if rectify_rounds else None
+    return (PunchPointEvent.objects
+            .filter(punch_point=point, action=PunchPointEvent.RECTIFIED)
+            .select_related('actor__user').order_by('-acted_at', '-pk').first())
+
+
+_ASK = object()   # next_action(engineer=...) not supplied: look it up
+
+
+def next_action(point, *, engineer=_ASK):
+    """The point's state, who acts next and what they do (closeout 7c), as a NextAction.
+
+    THE ONE DERIVATION. The COD refusal, the approval panel's blockers and any other
+    screen naming a point's next step read this; no template spells its own.
+        - rejection-raised Open: the assignee fixes and resubmits the task (PP-5);
+        - visit-raised Open: waiting for the assignee to rectify (PP-3). Unassigned: the
+          PM or a coordinator, who may also rectify;
+        - Rectified with an effective QA/QC engineer: waiting for that engineer to
+          re-verify (PP-4). If the engineer recorded the latest rectify round they may
+          not re-verify it (Q5), and the PM may not while an engineer can act (Q4), so
+          the line says so and only the waiver remains (ruling 12 Oct 2026);
+        - Rectified with no effective engineer: waiting for the PM or a coordinator; one
+          who recorded the round is named as excluded (Q5);
+        - Closed / Waived: nothing more.
+    Every outstanding line but that one ends "or the PM waives it" (the waiver is always
+    open to PM-level authority).
+
+    The words follow the writers' rules (reverify_refusal, user_can_rectify_punch_point,
+    user_can_reverify_punch_point) without calling them: they ask about a given user,
+    this asks who that user is.
+
+    BATCH CALLERS add no query per point: select_related('qaqc_answer',
+    'task__assigned_to__user'), prefetch the rectify rounds (`rounds` or
+    `rectify_rounds`, as `_latest_rectify_round` reads), and pass `engineer` - the
+    site's `effective_qaqc_engineer()`, asked once - for points on one site. Otherwise
+    each of those is looked up for this point.
+    """
+    status = point.status
+    if status not in PunchPoint.OUTSTANDING:
+        return NextAction(status, '', '', status)
+    assignee = point.task.assigned_to
+    if source_answer(point) is None:
+        # Rejection-raised: only Open is reachable; it closes on resubmit + approval.
+        who = _name(assignee) if assignee is not None else 'whoever is assigned the task'
+        does = 'fixes and resubmits the task'
+        return NextAction(status, who, does, f'{status} — {who} {does}, {WAIVER_TAIL}')
+    if status == PunchPoint.OPEN:
+        who = _name(assignee) if assignee is not None else 'the PM or a coordinator'
+        return NextAction(status, who, 'rectify',
+                          f'{status} — waiting for {who} to rectify, {WAIVER_TAIL}')
+
+    if engineer is _ASK:
+        engineer = effective_qaqc_engineer(point.task.phase.project)
+    latest = _latest_rectify_round(point)
+    rectifier_id = latest.actor_id if latest is not None else None
+    if engineer is not None:
+        if rectifier_id == engineer.pk:
+            who = _name(engineer)
+            return NextAction(
+                status, '', '',
+                f"{status} — {who} recorded this rectification and may not re-verify "
+                f"it; only the PM's waiver closes it")
+        who = _name(engineer)
+    elif latest is not None and rectifier_id != point.task.assigned_to_id:
+        # Only the assignee, the PM or a coordinator can rectify, so a round recorded by
+        # anyone but the assignee was a manager's, and that manager may not re-verify it.
+        who = f'the PM or a coordinator other than {_name(latest.actor)}'
+    else:
+        who = 'the PM or a coordinator'
+    return NextAction(status, who, 're-verify',
+                      f'{status} — waiting for {who} to re-verify, {WAIVER_TAIL}')
 
 
 def latest_rectifier_id(point):

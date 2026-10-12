@@ -26,7 +26,7 @@ stored value, never as one of the four.
 Each row carries id="punch-point-<pk>": the approval panel, the dashboards, the visit
 page and the notices link straight to it.
 
-Context: task_punch_points, can_waive_punch_point, punch_outstanding, project.
+Context: task_punch_points, can_waive_punch_point, punch_outstanding, project, task.
 {% endcomment %}
 {% if task_punch_points %}
 <div class="card shadow-sm mb-4 border-warning-subtle" id="punchPointsSection">
@@ -119,8 +119,16 @@ Context: task_punch_points, can_waive_punch_point, punch_outstanding, project.
         <ol class="small mt-2 mb-0 ps-3 punch-rounds">
           {% for r in pp.rounds %}
             <li class="mb-1">
+              {% comment %}Closeout 7c: a rectify round recorded by someone other than the
+                 task's assignee (the PM or a coordinator, PP-3) says so. Derived from the
+                 round's actor and the task's current assignee; nothing is stored.{% endcomment %}
+              {% if r.action == 'rectified' and task.assigned_to_id and r.actor_id != task.assigned_to_id %}
+                <span class="fw-semibold punch-on-behalf">Marked rectified by {{ r.actor.user.get_full_name|default:r.actor.user.username }} on behalf of {{ task.assigned_to.user.get_full_name|default:task.assigned_to.user.username }}</span>
+                — {{ r.acted_at|date:"d M Y, H:i" }}
+              {% else %}
               <span class="fw-semibold">{{ r.get_action_display }}</span>
               — {{ r.actor.user.get_full_name|default:r.actor.user.username }}, {{ r.acted_at|date:"d M Y, H:i" }}
+              {% endif %}
               {% if r.remark %}<div style="white-space:pre-line;">{{ r.remark }}</div>{% endif %}
               {% if r.photo_path %}
                 <a href="{% url 'punch_point_event_photo' project.project_id r.pk %}" target="_blank" rel="noopener">photo</a>{% if r.photo_taken_at %} <span class="text-muted">(taken {{ r.photo_taken_at|date:"d M Y, H:i" }})</span>{% endif %}

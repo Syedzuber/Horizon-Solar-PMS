@@ -4673,10 +4673,13 @@ Done beside it. Closing this means a rung in `_apply_task_status_change()` (forb
 ### G64 — punch point rectify / re-verify: smaller gaps left by closeout 7b
 
 Recorded 12 Oct 2026 by closeout step 7b.
-- The QA/QC engineer has no "awaiting re-verification" list on the SE dashboard. They
+- ~~The QA/QC engineer has no "awaiting re-verification" list on the SE dashboard. They
   hear by notice when a point is marked Rectified, and the task page offers the form; the
   PM dashboard's list shows every Rectified point on the PM's sites. If engineers miss
-  points, add a count to the "QA/QC sites" rows (`qaqc_sites_for_engineer`).
+  points, add a count to the "QA/QC sites" rows (`qaqc_sites_for_engineer`).~~
+  **Done 12 Oct 2026 (closeout 7c):** "Awaiting your re-verification" on the SE
+  dashboard, under "QA/QC sites" — the PM list's filter on the engineer's sites, minus
+  their own rectify rounds, with a count badge.
 - No notice on re-verify ACCEPT (PP-6 names visit-raise, rectify and reject only).
 - The three 7b notices share G60's limitation: one `send_notification()` per recipient,
   so the email carries the message but not the link; the in-app notice links to the point.

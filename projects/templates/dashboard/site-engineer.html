@@ -200,6 +200,35 @@
 </div>
 {% endif %}
 
+{% comment %}Closeout 7c: QA/QC punch points marked Rectified on the sites above that this
+   engineer may re-verify — not a round they recorded themselves (Q5) — oldest first
+   (views.dashboard_se over punch_points.awaiting_reverification, the PM list's filter;
+   three queries). The link opens the point on the task page, where the Accept / Reject
+   form is. Empty list draws nothing.{% endcomment %}
+{% if awaiting_my_reverification %}
+<div class="card shadow-sm border-0 mb-4" id="awaiting-my-reverification">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-arrow-repeat"></i> Awaiting your re-verification
+    <span class="badge bg-info text-dark">{{ awaiting_my_reverification|length }}</span>
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for point in awaiting_my_reverification %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between align-items-start gap-2 small">
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <div class="fw-semibold">{{ point.task.phase.project.project_id }} · {{ point.task.task_name }}</div>
+        <div class="text-muted">{{ point.reason|truncatechars:140 }}</div>
+        {% if point.latest_round %}
+          <div class="text-muted">Rectified by {{ point.latest_round.actor.user.get_full_name|default:point.latest_round.actor.user.username }}, {{ point.latest_round.acted_at|date:"d M Y" }}</div>
+        {% endif %}
+      </div>
+      <a href="{% url 'task_detail' point.task.phase.project.project_id point.task_id %}#punch-point-{{ point.pk }}"
+         class="btn btn-sm btn-brand align-self-center">Re-verify</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 {# ── Project cards ────────────────────────────────────────────────────────── #}
 {# Empty state: rendered when SE has no active projects assigned #}
 {% if not projects %}

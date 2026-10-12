@@ -2,7 +2,9 @@
    shown in the approval panel. Each links to its row on the punch points card at the top
    of this page, where the Rectify / Re-verify / Waive forms are. Context:
    approval_blockers (from _task_approval_context, which asks punch_points.approval_blockers,
-   the same query the approval endpoints refuse on).{% endcomment %}
+   the same query the approval endpoints refuse on). Each point's line is its
+   `next_action.line` (punch_points.next_action, closeout 7c): who acts next, by name, and
+   the waiver. The state is not re-derived here.{% endcomment %}
 <div class="alert alert-warning py-2 small approval-blockers">
   <div class="fw-semibold mb-1">
     Cannot be approved: {{ approval_blockers|length }} QA/QC punch point{{ approval_blockers|length|pluralize }} outstanding
@@ -11,9 +13,8 @@
     {% for point in approval_blockers %}
       <li>
         <a href="#punch-point-{{ point.pk }}">{{ point.reason|truncatechars:120 }}</a>
-        — {% if point.status == 'Rectified' %}rectified, awaiting re-verification{% else %}open{% endif %}
+        <div class="punch-next-action">{{ point.next_action.line }}</div>
       </li>
     {% endfor %}
   </ul>
-  <div>Rectify and re-verify it, or the PM waives it.</div>
 </div>

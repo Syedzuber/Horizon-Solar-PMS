@@ -17,6 +17,9 @@ WHAT IS PINNED HERE
     PP-6  notices (Q7, Q8)                                    NoticeTests              (10)
     PP-6  visit page badge links to the point                 VisitPageLinkTests       (11)
           Residential untouched                               ResidentialTests         (12)
+    7c    next_action: each state, both own-round cases       NextActionTests          (13)
+    7c    COD refusal, approval panel, "on behalf of"         NextActionScreenTests    (13)
+    7c    the QA/QC engineer's re-verification list           ReverificationListTests  (13)
 
 Every visit-raised point here is raised through the real visit screens
 (tests_qaqc_visit.VisitFixture): start, answer "No", submit. Storage is mocked there.
@@ -38,7 +41,7 @@ from .permissions import user_may_self_certify
 from .punch_points import (
     close_punch_points_on_approval, open_punch_points_for_project, raise_punch_point,
 )
-from .qaqc_views import end_site_qaqc
+from .qaqc_views import assign_site_qaqc, end_site_qaqc
 from .tests_qaqc_assignment import _client_for, _messages, _profile
 from .tests_qaqc_visit import VisitFixture, _photo
 from .utils import assign_tasks_to
@@ -641,3 +644,253 @@ class ResidentialTests(RectifyFixture):
         with self.assertNumQueries(0):
             _attach_open_punch_points(tasks, house)
         self.assertEqual([t.open_punch_points for t in tasks], [0, 0])
+
+
+# ---------------------------------------------------------------------------
+# 13 — Closeout 7c: next_action, the screens that read it, "on behalf of", and the
+#      QA/QC engineer's re-verification list
+# ---------------------------------------------------------------------------
+
+def _n(profile):
+    return profile.user.get_full_name()
+
+
+class NextActionFixture(RectifyFixture):
+
+    def _own_round_by_engineer(self):
+        """A Rectified point whose latest round the site's effective engineer recorded:
+        `spare` rectifies from a coordinator seat, then is named the QA/QC engineer."""
+        point = self._one_point()
+        self.site.coordinators.add(self.spare)
+        self._rectify(point, by=self.spare)
+        self.assertEqual(point.status, PunchPoint.RECTIFIED, 'fixture: not rectified')
+        assign_site_qaqc(self.site, self.spare, self.pm)
+        return point
+
+    def _raise_on_other_site(self):
+        """A visit-raised point on `other_site` (QA/QC `qaqc_b`), marked Rectified by
+        the worker, who holds that site's tasks too."""
+        civil_b = Task.objects.get(phase__project=self.other_site,
+                                   task_name=self.civil.task_name)
+        self._start(by=self.qaqc_b, site=self.other_site)
+        visit = self._open_visit(site=self.other_site)
+        self._answer(visit, civil_b, self.civil_items[0], answer='no', remark='Other site.',
+                     by=self.qaqc_b)
+        self._submit(visit, by=self.qaqc_b)
+        point = PunchPoint.objects.get(qaqc_answer__visit=visit)
+        with self.captureOnCommitCallbacks(execute=True):
+            _client_for(self.worker).post(
+                reverse('punch_point_rectify', args=[self.other_site.project_id, point.pk]),
+                {'remark': 'Fixed.', 'photo': _photo('fix.jpg')})
+        point.refresh_from_db()
+        self.assertEqual(point.status, PunchPoint.RECTIFIED, 'fixture: not rectified')
+        return point
+
+
+class NextActionTests(NextActionFixture):
+
+    def _line(self, point):
+        return punch_points.next_action(PunchPoint.objects.get(pk=point.pk)).line
+
+    def test_rejection_raised_open(self):
+        point = self._reject_task()
+        action = punch_points.next_action(point)
+        self.assertEqual(action.who, _n(self.worker))
+        self.assertEqual(action.line, f'Open — {_n(self.worker)} fixes and resubmits the '
+                                      f'task, or the PM waives it')
+
+    def test_visit_raised_open(self):
+        self.assertEqual(self._line(self._one_point()),
+                         f'Open — waiting for {_n(self.worker)} to rectify, or the PM waives it')
+
+    def test_visit_raised_open_on_an_unassigned_task(self):
+        point = self._one_point()
+        Task.objects.filter(pk=self.civil.pk).update(assigned_to=None)
+        self.assertEqual(self._line(point), 'Open — waiting for the PM or a coordinator to '
+                                            'rectify, or the PM waives it')
+
+    def test_rectified_with_an_engineer(self):
+        point = self._one_point()
+        self._rectify(point)
+        self.assertEqual(self._line(point), f'Rectified — waiting for {_n(self.qaqc)} to '
+                                            f're-verify, or the PM waives it')
+
+    def test_rectified_with_no_engineer(self):
+        point = self._one_point()
+        self._rectify(point)
+        end_site_qaqc(self.site, self.pm)
+        self.assertEqual(self._line(point), 'Rectified — waiting for the PM or a coordinator '
+                                            'to re-verify, or the PM waives it')
+
+    def test_a_stale_engineer_counts_as_none(self):
+        point = self._one_point()
+        self._rectify(point)
+        self.qaqc.role = 'SCM'
+        self.qaqc.save()
+        self.assertIn('waiting for the PM or a coordinator to re-verify', self._line(point))
+
+    def test_own_round_with_no_engineer_names_the_rectifier_as_excluded(self):
+        point = self._one_point()
+        end_site_qaqc(self.site, self.pm)
+        self._rectify(point, by=self.pm)
+        self.assertEqual(self._line(point),
+                         f'Rectified — waiting for the PM or a coordinator other than '
+                         f'{_n(self.pm)} to re-verify, or the PM waives it')
+
+    def test_own_round_by_the_engineer_leaves_only_the_waiver(self):
+        point = self._own_round_by_engineer()
+        self.assertEqual(self._line(point),
+                         f"Rectified — {_n(self.spare)} recorded this rectification and may "
+                         f"not re-verify it; only the PM's waiver closes it")
+        # The words match the writers: neither the engineer nor the PM may re-verify.
+        self._reverify(point, by=self.spare)
+        self._reverify(point, by=self.pm)
+        self.assertEqual(point.status, PunchPoint.RECTIFIED)
+
+    def test_closed_and_waived_name_nobody(self):
+        closed, waived = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(closed)
+        self._reverify(closed, 'accept')
+        self._waive(waived)
+        for point, state in ((closed, 'Closed'), (waived, 'Waived')):
+            with self.subTest(state=state):
+                action = punch_points.next_action(PunchPoint.objects.get(pk=point.pk))
+                self.assertEqual((action.state, action.who, action.line), (state, '', state))
+
+    def test_a_batch_caller_pays_nothing_per_point(self):
+        points = self._raise((self.civil, 0), (self.civil, 1), (self.module, 0))
+        self._rectify(points[0])
+        loaded = list(PunchPoint.objects.filter(pk__in=[p.pk for p in points])
+                      .select_related('qaqc_answer', 'task__assigned_to__user')
+                      .prefetch_related(punch_points.latest_rectify_prefetch()))
+        engineer = punch_points.effective_qaqc_engineer(self.site)
+        with self.assertNumQueries(0):
+            lines = [punch_points.next_action(p, engineer=engineer).line for p in loaded]
+        self.assertEqual(len(lines), 3)
+
+
+class NextActionScreenTests(NextActionFixture):
+
+    def _cod_page(self):
+        return _client_for(self.pm).get(reverse('cod_record', args=[self.site.project_id]))
+
+    def test_cod_refusal_says_who_acts_next_on_each_point(self):
+        open_point, rectified = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(rectified)
+        self._reject_task(task=self.module)
+        page = self._cod_page()
+        self.assertContains(page, '3 punch points are open on this site.')
+        self.assertContains(page, f'Open — waiting for {_n(self.worker)} to rectify')
+        self.assertContains(page, f'Rectified — waiting for {_n(self.qaqc)} to re-verify')
+        self.assertContains(page, f'Open — {_n(self.worker)} fixes and resubmits the task')
+        self.assertNotContains(page, 're-approving its task')
+
+    def test_cod_rows_cost_the_same_for_one_point_or_three(self):
+        points = self._raise((self.civil, 0), (self.civil, 1), (self.module, 0))
+        self._rectify(points[0])
+        with CaptureQueriesContext(connection) as three:
+            with self.assertRaises(CodRefused):
+                record_refusal(self.site)
+        self._waive(points[1])
+        self._waive(points[2])
+        with CaptureQueriesContext(connection) as one:
+            with self.assertRaises(CodRefused):
+                record_refusal(self.site)
+        self.assertEqual(len(three.captured_queries), len(one.captured_queries))
+
+    def test_approval_panel_names_who_acts_next(self):
+        point = self._one_point()
+        self._submitted()
+        page = self._task_page()
+        self.assertEqual(page.context['approval_blockers'][0].next_action.who, _n(self.worker))
+        self.assertContains(page, f'Open — waiting for {_n(self.worker)} to rectify, '
+                                  f'or the PM waives it')
+        self._rectify(point)
+        page = self._task_page()
+        self.assertContains(page, f'Rectified — waiting for {_n(self.qaqc)} to re-verify, '
+                                  f'or the PM waives it')
+        self.assertNotContains(page, 're-approving its task')
+
+    def test_approval_panel_costs_the_same_for_one_blocker_or_two(self):
+        first, second = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(first)
+        self._submitted()
+        client = _client_for(self.pm)
+        url = reverse('task_detail', args=[self.site.project_id, self.civil.pk])
+        with CaptureQueriesContext(connection) as two:
+            self.assertEqual(len(client.get(url).context['approval_blockers']), 2)
+        # Swap a blocker for a waived point: the card keeps two rows, the panel one.
+        self._waive(second)
+        with CaptureQueriesContext(connection) as one:
+            self.assertEqual(len(client.get(url).context['approval_blockers']), 1)
+        self.assertEqual(len(two.captured_queries), len(one.captured_queries))
+
+    def test_on_behalf_of_only_when_someone_else_rectified(self):
+        by_pm, by_worker = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(by_pm, by=self.pm)
+        page = self._task_page()
+        self.assertContains(page, f'Marked rectified by {_n(self.pm)} on behalf of '
+                                  f'{_n(self.worker)}', count=1)
+        self._rectify(by_worker)
+        page = self._task_page()
+        self.assertContains(page, 'on behalf of', count=1)
+        self.assertContains(page, f'— {_n(self.worker)},')
+
+
+class ReverificationListTests(NextActionFixture):
+
+    def _list(self, who):
+        page = _client_for(who).get(reverse('dashboard_site_engineer'))
+        return page, page.context['awaiting_my_reverification']
+
+    def test_rectified_points_on_my_sites_only(self):
+        open_point, rectified = self._raise((self.civil, 0), (self.module, 0))
+        self._rectify(rectified)
+        theirs = self._raise_on_other_site()
+        page, points = self._list(self.qaqc)
+        self.assertEqual([p.pk for p in points], [rectified.pk])
+        self.assertContains(page, 'Awaiting your re-verification')
+        self.assertContains(page, f'#punch-point-{rectified.pk}')
+        self.assertContains(page, f'Rectified by {_n(self.worker)}')
+        _, points_b = self._list(self.qaqc_b)
+        self.assertEqual([p.pk for p in points_b], [theirs.pk])
+
+    def test_oldest_first(self):
+        first, second = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(second)
+        self._rectify(first)
+        _, points = self._list(self.qaqc)
+        self.assertEqual([p.pk for p in points], [first.pk, second.pk])
+
+    def test_excludes_their_own_round(self):
+        point = self._own_round_by_engineer()
+        page, points = self._list(self.spare)
+        self.assertEqual(points, [])
+        self.assertNotContains(page, 'Awaiting your re-verification')
+        # Nor does the replaced engineer see it: the site is no longer theirs.
+        self.assertNotIn(point.pk, [p.pk for p in self._list(self.qaqc)[1]])
+
+    def test_leaves_the_list_on_accept_reject_or_waive(self):
+        accepted, rejected, waived = self._raise((self.civil, 0), (self.civil, 1),
+                                                 (self.module, 0))
+        for point in (accepted, rejected, waived):
+            self._rectify(point)
+        self.assertEqual(len(self._list(self.qaqc)[1]), 3)
+        self._reverify(accepted, 'accept')
+        self._reverify(rejected, 'reject', remark='Still loose.')
+        self._waive(waived)
+        self.assertEqual(self._list(self.qaqc)[1], [])
+
+    def test_constant_query_count(self):
+        points = self._raise((self.civil, 0), (self.civil, 1), (self.module, 0))
+        for point in points:
+            self._rectify(point)
+        client = _client_for(self.qaqc)
+        url = reverse('dashboard_site_engineer')
+        with CaptureQueriesContext(connection) as three:
+            self.assertEqual(len(client.get(url).context['awaiting_my_reverification']), 3)
+        self._reverify(points[1], 'accept')
+        self._reverify(points[2], 'accept')
+        with CaptureQueriesContext(connection) as one:
+            self.assertEqual(len(client.get(url).context['awaiting_my_reverification']), 1)
+        self.assertEqual(len(three.captured_queries), len(one.captured_queries))
