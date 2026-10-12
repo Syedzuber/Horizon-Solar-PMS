@@ -1800,6 +1800,10 @@ def site_has_effective_qaqc(project):
     — otherwise a point on a site whose engineer left could never be re-verified.
 
     OPEX only: no query for any other project type, as with site_qaqc_engineer_id().
+
+    TWIN OF punch_points.effective_qaqc_engineer(), which names the engineer this only
+    detects, for the "who acts next" line (closeout 7c). Edit both or neither;
+    tests_punch_rectify EffectiveEngineerTwinTests pins them equal.
     """
     if project is None or project.project_type != 'OPEX':
         return False

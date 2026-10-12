@@ -20,6 +20,8 @@ WHAT IS PINNED HERE
     7c    next_action: each state, both own-round cases       NextActionTests          (13)
     7c    COD refusal, approval panel, "on behalf of"         NextActionScreenTests    (13)
     7c    the QA/QC engineer's re-verification list           ReverificationListTests  (13)
+    7c-fix  task page card reads next_action                  PunchCardNextActionTests (13)
+    7c-fix  effective_qaqc_engineer twin of the permission    EffectiveEngineerTwinTests (13)
 
 Every visit-raised point here is raised through the real visit screens
 (tests_qaqc_visit.VisitFixture): start, answer "No", submit. Storage is mocked there.
@@ -37,7 +39,7 @@ from .cod_views import CodRefused, record_refusal
 from .models import (
     AppendOnlyViolation, NotificationLog, PunchPoint, PunchPointEvent, Task,
 )
-from .permissions import user_may_self_certify
+from .permissions import site_has_effective_qaqc, user_may_self_certify
 from .punch_points import (
     close_punch_points_on_approval, open_punch_points_for_project, raise_punch_point,
 )
@@ -835,6 +837,83 @@ class NextActionScreenTests(NextActionFixture):
         page = self._task_page()
         self.assertContains(page, 'on behalf of', count=1)
         self.assertContains(page, f'— {_n(self.worker)},')
+
+
+class PunchCardNextActionTests(NextActionFixture):
+    """Closeout 7c-fix: the task page's card reads next_action for its status lines."""
+
+    def test_rectified_with_no_engineer_reads_the_pm_or_a_coordinator(self):
+        point = self._one_point()
+        self._rectify(point)
+        end_site_qaqc(self.site, self.pm)
+        page = self._task_page()
+        self.assertEqual(page.context['task_punch_points'][0].next_action.line,
+                         'Rectified — waiting for the PM or a coordinator to re-verify, '
+                         'or the PM waives it')
+        self.assertContains(page, 'waiting for the PM or a coordinator to re-verify')
+        self.assertNotContains(page, 'Awaiting re-verification by the site')
+
+    def test_open_and_rectified_lines_name_the_people(self):
+        open_point, rectified = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(rectified)
+        self._reject_task(task=self.civil)
+        page = self._task_page()
+        self.assertContains(page, f'Open — waiting for {_n(self.worker)} to rectify')
+        self.assertContains(page, f'Rectified — waiting for {_n(self.qaqc)} to re-verify')
+        self.assertContains(page, f'Open — {_n(self.worker)} fixes and resubmits the task')
+
+    def test_closed_and_waived_points_carry_no_line(self):
+        closed, waived = self._raise((self.civil, 0), (self.civil, 1))
+        self._rectify(closed)
+        self._reverify(closed, 'accept')
+        self._waive(waived)
+        page = self._task_page()
+        self.assertEqual([p.next_action for p in page.context['task_punch_points']],
+                         [None, None])
+        self.assertNotContains(page, 'punch-next-action')
+
+    def test_card_costs_the_same_for_one_point_or_three(self):
+        points = self._raise((self.civil, 0), (self.civil, 1), (self.civil, 2))
+        self._rectify(points[0])
+        self._rectify(points[1])
+        client = _client_for(self.pm)
+        url = reverse('task_detail', args=[self.site.project_id, self.civil.pk])
+        with CaptureQueriesContext(connection) as three:
+            client.get(url)
+        # Fewer outstanding, same rows on the card: no per-point query either way.
+        self._waive(points[1])
+        self._waive(points[2])
+        with CaptureQueriesContext(connection) as one:
+            client.get(url)
+        self.assertEqual(len(three.captured_queries), len(one.captured_queries))
+
+
+class EffectiveEngineerTwinTests(NextActionFixture):
+    """effective_qaqc_engineer() names someone exactly when
+    permissions.site_has_effective_qaqc() says one exists - the twins must not drift."""
+
+    def _agree(self, expected):
+        engineer = punch_points.effective_qaqc_engineer(self.site)
+        self.assertEqual(site_has_effective_qaqc(self.site), expected)
+        self.assertEqual(engineer is not None, expected)
+        return engineer
+
+    def test_no_engineer(self):
+        end_site_qaqc(self.site, self.pm)
+        self._agree(False)
+
+    def test_an_active_engineer(self):
+        self.assertEqual(self._agree(True), self.qaqc)
+
+    def test_a_role_changed_engineer(self):
+        self.qaqc.role = 'SCM'
+        self.qaqc.save()
+        self._agree(False)
+
+    def test_a_deactivated_engineer(self):
+        self.qaqc.is_active = False
+        self.qaqc.save()
+        self._agree(False)
 
 
 class ReverificationListTests(NextActionFixture):

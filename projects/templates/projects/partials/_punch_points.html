@@ -108,10 +108,11 @@ Context: task_punch_points, can_waive_punch_point, punch_outstanding, project, t
             on {{ pp.closed_at|date:"d M Y H:i" }}
           </div>
         </div>
-      {% elif pp.status == 'Open' and not pp.source %}
-        <div class="small text-muted mt-2">Closes when the task is resubmitted and approved.</div>
-      {% elif pp.status == 'Rectified' %}
-        <div class="small text-muted mt-2">Awaiting re-verification by the site's QA/QC engineer.</div>
+      {% elif pp.next_action %}
+        {% comment %}Closeout 7c-fix: an outstanding point's status line is its
+           next_action (views._punch_point_context) — who acts next, by name, and the
+           waiver. Not re-derived here.{% endcomment %}
+        <div class="small text-muted mt-2 punch-next-action">{{ pp.next_action.line }}</div>
       {% endif %}
 
       {# ── History of rounds (PP-4): every rectify / accept / reject, oldest first ── #}

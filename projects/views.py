@@ -5656,6 +5656,18 @@ def _punch_point_context(request, project, task):
         # Go-ahead Q5: say why the re-verifier sees no form on their own round.
         point.reverify_own_round = visit_raised and rectified and can_reverify and own_round
         point.offer_waive = point.is_outstanding and can_waive
+    # Closeout 7c-fix: each outstanding point's status line is punch_points.next_action,
+    # the same derivation the approval panel and the COD refusal read. Batched as there:
+    # every point is on this one task, so it is handed the task instance (one assignee
+    # lookup, cached on it, instead of one per point); `rounds` is already prefetched and
+    # `qaqc_answer` joined by task_punch_points; the site's engineer is asked once, and
+    # only when a Rectified point needs it.
+    engineer = (effective_qaqc_engineer(project)
+                if any(p.status == PunchPoint.RECTIFIED for p in points) else None)
+    for point in points:
+        point.task = task
+        point.next_action = (next_action(point, engineer=engineer)
+                             if point.is_outstanding else None)
     return {
         'task_punch_points':     points,
         'can_waive_punch_point': can_waive,
