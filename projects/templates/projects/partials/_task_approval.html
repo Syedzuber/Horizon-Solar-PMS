@@ -3,7 +3,9 @@ Two-step completion panel (2.1) — OPEX only. Swapped into #taskApprovalBlock b
 HTMX; also included on the initial full-page render of task_detail.
 
 Expected context, all of it built by _task_approval_context() in views.py:
-  show_approval_panel, can_submit_task, can_approve_task, task, project
+  show_approval_panel, can_submit_task, can_approve_task, task, project,
+  approval_blockers (closeout 7b, PP-2: the QA/QC punch points that refuse approval
+  now - while any is listed there is no Approve and no self-certified Complete)
 
 THE PANEL DECIDES NOTHING. Every question it asks has already been answered by
 the view — `show_approval_panel` carries the OPEX-and-not-a-mirror scope,
@@ -66,6 +68,10 @@ Three states, and they are mutually exclusive:
           {% endif %}
         </div>
 
+        {% if approval_blockers %}
+          {% include 'projects/partials/_approval_blockers.html' %}
+        {% endif %}
+
         {% if can_approve_task %}
           {% comment %}
           One textarea, two buttons: `approval_remarks` is required by BOTH the
@@ -87,7 +93,7 @@ Three states, and they are mutually exclusive:
           the same conditional, and the endpoint a bare Enter in the textarea would
           hit is always one the viewer may actually use.
           {% endcomment %}
-          {% if task.submitted_by == request.user.profile %}
+          {% if task.submitted_by == request.user.profile or approval_blockers %}
             {% url 'task_reject' project.project_id task.pk as approval_form_action %}
           {% else %}
             {% url 'task_approve' project.project_id task.pk as approval_form_action %}
@@ -104,7 +110,9 @@ Three states, and they are mutually exclusive:
                         placeholder="What you checked, or what needs redoing"></textarea>
             </div>
             <div class="d-flex gap-2 align-items-center">
-              {% if task.submitted_by != request.user.profile %}
+              {% comment %}No Approve while a QA/QC punch point is outstanding (PP-2):
+                 task_approve would refuse it, and the list above says why.{% endcomment %}
+              {% if task.submitted_by != request.user.profile and not approval_blockers %}
                 <button type="submit" class="btn btn-brand btn-sm">Approve &amp; complete</button>
               {% endif %}
               <button type="submit" class="btn btn-outline-danger btn-sm"
@@ -152,7 +160,12 @@ Three states, and they are mutually exclusive:
                  someone's name while the button they pressed said it was asking for
                  review. The endpoint decides on its own reading of the pool either way —
                  this is the honest label, not the rule.{% endcomment %}
-              {% if can_self_certify %}
+              {% if can_self_certify and approval_blockers %}
+                {% comment %}A self-certification is an approval, so PP-2 refuses it while
+                   a QA/QC punch point is outstanding; the button is not offered.{% endcomment %}
+                {% include 'projects/partials/_approval_blockers.html' %}
+                <button type="button" class="btn btn-brand btn-sm" disabled>Complete (self-certified)</button>
+              {% elif can_self_certify %}
                 <button type="submit" class="btn btn-brand btn-sm">Complete (self-certified)</button>
                 <p class="text-muted small mb-0 mt-2">
                   No other approver on this project — this completes the task under your name.

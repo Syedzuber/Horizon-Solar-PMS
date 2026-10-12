@@ -44,6 +44,15 @@ Expected context:
         {{ task.location_label }}
       </span>
     {% endif %}
+    {% comment %}OPEN PUNCH POINTS (closeout 7b, PP-6): Open or Rectified, both sources, from
+       views._attach_open_punch_points() - one grouped query per page or responder, and
+       absent (0) on every non-OPEX site. Links to the card at the top of the task page.{% endcomment %}
+    {% if task.open_punch_points %}
+      <a href="{% url 'task_detail' project.project_id task.pk %}#punchPointsBlock"
+         class="badge rounded-pill bg-warning text-dark text-decoration-none ms-1 open-punch-badge"
+         style="font-size:.62rem;vertical-align:middle;"
+         title="Outstanding punch points on this task">{{ task.open_punch_points }} punch point{{ task.open_punch_points|pluralize }}</a>
+    {% endif %}
     {% comment %}DUPLICATE FOR LOCATIONS. Shown only where the predicate is True, asked
        through the filter so every responder that renders this row gets the same answer
        (templatetags/duplicate_tags.py). Presentation only: both views ask the predicate

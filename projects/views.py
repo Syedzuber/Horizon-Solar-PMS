@@ -66,9 +66,15 @@ from .payments import ceo_payment_strip, payment_counts
 # The one overdue rule. Every overdue count, list and flag in this module takes it from
 # here and adds only its own scope (type, mirror, assignee, project).
 from .task_health import OPEN_STATUSES, days_overdue, is_overdue, overdue_q
-# Closeout step 2 (CL-1): the one writer of a Closed punch point, called by both
-# approval paths below.
-from .punch_points import close_punch_points_on_approval, raise_punch_point
+# Closeout step 2 (CL-1): the approval closure, called by both approval paths below.
+# Closeout 7b: PP-2's guard on those same paths, and the punch point reads behind the
+# task card, the task-row badge and the PM / SE dashboard lists (PP-6).
+from .punch_points import (
+    approval_blockers, approval_refusal_message, awaiting_reverification,
+    close_punch_points_on_approval, latest_rectifier_id, open_points_on_my_tasks,
+    open_punch_point_counts, open_punch_point_counts_by_task, raise_punch_point,
+    source_answer, task_punch_points,
+)
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -107,6 +113,8 @@ from .permissions import (
     # 2.3a - waiving a punch point is PM-only and NARROWER than approving a task;
     # the docstring on the predicate says why is_qaqc is not enough.
     user_can_waive_punch_point,
+    # Closeout 7b - who may rectify a QA/QC punch point, and who may re-verify it.
+    user_can_rectify_punch_point, user_can_reverify_punch_point,
     # Not Applicable is the assigned PM's call alone — NARROWER than
     # user_can_manage_project, which admits a coordinator. The predicate says why,
     # and also refuses mirrors.
@@ -947,6 +955,26 @@ def dashboard_pm(request):
         row['has_qaqc_line'] = row['project'].pk in _qaqc_lines
         row['qaqc_visit_days'] = _qaqc_lines.get(row['project'].pk)
 
+    # Closeout 7b (PP-6): each site card's outstanding punch points (Open or Rectified,
+    # both sources - the count COD would refuse on), in ONE grouped query for the whole
+    # list, never one per card.
+    _open_points = open_punch_point_counts([row['project'].pk for row in projects_with_progress])
+    for row in projects_with_progress:
+        row['open_punch_points'] = _open_points.get(row['project'].pk, 0)
+
+    # Closeout 7b (PP-6): every Rectified point on a site this user manages, waiting for
+    # the QA/QC engineer's re-verification. Three queries whatever its length. A row
+    # offers this user the Re-verify link only where they could act on it: the site has
+    # no effective engineer (go-ahead Q4) and they did not record the round (Q5) - the
+    # endpoint asks both again.
+    awaiting_points = awaiting_reverification(managed_project_ids)
+    for point in awaiting_points:
+        rounds = point.rectify_rounds
+        point.latest_round = rounds[0] if rounds else None
+        point.pm_may_reverify = (not point.site_has_engineer
+                                 and (point.latest_round is None
+                                      or point.latest_round.actor_id != pm_profile.pk))
+
     # Group into Tenders / EPC Residential for display. Runs last, after every
     # per-row annotation and the sort above, so within-section order is exactly
     # the order this dashboard already produced. No query, no row added or lost.
@@ -1028,6 +1056,8 @@ def dashboard_pm(request):
         'role_label':             role_label,
         # Approvals 2c — the steps waiting on this user; None for a non-approver.
         'approvals_waiting':      pending_approvals_card(request.user),
+        # Closeout 7b (PP-6): Rectified punch points waiting for re-verification.
+        'awaiting_reverification': awaiting_points,
     })
 
 
@@ -1242,6 +1272,9 @@ def dashboard_site_engineer(request):
         # Closeout step 3: sites this engineer checks as QA/QC engineer, each with its
         # awaiting-approval count. Two queries whatever the number of sites.
         'qaqc_sites':        _qaqc_sites_for(se_profile),
+        # Closeout 7b (PP-6, go-ahead Q6): outstanding QA/QC-raised punch points on this
+        # engineer's own tasks. One query; Rectify links to the form on the task page.
+        'my_open_punch_points': open_points_on_my_tasks(se_profile),
     })
 
 
@@ -4592,6 +4625,7 @@ def _render_phase_tasks_hx(request, project, phase, status=200):
         task.phase = phase
     _attach_delivery_consignments(phase_tasks)
     _attach_due_health(phase_tasks, timezone.localdate())
+    _attach_open_punch_points(phase_tasks, project)
     return render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -5467,6 +5501,25 @@ def _attach_due_health(tasks, today):
         task.awaiting_approval = _awaiting_approval(task)
 
 
+def _attach_open_punch_points(tasks, project):
+    """Attach the task row's open-points badge (closeout 7b, PP-6) as
+    `task.open_punch_points`: the number of Open or Rectified punch points on each task,
+    both sources - the CL-2 membership, so the badges on a site add up to what COD
+    would refuse on.
+
+    ONE grouped query for every task passed, never one per row. None at all on a
+    non-OPEX site: both ways a punch point is raised (a rejection, a QA/QC visit) are
+    OPEX-only, so a Residential page pays nothing and shows nothing.
+
+    Called by project_overview and by the four responders that redraw a row, next to
+    `_attach_due_health()`. A responder that skipped it would drop the badge from the
+    row it had just redrawn."""
+    counts = ({} if project.project_type != 'OPEX'
+              else open_punch_point_counts_by_task([task.pk for task in tasks]))
+    for task in tasks:
+        task.open_punch_points = counts.get(task.pk, 0)
+
+
 def _render_task_row_hx(request, project, task, oob_tasks=None):
     """Render the HTMX task-row response for project_overview (#1/#3/#5):
     the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
@@ -5475,6 +5528,7 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
     oob_tasks = oob_tasks or []
     _attach_delivery_consignments([task, *oob_tasks])
     _attach_due_health([task, *oob_tasks], timezone.localdate())
+    _attach_open_punch_points([task, *oob_tasks], project)
     row_context = _task_row_context(request, project)
     return render(request, 'projects/partials/_task_row_response.html', {
         'project':             project,
@@ -5525,6 +5579,11 @@ def _task_approval_context(request, project, task):
         # behind it cannot disagree. Gated on `can_submit` so it costs its queries
         # only for someone actually being offered the button it relabels.
         'can_self_certify': can_submit and user_may_self_certify(request.user, project),
+        # PP-2: the QA/QC-raised points that would refuse an approval right now. The
+        # panel names them and offers no Approve button while any is outstanding; the
+        # endpoints ask approval_blockers() again under the project lock. One query, on
+        # OPEX non-mirror tasks only.
+        'approval_blockers': list(approval_blockers(task)) if eligible else [],
     }
 
 
@@ -5535,16 +5594,39 @@ def _punch_point_context(request, project, task):
 
     A SEPARATE query on a SEPARATE model (2.3a): the task-detail Issues panel reads
     `task_issues` and cannot move when a rejection raises a punch point.
+
+    Closeout 7b (PP-6): each point carries its source (`pp.source`, the raising visit
+    answer, or None for a rejection), its rounds (`pp.rounds`, oldest first) and the
+    actions THIS user may take on it - offer_rectify, offer_reverify, offer_waive - from
+    the same predicates and refusals the endpoints apply, so a button offered is a
+    button accepted. The rectify / re-verify predicates are asked only when the task has
+    an outstanding visit-raised point, so a Residential task page pays nothing for them.
     """
+    points = task_punch_points(task)
+    profile = getattr(request.user, 'profile', None)
+    profile_pk = profile.pk if profile is not None else None
+    # The waive control renders only for the project's PM-level authority — the
+    # same predicate the endpoint enforces, so the button offered and the button
+    # accepted cannot disagree.
+    can_waive = user_can_waive_punch_point(request.user, project)
+    in_loop = [p for p in points if source_answer(p) is not None and p.is_outstanding]
+    can_rectify = bool(in_loop) and user_can_rectify_punch_point(request.user, task, project)
+    can_reverify = bool(in_loop) and user_can_reverify_punch_point(request.user, project)
+    for point in points:
+        point.source = source_answer(point)
+        visit_raised = point.source is not None
+        rectified = point.status == PunchPoint.RECTIFIED
+        own_round = (visit_raised and rectified
+                     and latest_rectifier_id(point) == profile_pk)
+        point.offer_rectify = visit_raised and point.status == PunchPoint.OPEN and can_rectify
+        point.offer_reverify = visit_raised and rectified and can_reverify and not own_round
+        # Go-ahead Q5: say why the re-verifier sees no form on their own round.
+        point.reverify_own_round = visit_raised and rectified and can_reverify and own_round
+        point.offer_waive = point.is_outstanding and can_waive
     return {
-        'task_punch_points': (
-            PunchPoint.objects.filter(task=task)
-            .select_related('raised_by__user', 'waived_by__user', 'closed_by__user')
-        ),
-        # The waive control renders only for the project's PM-level authority — the
-        # same predicate the endpoint enforces, so the button offered and the button
-        # accepted cannot disagree.
-        'can_waive_punch_point': user_can_waive_punch_point(request.user, project),
+        'task_punch_points':     points,
+        'can_waive_punch_point': can_waive,
+        'punch_outstanding':     sum(1 for p in points if p.is_outstanding),
     }
 
 
@@ -5836,6 +5918,7 @@ def _render_task_assign_design_success_hx(request, project, task):
     be the PM)."""
     _attach_delivery_consignments([task])
     _attach_due_health([task], timezone.localdate())
+    _attach_open_punch_points([task], project)
     row_context = _task_row_context(request, project)
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
@@ -5855,6 +5938,7 @@ def _render_task_add_success_hx(request, project, phase):
     phase_tasks = list(phase.tasks.select_related('template_task'))
     _attach_delivery_consignments(phase_tasks)
     _attach_due_health(phase_tasks, timezone.localdate())
+    _attach_open_punch_points(phase_tasks, project)
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -6423,6 +6507,10 @@ def task_submit_for_approval(request, project_id, task_id):
     why `not_started + in_progress + completed + blocked == tasks_assigned` still
     holds on the daily report for a task sitting submitted-not-approved.
 
+    A SELF-CERTIFIED submission is an approval, so PP-2 (closeout 7b) refuses it while a
+    visit-raised punch point on the task is Open or Rectified, and writes nothing. An
+    ordinary submission is never refused for punch points.
+
     Access: the assigned engineer, or PM-level authority on the project
     (user_can_submit_task_for_approval). POST only.
     """
@@ -6539,6 +6627,16 @@ def task_submit_for_approval(request, project_id, task_id):
     certified_at = timezone.now()
     try:
         with transaction.atomic():
+            # PP-2, as in task_approve: a self-certification is an approval, so it is
+            # refused while a QA/QC-raised point on this task is Open or Rectified, and
+            # nothing is written - not even the submission. Asked under the project row
+            # lock submit_qaqc_visit() takes, so a visit cannot raise a point between
+            # this check and the commit.
+            Project.objects.select_for_update().filter(pk=project.pk).first()
+            blockers = list(approval_blockers(task))
+            if blockers:
+                messages.error(request, approval_refusal_message(task, blockers))
+                raise _ApprovalRolledBack
             Task.objects.filter(pk=task.pk).update(
                 submitted_by=profile,
                 submitted_at=certified_at,
@@ -6568,9 +6666,9 @@ def task_submit_for_approval(request, project_id, task_id):
                 # left written against a task that never completed.
                 raise _ApprovalRolledBack
             # CL-1: a self-certification is an approval, so it closes the task's
-            # Open punch points exactly as task_approve does, recorded with its own
-            # method. Inside the block, after Done is accepted, for the reason
-            # task_approve gives.
+            # Open rejection-raised punch points exactly as task_approve does (PP-1),
+            # recorded with its own method. Inside the block, after Done is accepted,
+            # for the reason task_approve gives.
             close_punch_points_on_approval(
                 task, profile, PunchPoint.CLOSED_ON_SELF_CERTIFIED, project,
             )
@@ -6605,6 +6703,10 @@ def task_approve(request, project_id, task_id):
     it. Otherwise a refused completion would leave the task approved and therefore
     completable later by anyone, which is the two-step rule defeated by its own
     implementation.
+
+    REFUSED WHILE A QA/QC POINT IS OUTSTANDING (closeout 7b, PP-2): a visit-raised punch
+    point on the task that is Open or Rectified blocks approval until it is re-verified
+    or waived. Rejection-raised points do not block; this approval closes them (PP-1).
 
     Access: PM-level authority on the project, the site's assigned QA/QC engineer, or
     the legacy QA/QC flag with sight of it (user_can_approve_task). POST only.
@@ -6688,6 +6790,18 @@ def task_approve(request, project_id, task_id):
     approved_at = timezone.now()
     try:
         with transaction.atomic():
+            # PP-2: NOT WHILE A QA/QC POINT IS OUTSTANDING. A visit-raised punch point
+            # leaves only by re-verification or waiver (PP-1), so approving past an Open
+            # or Rectified one would sign off work an independent check has found wrong
+            # and nobody has re-checked. The refusal names each point and the way out.
+            # The project row is locked first - the lock submit_qaqc_visit() takes
+            # before raising points - so a visit cannot add a point between this check
+            # and the approval committing. Refused before any write.
+            Project.objects.select_for_update().filter(pk=project.pk).first()
+            blockers = list(approval_blockers(task))
+            if blockers:
+                messages.error(request, approval_refusal_message(task, blockers))
+                raise _ApprovalRolledBack
             Task.objects.filter(pk=task.pk).update(
                 approved_by=profile,
                 approved_at=approved_at,
@@ -6705,9 +6819,11 @@ def task_approve(request, project_id, task_id):
                 # unwinding the transaction; its message survives, because
                 # `messages` is not part of it.
                 raise _ApprovalRolledBack
-            # CL-1: the approval closes every Open punch point on this task,
-            # whatever raised it (CL-B). Inside the block and after Done is
-            # accepted, so a refused completion closes nothing.
+            # CL-1 as amended by PP-1: the approval closes this task's Open punch
+            # points raised by REJECTION. QA/QC-raised points are not closed here -
+            # the guard above has already refused while one is outstanding. Inside
+            # the block and after Done is accepted, so a refused completion closes
+            # nothing.
             close_punch_points_on_approval(
                 task, profile, PunchPoint.CLOSED_ON_APPROVAL, project,
             )
@@ -6842,10 +6958,11 @@ def punch_point_waive(request, project_id, punch_point_id):
     `user_can_waive_punch_point`. A user holding only `is_qaqc` gets 403 here even
     on a project whose tasks they may reject.
 
-    Points that are no longer Open - already waived, or closed by an approval
-    (closeout step 2) - are refused rather than re-waived, so `waived_by` and
-    `waived_at` keep naming the person and moment the decision was actually taken,
-    and a Closed point is never relabelled Waived.
+    Open and Rectified points may be waived (closeout 7b: a Rectified point is still
+    outstanding until it is re-verified). Points that are no longer outstanding -
+    already waived, or closed by an approval or a re-verification - are refused rather
+    than re-waived, so `waived_by` and `waived_at` keep naming the person and moment
+    the decision was actually taken, and a Closed point is never relabelled Waived.
 
     Access: PM-level authority on the project. POST only.
     """
@@ -6876,7 +6993,7 @@ def punch_point_waive(request, project_id, punch_point_id):
     # Closeout step 2: a point can now leave Open two ways (approval closes it, a PM
     # waives it), so the refusal names both rather than guessing which one happened.
     already_done = 'This punch point is already closed or waived.'
-    if punch_point.status != PunchPoint.OPEN:
+    if punch_point.status not in PunchPoint.OUTSTANDING:
         messages.error(request, already_done)
         return back
 
@@ -6890,12 +7007,14 @@ def punch_point_waive(request, project_id, punch_point_id):
         return back
 
     waived_at = timezone.now()
-    # Race: `status=OPEN` in the UPDATE's own WHERE, not only the check above. Since
-    # closeout step 2 an approval can close this point between that check and this
-    # write; without the guard the waiver would overwrite Closed with Waived. Zero
-    # rows matched means the other write won, and the user is told so.
+    # Race: the outstanding statuses in the UPDATE's own WHERE, not only the check
+    # above. An approval or a re-verification can close this point between that check
+    # and this write; without the guard the waiver would overwrite Closed with Waived.
+    # A rectify or a rejected re-verification moves it only between Open and Rectified,
+    # both still waivable. Zero rows matched means a closing write won, and the user is
+    # told so.
     waived = PunchPoint.objects.filter(
-        pk=punch_point.pk, status=PunchPoint.OPEN,
+        pk=punch_point.pk, status__in=PunchPoint.OUTSTANDING,
     ).update(
         status=PunchPoint.WAIVED,
         waived_by=profile,
@@ -10341,6 +10460,11 @@ def project_overview(request, project_id):
         # Read once, outside the loop: every row's overdue badge is judged against the
         # same IST calendar day.
         today = timezone.localdate()
+        # The open-points badge (closeout 7b) for every row on the page in ONE grouped
+        # query, before the loop rather than per phase. `phase.tasks.all()` on a
+        # prefetched relation returns the cached instances, so the attribute set here is
+        # on the very objects the loop below hands the template.
+        _attach_open_punch_points([t for phase in phases for t in phase.tasks.all()], project)
         for phase in phases:
             tasks = list(phase.tasks.all())
             if not tasks:

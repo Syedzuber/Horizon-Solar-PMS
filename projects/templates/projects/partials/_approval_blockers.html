@@ -1,0 +1,19 @@
+{% comment %}Closeout 7b (PP-2) — the QA/QC punch points that stop this task being approved,
+   shown in the approval panel. Each links to its row on the punch points card at the top
+   of this page, where the Rectify / Re-verify / Waive forms are. Context:
+   approval_blockers (from _task_approval_context, which asks punch_points.approval_blockers,
+   the same query the approval endpoints refuse on).{% endcomment %}
+<div class="alert alert-warning py-2 small approval-blockers">
+  <div class="fw-semibold mb-1">
+    Cannot be approved: {{ approval_blockers|length }} QA/QC punch point{{ approval_blockers|length|pluralize }} outstanding
+  </div>
+  <ul class="mb-1 ps-3">
+    {% for point in approval_blockers %}
+      <li>
+        <a href="#punch-point-{{ point.pk }}">{{ point.reason|truncatechars:120 }}</a>
+        — {% if point.status == 'Rectified' %}rectified, awaiting re-verification{% else %}open{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  <div>Rectify and re-verify it, or the PM waives it.</div>
+</div>

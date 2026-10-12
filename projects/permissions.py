@@ -1756,6 +1756,84 @@ def user_can_waive_punch_point(user, project):
     return user_can_manage_project(user, project)
 
 
+# ---------------------------------------------------------------------------
+# Punch point rectify / re-verify — closeout step 7b (PP-3, PP-4)
+#
+# Who may act, as a property of the person, the task and the site. What the point
+# itself must be (visit-raised, Open / Rectified) and who recorded its latest round
+# (go-ahead Q5) are facts about ONE point's current state, so they live with the
+# writers in punch_points.py and are re-checked there under the row lock — the same
+# split task_approve makes for "nobody approves their own submission".
+# ---------------------------------------------------------------------------
+
+def user_can_rectify_punch_point(user, task, project):
+    """
+    Return True if `user` may mark a QA/QC punch point on `task` Rectified (PP-3).
+
+    The task's assignee, or PM-level authority on the project (the PM and its
+    coordinators, through user_can_manage_project).
+
+    THE SITE'S QA/QC ENGINEER IS REFUSED FIRST, whatever else they hold (go-ahead).
+    They raised the point and they re-verify it; letting the same person also declare
+    it fixed would make the second check a signature on their own claim. Asked before
+    the manager arm so a coordinator seat cannot readmit them.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or not profile.is_active:
+        return False
+    # Only the people who own the work or the site may claim the defect is fixed; the
+    # checker (the site's QA/QC engineer) is never one of them, even as a coordinator.
+    if user_is_site_qaqc(user, project):
+        return False
+    if task.assigned_to_id is not None and task.assigned_to_id == profile.pk:
+        return True
+    return user_can_manage_project(user, project)
+
+
+def site_has_effective_qaqc(project):
+    """Return True if `project` has a QA/QC engineer who can act as one right now.
+
+    "Effective" is the three terms user_is_site_qaqc() asks of the requesting user, asked
+    here of the assigned engineer instead: an active assignment row, the engineer still a
+    Site Engineer, and their profile active. A stale row (role changed, deactivated)
+    grants nothing there, so it must not block the PM fallback here either (go-ahead Q4)
+    — otherwise a point on a site whose engineer left could never be re-verified.
+
+    OPEX only: no query for any other project type, as with site_qaqc_engineer_id().
+    """
+    if project is None or project.project_type != 'OPEX':
+        return False
+    return project.qaqc_assignments.filter(
+        ended_at__isnull=True,
+        engineer__role='Site Engineer',
+        engineer__is_active=True,
+    ).exists()
+
+
+def user_can_reverify_punch_point(user, project):
+    """
+    Return True if `user` may re-verify (accept or reject) a Rectified QA/QC punch point
+    on `project` (PP-4).
+
+    The site's effective QA/QC engineer. When there is none — no assignment, or the
+    assigned engineer is stale (site_has_effective_qaqc) — the PM or a coordinator.
+
+    NOT the legacy `is_qaqc` flag (go-ahead): re-verification is the independent second
+    check of one site, and only the site assignment names who does it (CL-D).
+
+    Whether this person recorded the round being re-verified is the writer's question
+    (punch_points.reverify_refusal), not this one's.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or not profile.is_active:
+        return False
+    # The assigned engineer is the checker whenever one can act; managers re-verify only
+    # in their absence, so the PM cannot overrule a working engineer's verdict here.
+    if site_has_effective_qaqc(project):
+        return user_is_site_qaqc(user, project)
+    return user_can_manage_project(user, project)
+
+
 def user_can_record_cod(user, project):
     """
     Return True if `user` may record or withdraw `project`'s COD (closeout step 4,

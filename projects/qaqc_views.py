@@ -22,6 +22,11 @@ every answer, a remark on No) and submits; every "No" then raises a punch point 
 task. THE ONLY WRITERS of QaqcVisit and QaqcVisitAnswer: start_qaqc_visit(),
 answer_qaqc_point(), submit_qaqc_visit(), and the lapse inside assign_site_qaqc() /
 end_site_qaqc(). A visit never writes ChecklistItemCompletion (V-4).
+
+PUNCH POINT RECTIFY / RE-VERIFY — closeout step 7b (PP-3, PP-4). The screens at the end of
+this module take a visit-raised point's photo through the visit's own upload path (its own
+`punch-point` segment) and hand it to the writers in punch_points.py, which hold the rules.
+On submit, each task's assignee is told what the visit raised on their task (PP-6, Q8).
 """
 
 import logging
@@ -41,14 +46,20 @@ from .decorators import login_required
 from .design_storage import DesignStorageError, _client, build_design_path
 from .models import (
     Checklist, ChecklistItem, ChecklistItemCompletion, ChecklistTaskLink, Project,
-    QaqcVisit, QaqcVisitAnswer, SiteQaqcAssignment, Task, UserProfile, log_activity,
+    PunchPoint, PunchPointEvent, QaqcVisit, QaqcVisitAnswer, SiteQaqcAssignment, Task,
+    UserProfile, log_activity,
 )
 from .notifications import send_notification
 from .permissions import (
     project_managers, user_can_conduct_qaqc_visit, user_can_manage_project,
-    user_can_view_project,
+    user_can_rectify_punch_point, user_can_reverify_punch_point, user_can_view_project,
 )
-from .punch_points import raise_punch_point
+from .punch_points import (
+    ACCEPT_PHOTO_REQUIRED, RECTIFY_PHOTO_REQUIRED, RECTIFY_REMARK_REQUIRED,
+    REJECT_REASON_REQUIRED, PunchPointRefused, queue_visit_raise_notices,
+    raise_punch_point, rectify_punch_point, rectify_refusal, reverify_accept,
+    reverify_refusal, reverify_reject,
+)
 from .views import (
     ALLOWED_PHOTO_EXTENSIONS, MIME_TYPE_MAP, _active_project, _checklist_for_task, _is_hx,
     _validate_upload_file,
@@ -433,6 +444,9 @@ def site_qaqc(request, project_id):
 # The storage path segment: {project_id}/qaqc-visit/{uuid}.{ext} in the bills bucket.
 # Also the guard that keeps discard_unrecorded_visit_photo() off bill and COD PDFs.
 VISIT_PHOTO_KIND = 'qaqc-visit'
+# Closeout 7b: rectify / re-verify photos, same bucket, their own segment, so each
+# discard helper can only ever reach its own kind of object.
+PUNCH_PHOTO_KIND = 'punch-point'
 
 # NotificationLog.template_name label (not an Interakt template: no WhatsApp channel).
 T_VISIT_SUBMITTED = 'qaqc_visit_submitted'
@@ -441,6 +455,8 @@ VISIT_STORAGE_NOT_READY = ('QA/QC visits cannot be started yet: the private stor
                            'visit photos is not configured.')
 VISIT_STORAGE_OFF = ('Visit photos cannot be stored right now: the private store is not '
                      'configured. Nothing was saved.')
+PUNCH_STORAGE_OFF = ('Punch point photos cannot be stored right now: the private store is '
+                     'not configured. Nothing was saved.')
 VISIT_NOT_YOURS = "Only this site's assigned QA/QC engineer can do that."
 VISIT_NOT_OPEN = ('This visit is no longer open — it was submitted, or it lapsed when the '
                   'QA/QC engineer changed. Nothing was saved.')
@@ -750,19 +766,21 @@ def validate_visit_photo(file_obj):
         raise QaqcVisitRefused(f'Photo rejected: {exc}')
 
 
-def upload_visit_photo(file_obj, project):
-    """Store one visit photo in the private bills bucket under the qaqc-visit segment.
+def upload_visit_photo(file_obj, project, kind=VISIT_PHOTO_KIND, storage_off=VISIT_STORAGE_OFF):
+    """Store one visit photo in the private bills bucket under the `kind` segment —
+    qaqc-visit for a visit answer, punch-point for a rectify / re-verify round (7b).
 
     Returns {file_name, bucket, path, file_size_kb}; never a URL. Raises
-    QaqcVisitRefused when storage is off, the photo is refused, or the upload fails, so
-    the caller writes no row pointing at an object that does not exist.
+    QaqcVisitRefused when storage is off (with `storage_off` as the message), the photo
+    is refused, or the upload fails, so the caller writes no row pointing at an object
+    that does not exist.
     """
     bucket = bills_bucket()
     if not bucket:
-        raise QaqcVisitRefused(VISIT_STORAGE_OFF)
+        raise QaqcVisitRefused(storage_off)
     validate_visit_photo(file_obj)
     ext = file_obj.name.rsplit('.', 1)[-1].lower()
-    path = build_design_path(project.project_id, VISIT_PHOTO_KIND, file_obj.name)
+    path = build_design_path(project.project_id, kind, file_obj.name)
     try:
         file_obj.seek(0)
         payload = file_obj.read()
@@ -798,6 +816,26 @@ def discard_unrecorded_visit_photo(stored):
         return True
     except Exception as exc:
         logger.error('QA/QC visit photo cleanup failed for %s/%s — %s', bucket, path, exc)
+        return False
+
+
+def discard_unrecorded_punch_photo(stored):
+    """The punch-point twin of discard_unrecorded_visit_photo(): remove a rectify /
+    re-verify photo the writer then refused. Refuses anything a PunchPointEvent records,
+    anything outside the bills bucket, and anything not under the punch-point segment,
+    so neither a visit photo nor a bill or COD PDF is reachable from here. Never raises."""
+    bucket, path = (stored or {}).get('bucket'), (stored or {}).get('path')
+    if not bucket or not path or bucket != bills_bucket():
+        return False
+    if f'/{PUNCH_PHOTO_KIND}/' not in path:
+        return False
+    if PunchPointEvent.objects.filter(photo_bucket=bucket, photo_path=path).exists():
+        return False
+    try:
+        _client().storage.from_(bucket).remove([path])
+        return True
+    except Exception as exc:
+        logger.error('Punch point photo cleanup failed for %s/%s — %s', bucket, path, exc)
         return False
 
 
@@ -1020,7 +1058,7 @@ def submit_qaqc_visit(visit, user, project):
                        .select_related('task').order_by('pk'))
         if not answers:
             raise QaqcVisitRefused(VISIT_EMPTY)
-        raised = 0
+        raised_points = []
         for answer in answers:
             if answer.answer != QaqcVisitAnswer.NO:
                 continue
@@ -1029,7 +1067,8 @@ def submit_qaqc_visit(visit, user, project):
             # this answer; punch_point__isnull=True keeps a replay from re-pointing it.
             QaqcVisitAnswer.objects.filter(pk=answer.pk, punch_point__isnull=True).update(
                 punch_point=point)
-            raised += 1
+            raised_points.append(point)
+        raised = len(raised_points)
         # Race: status=OPEN in the UPDATE's own WHERE as well as the check above; the
         # locks make this a formality, and a 0 is refused rather than half-submitted.
         updated = (QaqcVisit.objects.filter(pk=locked.pk, status=QaqcVisit.OPEN)
@@ -1054,6 +1093,8 @@ def submit_qaqc_visit(visit, user, project):
             lambda: _send_visit_notices(recipient_pks, message, project_pk, actor_pk,
                                         visit_pk),
             robust=True)
+        # PP-6 / go-ahead Q8: each task's assignee, once per task, after commit.
+        queue_visit_raise_notices(raised_points, locked, locked_project, profile)
     return {'points_checked': checked, 'no_count': raised, 'punch_points': raised}
 
 
@@ -1323,6 +1364,165 @@ def qaqc_visit_photo(request, project_id, answer_pk):
     if answer is None or not user_can_read_visit(request.user, answer.visit, project):
         raise Http404
     url = bill_pdf_url(answer.photo_bucket, answer.photo_path)
+    if url is None:
+        raise Http404
+    return redirect(url)
+
+
+# ===========================================================================
+# Punch point rectify / re-verify — closeout step 7b (PP-3, PP-4)
+#
+# The screens for the loop. The writers live in punch_points.py and re-check source,
+# authority and state under a row lock; these views refuse what they can BEFORE the
+# photo upload (so a refused act leaves no orphan object) and delete the photo if the
+# writer refuses anyway. The forms are on the task page's punch points card.
+# ===========================================================================
+
+def _point_site(request, project_id):
+    """The site for a punch point screen, or 404 (the 0.2 shape). OPEX only: a
+    visit-raised point exists nowhere else, so every loop URL on Residential / CAPEX is
+    a 404 rather than a refusal message."""
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    if project.project_type != 'OPEX':
+        raise Http404
+    return project
+
+
+def _point_back(project, point):
+    return redirect(reverse('task_detail', args=[project.project_id, point.task_id])
+                    + f'#punch-point-{point.pk}')
+
+
+def _stored_round_photo(request, project):
+    """Validate and upload the round's photo, if one was sent. Returns the stored dict or
+    None. Raises QaqcVisitRefused on a refused or failed upload."""
+    photo = request.FILES.get('photo')
+    if photo is None:
+        return None
+    validate_visit_photo(photo)
+    return upload_visit_photo(photo, project, kind=PUNCH_PHOTO_KIND,
+                              storage_off=PUNCH_STORAGE_OFF)
+
+
+@login_required
+def punch_point_rectify(request, project_id, punch_point_id):
+    """
+    Mark a QA/QC-raised punch point Rectified: a remark and a photo (PP-3). POST only;
+    the form is on the task page.
+
+    Access: the task's assignee, the PM or a coordinator — never the site's QA/QC
+    engineer (permissions.user_can_rectify_punch_point). 404 for anyone who cannot see
+    the site and on Residential / CAPEX; 403 for any other viewer. A rejection-raised
+    point is refused with a message (PP-5).
+    """
+    project = _point_site(request, project_id)
+    point = get_object_or_404(PunchPoint.objects.select_related('task'),
+                              pk=punch_point_id, task__phase__project=project)
+    if request.method != 'POST':
+        return _point_back(project, point)
+    # The assignee, PM or a coordinator claim the fix; the QA/QC engineer who checks it
+    # and every other viewer (other SEs, SCM, Finance) are refused outright.
+    if not user_can_rectify_punch_point(request.user, point.task, project):
+        return HttpResponseForbidden()
+
+    remark = (request.POST.get('remark') or '').strip()
+    # Everything refusable is refused before the upload, so a refusal leaves no photo
+    # behind. The writer asks every one of these again under its lock.
+    refusal = rectify_refusal(point, request.user, project)
+    if refusal is None and not remark:
+        refusal = RECTIFY_REMARK_REQUIRED
+    if refusal is None and request.FILES.get('photo') is None:
+        refusal = RECTIFY_PHOTO_REQUIRED
+    if refusal:
+        messages.error(request, refusal)
+        return _point_back(project, point)
+
+    stored = None
+    try:
+        stored = _stored_round_photo(request, project)
+        rectify_punch_point(
+            point.pk, request.user, project, remark=remark, stored_photo=stored,
+            photo_taken_at=parse_photo_taken_at(request.POST.get('photo_taken_at')))
+    except (QaqcVisitRefused, PunchPointRefused) as exc:
+        discard_unrecorded_punch_photo(stored)
+        messages.error(request, str(exc))
+        return _point_back(project, point)
+    messages.success(request, f"Punch point on '{point.task.task_name}' marked rectified. "
+                              f"It now waits for re-verification.")
+    return _point_back(project, point)
+
+
+@login_required
+def punch_point_reverify(request, project_id, punch_point_id):
+    """
+    Re-verify a Rectified QA/QC punch point (PP-4). POST `decision`:
+    `accept` (photo required) closes it as re-verified; `reject` (reason required) sends
+    it back to Open. POST only; the form is on the task page.
+
+    Access: the site's effective QA/QC engineer; the PM or a coordinator only when no
+    engineer can act (permissions.user_can_reverify_punch_point). Whoever recorded the
+    latest rectify round is refused that round (go-ahead Q5). 404 for anyone who cannot
+    see the site and on Residential / CAPEX; 403 for any other viewer.
+    """
+    project = _point_site(request, project_id)
+    point = get_object_or_404(PunchPoint.objects.select_related('task'),
+                              pk=punch_point_id, task__phase__project=project)
+    if request.method != 'POST':
+        return _point_back(project, point)
+    # The site's QA/QC engineer re-verifies; managers only stand in when no engineer can
+    # act. Everyone else — including legacy is_qaqc holders — is refused.
+    if not user_can_reverify_punch_point(request.user, project):
+        return HttpResponseForbidden()
+
+    decision = (request.POST.get('decision') or '').strip()
+    remark = (request.POST.get('remark') or '').strip()
+    refusal = reverify_refusal(point, request.user, project)
+    if refusal is None and decision not in ('accept', 'reject'):
+        refusal = 'Choose Accept or Reject.'
+    if refusal is None and decision == 'accept' and request.FILES.get('photo') is None:
+        refusal = ACCEPT_PHOTO_REQUIRED
+    if refusal is None and decision == 'reject' and not remark:
+        refusal = REJECT_REASON_REQUIRED
+    if refusal:
+        messages.error(request, refusal)
+        return _point_back(project, point)
+
+    stored = None
+    taken = parse_photo_taken_at(request.POST.get('photo_taken_at'))
+    try:
+        stored = _stored_round_photo(request, project)
+        writer = reverify_accept if decision == 'accept' else reverify_reject
+        writer(point.pk, request.user, project, remark=remark, stored_photo=stored,
+               photo_taken_at=taken)
+    except (QaqcVisitRefused, PunchPointRefused) as exc:
+        discard_unrecorded_punch_photo(stored)
+        messages.error(request, str(exc))
+        return _point_back(project, point)
+    if decision == 'accept':
+        messages.success(request, f"Punch point on '{point.task.task_name}' re-verified "
+                                  f"and closed.")
+    else:
+        messages.warning(request, f"Rectification not accepted — the punch point on "
+                                  f"'{point.task.task_name}' is open again.")
+    return _point_back(project, point)
+
+
+@login_required
+def punch_point_event_photo(request, project_id, event_pk):
+    """
+    One rectify / re-verify round's photo: a redirect to a link signed now (the visit
+    photo pattern). Access: every viewer of the site — the punch points card, rounds
+    included, is shown to all of them. 404 otherwise, on Residential / CAPEX, for a
+    round on another site, for a round with no photo, and when no link can be signed.
+    """
+    project = _point_site(request, project_id)
+    event = (PunchPointEvent.objects
+             .filter(pk=event_pk, punch_point__task__phase__project=project).first())
+    if event is None or not event.photo_path:
+        raise Http404
+    url = bill_pdf_url(event.photo_bucket, event.photo_path)
     if url is None:
         raise Http404
     return redirect(url)

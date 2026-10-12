@@ -122,6 +122,42 @@
 {# ── Work to confirm (contractor bills 4b-1): None draws nothing ─────────────── #}
 {% include "projects/approvals/_pending_card_se.html" %}
 
+{% comment %}Closeout 7b (PP-6, go-ahead Q6): outstanding punch points a QA/QC visit raised on
+   this engineer's own tasks — task, reason, the QA/QC photo, status. Rectify links to the
+   form on the task page (one form, one place); a Rectified point waits on re-verification
+   and offers nothing here. Visit-raised only: a rejection's point is the rejected
+   submission, acted on by resubmitting. One query (punch_points.open_points_on_my_tasks).
+   Empty list draws nothing.{% endcomment %}
+{% if my_open_punch_points %}
+<div class="card shadow-sm border-0 mb-4" id="my-punch-points">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-exclamation-triangle"></i> Open punch points on my tasks
+    <span class="badge bg-warning text-dark">{{ my_open_punch_points|length }}</span>
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for point in my_open_punch_points %}
+    <li class="list-group-item d-flex flex-wrap align-items-start gap-2 small">
+      <a href="{% url 'qaqc_visit_photo' point.task.phase.project.project_id point.qaqc_answer.pk %}" target="_blank" rel="noopener" title="QA/QC photo">
+        <img src="{% url 'qaqc_visit_photo' point.task.phase.project.project_id point.qaqc_answer.pk %}" alt="QA/QC photo" loading="lazy"
+             style="max-height:56px; max-width:72px; object-fit:cover;" class="rounded border">
+      </a>
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <div class="fw-semibold">{{ point.task.phase.project.project_id }} · {{ point.task.task_name }}</div>
+        <div class="text-muted">{{ point.reason|truncatechars:160 }}</div>
+      </div>
+      {% if point.status == 'Open' %}
+        <span class="badge bg-danger align-self-center">Open</span>
+        <a href="{% url 'task_detail' point.task.phase.project.project_id point.task_id %}#punch-point-{{ point.pk }}"
+           class="btn btn-sm btn-brand align-self-center">Rectify</a>
+      {% else %}
+        <span class="badge bg-info text-dark align-self-center">Rectified — awaiting re-verification</span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 {% comment %}Closeout step 3: the sites this engineer is the active QA/QC engineer for.
    They hold no task there (CL-A), so these sites never appear among the project cards
    below, which are built from held tasks; this list is their way in. Each row counts the

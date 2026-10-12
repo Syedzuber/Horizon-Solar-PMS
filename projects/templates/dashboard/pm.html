@@ -116,6 +116,35 @@
 </div>
 {% endif %}
 
+{% comment %}Closeout 7b (PP-6): QA/QC punch points marked Rectified on this user's sites,
+   waiting for re-verification (views.dashboard_pm, punch_points.awaiting_reverification;
+   three queries). Re-verify is the site's QA/QC engineer's; the link reads "Re-verify" only
+   where this user may do it themselves (no engineer can act, and they did not record the
+   round), otherwise "Open" for sight of it. Empty list draws nothing.{% endcomment %}
+{% if awaiting_reverification %}
+<div class="card shadow-sm border-0 mb-4" id="awaiting-reverification">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-arrow-repeat"></i> Awaiting re-verification
+    <span class="badge bg-info text-dark">{{ awaiting_reverification|length }}</span>
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for point in awaiting_reverification %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between align-items-start gap-2 small">
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <div class="fw-semibold">{{ point.task.phase.project.project_id }} · {{ point.task.task_name }}</div>
+        <div class="text-muted">{{ point.reason|truncatechars:140 }}</div>
+        {% if point.latest_round %}
+          <div class="text-muted">Rectified by {{ point.latest_round.actor.user.get_full_name|default:point.latest_round.actor.user.username }}, {{ point.latest_round.acted_at|date:"d M Y" }}{% if point.site_has_engineer %} · with the site's QA/QC engineer{% endif %}</div>
+        {% endif %}
+      </div>
+      <a href="{% url 'task_detail' point.task.phase.project.project_id point.task_id %}#punch-point-{{ point.pk }}"
+         class="btn btn-sm {% if point.pm_may_reverify %}btn-brand{% else %}btn-outline-secondary{% endif %}">{% if point.pm_may_reverify %}Re-verify{% else %}Open{% endif %}</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h5 class="mb-0 fw-semibold">My Projects</h5>
   {% comment %}
@@ -169,6 +198,8 @@ dashboard looks exactly as it did before. Label only: no collapse/expand control
         {% endif %}
         {# Closeout step 7 (V-10): only on an OPEX site with a QA/QC engineer or a submitted visit (views.dashboard_pm, qaqc_views.last_visit_lines). #}
         {% if row.has_qaqc_line %}<span class="text-muted ms-2 qaqc-visit-line" style="font-size:.7rem;">· {% if row.qaqc_visit_days is None %}No QA/QC visit yet{% elif row.qaqc_visit_days == 0 %}Last QA/QC visit: today{% else %}Last QA/QC visit: {{ row.qaqc_visit_days }} day{{ row.qaqc_visit_days|pluralize }} ago{% endif %}</span>{% endif %}
+        {# Closeout 7b (PP-6): outstanding punch points on the site (Open or Rectified, both sources), one grouped query (views.dashboard_pm). #}
+        {% if row.open_punch_points %}<span class="badge bg-warning text-dark ms-2 site-open-punch" style="font-size:.68rem;">{{ row.open_punch_points }} open punch point{{ row.open_punch_points|pluralize }}</span>{% endif %}
       </span>
 
       {# Urgency indicator — after project name #}

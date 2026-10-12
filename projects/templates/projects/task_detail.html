@@ -58,6 +58,24 @@
   </div>
 </div>
 
+{# ── Punch points (2.3a; closeout steps 2 and 7b) — at the top, under the header (PP-6) ── #}
+{% comment %}
+The card lives in partials/_punch_points.html. This wrapper is always rendered,
+empty when the task has no punch points, because it is the out-of-band target
+_task_approval_response.html swaps after an approve (which closes points) or a
+reject (which raises the first one). The card's own id, punchPointsSection,
+still appears only when there is a card. Closeout 7b moved it up from below the
+checklist: an outstanding point is the first thing anyone opening the task must see,
+and the approval panel's PP-2 list links down to it.
+{% endcomment %}
+<div id="punchPointsBlock">
+  {% include 'projects/partials/_punch_points.html' %}
+</div>
+{% comment %}The photo helper for the Rectify / Re-verify forms on the card. Included
+   whenever the card is, so an out-of-band card swap still finds it on the page; it is
+   delegated from document and does nothing without a data-qaqc-photo input.{% endcomment %}
+{% if task_punch_points %}{% include 'projects/partials/_qaqc_photo_script.html' %}{% endif %}
+
 {# ── Not Applicable — the PM's scope call, reversible, reason required both ways ── #}
 {# Renders the STATE to anyone who may see the task, and the CONTROLS only to the     #}
 {# assigned PM (can_mark_not_applicable, which also refuses mirrors). Two separate    #}
@@ -252,18 +270,6 @@ completion action re-renders only this block, leaving #attachmentList / #taskSta
   </div>
 </div>
 {% endif %}
-
-{# ── Punch points (2.3a; closeout step 2) ────────────────── #}
-{% comment %}
-The card lives in partials/_punch_points.html. This wrapper is always rendered,
-empty when the task has no punch points, because it is the out-of-band target
-_task_approval_response.html swaps after an approve (which closes points) or a
-reject (which raises the first one). The card's own id, punchPointsSection,
-still appears only when there is a card.
-{% endcomment %}
-<div id="punchPointsBlock">
-  {% include 'projects/partials/_punch_points.html' %}
-</div>
 
 
 {# ── Issues section ───────────────────────────────────────────────────────── #}

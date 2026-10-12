@@ -5,7 +5,8 @@
                   conditional on another control), and a photo. The photo is required on
                   a first answer; on an edit an empty file keeps the current photo (Q9).
      answer     — the recorded answer, its photo (through qaqc_visit_photo, which signs at
-                  the click), the EXIF time if one was read, and any punch point it raised.
+                  the click), the EXIF time if one was read, and any punch point it raised
+                  (a badge linking to the point on its task page, closeout 7b).
      neither    — a Check button for the engineer.
    `capture="environment"` opens the rear camera on a phone, as on the site engineer's
    checklist. The visit page's script downscales the photo and reads its EXIF time before
@@ -59,8 +60,11 @@
         <div class="text-muted">
           Answered {{ answer.answered_at|date:"d M Y, H:i" }}{% if answer.photo_taken_at %} · photo taken {{ answer.photo_taken_at|date:"d M Y, H:i" }}{% endif %}
         </div>
+        {% comment %}Closeout 7b (PP-6): the badge links to that point's row on its task page,
+           where its rounds and the Rectify / Re-verify / Waive forms are.{% endcomment %}
         {% if answer.punch_point %}
-          <div><span class="badge bg-warning text-dark">Punch point {{ answer.punch_point.get_status_display|lower }}</span></div>
+          <div><a href="{% url 'task_detail' project.project_id answer.task_id %}#punch-point-{{ answer.punch_point_id }}"
+                  class="badge bg-warning text-dark text-decoration-none qaqc-punch-link">Punch point {{ answer.punch_point.get_status_display|lower }}</a></div>
         {% endif %}
       </div>
       {% if can_answer and visit.status == 'open' %}

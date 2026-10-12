@@ -221,8 +221,9 @@ urlpatterns = [
     path('projects/<str:project_id>/tasks/<int:task_id>/submit-approval/', views.task_submit_for_approval, name='task_submit_for_approval'), # Assigned user or PM
     path('projects/<str:project_id>/tasks/<int:task_id>/approve/',         views.task_approve,             name='task_approve'),             # PM, site QA/QC engineer, or is_qaqc
     path('projects/<str:project_id>/tasks/<int:task_id>/reject/',          views.task_reject,              name='task_reject'),              # PM, site QA/QC engineer, or is_qaqc
-    # Punch points (2.3a) — raised by a rejection, waived by the PM alone. The id is
-    # a PunchPoint pk, scoped to the project in the URL by the view.
+    # Punch points (2.3a) — raised by a rejection or a QA/QC visit, waived by the PM or a
+    # coordinator (Open or Rectified). The id is a PunchPoint pk, scoped to the project
+    # in the URL by the view.
     path('projects/<str:project_id>/punch-points/<int:punch_point_id>/waive/', views.punch_point_waive, name='punch_point_waive'), # PM only, NOT is_qaqc
     # Not Applicable — one endpoint for BOTH directions; the form posts
     # not_applicable=1 to mark and anything else to un-mark, and a reason is
@@ -242,6 +243,14 @@ urlpatterns = [
     path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/points/<int:task_id>/<int:item_id>/', qaqc_views.qaqc_visit_point, name='qaqc_visit_point'),
     path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/submit/', qaqc_views.qaqc_visit_submit, name='qaqc_visit_submit'),
     path('projects/<str:project_id>/qaqc/visit-answers/<int:answer_pk>/photo/', qaqc_views.qaqc_visit_photo, name='qaqc_visit_photo'),
+    # Punch point rectify / re-verify loop (closeout 7b) — QA/QC-raised points on RESCO
+    # (OPEX) sites only; 404 elsewhere. POST only, from the task page's punch card.
+    # punch_point_rectify — the task's assignee, the PM or a coordinator; never the site's QA/QC engineer
+    path('projects/<str:project_id>/punch-points/<int:punch_point_id>/rectify/', qaqc_views.punch_point_rectify, name='punch_point_rectify'),
+    # punch_point_reverify — the site's QA/QC engineer; PM / coordinator only when no engineer can act
+    path('projects/<str:project_id>/punch-points/<int:punch_point_id>/reverify/', qaqc_views.punch_point_reverify, name='punch_point_reverify'),
+    # punch_point_event_photo — every viewer of the site; a redirect to a link signed at the click
+    path('projects/<str:project_id>/punch-points/rounds/<int:event_pk>/photo/', qaqc_views.punch_point_event_photo, name='punch_point_event_photo'),
     # COD record (closeout step 4) — RESCO (OPEX) sites only; 404 elsewhere. Record and
     # withdraw: the site's PM and coordinators. The PDF: every viewer of the site, as a
     # redirect to a link signed at the click.

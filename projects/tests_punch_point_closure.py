@@ -7,8 +7,8 @@ WHAT IS PINNED
 - CL-1: an approval, ordinary or self-certified, closes every Open point on THAT
   task, crediting the approver at the approval instant, with the method recorded.
   Waived points, and points on other tasks, are untouched.
-- CL-B readiness: the closure does not care what raised the point. A row created
-  directly, as a step-7 spot check will create it, closes the same way.
+- PP-1 (closeout 7b, replacing CL-B readiness): a point a QA/QC visit raised is never
+  closed by approval; a point with no visit link is rejection-raised and closes.
 - A refused completion closes nothing (the closure is inside the approval's
   transaction).
 - CL-2: `open_punch_points_for_project()` counts Open only, across every task on
@@ -31,8 +31,13 @@ from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
 
-from .models import ActivityLog, Project, PunchPoint, Task
-from .punch_points import open_punch_points_for_project
+from .models import (
+    ActivityLog, Checklist, ChecklistItem, Project, PunchPoint, QaqcVisit, QaqcVisitAnswer,
+    SiteQaqcAssignment, Task,
+)
+from .punch_points import (
+    close_punch_points_on_approval, open_punch_points_for_project, raise_punch_point,
+)
 from .tests_punch_point import PunchPointFixture
 from .tests_two_step_completion import _client_for, _profile
 from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_task_to
@@ -133,12 +138,56 @@ class ApprovalClosesPunchPointsTests(ClosureFixture):
         self.assertEqual(elsewhere.status, PunchPoint.OPEN)
         self.assertIsNone(elsewhere.closed_at)
 
-    def test_a_point_not_raised_by_a_rejection_also_closes(self):
-        """CL-B readiness: a step-7 spot check will create the row directly. The
-        closure must not assume task_reject made it."""
+    def _visit_raised_point(self, task, reason='Spot check: cable glands loose.'):
+        """A punch point linked from a submitted QA/QC visit's "No" answer - the one
+        thing that makes a point visit-raised (punch_points.visit_raised_q)."""
+        engineer = _profile('closure_visit_qaqc', 'Site Engineer')
+        assignment = SiteQaqcAssignment.objects.create(
+            project=self.site, engineer=engineer, assigned_by=self.pm)
+        visit = QaqcVisit.objects.create(
+            project=self.site, engineer=engineer, assignment=assignment,
+            visit_date=timezone.localdate())
+        checklist = Checklist.objects.create(code='CLOSURE-V', name='Closure visit',
+                                             version_no=1, requires_photo=False)
+        item = ChecklistItem.objects.create(checklist=checklist, label='Glands', order=1)
+        point = raise_punch_point(task, reason, engineer)
+        QaqcVisitAnswer.objects.create(
+            visit=visit, task=task, item=item, answer=QaqcVisitAnswer.NO,
+            remark='loose', item_text_snapshot='Glands', photo_file_name='p.jpg',
+            photo_bucket='b', photo_path='SITE/qaqc-visit/p.jpg', punch_point=point)
+        # Answers are writable only while the visit is open, so it is submitted last,
+        # with the status write submit_qaqc_visit() itself makes.
+        QaqcVisit.objects.filter(pk=visit.pk).update(
+            status=QaqcVisit.SUBMITTED, submitted_at=timezone.now())
+        return point
+
+    def test_a_visit_raised_point_stays_open_under_approval(self):
+        """PP-1 (amending CL-B readiness): a point raised by a QA/QC visit is never
+        closed by an approval. Through the endpoint the approval is refused outright
+        (PP-2); asked of the closure function directly, it closes nothing."""
+        task = self._in_progress()
+        visit_point = self._visit_raised_point(task)
+        task = self._submitted(task=task)
+        self._approve(task)
+        task.refresh_from_db()
+        visit_point.refresh_from_db()
+        self.assertIsNone(task.approved_at)
+        self.assertEqual(visit_point.status, PunchPoint.OPEN)
+
+        task.approved_at = timezone.now()
+        closed = close_punch_points_on_approval(
+            task, self.qaqc, PunchPoint.CLOSED_ON_APPROVAL, self.site)
+        visit_point.refresh_from_db()
+        self.assertEqual(closed, 0)
+        self.assertEqual(visit_point.status, PunchPoint.OPEN)
+        self.assertIsNone(visit_point.closed_at)
+
+    def test_a_point_with_no_visit_link_still_closes_on_approval(self):
+        """PP-1: a point with no QaqcVisitAnswer link is rejection-raised, whoever
+        created the row, and closes on approval as CL-1 always said."""
         task = self._in_progress()
         direct = PunchPoint.objects.create(
-            task=task, reason='Spot check: cable glands loose.', raised_by=self.qaqc)
+            task=task, reason='No visit link.', raised_by=self.qaqc)
         task = self._submitted(task=task)
         self._approve(task)
         direct.refresh_from_db()

@@ -423,20 +423,22 @@ class PunchPointIsolationTests(PunchPointFixture):
         self.assertEqual([p.reason for p in response.context['task_punch_points']],
                          ['Earthing not tested.'])
 
-    def test_punch_point_states_are_three_and_share_only_spelling_with_issue(self):
-        """`Issue.status` is untouched by 2.3a and by closeout step 2. A punch
-        point has exactly three states. `Open` and `Closed` are spelt like Issue
-        states, but the tables are separate and no code path reads both, so the
-        shared spelling cannot route a row into the wrong branch. `Waived` is
-        punch-point only. A fourth value, or a wider overlap, is a change to the
-        model docstring's argument and must fail here first."""
+    def test_punch_point_states_are_four_and_share_only_spelling_with_issue(self):
+        """`Issue.status` is untouched by 2.3a and by closeout steps 2 and 7b. A punch
+        point has exactly four states (7b added Rectified, PP-3). `Open` and `Closed`
+        are spelt like Issue states, but the tables are separate and no code path reads
+        both, so the shared spelling cannot route a row into the wrong branch.
+        `Rectified` and `Waived` are punch-point only. A fifth value, or a wider
+        overlap, is a change to the model docstring's argument and must fail here
+        first."""
         issue_states = {value for value, _ in Issue.STATUS_CHOICES}
         punch_states = {value for value, _ in PunchPoint.STATUS_CHOICES}
-        self.assertEqual(punch_states, {'Open', 'Waived', 'Closed'})
+        self.assertEqual(punch_states, {'Open', 'Rectified', 'Waived', 'Closed'})
         self.assertEqual(
             punch_states & issue_states, {'Open', 'Closed'},
             'the two enums drifted — see the note in models.PunchPoint')
         self.assertNotIn('Waived', issue_states)
+        self.assertNotIn('Rectified', issue_states)
 
 
 # ---------------------------------------------------------------------------

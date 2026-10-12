@@ -6074,30 +6074,38 @@ class PunchPoint(models.Model):
     is a row here. Three rejections mean three rows, in order, each with its own
     reason. That is why `task` is a plain FK with no uniqueness on it.
 
-    WHY THE STATUS ENUM IS ITS OWN, AND WHY NO PERSON CAN SET "CLOSED". There is no
-    state a person reaches by declaring the work fixed, and that is deliberate: a
-    punch point is closed by the work being re-submitted and approved, which is a
-    fact about the TASK. `Closed` (closeout step 2, CL-1) is that fact recorded on
-    the row - written ONLY by `punch_points.close_punch_points_on_approval()`, from
-    the two approval paths, never by a form or a button of its own (migration 0111
-    also wrote it once, retroactively, for points that predate the rule). The only thing a
-    person may do to a punch point directly is WAIVE it - accept the defect and let
-    the site proceed with it - and B-12 puts that in the PM's hands alone.
+    WHY THE STATUS ENUM IS ITS OWN, AND WHY NOBODY CLOSES A POINT BY DECLARING IT
+    FIXED. A point raised by a REJECTION is closed by the work being re-submitted and
+    approved, which is a fact about the TASK: `punch_points.close_punch_points_on_approval()`
+    writes it from the two approval paths (CL-1; migration 0111 also wrote it once,
+    retroactively). A point raised by a QA/QC VISIT is never closed by approval
+    (PP-1): someone marks it Rectified with a remark and a photo, and a SECOND person
+    - the site's QA/QC engineer - re-verifies it with a photo of their own
+    (PP-3/PP-4, `punch_points.reverify_accept()`). Rectified is a claim, not a
+    closure: it still counts as open everywhere (`OUTSTANDING`). The only other way
+    out is a WAIVER - accept the defect and let the site proceed with it - which
+    B-12 puts in the PM's hands.
 
-    THREE VALUES, TWO SHARED WITH `Issue` BY SPELLING ONLY. `Open` and `Closed` are
-    also `Issue.status` values; `Waived` is not. The tables are separate and no code
-    path reads both, so the shared spelling cannot route a row into the wrong branch
-    (tests_punch_point.test_punch_point_states_are_three_and_share_only_spelling_with_issue).
+    FOUR VALUES, TWO SHARED WITH `Issue` BY SPELLING ONLY. `Open` and `Closed` are
+    also `Issue.status` values; `Rectified` and `Waived` are not. The tables are
+    separate and no code path reads both, so the shared spelling cannot route a row
+    into the wrong branch
+    (tests_punch_point.test_punch_point_states_are_four_and_share_only_spelling_with_issue).
     """
 
-    OPEN   = 'Open'
-    WAIVED = 'Waived'
-    CLOSED = 'Closed'
+    OPEN      = 'Open'
+    RECTIFIED = 'Rectified'
+    WAIVED    = 'Waived'
+    CLOSED    = 'Closed'
     STATUS_CHOICES = [
-        (OPEN,   'Open'),
-        (WAIVED, 'Waived'),
-        (CLOSED, 'Closed'),
+        (OPEN,      'Open'),
+        (RECTIFIED, 'Rectified'),
+        (WAIVED,    'Waived'),
+        (CLOSED,    'Closed'),
     ]
+    # Still outstanding: blocks COD (CL-2), HOTO, and - for a visit-raised point - the
+    # task's approval (PP-2). Rectified is here because it is not yet re-verified.
+    OUTSTANDING = (OPEN, RECTIFIED)
 
     # HOW a Closed point was closed. Stored, not derived from the task, because the
     # task's approval columns describe its CURRENT approval and the ledger must keep
@@ -6105,10 +6113,12 @@ class PunchPoint(models.Model):
     CLOSED_ON_APPROVAL       = 'approval'
     CLOSED_ON_SELF_CERTIFIED = 'self_certified'
     CLOSED_RETROACTIVELY     = 'retroactive'
+    CLOSED_ON_REVERIFICATION = 're_verified'
     CLOSURE_METHOD_CHOICES = [
         (CLOSED_ON_APPROVAL,       'Closed on approval'),
         (CLOSED_ON_SELF_CERTIFIED, 'Closed on self-certified approval'),
         (CLOSED_RETROACTIVELY,     'Closed retroactively (CL-1)'),
+        (CLOSED_ON_REVERIFICATION, 'Closed on re-verification'),
     ]
 
     # CASCADE, not SET_NULL: a punch point is a statement ABOUT one task's work and
@@ -6178,6 +6188,106 @@ class PunchPoint(models.Model):
     @property
     def is_open(self):
         return self.status == self.OPEN
+
+    @property
+    def is_outstanding(self):
+        """Open or Rectified: still counts against COD, HOTO and (visit-raised) approval."""
+        return self.status in self.OUTSTANDING
+
+
+class PunchPointEvent(models.Model):
+    """One round of a visit-raised punch point's rectify / re-verify loop (closeout
+    step 7b, PP-3 / PP-4). Append-only history: every round is kept, in order.
+
+    THREE ACTIONS, EACH WITH ITS OWN EVIDENCE RULE (the CHECKs below):
+        rectified          - the assignee, PM or a coordinator says it is fixed:
+                             remark and photo required.
+        reverify_accepted  - the re-verifier agrees: photo required (remark optional).
+                             The point becomes Closed, method `re_verified`.
+        reverify_rejected  - the re-verifier disagrees: reason required (photo
+                             optional). The point goes back to Open.
+
+    WRITTEN ONLY BY punch_points.rectify_punch_point(), reverify_accept() and
+    reverify_reject(), each under a row lock on the point. A waiver is not a round
+    and writes no row here: it is recorded on the PunchPoint itself, as before.
+
+    Only visit-raised points have rows (PP-5: rejection-raised points close on
+    resubmit + approval and never enter this loop).
+    """
+
+    RECTIFIED         = 'rectified'
+    REVERIFY_ACCEPTED = 'reverify_accepted'
+    REVERIFY_REJECTED = 'reverify_rejected'
+    ACTION_CHOICES = [
+        (RECTIFIED,         'Marked rectified'),
+        (REVERIFY_ACCEPTED, 'Re-verified: accepted'),
+        (REVERIFY_REJECTED, 'Re-verified: rejected'),
+    ]
+
+    # PROTECT: this is an accountability record. Only visit-raised points have rows,
+    # and their task is already PROTECTed through QaqcVisitAnswer.task, so this never
+    # blocks a deletion that could otherwise happen.
+    punch_point = models.ForeignKey(
+        PunchPoint, on_delete=models.PROTECT, related_name='events',
+    )
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    actor = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='punch_point_events',
+    )
+    acted_at = models.DateTimeField(default=timezone.now)  # server time of the round
+    remark = models.TextField(blank=True, default='')  # required on rectified / rejected (CHECKs)
+    # The photo, stored like QaqcVisitAnswer's: private bills bucket, signed at the click.
+    photo_file_name = models.CharField(max_length=255, blank=True, default='')  # original filename
+    photo_bucket = models.CharField(max_length=100, blank=True, default='')     # bucket at write time
+    photo_path = models.CharField(max_length=500, blank=True, default='')       # path within the bucket
+    photo_size_kb = models.PositiveIntegerField(default=0)
+    photo_taken_at = models.DateTimeField(null=True, blank=True)  # browser-read EXIF time, as on visits
+
+    class Meta:
+        ordering = ['acted_at', 'pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(action__in=['rectified', 'reverify_accepted',
+                                               'reverify_rejected']),
+                name='punchpointevent_action_valid'),
+            # The three photo columns are one fact: all set or all blank.
+            models.CheckConstraint(
+                condition=(models.Q(photo_file_name='', photo_bucket='', photo_path='')
+                           | (~models.Q(photo_file_name='') & ~models.Q(photo_bucket='')
+                              & ~models.Q(photo_path=''))),
+                name='punchpointevent_photo_columns_together'),
+            # PP-3: a rectification says what was done and shows it.
+            models.CheckConstraint(
+                condition=~models.Q(action='rectified')
+                          | (~models.Q(remark='') & ~models.Q(photo_path='')),
+                name='punchpointevent_rectified_remark_and_photo'),
+            # PP-4: an acceptance is evidenced by the verifier's own photo.
+            models.CheckConstraint(
+                condition=~models.Q(action='reverify_accepted') | ~models.Q(photo_path=''),
+                name='punchpointevent_accepted_photo'),
+            # PP-4: a rejection says why, so the next rectification knows what to fix.
+            models.CheckConstraint(
+                condition=~models.Q(action='reverify_rejected') | ~models.Q(remark=''),
+                name='punchpointevent_rejected_reason'),
+        ]
+
+    def __str__(self):
+        return f"{self.get_action_display()} — punch point {self.punch_point_id}"
+
+    @property
+    def has_photo(self):
+        return bool(self.photo_path)
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'PunchPointEvent is append-only — a recorded round is history; the next '
+                'round is a new row.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'PunchPointEvent is append-only — the rectify / re-verify history is kept.')
 
 
 class SiteQaqcAssignment(models.Model):

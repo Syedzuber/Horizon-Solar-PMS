@@ -4452,6 +4452,12 @@ task raises the point, and until G48 is decided it can only be waived. The propo
 ready to build on: `QaqcVisitAnswer.punch_point` links each "No" to the point it raised, so a
 later "Yes" on the same (task, item) can find the point to close.
 
+**RESOLVED by closeout step 7b (12 Oct 2026, PP-1 to PP-4).** Not by a later visit "Yes": a
+visit-raised point is marked Rectified (assignee, PM or coordinator; remark + photo) and the
+site's QA/QC engineer re-verifies it — accept (photo) closes it with method `re_verified`,
+reject (reason) reopens it. Approval never closes it, whether or not the task is approved.
+See `punch_points.py` and G63.
+
 ### G49 — no Django admin registration for `PunchPoint`
 
 Recorded 8 Oct 2026 by closeout step 2. `PunchPoint` is not registered in `admin.py`. Left
@@ -4651,6 +4657,34 @@ the visit logs only start, submit and lapse. Each answer is its own row with
 open — so the trail of edits during an open visit is not kept. The dossier (step 9) reads
 the submitted answers, which are immutable. If an edit history is wanted, it is a log line
 in `answer_qaqc_point()`.
+
+### G63 — a task reopened after approval can be re-completed without PP-2's guard
+
+Recorded 12 Oct 2026 by closeout step 7b (go-ahead). PP-2 guards the two acts that put an
+approval on a task: `task_approve` and the self-certified branch of
+`task_submit_for_approval`. A task reopened after approval (Done → Blocked → In Progress)
+keeps its stale `approved_at`, so rung 1 of `_apply_task_status_change()` lets it go back
+to Done through the status screens without asking whether a QA/QC punch point is still
+outstanding. The visit-raised point itself is unaffected — it stays Open or Rectified,
+still blocks COD (CL-2) and still needs re-verification or a waiver — but the task reads
+Done beside it. Closing this means a rung in `_apply_task_status_change()` (forbidden to
+7b) or clearing `approved_at` on reopen, which is a decision about what a reopen means.
+
+### G64 — punch point rectify / re-verify: smaller gaps left by closeout 7b
+
+Recorded 12 Oct 2026 by closeout step 7b.
+- The QA/QC engineer has no "awaiting re-verification" list on the SE dashboard. They
+  hear by notice when a point is marked Rectified, and the task page offers the form; the
+  PM dashboard's list shows every Rectified point on the PM's sites. If engineers miss
+  points, add a count to the "QA/QC sites" rows (`qaqc_sites_for_engineer`).
+- No notice on re-verify ACCEPT (PP-6 names visit-raise, rectify and reject only).
+- The three 7b notices share G60's limitation: one `send_notification()` per recipient,
+  so the email carries the message but not the link; the in-app notice links to the point.
+- Rectify / re-verify photos share G60's storage gap: uploaded before the round is
+  written, deleted by the view when the writer refuses, but a process that dies between
+  upload and commit leaves an orphan under `{project_id}/punch-point/`.
+- `PunchPointEvent` has no admin (G49's reasoning applies: the record is written only by
+  `punch_points.py`). Rounds are read on the task page.
 
 ---
 
