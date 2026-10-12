@@ -1,7 +1,7 @@
-# Closeout Spec v2.2 — COD, As-Built, HOTO, QA/QC verification
+# Closeout Spec v2.3 — COD, As-Built, HOTO, QA/QC verification
 
 Horizon Solar PMS · OPEX/RESCO sites · 7 Oct 2026
-Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
+Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.3, 12 Oct 2026: step 7b decisions PP-1 to PP-6, CL-1 amended. v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
 Supersedes: §4 of `docs/OPEX_task_template_spec.md` (stale: it says no mirror derives; Design and the four deliveries do).
 Evidence base: `docs/CLOSEOUT_MIRROR_AUDIT.md` (6 Oct 2026, HEAD `203ab65`). Every factual claim about the code below comes from that audit and must be re-verified by each build session before it is built on.
 
@@ -21,7 +21,7 @@ No mirror converts to an entered task. No template version change is required fo
 
 | # | Decision |
 |---|---|
-| CL-1 | **Punch points close when their task is re-approved.** `task_approve` closes that task's open points. Waiver by PM or coordinator, with a reason, stays. |
+| CL-1 | **Punch points close when their task is re-approved.** `task_approve` closes that task's open points. Waiver by PM or coordinator, with a reason, stays. *Amended 12 Oct 2026 (PP-1): applies to points raised by rejection only; points raised by a QA/QC visit close only by re-verification or waiver.* |
 | CL-2 | **Every open punch point on the site blocks COD and HOTO.** No severity, no "blocking" field. Scope: every task on the site. |
 | CL-3 | **COD evidence: any one of** DISCOM letter · net-meter installation · HRPPL commissioning report — a PDF, plus a **mandatory PM note**. |
 | CL-4 | **QMS-01 (Project-QMS-01_R00, 23 Aug 2026) is split across six homes** (§5). Agreed by Nirankar and the PMs. |
@@ -53,8 +53,9 @@ Order is by dependency. Every step is audit → build → commit, one concern pe
 | 4b | COD on CEO pipeline, stuck rules and site pill (CL-F) | ~0.5 | 4 | `c2a9acb`, no migration |
 | 5 | T&C checklist (QMS-01 §14–16) | ~1 | — | |
 | 6 | As-Built record | ~1 | — | |
-| 7 | QA/QC verification visits | 3–4 | 2, 3 (5 optional) | |
-| 8 | Final Acceptance + HOTO + override; decides project status at HOTO (G59) | 4–5 | 2, 3, 6, 7 | |
+| 7 | QA/QC verification visits — built | | | `a40865f`, migration 0114 |
+| 7b | Punch point rectification loop and visibility (PP-1 to PP-6) | 2–3 | 7 | must ship with 2–7 |
+| 8 | Final Acceptance + HOTO + override; decides project status at HOTO (G59) | 4–5 | 2, 3, 6, 7, 7b | |
 | 9 | Per-site QA/QC dossier | 3–4 | all above | |
 | | **Total** | **19–22** | | ±30% until each step's audit |
 
@@ -146,6 +147,21 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 | V-9 | One helper `site_has_submitted_qaqc_visit(project)`; step 8's HOTO gate (CL-C) calls it. |
 | V-10 | PM dashboard: each OPEX site card shows "Last QA/QC visit: N days ago" or "No QA/QC visit yet" (when an engineer is assigned or a visit exists). |
 
+### Step 7b — Punch point rectification loop and visibility
+
+Found in the 12 Oct 2026 walkthrough: approving a task silently closed QA/QC-raised points (CL-1 as built), there was no point-level fix-and-recheck path, and neither the SE nor the PM saw open points without hunting.
+
+| # | Decision (12 Oct 2026, product owner) |
+|---|---|
+| PP-1 | Task approval closes only points raised by **rejection**. Points raised by a **QA/QC visit** close only by re-verification or waiver. |
+| PP-2 | A task **cannot be approved** while it has an open or rectified-but-not-re-verified QA/QC point. The refusal names the points: rectify and re-verify, or waive. |
+| PP-3 | **Rectify**: the task's assignee, the PM or a coordinator marks a QA/QC point Rectified, with a remark and a photo. |
+| PP-4 | **Re-verify**: the site's assigned QA/QC engineer (or, when none is assigned, the PM or a coordinator). Accept requires a photo → Closed, method "re-verified". Reject requires a reason → back to Open. History of every round kept. |
+| PP-5 | Points raised by rejection do **not** use the rectify loop; they keep closing on resubmit + approval. |
+| PP-6 | Visibility: SE dashboard "Open punch points on my tasks"; PM dashboard per-site open count and "awaiting re-verification" list; open-points badge on the task row; punch points card at the top of the task page; visit-page badge links to the point; the task assignee is notified when a visit raises a point on their task, and the QA/QC engineer when a point is marked Rectified. |
+
+G48 is resolved by PP-3/PP-4.
+
 ### Step 8 — Final Acceptance + HOTO
 
 - One Final Acceptance record per site, covering QMS-01 §18–20:
@@ -188,7 +204,7 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 - **O&M access** to the dossier beyond PDF: future role decision.
 - **`is_qaqc` future**: retire, or keep for a company-wide QA/QC lead with cross-site approval. Decide after Q-0 and step 3.
 - **Delivery mirrors reconcile at activation** (audit Q26): half-day fix, when real tender sites activate.
-- **G48 — step 7 question**: a spot-check punch point raised on an already-approved task can only be waived today. Proposal (not decided): the QA/QC engineer re-verifying the same point as "Yes" closes it with method "re-verified".
+- **G48**: resolved by PP-3/PP-4 (step 7b).
 - **G59 — step 8 question**: does HOTO set `Project.status = Commissioned` (and `commissioned_at` = COD date)? If Commissioned is ever set before work is over, the R1–R10 readers need a shared "open work" status set first.
 - **View-grant switch** (follow-up to CL-G): name the switch in `user_works_on_site` generically ("view-only grants"), state the rule in its docstring, and add a test that fails if a new view grant opens a work gate.
 - **Small UI follow-ups**: G41 archive wording; Delete button shown on active/archived checklists; G55/G57 assignment and COD emails carry no site link.
