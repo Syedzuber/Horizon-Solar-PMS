@@ -4718,6 +4718,28 @@ forbidden to that session, or ruled out of it:
    production for the same pattern before touching it: tasks not Done whose holder is a
    PM who is neither the site's PM nor a coordinator on it.
 
+### G66 — the PM-11 handover message covers 8 pages; the other site 403s do not have it
+
+Recorded 13 Oct 2026 by the PM-11 session (ruling R5). An outgoing PM opening one of 8
+site pages by GET — `project_overview`, `task_detail`, `issue_detail`,
+`project_timeline`, `delivery_challan_detail`, `cod_record`, `site_qaqc`, `boq_detail` —
+is redirected to their dashboard with "… was handed over from you on …"
+(`site_pm.refuse_site_view_404` / `refuse_site_view_403`). These site pages still answer
+an outgoing PM with their plain 403 and no explanation:
+
+- the other BOQ pages, all a bare empty `HttpResponseForbidden()` from
+  `user_can_view_project_boq`: `opex_boq_entry`, `opex_boq_download`, `boq_correct`,
+  `boq_history`;
+- `vendor_order_list` (`user_can_view_project_vendor_orders`);
+- `design_file_download` (`user_can_view_design`);
+- `enable_cascade_scheduling` (`_pm_owns_project`);
+- `boq_request_revision` (`user_can_manage_project`).
+
+If an outgoing PM is found landing on any of them (an old bookmark, a notice link), each
+needs the same treatment: `return refuse_site_view_403(request, project)` in place of its
+plain 403, GET only. Tracked for **Prompt L** (not yet in the repo). Every POST, HTMX and
+download endpoint keeps its plain refusal by ruling (R4) and is not part of this item.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

@@ -84,7 +84,10 @@ from .approval_queries import (
     pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
 )
 # PM-2: the one writer of Project.assigned_pm. All five PM writers below call it.
-from .site_pm import SitePmChangeRefused, change_site_pm, with_outgoing_pm_task_count
+from .site_pm import (
+    SitePmChangeRefused, change_site_pm, refuse_site_view_403, refuse_site_view_404,
+    with_outgoing_pm_task_count,
+)
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -7925,8 +7928,11 @@ def boq_detail(request, project_id):
     profile = request.user.profile
     role    = profile.role
 
+    # Only someone who may read this site's BOQ opens it; anyone else gets the same empty
+    # 403 as before. PM-11: the one exception is a PM who was handed off this site — a
+    # plain GET redirects them to their dashboard with the handover message instead.
     if not user_can_view_project_boq(request.user, project):
-        return HttpResponseForbidden()
+        return refuse_site_view_403(request, project)
 
     # Computed once and reused by every Design write gate on this view, so the locks can
     # never be applied to one branch and forgotten on another.
@@ -10293,8 +10299,11 @@ def project_overview(request, project_id):
     # guard, so Project Coordinator, Site Engineer and Design reached any project in
     # the portfolio. Role and authority checks elsewhere in this view are unchanged --
     # scope is a separate question and gets its own answer.
+    # Only someone who can see the site may open it; anyone else gets the 0.2 refusal.
+    # PM-11: the one exception is a PM who was handed off this site — a plain GET
+    # redirects them to their dashboard with the handover message instead.
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
 
     is_assigned_pm    = user_can_manage_project(request.user, project)
 
@@ -11152,8 +11161,11 @@ def task_detail(request, project_id, task_id):
     # guard, so Project Coordinator, Site Engineer and Design reached any project in
     # the portfolio. Role and authority checks elsewhere in this view are unchanged --
     # scope is a separate question and gets its own answer.
+    # Only someone who can see the site may open it; anyone else gets the 0.2 refusal.
+    # PM-11: the one exception is a PM who was handed off this site — a plain GET
+    # redirects them to their dashboard with the handover message instead.
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
 
     task        = get_object_or_404(Task, pk=task_id, phase__project=project)
     attachments = task.attachments.filter(is_deleted=False)
@@ -12141,8 +12153,11 @@ def issue_detail(request, issue_id):
     # guard, so Project Coordinator, Site Engineer and Design reached any project in
     # the portfolio. Role and authority checks elsewhere in this view are unchanged --
     # scope is a separate question and gets its own answer.
+    # Only someone who can see the site may open it; anyone else gets the 0.2 refusal.
+    # PM-11: the one exception is a PM who was handed off this site — a plain GET
+    # redirects them to their dashboard with the handover message instead.
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
 
     # 0.2 lockdown: the assignee dropdown was every active UserProfile in the company.
     # Narrowed to people with an actual relationship to this project, and revalidated on
@@ -12610,8 +12625,11 @@ def project_timeline(request, project_id):
     # guard, so Project Coordinator, Site Engineer and Design reached any project in
     # the portfolio. Role and authority checks elsewhere in this view are unchanged --
     # scope is a separate question and gets its own answer.
+    # Only someone who can see the site may open it; anyone else gets the 0.2 refusal.
+    # PM-11: the one exception is a PM who was handed off this site — a plain GET
+    # redirects them to their dashboard with the handover message instead.
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
 
     # All activity logs for this project, newest first, with actor data
     logs = (
@@ -12962,8 +12980,11 @@ def delivery_challan_detail(request, project_id, dc_id):
     # was a PM-only guard, so a Project Coordinator or Site Engineer on any project read
     # the delivery detail of every project in the portfolio. The role list above is
     # unchanged -- role and scope are separate questions with separate answers.
+    # Only someone who can see the site may open it; anyone else gets the 0.2 refusal.
+    # PM-11: the one exception is a PM who was handed off this site — a plain GET
+    # redirects them to their dashboard with the handover message instead.
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
 
     # Cross-project guard: DC must belong to the project in the URL
     challan    = get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)

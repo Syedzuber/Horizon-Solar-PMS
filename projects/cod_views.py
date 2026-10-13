@@ -45,6 +45,7 @@ from .forms import check_typed_date
 from .models import CodRecord, Project, Task, UserProfile, log_activity
 from .notifications import send_notification
 from .permissions import project_managers, user_can_record_cod, user_can_view_project
+from .site_pm import refuse_site_view_404
 from .punch_points import (
     effective_qaqc_engineer, latest_rectify_prefetch, next_action,
     open_punch_points_for_project,
@@ -512,7 +513,16 @@ def cod_record(request, project_id):
     who cannot see the site and on Residential / CAPEX sites; 403 for a viewer who
     does not manage it.
     """
-    project = _cod_site(request, project_id)
+    # _cod_site()'s two checks, in its order, written out here rather than called: the
+    # visibility refusal on this screen's GET is the PM-11 handover redirect, and
+    # _cod_site() also serves cod_withdraw (POST) and cod_record_pdf (a download), which
+    # keep the bare 404 (R4). Anyone who cannot see the site: refused (0.2 shape).
+    project = _active_project(project_id)
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # COD is recorded on RESCO sites only; for Residential and CAPEX the URL does not exist.
+    if project.project_type != 'OPEX':
+        raise Http404
     # Only the site's managers record COD — it is the PM's declaration to the client.
     # Everyone else who can see the site reads the card and opens the PDF, no more.
     if not user_can_record_cod(request.user, project):

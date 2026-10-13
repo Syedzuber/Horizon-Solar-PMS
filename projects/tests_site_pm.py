@@ -15,6 +15,10 @@ The five writers all call it; the Zoho webhook calls it outside its creation blo
 a failure never loses the deal (C1). The source check at the bottom fails if anything
 else in application code writes the column (C2).
 
+PM-11 (HandoverMessageTests): an outgoing PM opening one of the 8 covered site pages
+by GET is redirected to their dashboard with the handover message; everyone else gets
+the page's existing refusal, byte for byte.
+
 Run with:
     python manage.py test projects.tests_site_pm --settings=solarpms.test_settings
 """
@@ -31,14 +35,16 @@ from django.contrib import admin as django_admin
 from django.contrib.auth.models import User
 from django.contrib.messages import get_messages
 from django.core.exceptions import PermissionDenied
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import Client, RequestFactory, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
+from .decorators import get_user_dashboard
 from .models import (
-    ActivityLog, AppendOnlyViolation, Program, Project, ProjectPhase, SitePmAssignment,
-    Task, UserProfile,
+    ActivityLog, AppendOnlyViolation, DeliveryChallan, Issue, Program, Project,
+    ProjectPhase, SitePmAssignment, Task, UserProfile,
 )
 from .permissions import can_change_site_pm, user_can_view_project
 from .site_pm import (
@@ -528,3 +534,178 @@ class OneWriterSourceTests(TestCase):
             self.assertIn(rel, files)
             self.assertTrue(_assigned_pm_writes(files[rel]),
                             f'{rel} no longer writes assigned_pm — remove it from the allowlist')
+
+
+# ---------------------------------------------------------------------------
+# PM-11 — the handover message for an outgoing PM
+# ---------------------------------------------------------------------------
+
+class HandoverMessageTests(TestCase):
+    """One OPEX site handed from pm_a to pm_b through the chokepoint, with a task, an
+    issue and a delivery challan so every covered page has something to resolve."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.admin = _profile('ho_admin', 'Admin')
+        cls.pm_a = _profile('ho_pm_a', 'PM')
+        cls.pm_b = _profile('ho_pm_b', 'PM')
+        cls.pm_c = _profile('ho_pm_c', 'PM')
+        cls.pm_never = _profile('ho_pm_never', 'PM')
+        cls.finance = _profile('ho_finance', 'Finance')
+        cls.scm = _profile('ho_scm', 'SCM')
+        cls.se = _profile('ho_se', 'Site Engineer')
+
+        cls.site = Project.objects.create(
+            customer_name='Handover Site', customer_phone='9876543210',
+            site_address='1 Sun Road', city='Lucknow', state='Uttar Pradesh',
+            project_type='OPEX', dc_capacity_kw=Decimal('5.00'), status='Active',
+            project_id='HOSITE01')
+        change_site_pm(cls.site, cls.pm_a, by=cls.admin)
+        phase = ProjectPhase.objects.create(project=cls.site, phase_name='Execution',
+                                            phase_order=1)
+        cls.task = Task.objects.create(phase=phase, task_name='Open task', task_order=1,
+                                       assigned_role='PM', assigned_to=cls.pm_a)
+        cls.issue = Issue.objects.create(project=cls.site, title='Handover issue',
+                                         raised_by=cls.pm_a)
+        cls.challan = DeliveryChallan.objects.create(
+            project=cls.site, dc_number='DC-HO-1', dc_date=timezone.localdate(),
+            status=DeliveryChallan.EXPECTED, created_by=cls.scm)
+        change_site_pm(cls.site, cls.pm_b, by=cls.admin, reason='Workload')
+
+    def pages(self):
+        """(name, url, existing refusal status) for the 8 covered pages (R3)."""
+        pid = self.site.project_id
+        return [
+            ('project_overview', reverse('project_overview', args=[pid]), 404),
+            ('task_detail', reverse('task_detail', args=[pid, self.task.pk]), 404),
+            ('issue_detail', reverse('issue_detail', args=[self.issue.pk]), 404),
+            ('project_timeline', reverse('project_timeline', args=[pid]), 404),
+            ('delivery_challan_detail',
+             reverse('delivery_challan_detail', args=[pid, self.challan.pk]), 404),
+            ('cod_record', reverse('cod_record', args=[pid]), 404),
+            ('site_qaqc', reverse('site_qaqc', args=[pid]), 404),
+            ('boq_detail', reverse('boq_detail', args=[pid]), 403),
+        ]
+
+    def _closed_date(self, profile, site=None):
+        valid_to = (SitePmAssignment.objects
+                    .filter(site=site or self.site, pm=profile, valid_to__isnull=False)
+                    .latest('valid_to').valid_to)
+        return f'{timezone.localtime(valid_to):%d %b %Y}'
+
+    def _expected(self, profile, current):
+        return (f'{self.site.project_id} was handed over from you on '
+                f'{self._closed_date(profile)}. Its current PM is '
+                f'{current.user.get_full_name()}. Contact Admin if you still need access.')
+
+    def _before(self, client, url):
+        """The response as it was before PM-11: the handover branch switched off, so
+        the view's own refusal runs exactly as it did."""
+        with mock.patch('projects.site_pm._handover_redirect', return_value=None):
+            return client.get(url)
+
+    # VERIFY 1
+    def test_outgoing_pm_is_redirected_with_the_message_on_every_page(self):
+        dashboard = get_user_dashboard(self.pm_a.user)
+        for name, url, _status in self.pages():
+            # A fresh client per page: the redirect is not followed here, so one client
+            # would carry page 1's unread message into page 2's list.
+            response = _client(self.pm_a).get(url)
+            self.assertRedirects(response, dashboard, fetch_redirect_response=False,
+                                 msg_prefix=name)
+            msgs = [str(m) for m in get_messages(response.wsgi_request)]
+            self.assertEqual(msgs, [self._expected(self.pm_a, self.pm_b)], name)
+
+    def test_the_message_shows_on_the_dashboard(self):
+        response = _client(self.pm_a).get(
+            reverse('project_overview', args=[self.site.project_id]), follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'was handed over from you on')
+        self.assertContains(response, 'Its current PM is Ho_Pm_B Test.')
+
+    # VERIFY 2
+    def test_a_to_b_to_c_names_the_current_pm_to_both(self):
+        change_site_pm(self.site, self.pm_c, by=self.admin, reason='Second change')
+        url = reverse('project_overview', args=[self.site.project_id])
+        for outgoing in (self.pm_a, self.pm_b):
+            response = _client(outgoing).get(url)
+            msgs = [str(m) for m in get_messages(response.wsgi_request)]
+            self.assertEqual(msgs, [self._expected(outgoing, self.pm_c)],
+                             outgoing.user.username)
+            self.assertIn('Its current PM is Ho_Pm_C Test.', msgs[0])
+
+    # VERIFY 3
+    def test_a_pm_with_no_row_gets_the_unchanged_refusal(self):
+        client = _client(self.pm_never)
+        for name, url, status in self.pages():
+            response = client.get(url)
+            before = self._before(client, url)
+            self.assertEqual(response.status_code, status, name)
+            self.assertEqual(response.status_code, before.status_code, name)
+            self.assertEqual(response.content, before.content, name)
+        boq = client.get(reverse('boq_detail', args=[self.site.project_id]))
+        self.assertEqual(boq.content, b'', 'boq_detail keeps its empty 403')
+
+    # VERIFY 4
+    def test_finance_scm_and_se_with_no_row_are_unchanged(self):
+        """Status always; body too wherever it is a refusal. A 200 page's body carries a
+        fresh CSRF token per request, so two renders are never byte-equal."""
+        for profile in (self.finance, self.scm, self.se):
+            client = _client(profile)
+            for name, url, _status in self.pages():
+                response = client.get(url)
+                before = self._before(client, url)
+                label = f'{profile.role} on {name}'
+                self.assertEqual(response.status_code, before.status_code, label)
+                self.assertNotEqual(response.status_code, 302, label)
+                if response.status_code != 200:
+                    self.assertEqual(response.content, before.content, label)
+
+    # VERIFY 5
+    def test_reassigned_away_then_back_has_normal_access_and_no_message(self):
+        change_site_pm(self.site, self.pm_a, by=self.admin, reason='Back again')
+        response = _client(self.pm_a).get(
+            reverse('project_overview', args=[self.site.project_id]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(list(get_messages(response.wsgi_request)), [])
+
+    # VERIFY 6 (R4)
+    def test_post_and_htmx_requests_keep_the_404(self):
+        client = _client(self.pm_a)
+        pid = self.site.project_id
+        posts = [reverse('task_status_update', args=[pid, self.task.pk]),
+                 reverse('cod_record', args=[pid]),
+                 reverse('site_qaqc', args=[pid])]
+        for url in posts:
+            self.assertEqual(client.post(url, {'status': 'In Progress'}).status_code, 404, url)
+        htmx = client.get(reverse('task_detail', args=[pid, self.task.pk]),
+                          HTTP_HX_REQUEST='true')
+        self.assertEqual(htmx.status_code, 404)
+
+    def test_a_closed_backfilled_row_triggers_the_message(self):
+        """R1: is_backfilled is ignored; only valid_to matters."""
+        old = _site('Backfilled site', assigned_pm=self.pm_c)   # tests may write it directly
+        SitePmAssignment.objects.create(site=old, pm=self.pm_c, is_backfilled=True,
+                                        valid_from=old.created_at)
+        change_site_pm(old, self.pm_b, by=self.admin, reason='First real change')
+        response = _client(self.pm_c).get(reverse('project_overview', args=[old.project_id]))
+        self.assertEqual(response.status_code, 302)
+        msgs = [str(m) for m in get_messages(response.wsgi_request)]
+        self.assertEqual(msgs, [
+            f'{old.project_id} was handed over from you on {self._closed_date(self.pm_c, old)}. '
+            f'Its current PM is Ho_Pm_B Test. Contact Admin if you still need access.'])
+
+    # VERIFY 7
+    def test_an_allowed_request_pays_no_query_for_the_handover_check(self):
+        client = _client(self.pm_b)
+        url = reverse('project_overview', args=[self.site.project_id])
+        client.get(url)                                   # warm per-process caches
+        with CaptureQueriesContext(connection) as plain:
+            self.assertEqual(client.get(url).status_code, 200)
+        with mock.patch('projects.site_pm.pm_handover_notice',
+                        side_effect=AssertionError('called on an allowed request')):
+            with CaptureQueriesContext(connection) as guarded:
+                self.assertEqual(client.get(url).status_code, 200)
+        self.assertEqual(len(plain), len(guarded))
+        self.assertFalse([q for q in plain.captured_queries
+                          if 'sitepmassignment' in q['sql'].lower()])

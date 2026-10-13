@@ -15,15 +15,22 @@ then logs ONE `pm_assigned` ActivityLog line after the writes commit.
 
 It sends nothing. admin_assign_pm and the webhook still send their own existing
 notifications after calling this; no new notification was added (ruling Q5).
+
+It also holds the one exception to "a site you cannot see does not exist for you"
+(PM-11): refuse_site_view_404() / refuse_site_view_403(), at the bottom.
 """
+from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.db.models import Count, OuterRef, Subquery, Value
 from django.db.models.functions import Coalesce
+from django.http import Http404, HttpResponseForbidden
+from django.shortcuts import redirect
 from django.utils import timezone
 
+from projects.decorators import get_user_dashboard
 from projects.models import Project, SitePmAssignment, Task, UserProfile, log_activity
-from projects.permissions import can_change_site_pm
+from projects.permissions import can_change_site_pm, user_can_view_project
 from projects.utils import assign_tasks_to
 
 
@@ -170,3 +177,82 @@ def change_site_pm(project, new_pm, by, reason='', first_assignment_only=False):
     log_activity(project, by, action, entity_type='Project', entity_id=project.pk,
                  action_code='pm_assigned')
     return moved
+
+
+# ---------------------------------------------------------------------------
+# PM-11 — the handover message for an outgoing PM
+#
+# A site you cannot see answers 404 (the 0.2 non-disclosure shape), so a PM who loses a
+# site and then follows an old link or notice gets "page not found" for a site they ran
+# yesterday. The narrow exception: a user who once held this site's PM seat (a CLOSED
+# SitePmAssignment row) and cannot see it now is redirected to their dashboard and told
+# what happened. Everyone else — other PMs, Finance, SCM, anyone with no closed row here —
+# still gets the view's existing refusal, unchanged.
+#
+# It discloses nothing new: the user already knows the site code (it is in their link),
+# and they held the seat, so who holds it now is theirs to know.
+#
+# ONLY ON A DENIAL. The views call these helpers after their own visibility check has
+# already failed, so an allowed request pays no query for this (verified on
+# project_overview). Only plain GETs are redirected; a POST, an HTMX request or anything
+# else gets the existing refusal (R4), because a redirect would break a form post or an
+# HTMX swap.
+# ---------------------------------------------------------------------------
+
+def pm_handover_notice(user, project):
+    """The handover message for `user` on `project`, or None.
+
+    Not None only when the user cannot see the site now AND has a closed
+    SitePmAssignment row on it. Uses their MOST RECENT closed row's `valid_to` (only
+    change_site_pm() ever sets it, so it is a real date even on a backfilled row —
+    `is_backfilled` is deliberately ignored, ruling R1) and the site's CURRENT PM, not
+    whoever followed them (R2): after A -> B -> C, A and B are both told C.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return None
+    # Someone who can see the site again (reassigned back, made a coordinator) is not
+    # refused at all, so they must never be told they were handed over.
+    if user_can_view_project(user, project):
+        return None
+    closed = (SitePmAssignment.objects
+              .filter(site=project, pm=profile, valid_to__isnull=False)
+              .order_by('-valid_to', '-pk')
+              .values_list('valid_to', flat=True)
+              .first())
+    if closed is None:
+        return None
+    current = project.assigned_pm
+    current_name = (current.user.get_full_name() or current.user.username) if current else 'not set'
+    return (f"{project.project_id} was handed over from you on "
+            f"{timezone.localtime(closed):%d %b %Y}. Its current PM is {current_name}. "
+            f"Contact Admin if you still need access.")
+
+
+def _handover_redirect(request, project):
+    """A redirect to the user's dashboard carrying the handover message, or None when
+    this request is not a handover case (not a plain GET, or no closed row)."""
+    if request.method != 'GET' or request.headers.get('HX-Request'):
+        return None
+    notice = pm_handover_notice(request.user, project)
+    if notice is None:
+        return None
+    messages.info(request, notice)
+    return redirect(get_user_dashboard(request.user))
+
+
+def refuse_site_view_404(request, project):
+    """Refuse a site page whose existing refusal is a bare 404. Returns the handover
+    redirect for an outgoing PM; raises the same bare Http404 for everyone else.
+    Callers: `return refuse_site_view_404(request, project)`."""
+    response = _handover_redirect(request, project)
+    if response is None:
+        raise Http404
+    return response
+
+
+def refuse_site_view_403(request, project):
+    """Refuse a site page whose existing refusal is a bare 403 (boq_detail). Returns the
+    handover redirect for an outgoing PM, otherwise the same empty HttpResponseForbidden
+    the view returned before."""
+    return _handover_redirect(request, project) or HttpResponseForbidden()

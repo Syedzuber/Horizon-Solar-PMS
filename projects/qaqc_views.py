@@ -54,6 +54,7 @@ from .permissions import (
     project_managers, user_can_conduct_qaqc_visit, user_can_manage_project,
     user_can_rectify_punch_point, user_can_reverify_punch_point, user_can_view_project,
 )
+from .site_pm import refuse_site_view_404
 from .punch_points import (
     ACCEPT_PHOTO_REQUIRED, RECTIFY_PHOTO_REQUIRED, RECTIFY_REMARK_REQUIRED,
     REJECT_REASON_REQUIRED, PunchPointRefused, queue_visit_raise_notices,
@@ -390,8 +391,10 @@ def site_qaqc(request, project_id):
     # see but do not manage refuses the screen (403). Only the site's managers name its
     # QA/QC engineer, consistent with every other site-level authority (go-ahead ruling);
     # the engineer, other PMs, Design, SCM and Finance are refused.
+    # PM-11: a PM who was handed off this site gets the handover redirect on a GET
+    # instead of the 404; the POST keeps the 404 (R4).
     if not user_can_view_project(request.user, project):
-        raise Http404
+        return refuse_site_view_404(request, project)
     if not user_can_manage_project(request.user, project):
         return HttpResponseForbidden()
     # Residential and CAPEX sites have no QA/QC assignment (CL-9): the screen does not
