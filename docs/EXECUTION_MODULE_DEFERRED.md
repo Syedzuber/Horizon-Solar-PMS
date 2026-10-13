@@ -4689,6 +4689,35 @@ Recorded 12 Oct 2026 by closeout step 7b.
 - `PunchPointEvent` has no admin (G49's reasoning applies: the record is written only by
   `punch_points.py`). Rounds are read on the task page.
 
+### G65 — site PM reassignment (PM-1): five things left as they are
+
+Recorded 13 Oct 2026 by the PM-1 session (rulings PM-1 to PM-4, PM-7, PM-10).
+`site_pm.change_site_pm()` is now the only writer of `Project.assigned_pm`. These were
+forbidden to that session, or ruled out of it:
+
+1. **The Zoho webhook's role filter.** `zoho_deal_closed_webhook` looks the PM up by
+   email with no `role='PM'` filter, so any profile whose email Zoho sends becomes the
+   site's PM. `change_site_pm()` deliberately does not check the role, because doing so
+   would change the webhook before its own fix. **When the filter is fixed, also enforce
+   `role='PM'` inside `change_site_pm()`** (TODO in the webhook marks the spot).
+2. **`dashboard_pm`'s query.** It builds its managed-project list with a hand-written
+   `Q(assigned_pm=…) | Q(coordinators=…)` instead of `permissions.manageable_projects_q()`
+   (R-13). It reads the same column and gives the same answer, so a PM change shows on
+   the dashboard immediately; the duplication is the problem, not the result.
+3. **`design_submission_detail`.** It admits any user with the PM role, not the site's
+   PM (`profile.role not in ('PM', 'Admin')`). After a change, the outgoing PM can still
+   open that site's design submissions by URL, and so can every other PM.
+4. **`project_edit`'s null guard.** It renders `project.assigned_pm.user…` with no check,
+   so a site with no PM (an Admin-created OPEX site, a webhook deal that matched nobody)
+   raises `AttributeError` on the edit page.
+5. **HRP-RES-2026-013 — the first known PM change made without moving tasks.** Local
+   data, 13 Oct 2026: the PM is `chetan`, but `siddharth` (a PM, not a coordinator on the
+   site) still holds 3 open PM tasks — "Pre Commissioning Visit by DISCOM",
+   "SCO Release" and "Meter Installation by DISCOM". The change predates
+   `change_site_pm()`, so nothing moved them. **No data step, by ruling (Q1).** Check
+   production for the same pattern before touching it: tasks not Done whose holder is a
+   PM who is neither the site's PM nor a coordinator on it.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

@@ -6387,6 +6387,76 @@ class SiteQaqcAssignment(models.Model):
             'SiteQaqcAssignment is append-only — an ended assignment stays in history.')
 
 
+class SitePmAssignment(models.Model):
+    """One site's PM for a dated span (rulings PM-2, PM-3).
+
+    HISTORY, NOT AUTHORITY. `Project.assigned_pm` stays the column every access and
+    authority check reads (permissions.py); this table only records who held it and
+    when. Nothing outside tests reads it yet. A future reader must not start deriving
+    access from it — the two are written together by one function and must never be
+    allowed to disagree about who is PM NOW.
+
+    WRITTEN BY site_pm.change_site_pm() ONLY, which closes the open row and opens the
+    next in the same transaction as the `assigned_pm` write. Closing is that function's
+    single filter().update(); save() on an existing row and delete() both raise.
+
+    BACKFILLED ROWS (`is_backfilled=True`, migration 0116) carry `valid_from` =
+    the site's `created_at`, which is NOT when that PM took over — the PM may have
+    been changed any number of times before this table existed, and nothing recorded
+    it (HRP-RES-2026-013 is the known case). A backfilled `valid_from` must NEVER be
+    shown as "PM since"; it is a lower bound at best.
+    """
+
+    # PROTECT throughout, as on SiteQaqcAssignment: an accountability record. Projects
+    # soft-delete, so the site FK never fires in normal operation; a UserProfile named
+    # here cannot be hard-deleted without first deciding what happens to the record.
+    site = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='pm_assignments',
+    )
+    pm = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='pm_site_assignments',
+    )
+    valid_from = models.DateTimeField(default=timezone.now)  # start of the span; approximate when is_backfilled
+    valid_to = models.DateTimeField(null=True, blank=True)  # end of the span; NULL = the PM now
+    assigned_by = models.ForeignKey(  # NULL for the Zoho webhook (no human) and for backfilled rows
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='pm_assignments_made',
+    )
+    reason = models.TextField(blank=True, default='')  # required by the writer on a change, blank on a first assignment
+    is_backfilled = models.BooleanField(default=False)  # written by migration 0116, not by a real assignment
+
+    class Meta:
+        ordering = ['site', '-valid_from', '-pk']
+        constraints = [
+            # One open row per site — the database's half of "one PM at a time".
+            # Backstop for two Admins changing the PM at once: the writer also locks the
+            # project row, so this fires only if that lock is ever bypassed.
+            models.UniqueConstraint(
+                fields=['site'],
+                condition=models.Q(valid_to__isnull=True),
+                name='uniq_site_pm_open'),
+            # A span cannot end before it began.
+            models.CheckConstraint(
+                condition=(models.Q(valid_to__isnull=True)
+                           | models.Q(valid_to__gte=models.F('valid_from'))),
+                name='site_pm_ends_after_start'),
+        ]
+
+    def __str__(self):
+        return f"{self.site.project_id} — PM {self.pm}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'SitePmAssignment is append-only — a span is closed through '
+                'site_pm.change_site_pm(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'SitePmAssignment is append-only — a closed span stays in history.')
+
+
 class CodRecord(models.Model):
     """One OPEX site's COD (commercial operation date) as recorded by its PM or a
     coordinator, with the evidence for it (closeout step 4, CL-3).

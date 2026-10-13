@@ -130,7 +130,14 @@ class ProjectAdmin(admin.ModelAdmin):
     #
     # On the ADD form Django omits readonly fields entirely, so a new project takes the
     # model default, Project.status's 'Draft' — the same value project_create gives it.
-    readonly_fields = ['project_id', 'status', 'created_at', 'activated_at', 'deleted_at']
+    #
+    # DO NOT REMOVE `assigned_pm` either — PM-2. site_pm.change_site_pm() is its one
+    # writer: it writes the SitePmAssignment history row, moves the outgoing PM's open
+    # tasks (PM-4) and enforces Admin-only / not-Cancelled. A form save here would do
+    # none of that. Change a PM from the portal's All Projects page instead. A project
+    # added here starts with no PM, like an Admin-created OPEX site.
+    readonly_fields = ['project_id', 'status', 'assigned_pm', 'created_at', 'activated_at',
+                       'deleted_at']
     inlines         = [PhaseInline, MilestoneInline, DocumentInline]
     actions         = ['soft_delete_selected', 'restore_selected']
 

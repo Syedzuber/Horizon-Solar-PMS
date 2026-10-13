@@ -81,8 +81,29 @@
         </td>
 
         <td class="px-4 py-3 text-gray-700" onclick="event.stopPropagation()">
+          {% comment %}
+            PM-1 / Q6: a Cancelled site's PM cannot be assigned or changed, so it gets no
+            control at all — change_site_pm() refuses it on every path regardless.
+            Change PM posts to the same admin_assign_pm view; outgoing_pm_task_count is
+            the set change_site_pm() moves, for the "N open tasks will move" line.
+          {% endcomment %}
           {% if project.assigned_pm %}
             {{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}
+            {% if project.status != 'Cancelled' %}
+            <button type="button"
+                    class="ml-1 inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-md border border-gray-300 text-gray-600 bg-white hover:bg-gray-50 transition-colors"
+                    data-testid="change-pm-button"
+                    data-project-id="{{ project.project_id }}"
+                    data-customer-name="{{ project.customer_name }}"
+                    data-current-pm-id="{{ project.assigned_pm_id }}"
+                    data-current-pm="{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}"
+                    data-open-count="{{ project.outgoing_pm_task_count }}"
+                    onclick="openChangePmModal(this)">
+              <i data-lucide="repeat" class="w-3 h-3"></i> Change PM
+            </button>
+            {% endif %}
+          {% elif project.status == 'Cancelled' %}
+            <span class="text-gray-400">—</span>
           {% else %}
             <button type="button"
                     class="inline-flex items-center gap-1 px-2 py-1 text-xs font-medium rounded-md border border-amber-300 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors"
@@ -159,6 +180,58 @@
   </div>
 </div>
 
+<!-- Change PM modal (PM-1 to PM-4): reason required; shows how many open tasks move -->
+<div id="changePmModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 hidden">
+  <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+    <div class="flex items-start gap-3 mb-5">
+      <span class="flex-shrink-0 w-9 h-9 rounded-full bg-amber-100 flex items-center justify-center">
+        <i data-lucide="repeat" class="w-4 h-4 text-amber-600"></i>
+      </span>
+      <div>
+        <h3 class="font-semibold text-gray-900">Change Project Manager</h3>
+        <p class="text-sm text-gray-500 mt-1">
+          <span id="changePmProjectId" class="font-medium text-gray-800"></span>
+          — <span id="changePmCustomerName" class="text-gray-700"></span>
+        </p>
+        <p class="text-sm text-gray-500 mt-1">Current PM: <span id="changePmCurrent" class="font-medium text-gray-800"></span></p>
+      </div>
+    </div>
+    <form id="changePmForm" method="post" action="">
+      {% csrf_token %}
+      <label for="changePmSelect" class="block text-sm font-medium text-gray-700 mb-1.5">New PM</label>
+      <select id="changePmSelect" name="pm_user_id" required
+              class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+        <option value="">— choose a PM —</option>
+        {% for pm in pm_users %}
+        <option value="{{ pm.pk }}">{{ pm.user.get_full_name|default:pm.user.username }}</option>
+        {% endfor %}
+      </select>
+      <label for="changePmReason" class="block text-sm font-medium text-gray-700 mb-1.5 mt-4">Reason <span class="text-red-500">*</span></label>
+      <textarea id="changePmReason" name="reason" rows="2" required
+                class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                placeholder="Why is the PM changing?"></textarea>
+      <div class="mt-4 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+        <p id="changePmSummary" data-testid="change-pm-summary"></p>
+        <p class="text-xs text-amber-700 mt-1">
+          Done tasks stay with <span class="changePmCurrentName"></span>.
+          <span class="changePmCurrentName"></span> loses access to this site unless they are a coordinator on it.
+        </p>
+      </div>
+      <div class="flex justify-end gap-2 mt-5">
+        <button type="button" onclick="closeChangePmModal()"
+                class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">
+          Cancel
+        </button>
+        <button type="submit" id="changePmSubmit" disabled
+                class="px-4 py-2 text-sm font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                style="background:#1a7a4a;">
+          Change PM
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+
 <!-- Delete confirmation modal -->
 <div id="deleteModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 hidden">
   <div class="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
@@ -207,6 +280,52 @@ function closeAssignModal() {
 }
 document.getElementById('assignPmModal').addEventListener('click', function(e) {
   if (e.target === this) closeAssignModal();
+});
+
+// Change PM. The confirmation line is rebuilt on every input so the Admin reads
+// "N open tasks will move from X to Y" with the PM they actually picked before submit.
+// The current PM is disabled in the list: picking them is a no-op on the server.
+var changePmState = {count: 0, current: '', currentId: ''};
+function updateChangePmSummary() {
+  var select = document.getElementById('changePmSelect');
+  var reason = document.getElementById('changePmReason');
+  var opt = select.options[select.selectedIndex];
+  var target = select.value ? opt.text : 'the new PM';
+  var n = changePmState.count;
+  document.getElementById('changePmSummary').textContent =
+    n + ' open task' + (n === 1 ? '' : 's') + ' will move from ' +
+    changePmState.current + ' to ' + target + '.';
+  document.getElementById('changePmSubmit').disabled =
+    !(select.value && reason.value.trim());
+}
+function openChangePmModal(btn) {
+  var pid = btn.getAttribute('data-project-id');
+  changePmState.count     = parseInt(btn.getAttribute('data-open-count'), 10) || 0;
+  changePmState.current   = btn.getAttribute('data-current-pm');
+  changePmState.currentId = btn.getAttribute('data-current-pm-id');
+  document.getElementById('changePmProjectId').textContent    = pid;
+  document.getElementById('changePmCustomerName').textContent = btn.getAttribute('data-customer-name');
+  document.getElementById('changePmCurrent').textContent      = changePmState.current;
+  document.querySelectorAll('.changePmCurrentName').forEach(function (el) {
+    el.textContent = changePmState.current;
+  });
+  var select = document.getElementById('changePmSelect');
+  select.value = '';
+  Array.prototype.forEach.call(select.options, function (o) {
+    o.disabled = (o.value !== '' && o.value === changePmState.currentId);
+  });
+  document.getElementById('changePmReason').value = '';
+  document.getElementById('changePmForm').action = '/portal-admin/projects/' + pid + '/assign-pm/';
+  updateChangePmSummary();
+  document.getElementById('changePmModal').classList.remove('hidden');
+}
+function closeChangePmModal() {
+  document.getElementById('changePmModal').classList.add('hidden');
+}
+document.getElementById('changePmSelect').addEventListener('change', updateChangePmSummary);
+document.getElementById('changePmReason').addEventListener('input', updateChangePmSummary);
+document.getElementById('changePmModal').addEventListener('click', function(e) {
+  if (e.target === this) closeChangePmModal();
 });
 
 function openDeleteModal(btn) {

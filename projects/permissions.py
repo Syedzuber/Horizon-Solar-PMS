@@ -1308,6 +1308,28 @@ def user_can_view_ceo_dashboard_lists(user):
     return profile.role in CEO_DASHBOARD_ROLES
 
 
+# Who may CHANGE a site's PM — replace one PM with another (rulings PM-7, narrowed by
+# Q3 to Admin only). Not System Admin: subadmin_projects stays first-assignment only, so
+# System Admin can fill an empty seat but never take one from a PM. Not the PM, a
+# coordinator, Finance or SCM: a change moves the outgoing PM's open tasks (PM-4) and
+# drops their access to the site, which is an organisational decision, not a project one.
+#
+# A FIRST assignment is not gated here: a PM creating a project and the Zoho webhook (no
+# user at all) both fill an empty seat, and their own views decide who may do that.
+# site_pm.change_site_pm() asks this only when the site already has a PM.
+SITE_PM_CHANGE_ROLES = frozenset({'Admin'})
+
+
+def can_change_site_pm(user):
+    """True for Admin (SITE_PM_CHANGE_ROLES); False for everyone else and for a user
+    with no UserProfile. Not project-scoped: Admin may change the PM on any site the
+    chokepoint's own status rule (PM-1) allows."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return profile.role in SITE_PM_CHANGE_ROLES
+
+
 # Who may read the reviewer-correction trail on a BOQ's history page — who changed which
 # quantity on somebody else's bill, and when.
 #

@@ -83,6 +83,8 @@ from .tender_stages import (
 from .approval_queries import (
     pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
 )
+# PM-2: the one writer of Project.assigned_pm. All five PM writers below call it.
+from .site_pm import SitePmChangeRefused, change_site_pm, with_outgoing_pm_task_count
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .decorators import (
     login_required, role_required, get_user_dashboard,
@@ -3539,7 +3541,6 @@ def project_create(request):
         if form.is_valid():
             with transaction.atomic():
                 project = form.save(commit=False)
-                project.assigned_pm = request.user.profile
                 project.status = 'Draft'
                 project.created_by = request.user
                 project.save()
@@ -3549,6 +3550,11 @@ def project_create(request):
                     project, to_status='Draft', actor=request.user.profile,
                     reason_code=REASON_CREATED,
                 )
+                # PM-2: the creating PM takes the seat through the one writer, so the
+                # project's first SitePmAssignment row is written with it. A first
+                # assignment, so no reason and no Admin check; inside this block so a
+                # project never exists without the PM the form promised.
+                change_site_pm(project, request.user.profile, by=request.user.profile)
 
             messages.success(request, f"Project {project.project_id} created successfully.")
             return redirect('project_overview', project_id=project.project_id)
@@ -4925,9 +4931,6 @@ def create_opex_site(program, data, creator, profile=None):
         # widened to 200 to match client_name so this can never overflow.
         site.customer_name = program.client_name
         site.status = 'Draft'
-        # A PM creator owns the site; an Admin creator leaves it unassigned
-        # (assign later via admin_assign_pm) — assigned_pm requires a PM profile.
-        site.assigned_pm = profile if (profile and profile.role == 'PM') else None
         site.created_by = creator
         site.project_id = form.composed_project_id   # explicit → skips generate_project_id()
         site.save()
@@ -4937,6 +4940,12 @@ def create_opex_site(program, data, creator, profile=None):
         record_transition(
             site, to_status='Draft', actor=profile, reason_code=REASON_CREATED,
         )
+        # A PM creator owns the site; an Admin creator leaves it unassigned
+        # (assign later via admin_assign_pm) — assigned_pm requires a PM profile.
+        # PM-2: through the one writer, inside this block, so a bulk upload that rolls
+        # back takes the history row with it.
+        if profile and profile.role == 'PM':
+            change_site_pm(site, profile, by=profile)
     log_activity(
         site, profile,
         f"Created RESCO site {site.project_id} under program {program.name}",
@@ -10971,7 +10980,7 @@ def zoho_deal_closed_webhook(request):
                 # ac_capacity_kw stays null on a webhook-created project.
                 dc_capacity_kw=_safe_decimal(deal.get('Capacity_kW') or deal.get('Capacity')),
                 contract_value=_safe_decimal(deal.get('Amount')),
-                assigned_pm=assigned_pm,
+                # assigned_pm is NOT set here — see change_site_pm() below (C1).
                 target_commissioning_date=target_commissioning_date,
                 status='Draft',
                 zoho_deal_id=record_id,
@@ -10986,10 +10995,6 @@ def zoho_deal_closed_webhook(request):
         # Return 200 even on failure — non-200 would cause Zoho to retry and create duplicates
         return HttpResponse(status=200)
 
-    logger.info('Webhook: project %s created for deal %s (pm=%s)',
-                project.project_id, record_id,
-                project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
-
     try:
         ActivityLog.objects.create(
             project=project,
@@ -11000,6 +11005,24 @@ def zoho_deal_closed_webhook(request):
         )
     except Exception:
         pass
+
+    # PM-2, ruling C1: the PM goes on in its OWN step, after the project is committed.
+    # A failure here must never lose the deal — the project stays, unassigned, and the
+    # no-PM branch below alerts Admin exactly as it does when the email matched nobody.
+    # by=None: no human acted, which change_site_pm() admits for a first assignment only.
+    # TODO: profile_match is not filtered to role='PM', so any profile whose email Zoho
+    # sends becomes PM. Deferred (forbidden this session); when it is fixed, enforce
+    # role='PM' inside change_site_pm() as well.
+    if assigned_pm is not None:
+        try:
+            change_site_pm(project, assigned_pm, by=None)
+        except Exception as exc:
+            logger.error('Webhook: PM assignment failed for project %s — %s',
+                         project.project_id, exc)
+
+    logger.info('Webhook: project %s created for deal %s (pm=%s)',
+                project.project_id, record_id,
+                project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
 
     if project.assigned_pm is None:
         # Notify Admin in-app: PM could not be assigned
@@ -14023,6 +14046,10 @@ def admin_project_list(request):
         )
         .order_by('-created_at')
     )
+    # outgoing_pm_task_count: the N in the Change PM confirmation ("N open tasks will
+    # move from X to Y") — the same set change_site_pm() moves, counted in the one list
+    # query as a subquery column.
+    projects = with_outgoing_pm_task_count(projects)
     pm_users = (
         UserProfile.objects
         .filter(role='PM', is_active=True)
@@ -14040,7 +14067,14 @@ def admin_project_list(request):
 @login_required
 @role_required(['Admin'])
 def admin_assign_pm(request, project_id):
-    """Assign (or reassign) a PM to a Draft project. POST only. Admin only."""
+    """Assign a PM to a site that has none, or change the PM of one that has. POST only.
+    Admin only.
+
+    Any non-deleted site except Cancelled, in any other status (PM-1) — not only Draft,
+    whatever this docstring used to say; the code never checked Draft. A change needs a
+    `reason` and moves the outgoing PM's open tasks on the site to the new PM (PM-4);
+    a first assignment needs neither. All of that is change_site_pm()'s, not this view's.
+    """
     if request.method != 'POST':
         return redirect('admin_project_list')
 
@@ -14057,21 +14091,15 @@ def admin_assign_pm(request, project_id):
         messages.error(request, 'Selected user is not a valid active PM.')
         return redirect('admin_project_list')
 
-    old_pm = project.assigned_pm
-    project.assigned_pm = pm_profile
-    project.save(update_fields=['assigned_pm'])
-
-    log_activity(
-        project=project,
-        actor=request.user.profile,  # was request.user (a User) — silently rejected by the FK
-        action=(
-            f"PM assigned to {pm_profile.user.get_full_name() or pm_profile.user.username}"
-            + (f" (previously {old_pm.user.get_full_name() or old_pm.user.username})" if old_pm else "")
-        ),
-        entity_type='Project',
-        entity_id=project.pk,
-        action_code='pm_assigned',
-    )
+    # PM-2: the one writer. It re-checks Admin itself for a change (PM-7) — the decorator
+    # above already admits only Admin, so a PermissionDenied from it would mean the two
+    # rules have drifted, and Django turns it into the same 403.
+    try:
+        moved = change_site_pm(project, pm_profile, by=request.user.profile,
+                               reason=request.POST.get('reason', ''))
+    except SitePmChangeRefused as exc:
+        messages.error(request, str(exc))
+        return redirect('admin_project_list')
 
     # Notify the newly assigned PM
     try:
@@ -14105,6 +14133,7 @@ def admin_assign_pm(request, project_id):
     messages.success(
         request,
         f'PM assigned to {project.project_id}: {pm_profile.user.get_full_name() or pm_profile.user.username}.'
+        + (f' {moved} open task{"s" if moved != 1 else ""} moved.' if moved else '')
     )
     return redirect('admin_project_list')
 
@@ -15057,22 +15086,23 @@ def subadmin_projects(request):
 
         project = get_object_or_404(Project, pk=project_pk, is_deleted=False)
 
-        # Only first-time assignment — prevent reassignment of already-assigned projects
+        # Only first-time assignment — prevent reassignment of already-assigned projects.
+        # System Admin fills an empty seat; changing a PM is Admin's alone (PM-7, Q3).
+        # This early check gives the plain message; change_site_pm() repeats it under
+        # the row lock (first_assignment_only) so a race cannot slip past it.
         if project.assigned_pm_id:
             messages.error(request, 'This project already has a PM assigned. Reassignment is not permitted here.')
             return redirect('subadmin_projects')
 
         pm_profile = get_object_or_404(UserProfile, pk=pm_prof_pk, role='PM', is_active=True)
-        project.assigned_pm = pm_profile
-        project.save(update_fields=['assigned_pm'])
-
-        log_activity(
-            project=project,
-            actor=request.user.profile,
-            action=f"PM '{pm_profile.user.get_full_name() or pm_profile.user.username}' assigned to project '{project.project_id}' by System Admin",
-            entity_type='Project',
-            entity_id=project.pk,
-        )
+        # PM-2: the one writer; it also writes the pm_assigned log line this view used
+        # to write by hand (without an action_code).
+        try:
+            change_site_pm(project, pm_profile, by=request.user.profile,
+                           first_assignment_only=True)
+        except SitePmChangeRefused as exc:
+            messages.error(request, str(exc))
+            return redirect('subadmin_projects')
         messages.success(request, f'PM assigned to {project.project_id}.')
         return redirect('subadmin_projects')
 
