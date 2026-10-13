@@ -1,0 +1,208 @@
+{% extends "projects/admin/admin_base.html" %}
+{% block page_title %}PM handover{% endblock %}
+{% block nav_pm_handover %}nav-active{% endblock %}
+
+{% block content %}
+{% comment %}
+  PM-2 bulk handover (rulings PM-12, PM-13). Three stages, one view (admin_pm_handover):
+    choose  — Program, then the outgoing PM (who holds a live site in it), then the incoming
+    preview — the outgoing PM's sites with check boxes; Cancelled ones skipped; what will
+              NOT move (material steps, bills waiting for changes) listed for SCM
+    result  — what moved, and the same not-moved lists
+  Every count on the confirmation line is summed in the browser from the ticked rows'
+  data attributes; the server's own counts are on the result page.
+{% endcomment %}
+<div class="mb-6">
+  <h1 class="text-xl font-bold text-gray-800">PM handover</h1>
+  <p class="text-sm text-gray-500 mt-0.5">Move sites of one Program from one PM to another. All chosen sites move, or none do.</p>
+</div>
+
+{% if stage == 'result' %}
+  {% with h=handover %}
+  <div class="mb-6 px-4 py-3 rounded-lg text-sm bg-green-50 text-green-800 border border-green-200" data-testid="handover-result">
+    Handed over {{ h.sites|length }} site{{ h.sites|length|pluralize }} in {{ h.program.name }}
+    from {{ h.from_pm.user.get_full_name|default:h.from_pm.user.username }}
+    to {{ h.to_pm.user.get_full_name|default:h.to_pm.user.username }}:
+    {{ h.tasks_moved }} open task{{ h.tasks_moved|pluralize }} and
+    {{ h.bill_steps_moved }} bill approval step{{ h.bill_steps_moved|pluralize }} moved{% if h.bill_steps_waiting %}
+    ({{ h.bill_steps_waiting }} still waiting on the Site Engineer){% endif %}.
+    One notice went to each PM.
+  </div>
+  <div class="bg-white rounded-xl border border-gray-200 p-4 mb-6">
+    <p class="text-sm font-semibold text-gray-700 mb-2">Sites handed over</p>
+    <p class="text-sm text-gray-600">{% for s in h.sites %}{{ s.project_id }}{% if not forloop.last %}, {% endif %}{% endfor %}</p>
+  </div>
+  {% include "projects/admin/_pm_handover_left_behind.html" with material_steps=h.material_steps returning_bills=h.returning_bills from_pm=h.from_pm %}
+  <a href="{% url 'admin_pm_handover' %}" class="text-sm text-green-700 hover:underline">Start another handover</a>
+  {% endwith %}
+{% else %}
+
+<form method="get" class="bg-white rounded-xl border border-gray-200 p-4 mb-6 grid grid-cols-1 md:grid-cols-4 gap-4 items-end" data-testid="handover-choose">
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1.5" for="hoProgram">Program</label>
+    <select id="hoProgram" name="program" onchange="this.form.submit()"
+            class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+      <option value="">— choose a Program —</option>
+      {% for p in programs %}
+      <option value="{{ p.pk }}" {% if program and p.pk == program.pk %}selected{% endif %}>{{ p.name }} ({{ p.get_program_type_display }})</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1.5" for="hoFrom">Outgoing PM</label>
+    <select id="hoFrom" name="from_pm" onchange="this.form.submit()" {% if not program %}disabled{% endif %}
+            class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+      <option value="">— choose —</option>
+      {% for p in from_choices %}
+      <option value="{{ p.pk }}" {% if from_pm and p.pk == from_pm.pk %}selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }} — {{ p.site_count }} site{{ p.site_count|pluralize }}{% if not p.is_active %} (inactive){% endif %}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <label class="block text-sm font-medium text-gray-700 mb-1.5" for="hoTo">Incoming PM</label>
+    <select id="hoTo" name="to_pm" onchange="this.form.submit()" {% if not from_pm %}disabled{% endif %}
+            class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm">
+      <option value="">— choose —</option>
+      {% for p in to_choices %}
+      <option value="{{ p.pk }}" {% if to_pm and p.pk == to_pm.pk %}selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <button type="submit" class="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200">Show sites</button>
+  </div>
+</form>
+
+{% if program and not from_choices %}
+  <p class="text-sm text-gray-500">No site in {{ program.name }} has a PM.</p>
+{% endif %}
+
+{% if stage == 'preview' %}
+  {% if error %}
+  <div class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200" data-testid="handover-error">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" id="handoverForm" data-testid="handover-preview">
+    {% csrf_token %}
+    <input type="hidden" name="program" value="{{ program.pk }}">
+    <input type="hidden" name="from_pm" value="{{ from_pm.pk }}">
+    <input type="hidden" name="to_pm" value="{{ to_pm.pk }}">
+
+    <div class="bg-white rounded-xl border border-gray-200 overflow-hidden mb-6">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+          <tr>
+            <th class="px-4 py-2 text-left">
+              <label class="inline-flex items-center gap-2 normal-case">
+                <input type="checkbox" id="hoSelectAll" {% if not offered %}disabled{% endif %}>
+                Select all of {{ from_pm.user.get_full_name|default:from_pm.user.username }}'s sites in {{ program.name }}
+              </label>
+            </th>
+            <th class="px-4 py-2 text-left">Site</th>
+            <th class="px-4 py-2 text-left">Status</th>
+            <th class="px-4 py-2 text-right">Open tasks moving</th>
+            <th class="px-4 py-2 text-right">Bill steps moving</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in offered %}
+          <tr class="border-t border-gray-100">
+            <td class="px-4 py-2">
+              <input type="checkbox" name="site_ids" value="{{ s.pk }}" class="hoSite"
+                     data-tasks="{{ s.outgoing_pm_task_count }}" data-steps="{{ s.bill_steps }}"
+                     {% if s.pk in picked %}checked{% endif %}>
+            </td>
+            <td class="px-4 py-2 text-gray-800">{{ s.project_id }}{% if s.city %} <span class="text-gray-400">· {{ s.city }}</span>{% endif %}</td>
+            <td class="px-4 py-2 text-gray-600">{{ s.status }}</td>
+            <td class="px-4 py-2 text-right text-gray-700">{{ s.outgoing_pm_task_count }}</td>
+            <td class="px-4 py-2 text-right text-gray-700">
+              {{ s.bill_steps }}{% if s.bill_steps_waiting %} <span class="text-xs text-gray-400">({{ s.bill_steps_waiting }} waiting on the Site Engineer)</span>{% endif %}
+            </td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="5" class="px-4 py-3 text-gray-500">{{ from_pm.user.get_full_name|default:from_pm.user.username }} holds no site in {{ program.name }} that can be handed over.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if skipped %}
+    <div class="bg-white rounded-xl border border-gray-200 p-4 mb-6" data-testid="handover-skipped">
+      <p class="text-sm font-semibold text-gray-700 mb-1">Skipped — Cancelled sites keep their PM</p>
+      <p class="text-sm text-gray-600">{% for s in skipped %}{{ s.project_id }}{% if not forloop.last %}, {% endif %}{% endfor %}</p>
+    </div>
+    {% endif %}
+
+    {% include "projects/admin/_pm_handover_left_behind.html" %}
+
+    <label for="hoReason" class="block text-sm font-medium text-gray-700 mb-1.5">Reason <span class="text-red-500">*</span></label>
+    <textarea id="hoReason" name="reason" rows="2" required
+              class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm mb-4"
+              placeholder="Why are these sites changing PM?">{{ reason }}</textarea>
+
+    <div class="rounded-lg bg-amber-50 border border-amber-200 px-4 py-3 text-sm text-amber-800 mb-4" data-testid="handover-confirmation">
+      Hand over <strong><span class="hoN">0</span> site<span class="hoNs">s</span></strong> in <strong>{{ program.name }}</strong>
+      from <strong>{{ from_pm.user.get_full_name|default:from_pm.user.username }}</strong>
+      to <strong>{{ to_pm.user.get_full_name|default:to_pm.user.username }}</strong>.
+      <strong><span id="hoT">0</span> open task<span id="hoTs">s</span></strong> and
+      <strong><span id="hoS">0</span> bill approval step<span id="hoSs">s</span></strong>
+      move to {{ to_pm.user.get_full_name|default:to_pm.user.username }}.
+      {{ from_pm.user.get_full_name|default:from_pm.user.username }} loses access to these sites.
+      {% if material_steps %}<strong>{{ material_steps|length }} material approval step{{ material_steps|length|pluralize }}</strong>
+      still name {{ from_pm.user.get_full_name|default:from_pm.user.username }}; SCM must reassign {{ material_steps|length|pluralize:"it,them" }}.{% endif %}
+      {{ from_pm.user.get_full_name|default:from_pm.user.username }} and {{ to_pm.user.get_full_name|default:to_pm.user.username }} each get one notice.
+      All <span class="hoN">0</span> move, or none do.
+    </div>
+
+    <button type="submit" id="hoSubmit" disabled
+            class="px-4 py-2 text-sm font-medium text-white rounded-lg hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            style="background:#1a7a4a;">
+      Hand over <span class="hoN">0</span> site<span class="hoNs">s</span>
+    </button>
+  </form>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Sums the ticked rows into the confirmation line and the button. The server decides
+// what actually moves (hand_over_sites); these numbers are what the preview showed.
+(function () {
+  var form = document.getElementById('handoverForm');
+  if (!form) { return; }
+  var boxes = Array.prototype.slice.call(form.querySelectorAll('.hoSite'));
+  var all = document.getElementById('hoSelectAll');
+  var reason = document.getElementById('hoReason');
+  function set(selector, text) {
+    form.querySelectorAll(selector).forEach(function (el) { el.textContent = text; });
+  }
+  function update() {
+    var n = 0, t = 0, s = 0;
+    boxes.forEach(function (b) {
+      if (b.checked) {
+        n += 1;
+        t += parseInt(b.getAttribute('data-tasks'), 10) || 0;
+        s += parseInt(b.getAttribute('data-steps'), 10) || 0;
+      }
+    });
+    set('.hoN', n); set('.hoNs', n === 1 ? '' : 's');
+    document.getElementById('hoT').textContent = t;
+    document.getElementById('hoTs').textContent = t === 1 ? '' : 's';
+    document.getElementById('hoS').textContent = s;
+    document.getElementById('hoSs').textContent = s === 1 ? '' : 's';
+    if (all) { all.checked = boxes.length > 0 && n === boxes.length; }
+    document.getElementById('hoSubmit').disabled = !(n > 0 && reason.value.trim());
+  }
+  if (all) {
+    all.addEventListener('change', function () {
+      boxes.forEach(function (b) { b.checked = all.checked; });
+      update();
+    });
+  }
+  boxes.forEach(function (b) { b.addEventListener('change', update); });
+  reason.addEventListener('input', update);
+  update();
+})();
+</script>
+{% endblock %}

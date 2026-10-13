@@ -4740,6 +4740,34 @@ needs the same treatment: `return refuse_site_view_403(request, project)` in pla
 plain 403, GET only. Tracked for **Prompt L** (not yet in the repo). Every POST, HTMX and
 download endpoint keeps its plain refusal by ruling (R4) and is not part of this item.
 
+### G67 — PM handover (PM-2): left for later by ruling
+
+Recorded 13 Oct 2026 by the PM-2 session (rulings PM-5, PM-6, PM-12, PM-13, pre-flight
+Q1–Q9). `site_pm.hand_over_sites()` now moves sites, open tasks and pending bill PM steps
+all or nothing, from the single-site Change PM and the bulk page `admin_pm_handover`.
+
+1. **PM-2b — a Program's creator keeps Program access after handing every site over
+   (Q5, not this session).** `views._can_access_program` admits `program.created_by` as
+   well as anyone who manages a site, so after a full handover the outgoing PM still has
+   `program_list`, `program_detail` (every site and its PM), `program_edit`,
+   `opex_site_create`, `opex_site_bulk_upload` and `opex_site_bulk_template`. Creating
+   a site through either path makes them its PM again (`create_opex_site` assigns a PM
+   creator), which also restores `user_can_manage_program()`. Production, 13 Oct dump:
+   MPUVNL was created by nirankar, IPGCL Clean and IPGCL Green by anand — each the sole
+   PM of those sites. `program_delete` (Admin only) and the design, site-group and
+   vendor-order Program pages do not read `created_by`.
+2. **A bill waiting for changes goes back to the outgoing PM on resubmit (Q7).**
+   `resubmit_approval_request` gives each party to whoever held it last, so round N+1 of
+   such a bill asks the outgoing PM unless SCM changes the approver. The handover lists
+   these bills ("On resubmit the PM step goes to [A] unless SCM changes the approver.")
+   and the resubmit page already warns "not the assigned PM" (`bill_rules.pm_warnings`).
+   Defaulting the resubmit's PM to the site's current PM is deferred by ruling.
+3. **Found, not fixed: `tests_approvals.ConcurrentDecisionTests` errors on Postgres.**
+   Its `setUp` raises a material request with no `lines`, refused ("Add at least one
+   material line.") since material lines became required on 28 Sep 2026. Both tests are
+   Postgres-only (skipped on SQLite), so the SQLite suite never showed it. Unrelated to
+   PM-2; the fixture needs `lines=[MODULE_LINE]`.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

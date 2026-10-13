@@ -85,8 +85,9 @@ from .approval_queries import (
 )
 # PM-2: the one writer of Project.assigned_pm. All five PM writers below call it.
 from .site_pm import (
-    SitePmChangeRefused, change_site_pm, refuse_site_view_403, refuse_site_view_404,
-    with_outgoing_pm_task_count,
+    SitePmChangeRefused, bill_step_counts, change_site_pm, hand_over_sites,
+    material_steps_held_by, refuse_site_view_403, refuse_site_view_404,
+    returning_bills_for, with_outgoing_pm_bill_step_count, with_outgoing_pm_task_count,
 )
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
 from .decorators import (
@@ -3557,7 +3558,8 @@ def project_create(request):
                 # project's first SitePmAssignment row is written with it. A first
                 # assignment, so no reason and no Admin check; inside this block so a
                 # project never exists without the PM the form promised.
-                change_site_pm(project, request.user.profile, by=request.user.profile)
+                change_site_pm(project, request.user.profile, by=request.user.profile,
+                               expected_outgoing_pm=None)
 
             messages.success(request, f"Project {project.project_id} created successfully.")
             return redirect('project_overview', project_id=project.project_id)
@@ -4948,7 +4950,7 @@ def create_opex_site(program, data, creator, profile=None):
         # PM-2: through the one writer, inside this block, so a bulk upload that rolls
         # back takes the history row with it.
         if profile and profile.role == 'PM':
-            change_site_pm(site, profile, by=profile)
+            change_site_pm(site, profile, by=profile, expected_outgoing_pm=None)
     log_activity(
         site, profile,
         f"Created RESCO site {site.project_id} under program {program.name}",
@@ -11024,7 +11026,7 @@ def zoho_deal_closed_webhook(request):
     # role='PM' inside change_site_pm() as well.
     if assigned_pm is not None:
         try:
-            change_site_pm(project, assigned_pm, by=None)
+            change_site_pm(project, assigned_pm, by=None, expected_outgoing_pm=None)
         except Exception as exc:
             logger.error('Webhook: PM assignment failed for project %s — %s',
                          project.project_id, exc)
@@ -14071,6 +14073,9 @@ def admin_project_list(request):
     # move from X to Y") — the same set change_site_pm() moves, counted in the one list
     # query as a subquery column.
     projects = with_outgoing_pm_task_count(projects)
+    # outgoing_pm_bill_step_count: the M in "... and M bill approval steps will move"
+    # (PM-5), a second subquery column on the same list query.
+    projects = with_outgoing_pm_bill_step_count(projects)
     pm_users = (
         UserProfile.objects
         .filter(role='PM', is_active=True)
@@ -14092,9 +14097,17 @@ def admin_assign_pm(request, project_id):
     Admin only.
 
     Any non-deleted site except Cancelled, in any other status (PM-1) — not only Draft,
-    whatever this docstring used to say; the code never checked Draft. A change needs a
-    `reason` and moves the outgoing PM's open tasks on the site to the new PM (PM-4);
-    a first assignment needs neither. All of that is change_site_pm()'s, not this view's.
+    whatever this docstring used to say; the code never checked Draft.
+
+    `expected_pm_id` is the PM the form showed (blank on the Assign modal): the change is
+    refused if the seat holds anyone else by the time it lands (PM-2 Q3).
+
+      * A FIRST assignment goes straight to change_site_pm() and keeps its assign_project
+        notice (in-app, WhatsApp, email), as before (Q8).
+      * A CHANGE is a one-site handover: hand_over_sites() moves the open tasks (PM-4) and
+        the pending bill PM steps (PM-5), and sends the PM-6 pair instead of
+        assign_project (Q8). Material steps and bills awaiting changes that still name
+        the outgoing PM are listed in the success message for the Admin (Q6, Q7).
     """
     if request.method != 'POST':
         return redirect('admin_project_list')
@@ -14112,17 +14125,42 @@ def admin_assign_pm(request, project_id):
         messages.error(request, 'Selected user is not a valid active PM.')
         return redirect('admin_project_list')
 
-    # PM-2: the one writer. It re-checks Admin itself for a change (PM-7) — the decorator
-    # above already admits only Admin, so a PermissionDenied from it would mean the two
-    # rules have drifted, and Django turns it into the same 403.
+    # The outgoing PM may have left (inactive) — that is often why the PM is changing —
+    # so no role or active filter here: this is "who the form said holds the seat".
+    expected_pm = None
+    expected_pm_id = request.POST.get('expected_pm_id', '').strip()
+    if expected_pm_id:
+        expected_pm = (UserProfile.objects.select_related('user')
+                       .filter(pk=expected_pm_id if expected_pm_id.isdigit() else None)
+                       .first())
+        if expected_pm is None:
+            messages.error(request, 'The current PM on that form no longer exists. '
+                                    'Reload the page and try again.')
+            return redirect('admin_project_list')
+
+    if expected_pm is not None:
+        # A change. hand_over_sites() asks change_site_pm(), which re-checks Admin itself
+        # (PM-7) — the decorator above already admits only Admin, so a PermissionDenied
+        # from it would mean the two rules have drifted, and Django turns it into a 403.
+        try:
+            handover = hand_over_sites([project], expected_pm, pm_profile,
+                                       request.user.profile, request.POST.get('reason', ''),
+                                       program=project.program)
+        except SitePmChangeRefused as exc:
+            messages.error(request, str(exc))
+            return redirect('admin_project_list')
+        messages.success(request, _single_handover_message(handover))
+        return redirect('admin_project_list')
+
     try:
-        moved = change_site_pm(project, pm_profile, by=request.user.profile,
-                               reason=request.POST.get('reason', ''))
+        change_site_pm(project, pm_profile, by=request.user.profile,
+                       expected_outgoing_pm=None)
     except SitePmChangeRefused as exc:
         messages.error(request, str(exc))
         return redirect('admin_project_list')
 
-    # Notify the newly assigned PM
+    # Notify the newly assigned PM — first assignment only (Q8); a change sends the PM-6
+    # pair from hand_over_sites() instead.
     try:
         pm_display_name = pm_profile.user.get_full_name() or pm_profile.user.username
         _link = f'/projects/{project.project_id}/overview/'
@@ -14154,9 +14192,147 @@ def admin_assign_pm(request, project_id):
     messages.success(
         request,
         f'PM assigned to {project.project_id}: {pm_profile.user.get_full_name() or pm_profile.user.username}.'
-        + (f' {moved} open task{"s" if moved != 1 else ""} moved.' if moved else '')
     )
     return redirect('admin_project_list')
+
+
+def _single_handover_message(handover):
+    """The success line for a one-site Change PM: what moved, then what did not and still
+    names the outgoing PM (Q6, Q7) — the single-site counterpart of the bulk result page,
+    which has room for a table."""
+    site = handover.sites[0]
+    old = handover.from_pm.user.get_full_name() or handover.from_pm.user.username
+    new = handover.to_pm.user.get_full_name() or handover.to_pm.user.username
+    parts = [
+        f'PM of {site.project_id} changed from {old} to {new}: '
+        f'{_plural(handover.tasks_moved, "open task")} moved, '
+        f'{_plural(handover.bill_steps_moved, "bill approval step")} moved.'
+    ]
+    if handover.material_steps:
+        listed = '; '.join(f'#{step.request_id} {step.request.title}'
+                           + (f' ({tag})' if tag else '')
+                           for step, tag in handover.material_steps)
+        parts.append(f'{_plural(len(handover.material_steps), "material approval step")} '
+                     f'still name {old} and did not move — SCM has been told: {listed}.')
+    for bill in handover.returning_bills:
+        parts.append(f'Bill #{bill.pk} {bill.title} is waiting for changes. On resubmit the '
+                     f'PM step goes to {old} unless SCM changes the approver.')
+    return ' '.join(parts)
+
+
+def _plural(n, noun):
+    return f'{n} {noun}{"" if n == 1 else "s"}'
+
+
+def _int_or_none(value):
+    value = (value or '').strip()
+    return int(value) if value.isdigit() else None
+
+
+def _handover_preview(program, from_pm):
+    """What the bulk handover page shows before the Admin confirms: the outgoing PM's live
+    sites in `program` with what each would move, the Cancelled ones as skipped (PM-13),
+    and what would NOT move but still names the outgoing PM (Q6, Q7).
+
+    Queries: the sites (with the open-task count as a subquery column), one grouped
+    bill-step count, the material steps (at most five) and the returning bills (one) —
+    flat in the number of sites.
+    """
+    sites = list(with_outgoing_pm_task_count(
+        Project.objects.filter(program=program, is_deleted=False, assigned_pm=from_pm)
+        .order_by('project_id')))
+    offered = [s for s in sites if s.status != 'Cancelled']
+    skipped = [s for s in sites if s.status == 'Cancelled']
+    counts = bill_step_counts(offered, from_pm.pk)
+    for site in offered:
+        site.bill_steps, site.bill_steps_waiting = counts.get(site.pk, (0, 0))
+    return {
+        'offered': offered,
+        'skipped': skipped,
+        'material_steps': material_steps_held_by(from_pm.pk, offered, program),
+        'returning_bills': returning_bills_for(from_pm.pk, offered),
+    }
+
+
+@login_required
+@role_required(['Admin'])
+def admin_pm_handover(request):
+    """Hand over many sites of one Program from one PM to another (rulings PM-12, PM-13).
+    Admin only: the same rule as a single-site Change PM (SITE_PM_CHANGE_ROLES, PM-7) —
+    a handover moves another PM's open work and takes their access, an organisational
+    decision. Everyone else is refused by role_required, and change_site_pm() re-checks
+    Admin for every site.
+
+    GET  ?program=&from_pm=&to_pm=  — choose the Program, then the outgoing PM (those
+         holding a live site in it, active or not: a PM who has left is the usual case),
+         then the incoming PM (an active PM). With all three chosen, the preview: every
+         one of the outgoing PM's sites in the Program with a check box, Cancelled ones
+         listed as skipped, and what will not move.
+    POST confirm — hand_over_sites() over the ticked sites, one transaction. Success
+         renders the result page (what moved, and what still names the outgoing PM);
+         a refusal re-renders the preview with the site that failed and why, and
+         nothing has moved.
+    """
+    data = request.POST if request.method == 'POST' else request.GET
+    programs = list(Program.objects.filter(is_deleted=False).order_by('name'))
+    program = next((p for p in programs if p.pk == _int_or_none(data.get('program'))), None)
+
+    from_choices, to_choices = [], []
+    from_pm = to_pm = None
+    if program is not None:
+        # Who holds a live site in this Program, with how many — the outgoing PM is one
+        # of them by definition (PM-12).
+        held = dict(Project.objects.filter(program=program, is_deleted=False,
+                                           assigned_pm__isnull=False)
+                    .order_by().values_list('assigned_pm').annotate(n=Count('pk')))
+        from_choices = list(UserProfile.objects.filter(pk__in=held).select_related('user')
+                            .order_by('user__first_name', 'user__username'))
+        for profile in from_choices:
+            profile.site_count = held[profile.pk]
+        from_pm = next((p for p in from_choices
+                        if p.pk == _int_or_none(data.get('from_pm'))), None)
+        to_choices = list(UserProfile.objects.filter(role='PM', is_active=True)
+                          .select_related('user').order_by('user__first_name', 'user__username'))
+        if from_pm is not None:
+            to_choices = [p for p in to_choices if p.pk != from_pm.pk]
+        to_pm = next((p for p in to_choices if p.pk == _int_or_none(data.get('to_pm'))), None)
+
+    ctx = {
+        'programs': programs, 'program': program,
+        'from_choices': from_choices, 'from_pm': from_pm,
+        'to_choices': to_choices, 'to_pm': to_pm,
+        'stage': 'choose',
+    }
+
+    if request.method == 'POST' and program and from_pm and to_pm:
+        reason = request.POST.get('reason', '')
+        picked = [pk for pk in (_int_or_none(v) for v in request.POST.getlist('site_ids'))
+                  if pk is not None]
+        # Only this Program's live sites can be handed over from here; a posted id that
+        # is not one of them is a tampered or stale form, refused before anything moves.
+        sites = list(Project.objects.filter(pk__in=picked, program=program, is_deleted=False)
+                     .order_by('project_id'))
+        error = None
+        if len(sites) != len(set(picked)):
+            error = 'A chosen site is no longer in this Program. Reload the page.'
+        else:
+            try:
+                handover = hand_over_sites(sites, from_pm, to_pm, request.user.profile,
+                                           reason, program=program)
+            except SitePmChangeRefused as exc:
+                error = str(exc)
+        if error is None:
+            ctx.update({'stage': 'result', 'handover': handover})
+            return render(request, 'projects/admin/pm_handover.html', ctx)
+        ctx.update(_handover_preview(program, from_pm))
+        ctx.update({'stage': 'preview', 'error': f'Nothing was handed over. {error}',
+                    'picked': set(picked), 'reason': reason})
+        return render(request, 'projects/admin/pm_handover.html', ctx)
+
+    if program and from_pm and to_pm:
+        ctx.update(_handover_preview(program, from_pm))
+        ctx.update({'stage': 'preview', 'picked': set(), 'reason': ''})
+    return render(request, 'projects/admin/pm_handover.html', ctx)
 
 
 def _residential_template_duration_rows():
@@ -15120,7 +15296,7 @@ def subadmin_projects(request):
         # to write by hand (without an action_code).
         try:
             change_site_pm(project, pm_profile, by=request.user.profile,
-                           first_assignment_only=True)
+                           expected_outgoing_pm=None, first_assignment_only=True)
         except SitePmChangeRefused as exc:
             messages.error(request, str(exc))
             return redirect('subadmin_projects')

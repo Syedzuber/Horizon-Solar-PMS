@@ -462,6 +462,7 @@ urlpatterns = [
     path('portal-admin/audit-log/',                     views.admin_audit_log,           name='admin_audit_log'),
     path('portal-admin/projects/',                      views.admin_project_list,        name='admin_project_list'),
     path('portal-admin/projects/<str:project_id>/assign-pm/', views.admin_assign_pm,      name='admin_assign_pm'),
+    path('portal-admin/pm-handover/',                   views.admin_pm_handover,         name='admin_pm_handover'),   # PM-2: Admin only
     path('portal-admin/task-durations/',                views.admin_task_durations,      name='admin_task_durations'),
     path('portal-admin/users/<int:user_id>/reset-password/', views.admin_reset_password, name='admin_reset_password'),
 

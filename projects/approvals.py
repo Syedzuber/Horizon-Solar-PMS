@@ -9,7 +9,7 @@ through filter().update() once the row exists. The same pattern as payments.py,
 utils.assign_task_to() and utils.record_transition(): one function family owns one
 table's writes, with no signals and no save() overrides.
 
-The five entry points:
+The six entry points:
 
   create_approval_request()   the request, its material detail, its scope, its round-1
                               steps and attachments; sequence-1 steps activated at once
@@ -17,6 +17,8 @@ The five entry points:
   resubmit_approval_request() SCM's revision after "changes requested" — round N+1
   withdraw_approval_request() SCM closes a request that is open or awaiting changes
   reassign_approval_step()    SCM hands a pending step to someone else, same round
+  hand_over_pm_step()         a site's PM changed: its pending bill PM step moves with
+                              it (PM-5) — Admin, not SCM; no per-step notice
 
 THE ORDER INSIDE EVERY WRITE IS FIXED (Layer 5 #1): take select_for_update() on the
 REQUEST row first, then read any step. Two parallel approvers each lock the one request
@@ -71,7 +73,9 @@ rejected; "work not done" is a changes request. apply_approval_decision holds th
 NOTIFICATIONS (Approvals 2b) ARE REGISTERED HERE AND BUILT ELSEWHERE. Each entry point
 registers exactly one transaction.on_commit(..., robust=True) callback from
 approval_notices.py, inside its own atomic block, passing ids: a refused or rolled-back
-action sends nothing, and a notice that fails after commit never undoes the action.
+action sends nothing, and a notice that fails after commit never undoes the action. The
+one exception is hand_over_pm_step(), which registers none: the PM change it is part of
+sends one summary per PM for every step it moved (PM-6).
 Who hears what, and the wording, live in approval_notices.py. record_transition() is
 still called with its default notify=True: the only StatusTransition receiver
 (signals.payment_transition_notices) returns at once for any subject other than
@@ -109,7 +113,7 @@ from .bill_storage import bills_bucket
 # today + 5 years); forms imports models, utils and permissions, never this module.
 from .forms import check_typed_date
 from .permissions import (
-    profile_can_be_approval_assignee, user_can_decide_approval_step,
+    can_change_site_pm, profile_can_be_approval_assignee, user_can_decide_approval_step,
     user_can_raise_approval_request, user_can_reassign_approval_step,
     user_can_record_proxy_decision, user_can_withdraw_approval_request,
 )
@@ -1580,23 +1584,79 @@ def reassign_approval_step(step, new_assignee, actor, note):
             if step.verdict != APPROVAL_STEP_PENDING or approval.status != APPROVAL_OPEN:
                 raise ApprovalRefused('Only a pending step of an open request can be reassigned.')
             raise ApprovalRefused('Only SCM can reassign an approval step.')
-        if new_assignee is None or new_assignee.pk == step.assignee_id:
-            raise ApprovalRefused('Choose someone other than the current assignee.')
-        _check_assignees(approval.raised_by_id, {step.party: new_assignee},
-                         _other_parties(approval, step.party, approval.current_round))
-
-        now = timezone.now()
-        ApprovalStep.objects.filter(pk=step.pk, verdict=APPROVAL_STEP_PENDING).update(
-            verdict=APPROVAL_STEP_SUPERSEDED, superseded_at=now, superseded_by=actor,
-            note=note)
-        replacement = ApprovalStep.objects.create(
-            request=approval, round=step.round, party=step.party, sequence=step.sequence,
-            assignee=new_assignee,
-            activated_at=now if step.activated_at is not None else None)
+        replacement = _supersede_with(approval, step, new_assignee, actor, note)
         transaction.on_commit(
             lambda: approval_notices.after_reassign(step.pk, replacement.pk, actor.pk),
             robust=True)
     return replacement
+
+
+def _supersede_with(approval, step, new_assignee, actor, note):
+    """The write both reassignments share: supersede `step` (locked, re-read) and create
+    its replacement for the same round, party and sequence. The replacement is activated
+    now only if the old step was, so a step still waiting on the Site Engineer stays
+    waiting and is announced when that sequence completes. Refuses the same assignee and
+    anyone the same-person rule excludes. Registers no notice — that is the caller's."""
+    if new_assignee is None or new_assignee.pk == step.assignee_id:
+        raise ApprovalRefused('Choose someone other than the current assignee.')
+    _check_assignees(approval.raised_by_id, {step.party: new_assignee},
+                     _other_parties(approval, step.party, approval.current_round))
+
+    now = timezone.now()
+    # Race: safe — the request row is locked (_lock) by the caller, and every step write
+    # takes that lock first, so no decision or other reassignment can land between the
+    # read in _locked_step and this update. The verdict filter is the backstop.
+    ApprovalStep.objects.filter(pk=step.pk, verdict=APPROVAL_STEP_PENDING).update(
+        verdict=APPROVAL_STEP_SUPERSEDED, superseded_at=now, superseded_by=actor,
+        note=note)
+    return ApprovalStep.objects.create(
+        request=approval, round=step.round, party=step.party, sequence=step.sequence,
+        assignee=new_assignee,
+        activated_at=now if step.activated_at is not None else None)
+
+
+def hand_over_pm_step(step, from_pm, to_pm, actor, note):
+    """A site's PM changed: move one pending contractor-bill PM step from the outgoing PM
+    to the incoming one (ruling PM-5, pre-flight Q1/Q2). Returns the new step, or None
+    when there was nothing left to move.
+
+    The ONE caller is site_pm.change_site_pm(), inside its transaction, so a refusal here
+    rolls the whole PM change back (PM-13). It differs from reassign_approval_step() in
+    exactly two ways:
+
+      * THE SCM GATE IS NOT ASKED. The actor is the Admin changing the PM, and
+        can_change_site_pm() is asked instead — the same rule that let them change the
+        PM. Every other rule stands: a pending step of an open request's current round,
+        a different assignee, an eligible PM, and the same-person rule.
+      * NO PER-STEP NOTICE. after_reassign is not registered: the PM change sends one
+        summary to each PM for the whole change (PM-6), with the step count in it. A
+        replacement still waiting on the Site Engineer is announced as usual, by
+        after_decision, when the Site Engineer approves — that notice is untouched.
+
+    `superseded_by` is the Admin and the old row's `note` the PM-change reason, so
+    History shows "Reassigned the PM step" by the Admin with that reason, unchanged.
+
+    None, not a refusal, when under the lock the step is no longer pending in an open
+    request's current round, or no longer names `from_pm`: someone decided it, withdrew
+    the request or reassigned it between the caller's read and this lock. There is then
+    nothing of the outgoing PM's to move, and failing the whole PM change over it would
+    refuse a handover for a step that has already left their hands.
+    """
+    note = _clean(note)
+    if not note:
+        raise ApprovalRefused('Say why this step is being reassigned.')
+    if actor is None or not can_change_site_pm(actor.user):
+        raise ApprovalRefused('Only an Admin changing the PM can hand over a PM step.')
+
+    with transaction.atomic():
+        approval = _lock(step.request_id)
+        step = _locked_step(step, approval)
+        if step.party != APPROVAL_PARTY_PM:
+            raise ApprovalRefused('Only a PM step moves with a change of PM.')
+        if (step.verdict != APPROVAL_STEP_PENDING or approval.status != APPROVAL_OPEN
+                or step.round != approval.current_round or step.assignee_id != from_pm.pk):
+            return None
+        return _supersede_with(approval, step, to_pm, actor, note)
 
 
 # ---------------------------------------------------------------------------

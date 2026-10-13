@@ -1,0 +1,40 @@
+{% comment %}
+  What a PM handover does NOT move but still names the outgoing PM (rulings Q6, Q7).
+  Shared by the preview and the result page of admin_pm_handover.
+    material_steps   [(ApprovalStep, tag)] — every pending material PM step of from_pm;
+                     tag says when its scope names a handed-over site, the Program, or a
+                     group holding one (site_pm.material_steps_held_by)
+    returning_bills  [ApprovalRequest] — bills waiting for changes whose next round would
+                     ask from_pm (site_pm.returning_bills_for)
+{% endcomment %}
+{% with old=from_pm.user.get_full_name|default:from_pm.user.username %}
+{% if material_steps %}
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-6" data-testid="handover-material">
+  <p class="text-sm font-semibold text-gray-700">Material approval steps — not moved, for SCM to reassign</p>
+  <p class="text-xs text-gray-500 mb-2">Every pending material approval step that names {{ old }} as PM. SCM chose the PM on these, so they stay until SCM reassigns them.</p>
+  <ul class="text-sm text-gray-700 space-y-1">
+    {% for step, tag in material_steps %}
+    <li>
+      <a href="{% url 'approval_detail' step.request_id %}" class="text-green-700 hover:underline">#{{ step.request_id }} {{ step.request.title }}</a>
+      <span class="text-xs text-gray-400">· {{ step.request.get_kind_display }} · raised {{ step.request.raised_at|date:"d M Y" }}</span>
+      {% if tag %}<span class="ml-1 inline-block px-1.5 py-0.5 rounded text-xs bg-amber-100 text-amber-800">{{ tag }}</span>{% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% if returning_bills %}
+<div class="bg-white rounded-xl border border-gray-200 p-4 mb-6" data-testid="handover-returning-bills">
+  <p class="text-sm font-semibold text-gray-700">Bills waiting for changes — not moved</p>
+  <ul class="text-sm text-gray-700 space-y-1 mt-1">
+    {% for bill in returning_bills %}
+    <li>
+      <a href="{% url 'approval_detail' bill.pk %}" class="text-green-700 hover:underline">#{{ bill.pk }} {{ bill.title }}</a>
+      <span class="text-xs text-gray-400">· {{ bill.bill_detail.project.project_id }}</span>
+      — On resubmit the PM step goes to {{ old }} unless SCM changes the approver.
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+{% endwith %}

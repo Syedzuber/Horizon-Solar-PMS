@@ -98,6 +98,7 @@
                     data-current-pm-id="{{ project.assigned_pm_id }}"
                     data-current-pm="{{ project.assigned_pm.user.get_full_name|default:project.assigned_pm.user.username }}"
                     data-open-count="{{ project.outgoing_pm_task_count }}"
+                    data-bill-step-count="{{ project.outgoing_pm_bill_step_count }}"
                     onclick="openChangePmModal(this)">
               <i data-lucide="repeat" class="w-3 h-3"></i> Change PM
             </button>
@@ -156,6 +157,8 @@
     </div>
     <form id="assignPmForm" method="post" action="">
       {% csrf_token %}
+      {# Blank: the Assign modal fills an empty seat, and the server refuses if it is no longer empty (PM-2 Q3). #}
+      <input type="hidden" name="expected_pm_id" value="">
       <label class="block text-sm font-medium text-gray-700 mb-1.5">Select PM</label>
       <select name="pm_user_id" required
               class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
@@ -198,6 +201,8 @@
     </div>
     <form id="changePmForm" method="post" action="">
       {% csrf_token %}
+      {# The PM this page showed. The server refuses the change if the seat holds anyone else by then (PM-2 Q3). #}
+      <input type="hidden" id="changePmExpected" name="expected_pm_id" value="">
       <label for="changePmSelect" class="block text-sm font-medium text-gray-700 mb-1.5">New PM</label>
       <select id="changePmSelect" name="pm_user_id" required
               class="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
@@ -285,15 +290,17 @@ document.getElementById('assignPmModal').addEventListener('click', function(e) {
 // Change PM. The confirmation line is rebuilt on every input so the Admin reads
 // "N open tasks will move from X to Y" with the PM they actually picked before submit.
 // The current PM is disabled in the list: picking them is a no-op on the server.
-var changePmState = {count: 0, current: '', currentId: ''};
+var changePmState = {count: 0, steps: 0, current: '', currentId: ''};
 function updateChangePmSummary() {
   var select = document.getElementById('changePmSelect');
   var reason = document.getElementById('changePmReason');
   var opt = select.options[select.selectedIndex];
   var target = select.value ? opt.text : 'the new PM';
   var n = changePmState.count;
+  var m = changePmState.steps;
   document.getElementById('changePmSummary').textContent =
-    n + ' open task' + (n === 1 ? '' : 's') + ' will move from ' +
+    n + ' open task' + (n === 1 ? '' : 's') + ' and ' +
+    m + ' bill approval step' + (m === 1 ? '' : 's') + ' will move from ' +
     changePmState.current + ' to ' + target + '.';
   document.getElementById('changePmSubmit').disabled =
     !(select.value && reason.value.trim());
@@ -301,6 +308,7 @@ function updateChangePmSummary() {
 function openChangePmModal(btn) {
   var pid = btn.getAttribute('data-project-id');
   changePmState.count     = parseInt(btn.getAttribute('data-open-count'), 10) || 0;
+  changePmState.steps     = parseInt(btn.getAttribute('data-bill-step-count'), 10) || 0;
   changePmState.current   = btn.getAttribute('data-current-pm');
   changePmState.currentId = btn.getAttribute('data-current-pm-id');
   document.getElementById('changePmProjectId').textContent    = pid;
@@ -315,6 +323,7 @@ function openChangePmModal(btn) {
     o.disabled = (o.value !== '' && o.value === changePmState.currentId);
   });
   document.getElementById('changePmReason').value = '';
+  document.getElementById('changePmExpected').value = changePmState.currentId;
   document.getElementById('changePmForm').action = '/portal-admin/projects/' + pid + '/assign-pm/';
   updateChangePmSummary();
   document.getElementById('changePmModal').classList.remove('hidden');

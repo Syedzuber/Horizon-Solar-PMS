@@ -95,7 +95,8 @@ class _Fixture(TestCase):
         cls.se = _profile('spm_se', 'Site Engineer')
 
         cls.site = _site()
-        change_site_pm(cls.site, cls.pm_a, by=cls.admin)   # first assignment, no reason
+        change_site_pm(cls.site, cls.pm_a, by=cls.admin,   # first assignment, no reason
+                       expected_outgoing_pm=None)
 
         phase = ProjectPhase.objects.create(project=cls.site, phase_name='Execution',
                                             phase_order=1)
@@ -123,7 +124,8 @@ class _Fixture(TestCase):
     def _change_via_view(self, actor, reason='PM moved to the Kanpur cluster', pm=None):
         return _client(actor).post(
             reverse('admin_assign_pm', args=[self.site.project_id]),
-            {'pm_user_id': (pm or self.pm_b).pk, 'reason': reason})
+            {'pm_user_id': (pm or self.pm_b).pk, 'reason': reason,
+             'expected_pm_id': self.pm_a.pk})
 
     def _site_pm_id(self):
         return Project.objects.values_list('assigned_pm_id', flat=True).get(pk=self.site.pk)
@@ -215,8 +217,10 @@ class ChangeThroughAdminScreenTests(_Fixture):
         self.assertEqual(self.t_not_started.assigned_to_id, self.pm_a.pk)
 
     def test_same_pm_is_a_no_op(self):
-        moved = change_site_pm(self.site, self.pm_a, by=self.admin, reason='again')
-        self.assertEqual(moved, 0)
+        result = change_site_pm(self.site, self.pm_a, by=self.admin,
+                                expected_outgoing_pm=self.pm_a, reason='again')
+        self.assertFalse(result.changed)
+        self.assertEqual(result.tasks_moved, 0)
         self.assertEqual(SitePmAssignment.objects.filter(site=self.site).count(), 1)
 
 
@@ -250,7 +254,8 @@ class CancelledSiteTests(_Fixture):
 
     def test_change_on_a_cancelled_site_is_refused(self):
         with self.assertRaises(SitePmChangeRefused):
-            change_site_pm(self.site, self.pm_b, by=self.admin, reason='x')
+            change_site_pm(self.site, self.pm_b, by=self.admin,
+                           expected_outgoing_pm=self.pm_a, reason='x')
         response = self._change_via_view(self.admin)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self._site_pm_id(), self.pm_a.pk)
@@ -288,7 +293,8 @@ class WhoMayChangeTests(_Fixture):
     def test_the_chokepoint_refuses_every_non_admin_change(self):
         for actor in (self.pm_a, self.finance, self.scm, self.sysadmin, None):
             with self.assertRaises(PermissionDenied):
-                change_site_pm(self.site, self.pm_b, by=actor, reason='x')
+                change_site_pm(self.site, self.pm_b, by=actor,
+                               expected_outgoing_pm=self.pm_a, reason='x')
         self.assertEqual(self._site_pm_id(), self.pm_a.pk)
 
     def test_helper(self):
@@ -302,7 +308,7 @@ class WhoMayChangeTests(_Fixture):
     def test_system_admin_screen_only_fills_an_empty_seat(self):
         with self.assertRaises(SitePmChangeRefused):
             change_site_pm(self.site, self.pm_b, by=self.sysadmin,
-                           first_assignment_only=True)
+                           expected_outgoing_pm=None, first_assignment_only=True)
         empty = _site('Empty seat', status='Draft')
         response = _client(self.sysadmin).post(
             reverse('subadmin_projects'),
@@ -560,7 +566,7 @@ class HandoverMessageTests(TestCase):
             site_address='1 Sun Road', city='Lucknow', state='Uttar Pradesh',
             project_type='OPEX', dc_capacity_kw=Decimal('5.00'), status='Active',
             project_id='HOSITE01')
-        change_site_pm(cls.site, cls.pm_a, by=cls.admin)
+        change_site_pm(cls.site, cls.pm_a, by=cls.admin, expected_outgoing_pm=None)
         phase = ProjectPhase.objects.create(project=cls.site, phase_name='Execution',
                                             phase_order=1)
         cls.task = Task.objects.create(phase=phase, task_name='Open task', task_order=1,
@@ -570,7 +576,8 @@ class HandoverMessageTests(TestCase):
         cls.challan = DeliveryChallan.objects.create(
             project=cls.site, dc_number='DC-HO-1', dc_date=timezone.localdate(),
             status=DeliveryChallan.EXPECTED, created_by=cls.scm)
-        change_site_pm(cls.site, cls.pm_b, by=cls.admin, reason='Workload')
+        change_site_pm(cls.site, cls.pm_b, by=cls.admin, expected_outgoing_pm=cls.pm_a,
+                       reason='Workload')
 
     def pages(self):
         """(name, url, existing refusal status) for the 8 covered pages (R3)."""
@@ -625,7 +632,8 @@ class HandoverMessageTests(TestCase):
 
     # VERIFY 2
     def test_a_to_b_to_c_names_the_current_pm_to_both(self):
-        change_site_pm(self.site, self.pm_c, by=self.admin, reason='Second change')
+        change_site_pm(self.site, self.pm_c, by=self.admin, expected_outgoing_pm=self.pm_b,
+                       reason='Second change')
         url = reverse('project_overview', args=[self.site.project_id])
         for outgoing in (self.pm_a, self.pm_b):
             response = _client(outgoing).get(url)
@@ -663,7 +671,8 @@ class HandoverMessageTests(TestCase):
 
     # VERIFY 5
     def test_reassigned_away_then_back_has_normal_access_and_no_message(self):
-        change_site_pm(self.site, self.pm_a, by=self.admin, reason='Back again')
+        change_site_pm(self.site, self.pm_a, by=self.admin, expected_outgoing_pm=self.pm_b,
+                       reason='Back again')
         response = _client(self.pm_a).get(
             reverse('project_overview', args=[self.site.project_id]))
         self.assertEqual(response.status_code, 200)
@@ -687,7 +696,8 @@ class HandoverMessageTests(TestCase):
         old = _site('Backfilled site', assigned_pm=self.pm_c)   # tests may write it directly
         SitePmAssignment.objects.create(site=old, pm=self.pm_c, is_backfilled=True,
                                         valid_from=old.created_at)
-        change_site_pm(old, self.pm_b, by=self.admin, reason='First real change')
+        change_site_pm(old, self.pm_b, by=self.admin, expected_outgoing_pm=self.pm_c,
+                       reason='First real change')
         response = _client(self.pm_c).get(reverse('project_overview', args=[old.project_id]))
         self.assertEqual(response.status_code, 302)
         msgs = [str(m) for m in get_messages(response.wsgi_request)]
