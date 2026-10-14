@@ -4795,6 +4795,19 @@ still admitted him to all six views; PM-14 refuses him on all six.
 3. **`Program.created_by` is read-only in `ProgramAdmin` (Q3).** A Program added through
    the Django admin therefore has no creator (NULL), and so no creator fallback. Programs
    are created through `program_create` in practice, which still sets it.
+   **Closed 14 Oct 2026 (04ac764):** `ProgramAdmin.save_model` sets `created_by` to the
+   adding user on add only; the field stays read-only. A superuser whose role is PM
+   therefore gets creator access to a Program they add there — accepted (Q6).
+
+### G69 — PM assignment: first-assignment paths have no catch-all (Q5)
+
+Recorded 14 Oct 2026. `hand_over_sites()` turns every per-site and follow-up-read failure
+into a page message naming what failed, so a CHANGE of PM (bulk page or single-site
+Change PM) never answers 500. The two FIRST-assignment paths call `change_site_pm()`
+directly and catch only `SitePmChangeRefused`: the first-assignment branch of
+`admin_assign_pm` and `subadmin_projects`. An unexpected error there (a database fault,
+a bug) still escapes as a 500. Nothing moves either way, since `change_site_pm()` runs in
+its own transaction. Deferred by ruling (Q5).
 
 ---
 

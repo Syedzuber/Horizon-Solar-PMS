@@ -26,6 +26,7 @@ It also holds the one exception to "a site you cannot see does not exist for you
 (PM-11): refuse_site_view_404() / refuse_site_view_403(), at the bottom.
 """
 import logging
+import re
 from dataclasses import dataclass, field
 
 from django.contrib import messages
@@ -64,6 +65,32 @@ class SitePmChangeRefused(Exception):
     """The site, its state or the request makes this PM write impossible. The message is
     written for the person who asked and is safe to show them. A caller who is not
     allowed to change the PM gets PermissionDenied (a 403) instead."""
+
+
+class HandoverFailed(SitePmChangeRefused):
+    """A handover failed after every site went through, in the follow-up reads inside
+    its transaction (material steps, returning bills), so nothing moved. Not any one
+    site's failure: str() is the whole page line. Use handover_error_line()."""
+
+
+def handover_error_line(exc):
+    """The page line for a failed hand_over_sites(), the same on the bulk page and the
+    single-site Change PM: "Nothing was handed over. <site failure or refusal>", or a
+    HandoverFailed's own line."""
+    if isinstance(exc, HandoverFailed):
+        return str(exc)
+    return f'Nothing was handed over. {exc}'
+
+
+def _failed_line(site, reason):
+    """'<code> failed: <reason>' — without the prefix when the reason already starts
+    with the site's code (Q1), as most refusals do ("MB0177 is Cancelled — ..."), so
+    the code is not said twice. The lookahead stops MB001 matching a reason that
+    starts with MB0010."""
+    reason = str(reason)
+    if re.match(rf'{re.escape(site.project_id)}(?![A-Za-z0-9])', reason):
+        return reason
+    return f'{site.project_id} failed: {reason}'
 
 
 def _name(profile):
@@ -395,10 +422,12 @@ def returning_bills_for(pm_id, sites):
 
 def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
     """Move every site in `sites` from `from_pm` to `to_pm`, ALL OR NOTHING (PM-13).
-    Returns a Handover. When any site fails, nothing at all has moved and this raises
-    SitePmChangeRefused("<site code> failed: <reason>"): the reason is the refusal's own
-    message, or "unexpected error (logged)" for any other exception, which is logged with
-    its traceback. PermissionDenied (not Admin) propagates as a 403.
+    Returns a Handover. When anything fails, nothing at all has moved and this raises
+    SitePmChangeRefused("<site code> failed: <reason>") — the reason is the refusal's own
+    message (unprefixed when it already starts with the code), or "unexpected error
+    (logged)" for any other exception, logged with its traceback. An unexpected error in
+    the follow-up reads after the last site raises HandoverFailed instead. Callers show
+    handover_error_line(exc). PermissionDenied (not Admin) propagates as a 403.
 
     Every site goes through change_site_pm() with `from_pm` as the expected outgoing PM,
     in one transaction: a site whose PM changed since the page was loaded, a Cancelled
@@ -417,8 +446,9 @@ def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
 
     handover = Handover(actor=by, from_pm=from_pm, to_pm=to_pm, program=program,
                         reason=reason, sites=list(sites))
-    # The site being processed when something went wrong; None outside the loop, so an
-    # error after it (the material / returning-bill reads) is not blamed on a site.
+    # The site being processed when something went wrong; None after the loop, so an
+    # error in the material / returning-bill reads is not blamed on a site. Those reads
+    # are INSIDE the transaction, so their failure rolls the whole handover back too.
     failing = None
     # The try is OUTSIDE the atomic block on purpose: by the time an except clause runs,
     # the block has already rolled back, so nothing has moved and the connection is
@@ -447,17 +477,20 @@ def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
         # approval rules refuse), so a warning line without a traceback.
         logger.warning('hand_over_sites: %s failed, nothing was handed over: %s',
                        failing.project_id, exc)
-        raise SitePmChangeRefused(f'{failing.project_id} failed: {exc}') from exc
+        raise SitePmChangeRefused(_failed_line(failing, exc)) from exc
     except Exception as exc:
+        # Anything else is a bug or a database fault. The screens must still say what
+        # failed and that nothing moved, never a 500 (PM-13, Q4); the detail goes to the
+        # log, not the page.
         if failing is None:
-            raise
-        # Anything else is a bug or a database fault. The screens must still say which
-        # site failed and that nothing moved, never a 500 (PM-13); the detail goes to
-        # the log, not the page.
+            logger.exception('hand_over_sites: the follow-up reads failed with an '
+                             'unexpected error, nothing was handed over')
+            raise HandoverFailed('Nothing was handed over: unexpected error (logged)') \
+                from exc
         logger.exception('hand_over_sites: %s failed with an unexpected error, nothing '
                          'was handed over', failing.project_id)
         raise SitePmChangeRefused(
-            f'{failing.project_id} failed: unexpected error (logged)') from exc
+            _failed_line(failing, 'unexpected error (logged)')) from exc
     return handover
 
 

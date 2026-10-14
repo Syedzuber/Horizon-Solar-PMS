@@ -86,7 +86,7 @@ from .approval_queries import (
 # PM-2: the one writer of Project.assigned_pm. All five PM writers below call it.
 from .site_pm import (
     SitePmChangeRefused, bill_step_counts, change_site_pm, hand_over_sites,
-    material_steps_held_by, refuse_site_view_403, refuse_site_view_404,
+    handover_error_line, material_steps_held_by, refuse_site_view_403, refuse_site_view_404,
     returning_bills_for, with_outgoing_pm_bill_step_count, with_outgoing_pm_task_count,
 )
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
@@ -14158,7 +14158,7 @@ def admin_assign_pm(request, project_id):
                                        request.user.profile, request.POST.get('reason', ''),
                                        program=project.program)
         except SitePmChangeRefused as exc:
-            messages.error(request, f'Nothing was handed over. {exc}')
+            messages.error(request, handover_error_line(exc))
             return redirect('admin_project_list')
         messages.success(request, _single_handover_message(handover))
         return redirect('admin_project_list')
@@ -14325,21 +14325,31 @@ def admin_pm_handover(request):
                      .order_by('project_id'))
         error = None
         if len(sites) != len(set(picked)):
-            error = 'A chosen site is no longer in this Program. Reload the page.'
+            error = ('Nothing was handed over. A chosen site is no longer in this '
+                     'Program. Reload the page.')
         else:
-            # Every per-site failure, unexpected errors included, arrives as
-            # SitePmChangeRefused("<site code> failed: <reason>"): the preview is
-            # re-rendered with that line, never a 500.
+            # Every failure, unexpected errors included, arrives as SitePmChangeRefused
+            # (or its HandoverFailed): the preview is re-rendered with the line from
+            # handover_error_line(), never a 500.
             try:
                 handover = hand_over_sites(sites, from_pm, to_pm, request.user.profile,
                                            reason, program=program)
             except SitePmChangeRefused as exc:
-                error = str(exc)
+                error = handover_error_line(exc)
         if error is None:
             ctx.update({'stage': 'result', 'handover': handover})
             return render(request, 'projects/admin/pm_handover.html', ctx)
-        ctx.update(_handover_preview(program, from_pm))
-        ctx.update({'stage': 'preview', 'error': f'Nothing was handed over. {error}',
+        try:
+            ctx.update(_handover_preview(program, from_pm))
+        except Exception:
+            # The preview runs the same material / returning-bill reads that may just
+            # have failed the handover (HandoverFailed). If they fail again, show the
+            # error over the choose stage rather than a 500 (Q4).
+            logger.exception('admin_pm_handover: the preview could not be reloaded '
+                             'after a failed handover')
+            ctx.update({'error': error})
+            return render(request, 'projects/admin/pm_handover.html', ctx)
+        ctx.update({'stage': 'preview', 'error': error,
                     'picked': set(picked), 'reason': reason})
         return render(request, 'projects/admin/pm_handover.html', ctx)
 

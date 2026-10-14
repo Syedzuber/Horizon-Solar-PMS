@@ -9,9 +9,12 @@ WHAT IS PINNED HERE
       a first assignment still does (VERIFY 2, Q8)
     - a seat that no longer holds the expected PM is refused and nothing moves (VERIFY 3)
     - one failing site fails the whole handover, and the page names it (VERIFY 4) —
-      a refusal with its own message, anything else (a real IntegrityError) as
-      "unexpected error (logged)" with the traceback logged; never a 500, on the bulk
-      page and the single-site Change PM alike
+      a refusal with its own message ("<code> failed:" only when it does not already
+      start with the code, Q1), anything else (a real IntegrityError) as "unexpected
+      error (logged)" with the traceback logged; a failing follow-up read (material
+      steps, returning bills — inside the transaction, Q4) as "Nothing was handed over:
+      unexpected error (logged)"; never a 500, on the bulk page and the single-site
+      Change PM alike
     - a failed log line never loses the handover — its own savepoint (VERIFY 5, Q4)
     - material steps and bills waiting for changes are listed, not moved; SCM is told
       only when material steps remain (VERIFY 7)
@@ -44,7 +47,7 @@ from .models import (
     APPROVAL_KIND_CONTRACTOR_BILL, APPROVAL_KIND_MATERIAL_PRE_ORDER, APPROVAL_PARTY_PM,
     APPROVAL_PARTY_SITE_ENGINEER, VENDOR_KIND_CONTRACTOR,
 )
-from .site_pm import SitePmChangeRefused, change_site_pm, hand_over_sites
+from .site_pm import SitePmChangeRefused, _failed_line, change_site_pm, hand_over_sites
 from .tests_approvals import MODULE_LINE, SE_PHOTO
 
 BUCKET = 'test-bills'
@@ -409,8 +412,9 @@ class AllOrNothingTests(HandoverFixture):
             response = self._post_bulk([self.s1, self.s2, self.s3])
         self.assertContains(response, 'data-testid="handover-error"')
         self.assertContains(response, 'Nothing was handed over.')
-        self.assertContains(response, f'HOS002&#x27;s PM is now {_name(self.pm_c)}, not '
-                                      f'{_name(self.pm_a)}')
+        self.assertContains(response, f'Nothing was handed over. HOS002&#x27;s PM is now '
+                                      f'{_name(self.pm_c)}, not {_name(self.pm_a)}')
+        self.assertNotContains(response, 'HOS002 failed')   # Q1: the code is not repeated
         self.assertEqual(SitePmAssignment.objects.count(), before)
         self.assertEqual(self._pm(self.s1), self.pm_a.pk)     # HOS001 ran first: rolled back
         self.assertEqual(self._pm(self.s2), self.pm_c.pk)
@@ -439,7 +443,7 @@ class AllOrNothingTests(HandoverFixture):
         with self.captureOnCommitCallbacks(execute=True):
             response = self._post_bulk([self.s1, self.s2, self.s3, self.cancelled])
         self.assertContains(response,
-                            'Nothing was handed over. HOS009 failed: HOS009 is Cancelled')
+                            'Nothing was handed over. HOS009 is Cancelled')
         self._assert_nothing_moved()
         summary.assert_not_called()
 
@@ -453,7 +457,7 @@ class AllOrNothingTests(HandoverFixture):
                     response = self._post_bulk([self.s1, self.s2, self.s3])
         self.assertEqual(response.status_code, 200)
         self.assertContains(response,
-                            'Nothing was handed over. HOS001 failed: HOS001: bill approval')
+                            'Nothing was handed over. HOS001: bill approval')
         self._assert_nothing_moved()
         summary.assert_not_called()
         self.assertEqual(len(logs.records), 1)
@@ -508,10 +512,69 @@ class AllOrNothingTests(HandoverFixture):
                      'expected_pm_id': self.pm_a.pk})
         self.assertEqual(response.status_code, 302)
         text = ' '.join(str(m) for m in response.wsgi_request._messages)
-        self.assertIn('Nothing was handed over. HOS001 failed: HOS001: bill approval', text)
+        self.assertIn('Nothing was handed over. HOS001: bill approval', text)
         self._assert_nothing_moved()
         summary.assert_not_called()
         self.assertIn('HOS001 failed', logs.records[0].getMessage())
+
+    # -- Q4: the follow-up reads run INSIDE the transaction ---------------------------
+
+    def test_a_failing_material_read_moves_nothing(self, summary, _ps, _ap):
+        # Fails inside hand_over_sites only (the view's preview has its own reference),
+        # so the preview re-renders under the error.
+        with mock.patch('projects.site_pm.material_steps_held_by',
+                        side_effect=RuntimeError('material read broke')):
+            with self.assertLogs('projects.site_pm', level='ERROR') as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self._post_bulk([self.s1, self.s2, self.s3])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Nothing was handed over: unexpected error (logged)')
+        self.assertContains(response, 'data-testid="handover-preview"')
+        self.assertNotContains(response, 'material read broke')
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+        self.assertIs(logs.records[0].exc_info[0], RuntimeError)
+
+    def test_a_returning_bill_read_that_keeps_failing_still_renders(self, summary, _ps, _ap):
+        # Fails in the handover AND in the preview reload: the page falls back to the
+        # choose stage with the error, not a 500.
+        broken = mock.Mock(side_effect=RuntimeError('returning read broke'))
+        with mock.patch('projects.site_pm.returning_bills_for', broken), \
+                mock.patch('projects.views.returning_bills_for', broken):
+            with self.assertLogs('projects', level='ERROR') as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self._post_bulk([self.s1, self.s2, self.s3])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Nothing was handed over: unexpected error (logged)')
+        self.assertContains(response, 'data-testid="handover-choose"')
+        self.assertNotContains(response, 'data-testid="handover-preview"')
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+        self.assertEqual(sorted(r.name for r in logs.records),
+                         ['projects.site_pm', 'projects.views'])
+
+    def test_a_failing_read_on_a_single_site_change_moves_nothing(self, summary, _ps, _ap):
+        with mock.patch('projects.site_pm.material_steps_held_by',
+                        side_effect=RuntimeError('material read broke')):
+            with self.assertLogs('projects.site_pm', level='ERROR'):
+                response = _client(self.admin).post(
+                    reverse('admin_assign_pm', args=['HOS001']),
+                    {'pm_user_id': self.pm_b.pk, 'reason': REASON,
+                     'expected_pm_id': self.pm_a.pk})
+        self.assertEqual(response.status_code, 302)
+        text = ' '.join(str(m) for m in response.wsgi_request._messages)
+        self.assertIn('Nothing was handed over: unexpected error (logged)', text)
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+
+    def test_the_site_code_prefix_is_skipped_only_for_that_exact_code(self, *_mocks):
+        site = Project(project_id='MB001')
+        self.assertEqual(_failed_line(site, 'MB001 is Cancelled'), 'MB001 is Cancelled')
+        self.assertEqual(_failed_line(site, "MB001's PM is now X"), "MB001's PM is now X")
+        self.assertEqual(_failed_line(site, 'MB0010 is Cancelled'),
+                         'MB001 failed: MB0010 is Cancelled')
+        self.assertEqual(_failed_line(site, 'unexpected error (logged)'),
+                         'MB001 failed: unexpected error (logged)')
 
     def test_reason_and_a_different_pm_are_required(self, *_mocks):
         with self.assertRaises(SitePmChangeRefused):

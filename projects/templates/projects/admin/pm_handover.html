@@ -77,10 +77,15 @@
   <p class="text-sm text-gray-500">No site in {{ program.name }} has a PM.</p>
 {% endif %}
 
-{% if stage == 'preview' %}
-  {% if error %}
+{% comment %}
+  Outside the preview block: when the preview itself cannot be reloaded after a failed
+  handover, the view falls back to the choose stage and the error must still show.
+{% endcomment %}
+{% if error %}
   <div class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200" data-testid="handover-error">{{ error }}</div>
-  {% endif %}
+{% endif %}
+
+{% if stage == 'preview' %}
 
   <form method="post" id="handoverForm" data-testid="handover-preview">
     {% csrf_token %}
