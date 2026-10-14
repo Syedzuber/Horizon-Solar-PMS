@@ -8,7 +8,10 @@ WHAT IS PINNED HERE
     - a single-site Change PM does the same for N = 1 and no longer sends assign_project;
       a first assignment still does (VERIFY 2, Q8)
     - a seat that no longer holds the expected PM is refused and nothing moves (VERIFY 3)
-    - one failing site fails the whole handover, and the page names it (VERIFY 4)
+    - one failing site fails the whole handover, and the page names it (VERIFY 4) —
+      a refusal with its own message, anything else (a real IntegrityError) as
+      "unexpected error (logged)" with the traceback logged; never a 500, on the bulk
+      page and the single-site Change PM alike
     - a failed log line never loses the handover — its own savepoint (VERIFY 5, Q4)
     - material steps and bills waiting for changes are listed, not moved; SCM is told
       only when material steps remain (VERIFY 7)
@@ -26,6 +29,7 @@ from decimal import Decimal
 from unittest import mock
 
 from django.contrib.auth.models import User
+from django.db import IntegrityError, connection
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -69,6 +73,22 @@ def _client(profile):
 
 def _name(profile):
     return profile.user.get_full_name()
+
+
+def _db_error_on_call(n):
+    """A change_site_pm stand-in that does the real work, then on its n-th call hits a
+    real database error: an INSERT violating NOT NULL. The site's writes are already
+    made when it fails, so the rollback has something to undo."""
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(1)
+        result = change_site_pm(*args, **kwargs)
+        if len(calls) == n:
+            with connection.cursor() as cursor:
+                cursor.execute('INSERT INTO projects_activitylog (action) VALUES (NULL)')
+        return result
+    return run
 
 
 class HandoverFixture(TestCase):
@@ -418,7 +438,8 @@ class AllOrNothingTests(HandoverFixture):
         # HOS001..HOS003, so three sites are written before it fails.
         with self.captureOnCommitCallbacks(execute=True):
             response = self._post_bulk([self.s1, self.s2, self.s3, self.cancelled])
-        self.assertContains(response, 'Nothing was handed over. HOS009 is Cancelled')
+        self.assertContains(response,
+                            'Nothing was handed over. HOS009 failed: HOS009 is Cancelled')
         self._assert_nothing_moved()
         summary.assert_not_called()
 
@@ -427,11 +448,70 @@ class AllOrNothingTests(HandoverFixture):
         # eligibility or same-person rule would): the whole handover rolls back.
         with mock.patch('projects.approvals._check_assignees',
                         side_effect=ApprovalRefused('Ho_Pm_B Test cannot be named.')):
-            with self.captureOnCommitCallbacks(execute=True):
-                response = self._post_bulk([self.s1, self.s2, self.s3])
-        self.assertContains(response, 'Nothing was handed over. HOS001: bill approval')
+            with self.assertLogs('projects.site_pm', level='WARNING') as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self._post_bulk([self.s1, self.s2, self.s3])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response,
+                            'Nothing was handed over. HOS001 failed: HOS001: bill approval')
         self._assert_nothing_moved()
         summary.assert_not_called()
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn('HOS001 failed', logs.records[0].getMessage())
+        self.assertIn('Ho_Pm_B Test cannot be named.', logs.records[0].getMessage())
+
+    def test_an_unexpected_error_on_the_third_site_moves_nothing_and_is_named(
+            self, summary, _ps, _ap):
+        # A real database error (NOT NULL violation) after HOS001..HOS003 are all written:
+        # not a refusal, so it used to escape as a 500. Run on Postgres too, where the
+        # error also aborts the transaction until the rollback.
+        with mock.patch('projects.site_pm.change_site_pm',
+                        side_effect=_db_error_on_call(3)):
+            with self.assertLogs('projects.site_pm', level='ERROR') as logs:
+                with self.captureOnCommitCallbacks(execute=True):
+                    response = self._post_bulk([self.s1, self.s2, self.s3])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-testid="handover-error"')
+        self.assertContains(
+            response, 'Nothing was handed over. HOS003 failed: unexpected error (logged)')
+        self.assertNotContains(response, 'projects_activitylog')   # detail stays in the log
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn('HOS003', logs.records[0].getMessage())
+        self.assertIs(logs.records[0].exc_info[0], IntegrityError)
+
+    def test_a_single_site_change_with_an_unexpected_error_is_named(self, summary, _ps, _ap):
+        with mock.patch('projects.site_pm.change_site_pm',
+                        side_effect=_db_error_on_call(1)):
+            with self.assertLogs('projects.site_pm', level='ERROR') as logs:
+                response = _client(self.admin).post(
+                    reverse('admin_assign_pm', args=['HOS001']),
+                    {'pm_user_id': self.pm_b.pk, 'reason': REASON,
+                     'expected_pm_id': self.pm_a.pk})
+        self.assertEqual(response.status_code, 302)
+        text = ' '.join(str(m) for m in response.wsgi_request._messages)
+        self.assertIn('Nothing was handed over. HOS001 failed: unexpected error (logged)',
+                      text)
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+        self.assertIs(logs.records[0].exc_info[0], IntegrityError)
+        self.assertIn('HOS001', logs.records[0].getMessage())
+
+    def test_a_single_site_change_whose_bill_step_is_refused_is_named(self, summary, _ps, _ap):
+        with mock.patch('projects.approvals._check_assignees',
+                        side_effect=ApprovalRefused('Ho_Pm_B Test cannot be named.')):
+            with self.assertLogs('projects.site_pm', level='WARNING') as logs:
+                response = _client(self.admin).post(
+                    reverse('admin_assign_pm', args=['HOS001']),
+                    {'pm_user_id': self.pm_b.pk, 'reason': REASON,
+                     'expected_pm_id': self.pm_a.pk})
+        self.assertEqual(response.status_code, 302)
+        text = ' '.join(str(m) for m in response.wsgi_request._messages)
+        self.assertIn('Nothing was handed over. HOS001 failed: HOS001: bill approval', text)
+        self._assert_nothing_moved()
+        summary.assert_not_called()
+        self.assertIn('HOS001 failed', logs.records[0].getMessage())
 
     def test_reason_and_a_different_pm_are_required(self, *_mocks):
         with self.assertRaises(SitePmChangeRefused):

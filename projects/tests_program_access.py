@@ -22,7 +22,8 @@ WHAT IS PINNED HERE — refusals first, because they are the point
       or is a coordinator only, is allowed as before
     - Admin and CEO are unchanged; the incoming PM is allowed
     - program_list issues at most ONE extra query for PM-14, however many Programs
-    - Program.created_by is read-only in the Django admin (it is an access input now)
+    - Program.created_by is read-only in the Django admin (it is an access input now);
+      adding a Program there records the adding user, editing one never changes it
 
     python manage.py test projects.tests_program_access --settings=solarpms.test_settings
 """
@@ -323,7 +324,8 @@ class ProgramListQueryTests(ProgramAccessFixture):
 
 
 class ProgramAdminCreatedByTests(ProgramAccessFixture):
-    """Q3: created_by is an access input, so the Django admin shows it but cannot set it."""
+    """Q3: created_by is an access input, so the Django admin shows it but no form field
+    sets it; save_model() records the adding user on add, and only on add."""
 
     def test_01_change_form_does_not_offer_created_by(self):
         program = self._program()
@@ -342,3 +344,49 @@ class ProgramAdminCreatedByTests(ProgramAccessFixture):
         model_admin = admin_site._registry[Program]
         self.assertIn('created_by', model_admin.get_readonly_fields(request, program))
         self.assertNotIn('created_by', model_admin.get_form(request, program).base_fields)
+
+    # -- save_model: the adding user is the creator; an edit never moves it ------------
+
+    def _superuser_client(self, username):
+        superuser = User.objects.create_superuser(username, f'{username}@example.com', 'x')
+        superuser.profile.role = 'Admin'
+        superuser.profile.save()
+        client = Client(SERVER_NAME='localhost')
+        client.force_login(superuser)
+        return superuser, client
+
+    @staticmethod
+    def _admin_form(**overrides):
+        """Every field the ProgramAdmin form posts, as a browser would send them."""
+        data = {'program_type': 'OPEX', 'name': 'Admin Tender', 'client_name': 'Client',
+                'status': 'Active', 'short_tender_code': 'PAADM', 'total_capacity': '',
+                'expected_completion_date': '', 'planned_site_count': '',
+                'tender_reference_number': '', 'bid_value': '', 'award_date': '',
+                'ppa_reference': '', 'ppa_signed_date': '', 'ppa_per_unit_rate': '',
+                'ppa_escalation_percentage': '', 'ppa_escalation_frequency': '',
+                'financing_partner_name': '', 'financing_assistance_type': '',
+                '_save': 'Save'}
+        data.update(overrides)
+        return data
+
+    def test_02_adding_through_the_admin_records_the_adding_user(self):
+        superuser, client = self._superuser_client('pa_super_add')
+
+        response = client.post(reverse('admin:projects_program_add'), self._admin_form())
+
+        self.assertEqual(response.status_code, 302)
+        program = Program.objects.get(short_tender_code='PAADM')
+        self.assertEqual(program.created_by_id, superuser.pk)
+
+    def test_03_editing_through_the_admin_leaves_the_creator_alone(self):
+        program = self._program()                     # created by pa_creator
+        _superuser, client = self._superuser_client('pa_super_edit')
+
+        response = client.post(
+            reverse('admin:projects_program_change', args=[program.pk]),
+            self._admin_form(name='Renamed Tender', short_tender_code=program.short_tender_code))
+
+        self.assertEqual(response.status_code, 302)
+        program.refresh_from_db()
+        self.assertEqual(program.name, 'Renamed Tender')
+        self.assertEqual(program.created_by_id, self.creator.user.pk)

@@ -14151,12 +14151,14 @@ def admin_assign_pm(request, project_id):
         # A change. hand_over_sites() asks change_site_pm(), which re-checks Admin itself
         # (PM-7) — the decorator above already admits only Admin, so a PermissionDenied
         # from it would mean the two rules have drifted, and Django turns it into a 403.
+        # Any other failure, unexpected errors included, arrives as SitePmChangeRefused
+        # naming the site, so the Admin gets the bulk page's wording, never a 500.
         try:
             handover = hand_over_sites([project], expected_pm, pm_profile,
                                        request.user.profile, request.POST.get('reason', ''),
                                        program=project.program)
         except SitePmChangeRefused as exc:
-            messages.error(request, str(exc))
+            messages.error(request, f'Nothing was handed over. {exc}')
             return redirect('admin_project_list')
         messages.success(request, _single_handover_message(handover))
         return redirect('admin_project_list')
@@ -14325,6 +14327,9 @@ def admin_pm_handover(request):
         if len(sites) != len(set(picked)):
             error = 'A chosen site is no longer in this Program. Reload the page.'
         else:
+            # Every per-site failure, unexpected errors included, arrives as
+            # SitePmChangeRefused("<site code> failed: <reason>"): the preview is
+            # re-rendered with that line, never a 500.
             try:
                 handover = hand_over_sites(sites, from_pm, to_pm, request.user.profile,
                                            reason, program=program)

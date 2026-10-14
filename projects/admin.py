@@ -77,7 +77,7 @@ class ProgramAdmin(admin.ModelAdmin):
     search_fields = ['name', 'client_name', 'short_tender_code', 'tender_reference_number']
     # created_by is read-only because it is an access input (PM-14): the creator keeps
     # the Program pages until they hand the tender over, so editing it here would hand
-    # someone those pages outside the handover path.
+    # someone those pages outside the handover path. save_model() sets it on add only.
     readonly_fields = ['created_by', 'created_at', 'updated_at', 'deleted_at']
     fieldsets = (
         ('Program', {
@@ -100,6 +100,14 @@ class ProgramAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+    def save_model(self, request, obj, form, change):
+        """Record who added the Program, as the portal's program_create does. ADD only:
+        created_by is an access input (PM-14), so an edit must never move it to whoever
+        happened to save the form last."""
+        if not change:
+            obj.created_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(Project)

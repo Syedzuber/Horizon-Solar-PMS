@@ -395,8 +395,10 @@ def returning_bills_for(pm_id, sites):
 
 def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
     """Move every site in `sites` from `from_pm` to `to_pm`, ALL OR NOTHING (PM-13).
-    Returns a Handover; raises SitePmChangeRefused naming the site that failed, and then
-    nothing at all has moved. PermissionDenied (not Admin) propagates as a 403.
+    Returns a Handover. When any site fails, nothing at all has moved and this raises
+    SitePmChangeRefused("<site code> failed: <reason>"): the reason is the refusal's own
+    message, or "unexpected error (logged)" for any other exception, which is logged with
+    its traceback. PermissionDenied (not Admin) propagates as a 403.
 
     Every site goes through change_site_pm() with `from_pm` as the expected outgoing PM,
     in one transaction: a site whose PM changed since the page was loaded, a Cancelled
@@ -415,22 +417,47 @@ def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
 
     handover = Handover(actor=by, from_pm=from_pm, to_pm=to_pm, program=program,
                         reason=reason, sites=list(sites))
-    with transaction.atomic():
-        for site in handover.sites:
-            try:
+    # The site being processed when something went wrong; None outside the loop, so an
+    # error after it (the material / returning-bill reads) is not blamed on a site.
+    failing = None
+    # The try is OUTSIDE the atomic block on purpose: by the time an except clause runs,
+    # the block has already rolled back, so nothing has moved and the connection is
+    # usable again, even after a Postgres error, before anything is logged.
+    try:
+        with transaction.atomic():
+            for site in handover.sites:
+                failing = site
                 result = change_site_pm(site, to_pm, by, expected_outgoing_pm=from_pm,
                                         reason=reason)
-            except SitePmChangeRefused as exc:
-                message = str(exc)
-                if site.project_id not in message:
-                    message = f'{site.project_id}: {message}'
-                raise SitePmChangeRefused(message) from exc
-            handover.tasks_moved += result.tasks_moved
-            handover.bill_steps_moved += result.bill_steps_moved
-            handover.bill_steps_waiting += result.bill_steps_waiting
-        handover.material_steps = material_steps_held_by(from_pm.pk, handover.sites, program)
-        handover.returning_bills = returning_bills_for(from_pm.pk, handover.sites)
-        transaction.on_commit(lambda: send_handover_notices(handover), robust=True)
+                handover.tasks_moved += result.tasks_moved
+                handover.bill_steps_moved += result.bill_steps_moved
+                handover.bill_steps_waiting += result.bill_steps_waiting
+            failing = None
+            handover.material_steps = material_steps_held_by(from_pm.pk, handover.sites,
+                                                             program)
+            handover.returning_bills = returning_bills_for(from_pm.pk, handover.sites)
+            transaction.on_commit(lambda: send_handover_notices(handover), robust=True)
+    except PermissionDenied:
+        # Not Admin: a 403 by design (PM-7), not a failure of the site, so not reworded.
+        raise
+    except SitePmChangeRefused as exc:
+        if failing is None:
+            raise
+        # A refusal is an expected outcome (stale page, Cancelled site, a bill step the
+        # approval rules refuse), so a warning line without a traceback.
+        logger.warning('hand_over_sites: %s failed, nothing was handed over: %s',
+                       failing.project_id, exc)
+        raise SitePmChangeRefused(f'{failing.project_id} failed: {exc}') from exc
+    except Exception as exc:
+        if failing is None:
+            raise
+        # Anything else is a bug or a database fault. The screens must still say which
+        # site failed and that nothing moved, never a 500 (PM-13); the detail goes to
+        # the log, not the page.
+        logger.exception('hand_over_sites: %s failed with an unexpected error, nothing '
+                         'was handed over', failing.project_id)
+        raise SitePmChangeRefused(
+            f'{failing.project_id} failed: unexpected error (logged)') from exc
     return handover
 
 
