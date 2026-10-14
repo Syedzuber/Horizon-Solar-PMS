@@ -514,6 +514,63 @@ def user_can_manage_program(user, program):
     return False
 
 
+# Roles that reach every Program view by remit. role_required already limits which roles
+# reach a Program view at all; this set says which of those are never scoped to a tender.
+PROGRAM_PORTFOLIO_ROLES = frozenset({'Admin', 'CEO'})
+
+
+def program_ids_handed_over_by(profile):
+    """Return the set of Program ids in which `profile` once held a site's PM seat and
+    gave it up — a CLOSED SitePmAssignment row on any site of that Program.
+
+    Soft-deleted sites count (ruling PM-14 (a)): a creator whose last site was handed
+    over and later deleted has still handed the tender over. One query. List callers
+    compute this once and pass it to user_can_access_program(); see program_list."""
+    if profile is None:
+        return set()
+    return set(profile.pm_site_assignments
+               .filter(valid_to__isnull=False, site__program__isnull=False)
+               .values_list('site__program_id', flat=True))
+
+
+def user_can_access_program(user, program, *, handed_over_program_ids=None):
+    """Return True if `user` may open `program`'s pages — detail, edit, site create, bulk
+    upload and its template — and see it in program_list.
+
+    Admin / CEO reach every Program. Anyone who manages a live child site reaches it,
+    through user_can_manage_program() (never by re-comparing assigned_pm here).
+
+    The creator also reaches it, because a brand-new Program has no site to derive
+    authority from — EXCEPT, under ruling PM-14, a creator who has handed the tender
+    over: they hold a closed SitePmAssignment row on a site in it AND manage none of
+    its live sites. Without that exception an outgoing PM kept every Program page after
+    a full handover, and opex_site_create would make them a new site's PM, restoring
+    full authority. A creator who never held a seat here (sites assigned to others from
+    the start), or who still manages one site, keeps the fallback exactly as before.
+
+    The manage check runs first, so a creator reassigned back onto a site is allowed
+    whatever their history says. The history can only take the creator fallback away;
+    it never grants access on its own.
+
+    `handed_over_program_ids` is program_ids_handed_over_by(profile), precomputed by a
+    list caller; when omitted, one query runs, and only for a creator who does not
+    manage the Program."""
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    if profile.role in PROGRAM_PORTFOLIO_ROLES:
+        return True
+    if user_can_manage_program(user, program):
+        return True
+    if program.created_by_id != user.id:
+        return False
+    if handed_over_program_ids is not None:
+        return program.pk not in handed_over_program_ids
+    return not (profile.pm_site_assignments
+                .filter(valid_to__isnull=False, site__program=program)
+                .exists())
+
+
 # ---------------------------------------------------------------------------
 # OPEX design module (Parts 2-4)
 #

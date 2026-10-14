@@ -4756,6 +4756,7 @@ all or nothing, from the single-site Change PM and the bulk page `admin_pm_hando
    MPUVNL was created by nirankar, IPGCL Clean and IPGCL Green by anand — each the sole
    PM of those sites. `program_delete` (Admin only) and the design, site-group and
    vendor-order Program pages do not read `created_by`.
+   **Closed by PM-2b (ruling PM-14, 13 Oct 2026)** — see G68.
 2. **A bill waiting for changes goes back to the outgoing PM on resubmit (Q7).**
    `resubmit_approval_request` gives each party to whoever held it last, so round N+1 of
    such a bill asks the outgoing PM unless SCM changes the approver. The handover lists
@@ -4767,6 +4768,33 @@ all or nothing, from the single-site Change PM and the bulk page `admin_pm_hando
    material line.") since material lines became required on 28 Sep 2026. Both tests are
    Postgres-only (skipped on SQLite), so the SQLite suite never showed it. Unrelated to
    PM-2; the fixture needs `lines=[MODULE_LINE]`.
+
+### G68 — Program creator access after handover (PM-2b): left for later by ruling
+
+Recorded 13 Oct 2026 by the PM-2b session (ruling PM-14, pre-flight Q1–Q4).
+`permissions.user_can_access_program()` now ends a creator's fallback once they hold a
+closed `SitePmAssignment` row on a site of the Program (soft-deleted sites included) and
+manage none of its live sites. `views._can_access_program` is a wrapper over it and
+`program_list` uses it with one precomputed set. Rehearsed on `pm2_timing` (13 Oct prod
+restore, rolled back): after nirankar handed all 86 MPUVNL sites to chetan, the old rule
+still admitted him to all six views; PM-14 refuses him on all six.
+
+1. **No handover message on Program pages.** A former creator gets the existing denial:
+   MPUVNL simply drops out of `program_list`, and the five object views
+   (`program_detail`, `program_edit`, `opex_site_create`, `opex_site_bulk_upload`,
+   `opex_site_bulk_template`) answer a bare 404. Whether they should get a PM-11-style
+   redirect ("MPUVNL was handed over from you on …") is not decided. If it is, the
+   message belongs only on plain GETs of `program_detail`, as PM-11's R4 keeps POST,
+   HTMX and download refusals plain.
+2. **The rule reads the site's CURRENT Program (Q2, accepted).** A closed row counts in
+   whichever Program its site belongs to now. No code path changes `Project.program`
+   after creation today: `create_opex_site` sets it once, no form or `ProjectAdmin`
+   fieldset exposes it, and no command rewrites it. If one is ever added, a moved site
+   carries its PM history into the new Program and can end that Program's creator's
+   fallback.
+3. **`Program.created_by` is read-only in `ProgramAdmin` (Q3).** A Program added through
+   the Django admin therefore has no creator (NULL), and so no creator fallback. Programs
+   are created through `program_create` in practice, which still sets it.
 
 ---
 

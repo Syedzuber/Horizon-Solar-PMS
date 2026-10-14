@@ -75,7 +75,10 @@ class ProgramAdmin(admin.ModelAdmin):
                      'short_tender_code', 'planned_site_count', 'is_deleted']
     list_filter   = ['program_type', 'status', 'is_deleted']
     search_fields = ['name', 'client_name', 'short_tender_code', 'tender_reference_number']
-    readonly_fields = ['created_at', 'updated_at', 'deleted_at']
+    # created_by is read-only because it is an access input (PM-14): the creator keeps
+    # the Program pages until they hand the tender over, so editing it here would hand
+    # someone those pages outside the handover path.
+    readonly_fields = ['created_by', 'created_at', 'updated_at', 'deleted_at']
     fieldsets = (
         ('Program', {
             'fields': ('program_type', 'name', 'client_name', 'status',

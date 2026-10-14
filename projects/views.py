@@ -97,6 +97,7 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
     project_managers, user_can_manage_program,
+    user_can_access_program, program_ids_handed_over_by,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
     # Session B - reviewer correction. A THIRD write authority, not a widening of the
@@ -4735,17 +4736,11 @@ def phase_tasks_reorder(request, project_id, phase_id):
 
 def _can_access_program(request, program):
     """View-layer access gate for a SPECIFIC Program (mirrors _pm_owns_project's role
-    for projects). Admin / CEO reach every Program (role_required already limits who
-    gets here). A PM reaches a Program they manage — canonical user_can_manage_program
-    (authority over any child site) — OR one they created (covers a brand-new empty
-    Program whose creator has no site to derive authority from yet). The created_by
-    fallback is a creator check, NOT a re-implementation of PM/coordinator comparison."""
-    role = _get_user_role(request)
-    if role in ('Admin', 'CEO'):
-        return True
-    if user_can_manage_program(request.user, program):
-        return True
-    return program.created_by_id == request.user.id
+    for projects). The rule lives in permissions.user_can_access_program() (R-13):
+    Admin / CEO always; a PM who manages a child site; the creator, unless they have
+    handed the tender over (ruling PM-14). Kept as a wrapper so the five object views
+    that call it stay unchanged."""
+    return user_can_access_program(request.user, program)
 
 
 @login_required
@@ -4754,8 +4749,9 @@ def program_list(request):
     """Role-scoped list of Programs with a live site-count-by-stage rollup.
 
     Admin / CEO see every non-deleted Program; a PM sees only Programs they can access
-    (manage a child site, or created it). Rollup counts are annotated on the queryset
-    (single query — no N+1 across Programs), computed live from child-site status.
+    (manage a child site, or created it and have not handed it over — PM-14). Rollup
+    counts are annotated on the queryset (single query — no N+1 across Programs),
+    computed live from child-site status.
     """
     programs = (
         Program.objects.filter(is_deleted=False)
@@ -4764,7 +4760,20 @@ def program_list(request):
     )
     role = _get_user_role(request)
     if role == 'PM':
-        programs = [p for p in programs if _can_access_program(request, p)]
+        # TODO: user_can_manage_program() re-queries each Program's sites (the prefetch
+        # above is bypassed by its .filter()), so this list costs about one query per
+        # site — see SECONDARY_FINDINGS.md "program_list per-site query cost". Deferred:
+        # out of scope for PM-14, which only adds the one query below.
+        programs = list(programs)
+        # PM-14: the handed-over set is fetched ONCE, and only when this PM created a
+        # listed Program, so the creator check costs at most one query for the page
+        # instead of one per Program.
+        handed_over = None
+        if any(p.created_by_id == request.user.id for p in programs):
+            handed_over = program_ids_handed_over_by(getattr(request.user, 'profile', None))
+        programs = [p for p in programs
+                    if user_can_access_program(request.user, p,
+                                               handed_over_program_ids=handed_over)]
     else:
         programs = list(programs)
 

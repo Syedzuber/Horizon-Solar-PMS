@@ -6392,9 +6392,12 @@ class SitePmAssignment(models.Model):
 
     HISTORY, NOT AUTHORITY. `Project.assigned_pm` stays the column every access and
     authority check reads (permissions.py); this table only records who held it and
-    when. Nothing outside tests reads it yet. A future reader must not start deriving
-    access from it — the two are written together by one function and must never be
-    allowed to disagree about who is PM NOW.
+    when. Two readers use a CLOSED row: PM-11 (site_pm.pm_handover_notice, the message
+    an outgoing PM sees instead of a 404) and PM-14
+    (permissions.user_can_access_program, which ends a Program creator's fallback once
+    they have handed the tender over). A closed row may REMOVE access; it never grants
+    it. No reader may derive who is PM NOW from this table — `assigned_pm` and the open
+    row are written together by one function and must never disagree.
 
     WRITTEN BY site_pm.change_site_pm() ONLY, which closes the open row and opens the
     next in the same transaction as the `assigned_pm` write. Closing is that function's
