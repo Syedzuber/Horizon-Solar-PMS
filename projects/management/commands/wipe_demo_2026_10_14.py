@@ -77,6 +77,12 @@ lines, challans, tasks, phases; then the coordinator rows, ledger, activity and
 notification rows; then the project restore. Each delete's per-model count must equal
 the list exactly, so a cascade nobody listed rolls the run back.
 
+ONE TRACE ROW IS WRITTEN, by ruling (Zuber, 15 Oct): after the deletes and inside the
+same transaction, a single ActivityLog row with no actor and no project, naming the
+ruling and the number of rows deleted (TRACE_ACTION). It is the only row this command
+creates. It is not one of the listed or kept rows, so the post-checks' counts never see
+it; a separate post-check requires that exactly that one row exists.
+
 STORAGE runs only after the commit: the 5 QA/QC photos, through
 qaqc_views.discard_unrecorded_visit_photo(), which refuses any path a row still
 records, any bucket but the bills bucket, and anything outside qaqc-visit/. Each
@@ -352,6 +358,10 @@ KEEP = [
 
 _COORDINATORS = Project.coordinators.through
 
+#: The trace row's text; {total} is the number of rows deleted.
+TRACE_ACTION = ('14 Oct demo S1-S4 wiped by ruling, see execution-model §12: '
+                '{total} rows deleted, 4 sites restored to Draft')
+
 #: Children first. Each entry is deleted with QuerySet.delete(), whose per-model count
 #: must equal this list exactly.
 DELETE_ORDER = [
@@ -442,10 +452,11 @@ class Command(BaseCommand):
                 raise CommandError('Pre-checks failed. Nothing was written.')
 
             kept_before = self._snapshot_keep()
-            self._delete_all()
+            total = self._delete_all()
             self._restore_projects()
+            trace = self._write_trace(total)
 
-            problems = self._postchecks(kept_before)
+            problems = self._postchecks(kept_before, trace)
             if problems:
                 for line in problems:
                     self.stderr.write(f'  POST-CHECK FAILED: {line}')
@@ -640,6 +651,7 @@ class Command(BaseCommand):
         model's delete() override. That is the append-only bypass the ruling allows,
         and the reason no instance is ever loaded and deleted here."""
         self.stdout.write('\nDELETING')
+        total = 0
         for label, model, rows in DELETE_ORDER:
             _total, per_model = model._base_manager.filter(pk__in=rows).delete()
             per_model = {k: v for k, v in per_model.items() if v}
@@ -649,6 +661,18 @@ class Command(BaseCommand):
                     f'{{{model._meta.label!r}: {len(rows)}}}. A cascade nobody listed, or '
                     f'a missing row. Everything was rolled back.')
             self.stdout.write(f'  {model._meta.label}: {len(rows)}')
+            total += len(rows)
+        return total
+
+    def _write_trace(self, total):
+        """The one row this command creates. Written with objects.create() and NOT
+        log_activity(), which swallows exceptions: inside this transaction a swallowed
+        database error would leave the transaction aborted and the trace silently
+        missing, where a raised one rolls the whole wipe back."""
+        trace = ActivityLog.objects.create(
+            project=None, actor=None, action=TRACE_ACTION.format(total=total))
+        self.stdout.write(f'  ActivityLog trace row written: {trace.pk}')
+        return trace
 
     def _restore_projects(self):
         # Race: the 4 rows are locked by select_for_update() at the top of the
@@ -677,8 +701,14 @@ class Command(BaseCommand):
             snap[model._meta.label] = rows
         return snap
 
-    def _postchecks(self, kept_before):
+    def _postchecks(self, kept_before, trace):
         problems = []
+        # Exactly one row carries the trace text: the one just written. A second
+        # means this ruling was already applied once and somehow ran again.
+        traces = ActivityLog.objects.filter(action__startswith=TRACE_ACTION.split(':')[0])
+        if list(traces.values_list('pk', flat=True)) != [trace.pk]:
+            problems.append(f'trace row: expected only ActivityLog {trace.pk}, found '
+                            f'{sorted(traces.values_list("pk", flat=True))}')
         for _label, model, rows in DELETE_ORDER:
             left = model._base_manager.filter(pk__in=rows).count()
             if left:
