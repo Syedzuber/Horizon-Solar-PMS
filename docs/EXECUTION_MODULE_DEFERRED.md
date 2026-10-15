@@ -4809,6 +4809,15 @@ directly and catch only `SitePmChangeRefused`: the first-assignment branch of
 a bug) still escapes as a 500. Nothing moves either way, since `change_site_pm()` runs in
 its own transaction. Deferred by ruling (Q5).
 
+### G70 — QA/QC visit: the "QA/QC visit started" banner reappears on a later page load
+
+Recorded 15 Oct 2026 by the visit-page counts session (ruling: record, do not fix). On
+`solarpms_walk` the success message `qaqc_visit_start` sets ("QA/QC visit started for
+<site>.") was seen again on a page load after the visit page had already shown it.
+The cause was not investigated: that session was limited to the header counts and the
+submit flow. Start from where the message is consumed: `base.html` draws `messages` on
+a full render, and the visit page's HTMX point responses draw none.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

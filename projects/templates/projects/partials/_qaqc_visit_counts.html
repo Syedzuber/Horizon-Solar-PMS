@@ -1,0 +1,4 @@
+{% comment %}Closeout step 7 — the visit header's "N points checked, M No." Drawn by
+   qaqc_visit.html, and swapped out of band (oob) by every qaqc_visit_point POST through
+   _qaqc_point_response.html, so it follows each save without a reload.{% endcomment %}
+<span id="visit-counts"{% if oob %} hx-swap-oob="true"{% endif %}>{{ answered_count }} point{{ answered_count|pluralize }} checked{% if no_count %}, <span class="text-danger fw-semibold">{{ no_count }} No</span>{% endif %}.</span>

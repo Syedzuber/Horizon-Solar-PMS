@@ -1,0 +1,7 @@
+{% comment %}Closeout step 7 — qaqc_visit_point's answer to a POST (saved, edited or
+   refused): the point's row, plus the header counts and this task's "N / M" out of band,
+   so neither is left at its page-load value. task_count is None when the page draws no
+   group for the task; then there is nothing to swap.{% endcomment %}
+{% include 'projects/partials/_qaqc_point.html' %}
+{% include 'projects/partials/_qaqc_visit_counts.html' with oob=True %}
+{% if task_count %}{% include 'projects/partials/_qaqc_task_count.html' with oob=True answered=task_count.answered point_count=task_count.point_count %}{% endif %}

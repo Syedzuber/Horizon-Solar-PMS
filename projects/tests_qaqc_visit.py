@@ -26,6 +26,7 @@ own tables and never touch the site engineer's ChecklistItemCompletion rows.
     pre-flight 5  mirrors / NA / no version       PointRulingTests
     Q5   photo_taken_at, downscale fallback       PhotoTests
     Q6   the PunchPoint.objects.create tripwire   PunchPointCreationTripwireTests
+         counts follow each save; review/submit   VisitPageCountsTests, ReviewAndSubmitTests
 
 EVERY SITE HERE IS REALLY ACTIVATED through opex_site_activate, so its tasks carry the
 template_task the checklist links key on. Visits go through the real screens; storage is
@@ -965,3 +966,188 @@ class PunchPointCreationTripwireTests(TestCase):
             if pattern.search(path.read_text(encoding='utf-8')):
                 offenders.append(path.name)
         self.assertEqual(offenders, ['punch_points.py'])
+
+
+# ---------------------------------------------------------------------------
+# The visit page's counts follow each save; Review and submit at any count
+# ---------------------------------------------------------------------------
+
+def _text(response):
+    """The response body with runs of whitespace folded to one space."""
+    return ' '.join(response.content.decode().split())
+
+
+class VisitPageCountsTests(VisitFixture):
+    """Saving a point swapped only its row, so the header ("N points checked, M No"),
+    the Review and submit button gated on it, and the task's "N / M" kept their
+    page-load values until a reload. Every point POST now carries them out of band."""
+
+    def setUp(self):
+        super().setUp()
+        self._start()
+        self.visit = self._open_visit()
+
+    def _detail(self, by=None):
+        return _client_for(by or self.qaqc).get(
+            reverse('qaqc_visit_detail', args=[self.site.project_id, self.visit.pk]))
+
+    def _header_oob(self, text):
+        return f'<span id="visit-counts" hx-swap-oob="true">{text}</span>'
+
+    def _task_oob(self, task, text):
+        return (f'<span id="task-count-{task.pk}" class="small text-muted" '
+                f'hx-swap-oob="true">{text}</span>')
+
+    def test_review_and_submit_is_shown_at_zero_points(self):
+        page = self._detail()
+        self.assertContains(page, 'Review and submit')
+        self.assertIn('0 points checked.', _text(page))
+
+    def test_each_save_returns_the_header_and_task_counts(self):
+        first = self._answer(self.visit, self.civil, self.civil_items[0])
+        self.assertContains(first, self._header_oob('1 point checked.'), html=True)
+        self.assertContains(first, self._task_oob(self.civil, '1 / 4'), html=True)
+        second = self._answer(self.visit, self.civil, self.civil_items[1], answer='no',
+                              remark='Bolt missing')
+        self.assertContains(
+            second,
+            self._header_oob('2 points checked, '
+                             '<span class="text-danger fw-semibold">1 No</span>.'),
+            html=True)
+        self.assertContains(second, self._task_oob(self.civil, '2 / 4'), html=True)
+        # The other task's count is not touched by a Civil save.
+        self.assertNotContains(second, f'task-count-{self.module.pk}')
+
+    def test_a_yes_to_no_edit_updates_the_no_count(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        edit = self._answer(self.visit, self.civil, self.civil_items[0], answer='no',
+                            remark='Loose on second look', photo=False)
+        self.assertEqual(edit.status_code, 200)
+        self.assertContains(
+            edit,
+            self._header_oob('1 point checked, '
+                             '<span class="text-danger fw-semibold">1 No</span>.'),
+            html=True)
+        self.assertContains(edit, self._task_oob(self.civil, '1 / 4'), html=True)
+
+    def test_a_refused_answer_still_returns_the_counts(self):
+        self._answer(self.visit, self.module, self.module_items[0])
+        refused = self._answer(self.visit, self.module, self.module_items[1], answer='no')
+        self.assertContains(refused, 'requires a remark')
+        self.assertContains(refused, self._header_oob('1 point checked.'), html=True)
+        self.assertContains(refused, self._task_oob(self.module, '1 / 3'), html=True)
+
+    def test_opening_a_point_form_carries_no_counts(self):
+        form = _client_for(self.qaqc).get(
+            reverse('qaqc_visit_point', args=[self.site.project_id, self.visit.pk,
+                                              self.civil.pk, self.civil_items[0].pk]))
+        self.assertNotContains(form, 'hx-swap-oob')
+
+    def test_the_full_page_draws_the_same_ids(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        page = self._detail()
+        self.assertContains(page, '<span id="visit-counts">1 point checked.</span>',
+                            html=True)
+        self.assertContains(page, f'<span id="task-count-{self.civil.pk}" '
+                                  f'class="small text-muted">1 / 4</span>', html=True)
+        self.assertNotContains(page, 'hx-swap-oob')
+
+    def test_a_submitted_visit_shows_no_submit_button(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        self._submit(self.visit)
+        for who in (self.qaqc, self.pm):
+            with self.subTest(who=who.user.username):
+                page = self._detail(by=who)
+                self.assertNotContains(page, 'Review and submit')
+                self.assertNotContains(page, '>Edit</button>')
+
+
+class ReviewAndSubmitTests(VisitFixture):
+    """"Review and submit" opens the review page; the final Submit visit is the one
+    irreversible act, states its consequence, and is single-shot."""
+
+    def setUp(self):
+        super().setUp()
+        self._start()
+        self.visit = self._open_visit()
+
+    def _review(self, by=None):
+        return _client_for(by or self.qaqc).get(
+            reverse('qaqc_visit_submit', args=[self.site.project_id, self.visit.pk]))
+
+    def test_the_zero_point_review_page_explains_and_offers_no_submit(self):
+        page = self._review()
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, qaqc_views.VISIT_EMPTY)
+        self.assertNotContains(page, 'id="visitSubmit"')
+
+    def test_a_zero_point_submit_is_refused_readably(self):
+        response = self._submit(self.visit)
+        self.assertRedirects(response, reverse('qaqc_visit_detail',
+                                               args=[self.site.project_id, self.visit.pk]))
+        self.assertIn(qaqc_views.VISIT_EMPTY, _messages(response))
+        self.visit.refresh_from_db()
+        self.assertEqual(self.visit.status, QaqcVisit.OPEN)
+
+    def test_the_review_page_states_the_consequence(self):
+        self._answer(self.visit, self.civil, self.civil_items[0], answer='no', remark='Loose')
+        self._answer(self.visit, self.civil, self.civil_items[1])
+        self._answer(self.visit, self.module, self.module_items[0])
+        text = _text(self._review())
+        self.assertIn('3 points checked, 1 No. 1 punch point will be raised. '
+                      'This cannot be changed after submitting.', text)
+        self.assertIn('>Submit visit</button>', text)
+        self.assertIn('Back to the visit</a> </form>', text)
+
+    def test_with_no_no_answers_the_punch_point_clause_is_left_out(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        text = _text(self._review())
+        self.assertIn('<div class="alert alert-warning small mb-3" id="visitSubmitConsequence"> '
+                      '1 point checked, 0 No. This cannot be changed after submitting. </div>',
+                      text)
+
+    def test_review_then_back_leaves_the_visit_open(self):
+        self._answer(self.visit, self.civil, self.civil_items[0], answer='no', remark='Loose')
+        notices = NotificationLog.objects.count()
+        with self.captureOnCommitCallbacks(execute=True):
+            self.assertEqual(self._review().status_code, 200)
+            back = _client_for(self.qaqc).get(
+                reverse('qaqc_visit_detail', args=[self.site.project_id, self.visit.pk]))
+        self.assertContains(back, 'Review and submit')
+        self.visit.refresh_from_db()
+        self.assertEqual(self.visit.status, QaqcVisit.OPEN)
+        self.assertEqual(QaqcVisitAnswer.objects.filter(visit=self.visit).count(), 1)
+        self.assertFalse(PunchPoint.objects.exists())
+        self.assertEqual(NotificationLog.objects.count(), notices)
+
+    def test_a_second_submit_is_refused_readably_and_raises_nothing_more(self):
+        self._answer(self.visit, self.civil, self.civil_items[0], answer='no', remark='Loose')
+        self._submit(self.visit)
+        points = PunchPoint.objects.count()
+        notices = NotificationLog.objects.count()
+        again = self._submit(self.visit)
+        self.assertRedirects(again, reverse('qaqc_visit_detail',
+                                            args=[self.site.project_id, self.visit.pk]))
+        self.assertIn(qaqc_views.VISIT_NOT_OPEN, _messages(again))
+        self.assertEqual(points, 1)
+        self.assertEqual(PunchPoint.objects.count(), 1)
+        self.assertEqual(NotificationLog.objects.count(), notices)
+        self.assertEqual(NotificationLog.objects.filter(
+            template_name=qaqc_views.T_VISIT_SUBMITTED, channel='in_app').count(), 2)
+
+    def test_after_submit_everyone_else_and_every_get_keep_the_bare_403(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        self._submit(self.visit)
+        for who in (self.pm, self.coord):
+            with self.subTest(who=who.user.username):
+                response = self._submit(self.visit, by=who)
+                self.assertEqual(response.status_code, 403)
+                self.assertEqual(_messages(response), [])
+        # The engineer's GET of the review page of a submitted visit: still a plain 403.
+        self.assertEqual(self._review().status_code, 403)
+
+    def test_the_final_button_is_disabled_on_submit_and_restored_on_pageshow(self):
+        self._answer(self.visit, self.civil, self.civil_items[0])
+        page = self._review().content.decode()
+        self.assertIn("btn.disabled = true;", page)
+        self.assertIn("window.addEventListener('pageshow'", page)

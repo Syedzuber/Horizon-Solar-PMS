@@ -29,18 +29,19 @@
       {% if visit.status == 'submitted' %}Submitted {{ visit.submitted_at|date:"d M Y, H:i" }}.
       {% elif visit.status == 'lapsed' %}Lapsed {{ visit.lapsed_at|date:"d M Y" }} — {{ visit.get_lapse_reason_display|lower }}. Its answers are kept; it raised no punch points and counts toward nothing.
       {% else %}Open since {{ visit.visit_date|date:"d M Y" }}.{% endif %}
-      {{ answered_count }} point{{ answered_count|pluralize }} checked{% if no_count %}, <span class="text-danger fw-semibold">{{ no_count }} No</span>{% endif %}.
+      {% include 'projects/partials/_qaqc_visit_counts.html' with oob=False %}
     </div>
     <div class="small text-muted mt-1">
       Site coverage: {% if coverage.total %}{{ coverage.verified }} of {{ coverage.total }} points verified on submitted visits ({{ coverage.percent }}%){% else %}no checklist points on this site yet{% endif %}.
     </div>
+    {% comment %}Shown at any count while the engineer may answer: the count above is
+       swapped in place as points are saved, so a button gated on it would stay hidden
+       until a reload. The review page explains a zero-point visit; the server refuses
+       its submit (VISIT_EMPTY).{% endcomment %}
     {% if can_answer %}
-      <div class="mt-3">
-        {% if answered_count %}
-          <a href="{% url 'qaqc_visit_submit' project.project_id visit.pk %}" class="btn btn-brand btn-sm">Review and submit</a>
-        {% else %}
-          <span class="text-muted small">Check at least one point, then submit. Every "No" raises a punch point when you submit.</span>
-        {% endif %}
+      <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+        <a href="{% url 'qaqc_visit_submit' project.project_id visit.pk %}" class="btn btn-brand btn-sm">Review and submit</a>
+        <span class="text-muted small">Every "No" raises a punch point when you submit.</span>
       </div>
     {% endif %}
   </div>
@@ -50,7 +51,7 @@
   <details class="card shadow-sm mb-2" {% if not can_answer %}open{% endif %}>
     <summary class="card-header d-flex justify-content-between align-items-center" style="cursor:pointer;">
       <span class="fw-semibold small">{{ group.task.task_name }}</span>
-      <span class="small text-muted">{% if can_answer %}{{ group.answered }} / {{ group.point_count }}{% else %}{{ group.answered }} checked{% endif %}</span>
+      {% include 'projects/partials/_qaqc_task_count.html' with task=group.task answered=group.answered point_count=group.point_count oob=False %}
     </summary>
     <div class="px-3 pt-2 small text-muted">{{ group.checklist.name }} v{{ group.checklist.version_no }}</div>
     <ul class="list-group list-group-flush">

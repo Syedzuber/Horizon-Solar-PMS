@@ -1211,10 +1211,39 @@ def qaqc_visit_detail(request, project_id, visit_pk):
                   _visit_page_context(request, project, visit))
 
 
+def _visit_header_counts(visit):
+    """The visit header's "N points checked, M No": every answer on the visit, stale
+    points included, as _visit_page_context() counts them. One query."""
+    counts = visit.answers.aggregate(
+        answered=Count('pk'), no=Count('pk', filter=Q(answer=QaqcVisitAnswer.NO)))
+    return counts['answered'], counts['no']
+
+
+def _task_point_count(visit, project, task):
+    """{'answered', 'point_count'} for `task`'s group on the visit page, or None when the
+    page draws no group for it (a mirror, Not Applicable, or no checklist). The answered
+    count is limited to the version the task resolves to now, as the page's group is."""
+    if task.is_mirror or task.is_not_applicable:
+        return None
+    checklist = _checklist_for_task(task, project)
+    if checklist is None:
+        return None
+    point_count = checklist.items.count()
+    if not point_count:
+        return None
+    return {'answered': QaqcVisitAnswer.objects.filter(visit=visit, task=task,
+                                                       item__checklist=checklist).count(),
+            'point_count': point_count}
+
+
 def _point_response(request, project, visit, task, item, *, form, error=''):
     """Render one point's row (partials/_qaqc_point.html): its form when `form`, else
     its current state. Reached only by the visit's engineer, so the row's Edit / Check
-    buttons are always drawn."""
+    buttons are always drawn.
+
+    On a POST (saved, edited or refused) the response also carries the header's counts
+    and this task's "N / M" as out-of-band swaps: the row swap alone left them at their
+    page-load values until the page was reloaded."""
     answer = QaqcVisitAnswer.objects.filter(visit=visit, task=task, item=item).first()
     # What the form shows pre-filled: what was just posted when it was refused, else the
     # stored answer when editing. Decided here so the template needs no default filter
@@ -1225,11 +1254,16 @@ def _point_response(request, project, visit, task, item, *, form, error=''):
         selected, remark = answer.answer, answer.remark
     else:
         selected, remark = '', ''
-    return render(request, 'projects/partials/_qaqc_point.html', {
+    context = {
         'project': project, 'visit': visit, 'task': task, 'item': item,
         'answer': answer, 'show_form': form, 'error': error, 'can_answer': True,
         'selected_answer': selected, 'remark_value': remark,
-    })
+    }
+    if request.method != 'POST':
+        return render(request, 'projects/partials/_qaqc_point.html', context)
+    context['answered_count'], context['no_count'] = _visit_header_counts(visit)
+    context['task_count'] = _task_point_count(visit, project, task)
+    return render(request, 'projects/partials/_qaqc_point_response.html', context)
 
 
 @login_required
@@ -1323,14 +1357,25 @@ def qaqc_visit_submit(request, project_id, visit_pk):
     with the task it will raise a punch point on. POST: submit (V-5, V-8).
 
     Access: the visit's own engineer while it is open (user_can_answer_visit). 404 for a
-    reader who may not see the visit; 403 for one who may read but not submit it.
+    reader who may not see the visit; 403 for one who may read but not submit it —
+    except the visit's own engineer POSTing once it is no longer open, who gets
+    VISIT_NOT_OPEN as a message and is sent back to the visit.
     """
     project = _visit_site(request, project_id)
     visit = _readable_visit(request, project, visit_pk)
+    back = reverse('qaqc_visit_detail', args=[project.project_id, visit.pk])
     # Only the visit's engineer submits it; the PM reads it and decides nothing here.
     if not user_can_answer_visit(request.user, visit, project):
+        # The one readable refusal: the visit's own engineer POSTing a visit that is no
+        # longer open — a double-click, or Back and resubmit, after it was submitted (or
+        # lapsed). They can still view it (_readable_visit above 404s otherwise), so they
+        # are told why and sent to it. Everyone else, and every GET, keeps the bare 403.
+        profile = getattr(request.user, 'profile', None)
+        if (request.method == 'POST' and visit.status != QaqcVisit.OPEN
+                and profile is not None and visit.engineer_id == profile.pk):
+            messages.error(request, VISIT_NOT_OPEN)
+            return redirect(back)
         return HttpResponseForbidden()
-    back = reverse('qaqc_visit_detail', args=[project.project_id, visit.pk])
     if request.method == 'POST':
         try:
             summary = submit_qaqc_visit(visit, request.user, project)

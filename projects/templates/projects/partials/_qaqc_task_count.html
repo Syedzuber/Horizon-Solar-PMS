@@ -1,0 +1,4 @@
+{% comment %}Closeout step 7 — one task group's count in its <summary> on the visit page:
+   "N / M" for the engineer answering, "N checked" for a reader. Swapped out of band
+   (oob) by every qaqc_visit_point POST, where the reader form never arises.{% endcomment %}
+<span id="task-count-{{ task.pk }}" class="small text-muted"{% if oob %} hx-swap-oob="true"{% endif %}>{% if can_answer %}{{ answered }} / {{ point_count }}{% else %}{{ answered }} checked{% endif %}</span>

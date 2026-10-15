@@ -13,7 +13,6 @@
 <div class="card shadow-sm mb-4" style="max-width:720px;">
   <div class="card-header fw-semibold">Submit QA/QC visit — {{ visit.visit_date|date:"d M Y" }}, {{ project.project_id }}</div>
   <div class="card-body">
-    <p class="mb-2">{{ answers|length }} point{{ answers|length|pluralize }} checked.</p>
     {% if no_answers %}
       <p class="mb-2 text-danger fw-semibold">{{ no_answers|length }} "No" answer{{ no_answers|length|pluralize }} — each raises a punch point on its task:</p>
       <ul class="small">
@@ -25,16 +24,52 @@
     {% else %}
       <p class="text-muted small">No "No" answers: no punch points will be raised.</p>
     {% endif %}
-    <p class="small text-muted">Once submitted, the answers cannot be changed.</p>
     {% if answers %}
-      <form method="post" action="{% url 'qaqc_visit_submit' project.project_id visit.pk %}" class="d-flex gap-2">
+      {% comment %}The consequence, from the visit's own counts, directly above the one
+         irreversible button. Every "No" raises exactly one punch point (V-5), so the
+         punch point count is the No count.{% endcomment %}
+      {% with checked=answers|length no=no_answers|length %}
+      <div class="alert alert-warning small mb-3" id="visitSubmitConsequence">
+        {{ checked }} point{{ checked|pluralize }} checked, {{ no }} No.
+        {% if no %}{{ no }} punch point{{ no|pluralize }} will be raised.{% endif %}
+        This cannot be changed after submitting.
+      </div>
+      {% endwith %}
+      <form method="post" action="{% url 'qaqc_visit_submit' project.project_id visit.pk %}" class="d-flex gap-2" id="visitSubmitForm">
         {% csrf_token %}
-        <button type="submit" class="btn btn-brand">Submit visit</button>
-        <a href="{% url 'qaqc_visit_detail' project.project_id visit.pk %}" class="btn btn-outline-secondary">Keep checking</a>
+        <button type="submit" class="btn btn-brand" id="visitSubmit">Submit visit</button>
+        <a href="{% url 'qaqc_visit_detail' project.project_id visit.pk %}" class="btn btn-outline-secondary">Back to the visit</a>
       </form>
     {% else %}
       <p class="text-muted">Check at least one point before submitting the visit.</p>
     {% endif %}
   </div>
 </div>
+
+{% if answers %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  /* A double-click sends one submit. The server is single-shot anyway: the visit row is
+     locked and must still be open, and a repeat POST is answered "no longer open". */
+  var form = document.getElementById('visitSubmitForm');
+  var btn = document.getElementById('visitSubmit');
+  if (!form || !btn) return;
+  form.addEventListener('submit', function () {
+    btn.dataset.label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+  });
+
+  /* Back to this page from the one it led to: the browser can restore it exactly as it
+     was left, button disabled. Re-enable it with its own label. */
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    if (btn.disabled) {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  });
+});
+</script>
+{% endif %}
 {% endblock %}
