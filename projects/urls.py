@@ -404,6 +404,9 @@ urlpatterns = [
     # ---------------------------------------------------------------------------
     path('projects/<str:project_id>/tasks/<int:task_id>/checklist/<int:item_id>/complete/',
          views.checklist_item_complete, name='checklist_item_complete'),              # Role-match or PM/coordinator
+    # Task checklist PDF download — anyone who can see the site (task_detail's access)
+    path('projects/<str:project_id>/tasks/<int:task_id>/checklist/pdf/',
+         views.task_checklist_pdf, name='task_checklist_pdf'),
 
     # ---------------------------------------------------------------------------
     # Issues — any role with project access can raise; PM closes

@@ -4818,6 +4818,52 @@ The cause was not investigated: that session was limited to the header counts an
 submit flow. Start from where the message is consumed: `base.html` draws `messages` on
 a full render, and the visit page's HTMX point responses draw none.
 
+### G71 — checklist section headings are not snapshotted; a rename re-groups history in the PDF
+
+Recorded 15 Oct 2026 by the checklist PDF session (part 1), by ruling 3 of
+`docs/CHECKLIST_PDF_SPEC.md`. `ChecklistItem.section` is presentation only and no
+completion stores a copy of it (R-8 snapshots the label, not the heading — see the
+comment on the field). The task checklist PDF groups rows by the live `section` of the
+pinned version's items, through `_checklist_context()`'s `checklist_sections`, so a
+heading renamed in a later version re-groups an earlier task's PDF only if that task is
+pinned to the renamed version — and a pinned version is active or archived, whose
+headings R-7 freezes. In practice a rename reaches a PDF only through a write that
+bypasses R-7 (`QuerySet.update()`). Printed as it is, with no caveat, by ruling 3.
+
+### G72 — the checklist PDF prints characters outside cp1252 as blanks
+
+Recorded 15 Oct 2026 by the checklist PDF session (part 1). `checklist_pdf.render_pdf()`
+uses xhtml2pdf's default Helvetica, which draws cp1252 only. Anything else a person types
+into a remark or witness name — "Ω" in an earthing reading, "≤", "₹", any Devanagari —
+renders BLANK; xhtml2pdf logs a warning ("No font this document has can draw …") and
+reports no error, so the renderer's raise-on-error rule does not catch it. Local data
+holds no such character today (every stored label, snapshot, remark, witness name, site
+and tender name scanned on `solarpms_local`). Not fixed: the font is a decision the
+session prompt did not make. Options: reportlab ships Bitstream Vera inside its wheel
+(covers Ω, ≤, ≥, µ, √; not ₹ or Devanagari), one `@font-face` in
+`templates/projects/pdf/base_document.html`; Devanagari needs a bundled font file.
+
+### G73 — the checklist's source form reference is not stored, so the PDF header omits it
+
+Recorded 15 Oct 2026 by the checklist PDF session (part 1). F-6 names "the source form
+reference already stored on the checklist (e.g. HRPPL/ELE/I&C/DCDB R00)". It is not
+stored: `Checklist` has no such field, and `seed_opex_installation_checklists` keeps each
+reference in its `CHECKLISTS` dict (`'sources': …`) and never writes it. The header
+therefore omits the line under F-6's own rule ("left out rather than printed blank").
+Storing it needs a field and a migration, which the session was told not to add; reading
+the seed command's dict at request time would make a management command a runtime
+dependency. Open as a question to Zuber.
+
+### G74 — per-location copies of a task print identical checklist PDF headers and filenames
+
+Recorded 15 Oct 2026 by the checklist PDF session (part 1). Duplicate-for-locations
+(`Task.location_label`) gives one site several tasks on the same checklist —
+SCMPILOT01 has four Civil Work tasks (blank, Parking, ticket plaza 1, ticket plaza-2).
+F-6's header (site, client, tender, checklist, version) and the filename
+(`<site>_<checklist code>_v<n>_<date>.pdf`) name none of what tells them apart, so their
+four PDFs read alike and download under one filename. Not added: the task name or
+location is not in F-6. Open as a question to Zuber.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

@@ -23,6 +23,7 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_GET
 
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
@@ -82,6 +83,11 @@ from .tender_stages import (
 )
 from .approval_queries import (
     pending_approvals_card, tender_approvals_waiting, work_to_confirm_card,
+)
+# Checklist PDF (docs/CHECKLIST_PDF_SPEC.md): the shared renderer and the task checklist
+# document builder, read by task_checklist_pdf below.
+from .checklist_pdf import (
+    TASK_CHECKLIST_TEMPLATE, render_pdf, task_checklist_document, task_checklist_filename,
 )
 # PM-2: the one writer of Project.assigned_pm. All five PM writers below call it.
 from .site_pm import (
@@ -11722,6 +11728,43 @@ def checklist_item_complete(request, project_id, task_id, item_id):
     if _is_hx(request):
         return _render_checklist_hx(request, project, task)
     return redirect('task_detail', project_id=project_id, task_id=task_id)
+
+
+@login_required
+@require_GET
+def task_checklist_pdf(request, project_id, task_id):
+    """Download this task's checklist as a PDF (docs/CHECKLIST_PDF_SPEC.md, part 1).
+    Access: exactly task_detail's — anyone who can see the site (user_can_view_project),
+    the site's view-only QA/QC engineer included (ruling 6). GET only; read-only.
+
+    The rows are the version _checklist_for_task() pins and every item of it, answered
+    or not (F-3), taken from _checklist_context() so the PDF and the task page share one
+    wording rule (F-5). 404 when the task has no checklist, as the page then shows none.
+    A rendering failure raises (checklist_pdf.PdfRenderError) and is never served as a
+    partial file. Writes nothing: no ActivityLog, no session, no row.
+    """
+    project = _active_project(project_id)
+
+    # Same gate and same refusal as task_detail: only someone who can see the site may
+    # read its checklist; a download is a view, not a work gate, so no role match and no
+    # user_works_on_site() (ruling 6, CL-G). An outgoing PM gets the handover redirect.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+
+    task = get_object_or_404(Task, pk=task_id, phase__project=project)
+    context = _checklist_context(request, project, task)
+    checklist = context['checklist']
+    if checklist is None:
+        raise Http404
+
+    generated_at = timezone.now()
+    pdf = render_pdf(TASK_CHECKLIST_TEMPLATE, task_checklist_document(
+        project, task, checklist, context['checklist_sections'], generated_at))
+
+    response = HttpResponse(pdf, content_type='application/pdf')
+    filename = task_checklist_filename(project, checklist, generated_at)
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
 
 
 # ---------------------------------------------------------------------------

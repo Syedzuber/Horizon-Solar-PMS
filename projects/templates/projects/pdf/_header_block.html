@@ -1,0 +1,21 @@
+{% comment %}
+SHARED PDF PARTIAL — the page header block. Reused by every checklist-family PDF (task
+checklist now; QA/QC visit and dossier later), so it takes plain keys only:
+  pdf_title         the document's title line
+  pdf_is_final      True prints FINAL; False prints NOT FINAL large, with the time (F-1)
+  pdf_generated_at  generation time, already formatted in IST
+  pdf_header_rows   [(label, value), ...] — the builder omits fields the system does not
+                    hold, so every row here has a value (F-6)
+Printed once, on page 1; the footer carries the identity on every later page.
+{% endcomment %}
+<h1>{{ pdf_title }}</h1>
+{% if pdf_is_final %}
+<div class="final-state is-final">FINAL</div>
+{% else %}
+<div class="final-state not-final">NOT FINAL<br><span class="note">Generated {{ pdf_generated_at }}. This record may still change.</span></div>
+{% endif %}
+<table class="header-rows">
+  {% for label, value in pdf_header_rows %}
+  <tr><td class="label">{{ label }}</td><td>{{ value }}</td></tr>
+  {% endfor %}
+</table>

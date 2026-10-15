@@ -1,0 +1,33 @@
+{% comment %}
+SHARED PDF PARTIAL — the sign-off grid for wet signatures (ruling 1). Reused by every
+checklist-family PDF that is signed on paper:
+  pdf_signoff  [{'heading', 'name'}] — one column per signatory; `name` is pre-filled
+               only where the system recorded the person, blank otherwise
+Rows are fixed: Signature, Name, Date, Company. Signature, Date and Company are always
+blank — the system holds no signature, and printing a date would claim one. Kept on one
+page with what follows it (page-break-inside: avoid on the wrapper in the document).
+{% endcomment %}
+<table class="signoff">
+  <thead>
+    <tr>
+      <th class="row-label"></th>
+      {% for column in pdf_signoff %}<th>{{ column.heading }}</th>{% endfor %}
+    </tr>
+  </thead>
+  <tr class="signature">
+    <td class="row-label">Signature</td>
+    {% for column in pdf_signoff %}<td></td>{% endfor %}
+  </tr>
+  <tr>
+    <td class="row-label">Name</td>
+    {% for column in pdf_signoff %}<td>{{ column.name }}</td>{% endfor %}
+  </tr>
+  <tr>
+    <td class="row-label">Date</td>
+    {% for column in pdf_signoff %}<td></td>{% endfor %}
+  </tr>
+  <tr>
+    <td class="row-label">Company</td>
+    {% for column in pdf_signoff %}<td></td>{% endfor %}
+  </tr>
+</table>

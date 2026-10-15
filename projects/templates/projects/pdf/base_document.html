@@ -1,0 +1,79 @@
+{% comment %}
+SHARED PDF PAGE SKELETON — checklist_pdf.render_pdf() documents extend this.
+Users today: task_checklist.html (part 1). Planned: the QA/QC visit PDF (part 2) and the
+step 9 dossier. Every checklist-family PDF gets the same page from here: A4 portrait,
+1.5 cm margins, and a footer reading "<pdf_footer_left> · Generated <time> · Page N of M".
+
+The shared partials beside this file are the reusable pieces; each takes plain
+context keys and knows nothing about tasks or visits:
+  _header_block.html  pdf_title, pdf_is_final, pdf_generated_at, pdf_header_rows
+  _item_table.html    pdf_columns, pdf_sections
+  _signoff_grid.html  pdf_signoff
+  _footnotes.html     pdf_footnotes
+
+xhtml2pdf, not a browser: only the CSS it implements works here. The footer is a static
+frame placed in the bottom margin, filled from #pdf_footer, which is taken out of the
+flow and drawn on every page.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ pdf_title }}</title>
+<style>
+  @page {
+    size: a4 portrait;
+    margin: 1.5cm;
+    @frame footer_frame {
+      -pdf-frame-content: pdf_footer;
+      left: 1.5cm;
+      width: 18cm;
+      bottom: 0.5cm;
+      height: 0.8cm;
+    }
+  }
+  body { font-family: Helvetica; font-size: 8.5pt; color: #111111; }
+  h1 { font-size: 14pt; margin: 0 0 4pt 0; }
+  h2 { font-size: 10pt; margin: 10pt 0 4pt 0; }
+  table { width: 100%; }
+  /* overflow-wrap: a word wider than its column (a serial number typed into a remark)
+     is split rather than run past the right margin; ordinary text still wraps at spaces. */
+  td, th { vertical-align: top; overflow-wrap: break-word; }
+
+  /* _header_block.html */
+  .final-state { font-size: 11pt; font-weight: bold; padding: 4pt 6pt; margin-bottom: 6pt; }
+  .final-state.is-final { color: #1a7a4a; border: 1pt solid #1a7a4a; }
+  .final-state.not-final { color: #b00020; border: 2pt solid #b00020; font-size: 14pt; }
+  .final-state .note { font-size: 8pt; font-weight: normal; }
+  .header-rows td { padding: 1pt 4pt 1pt 0; }
+  .header-rows .label { width: 18%; color: #555555; }
+
+  /* _item_table.html — every cell wraps; nothing is allowed a fixed single line */
+  .items th { background-color: #e8e8e8; font-weight: bold; text-align: left;
+              border: 0.5pt solid #888888; padding: 3pt; }
+  .items td { border: 0.5pt solid #888888; padding: 3pt; }
+  .items td.section { background-color: #f3f3f3; font-weight: bold; }
+
+  /* _signoff_grid.html */
+  .signoff th, .signoff td { border: 0.5pt solid #888888; padding: 3pt; }
+  .signoff th { background-color: #e8e8e8; text-align: left; }
+  .signoff .row-label { width: 12%; color: #555555; }
+  .signoff .signature td { height: 1.2cm; }
+
+  /* _footnotes.html */
+  .footnotes { font-size: 7.5pt; color: #555555; margin-top: 6pt; }
+
+  #pdf_footer td { font-size: 7.5pt; color: #555555; }
+</style>
+</head>
+<body>
+<div id="pdf_footer">
+  <table>
+    <tr>
+      <td>{{ pdf_footer_left }} · Generated {{ pdf_generated_at }}</td>
+      <td style="text-align: right; width: 25%;">Page <pdf:pagenumber> of <pdf:pagecount></td>
+    </tr>
+  </table>
+</div>
+{% block content %}{% endblock %}
+</body>
+</html>

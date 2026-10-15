@@ -1,0 +1,10 @@
+{% comment %}
+SHARED PDF PARTIAL — the footnotes. Reused by every checklist-family PDF:
+  pdf_footnotes  [text, ...] — each printed once, numbered, at the end of the document
+                 (ruling 2: a caveat is said once, not on every line)
+{% endcomment %}
+{% if pdf_footnotes %}
+<div class="footnotes">
+  {% for note in pdf_footnotes %}<div>{{ forloop.counter }}. {{ note }}</div>{% endfor %}
+</div>
+{% endif %}

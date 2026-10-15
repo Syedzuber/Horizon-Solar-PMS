@@ -264,6 +264,13 @@ completion action re-renders only this block, leaving #attachmentList / #taskSta
       {{ checklist.name }}
       <span id="checklistCountBadge">{% if checklist_items %}<span class="badge bg-secondary ms-1">{{ checklist_items|length }}</span>{% endif %}</span>
     </span>
+    {% comment %}Everyone who sees this card may download it: the view's gate is this
+       page's gate (user_can_view_project), and the card exists only when the task has a
+       checklist. Outside #checklistSection, so the HTMX swap never removes it.{% endcomment %}
+    <a href="{% url 'task_checklist_pdf' project.project_id task.pk %}"
+       class="btn btn-sm btn-outline-secondary">
+      <i class="bi bi-file-earmark-pdf me-1"></i>Download checklist (PDF)
+    </a>
   </div>
   <div class="card-body p-0" id="checklistSection">
     {% include 'projects/partials/_checklist.html' %}

@@ -1,0 +1,18 @@
+{% extends 'projects/pdf/base_document.html' %}
+{% comment %}
+The task checklist PDF (docs/CHECKLIST_PDF_SPEC.md, part 1). Context from
+checklist_pdf.task_checklist_document(); layout from the shared partials. Holds no
+logic of its own: every row, label and name was decided by the builder.
+{% endcomment %}
+{% block content %}
+{% include 'projects/pdf/_header_block.html' %}
+
+<h2>Checking points</h2>
+{% include 'projects/pdf/_item_table.html' %}
+
+<div style="page-break-inside: avoid;">
+  <h2>Sign-off</h2>
+  {% include 'projects/pdf/_signoff_grid.html' %}
+  {% include 'projects/pdf/_footnotes.html' %}
+</div>
+{% endblock %}

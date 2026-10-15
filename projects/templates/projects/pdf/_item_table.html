@@ -1,0 +1,27 @@
+{% comment %}
+SHARED PDF PARTIAL — the item table. Reused by every checklist-family PDF, so the caller
+decides the columns and the cells; this only lays them out:
+  pdf_columns   [{'label', 'width'}]  — width in percent of the content width
+  pdf_sections  [{'name', 'rows': [{'cells': [...]}]}] — a blank name is the ungrouped
+                bucket and gets no heading row
+The <thead> repeats at the top of every page (xhtml2pdf 0.2.24 repeats a thead itself;
+repeat="1" says the same thing for older readers of this file). Cells are plain text,
+escaped, with line breaks kept — witness names are often one per line.
+{% endcomment %}
+<table class="items" repeat="1">
+  <thead>
+    <tr>
+      {% for column in pdf_columns %}<th width="{{ column.width }}%">{{ column.label }}</th>{% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for section in pdf_sections %}
+      {% if section.name %}
+      <tr><td class="section" colspan="{{ pdf_columns|length }}">{{ section.name }}</td></tr>
+      {% endif %}
+      {% for row in section.rows %}
+      <tr>{% for cell in row.cells %}<td>{{ cell|linebreaksbr }}</td>{% endfor %}</tr>
+      {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>

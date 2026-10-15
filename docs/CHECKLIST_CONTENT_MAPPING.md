@@ -338,10 +338,19 @@ Rendered as one name and one timestamp:
             </div>
 ```
 
-**Stated plainly: one signer. The model supports Checked By and nothing else.** There is
-no witness field, no second or third actor, no free-text field a witness's name could go
-in, and no related model pointing at a completion. It does not support the real pattern
-(Checked By + two Witnessed By) in any form.
+**Stated plainly: one signer.** The model records one authenticated person, Checked By
+(`checked_by` / `checked_at`), and no second or third actor: no witness FK and no related
+model pointing at a completion.
+
+> **Corrected 15 Oct 2026 (checklist PDF session).** This section originally said "There
+> is no witness field … no free-text field a witness's name could go in". That is no
+> longer true: `ChecklistItemCompletion.witness_names` exists (Option 2 below, as
+> built). It is **free text, an assertion by the completer, not a signature** — nobody
+> named in it logged in or confirmed anything (`help_text='Names asserted by the
+> completer. Not verified signatures.'`). The task checklist PDF prints it per item and
+> footnotes exactly that (docs/CHECKLIST_PDF_SPEC.md, ruling 2). The real paper pattern
+> (Checked By + two Witnessed By, signed) is still not captured as signatures; the PDF's
+> sign-off grid leaves those for wet signing (ruling 1).
 
 **One structural note before the options.** On the real documents the three signatures are
 almost certainly **per-document**, signed once at the foot of the sheet — not per line.
