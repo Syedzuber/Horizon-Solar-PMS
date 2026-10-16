@@ -619,7 +619,18 @@ def point_keys(points):
     return {(entry['task'].pk, item.pk) for entry in points for item in entry['items']}
 
 
-def site_coverage(project, points):
+def answer_left_site(answer, current_keys):
+    """True when a visit answer's point is no longer one of the site's points
+    (`current_keys` = point_keys(site_checklist_points(project))): its task became Not
+    Applicable or a mirror, or the task resolves to a different checklist version now
+    (pre-flight 5). Such an answer is kept and shown apart, never offered again.
+
+    THE ONE PREDICATE. The visit page and the visit PDF (V-PDF-10) both separate these
+    answers with it, so the two cannot disagree about which answers drifted."""
+    return (answer.task_id, answer.item_id) not in current_keys
+
+
+def site_coverage(project, points, as_of=None):
     """V-6: distinct points ever verified on a SUBMITTED visit ÷ the site's current
     points. One query.
 
@@ -627,16 +638,22 @@ def site_coverage(project, points):
     (its task became Not Applicable, or an unanswered task moved to a new checklist
     version) leaves both sides together and coverage never passes 100%. Open and lapsed
     visits verify nothing.
+
+    `as_of` (V-PDF-12, the visit PDF): count only visits submitted at or before that
+    instant, so a visit's document shows the coverage it reached, not today's. The
+    denominator stays the site's points now — no history of the site's points is kept.
     """
     keys = point_keys(points)
     verified = set()
     if keys:
+        submitted = QaqcVisitAnswer.objects.filter(visit__project=project,
+                                                   visit__status=QaqcVisit.SUBMITTED)
+        if as_of is not None:
+            submitted = submitted.filter(visit__submitted_at__lte=as_of)
         # order_by() clears QaqcVisitAnswer's Meta ordering, which would put pk into the
         # SELECT DISTINCT and count every answer instead of every point.
         verified = set(
-            QaqcVisitAnswer.objects
-            .filter(visit__project=project, visit__status=QaqcVisit.SUBMITTED)
-            .values_list('task_id', 'item_id').distinct().order_by()
+            submitted.values_list('task_id', 'item_id').distinct().order_by()
         ) & keys
     total = len(keys)
     return {
@@ -1140,12 +1157,12 @@ def _visit_page_context(request, project, visit):
                for a in visit.answers.select_related('punch_point', 'task')}
     points = site_checklist_points(project)
     coverage = site_coverage(project, points)
-    groups, current_keys = [], set()
+    current_keys = point_keys(points)
+    groups = []
     for entry in points:
         rows = []
         for number, item in enumerate(entry['items'], start=1):
             key = (entry['task'].pk, item.pk)
-            current_keys.add(key)
             answer = answers.get(key)
             if answer is None and not can_answer:
                 continue
@@ -1157,7 +1174,8 @@ def _visit_page_context(request, project, visit):
                            'answered': sum(1 for r in rows if r['answer'])})
     # Answers whose point has left the site since (version drift, Not Applicable): kept
     # and shown read-only, never offered again (pre-flight 5).
-    stale = [a for key, a in answers.items() if key not in current_keys]
+    # The visit PDF splits them with the same predicate (V-PDF-10).
+    stale = [a for a in answers.values() if answer_left_site(a, current_keys)]
     return {
         'project':        project,
         'visit':          visit,
@@ -1419,6 +1437,24 @@ def qaqc_visit_photo(request, project_id, answer_pk):
     return redirect(url)
 
 
+def visit_pdf_document(project, visit, generated_at):
+    """The visit PDF's template context: checklist_pdf.qaqc_visit_document() fed with this
+    module's own site functions, so the PDF and the visit page cannot drift apart.
+
+    V-PDF-12: coverage as this visit left it — site_coverage() as of its own submit.
+    V-PDF-10: answer_left_site(), the visit page's predicate, bound to the site's current
+    points and handed to the builder; checklist_pdf cannot import this module (this
+    module imports it), so it is passed rather than re-derived there. About seven
+    queries: the five of site_checklist_points(), coverage, and the builder's two.
+    """
+    points = site_checklist_points(project)
+    coverage = site_coverage(project, points, as_of=visit.submitted_at)
+    current_keys = point_keys(points)
+    return qaqc_visit_document(
+        project, visit, coverage, generated_at,
+        left_site=lambda answer: answer_left_site(answer, current_keys))
+
+
 @login_required
 @require_GET
 def qaqc_visit_pdf(request, project_id, visit_pk):
@@ -1446,9 +1482,7 @@ def qaqc_visit_pdf(request, project_id, visit_pk):
     # F-9 / V-PDF-8: ANY failure building or rendering the document ends on the visit page
     # with a message, as task_checklist_pdf does for the task PDF.
     try:
-        coverage = site_coverage(project, site_checklist_points(project))
-        pdf = render_pdf(QAQC_VISIT_TEMPLATE,
-                         qaqc_visit_document(project, visit, coverage, generated_at))
+        pdf = render_pdf(QAQC_VISIT_TEMPLATE, visit_pdf_document(project, visit, generated_at))
     except Exception:
         logger.exception('QA/QC visit PDF failed for visit %s on %s',
                          visit.pk, project.project_id)

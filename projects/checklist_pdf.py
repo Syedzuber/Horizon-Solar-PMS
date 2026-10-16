@@ -13,7 +13,7 @@ TWO HALVES, AND ONLY THE FIRST IS SHARED.
                   partials, not this builder.
 
   qaqc_visit_document() and its helpers — the QA/QC visit PDF's content (part 2,
-                  spec §3, V-PDF-1 to V-PDF-8). The second builder of that shape.
+                  spec §3, V-PDF-1 to V-PDF-13). The second builder of that shape.
 
 READ-ONLY, BOTH HALVES. Nothing here writes a row, a file or a session. The one thing
 it writes is a log line: the F-7 warning when a character had to be replaced. A
@@ -371,6 +371,9 @@ VISIT_SIGNOFF_HEADINGS = ['QA/QC Engineer', 'Witnessed By', 'Witnessed By',
 NO_WITNESS = '—'   # V-PDF-4: the Witness cell; a visit answer has no witness field
 VISIT_WITNESS_FOOTNOTE = 'QA/QC visit answers do not record witnesses.'   # V-PDF-4, verbatim
 
+DRIFTED_SECTION = "Points no longer on the site's checklist"   # V-PDF-10, verbatim
+COVERAGE_LABEL = 'Coverage as of this visit'                     # V-PDF-12, verbatim
+
 
 def _plural(count, word):
     """Same wording as qaqc_views._plural, which the visit notices use. Not imported from
@@ -386,7 +389,8 @@ def qaqc_visit_counts_line(points, no_count, raised):
 
 def qaqc_visit_coverage_line(coverage):
     """The visit page's coverage sentence (qaqc_visit.html), from site_coverage()'s dict.
-    Site-wide and as of now, exactly as the page shows it — not as of the visit."""
+    The PDF passes the dict computed as of the visit's submit (V-PDF-12) and prints it
+    under COVERAGE_LABEL, so the sentence is the page's and the moment is the visit's."""
     if not coverage['total']:
         return 'No checklist points on this site yet'
     return (f"{coverage['verified']} of {coverage['total']} points verified on submitted "
@@ -414,9 +418,10 @@ def _visit_answers(visit):
 
     ORDER: task in site order (phase, then task order — site_checklist_points()' order),
     then the item in its checklist's own numbering (ChecklistItem.Meta: order, pk). Every
-    answer on the visit is a row, including one whose point has left the site since
-    (version drift, Not Applicable): it was checked on this visit, and the visit page
-    still shows it. Its task and item are the ones it was answered against.
+    answer on the visit is returned, including one whose point has left the site since
+    (version drift, Not Applicable): it was checked on this visit. Its task and item are
+    the ones it was answered against; qaqc_visit_document() moves it to the final section
+    (V-PDF-10).
 
     The number is the item's position in its version, as the visit page and the task PDF
     number it, so a printed line can be matched to the screen. Counting needs every item
@@ -441,13 +446,16 @@ def _visit_answers(visit):
 def _visit_remark(answer):
     """V-PDF-4's Remark cell: the remark, and on a No the punch point it raised with that
     point's CURRENT status — the reader wants to know whether the finding is still open.
+    V-PDF-13's wording says "now … (at generation)" because the status is read when the
+    PDF is made, not when the visit was submitted: every point starts Open.
 
     Every No on a submitted visit raised one (V-5, in the submit's own transaction), so a
     No without one should not exist; should one anyway, its remark is printed alone
     rather than claiming a punch point that was never raised."""
     remark = answer.remark
     if answer.answer == QaqcVisitAnswer.NO and answer.punch_point_id:
-        raised = f'Punch point raised ({answer.punch_point.get_status_display()})'
+        raised = (f'Punch point raised · now {answer.punch_point.get_status_display()} '
+                  f'(at generation)')
         remark = f'{remark}\n{raised}' if remark else raised
     return remark
 
@@ -465,22 +473,29 @@ def _visit_row_cells(answer, number):
     ]
 
 
+def _visit_group_heading(answer):
+    """A task group's heading, "<task> — <checklist> v<n>", as the visit page heads its
+    groups. V-PDF-11: when the checklist is named exactly as the task, the name is said
+    once — "<task> — v<n>" — and the version stays, since it is what tells two versions
+    of one checklist apart."""
+    task_name, checklist = answer.task.task_name, answer.item.checklist
+    if checklist.name == task_name:
+        return f'{task_name} — v{checklist.version_no}'
+    return f'{task_name} — {checklist.name} v{checklist.version_no}'
+
+
 def _visit_sections(answers, numbers):
     """pdf_sections for the item table: one section per (task, checklist version) in the
-    order given, headed "<task> — <checklist> v<n>" as the visit page heads its groups,
-    with a sub-heading row each time the checklist section changes (V-PDF-3). Contiguous
-    runs, as _checklist_context() groups part 1's rows: a heading that recurs later in
-    the checklist's order is printed again rather than pulling item 14 up beside item 3."""
+    order given, headed by _visit_group_heading(), with a sub-heading row each time the
+    checklist section changes (V-PDF-3). Contiguous runs, as _checklist_context() groups
+    part 1's rows: a heading that recurs later in the checklist's order is printed again
+    rather than pulling item 14 up beside item 3."""
     sections = []
     current_key = current_heading = None
     for answer in answers:
         key = (answer.task_id, answer.item.checklist_id)
         if key != current_key:
-            checklist = answer.item.checklist
-            sections.append({
-                'name': f'{answer.task.task_name} — {checklist.name} v{checklist.version_no}',
-                'rows': [],
-            })
+            sections.append({'name': _visit_group_heading(answer), 'rows': []})
             current_key, current_heading = key, None
         if answer.item.section and answer.item.section != current_heading:
             sections[-1]['rows'].append({'subheading': answer.item.section})
@@ -489,21 +504,51 @@ def _visit_sections(answers, numbers):
     return sections
 
 
-def qaqc_visit_document(project, visit, coverage, generated_at):
+def _drifted_section(answers, numbers):
+    """V-PDF-10's final section: the answers whose point has left the site, under one
+    heading, as the visit page lists them apart. The item table has two heading levels
+    and this section takes the first, so each task group's heading becomes a sub-heading
+    row here and the checklist's own section headings are not printed — a point that is
+    no longer on the site has no place in the site's checklist layout to show. None when
+    no answer drifted, so the heading never stands over an empty table."""
+    if not answers:
+        return None
+    rows, current_key = [], None
+    for answer in answers:
+        key = (answer.task_id, answer.item.checklist_id)
+        if key != current_key:
+            rows.append({'subheading': _visit_group_heading(answer)})
+            current_key = key
+        rows.append({'cells': _visit_row_cells(answer, numbers[answer.item_id])})
+    return {'name': DRIFTED_SECTION, 'rows': rows}
+
+
+def qaqc_visit_document(project, visit, coverage, generated_at, *, left_site):
     """The template context for one SUBMITTED QA/QC visit's PDF (spec §3).
 
-    `coverage` is qaqc_views.site_coverage()'s dict for the site, passed in rather than
-    computed here because qaqc_views imports this module. The caller has already checked
-    the visit is submitted (V-PDF-1) and readable (V-PDF-2); nothing here re-decides it.
+    `coverage` is qaqc_views.site_coverage()'s dict for the site AS OF this visit's submit
+    (V-PDF-12). `left_site(answer)` is qaqc_views.answer_left_site bound to the site's
+    current points: the visit page's predicate for an answer whose point has left the
+    site (V-PDF-10). Both are passed in because qaqc_views imports this module, so the
+    page's own functions reach here without a second calculation. The caller has already
+    checked the visit is submitted (V-PDF-1) and readable (V-PDF-2).
 
-    Rows (V-PDF-3): only this visit's answers. Header (V-PDF-5): only fields the system
-    holds, the counts and the coverage line; the marker reads "SUBMITTED <date>" where the
-    task PDF reads FINAL. There is no verdict (ruling 7). Two queries for the rows.
+    Rows (V-PDF-3): only this visit's answers; those left_site() picks out print last,
+    in their own section. Header (V-PDF-5): only fields the system holds, the counts
+    (every answer, drifted ones included, as the visit page counts) and the coverage
+    line; the marker reads "SUBMITTED <date>" where the task PDF reads FINAL. There is no
+    verdict (ruling 7). Two queries for the rows.
 
     F-7 / V-PDF-8: every string has had undrawable characters replaced by "□", and one
     warning naming the visit is logged when any were.
     """
     answers, numbers = _visit_answers(visit)
+    drifted = [a for a in answers if left_site(a)]
+    on_site = [a for a in answers if not left_site(a)]
+    sections = _visit_sections(on_site, numbers)
+    drifted_section = _drifted_section(drifted, numbers)
+    if drifted_section:
+        sections.append(drifted_section)
     no_count = sum(1 for a in answers if a.answer == QaqcVisitAnswer.NO)
     raised = sum(1 for a in answers if a.punch_point_id)
     generated_text = timezone.localtime(generated_at).strftime('%d %b %Y %H:%M IST')
@@ -519,7 +564,7 @@ def qaqc_visit_document(project, visit, coverage, generated_at):
         ('QA/QC engineer', engineer),
         ('Submitted', timezone.localtime(visit.submitted_at).strftime('%d %b %Y %H:%M IST')),
         ('Checked', qaqc_visit_counts_line(len(answers), no_count, raised)),
-        ('Site coverage', qaqc_visit_coverage_line(coverage)),
+        (COVERAGE_LABEL, qaqc_visit_coverage_line(coverage)),
         ('Generated', generated_text),
     ]
 
@@ -531,7 +576,7 @@ def qaqc_visit_document(project, visit, coverage, generated_at):
         'pdf_footer_left':  (f'{project.project_id} · QA/QC visit '
                              f'{visit.visit_date:%d %b %Y} (visit {visit.pk})'),
         'pdf_columns':      QAQC_VISIT_COLUMNS,
-        'pdf_sections':     _visit_sections(answers, numbers),
+        'pdf_sections':     sections,
         'pdf_signoff':      [{'heading': heading, 'name': name}
                              for heading, name in zip(VISIT_SIGNOFF_HEADINGS,
                                                       [engineer, '', '', ''])],

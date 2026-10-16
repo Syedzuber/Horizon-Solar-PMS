@@ -16,3 +16,6 @@ opex_catalogue.csv
 # (doc no. + revision) rather than committed. Held by GM-Projects.
 docs/Installation check list_Final/
 docs/QA QC Check List_Final/
+
+# Session scratch files (prompts say "scratch files go in .scratch/"): never committed.
+.scratch/
