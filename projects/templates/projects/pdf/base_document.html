@@ -14,6 +14,11 @@ context keys and knows nothing about tasks or visits:
 xhtml2pdf, not a browser: only the CSS it implements works here. The footer is a static
 frame placed in the bottom margin, filled from #pdf_footer, which is taken out of the
 flow and drawn on every page.
+
+FONT (F-7): DejaVu Sans, bundled in projects/fonts/dejavu/ with its licence. The URLs
+below are relative because checklist_pdf.render_pdf() names a document inside that
+directory and allows reads from it alone. Characters it cannot draw are replaced with
+"□" before the template is rendered (checklist_pdf.replace_undrawable).
 {% endcomment %}<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -31,7 +36,9 @@ flow and drawn on every page.
       height: 0.8cm;
     }
   }
-  body { font-family: Helvetica; font-size: 8.5pt; color: #111111; }
+  @font-face { font-family: "DejaVu Sans"; src: url("DejaVuSans.ttf"); }
+  @font-face { font-family: "DejaVu Sans"; src: url("DejaVuSans-Bold.ttf"); font-weight: bold; }
+  body { font-family: "DejaVu Sans"; font-size: 8.5pt; color: #111111; }
   h1 { font-size: 14pt; margin: 0 0 4pt 0; }
   h2 { font-size: 10pt; margin: 10pt 0 4pt 0; }
   table { width: 100%; }

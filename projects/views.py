@@ -11740,8 +11740,9 @@ def task_checklist_pdf(request, project_id, task_id):
     The rows are the version _checklist_for_task() pins and every item of it, answered
     or not (F-3), taken from _checklist_context() so the PDF and the task page share one
     wording rule (F-5). 404 when the task has no checklist, as the page then shows none.
-    A rendering failure raises (checklist_pdf.PdfRenderError) and is never served as a
-    partial file. Writes nothing: no ActivityLog, no session, no row.
+    A rendering failure (F-9) is logged and answered with a redirect to the task page
+    carrying an error message — never a 500, never a partial file. A successful download
+    writes nothing: no ActivityLog, no session, no row.
     """
     project = _active_project(project_id)
 
@@ -11758,11 +11759,20 @@ def task_checklist_pdf(request, project_id, task_id):
         raise Http404
 
     generated_at = timezone.now()
-    pdf = render_pdf(TASK_CHECKLIST_TEMPLATE, task_checklist_document(
-        project, task, checklist, context['checklist_sections'], generated_at))
+    # F-9: ANY failure building or rendering the document — not only PdfRenderError —
+    # ends on the task page with a message, because a 500 is the one answer the spec
+    # rules out and a half-built document is never sent. The exception and its traceback
+    # go to the log, where they can be read; the person is told it was logged.
+    try:
+        pdf = render_pdf(TASK_CHECKLIST_TEMPLATE, task_checklist_document(
+            project, task, checklist, context['checklist_sections'], generated_at))
+    except Exception:
+        logger.exception('Checklist PDF failed for task %s on %s', task.pk, project.project_id)
+        messages.error(request, 'The PDF could not be generated. The error has been logged.')
+        return redirect('task_detail', project_id=project.project_id, task_id=task.pk)
 
     response = HttpResponse(pdf, content_type='application/pdf')
-    filename = task_checklist_filename(project, checklist, generated_at)
+    filename = task_checklist_filename(project, task, checklist, generated_at)
     response['Content-Disposition'] = f'attachment; filename="{filename}"'
     return response
 

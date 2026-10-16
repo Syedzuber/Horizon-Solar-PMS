@@ -12,6 +12,12 @@ WHAT IS PINNED HERE
          view-only QA/QC engineer (who holds no task there).
     render_pdf() raises on an exception AND on a counted error, never returning bytes.
     The view issues zero write queries.
+  v1.1 (part 1b):
+    F-1  the marker reads "FINAL · N of M points checked" / "NOT FINAL · …".
+    F-7  a character the bundled font cannot draw becomes "□", one warning names the task;
+         Ω and ₹ (which DejaVu draws) are kept.
+    F-8  the task name is in the header and, slugified, in the filename.
+    F-9  a render failure redirects to the task page with the message: 302, no file.
 
 FIXTURE SHAPE. One OPEX site activated through the real view (tasks carry
 template_task), a four-item checklist in two sections linked to its Civil Work task,
@@ -34,8 +40,8 @@ from django.utils import timezone
 from pypdf import PdfReader
 
 from .checklist_pdf import (
-    NOT_CHECKED, PdfRenderError, TASK_CHECKLIST_TEMPLATE, WITNESS_FOOTNOTE, render_pdf,
-    task_checklist_document, task_checklist_filename, task_checklist_is_final,
+    NOT_CHECKED, PdfRenderError, TASK_CHECKLIST_TEMPLATE, UNDRAWABLE, WITNESS_FOOTNOTE,
+    render_pdf, task_checklist_document, task_checklist_filename, task_checklist_is_final,
 )
 from .models import (
     Checklist, ChecklistItem, ChecklistItemCompletion, ChecklistTaskLink,
@@ -206,14 +212,65 @@ class SignoffAndHeaderTests(ChecklistPdfFixture):
 
     def test_header_omits_fields_the_system_does_not_hold(self):
         labels = [label for label, _value in self._document()['pdf_header_rows']]
-        self.assertEqual(labels, ['Site code', 'Client', 'Checklist', 'Generated'])
+        self.assertEqual(labels, ['Site code', 'Client', 'Task', 'Checklist', 'Generated'])
         self.assertEqual(self._document()['pdf_footnotes'], [WITNESS_FOOTNOTE])
 
-    def test_filename_is_site_code_checklist_version_and_ist_date(self):
+    def test_header_names_the_task(self):
+        self.assertEqual(dict(self._document()['pdf_header_rows'])['Task'], self.task.task_name)
+
+    def test_progress_counts_answered_items_of_the_pinned_version(self):
+        self.assertEqual(self._document()['pdf_progress'], f'2 of {len(ITEMS)} points checked')
+
+    def test_filename_is_site_task_checklist_version_and_ist_date(self):
         moment = timezone.now()
-        self.assertEqual(task_checklist_filename(self.site, self.checklist, moment),
-                         f'{self.site.project_id}_PDF-CIVIL_v1_'
-                         f'{timezone.localtime(moment):%Y%m%d}.pdf')
+        self.assertEqual(
+            task_checklist_filename(self.site, self.task, self.checklist, moment),
+            f'{self.site.project_id}_civil-work-and-mms-installation_PDF-CIVIL_v1_'
+            f'{timezone.localtime(moment):%Y%m%d}.pdf')
+
+    def test_filename_differs_per_location_copy_and_is_windows_safe(self):
+        """G74: per-location copies of one task download under different names. A name
+        with characters Windows forbids, or none slugify keeps, still gives a safe part."""
+        moment = timezone.now()
+        names = {}
+        for task_name in ['Civil Work — Parking', 'Civil Work — ticket plaza 1',
+                          'Civil: Work? <A>|"B"*', 'राम कार्य']:
+            self.task.task_name = task_name   # unsaved: only the filename reads it
+            names[task_name] = task_checklist_filename(self.site, self.task,
+                                                       self.checklist, moment)
+        self.assertEqual(len(set(names.values())), 4)
+        for filename in names.values():
+            self.assertRegex(filename, r'^[A-Za-z0-9._-]+\.pdf$')
+        self.assertIn('_civil-work-ab_', names['Civil: Work? <A>|"B"*'])
+        self.assertIn('_task_', names['राम कार्य'])
+
+
+class UndrawableCharacterTests(ChecklistPdfFixture):
+    """F-7: never a blank where something was typed."""
+
+    def _answer_with(self, **fields):
+        ChecklistItemCompletion.objects.filter(task=self.task, item=self.items[2]).update(**fields)
+
+    def test_undrawable_characters_become_boxes_and_one_warning_names_the_task(self):
+        self._answer_with(remarks='Earth Ω 2.5, fee ₹500', witness_names='राम')
+        with self.assertLogs('projects.checklist_pdf', level='WARNING') as logs:
+            document = self._document()
+        _label, _status, witness, _photo, _date, remark = document['pdf_sections'][1]['rows'][0]['cells']
+        self.assertEqual(remark, 'Earth Ω 2.5, fee ₹500')       # DejaVu draws both
+        self.assertEqual(witness, UNDRAWABLE * 3)                # र ा म — one box each
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(f'task {self.task.pk}', logs.output[0])
+
+    def test_no_warning_when_every_character_is_drawable(self):
+        self._answer_with(remarks='Earth Ω 2.5 ≤ 5, fee ₹500')
+        with self.assertNoLogs('projects.checklist_pdf', level='WARNING'):
+            self._document()
+
+    def test_boxes_reach_the_pdf_itself(self):
+        self._answer_with(witness_names='राम')
+        with self.assertLogs('projects.checklist_pdf', level='WARNING'):
+            response = _client_for(self.pm).get(self._url())
+        self.assertIn(UNDRAWABLE * 3, _pdf_text(response.content))
 
 
 class DownloadViewTests(ChecklistPdfFixture):
@@ -224,10 +281,11 @@ class DownloadViewTests(ChecklistPdfFixture):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertRegex(response['Content-Disposition'],
-                         rf'^attachment; filename="{self.site.project_id}_PDF-CIVIL_v1_\d{{8}}\.pdf"$')
+                         rf'^attachment; filename="{self.site.project_id}_'
+                         rf'civil-work-and-mms-installation_PDF-CIVIL_v1_\d{{8}}\.pdf"$')
         text = _pdf_text(response.content)
         self.assertEqual(text.count(NOT_CHECKED), 2)
-        self.assertIn('NOT FINAL', text)
+        self.assertIn(f'NOT FINAL · 2 of {len(ITEMS)} points checked', text)
         for number in range(1, len(ITEMS) + 1):
             self.assertRegex(text, rf'(?m)^{number}\. ')
 
@@ -244,6 +302,25 @@ class DownloadViewTests(ChecklistPdfFixture):
     def test_task_without_a_checklist_is_404(self):
         response = _client_for(self.pm).get(self._url(self.inverter))
         self.assertEqual(response.status_code, 404)
+
+    def test_render_failure_redirects_to_the_task_with_a_message(self):
+        """F-9: the converter fails mid-render — the person lands back on the task page
+        with the message, the failure is logged, and no file is sent."""
+        def broken(html, dest, **kwargs):
+            dest.write(b'%PDF-1.4 truncated')
+            raise ValueError('layout failed')
+        client = _client_for(self.pm)
+        with mock.patch('xhtml2pdf.pisa.CreatePDF', side_effect=broken), \
+                self.assertLogs('projects.views', level='ERROR') as logs:
+            response = client.get(self._url())
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response['Location'],
+                         reverse('task_detail', args=[self.site.project_id, self.task.pk]))
+        self.assertNotIn('Content-Disposition', response)
+        self.assertNotIn(b'%PDF', response.content)
+        self.assertIn('layout failed', '\n'.join(logs.output))
+        page = client.get(response['Location'])
+        self.assertContains(page, 'The PDF could not be generated. The error has been logged.')
 
     def test_get_only(self):
         response = _client_for(self.pm).post(self._url())

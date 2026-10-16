@@ -4830,7 +4830,13 @@ pinned to the renamed version — and a pinned version is active or archived, wh
 headings R-7 freezes. In practice a rename reaches a PDF only through a write that
 bypasses R-7 (`QuerySet.update()`). Printed as it is, with no caveat, by ruling 3.
 
-### G72 — the checklist PDF prints characters outside cp1252 as blanks
+### ~~G72 — the checklist PDF prints characters outside cp1252 as blanks~~ — **CLOSED 16 Oct 2026 by checklist PDF part 1b (F-7)**
+
+Closed: DejaVu Sans (regular and bold) is bundled in `projects/fonts/dejavu/` and
+registered in `base_document.html`; it draws Ω, ≤, ≥, µ and ₹. Anything it still cannot
+draw — Devanagari above all, by ruling no Devanagari font is bundled — is replaced with a
+visible "□" by `checklist_pdf.replace_undrawable()` before rendering, and one warning
+naming the task is logged. Nothing prints blank. Original entry kept below.
 
 Recorded 15 Oct 2026 by the checklist PDF session (part 1). `checklist_pdf.render_pdf()`
 uses xhtml2pdf's default Helvetica, which draws cp1252 only. Anything else a person types
@@ -4854,7 +4860,15 @@ Storing it needs a field and a migration, which the session was told not to add;
 the seed command's dict at request time would make a management command a runtime
 dependency. Open as a question to Zuber.
 
-### G74 — per-location copies of a task print identical checklist PDF headers and filenames
+**Ruled 16 Oct 2026 (spec v1.1, F-6 amended):** the reference is dropped from the header
+until it is stored. Revisit at closeout step 5 (the T&C checklist seed), which is the
+next session to author checklist content.
+
+### ~~G74 — per-location copies of a task print identical checklist PDF headers and filenames~~ — **CLOSED 16 Oct 2026 by checklist PDF part 1b (F-8)**
+
+Closed: the header prints the task name (which carries the location, e.g. "Civil Work
+and MMS Installation — Parking"), and the filename inserts it, slugified, after the site
+code. Original entry kept below.
 
 Recorded 15 Oct 2026 by the checklist PDF session (part 1). Duplicate-for-locations
 (`Task.location_label`) gives one site several tasks on the same checklist —
@@ -4863,6 +4877,33 @@ F-6's header (site, client, tender, checklist, version) and the filename
 (`<site>_<checklist code>_v<n>_<date>.pdf`) name none of what tells them apart, so their
 four PDFs read alike and download under one filename. Not added: the task name or
 location is not in F-6. Open as a question to Zuber.
+
+### G75 — xhtml2pdf installs a signing stack the checklist PDF never uses
+
+Recorded 16 Oct 2026 by checklist PDF part 1b. `xhtml2pdf==0.2.24` requires pyHanko and
+pyhanko-certvalidator, which pull in aiohttp (with aiohappyeyeballs, aiosignal,
+frozenlist, multidict, propcache, yarl), cryptography, oscrypto, lxml, uritools and
+tzlocal — about thirty packages of the sixty-eight the deploy now resolves. They exist for
+PDF digital signatures; nothing in this app signs a PDF. Two costs follow: a larger
+Railway image, and an import of xhtml2pdf that loads pyHanko and aiohttp EAGERLY
+(~1.8 s warm, measured 15 Oct 2026), which is why `checklist_pdf.render_pdf()` imports it
+lazily and the first PDF in each worker takes longer. oscrypto loads the system libcrypto
+through ctypes, but only inside `pyhanko_certvalidator.registry._system_trust_roots()`, a
+signature-validation path no render reaches. Not fixed: xhtml2pdf declares them as hard
+requirements, so dropping them means installing with `--no-deps` and pinning the rest by
+hand, or another library — a dependency decision, not this session's. Revisit if image
+size or worker boot time matters, or when xhtml2pdf makes signing an extra.
+
+### G76 — local development runs Python 3.14; production runs 3.12
+
+Recorded 16 Oct 2026 by checklist PDF part 1b. `.python-version` says 3.12, so nixpacks
+builds production on 3.12. The only interpreter on the development machine is 3.14, and
+the project venv and every test run (including the 4,488-test suite) use it. Code that
+works on 3.14 can fail on 3.12 (newer syntax and standard-library additions), and a
+dependency's wheel can differ between the two. For the checklist PDF, the 3.12 install
+was checked by hand: a portable CPython 3.12.10 in a session scratchpad, a clean venv,
+a wheels-only install, import and render. Nothing checks that routinely. Options: install
+3.12 locally and build the venv on it, or add a 3.12 CI run.
 
 ---
 
