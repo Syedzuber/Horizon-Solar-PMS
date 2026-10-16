@@ -1,7 +1,7 @@
-# Checklist PDF Spec v1.0 — task checklist and QA/QC visit downloads
+# Checklist PDF Spec v1.1 — task checklist and QA/QC visit downloads
 
 Horizon Solar PMS · 15 Oct 2026
-Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026).
+Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b).
 Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the QA/QC visit PDF, a separate session that reuses the renderer.
 
 ---
@@ -24,9 +24,12 @@ Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the
 
 | # | Rule |
 |---|---|
-| F-1 | Final vs draft (task). The PDF is “final” only when the task is Done, approved_at is set, and no answer was recorded after approved_at. Anything else prints “NOT FINAL” in the header with the generation time. The third condition covers the stale-approval defect (G63). |
+| F-1 | Final vs draft (task). The PDF is “final” only when the task is Done, approved_at is set, and no answer was recorded after approved_at. Anything else prints “NOT FINAL” in the header with the generation time. The third condition covers the stale-approval defect (G63). **Amended v1.1:** FINAL/NOT FINAL rule unchanged. The header ALSO shows "N of M points checked" beside the marker, same size and weight. |
 | F-2 | Draft rule (visit). Only submitted visits can be downloaded. An open visit has no download button. |
 | F-3 | Rows. The task PDF lists every item of the pinned version, with unanswered items marked “Not checked”. A checklist PDF that silently omits items reads as complete. The visit PDF lists only the points checked, plus a coverage line. |
 | F-4 | Columns. Checking point · Status · Witness · Photo proof (Yes/No) · Date of checking · Remark. Remark is added because a No without its reason is useless to a client. |
 | F-5 | Item wording comes from item_text_snapshot when answered and the pinned version’s label when not. |
-| F-6 | Header. Site code, client, tender, checklist name and version, and the source form reference already stored on the checklist (e.g. HRPPL/ELE/I&C/DCDB R00), plus the generation time in IST. Paper-form fields the system doesn’t hold (Job No, Drawing, Spec No) are left out rather than printed blank. |
+| F-6 | Header. Site code, client, tender, checklist name and version, and the source form reference already stored on the checklist (e.g. HRPPL/ELE/I&C/DCDB R00), plus the generation time in IST. Paper-form fields the system doesn’t hold (Job No, Drawing, Spec No) are left out rather than printed blank. **Amended v1.1:** source form reference dropped until stored (G73; revisit at step 5). |
+| F-7 | (v1.1) Unsupported characters print as a visible "□", never blank. |
+| F-8 | (v1.1) Task name appears in the header and the filename. |
+| F-9 | (v1.1) A render failure redirects to the task page with an error message; never a 500, never a partial file. |
