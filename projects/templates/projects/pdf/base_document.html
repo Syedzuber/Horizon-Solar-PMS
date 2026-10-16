@@ -1,13 +1,14 @@
 {% comment %}
 SHARED PDF PAGE SKELETON — checklist_pdf.render_pdf() documents extend this.
-Users today: task_checklist.html (part 1). Planned: the QA/QC visit PDF (part 2) and the
+Users today: task_checklist.html (part 1) and qaqc_visit.html (part 2). Planned: the
 step 9 dossier. Every checklist-family PDF gets the same page from here: A4 portrait,
 1.5 cm margins, and a footer reading "<pdf_footer_left> · Generated <time> · Page N of M".
 
 The shared partials beside this file are the reusable pieces; each takes plain
 context keys and knows nothing about tasks or visits:
-  _header_block.html  pdf_title, pdf_is_final, pdf_generated_at, pdf_header_rows
-  _item_table.html    pdf_columns, pdf_sections
+  _header_block.html  pdf_title, pdf_is_final or pdf_marker, pdf_progress,
+                      pdf_generated_at, pdf_header_rows
+  _item_table.html    pdf_columns, pdf_sections (rows may be sub-headings)
   _signoff_grid.html  pdf_signoff
   _footnotes.html     pdf_footnotes
 
@@ -59,6 +60,7 @@ directory and allows reads from it alone. Characters it cannot draw are replaced
               border: 0.5pt solid #888888; padding: 3pt; }
   .items td { border: 0.5pt solid #888888; padding: 3pt; }
   .items td.section { background-color: #f3f3f3; font-weight: bold; }
+  .items td.subsection { font-weight: bold; color: #555555; }
 
   /* _signoff_grid.html */
   .signoff th, .signoff td { border: 0.5pt solid #888888; padding: 3pt; }

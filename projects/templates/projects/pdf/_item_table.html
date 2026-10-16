@@ -4,6 +4,9 @@ decides the columns and the cells; this only lays them out:
   pdf_columns   [{'label', 'width'}]  — width in percent of the content width
   pdf_sections  [{'name', 'rows': [{'cells': [...]}]}] — a blank name is the ungrouped
                 bucket and gets no heading row
+                A row may instead be {'subheading': text}: a lighter heading row inside
+                the section, for a second level of grouping (the visit PDF's checklist
+                section under its task heading, V-PDF-3). The task PDF never sends one.
 The <thead> repeats at the top of every page (xhtml2pdf 0.2.24 repeats a thead itself;
 repeat="1" says the same thing for older readers of this file). Cells are plain text,
 escaped, with line breaks kept — witness names are often one per line.
@@ -20,7 +23,11 @@ escaped, with line breaks kept — witness names are often one per line.
       <tr><td class="section" colspan="{{ pdf_columns|length }}">{{ section.name }}</td></tr>
       {% endif %}
       {% for row in section.rows %}
+      {% if row.subheading %}
+      <tr><td class="subsection" colspan="{{ pdf_columns|length }}">{{ row.subheading }}</td></tr>
+      {% else %}
       <tr>{% for cell in row.cells %}<td>{{ cell|linebreaksbr }}</td>{% endfor %}</tr>
+      {% endif %}
       {% endfor %}
     {% endfor %}
   </tbody>

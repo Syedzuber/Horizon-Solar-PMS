@@ -12,6 +12,9 @@ TWO HALVES, AND ONLY THE FIRST IS SHARED.
                   document writes its own builder of the same shape and reuses the
                   partials, not this builder.
 
+  qaqc_visit_document() and its helpers — the QA/QC visit PDF's content (part 2,
+                  spec §3, V-PDF-1 to V-PDF-8). The second builder of that shape.
+
 READ-ONLY, BOTH HALVES. Nothing here writes a row, a file or a session. The one thing
 it writes is a log line: the F-7 warning when a character had to be replaced. A
 download is a view (ruling 6), and the view's test asserts it issues no write query.
@@ -33,7 +36,7 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.text import slugify
 
-from .models import ChecklistItemCompletion, Task
+from .models import ChecklistItem, ChecklistItemCompletion, QaqcVisitAnswer, Task
 
 logger = logging.getLogger(__name__)
 
@@ -347,5 +350,201 @@ def task_checklist_document(project, task, checklist, sections, generated_at):
             "Checklist PDF for task %s ('%s') on %s: %d character(s) the bundled font "
             "cannot draw were printed as %s: %s",
             task.pk, task.task_name, project.project_id, len(found), UNDRAWABLE,
+            ' '.join(f'U+{ord(ch):04X}' for ch in sorted(found)))
+    return document
+
+
+# ---------------------------------------------------------------------------
+# QA/QC visit PDF (part 2, spec §3)
+# ---------------------------------------------------------------------------
+
+QAQC_VISIT_TEMPLATE = 'projects/pdf/qaqc_visit.html'
+
+# V-PDF-4: part 1's six columns and widths, so the two documents read alike side by side.
+QAQC_VISIT_COLUMNS = TASK_CHECKLIST_COLUMNS
+
+# V-PDF-6. Reviewed By names PM/Coordinator as the paper form's signatory; nothing in the
+# system records a review of a visit, so its Name is blank like the two witnesses'.
+VISIT_SIGNOFF_HEADINGS = ['QA/QC Engineer', 'Witnessed By', 'Witnessed By',
+                          'Reviewed By (PM/Coordinator)']
+
+NO_WITNESS = '—'   # V-PDF-4: the Witness cell; a visit answer has no witness field
+VISIT_WITNESS_FOOTNOTE = 'QA/QC visit answers do not record witnesses.'   # V-PDF-4, verbatim
+
+
+def _plural(count, word):
+    """Same wording as qaqc_views._plural, which the visit notices use. Not imported from
+    there: qaqc_views imports this module."""
+    return f"{count} {word}{'' if count == 1 else 's'}"
+
+
+def qaqc_visit_counts_line(points, no_count, raised):
+    """V-PDF-5's counts: "N points checked, M No, M punch points raised"."""
+    return (f"{_plural(points, 'point')} checked, {no_count} No, "
+            f"{_plural(raised, 'punch point')} raised")
+
+
+def qaqc_visit_coverage_line(coverage):
+    """The visit page's coverage sentence (qaqc_visit.html), from site_coverage()'s dict.
+    Site-wide and as of now, exactly as the page shows it — not as of the visit."""
+    if not coverage['total']:
+        return 'No checklist points on this site yet'
+    return (f"{coverage['verified']} of {coverage['total']} points verified on submitted "
+            f"visits ({coverage['percent']}%)")
+
+
+def qaqc_visit_filename(project, visit):
+    """<site code>_QAQC-visit_<YYYYMMDD>_<visit id>.pdf (V-PDF-7).
+
+    The date is the visit's own date (visit_date, the IST day it was started), not the
+    generation day part 1 uses: a visit is one dated event, so the same visit downloads
+    under the same name whenever it is fetched. The id keeps two visits of one site
+    apart when one of them lapsed on the same day (V-1 lets a replacement start then)."""
+    return '_'.join([
+        _safe_filename_part(project.project_id),
+        'QAQC-visit',
+        visit.visit_date.strftime('%Y%m%d'),
+        str(visit.pk),
+    ]) + '.pdf'
+
+
+def _visit_answers(visit):
+    """This visit's answers in V-PDF-3 order, and each answered item's number in its own
+    checklist version. Two queries.
+
+    ORDER: task in site order (phase, then task order — site_checklist_points()' order),
+    then the item in its checklist's own numbering (ChecklistItem.Meta: order, pk). Every
+    answer on the visit is a row, including one whose point has left the site since
+    (version drift, Not Applicable): it was checked on this visit, and the visit page
+    still shows it. Its task and item are the ones it was answered against.
+
+    The number is the item's position in its version, as the visit page and the task PDF
+    number it, so a printed line can be matched to the screen. Counting needs every item
+    of each answered version, not only the answered ones — hence the second query, which
+    relies on ChecklistItem.Meta ordering (order, pk) for the numbering.
+    """
+    answers = list(
+        QaqcVisitAnswer.objects.filter(visit=visit)
+        .select_related('task__phase', 'item__checklist', 'punch_point')
+        .order_by('task__phase__phase_order', 'task__task_order', 'task_id',
+                  'item__order', 'item_id'))
+    numbers, seen = {}, {}
+    checklist_pks = {answer.item.checklist_id for answer in answers}
+    for checklist_pk, item_pk in (ChecklistItem.objects
+                                  .filter(checklist_id__in=checklist_pks)
+                                  .values_list('checklist_id', 'pk')):
+        seen[checklist_pk] = seen.get(checklist_pk, 0) + 1
+        numbers[item_pk] = seen[checklist_pk]
+    return answers, numbers
+
+
+def _visit_remark(answer):
+    """V-PDF-4's Remark cell: the remark, and on a No the punch point it raised with that
+    point's CURRENT status — the reader wants to know whether the finding is still open.
+
+    Every No on a submitted visit raised one (V-5, in the submit's own transaction), so a
+    No without one should not exist; should one anyway, its remark is printed alone
+    rather than claiming a punch point that was never raised."""
+    remark = answer.remark
+    if answer.answer == QaqcVisitAnswer.NO and answer.punch_point_id:
+        raised = f'Punch point raised ({answer.punch_point.get_status_display()})'
+        remark = f'{remark}\n{raised}' if remark else raised
+    return remark
+
+
+def _visit_row_cells(answer, number):
+    """One answer's six cells (V-PDF-4). The wording is always item_text_snapshot: the
+    model requires it on every answer, and it is the question the engineer answered."""
+    return [
+        f'{number}. {answer.item_text_snapshot}',
+        answer.get_answer_display(),
+        NO_WITNESS,
+        'Yes',   # V-PDF-4: a photo is required on every answer (qaqc_answer_photo_required)
+        _ist_date(answer.answered_at),
+        _visit_remark(answer),
+    ]
+
+
+def _visit_sections(answers, numbers):
+    """pdf_sections for the item table: one section per (task, checklist version) in the
+    order given, headed "<task> — <checklist> v<n>" as the visit page heads its groups,
+    with a sub-heading row each time the checklist section changes (V-PDF-3). Contiguous
+    runs, as _checklist_context() groups part 1's rows: a heading that recurs later in
+    the checklist's order is printed again rather than pulling item 14 up beside item 3."""
+    sections = []
+    current_key = current_heading = None
+    for answer in answers:
+        key = (answer.task_id, answer.item.checklist_id)
+        if key != current_key:
+            checklist = answer.item.checklist
+            sections.append({
+                'name': f'{answer.task.task_name} — {checklist.name} v{checklist.version_no}',
+                'rows': [],
+            })
+            current_key, current_heading = key, None
+        if answer.item.section and answer.item.section != current_heading:
+            sections[-1]['rows'].append({'subheading': answer.item.section})
+        current_heading = answer.item.section
+        sections[-1]['rows'].append({'cells': _visit_row_cells(answer, numbers[answer.item_id])})
+    return sections
+
+
+def qaqc_visit_document(project, visit, coverage, generated_at):
+    """The template context for one SUBMITTED QA/QC visit's PDF (spec §3).
+
+    `coverage` is qaqc_views.site_coverage()'s dict for the site, passed in rather than
+    computed here because qaqc_views imports this module. The caller has already checked
+    the visit is submitted (V-PDF-1) and readable (V-PDF-2); nothing here re-decides it.
+
+    Rows (V-PDF-3): only this visit's answers. Header (V-PDF-5): only fields the system
+    holds, the counts and the coverage line; the marker reads "SUBMITTED <date>" where the
+    task PDF reads FINAL. There is no verdict (ruling 7). Two queries for the rows.
+
+    F-7 / V-PDF-8: every string has had undrawable characters replaced by "□", and one
+    warning naming the visit is logged when any were.
+    """
+    answers, numbers = _visit_answers(visit)
+    no_count = sum(1 for a in answers if a.answer == QaqcVisitAnswer.NO)
+    raised = sum(1 for a in answers if a.punch_point_id)
+    generated_text = timezone.localtime(generated_at).strftime('%d %b %Y %H:%M IST')
+    engineer = _person(visit.engineer)
+
+    header_rows = [('Site code', project.project_id)]
+    if project.customer_name:
+        header_rows.append(('Client', project.customer_name))
+    if project.program_id:
+        header_rows.append(('Tender', project.program.reference_display))
+    header_rows += [
+        ('Visit date', visit.visit_date.strftime('%d %b %Y')),
+        ('QA/QC engineer', engineer),
+        ('Submitted', timezone.localtime(visit.submitted_at).strftime('%d %b %Y %H:%M IST')),
+        ('Checked', qaqc_visit_counts_line(len(answers), no_count, raised)),
+        ('Site coverage', qaqc_visit_coverage_line(coverage)),
+        ('Generated', generated_text),
+    ]
+
+    document = {
+        'pdf_title':        'QA/QC verification visit',
+        'pdf_marker':       f'SUBMITTED {_ist_date(visit.submitted_at)}',
+        'pdf_generated_at': generated_text,
+        'pdf_header_rows':  header_rows,
+        'pdf_footer_left':  (f'{project.project_id} · QA/QC visit '
+                             f'{visit.visit_date:%d %b %Y} (visit {visit.pk})'),
+        'pdf_columns':      QAQC_VISIT_COLUMNS,
+        'pdf_sections':     _visit_sections(answers, numbers),
+        'pdf_signoff':      [{'heading': heading, 'name': name}
+                             for heading, name in zip(VISIT_SIGNOFF_HEADINGS,
+                                                      [engineer, '', '', ''])],
+        'pdf_footnotes':    [VISIT_WITNESS_FOOTNOTE],
+    }
+    # F-7 over the whole context, as for the task PDF: remarks and snapshots are typed by
+    # the engineer, and task, client and person names by someone else.
+    found = set()
+    document = replace_undrawable(document, found)
+    if found:
+        logger.warning(
+            "QA/QC visit PDF for visit %s on %s: %d character(s) the bundled font cannot "
+            "draw were printed as %s: %s",
+            visit.pk, project.project_id, len(found), UNDRAWABLE,
             ' '.join(f'U+{ord(ch):04X}' for ch in sorted(found)))
     return document

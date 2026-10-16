@@ -23,7 +23,16 @@
           · {{ visit.engineer.user.get_full_name|default:visit.engineer.user.username }}
         </div>
       </div>
-      <span class="badge {% if visit.status == 'submitted' %}bg-success{% elif visit.status == 'lapsed' %}bg-secondary{% else %}bg-warning text-dark{% endif %}" id="visit-status">{{ visit.get_status_display }}</span>
+      <div class="d-flex flex-wrap align-items-center gap-2">
+        {% comment %}V-PDF-1: submitted visits only; the view 404s open and lapsed ones. Everyone
+           who reads a submitted visit's page may download it (V-PDF-2).{% endcomment %}
+        {% if visit.status == 'submitted' %}
+          <a href="{% url 'qaqc_visit_pdf' project.project_id visit.pk %}" class="btn btn-sm btn-outline-secondary">
+            <i class="bi bi-file-earmark-pdf me-1"></i>Download visit (PDF)
+          </a>
+        {% endif %}
+        <span class="badge {% if visit.status == 'submitted' %}bg-success{% elif visit.status == 'lapsed' %}bg-secondary{% else %}bg-warning text-dark{% endif %}" id="visit-status">{{ visit.get_status_display }}</span>
+      </div>
     </div>
     <div class="small mt-2">
       {% if visit.status == 'submitted' %}Submitted {{ visit.submitted_at|date:"d M Y, H:i" }}.

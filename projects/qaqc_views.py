@@ -36,12 +36,14 @@ from datetime import datetime, timedelta
 from django.contrib import messages
 from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, Q
-from django.http import Http404, HttpResponseForbidden
+from django.http import Http404, HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.views.decorators.http import require_GET
 
 from .bill_storage import bill_pdf_url, bills_bucket
+from .checklist_pdf import QAQC_VISIT_TEMPLATE, qaqc_visit_document, qaqc_visit_filename, render_pdf
 from .decorators import login_required
 from .design_storage import DesignStorageError, _client, build_design_path
 from .models import (
@@ -1415,6 +1417,48 @@ def qaqc_visit_photo(request, project_id, answer_pk):
     if url is None:
         raise Http404
     return redirect(url)
+
+
+@login_required
+@require_GET
+def qaqc_visit_pdf(request, project_id, visit_pk):
+    """Download one SUBMITTED QA/QC visit as a PDF (docs/CHECKLIST_PDF_SPEC.md §3, part 2).
+    Access: exactly qaqc_visit_detail's (V-PDF-2) — for a submitted visit, every viewer of
+    the site. GET only; read-only.
+
+    404 for an open or lapsed visit (V-PDF-1), whoever asks: neither is a finding yet, so
+    there is no document of it, even for its engineer. Rows are this visit's answers only
+    (V-PDF-3). A rendering failure (V-PDF-8, F-9) is logged and answered with a redirect
+    to the visit page carrying an error message — never a 500, never a partial file. A
+    successful download writes nothing: no ActivityLog, no session, no row.
+    """
+    # The visit page's own two gates, in its order and with its refusals: _visit_site 404s
+    # anyone who cannot see the site and every non-OPEX site; _readable_visit 404s a visit
+    # the person may not read (V-7). No permission logic of the PDF's own (V-PDF-2).
+    project = _visit_site(request, project_id)
+    visit = _readable_visit(request, project, visit_pk)
+    # V-PDF-1: only a submitted visit is a document. The engineer and the managers can
+    # read an open or lapsed visit on screen, but are refused its PDF all the same.
+    if visit.status != QaqcVisit.SUBMITTED:
+        raise Http404
+
+    generated_at = timezone.now()
+    # F-9 / V-PDF-8: ANY failure building or rendering the document ends on the visit page
+    # with a message, as task_checklist_pdf does for the task PDF.
+    try:
+        coverage = site_coverage(project, site_checklist_points(project))
+        pdf = render_pdf(QAQC_VISIT_TEMPLATE,
+                         qaqc_visit_document(project, visit, coverage, generated_at))
+    except Exception:
+        logger.exception('QA/QC visit PDF failed for visit %s on %s',
+                         visit.pk, project.project_id)
+        messages.error(request, 'The PDF could not be generated. The error has been logged.')
+        return redirect('qaqc_visit_detail', project_id=project.project_id, visit_pk=visit.pk)
+
+    response = HttpResponse(pdf, content_type='application/pdf')
+    response['Content-Disposition'] = (
+        f'attachment; filename="{qaqc_visit_filename(project, visit)}"')
+    return response
 
 
 # ===========================================================================

@@ -243,6 +243,8 @@ urlpatterns = [
     path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/points/<int:task_id>/<int:item_id>/', qaqc_views.qaqc_visit_point, name='qaqc_visit_point'),
     path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/submit/', qaqc_views.qaqc_visit_submit, name='qaqc_visit_submit'),
     path('projects/<str:project_id>/qaqc/visit-answers/<int:answer_pk>/photo/', qaqc_views.qaqc_visit_photo, name='qaqc_visit_photo'),
+    # qaqc_visit_pdf — the visit page's readers; SUBMITTED visits only, 404 for open / lapsed
+    path('projects/<str:project_id>/qaqc/visits/<int:visit_pk>/pdf/', qaqc_views.qaqc_visit_pdf, name='qaqc_visit_pdf'),
     # Punch point rectify / re-verify loop (closeout 7b) — QA/QC-raised points on RESCO
     # (OPEX) sites only; 404 elsewhere. POST only, from the task page's punch card.
     # punch_point_rectify — the task's assignee, the PM or a coordinator; never the site's QA/QC engineer

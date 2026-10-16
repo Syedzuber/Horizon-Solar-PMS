@@ -1,0 +1,19 @@
+{% extends 'projects/pdf/base_document.html' %}
+{% comment %}
+The QA/QC visit PDF (docs/CHECKLIST_PDF_SPEC.md §3, part 2). Context from
+checklist_pdf.qaqc_visit_document(); layout from the shared partials, exactly as the
+task checklist PDF lays them out. Holds no logic of its own: every row, label and name
+was decided by the builder.
+{% endcomment %}
+{% block content %}
+{% include 'projects/pdf/_header_block.html' %}
+
+<h2>Points checked on this visit</h2>
+{% include 'projects/pdf/_item_table.html' %}
+
+<div style="page-break-inside: avoid;">
+  <h2>Sign-off</h2>
+  {% include 'projects/pdf/_signoff_grid.html' %}
+  {% include 'projects/pdf/_footnotes.html' %}
+</div>
+{% endblock %}

@@ -876,14 +876,17 @@ label (get_status_display) — never a two-state branch.
     {% endif %}
     {% if qaqc_visits_recent %}
       <table class="table table-sm mb-0">
-        <thead><tr><th>Date</th><th>Engineer</th><th>Points</th><th>No</th></tr></thead>
+        <thead><tr><th>Date</th><th>Engineer</th><th>Points</th><th>No</th><th></th></tr></thead>
         <tbody>
+          {% comment %}qaqc_visits_recent holds SUBMITTED visits only, so every row may carry
+             its PDF link (V-PDF-1); every viewer of this card may read them (V-PDF-2).{% endcomment %}
           {% for v in qaqc_visits_recent %}
             <tr>
               <td><a href="{% url 'qaqc_visit_detail' project.project_id v.pk %}">{{ v.visit_date|date:"d M Y" }}</a></td>
               <td>{{ v.engineer.user.get_full_name|default:v.engineer.user.username }}</td>
               <td>{{ v.points_checked }}</td>
               <td>{% if v.no_count %}<span class="badge bg-danger">{{ v.no_count }}</span>{% else %}0{% endif %}</td>
+              <td class="text-end"><a href="{% url 'qaqc_visit_pdf' project.project_id v.pk %}" title="Download visit (PDF)">PDF</a></td>
             </tr>
           {% endfor %}
         </tbody>
