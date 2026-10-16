@@ -1,7 +1,7 @@
-# Checklist PDF Spec v1.2 — task checklist and QA/QC visit downloads
+# Checklist PDF Spec v1.3 — task checklist and QA/QC visit downloads
 
 Horizon Solar PMS · 15 Oct 2026
-Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b). v1.2, 16 Oct 2026: F-8 amended with the exact filename format (part 1c).
+Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b). v1.2, 16 Oct 2026: F-8 amended with the exact filename format (part 1c). v1.3, 16 Oct 2026: §3 added, rulings V-PDF-1 to V-PDF-8 for the QA/QC visit PDF (part 2).
 Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the QA/QC visit PDF, a separate session that reuses the renderer.
 
 ---
@@ -33,3 +33,16 @@ Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the
 | F-7 | (v1.1) Unsupported characters print as a visible "□", never blank. |
 | F-8 | (v1.1) Task name appears in the header and the filename. **Amended v1.2:** the filename is `<site code>_<task name slug>_t<task id>_<checklist code>_v<version>_<YYYYMMDD>.pdf`, dated by the IST generation day. The task name slug is lowercase ASCII letters, digits and hyphens (Django `slugify`), capped at 60 characters, and reads `task` when nothing of the name survives slugifying. `t<task id>` always follows the slug, so two tasks whose names slugify alike never share a filename. |
 | F-9 | (v1.1) A render failure redirects to the task page with an error message; never a 500, never a partial file. |
+
+## 3. The QA/QC visit PDF (v1.3, part 2)
+
+| # | Rule |
+|---|---|
+| V-PDF-1 | Only SUBMITTED visits can be downloaded (F-2). Open and lapsed visits have no button, and the view refuses them (404). |
+| V-PDF-2 | Access is exactly `qaqc_visit_detail`'s: `_visit_site` + `user_can_read_visit`. No new permission logic. |
+| V-PDF-3 | Rows: only the points answered on this visit (F-3, visit variant), grouped by task, then checklist section, in checklist order. |
+| V-PDF-4 | Columns as part 1: Checking point · Status (Yes/No/Not Applicable) · Witness · Photo proof · Date of checking · Remark. Witness: visit answers record none; print "—" and add the footnote "QA/QC visit answers do not record witnesses." Photo proof: Yes, always (a photo is required on every answer). Date of checking: `answered_at`, IST date. Remark: the remark; for a No, append "Punch point raised" and its current status (Open / Rectified / Closed / Waived). Wording: `item_text_snapshot` (always present on visit answers). |
+| V-PDF-5 | Header: site code, client, tender, "QA/QC verification visit", visit date, engineer, submitted at (IST), counts ("N points checked, M No, M punch points raised"), the site coverage line as on the visit page, and the generation time. Marker: "SUBMITTED <date>" in the place part 1 prints FINAL. |
+| V-PDF-6 | Sign-off grid, the same partial: QA/QC Engineer (Name pre-filled with `visit.engineer`) · Witnessed By · Witnessed By · Reviewed By (PM/Coordinator, blank). Signature, Date and Company blank. |
+| V-PDF-7 | Filename: `<site code>_QAQC-visit_<YYYYMMDD>_<visit id>.pdf`. |
+| V-PDF-8 | The same "□" replacement for undrawable characters (F-7) and the same render-failure behaviour (F-9): a redirect to the visit page with the error message, never a 500. |
