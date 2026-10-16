@@ -4905,6 +4905,68 @@ was checked by hand: a portable CPython 3.12.10 in a session scratchpad, a clean
 a wheels-only install, import and render. Nothing checks that routinely. Options: install
 3.12 locally and build the venv on it, or add a 3.12 CI run.
 
+### G77 — `staticfiles/` is tracked in git although `.gitignore` excludes it
+
+Recorded 16 Oct 2026 by checklist PDF part 1c (by ruling). `.gitignore` lists
+`staticfiles/`, but 130 files under it are tracked — all Django admin assets
+(`staticfiles/admin/…`: select2 i18n, images, js, css; 1.4 MB), committed once in
+`931c87b` ("Fix for broken css issue", 8 Jun 2026) and never since. `.gitignore` does not
+untrack a file already committed, so the rule has done nothing for them. Two
+consequences: every local `collectstatic` rewrites those files and leaves them
+modified, which is why every session's COMMIT section must begin with
+`git restore staticfiles/`; and the deploy does not need them, because the nixpacks start
+command runs `collectstatic --noinput` before gunicorn. Fix: `git rm -r --cached
+staticfiles/` in a commit of its own, then confirm the next Railway deploy still serves
+the admin CSS (the "broken css" that 931c87b fixed must be fixed by collectstatic, not by
+the committed copy). Not done here: it changes what is deployed, and 931c87b's reason
+was not investigated. See G78, which may be that reason.
+
+### G78 — `STATICFILES_STORAGE` is ignored on Django 6: WhiteNoise's manifest storage is not in use
+
+Recorded 16 Oct 2026 by checklist PDF part 1c (found while recording G77; not fixed, R-12).
+`solarpms/settings.py` sets `STATICFILES_STORAGE =
+'whitenoise.storage.CompressedManifestStaticFilesStorage'`. Django removed that setting
+in 5.1 in favour of `STORAGES['staticfiles']`, and the project runs Django 6.0.6, so it
+is silently ignored. Verified on the dev venv: `settings.STORAGES['staticfiles']` is
+`django.contrib.staticfiles.storage.StaticFilesStorage`, and that is the class
+`staticfiles_storage` resolves to. Effect: no compressed copies and no hashed filenames,
+so a changed CSS or JS file keeps its URL and browsers may serve the stale cached
+copy after a deploy. Fix: `STORAGES = {'default': {...}, 'staticfiles': {'BACKEND':
+'whitenoise.storage.CompressedManifestStaticFilesStorage'}}`. Manifest storage then
+raises on any `{% static %}` reference to a missing file, so it needs a `collectstatic`
+plus a full page sweep before deploy, not a one-line change pushed blind.
+
+### G79 — xhtml2pdf cannot shape Devanagari: conjuncts and pre-base matras render wrong
+
+Recorded 16 Oct 2026 by checklist PDF part 1c (research, nothing built). Today the PDF
+prints Devanagari as "□" (F-7; no Devanagari font is bundled). Bundling Noto Sans
+Devanagari would NOT fix it: rendered through xhtml2pdf 0.2.24 with Noto as the
+fallback font, "राम कुमार" looks right, but "श्री" prints as श्‌री (visible halant, no
+conjunct), "क्षेत्र" as क्‌षेत्‌र, and "किरण" as "करिण" (ि placed after the consonant). Installing
+`uharfbuzz` changes nothing: xhtml2pdf never sets reportlab's ParagraphStyle `shaping`.
+reportlab itself shapes all four correctly (Paragraph with `shaping=1` and `uharfbuzz`).
+WeasyPrint shapes correctly but loads Pango, HarfBuzz, fontconfig and GObject through
+cffi at import, which needs system packages on the deploy. Options and estimates are in
+the part 1c session report; awaiting a decision.
+
+### G80 — a design staleness test is flaky on Python 3.12 under Windows (timestamp ties)
+
+Recorded 16 Oct 2026 by checklist PDF part 1c, from the first full-suite run on Python
+3.12 (see G76); not fixed, R-12. `tests_design_staleness_signal.StalenessBadgeRendersTests
+.test_the_footer_renders_with_no_uploaded_file_at_all` failed in the 3.12 suite run and
+in 1 of 6 runs of its class on 3.12; it passed in every 3.14 run. Cause: the test
+completes the BOQ and then submits Arka v1 back to back, and `_boq_provenance()` in
+`design_views.py` counts an Arka as already on the table when
+`a.submitted_at <= attempt.boq_submitted_at` — on an EQUAL timestamp the BOQ reads as
+"under Arka v1 (current)", not "completed before any Arka was submitted". On Windows,
+Python 3.12's `time.time()` uses `GetSystemTimeAsFileTime()` (coarse; reported
+resolution 15.6 ms), so the two writes often share a timestamp; 3.13+ uses
+`GetSystemTimePreciseAsFileTime()` (0.1 µs). Production (Linux, nanosecond clock, two
+human actions) is not exposed in practice. Its sibling
+`test_a_boq_stamped_before_any_arka_says_exactly_that` has the same shape and is exposed
+the same way. Options: make the fixture's timestamps explicit (move `boq_submitted_at`
+back a second), or decide what a genuine tie should read and pin it.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

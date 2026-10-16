@@ -238,9 +238,9 @@ def _safe_filename_part(value):
     return re.sub(r'[^A-Za-z0-9._-]+', '-', str(value)).strip('-') or 'x'
 
 
-# A cap on the task-name part alone, so the whole filename stays far inside Windows'
-# 255-character limit whatever the task is called.
-TASK_SLUG_MAX = 80
+# A cap on the task-name part alone (part 1c ruling), so the whole filename stays far
+# inside Windows' 255-character limit whatever the task is called.
+TASK_SLUG_MAX = 60
 
 
 def _task_slug(task):
@@ -252,13 +252,18 @@ def _task_slug(task):
 
 
 def task_checklist_filename(project, task, checklist, generated_at):
-    """<site code>_<task name>_<checklist code>_v<version>_<YYYYMMDD>.pdf, dated by the IST
-    generation day (F-8). For OPEX the site code is project_id (site_code IS the project
-    ID). The task name is what tells per-location copies of one task apart (G74): four
-    Civil Work tasks on one site otherwise download under one filename."""
+    """<site code>_<task name>_t<task id>_<checklist code>_v<version>_<YYYYMMDD>.pdf, dated
+    by the IST generation day (F-8). For OPEX the site code is project_id (site_code IS
+    the project ID).
+
+    The task name tells per-location copies of one task apart for a reader (G74); the
+    task id ALWAYS follows it (part 1c ruling), because the slug alone cannot be trusted
+    to: two names that differ only in characters slugify() drops, two names cut at the
+    same 60 characters, and every name that falls back to "task" would otherwise collide."""
     return '_'.join([
         _safe_filename_part(project.project_id),
         _task_slug(task),
+        f't{task.pk}',
         _safe_filename_part(checklist.code),
         f'v{checklist.version_no}',
         timezone.localtime(generated_at).strftime('%Y%m%d'),

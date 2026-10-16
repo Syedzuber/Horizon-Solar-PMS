@@ -225,8 +225,8 @@ class SignoffAndHeaderTests(ChecklistPdfFixture):
         moment = timezone.now()
         self.assertEqual(
             task_checklist_filename(self.site, self.task, self.checklist, moment),
-            f'{self.site.project_id}_civil-work-and-mms-installation_PDF-CIVIL_v1_'
-            f'{timezone.localtime(moment):%Y%m%d}.pdf')
+            f'{self.site.project_id}_civil-work-and-mms-installation_t{self.task.pk}_'
+            f'PDF-CIVIL_v1_{timezone.localtime(moment):%Y%m%d}.pdf')
 
     def test_filename_differs_per_location_copy_and_is_windows_safe(self):
         """G74: per-location copies of one task download under different names. A name
@@ -241,8 +241,29 @@ class SignoffAndHeaderTests(ChecklistPdfFixture):
         self.assertEqual(len(set(names.values())), 4)
         for filename in names.values():
             self.assertRegex(filename, r'^[A-Za-z0-9._-]+\.pdf$')
-        self.assertIn('_civil-work-ab_', names['Civil: Work? <A>|"B"*'])
-        self.assertIn('_task_', names['राम कार्य'])
+        self.assertIn(f'_civil-work-ab_t{self.task.pk}_', names['Civil: Work? <A>|"B"*'])
+        self.assertIn(f'_task_t{self.task.pk}_', names['राम कार्य'])
+
+    def test_task_id_separates_names_the_slug_cannot(self):
+        """Part 1c: the task id always follows the slug, so two tasks whose names
+        slugify alike — both falling back to "task", or cut at the same 60 characters —
+        still download under different names."""
+        moment = timezone.now()
+        for shared_name in ['राम कार्य', 'Inspection of ' + 'x' * 80]:
+            self.task.task_name = self.inverter.task_name = shared_name   # unsaved
+            first = task_checklist_filename(self.site, self.task, self.checklist, moment)
+            second = task_checklist_filename(self.site, self.inverter, self.checklist, moment)
+            self.assertNotEqual(first, second)
+            self.assertIn(f'_t{self.task.pk}_', first)
+            self.assertIn(f'_t{self.inverter.pk}_', second)
+
+    def test_name_slug_is_capped_at_60_characters(self):
+        self.task.task_name = 'Inspection of ' + 'x' * 80   # unsaved
+        filename = task_checklist_filename(self.site, self.task, self.checklist,
+                                           timezone.now())
+        slug = filename.split('_')[1]
+        self.assertEqual(len(slug), 60)
+        self.assertTrue(slug.startswith('inspection-of-xxx'))
 
 
 class UndrawableCharacterTests(ChecklistPdfFixture):
@@ -282,7 +303,8 @@ class DownloadViewTests(ChecklistPdfFixture):
         self.assertEqual(response['Content-Type'], 'application/pdf')
         self.assertRegex(response['Content-Disposition'],
                          rf'^attachment; filename="{self.site.project_id}_'
-                         rf'civil-work-and-mms-installation_PDF-CIVIL_v1_\d{{8}}\.pdf"$')
+                         rf'civil-work-and-mms-installation_t{self.task.pk}_'
+                         rf'PDF-CIVIL_v1_\d{{8}}\.pdf"$')
         text = _pdf_text(response.content)
         self.assertEqual(text.count(NOT_CHECKED), 2)
         self.assertIn(f'NOT FINAL · 2 of {len(ITEMS)} points checked', text)
