@@ -4921,6 +4921,15 @@ the admin CSS (the "broken css" that 931c87b fixed must be fixed by collectstati
 the committed copy). Not done here: it changes what is deployed, and 931c87b's reason
 was not investigated. See G78, which may be that reason.
 
+**Correction, 16 Oct 2026 (part 1d):** the reasoning above assumed the deploy uses
+`nixpacks.toml`; it does not (G81). Production builds with Railpack, whose documented
+Django start is `python manage.py migrate && gunicorn …` with no collectstatic. Static
+files are nevertheless served: `/static/images/horizon-logo.png` and
+`/static/projects/js/number_input_guard.js` — neither committed under `staticfiles/` —
+returned 200 from production on 16 Oct 2026. HOW they get there is not established,
+which must be answered before the tracked copy is removed. Ordered by ruling: G78, then
+this item, as one piece of work after the checklist PDF renderer decision.
+
 ### G78 — `STATICFILES_STORAGE` is ignored on Django 6: WhiteNoise's manifest storage is not in use
 
 Recorded 16 Oct 2026 by checklist PDF part 1c (found while recording G77; not fixed, R-12).
@@ -4949,6 +4958,20 @@ WeasyPrint shapes correctly but loads Pango, HarfBuzz, fontconfig and GObject th
 cffi at import, which needs system packages on the deploy. Options and estimates are in
 the part 1c session report; awaiting a decision.
 
+**Deploy spike, 16 Oct 2026 (part 1d, report only).** PyMuPDF was ruled out first: AGPL
+for a server-deployed application requires disclosing the whole application's source to
+its users (Artifex's own licensing page), and the commercial licence has no published
+price. WeasyPrint 70.0 was then deployed to a THROWAWAY Railway project
+(`weasyprint-spike`, separate from production), built the way production is built:
+Railpack, Python 3.12, with `deploy.aptPackages` in `railpack.json` =
+`libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 libfontconfig1`. Result: the build
+succeeded (Debian 13 trixie, Pango 1.56.3, HarfBuzz 10.2.0), WeasyPrint imported, and
+"क्षेत्र", "श्री" and "किरण" rendered correctly with a bundled Noto Sans Devanagari — the spike
+succeeded inside its one-day box. Two notes for the build: WeasyPrint ≥66 takes a
+`URLFetcher` subclass, not a function (a function fails every @font-face silently, with
+only a log line); and text copied out of the PDF garbles reordered matras (किरण extracts
+with a stray character), which affects search and copy-paste, not the printed page.
+
 ### G80 — a design staleness test is flaky on Python 3.12 under Windows (timestamp ties)
 
 Recorded 16 Oct 2026 by checklist PDF part 1c, from the first full-suite run on Python
@@ -4964,8 +4987,38 @@ resolution 15.6 ms), so the two writes often share a timestamp; 3.13+ uses
 `GetSystemTimePreciseAsFileTime()` (0.1 µs). Production (Linux, nanosecond clock, two
 human actions) is not exposed in practice. Its sibling
 `test_a_boq_stamped_before_any_arka_says_exactly_that` has the same shape and is exposed
-the same way. Options: make the fixture's timestamps explicit (move `boq_submitted_at`
+the same way. Options (as first recorded): make the fixture's timestamps explicit (move `boq_submitted_at`
 back a second), or decide what a genuine tie should read and pin it.
+
+**16 Oct 2026, part 1d — ruling "tiebreak by id" not implemented; question raised.** The
+two timestamps are not on rows of one table: an Arka is an `ArkaSubmission` row
+(`submitted_at` auto_now_add), but completing the BOQ writes no row — it sets
+`DesignAttempt.boq_submitted_at` / `boq_submitted_by` (in the BOQ-complete view, beside a
+`log_activity(..., action_code='design_boq_submitted')`). Ids of two different tables do
+not order events against each other, so there is no id to break the tie with. The only
+shared sequence is `ActivityLog.id` (BOQ-complete logs `design_boq_submitted`; the Arka
+submit logs through `apply_design_status`), but `log_activity` swallows failures, the
+redo carry in the new-attempt path copies `boq_submitted_at` with no log row, and it
+would add a query to the review render. Left open until the tie rule is chosen.
+
+### G81 — production builds with Railpack; `nixpacks.toml` is dead configuration
+
+Recorded 16 Oct 2026 by checklist PDF part 1d (found during the WeasyPrint spike; not
+fixed, R-12). Production's active deployment (commit 307ed22, read with `railway status
+--json`, read-only) reports `builder: RAILPACK`, `railpackVersion 0.41.0`, providers
+`python`, `pythonRuntime: django`, Python resolved `3.12.15` from `.python-version`,
+`nixpacksConfigPath: null`, and `startCommand: null`. Railpack does not read
+`nixpacks.toml`, so its `[start] cmd` (`migrate --run-syncdb && collectstatic --noinput &&
+gunicorn …`) is not what runs; Railpack's documented Django start is
+`python manage.py migrate && gunicorn {app}:application`. Consequences to check:
+`--run-syncdb` is not run (probably harmless with full migrations); collectstatic is not
+in the documented start, yet uncommitted static files are served (see G77's correction);
+and earlier entries and session reports — G75, G76, G77, the checklist PDF part 1
+dependency check — say "nixpacks" where they mean Railpack. The part 1 dependency check
+still holds: the deploy resolves wheels only and Railpack installs no system library for
+them. Fix: delete `nixpacks.toml` or replace it with an explicit `railpack.json`
+(start command, and the apt packages if WeasyPrint is chosen), after confirming the
+static-file mechanism.
 
 ---
 
