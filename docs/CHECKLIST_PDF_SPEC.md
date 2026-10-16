@@ -1,7 +1,7 @@
-# Checklist PDF Spec v1.3 — task checklist and QA/QC visit downloads
+# Checklist PDF Spec v1.4 — task checklist and QA/QC visit downloads
 
 Horizon Solar PMS · 15 Oct 2026
-Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b). v1.2, 16 Oct 2026: F-8 amended with the exact filename format (part 1c). v1.3, 16 Oct 2026: §3 added, rulings V-PDF-1 to V-PDF-8 for the QA/QC visit PDF (part 2).
+Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b). v1.2, 16 Oct 2026: F-8 amended with the exact filename format (part 1c). v1.3, 16 Oct 2026: §3 added, rulings V-PDF-1 to V-PDF-8 for the QA/QC visit PDF (part 2). v1.4, 16 Oct 2026: V-PDF-9 to V-PDF-13, rulings on part 2's questions (part 2b); V-PDF-4 and V-PDF-5 amended by V-PDF-13 and V-PDF-12.
 Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the QA/QC visit PDF, a separate session that reuses the renderer.
 
 ---
@@ -41,8 +41,13 @@ Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the
 | V-PDF-1 | Only SUBMITTED visits can be downloaded (F-2). Open and lapsed visits have no button, and the view refuses them (404). |
 | V-PDF-2 | Access is exactly `qaqc_visit_detail`'s: `_visit_site` + `user_can_read_visit`. No new permission logic. |
 | V-PDF-3 | Rows: only the points answered on this visit (F-3, visit variant), grouped by task, then checklist section, in checklist order. |
-| V-PDF-4 | Columns as part 1: Checking point · Status (Yes/No/Not Applicable) · Witness · Photo proof · Date of checking · Remark. Witness: visit answers record none; print "—" and add the footnote "QA/QC visit answers do not record witnesses." Photo proof: Yes, always (a photo is required on every answer). Date of checking: `answered_at`, IST date. Remark: the remark; for a No, append "Punch point raised" and its current status (Open / Rectified / Closed / Waived). Wording: `item_text_snapshot` (always present on visit answers). |
-| V-PDF-5 | Header: site code, client, tender, "QA/QC verification visit", visit date, engineer, submitted at (IST), counts ("N points checked, M No, M punch points raised"), the site coverage line as on the visit page, and the generation time. Marker: "SUBMITTED <date>" in the place part 1 prints FINAL. |
+| V-PDF-4 | Columns as part 1: Checking point · Status (Yes/No/Not Applicable) · Witness · Photo proof · Date of checking · Remark. Witness: visit answers record none; print "—" and add the footnote "QA/QC visit answers do not record witnesses." Photo proof: Yes, always (a photo is required on every answer). Date of checking: `answered_at`, IST date. Remark: the remark; for a No, append "Punch point raised" and its current status (Open / Rectified / Closed / Waived). Wording: `item_text_snapshot` (always present on visit answers). **Amended v1.4:** the punch point wording is V-PDF-13's. |
+| V-PDF-5 | Header: site code, client, tender, "QA/QC verification visit", visit date, engineer, submitted at (IST), counts ("N points checked, M No, M punch points raised"), the site coverage line as on the visit page, and the generation time. Marker: "SUBMITTED <date>" in the place part 1 prints FINAL. **Amended v1.4:** the coverage line is V-PDF-12's, as of this visit. |
 | V-PDF-6 | Sign-off grid, the same partial: QA/QC Engineer (Name pre-filled with `visit.engineer`) · Witnessed By · Witnessed By · Reviewed By (PM/Coordinator, blank). Signature, Date and Company blank. |
 | V-PDF-7 | Filename: `<site code>_QAQC-visit_<YYYYMMDD>_<visit id>.pdf`. |
 | V-PDF-8 | The same "□" replacement for undrawable characters (F-7) and the same render-failure behaviour (F-9): a redirect to the visit page with the error message, never a 500. |
+| V-PDF-9 | (v1.4) The filename's date is the visit date (`visit_date`), not the generation day. Confirmed. |
+| V-PDF-10 | (v1.4) Answers on points no longer on the site's checklist print in a final section, "Points no longer on the site's checklist", as the visit page separates them. The PDF uses the same predicate the visit page uses; it does not re-derive it. |
+| V-PDF-11 | (v1.4) A group heading omits the checklist name when it equals the task name; the version stays. |
+| V-PDF-12 | (v1.4) The coverage line is coverage as of this visit: distinct points verified on submitted visits whose `submitted_at` is at or before this visit's `submitted_at`, over the site's total points. Label: "Coverage as of this visit". The visit page's coverage function takes an as-of parameter; there is no second calculation. |
+| V-PDF-13 | (v1.4) Punch point text: "Punch point raised · now <status> (at generation)". |
