@@ -1,7 +1,7 @@
-# Checklist PDF Spec v1.1 — task checklist and QA/QC visit downloads
+# Checklist PDF Spec v1.2 — task checklist and QA/QC visit downloads
 
 Horizon Solar PMS · 15 Oct 2026
-Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b).
+Status: **rulings closed by Zuber** on the questions raised by the checklist-PDF data audit (15 Oct 2026). v1.1, 16 Oct 2026: rulings on part 1's questions — F-1 and F-6 amended, F-7 to F-9 added (part 1b). v1.2, 16 Oct 2026: F-8 amended with the exact filename format (part 1c).
 Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the QA/QC visit PDF, a separate session that reuses the renderer.
 
 ---
@@ -31,5 +31,5 @@ Build: part 1 — the task checklist PDF and the shared renderer; part 2 — the
 | F-5 | Item wording comes from item_text_snapshot when answered and the pinned version’s label when not. |
 | F-6 | Header. Site code, client, tender, checklist name and version, and the source form reference already stored on the checklist (e.g. HRPPL/ELE/I&C/DCDB R00), plus the generation time in IST. Paper-form fields the system doesn’t hold (Job No, Drawing, Spec No) are left out rather than printed blank. **Amended v1.1:** source form reference dropped until stored (G73; revisit at step 5). |
 | F-7 | (v1.1) Unsupported characters print as a visible "□", never blank. |
-| F-8 | (v1.1) Task name appears in the header and the filename. |
+| F-8 | (v1.1) Task name appears in the header and the filename. **Amended v1.2:** the filename is `<site code>_<task name slug>_t<task id>_<checklist code>_v<version>_<YYYYMMDD>.pdf`, dated by the IST generation day. The task name slug is lowercase ASCII letters, digits and hyphens (Django `slugify`), capped at 60 characters, and reads `task` when nothing of the name survives slugifying. `t<task id>` always follows the slug, so two tasks whose names slugify alike never share a filename. |
 | F-9 | (v1.1) A render failure redirects to the task page with an error message; never a 500, never a partial file. |
