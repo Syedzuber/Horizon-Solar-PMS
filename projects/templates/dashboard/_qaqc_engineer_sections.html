@@ -1,0 +1,75 @@
+{% comment %}The QA/QC engineer's two dashboard sections (CL-K), included by
+   dashboard/site-engineer.html and dashboard/pm.html (PM and Project Coordinator); context
+   from qaqc_views.qaqc_engineer_dashboard_context.
+
+   Closeout step 3: the sites this person is the active QA/QC engineer for. They hold no
+   task there and do not manage them (CL-A), so these sites never appear among the
+   dashboard's own project cards, which are built from held tasks or managed sites; this
+   list is their way in. Each row counts the tasks awaiting approval (submitted, not yet
+   approved). Empty list draws nothing.{% endcomment %}
+{% if qaqc_sites %}
+<div class="card shadow-sm border-0 mb-4" id="qaqc-sites">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-clipboard-check"></i> QA/QC sites
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for s in qaqc_sites %}
+    <li class="list-group-item d-flex justify-content-between align-items-center">
+      <div>
+        <a href="{% url 'project_overview' s.project.project_id %}" class="fw-semibold text-decoration-none">{{ s.project.project_id }}</a>
+        {% if s.project.customer_name and s.project.customer_name != s.project.project_id %}<span class="text-muted small ms-1">{{ s.project.customer_name }}</span>{% endif %}
+        <div class="text-muted small">QA/QC since {{ s.assigned_at|date:"d M Y" }}</div>
+        {% comment %}Closeout step 7: the site's visit. An open visit shows "open since" so a
+           forgotten one is visible (Q3) — there is at most one per site. Otherwise Start,
+           unless a visit was already submitted today (one per site per day, V-1).{% endcomment %}
+        <div class="mt-1">
+          {% if s.open_visit %}
+            <a href="{% url 'qaqc_visit_detail' s.project.project_id s.open_visit.pk %}" class="btn btn-sm btn-outline-primary">Continue visit</a>
+            <span class="badge bg-warning text-dark ms-1">Open since {{ s.open_visit.visit_date|date:"d M Y" }}</span>
+          {% elif s.visited_today %}
+            <span class="badge bg-success">Visited today</span>
+          {% else %}
+            <form method="post" action="{% url 'qaqc_visit_start' s.project.project_id %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-sm btn-brand">Start today's visit</button>
+            </form>
+          {% endif %}
+        </div>
+      </div>
+      <span class="badge {% if s.awaiting_count %}bg-warning text-dark{% else %}bg-light text-muted border{% endif %}">
+        {{ s.awaiting_count }} awaiting approval
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% comment %}Closeout 7c: QA/QC punch points marked Rectified on the sites above that this
+   engineer may re-verify — not a round they recorded themselves (Q5) — oldest first
+   (qaqc_views.qaqc_engineer_dashboard_context over punch_points.awaiting_reverification,
+   the PM list's filter; three queries). The link opens the point on the task page, where the Accept / Reject
+   form is. Empty list draws nothing.{% endcomment %}
+{% if awaiting_my_reverification %}
+<div class="card shadow-sm border-0 mb-4" id="awaiting-my-reverification">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-arrow-repeat"></i> Awaiting your re-verification
+    <span class="badge bg-info text-dark">{{ awaiting_my_reverification|length }}</span>
+  </div>
+  <ul class="list-group list-group-flush">
+    {% for point in awaiting_my_reverification %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between align-items-start gap-2 small">
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <div class="fw-semibold">{{ point.task.phase.project.project_id }} · {{ point.task.task_name }}</div>
+        <div class="text-muted">{{ point.reason|truncatechars:140 }}</div>
+        {% if point.latest_round %}
+          <div class="text-muted">Rectified by {{ point.latest_round.actor.user.get_full_name|default:point.latest_round.actor.user.username }}, {{ point.latest_round.acted_at|date:"d M Y" }}</div>
+        {% endif %}
+      </div>
+      <a href="{% url 'task_detail' point.task.phase.project.project_id point.task_id %}#punch-point-{{ point.pk }}"
+         class="btn btn-sm btn-brand align-self-center">Re-verify</a>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}

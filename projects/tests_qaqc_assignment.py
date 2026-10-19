@@ -321,7 +321,7 @@ class ReplaceAndEndTests(QaqcFixture):
         self.assertIsNone(SiteQaqcAssignment.objects.get(project=self.site_a).ended_at)
         response = self._overview(self.site_a, self.pm_a)
         self.assertTrue(response.context['qaqc_stale'])
-        self.assertContains(response, 'No longer an active site engineer')
+        self.assertContains(response, 'No longer eligible as QA/QC engineer')
 
     def test_deactivated_profile_stops_access(self):
         self._assign(self.site_a, self.qaqc)

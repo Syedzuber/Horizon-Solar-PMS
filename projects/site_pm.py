@@ -10,6 +10,7 @@ tests_site_pm.py; anything else that writes the column fails that test.
 What a change does, in one transaction (PM-1 to PM-5):
   - refuses a soft-deleted or Cancelled site, on every path (PM-1, Q6)
   - refuses when the seat no longer holds the PM the caller expected (PM-2 Q3)
+  - refuses to seat the site's current QA/QC engineer (CL-H)
   - closes the site's open SitePmAssignment row and opens the next (PM-3)
   - writes `assigned_pm` (filter().update(), under the row lock)
   - moves the outgoing PM's open tasks on that site to the incoming PM (PM-4)
@@ -48,7 +49,9 @@ from projects.models import (
     log_activity,
 )
 from projects.notifications import send_notification
-from projects.permissions import can_change_site_pm, user_can_view_project
+from projects.permissions import (
+    can_change_site_pm, qaqc_engineer_manager_refusal, user_can_view_project,
+)
 from projects.utils import assign_tasks_to
 
 logger = logging.getLogger(__name__)
@@ -196,8 +199,9 @@ def change_site_pm(project, new_pm, by, *, expected_outgoing_pm, reason='',
                              Admin, or with no actor at all.
         SitePmChangeRefused  deleted or Cancelled site, an occupied seat with
                              first_assignment_only, a seat that no longer holds
-                             `expected_outgoing_pm`, a missing reason on a change, or a
-                             bill step the approval rules will not move.
+                             `expected_outgoing_pm`, `new_pm` being the site's QA/QC
+                             engineer (CL-H), a missing reason on a change, or a bill
+                             step the approval rules will not move.
 
     Assigning the PM the site already has is a no-op: no history row, no log line.
     Callers inside their own transaction.atomic() (project_create, create_opex_site,
@@ -230,6 +234,13 @@ def change_site_pm(project, new_pm, by, *, expected_outgoing_pm, reason='',
         if old_pm_id == new_pm.pk:
             project.assigned_pm = new_pm
             return SitePmChange(changed=False, old_pm_id=old_pm_id)
+        # CL-H: the site's QA/QC engineer may not become its PM — the person checking the
+        # site's work would then also manage it. Asked under this row lock, the one
+        # qaqc_views.assign_site_qaqc() takes, so an assignment cannot land in between.
+        # Every caller (hand_over_sites included) gets the refusal from here.
+        refusal = qaqc_engineer_manager_refusal(new_pm, site, 'PM')
+        if refusal:
+            raise SitePmChangeRefused(f'{site.project_id}: {refusal}')
 
         if old_pm_id is not None:
             # Only Admin may take a site from one PM and give it to another (PM-7, Q3):
@@ -431,7 +442,8 @@ def hand_over_sites(sites, from_pm, to_pm, by, reason, program=None):
 
     Every site goes through change_site_pm() with `from_pm` as the expected outgoing PM,
     in one transaction: a site whose PM changed since the page was loaded, a Cancelled
-    site, or a bill step the approval rules refuse fails the whole handover. After the
+    site, a site whose QA/QC engineer is `to_pm` (CL-H), or a bill step the approval
+    rules refuse fails the whole handover. After the
     commit the PM-6 pair goes out — one notice to each PM, in-app and email, never one
     per site — and, when the outgoing PM still holds material steps, one in-app notice
     to every active SCM user (Q6).

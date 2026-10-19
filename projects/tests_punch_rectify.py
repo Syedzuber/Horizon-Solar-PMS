@@ -661,11 +661,13 @@ class NextActionFixture(RectifyFixture):
 
     def _own_round_by_engineer(self):
         """A Rectified point whose latest round the site's effective engineer recorded:
-        `spare` rectifies from a coordinator seat, then is named the QA/QC engineer."""
+        `spare` rectifies from a coordinator seat, leaves it, then is named the QA/QC
+        engineer (a current coordinator may not be, CL-A as amended in spec v2.4)."""
         point = self._one_point()
         self.site.coordinators.add(self.spare)
         self._rectify(point, by=self.spare)
         self.assertEqual(point.status, PunchPoint.RECTIFIED, 'fixture: not rectified')
+        self.site.coordinators.remove(self.spare)
         assign_site_qaqc(self.site, self.spare, self.pm)
         return point
 

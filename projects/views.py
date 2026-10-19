@@ -158,6 +158,8 @@ from .permissions import (
     # never becomes a right to do the site's work. The refusal names the CL-A rule for
     # the task-assignment paths; the engineer id excludes them from candidate lists.
     user_works_on_site, qaqc_engineer_assignment_refusal, site_qaqc_engineer_id,
+    # CL-H (spec v2.4): the site's QA/QC engineer may not be made one of its coordinators.
+    qaqc_engineer_manager_refusal,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -1072,6 +1074,10 @@ def dashboard_pm(request):
         'approvals_waiting':      pending_approvals_card(request.user),
         # Closeout 7b (PP-6): Rectified punch points waiting for re-verification.
         'awaiting_reverification': awaiting_points,
+        # CL-K: the sites this PM or coordinator checks as QA/QC engineer (never one they
+        # manage, CL-A), and the points there awaiting their re-verification - the Site
+        # Engineer dashboard's computation and partial. One query when they check none.
+        **_qaqc_engineer_sections(pm_profile),
     })
 
 
@@ -1268,20 +1274,9 @@ def dashboard_site_engineer(request):
     se_tasks_due_soon  = _se_task_base.filter(due_date__gt=today, due_date__lte=_se_soon, status__in=_se_active).count()
     se_tasks_overdue   = _se_task_base.filter(overdue_q(today)).count()
 
-    # Closeout 7c: the QA/QC sites, then the Rectified points on them that this engineer
-    # may re-verify - the PM's awaiting list (awaiting_reverification, same filter, three
-    # queries whatever its length) narrowed by the two terms the re-verify writer asks of
-    # an engineer: they are the site's effective engineer (`site_has_engineer`: at most
-    # one active assignment per site, and it is theirs), and they did not record the
-    # latest rectify round (Q5).
-    qaqc_sites = _qaqc_sites_for(se_profile)
-    awaiting_my_reverification = []
-    for point in awaiting_reverification([s['project'].pk for s in qaqc_sites]):
-        rounds = point.rectify_rounds
-        point.latest_round = rounds[0] if rounds else None
-        if point.site_has_engineer and (point.latest_round is None
-                                        or point.latest_round.actor_id != se_profile.pk):
-            awaiting_my_reverification.append(point)
+    # Closeout step 3 / 7c: the QA/QC sites and the Rectified points on them awaiting this
+    # engineer's re-verification - the same computation dashboard_pm uses (CL-K).
+    qaqc_engineer_context = _qaqc_engineer_sections(se_profile)
 
     return render(request, 'dashboard/site-engineer.html', {
         'projects':          projects_data,
@@ -1298,23 +1293,21 @@ def dashboard_site_engineer(request):
         # 4b-1: the contractor bills waiting for this Site Engineer to confirm the work.
         # One query; no amount, bill number or PDF reaches the page (D-A53).
         'work_to_confirm':   work_to_confirm_card(request.user),
-        # Closeout step 3: sites this engineer checks as QA/QC engineer, each with its
-        # awaiting-approval count. Two queries whatever the number of sites.
-        'qaqc_sites':        qaqc_sites,
-        # Closeout 7c: Rectified QA/QC points on those sites waiting for this engineer.
-        'awaiting_my_reverification': awaiting_my_reverification,
+        # qaqc_sites / awaiting_my_reverification (qaqc_views.qaqc_engineer_dashboard_context)
+        **qaqc_engineer_context,
         # Closeout 7b (PP-6, go-ahead Q6): outstanding QA/QC-raised punch points on this
         # engineer's own tasks. One query; Rectify links to the form on the task page.
         'my_open_punch_points': open_points_on_my_tasks(se_profile),
     })
 
 
-def _qaqc_sites_for(profile):
-    """The SE dashboard's "QA/QC sites" rows (qaqc_views.qaqc_sites_for_engineer)."""
+def _qaqc_engineer_sections(profile):
+    """The QA/QC engineer sections' context for dashboard_site_engineer and dashboard_pm
+    (qaqc_views.qaqc_engineer_dashboard_context, CL-K)."""
     # Import inside the function to avoid a circular import: qaqc_views imports this
     # module for _active_project.
-    from .qaqc_views import qaqc_sites_for_engineer
-    return qaqc_sites_for_engineer(profile)
+    from .qaqc_views import qaqc_engineer_dashboard_context
+    return qaqc_engineer_dashboard_context(profile)
 
 
 @login_required
@@ -7499,6 +7492,8 @@ def assign_coordinators(request, project_id):
     Uses M2M .add()/.remove() ONLY — this endpoint never assigns or reads
     assigned_pm, so PM ownership can never be transferred or lost through it
     (the Overwrite bug the invariant warns against is impossible here by construction).
+
+    Refuses to add the site's current QA/QC engineer (CL-H, closeout spec v2.4).
     """
     project = _active_project(project_id)
 
@@ -7518,15 +7513,31 @@ def assign_coordinators(request, project_id):
         valid_ids    = set(candidates.values_list('pk', flat=True))
         desired      = selected_ids & valid_ids   # ignore anything not an active PC candidate
 
-        current   = set(project.coordinators.values_list('pk', flat=True))
-        to_add    = desired - current
-        to_remove = current - desired
+        with transaction.atomic():
+            # Race: the project row lock is the one qaqc_views.assign_site_qaqc() takes, so
+            # a QA/QC assignment and this edit serialise and the CL-H check below reads the
+            # assignment as it stands — neither can make one person both checker and
+            # coordinator. Two coordinator edits also serialise, each diffing from the
+            # coordinator set the other left.
+            locked = Project.objects.select_for_update().get(pk=project.pk)
+            current   = set(locked.coordinators.values_list('pk', flat=True))
+            to_add    = desired - current
+            to_remove = current - desired
 
-        # M2M operations ONLY — assigned_pm is never touched.
-        if to_add:
-            project.coordinators.add(*to_add)
-        if to_remove:
-            project.coordinators.remove(*to_remove)
+            # CL-H: the site's QA/QC engineer cannot be added; nothing is saved, so the
+            # PM ends that assignment first rather than finding half an edit applied.
+            engineer_id = site_qaqc_engineer_id(locked)
+            if engineer_id in to_add:
+                engineer = UserProfile.objects.select_related('user').get(pk=engineer_id)
+                messages.error(request,
+                               qaqc_engineer_manager_refusal(engineer, locked, 'coordinator'))
+                return redirect('assign_coordinators', project_id=project.project_id)
+
+            # M2M operations ONLY — assigned_pm is never touched.
+            if to_add:
+                locked.coordinators.add(*to_add)
+            if to_remove:
+                locked.coordinators.remove(*to_remove)
 
         if to_add or to_remove:
             actor = request.user.profile
@@ -10795,8 +10806,16 @@ def project_overview(request, project_id):
     # (O2d): a group order anchored to a DIFFERENT site is listed here too. Read-only for
     # every role; Finance pays from the payments queue, the one path to pay. Two
     # prefetches carry every figure, so ten orders cost what one does.
+    #
+    # CL-I (closeout spec v2.4): the PM role reads this card on a site the PM manages, not
+    # on one they only see as its QA/QC engineer — the assignment grants a PM no more than
+    # it grants a Site Engineer. Finance, SCM and Admin read it portfolio-wide as before.
+    # `manages_as_pm` is the same rule for the template's PM / coordinator blocks.
+    manages_as_pm = role in ('PM', 'Project Coordinator') and is_assigned_pm
+    show_vendor_orders = (role in ('Finance', 'SCM', 'Admin')
+                          or (role == 'PM' and is_assigned_pm))
     site_orders = []
-    if role in ('Finance', 'PM', 'SCM', 'Admin'):
+    if show_vendor_orders:
         from .order_views import _order_money   # order_views imports views: no top-level import
         orders = (
             VendorOrder.objects.filter(sites__project=project)
@@ -10874,6 +10893,8 @@ def project_overview(request, project_id):
         'boq_revision_history':        boq_revision_history,
         'today':                       date.today(),
         'site_orders':                 site_orders,
+        'show_vendor_orders':          show_vendor_orders,
+        'manages_as_pm':               manages_as_pm,
         'show_order_list_link':        show_order_list_link,
         'show_payment_queue_link':     show_payment_queue_link,
         'user_dashboard_url':          get_user_dashboard(request.user),

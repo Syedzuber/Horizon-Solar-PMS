@@ -40,7 +40,7 @@ from .models import (
 )
 from .notifications import send_notification
 from .permissions import (
-    project_managers, site_has_effective_qaqc, site_qaqc_engineer_id,
+    QAQC_ENGINEER_ROLES, project_managers, site_has_effective_qaqc, site_qaqc_engineer_id,
     user_can_rectify_punch_point, user_can_reverify_punch_point,
 )
 
@@ -326,7 +326,7 @@ def awaiting_reverification(project_ids):
     with_engineer = set(
         SiteQaqcAssignment.objects
         .filter(project_id__in={p.task.phase.project_id for p in points},
-                ended_at__isnull=True, engineer__role='Site Engineer',
+                ended_at__isnull=True, engineer__role__in=QAQC_ENGINEER_ROLES,
                 engineer__is_active=True)
         .values_list('project_id', flat=True))
     for point in points:
@@ -373,9 +373,9 @@ def effective_qaqc_engineer(project):
     """`project`'s QA/QC engineer who can act right now (UserProfile with user), or None.
 
     TWIN OF permissions.site_has_effective_qaqc(), which answers "is there one?" where
-    this answers "who?". The same three terms - an active assignment, the engineer still
-    a Site Engineer, their profile active. Edit both or neither: if they drift,
-    next_action() names someone the re-verify writer refuses, or sends the PM to
+    this answers "who?". The same three terms - an active assignment, the engineer's role
+    still in QAQC_ENGINEER_ROLES, their profile active. Edit both or neither: if they
+    drift, next_action() names someone the re-verify writer refuses, or sends the PM to
     re-verify when the writer still wants the engineer. tests_punch_rectify
     EffectiveEngineerTwinTests pins them equal. One query; none for a non-OPEX site, as
     there.
@@ -384,7 +384,7 @@ def effective_qaqc_engineer(project):
         return None
     assignment = (SiteQaqcAssignment.objects
                   .filter(project=project, ended_at__isnull=True,
-                          engineer__role='Site Engineer', engineer__is_active=True)
+                          engineer__role__in=QAQC_ENGINEER_ROLES, engineer__is_active=True)
                   .select_related('engineer__user').first())
     return assignment.engineer if assignment is not None else None
 

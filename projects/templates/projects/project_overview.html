@@ -179,8 +179,9 @@
       {% comment %}Closeout step 3: the site's QA/QC engineer, RESCO (OPEX) sites only
          (show_qaqc_card). Every viewer sees the name; the site's PM and coordinators
          (can_manage_qaqc) get the link to assign, replace or end. qaqc_stale flags a
-         row whose engineer is no longer an active site engineer — their access has
-         already stopped, and the PM should replace or end the assignment.{% endcomment %}
+         row whose engineer is no longer an active site engineer, PM or project
+         coordinator (CL-J) — their access has already stopped, and the PM should replace
+         or end the assignment.{% endcomment %}
       {% if show_qaqc_card %}
         <span class="info-pill" id="qaqc-engineer-pill">
           <i class="bi bi-clipboard-check"></i>QA/QC:
@@ -188,7 +189,7 @@
             {{ qaqc_assignment.engineer.user.get_full_name|default:qaqc_assignment.engineer.user.username }}
             <span class="text-muted ms-1">since {{ qaqc_assignment.assigned_at|date:"d M Y" }}</span>
             {% if qaqc_stale %}
-              <span class="badge bg-warning text-dark ms-1" title="This engineer is no longer an active site engineer and has lost access to the site.">No longer an active site engineer — replace or end</span>
+              <span class="badge bg-warning text-dark ms-1" title="This engineer is no longer an active site engineer, PM or project coordinator and has lost access to the site.">No longer eligible as QA/QC engineer — replace or end</span>
             {% endif %}
           {% else %}
             <em>Not assigned</em>
@@ -488,7 +489,8 @@
 {# ── 3. BOQ + Delivery Challans + Material Status ──────────────────────────── #}
 <div class="row g-3 mb-4">
 
-  {% if role == 'PM' or role == 'Project Coordinator' or role == 'SCM' or role == 'Design' or role == 'Admin' %}
+  {# CL-I: PM / coordinator through manages_as_pm, so a QA/QC engineer of either role on a site they do not manage is not shown it. #}
+  {% if manages_as_pm or role == 'SCM' or role == 'Design' or role == 'Admin' %}
   <div class="col-12 col-md-4">
     <div class="card h-100 shadow-sm">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
@@ -709,7 +711,7 @@ Built around ORDERS, not PaymentRequest.project: a group order anchored to anoth
 is listed here because this site is one it was sized against. Status is the model's own
 label (get_status_display) — never a two-state branch.
 {% endcomment %}
-{% if role == 'Finance' or role == 'PM' or role == 'SCM' or role == 'Admin' %}
+{% if show_vendor_orders %}{# CL-I: the PM role on a managed site only — views.project_overview #}
 <div class="card shadow-sm mb-4" id="vendor-orders-card">
   <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2"
        style="background:#fff3cd; border-bottom:2px solid #f0a829;">

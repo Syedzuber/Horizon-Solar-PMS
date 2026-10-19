@@ -4,8 +4,9 @@
 {% block content %}
 {% comment %}Closeout step 3 (CL-9, CL-A). Reached only by the site's PM and coordinators
    on a RESCO (OPEX) site — qaqc_views.site_qaqc refuses everyone else. The eligible
-   list is already filtered to active site engineers holding no task on the site; the
-   writer re-checks both under a lock and names any task held if it refuses.{% endcomment %}
+   list is already filtered to active Site Engineers, PMs and Project Coordinators who
+   hold no task on the site and do not manage it (CL-9, CL-A as amended in spec v2.4);
+   the writer re-checks all of it under a lock and says why if it refuses.{% endcomment %}
 <div class="mb-3">
   <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
 </div>
@@ -18,7 +19,7 @@
     <p class="text-muted small">
       The QA/QC engineer can view this site and approve or reject its submitted tasks.
       They cannot change task status, edit dates, answer checklists, assign tasks or waive
-      punch points, and they may not hold a task on this site.
+      punch points, and they may not hold a task on this site or manage it.
     </p>
 
     <div class="mb-3">
@@ -30,8 +31,8 @@
         </div>
         {% if stale %}
           <div class="alert alert-warning py-2 small mt-2 mb-0">
-            This engineer is no longer an active site engineer and has already lost access
-            to the site. Replace or end the assignment.
+            This engineer is no longer an active site engineer, PM or project coordinator
+            and has already lost access to the site. Replace or end the assignment.
           </div>
         {% endif %}
       {% else %}
@@ -45,7 +46,7 @@
       <label for="qaqcEngineer" class="form-label small">{% if current %}Replace with{% else %}Assign{% endif %}</label>
       <div class="d-flex gap-2">
         <select name="engineer_id" id="qaqcEngineer" class="form-select form-select-sm" required>
-          <option value="">— Choose a site engineer —</option>
+          <option value="">— Choose a site engineer, PM or project coordinator —</option>
           {% for engineer in eligible %}
             <option value="{{ engineer.pk }}">{{ engineer.user.get_full_name|default:engineer.user.username }}</option>
           {% endfor %}
@@ -55,9 +56,9 @@
         </button>
       </div>
       {% if not eligible %}
-        <div class="form-text">No active site engineer is free to assign: every one holds a task on this site.</div>
+        <div class="form-text">No one is free to assign: every active site engineer, PM and project coordinator holds a task on this site or manages it.</div>
       {% else %}
-        <div class="form-text">Site engineers holding a task on this site are not listed.</div>
+        <div class="form-text">People holding a task on this site, and its own PM and coordinators, are not listed.</div>
       {% endif %}
     </form>
 

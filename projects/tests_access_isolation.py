@@ -796,3 +796,133 @@ class QaqcAssignmentIsolationTests(QaqcFixture):
             self._url('task_submit_for_approval', None, self.task.pk),
             {'submission_remarks': 'x'})
         self.assertEqual(response.status_code, 403)
+
+
+# ---------------------------------------------------------------------------
+# CL-G tripwire — a view-only grant never opens a work gate, whatever the role
+# ---------------------------------------------------------------------------
+
+class ViewOnlyGrantNeverOpensWorkTripwireTests(QaqcFixture):
+    """CL-G, hardened for closeout spec v2.4 (CL-9 amended, CL-I).
+
+    A view-only grant lets a person SEE a site; it never lets them do its work. For every
+    role in QAQC_ENGINEER_ROLES, a QA/QC assignment alone must leave user_works_on_site()
+    False and keep task status, due date, checklist answering and GRN shut on the site —
+    on a task of the engineer's OWN role, so the role match is satisfied and the refusal
+    can only come from the missing working relationship.
+
+    ANY FUTURE VIEW-ONLY GRANT (an HSE or O&M viewer, say) MUST BE ADDED TO `_grants()`
+    and pass this test too. If a role is added to QAQC_ENGINEER_ROLES, add its row there:
+    test_every_engineer_role_is_covered fails until you do.
+    """
+
+    #: The OPEX v1 template task whose assigned_role matches each engineer role.
+    OWN_ROLE_TASK = {
+        'Site Engineer':       None,   # the worker's task, from QaqcFixture._se_task
+        'PM':                  'Net Metering Approval',
+        'Project Coordinator': 'Completion Certificates (Paperwork)',
+    }
+
+    def setUp(self):
+        super().setUp()
+        # A coordinator of site_b, and pm_b (site_b's PM): each manages a site, just
+        # not site_a, where they are tried as its QA/QC engineer (CL-A v2.4).
+        self.coord_b = _profile('qq_coord_b', 'Project Coordinator')
+        self.site_b.coordinators.add(self.coord_b)
+        # Every own-role task is held by someone on site_a, so no gate refuses earlier on
+        # "unassigned" and each refusal below is the working-relationship term's. Activation
+        # leaves the coordinator's task unassigned; site_a's own coordinator takes it.
+        assign_tasks_to(Task.objects.filter(
+            phase__project=self.site_a, assigned_to__isnull=True,
+            task_name=self.OWN_ROLE_TASK['Project Coordinator']), self.coord_a)
+
+    def _grants(self):
+        """(label, profile, task on site_a of that profile's own role) per grant."""
+        rows = []
+        for profile in (self.qaqc, self.pm_b, self.coord_b):
+            name = self.OWN_ROLE_TASK[profile.role]
+            task = (self._se_task(self.site_a) if name is None
+                    else Task.objects.get(phase__project=self.site_a, task_name=name))
+            self.assertIsNotNone(task.assigned_to_id, f'fixture: {task.task_name} unassigned')
+            rows.append((f'QA/QC engineer ({profile.role})', profile, task))
+        return rows
+
+    def _grant(self, profile):
+        response = self._assign(self.site_a, profile)
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(user_can_view_project(profile.user, self.site_a),
+                        'fixture: the grant did not grant view')
+
+    def test_every_engineer_role_is_covered(self):
+        from .permissions import QAQC_ENGINEER_ROLES
+        self.assertEqual(set(self.OWN_ROLE_TASK), set(QAQC_ENGINEER_ROLES))
+        self.assertEqual({p.role for _, p, _ in self._grants()}, set(QAQC_ENGINEER_ROLES))
+
+    def test_the_grant_never_makes_works_on_site_true(self):
+        for label, profile, _task in self._grants():
+            with self.subTest(grant=label):
+                self._grant(profile)
+                self.assertFalse(user_works_on_site(profile.user, self.site_a))
+
+    def test_task_status_stays_shut(self):
+        for label, profile, task in self._grants():
+            with self.subTest(grant=label):
+                self._grant(profile)
+                before = task.status
+                response = _client_for(profile).post(
+                    reverse('task_status_update', args=[self.site_a.project_id, task.pk]),
+                    {'status': Task.IN_PROGRESS,
+                     'due_date': (date.today() + timedelta(days=7)).isoformat()})
+                self.assertEqual(response.status_code, 403)
+                task.refresh_from_db()
+                self.assertEqual(task.status, before)
+
+    def test_due_date_stays_shut(self):
+        for label, profile, task in self._grants():
+            with self.subTest(grant=label):
+                self._grant(profile)
+                before = task.due_date
+                response = _client_for(profile).post(
+                    reverse('task_set_due_date', args=[self.site_a.project_id, task.pk]),
+                    {'due_date': (date.today() + timedelta(days=9)).isoformat()})
+                self.assertEqual(response.status_code, 403)
+                task.refresh_from_db()
+                self.assertEqual(task.due_date, before)
+
+    def test_checklist_answering_stays_shut(self):
+        for n, (label, profile, task) in enumerate(self._grants()):
+            with self.subTest(grant=label):
+                self._grant(profile)
+                checklist = Checklist.objects.create(
+                    name=f'Tripwire {n}', code=f'qq-tripwire-{n}', version_no=1)
+                item = ChecklistItem.objects.create(checklist=checklist, label='Done right',
+                                                    order=1)
+                checklist.activate()
+                ChecklistTaskLink.objects.create(checklist=checklist, task_name=task.task_name,
+                                                 project_type='OPEX')
+                response = _client_for(profile).post(
+                    reverse('checklist_item_complete',
+                            args=[self.site_a.project_id, task.pk, item.pk]),
+                    {'answer': 'yes', 'photo': _photo()})
+                self.assertEqual(response.status_code, 403)
+                self.assertFalse(ChecklistItemCompletion.objects.filter(item=item).exists())
+                page = _client_for(profile).get(
+                    reverse('task_detail', args=[self.site_a.project_id, task.pk]))
+                self.assertFalse(page.context['can_complete_items'])
+
+    def test_grn_stays_shut(self):
+        for n, (label, profile, _task) in enumerate(self._grants()):
+            with self.subTest(grant=label):
+                self._grant(profile)
+                challan = DeliveryChallan.objects.create(
+                    project=self.site_a, dc_number=f'DC-TRIP-{n}', dc_date=date.today(),
+                    status=DeliveryChallan.EXPECTED, created_by=self.scm)
+                response = _client_for(profile).post(
+                    reverse('confirm_grn', args=[self.site_a.project_id, challan.pk]), {})
+                self.assertEqual(response.status_code, 403)
+                challan.refresh_from_db()
+                self.assertEqual(challan.status, DeliveryChallan.EXPECTED)
+                page = _client_for(profile).get(
+                    reverse('delivery_challan_detail', args=[self.site_a.project_id, challan.pk]))
+                self.assertEqual(page.status_code, 200)
+                self.assertFalse(page.context['can_confirm_grn'])

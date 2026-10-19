@@ -5020,6 +5020,30 @@ them. Fix: delete `nixpacks.toml` or replace it with an explicit `railpack.json`
 (start command, and the apt packages if WeasyPrint is chosen), after confirming the
 static-file mechanism.
 
+### G82 — a site's QA/QC engineer can read vendor-order prices on that site
+
+Recorded 19 Oct 2026 by the QA/QC eligibility build (closeout spec v2.4; found by the audit
+of the same day; not fixed, R-12). `permissions._user_reads_orders_on()` admits anyone who
+`user_can_view_project()` on ANY site an order names (clause 2), and the QA/QC assignment is
+a view grant. So the site's QA/QC engineer — a Site Engineer since closeout step 3, and a PM
+or Project Coordinator since v2.4 — can open `vendor_order_detail` and the site's order list
+(`user_can_view_project_vendor_orders`) and read lines, prices, documents and payments.
+v2.4's CL-I closed the `project_overview` card for a PM engineer only; these two pages
+are not role-keyed, so they stay open to every QA/QC engineer whatever the role. Fix:
+clause 2 should ask a working relationship (`user_works_on_site`) or management, not
+view — decide which, and whether a Site Engineer holding tasks should keep reading prices.
+
+### G83 — `design_submission_detail` admits any PM to any submission, with no project check
+
+Recorded 19 Oct 2026 by the QA/QC eligibility build (found by the audit of the same day;
+not fixed, R-12 — an access hole that needs its own session). The view resolves the
+`DesignSubmission` by pk and refuses only when `profile != submission.submitted_by and
+profile.role not in ('PM', 'Admin')`. Nothing asks `user_can_view_project()` or
+`user_can_manage_project()`, so every PM reads every submission in the portfolio by
+guessing pks, which breaks D-4 ("PM: projects they manage"). Fix: add the project scope
+(the 0.2 shape — 404 for a site the user cannot see) and decide whether a coordinator
+should be admitted as the PM is.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

@@ -156,9 +156,12 @@ def user_can_view_project(user, project):
       ASSIGNMENT-BASED (True only where the user has a relationship)
         PM                  — assigned PM (or coordinator) on this project
         Project Coordinator — coordinator (or assigned PM) on this project
-        Site Engineer       — holds a task on this project, OR is the site's assigned
-                              QA/QC engineer (closeout step 3, CL-9 / CL-D)
+        Site Engineer       — holds a task on this project
         Design              — is assigned_design, or holds a task on this project
+
+      THE SITE'S QA/QC ENGINEER (closeout step 3, CL-9 / CL-D; any role in
+      QAQC_ENGINEER_ROLES since closeout spec v2.4) sees the site from the assignment,
+      asked after the role branches so it adds to them and never replaces one.
 
     THE QA/QC GRANT IS THE ONE ROUTE THAT IS VIEW AND NOTHING ELSE. Every other route
     here is also a working relationship with the site, and the role-match gates (task
@@ -291,10 +294,6 @@ def _project_visibility(user, project, qaqc_grant):
         # to this user. Reverse relations only — keeps this module import-free.
         if project.phases.filter(tasks__assigned_to=profile).exists():
             return True
-        # The site's QA/QC engineer sees it without holding a task (CL-D: authority
-        # from the assignment). Asked second, so an engineer holding a task pays no
-        # extra query, and only for view: user_works_on_site() passes False here.
-        return qaqc_grant and user_is_site_qaqc(user, project)
 
     if role == 'Design':
         # Mirrors dashboard_design's union: the assigned_design FK, OR a task on this
@@ -303,7 +302,17 @@ def _project_visibility(user, project, qaqc_grant):
             return True
         return project.phases.filter(tasks__assigned_to=profile).exists()
 
-    # System Admin, blank role, or any future unlisted role: management authority only.
+    # The site's QA/QC engineer sees it without holding a task or managing it (CL-D:
+    # authority from the assignment), whichever of QAQC_ENGINEER_ROLES they hold (CL-I).
+    # Asked after the role branches, so a Site Engineer holding a task and a manager pay
+    # no extra query; user_is_site_qaqc() answers any other role without one. View only:
+    # user_works_on_site() passes False here, so no work gate ever opens on it (CL-G).
+    if qaqc_grant and user_is_site_qaqc(user, project):
+        return True
+
+    # Every other role here (PM and Project Coordinator off their own sites, a blank role,
+    # any future unlisted role): management authority only — False, since can_manage was
+    # asked first.
     return can_manage
 
 
@@ -1489,8 +1498,8 @@ def project_managers(project):
 # ---------------------------------------------------------------------------
 # Site QA/QC engineer — closeout step 3 (CL-9, CL-A, CL-D)
 #
-# One active SiteQaqcAssignment per OPEX site names the Site Engineer who signs off
-# that site's work. The assignment, not the `is_qaqc` flag, is the authority (CL-D).
+# One active SiteQaqcAssignment per OPEX site names the person who signs off that
+# site's work. The assignment, not the `is_qaqc` flag, is the authority (CL-D).
 #
 # ONE READING OF THE ROW, ONE AUTHORITY HELPER. site_qaqc_engineer_id() is the only
 # code that reads "the site's active assignment"; user_is_site_qaqc() is the only code
@@ -1500,6 +1509,14 @@ def project_managers(project):
 # qaqc_engineer_assignment_refusal(), which reads site_qaqc_engineer_id() directly,
 # because they ask about a person being GIVEN work, not about the person asking.
 # ---------------------------------------------------------------------------
+
+# The roles a site's QA/QC engineer may hold (CL-9, amended in closeout spec v2.4). THE
+# ONE PLACE this role rule is written: eligibility, the stale flag, the authority helper,
+# the view grant and the "effective engineer" reads all use this set, so a role is never
+# eligible to be named but refused as soon as it acts. A change of role WITHIN the set
+# keeps an assignment live; a change out of it makes the row stale (CL-J).
+QAQC_ENGINEER_ROLES = frozenset({'Site Engineer', 'PM', 'Project Coordinator'})
+
 
 def site_qaqc_engineer_id(project):
     """Return the UserProfile pk of `project`'s active QA/QC engineer, or None.
@@ -1524,8 +1541,12 @@ def user_is_site_qaqc(user, project):
 
     Three terms, all required:
         - an active SiteQaqcAssignment on `project` naming this user;
-        - the user is STILL a Site Engineer — the role the assignment was made from;
+        - the user STILL holds a role in QAQC_ENGINEER_ROLES (CL-9, CL-J);
         - the user's profile is active.
+
+    THE SAME GRANT WHATEVER THAT ROLE IS (CL-I). A PM or Project Coordinator named on a
+    site they do not manage gets exactly what a Site Engineer gets there; their own
+    role's content stays behind user_can_manage_project().
 
     WHY ROLE AND ACTIVE ARE RE-CHECKED HERE. The assignment row is not ended when the
     person's role changes or their profile is deactivated (the row is history, and
@@ -1537,13 +1558,13 @@ def user_is_site_qaqc(user, project):
     reaches this through `request.user`, which Django has already refused if inactive,
     and that one filters both flags on its candidates itself.
 
-    One query (via site_qaqc_engineer_id) for an active Site Engineer on an OPEX site;
-    none otherwise.
+    One query (via site_qaqc_engineer_id) for an active profile in QAQC_ENGINEER_ROLES on
+    an OPEX site; none otherwise.
     """
     profile = getattr(user, 'profile', None)
     if profile is None or project is None:
         return False
-    if profile.role != 'Site Engineer' or not profile.is_active:
+    if profile.role not in QAQC_ENGINEER_ROLES or not profile.is_active:
         return False
     return site_qaqc_engineer_id(project) == profile.pk
 
@@ -1560,9 +1581,10 @@ def qaqc_engineer_assignment_refusal(assignee_profile, project):
     Asked by every path where a PERSON picks the assignee: task_assign (and its HTMX
     modal), TaskAddForm.clean(), duplicate-for-locations and TaskAdminForm. NOT by
     utils.assign_task_to() / assign_tasks_to(): that chokepoint is check-free by
-    design, the activation bulk paths it serves assign only PM and Finance roles (never
-    a Site Engineer), and a raise inside activation's atomic block would surface as a
-    500 rather than a message.
+    design, the activation bulk paths it serves assign only the site's own PM (whom CL-A
+    keeps from ever being its QA/QC engineer) and Finance (not in QAQC_ENGINEER_ROLES),
+    and a raise inside activation's atomic block would surface as a 500 rather than a
+    message.
 
     Any role: the row is read as stored, so an engineer whose role has since changed
     is still refused while the row is active — the PM sees the card's stale flag and
@@ -1576,6 +1598,26 @@ def qaqc_engineer_assignment_refusal(assignee_profile, project):
     name = assignee_profile.user.get_full_name() or assignee_profile.user.username
     return (f"{name} is this site's QA/QC engineer. "
             f"End or replace that assignment first.")
+
+
+def qaqc_engineer_manager_refusal(profile, project, seat):
+    """Return the refusal message if `profile` may not take `seat` ('PM' or
+    'coordinator') on `project` because they are its QA/QC engineer, else None (CL-H).
+
+    CL-A keeps a site's manager from being named its QA/QC engineer; this is the other
+    end — the engineer being made a manager afterwards, which would let one person check
+    the site's work and also waive what they found. Asked by change_site_pm() (and so by
+    hand_over_sites()) and assign_coordinators(), each under the project row lock that
+    qaqc_views.assign_site_qaqc() also takes, so neither order can slip past the other.
+
+    Reads the row as stored, any role, like qaqc_engineer_assignment_refusal(): a stale
+    row is still refused until the PM ends it. None, with no query, for a non-OPEX site.
+    """
+    if profile is None or site_qaqc_engineer_id(project) != profile.pk:
+        return None
+    name = profile.user.get_full_name() or profile.user.username
+    return (f"{name} is this site's QA/QC engineer, so cannot be its {seat}. "
+            f"End the QA/QC assignment first.")
 
 
 # ---------------------------------------------------------------------------
@@ -1873,10 +1915,11 @@ def site_has_effective_qaqc(project):
     """Return True if `project` has a QA/QC engineer who can act as one right now.
 
     "Effective" is the three terms user_is_site_qaqc() asks of the requesting user, asked
-    here of the assigned engineer instead: an active assignment row, the engineer still a
-    Site Engineer, and their profile active. A stale row (role changed, deactivated)
-    grants nothing there, so it must not block the PM fallback here either (go-ahead Q4)
-    — otherwise a point on a site whose engineer left could never be re-verified.
+    here of the assigned engineer instead: an active assignment row, the engineer's role
+    still in QAQC_ENGINEER_ROLES, and their profile active. A stale row (role changed,
+    deactivated) grants nothing there, so it must not block the PM fallback here either
+    (go-ahead Q4) — otherwise a point on a site whose engineer left could never be
+    re-verified.
 
     OPEX only: no query for any other project type, as with site_qaqc_engineer_id().
 
@@ -1888,7 +1931,7 @@ def site_has_effective_qaqc(project):
         return False
     return project.qaqc_assignments.filter(
         ended_at__isnull=True,
-        engineer__role='Site Engineer',
+        engineer__role__in=QAQC_ENGINEER_ROLES,
         engineer__is_active=True,
     ).exists()
 
@@ -1947,9 +1990,9 @@ def user_can_conduct_qaqc_visit(user, project):
     only the engineer and user_can_manage_project holders (V-7).
 
     THE SITE'S ASSIGNED QA/QC ENGINEER ONLY, on an OPEX site: user_is_site_qaqc(), which
-    re-checks the assignment, the Site Engineer role and the active profile. A visit is
-    the independent second check of the site's work (CL-5), so the people whose work or
-    site it is — the PM, coordinators, the site engineers holding its tasks — are
+    re-checks the assignment, the role (QAQC_ENGINEER_ROLES) and the active profile. A
+    visit is the independent second check of the site's work (CL-5), so the people whose
+    work or site it is — the PM, coordinators, the site engineers holding its tasks — are
     refused, as are another site's QA/QC engineer and an engineer whose assignment has
     ended. The legacy `is_qaqc` flag grants nothing here (CL-D).
 

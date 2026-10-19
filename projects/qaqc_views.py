@@ -1,9 +1,11 @@
 """
 Site QA/QC engineer — closeout step 3 (docs/CLOSEOUT_SPEC.md CL-9, CL-A, CL-D).
 
-A PM or coordinator names one active Site Engineer as an OPEX site's QA/QC engineer.
-The assignment grants that engineer view of the site and the right to approve or
-reject its submitted tasks (permissions.user_is_site_qaqc); nothing else.
+A PM or coordinator names one active Site Engineer, PM or Project Coordinator
+(permissions.QAQC_ENGINEER_ROLES, CL-9 as amended in spec v2.4) as an OPEX site's QA/QC
+engineer — never the site's own PM or coordinator, nor anyone holding a task on it
+(CL-A). The assignment grants that engineer view of the site and the right to approve
+or reject its submitted tasks (permissions.user_is_site_qaqc); nothing else.
 
 A separate module from views.py for the same reason order_views.py is one: a
 self-contained screen with its own URL. urls.py imports it beside `views`.
@@ -12,9 +14,10 @@ THE ONLY WRITER of SiteQaqcAssignment: assign_site_qaqc() and end_site_qaqc() be
 The model's save() refuses an update and delete() always refuses, so ending a row is
 this module's single filter().update().
 
-The project page's card and the Site Engineer dashboard's "QA/QC sites" section read
-their context from here too, so views.py imports this module lazily (it is imported
-BY this module for _active_project; a top-level import there would be circular).
+The project page's card and the "QA/QC sites" section of the Site Engineer and PM
+dashboards read their context from here too, so views.py imports this module lazily (it
+is imported BY this module for _active_project; a top-level import there would be
+circular).
 
 QA/QC VISITS — closeout step 7 (CL-5, CL-B, CL-C; decisions V-1 to V-10). The assigned
 engineer starts a dated visit, answers chosen checklist points (Yes / No / NA, a photo on
@@ -53,15 +56,16 @@ from .models import (
 )
 from .notifications import send_notification
 from .permissions import (
-    project_managers, user_can_conduct_qaqc_visit, user_can_manage_project,
-    user_can_rectify_punch_point, user_can_reverify_punch_point, user_can_view_project,
+    QAQC_ENGINEER_ROLES, project_managers, user_can_conduct_qaqc_visit,
+    user_can_manage_project, user_can_rectify_punch_point, user_can_reverify_punch_point,
+    user_can_view_project,
 )
 from .site_pm import refuse_site_view_404
 from .punch_points import (
     ACCEPT_PHOTO_REQUIRED, RECTIFY_PHOTO_REQUIRED, RECTIFY_REMARK_REQUIRED,
-    REJECT_REASON_REQUIRED, PunchPointRefused, queue_visit_raise_notices,
-    raise_punch_point, rectify_punch_point, rectify_refusal, reverify_accept,
-    reverify_refusal, reverify_reject,
+    REJECT_REASON_REQUIRED, PunchPointRefused, awaiting_reverification,
+    queue_visit_raise_notices, raise_punch_point, rectify_punch_point, rectify_refusal,
+    reverify_accept, reverify_refusal, reverify_reject,
 )
 from .views import (
     ALLOWED_PHOTO_EXTENSIONS, MIME_TYPE_MAP, _active_project, _checklist_for_task, _is_hx,
@@ -118,10 +122,11 @@ def engineer_is_stale(profile):
     """True if the engineer named on an active row can no longer act as one.
 
     The same two terms user_is_site_qaqc() re-checks (role, profile active), plus the
-    login flag, so the card can tell the PM the row needs replacing or ending. The row
-    itself is never ended automatically: history is the PM's to write.
+    login flag, so the card can tell the PM the row needs replacing or ending (CL-J). A
+    move between the roles in QAQC_ENGINEER_ROLES is not stale. The row itself is never
+    ended automatically: history is the PM's to write.
     """
-    return (profile.role != 'Site Engineer' or not profile.is_active
+    return (profile.role not in QAQC_ENGINEER_ROLES or not profile.is_active
             or not profile.user.is_active)
 
 
@@ -138,20 +143,26 @@ def tasks_held_on_site(profile, project):
 
 
 def eligible_qaqc_engineers(project):
-    """The Site Engineers who may be named QA/QC engineer on `project` now.
+    """The people who may be named QA/QC engineer on `project` now.
 
-    Active on both models (UserProfile.is_active is the portal's deactivation,
-    User.is_active Django's login gate — a person off by either can never sign
-    anything), holding no task on the site (CL-A), and not already its engineer.
-    One query: the held-task exclusion is a subquery on the same statement.
+    A role in QAQC_ENGINEER_ROLES (CL-9); active on both models (UserProfile.is_active
+    is the portal's deactivation, User.is_active Django's login gate — a person off by
+    either can never sign anything); holding no task on the site and neither its
+    assigned PM nor one of its coordinators (CL-A — a manager checking their own site is
+    not independent of it); and not already its engineer. One query: the held-task and
+    coordinator exclusions are subqueries on the same statement.
     """
     holders = (Task.objects.filter(phase__project=project, assigned_to__isnull=False)
                .values('assigned_to'))
+    coordinators = project.coordinators.values('pk')
     qs = (UserProfile.objects
-          .filter(role='Site Engineer', is_active=True, user__is_active=True)
+          .filter(role__in=QAQC_ENGINEER_ROLES, is_active=True, user__is_active=True)
           .exclude(pk__in=holders)
+          .exclude(pk__in=coordinators)
           .select_related('user')
           .order_by('user__first_name', 'user__last_name', 'user__username'))
+    if project.assigned_pm_id is not None:
+        qs = qs.exclude(pk=project.assigned_pm_id)
     current = current_site_qaqc(project)
     if current is not None:
         qs = qs.exclude(pk=current.engineer_id)
@@ -173,7 +184,7 @@ def site_qaqc_card_context(project, can_manage):
 
 
 def qaqc_sites_for_engineer(profile):
-    """The Site Engineer dashboard's "QA/QC sites" rows: every live site this engineer
+    """The dashboards' "QA/QC sites" rows (CL-K): every live site this engineer
     is the active QA/QC engineer for, each with its count of tasks awaiting approval.
 
     Three queries whatever the number of sites: the assignments, one grouped count, and
@@ -221,6 +232,32 @@ def qaqc_sites_for_engineer(profile):
     ]
 
 
+def qaqc_engineer_dashboard_context(profile):
+    """The two QA/QC engineer sections of a dashboard (CL-K), for whichever role holds
+    the assignment: dashboard_site_engineer and dashboard_pm (PM and Project Coordinator)
+    both render it through dashboard/_qaqc_engineer_sections.html.
+
+    `qaqc_sites`: qaqc_sites_for_engineer(). `awaiting_my_reverification`: the Rectified
+    points on those sites this person may re-verify - punch_points.awaiting_reverification
+    (the PM list's filter, three queries whatever its length) narrowed by the two terms
+    the re-verify writer asks of an engineer: they are the site's effective engineer
+    (`site_has_engineer`: at most one active assignment per site, and it is theirs), and
+    they did not record the latest rectify round (Q5).
+
+    One query for someone with no QA/QC assignment: the empty site list short-circuits
+    the rest.
+    """
+    qaqc_sites = qaqc_sites_for_engineer(profile)
+    awaiting_mine = []
+    for point in awaiting_reverification([s['project'].pk for s in qaqc_sites]):
+        rounds = point.rectify_rounds
+        point.latest_round = rounds[0] if rounds else None
+        if point.site_has_engineer and (point.latest_round is None
+                                        or point.latest_round.actor_id != profile.pk):
+            awaiting_mine.append(point)
+    return {'qaqc_sites': qaqc_sites, 'awaiting_my_reverification': awaiting_mine}
+
+
 # ---------------------------------------------------------------------------
 # Writers — the only code that creates or ends a SiteQaqcAssignment
 # ---------------------------------------------------------------------------
@@ -234,7 +271,16 @@ def _refuse_ineligible(project, engineer):
             'A QA/QC engineer is assigned on RESCO sites only.')
     if engineer_is_stale(engineer):
         raise QaqcAssignmentRefused(
-            f"{_person(engineer)} is not an active site engineer.")
+            f"{_person(engineer)} is not an active site engineer, PM or project "
+            f"coordinator.")
+    # CL-A (v2.4): the site's own managers are not independent of it. Asked before the
+    # held-task term because a PM usually holds tasks too, and "manages this site" is
+    # the reason that tells the person choosing what to do instead.
+    if (project.assigned_pm_id == engineer.pk
+            or project.coordinators.filter(pk=engineer.pk).exists()):
+        raise QaqcAssignmentRefused(
+            f"{_person(engineer)} manages this site, so cannot be its independent QA/QC "
+            f"engineer.")
     held = tasks_held_on_site(engineer, project)
     if held:
         named = ', '.join(held[:HELD_TASKS_NAMED])
@@ -244,7 +290,7 @@ def _refuse_ineligible(project, engineer):
         raise QaqcAssignmentRefused(
             f"{_person(engineer)} holds {len(held)} task{'s' if len(held) != 1 else ''} "
             f"on this site ({named}). A site's QA/QC engineer may not hold a task on "
-            f"the site they check — reassign those tasks or choose another engineer.")
+            f"the site they check — reassign those tasks or choose someone else.")
 
 
 def _notify(recipient_pk, message, project_pk, actor_pk, template):
@@ -413,7 +459,7 @@ def site_qaqc(request, project_id):
                 engineer = (UserProfile.objects.select_related('user')
                             .filter(pk=request.POST.get('engineer_id') or None).first())
                 if engineer is None:
-                    raise QaqcAssignmentRefused('Choose a site engineer to assign.')
+                    raise QaqcAssignmentRefused('Choose someone to assign.')
                 row = assign_site_qaqc(project, engineer, actor)
                 messages.success(
                     request, f"{_person(row.engineer)} is now this site's QA/QC engineer.")
