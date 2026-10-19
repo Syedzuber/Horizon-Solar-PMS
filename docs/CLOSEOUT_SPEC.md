@@ -1,7 +1,7 @@
-# Closeout Spec v2.3 — COD, As-Built, HOTO, QA/QC verification
+# Closeout Spec v2.4 — COD, As-Built, HOTO, QA/QC verification
 
 Horizon Solar PMS · OPEX/RESCO sites · 7 Oct 2026
-Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.3, 12 Oct 2026: step 7b decisions PP-1 to PP-6, CL-1 amended. v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
+Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.4, 19 Oct 2026: the QA/QC engineer may be a PM or Project Coordinator on a site they do not manage — CL-9 and CL-A amended, CL-H to CL-K added (audit of 19 Oct 2026). v2.3, 12 Oct 2026: step 7b decisions PP-1 to PP-6, CL-1 amended. v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
 Supersedes: §4 of `docs/OPEX_task_template_spec.md` (stale: it says no mirror derives; Design and the four deliveries do).
 Evidence base: `docs/CLOSEOUT_MIRROR_AUDIT.md` (6 Oct 2026, HEAD `203ab65`). Every factual claim about the code below comes from that audit and must be re-verified by each build session before it is built on.
 
@@ -29,14 +29,18 @@ No mirror converts to an entered task. No template version change is required fo
 | CL-6 | **As-Built**: either upload drawings, or declare "same as released design" with a note. Approved by the PM or a coordinator. The declaration names the released design version automatically and warns (never blocks) when a design change request was accepted after release, or when an installation task carries a punch point or a "No" checklist answer. |
 | CL-7 | **Client signature on Final Acceptance**: the client representative's name plus an uploaded signed sheet. No client login. |
 | CL-8 | **HOTO override**: PM **or** coordinator may release HOTO without As-Built, with a mandatory reason. Recorded with who, role, when and why; counted on a report. The override skips As-Built only — never punch points, never the Final Acceptance verdict. As-Built stays open and owed afterwards. |
-| CL-9 | **QA/QC engineer per site**: the PM assigns one from the active site engineers. Dated assignment; history kept. |
-| CL-A | The QA/QC engineer **may not** be a site engineer holding a task on that same site. Refused, not warned. |
+| CL-9 | **QA/QC engineer per site**: the PM assigns one from the active site engineers. Dated assignment; history kept. *Amended 19 Oct 2026 (v2.4): the QA/QC engineer may be an active Site Engineer, PM or Project Coordinator.* |
+| CL-A | The QA/QC engineer **may not** be a site engineer holding a task on that same site. Refused, not warned. *Amended 19 Oct 2026 (v2.4): refused if the person holds a task on the site, is the site's assigned PM, or is one of its coordinators.* |
 | CL-B | A **"No" on a spot check raises a punch point** on the task that checklist point belongs to. It then blocks COD and HOTO through CL-2. |
 | CL-C | **At least one QA/QC visit** before HOTO. Coverage % shown; no coverage threshold. |
 | CL-D | The assigned QA/QC engineer **approves tasks on their assigned sites only**. Authority comes from the assignment, not from a flag. `is_qaqc` is left unchanged until audited (Prompt Q-0). |
 | CL-E | The assigned QA/QC engineer is automatically the **"QA/QC Engineer" signatory** on Final Acceptance. |
 | CL-F | (8 Oct 2026) **COD does not change `Project.status`.** In this codebase Commissioned means "work over": ~30 readers drop it from working lists, while HOTO, As-Built and Completion Certificates are still open after COD. COD is shown from the active COD record instead — CEO pipeline "Commissioned" row, stuck-site rules, and a "COD recorded <date>" pill. COD is refused unless the site is Active or In Progress. Whether HOTO sets Commissioned is decided in step 8 (G59). |
 | CL-G | (8 Oct 2026) **Site-scoped work gates** (status, due date, checklist answers, GRN) require `user_works_on_site` — `user_can_view_project` minus view-only grants — on top of their role match. A view-only grant (the QA/QC engineer today; any future HSE / O&M viewer) never opens a work gate. |
+| CL-H | (19 Oct 2026) **The QA/QC engineer cannot become the site's manager.** `assign_coordinators`, `change_site_pm` and `hand_over_sites` refuse to make a site's current QA/QC engineer its PM or coordinator. Message: end the QA/QC assignment first. |
+| CL-I | (19 Oct 2026) **A QA/QC assignment grants the same access whatever the person's role.** It never grants PM-only or coordinator-only content (e.g. the vendor-order section on `project_overview`) on a site the person does not manage. |
+| CL-J | (19 Oct 2026) **"Stale"** = role outside {Site Engineer, PM, Project Coordinator}, or inactive on `UserProfile` or `User`. A change among those three roles keeps the row live. |
+| CL-K | (19 Oct 2026) **PMs and Project Coordinators find their QA/QC sites and "awaiting your re-verification" on their own dashboard**, from the same partial the Site Engineer dashboard uses. |
 
 ---
 
@@ -91,7 +95,7 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 ### Step 3 — QA/QC engineer assignment
 
 - New dated assignment: site, engineer, assigned by, from, to. One active per site.
-- PM-facing screen to assign and replace. Eligible: active site engineers not holding a task on the site (CL-A).
+- PM-facing screen to assign and replace. Eligible: active site engineers not holding a task on the site (CL-A). *v2.4: active Site Engineers, PMs and Project Coordinators who hold no task on the site and are neither its assigned PM nor one of its coordinators (CL-9, CL-A amended).*
 - Access: the assignment grants view of that site through a `permissions.py` helper. Update `tests_access_isolation` and the access matrix.
 - Approval: `user_can_approve_task` admits the site's assigned QA/QC engineer (CL-D). Precedence written in one helper.
 - **`task_has_independent_approver` must count the site's assigned QA/QC engineer** in its candidate pool (today it reads only `is_qaqc=True` holders). Without this, self-certification (`user_may_self_certify`, migration 0088) fires on sites that do have an independent approver.
