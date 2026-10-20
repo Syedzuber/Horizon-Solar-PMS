@@ -1,0 +1,62 @@
+{% comment %}
+Started early — the phase-rule overrides on one OPEX v1 site (phase_rules.py). Drawn by
+project_overview only when the site has at least one override (show_started_early_card),
+and redrawn in place by phase_rule_override_explain's HTMX response.
+
+Context (views._phase_rule_card_context): started_early_rows, started_early_count,
+started_early_awaiting, can_explain_started_early, project.
+
+EVERY VIEWER OF THE SITE READS IT. THE REASON FORM IS DRAWN ONLY FOR THE SITE'S PM SIDE
+(can_explain_started_early = user_can_manage_project), and the view asks the same
+question again and refuses anyone else. Presentation only: nothing here is the gate.
+
+Rows are stacked blocks, not a table, so the card reads at phone width without the
+horizontal scroll the phase tables have. Open by default, like the other overview cards.
+{% endcomment %}
+<div class="card shadow-sm mb-4" id="started-early">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="fw-semibold small">
+      <i data-lucide="fast-forward" class="lucide-icon me-1"></i>Started early
+      <span class="badge bg-secondary ms-1">{{ started_early_count }}</span>
+      {% if started_early_awaiting %}<span class="badge bg-warning text-dark ms-1">{{ started_early_awaiting }} awaiting PM reason</span>{% endif %}
+    </span>
+    <button class="btn btn-sm btn-link text-muted p-0 block-toggle" type="button"
+            data-bs-toggle="collapse" data-bs-target="#startedEarlyCollapse" aria-expanded="true"
+            aria-controls="startedEarlyCollapse">
+      <i class="bi bi-chevron-down collapse-chevron"></i>
+    </button>
+  </div>
+  <div class="collapse show" id="startedEarlyCollapse">
+    <div class="card-body small">
+      <p class="text-muted mb-2">Work that started before the step it normally follows. It went ahead; the site's PM side records why.</p>
+      {% for o in started_early_rows %}
+        <div class="border-top pt-2 mt-2" id="started-early-{{ o.pk }}">
+          <div>
+            {% if o.task_id %}
+              <a href="{% url 'task_detail' project.project_id o.task_id %}" class="fw-semibold">{{ o.task.task_name }}</a>
+            {% else %}
+              <a href="{% url 'delivery_challan_detail' project.project_id o.delivery_challan_id %}" class="fw-semibold">Delivery challan {{ o.delivery_challan.dc_number }}</a>
+            {% endif %}
+            — {{ o.rule_text }}
+          </div>
+          <div class="text-muted">Started by {{ o.started_by.user.get_full_name|default:o.started_by.user.username }}, {{ o.started_at|date:"d M Y, H:i" }}</div>
+          {% if o.explained_at %}
+            <div class="mt-1">Reason: <span style="white-space:pre-line;">{{ o.reason }}</span></div>
+            <div class="text-muted">{{ o.explained_by.user.get_full_name|default:o.explained_by.user.username }}, {{ o.explained_at|date:"d M Y, H:i" }}</div>
+          {% elif can_explain_started_early %}
+            <form method="post" action="{% url 'phase_rule_override_explain' project.project_id o.pk %}" class="mt-1"
+                  hx-post="{% url 'phase_rule_override_explain' project.project_id o.pk %}"
+                  hx-target="#started-early" hx-swap="outerHTML">
+              {% csrf_token %}
+              <label class="form-label mb-1" for="startedEarlyReason{{ o.pk }}"><em class="text-warning-emphasis">Awaiting PM reason</em> — why did this start early?</label>
+              <textarea name="reason" id="startedEarlyReason{{ o.pk }}" rows="2" class="form-control form-control-sm" required></textarea>
+              <button type="submit" class="btn btn-brand btn-sm mt-1">Save reason</button>
+            </form>
+          {% else %}
+            <div class="mt-1"><em class="text-warning-emphasis">Awaiting PM reason</em></div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>

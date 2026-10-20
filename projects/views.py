@@ -77,6 +77,13 @@ from .punch_points import (
     open_punch_point_counts, open_punch_point_counts_by_task, raise_punch_point,
     source_answer, task_punch_points,
 )
+from .phase_rules import (
+    ALREADY_EXPLAINED, BLANK_REASON, SiteRuleState, dc_creation_warnings,
+    explain_phase_rule_override, override_counts_by_task, overrides_for_project,
+    overrides_for_task, phase_rule_warnings, record_phase_rule_overrides,
+    start_warnings,
+)
+from .models import PhaseRuleOverride
 from .tender_stages import (
     STAGE_LABELS, STUCK_RULES, activated_progress, design_throughput, stage_summary,
     stuck_sites, tender_cards, tender_site_list,
@@ -4655,6 +4662,7 @@ def _render_phase_tasks_hx(request, project, phase, status=200):
     _attach_delivery_consignments(phase_tasks)
     _attach_due_health(phase_tasks, timezone.localdate())
     _attach_open_punch_points(phase_tasks, project)
+    _attach_phase_rule_flags(phase_tasks, project, request)
     return render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -5560,6 +5568,52 @@ def _attach_open_punch_points(tasks, project):
         task.open_punch_points = counts.get(task.pk, 0)
 
 
+def _attach_phase_rule_flags(tasks, project, request):
+    """Attach the task row's phase-rule state (OPEX v1):
+
+      task.started_early           overrides recorded against the task ("Started early" chip)
+      task.started_early_awaiting  how many of them still wait for the PM's reason
+      task.phase_rule_preview      the rule wording a start would bypass, for a Not
+                                   Started row, FOR THE SITE'S PM SIDE ONLY — it is what
+                                   the overview's start dialog offers them a reason for.
+                                   Empty for everyone else: an SE is never asked.
+
+    A FIXED NUMBER OF QUERIES WHATEVER THE TASK COUNT: one grouped query for the chips;
+    for a manager, one permission query and SiteRuleState's at most three. Nothing at
+    all on a non-OPEX site.
+
+    Called next to `_attach_open_punch_points()` by project_overview and by the four
+    responders that redraw a row, so a redrawn row carries the same chip as the page.
+    The preview covers Not Started rows only: a never-started Blocked row unblocked by a
+    manager is still recorded, awaiting a reason, and explained from the card."""
+    for task in tasks:
+        task.started_early = 0
+        task.started_early_awaiting = 0
+        task.phase_rule_preview = []
+    if project.project_type != 'OPEX' or not tasks:
+        return
+    counts = override_counts_by_task([task.pk for task in tasks])
+    for task in tasks:
+        task.started_early, task.started_early_awaiting = counts.get(task.pk, (0, 0))
+    # The preview is drawn only for the site's PM and coordinators, because only they
+    # may give a reason at the start; it would be a question nobody else may answer.
+    if not user_can_manage_project(request.user, project):
+        return
+    state = SiteRuleState(project)
+    for task in tasks:
+        if task.status == Task.NOT_STARTED:
+            task.phase_rule_preview = [rule.text for rule in
+                                       phase_rule_warnings(task, state=state)]
+
+
+def _phase_rule_just_started(request):
+    """(task pk, [rule wording]) for the start this request just recorded, or (None, [])
+    — read by the row and status-block templates to print the wording under the
+    redrawn control. Set by `_apply_task_status_change()`; absent on a full page load,
+    which is why after a reload the row shows the chip alone (ruling Q9)."""
+    return getattr(request, 'phase_rule_just_started', (None, []))
+
+
 def _render_task_row_hx(request, project, task, oob_tasks=None):
     """Render the HTMX task-row response for project_overview (#1/#3/#5):
     the primary row (swapped into #task-row-<pk>), optional out-of-band cascade
@@ -5569,12 +5623,16 @@ def _render_task_row_hx(request, project, task, oob_tasks=None):
     _attach_delivery_consignments([task, *oob_tasks])
     _attach_due_health([task, *oob_tasks], timezone.localdate())
     _attach_open_punch_points([task, *oob_tasks], project)
+    _attach_phase_rule_flags([task, *oob_tasks], project, request)
     row_context = _task_row_context(request, project)
+    just_started_pk, just_started_rules = _phase_rule_just_started(request)
     return render(request, 'projects/partials/_task_row_response.html', {
         'project':             project,
         'row_task':            task,
         'oob_tasks':           oob_tasks,
         'primary_is_gate':     task.pk == row_context['gate_task_pk'],
+        'phase_rule_just_started_pk':    just_started_pk,
+        'phase_rule_just_started_rules': just_started_rules,
         **row_context,
     })
 
@@ -5587,7 +5645,107 @@ def _render_task_status_hx(request, project, task):
         'task':                task,
         'is_assignee':         task.assigned_to is not None and task.assigned_to == profile,
         'task_status_choices': Task.STATUS_CHOICES,
+        **_phase_rule_task_context(request, project, task),
     })
+
+
+def _phase_rule_card_context(request, project):
+    """The project overview's Started early card (OPEX v1), for the full page and for
+    the HTMX swap after a reason is saved (one builder, two callers).
+
+    The card is drawn only when the site has at least one override: on every other
+    site it would be an empty box. Two queries on an OPEX site (the rows, and the
+    permission), none on any other."""
+    if project.project_type != 'OPEX':
+        return {'show_started_early_card': False}
+    rows = overrides_for_project(project)
+    if not rows:
+        return {'show_started_early_card': False}
+    return {
+        'show_started_early_card':   True,
+        'started_early_rows':        rows,
+        'started_early_count':       len(rows),
+        'started_early_awaiting':    sum(1 for row in rows if row.explained_at is None),
+        # Only the site's PM and coordinators write the reason (B-08 as amended
+        # 20 Oct 2026); everyone else who can see the site reads it.
+        'can_explain_started_early': user_can_manage_project(request.user, project),
+    }
+
+
+@login_required
+def phase_rule_override_explain(request, project_id, override_id):
+    """
+    Record the reason for one out-of-sequence start, from the overview's Started early
+    card. Access: the site's PM and coordinators (user_can_manage_project). POST only.
+
+    Written once: reason, explained_by and explained_at together, by a conditional
+    update in phase_rules.explain_phase_rule_override(); a second attempt on an
+    explained row changes nothing and says so. HTMX redraws the card; without HTMX the
+    page reloads at the card.
+    """
+    if request.method != 'POST':
+        return redirect('project_overview', project_id=project_id)
+
+    project = _active_project(project_id)
+    # Two separate questions, as on the task status views: may you see this site
+    # (anyone else gets the 0.2 refusal), and are you its PM side.
+    if not user_can_view_project(request.user, project):
+        raise Http404
+    # Only the site's PM and coordinators give the reason: the person who started the
+    # work is not asked (B-08 as amended 20 Oct 2026), and nobody outside the site's
+    # management may explain it on the PM's behalf.
+    if not user_can_manage_project(request.user, project):
+        return HttpResponseForbidden()
+
+    override = get_object_or_404(
+        PhaseRuleOverride.objects.select_related('task', 'delivery_challan', 'project'),
+        pk=override_id, project=project,
+    )
+    outcome = explain_phase_rule_override(
+        override, request.POST.get('reason', ''), request.user.profile)
+    if outcome == BLANK_REASON:
+        messages.error(request, 'Please write the reason before saving.')
+    elif outcome == ALREADY_EXPLAINED:
+        messages.info(request, 'This start already has its reason. Nothing was changed.')
+    else:
+        messages.success(request, 'Reason recorded.')
+
+    if _is_hx(request):
+        return render(request, 'projects/partials/_started_early_response.html', {
+            'project': project,
+            **_phase_rule_card_context(request, project),
+        })
+    return redirect(reverse('project_overview', kwargs={'project_id': project.project_id})
+                    + '#started-early')
+
+
+def _phase_rule_task_context(request, project, task):
+    """The status block's phase-rule context, for the task-detail page and its HTMX
+    swap alike (one builder, two callers, as `_task_approval_context()`):
+
+      task_phase_rule_overrides  every override on this task, each with its reason or
+                                 awaiting the PM's
+      phase_rule_preview         for the site's PM side on a Not Started task, the rule
+                                 wording a start would bypass — the inline reason field
+                                 is drawn beside it. Empty for everyone else.
+      phase_rule_just_started    the wording for the start this request recorded
+
+    Nothing is queried on a non-OPEX site."""
+    if project.project_type != 'OPEX':
+        return {'task_phase_rule_overrides': [], 'phase_rule_preview': [],
+                'phase_rule_just_started': []}
+    preview = []
+    # Only the site's PM and coordinators may give a reason at the start, so only
+    # they are shown the rules before starting; an SE sees them after.
+    if (task.status == Task.NOT_STARTED and not task.is_mirror
+            and user_can_manage_project(request.user, project)):
+        preview = [rule.text for rule in phase_rule_warnings(task, project=project)]
+    just_started_pk, just_started_rules = _phase_rule_just_started(request)
+    return {
+        'task_phase_rule_overrides': overrides_for_task(task),
+        'phase_rule_preview':        preview,
+        'phase_rule_just_started':   just_started_rules if just_started_pk == task.pk else [],
+    }
 
 
 def _task_approval_context(request, project, task):
@@ -5721,6 +5879,9 @@ def _render_task_approval_hx(request, project, task):
         'swap_punch_points':   request.headers.get('HX-Target') == 'taskApprovalBlock',
     }
     ctx.update(_task_approval_context(request, project, task))
+    # The out-of-band status block lists the task's phase-rule overrides; without this
+    # an approval would redraw it without them.
+    ctx.update(_phase_rule_task_context(request, project, task))
     if ctx['swap_punch_points']:
         ctx.update(_punch_point_context(request, project, task))
     return render(request, 'projects/partials/_task_approval_response.html', ctx)
@@ -5986,6 +6147,7 @@ def _render_task_assign_design_success_hx(request, project, task):
     _attach_delivery_consignments([task])
     _attach_due_health([task], timezone.localdate())
     _attach_open_punch_points([task], project)
+    _attach_phase_rule_flags([task], project, request)
     row_context = _task_row_context(request, project)
     resp = render(request, 'projects/partials/_task_row_modal_success.html', {
         'project':             project,
@@ -6006,6 +6168,7 @@ def _render_task_add_success_hx(request, project, phase):
     _attach_delivery_consignments(phase_tasks)
     _attach_due_health(phase_tasks, timezone.localdate())
     _attach_open_punch_points(phase_tasks, project)
+    _attach_phase_rule_flags(phase_tasks, project, request)
     resp = render(request, 'projects/partials/_task_add_success.html', {
         'project':             project,
         'phase':               phase,
@@ -6034,6 +6197,22 @@ class _ApprovalRolledBack(Exception):
     `_apply_task_status_change()` refuses the completion, so the approval columns are
     not left written against a task that never reached Done. Never escapes either
     view and is never raised anywhere else."""
+
+
+def _announce_phase_rule_overrides(request, subject_name, rows, may_explain):
+    """The warning shown after an out-of-sequence start or challan, naming each rule
+    bypassed in plain words. Worded once here for the status chokepoint and
+    create_delivery_challan. Nobody is asked for a reason in it: the site's PM side
+    gives that, inline if they started the work themselves, otherwise from the
+    overview's Started early card."""
+    rules = '; '.join(row.rule_text for row in rows)
+    if rows[0].explained_at is not None:
+        tail = 'Your reason was recorded.'
+    elif may_explain:
+        tail = "Give the reason from the Started early card on the site page."
+    else:
+        tail = "The site's PM will give the reason."
+    messages.warning(request, f"'{subject_name}' started early — {rules}. {tail}")
 
 
 def _apply_task_status_change(task, new_status, profile, request, project):
@@ -6254,7 +6433,21 @@ def _apply_task_status_change(task, new_status, profile, request, project):
         messages.success(request, f'Task blocked. Issue "{block_issue_title}" created.')
         return _TASK_STATUS_APPLIED
 
-    # R-2, same tight pair as the blocked branch above.
+    # PHASE RULES (OPEX v1). Asked here, after every refusal above has passed, so only
+    # a start that is really going to happen is checked — and asked of the pre-change
+    # status, which is what "leaving Not Started" means. IT NEVER REFUSES (B-08): the
+    # hits only decide which PhaseRuleOverride rows are written alongside the start.
+    # Empty, at no query, for Residential, CAPEX, mirrors, N/A tasks and every move
+    # that is not a first start (phase_rules.start_warnings).
+    phase_rule_hits = start_warnings(task, new_status, project)
+    # Only the site's PM side may give the reason at the start (B-08 as amended
+    # 20 Oct 2026); a reason POSTed by anybody else is ignored, not refused, and their
+    # row waits for the PM. Asked only when a rule fired, so no other start pays the
+    # query.
+    may_explain = bool(phase_rule_hits) and user_can_manage_project(request.user, project)
+
+    # R-2, same tight pair as the blocked branch above. The override rows join it:
+    # a start and the record that it was early commit together or not at all.
     with transaction.atomic():
         Task.objects.filter(pk=task.pk).update(**update_kwargs)
         record_transition(
@@ -6265,6 +6458,17 @@ def _apply_task_status_change(task, new_status, profile, request, project):
             # people will later group by.
             reason_code=REASON_UNBLOCKED if task.status == Task.BLOCKED else '',
         )
+        phase_rule_rows = record_phase_rule_overrides(
+            project, profile, phase_rule_hits, task=task,
+            reason=request.POST.get('phase_rule_reason', ''), may_explain=may_explain,
+        )
+    if phase_rule_rows:
+        _announce_phase_rule_overrides(request, task.task_name, phase_rule_rows, may_explain)
+        # Handed to the row and status-block responders, which print the rule wording
+        # under the redrawn control (ruling Q9). An attribute on the request rather
+        # than a fourth return value: both callers and the tests compare the return
+        # against the three outcome constants, and only the HTMX responders read this.
+        request.phase_rule_just_started = (task.pk, [row.rule_text for row in phase_rule_rows])
     # Log status changes for all non-blocked transitions (blocked has its own log above)
     log_activity(project, profile, f"Changed task status to {new_status}: {task.task_name}", entity_type='Task', entity_id=task.pk,
                  action_code=f"task_status_{new_status.lower().replace(' ', '_')}")
@@ -10556,6 +10760,9 @@ def project_overview(request, project_id):
         # prefetched relation returns the cached instances, so the attribute set here is
         # on the very objects the loop below hands the template.
         _attach_open_punch_points([t for phase in phases for t in phase.tasks.all()], project)
+        # The Started early chip, and for the site's PM side the start-dialog preview,
+        # for every row on the page in a fixed number of queries.
+        _attach_phase_rule_flags([t for phase in phases for t in phase.tasks.all()], project, request)
         for phase in phases:
             tasks = list(phase.tasks.all())
             if not tasks:
@@ -10875,6 +11082,9 @@ def project_overview(request, project_id):
         **cod_context,
         # show_qaqc_visit_card / qaqc_visits_recent / qaqc_visit_open / qaqc_visit_coverage ...
         **qaqc_visit_context,
+        # show_started_early_card / started_early_rows / ..._count / ..._awaiting /
+        # can_explain_started_early — the phase-rule overrides card (OPEX v1)
+        **_phase_rule_card_context(request, project),
         'documents':                 documents,
         'project_issues':              project_issues,
         'all_profiles':                all_profiles,
@@ -11256,6 +11466,9 @@ def task_detail(request, project_id, task_id):
     context['can_mark_not_applicable'] = user_can_mark_task_not_applicable(
         request.user, task, project,
     )
+    # Phase rules (OPEX v1): the overrides on this task and, for the site's PM side,
+    # the inline reason field. Shared with the status block's HTMX swap.
+    context.update(_phase_rule_task_context(request, project, task))
     return render(request, 'projects/task_detail.html', context)
 
 
@@ -13035,6 +13248,22 @@ def create_delivery_challan(request, project_id):
         # of the projects that reach this view today.
         # ───────────────────────────────────────────────────────────────────────────
         sync_delivery_mirrors(project)
+
+        # PHASE RULE R1 (OPEX v1): a challan raised before the site's design is
+        # released. The challan is still created (B-08 never refuses); the override row
+        # hangs off it, inside this block so the two commit together. Same flow as a
+        # task start: the reason is honoured only from the site's PM side, which an SCM
+        # user normally is not, so the row usually waits for the PM.
+        dc_rule_hits = dc_creation_warnings(project)
+        dc_may_explain = bool(dc_rule_hits) and user_can_manage_project(request.user, project)
+        dc_rule_rows = record_phase_rule_overrides(
+            project, profile, dc_rule_hits, challan=challan,
+            reason=request.POST.get('phase_rule_reason', ''), may_explain=dc_may_explain,
+        )
+
+    if dc_rule_rows:
+        _announce_phase_rule_overrides(
+            request, f'Delivery Challan {dc_number}', dc_rule_rows, dc_may_explain)
 
     vendor_name = vendor.name if vendor else 'Unknown Vendor'
     log_activity(

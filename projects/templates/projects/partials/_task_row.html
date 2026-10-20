@@ -180,6 +180,7 @@ Expected context:
                 onchange="handleTaskStatusChange(this)"
                 data-original-status="{{ task.status }}"
                 data-task-name="{{ task.task_name }}"
+                {% if task.phase_rule_preview %}data-phase-rules="{{ task.phase_rule_preview|join:'; ' }}"{% endif %}
                 {% if is_milestone_gate_candidate and user_task_role == 'BD / Sales' %}
                 data-is-milestone-gate="true"
                 data-project-id="{{ project.project_id }}"
@@ -244,6 +245,26 @@ Expected context:
        still needs to know it is waiting on an approver. The include decides for itself
        whether the person gets a Submit button — see the partial.{% endcomment %}
     {% include 'projects/partials/_task_row_approval.html' %}
+    {% comment %}STARTED EARLY (phase rules, OPEX v1). The chip is set by
+       views._attach_phase_rule_flags() — one grouped query per page or responder, 0 on
+       every non-OPEX site — and links to the task page, which lists each override with
+       its reason or "Awaiting PM reason". The rule wording underneath is printed only in
+       the response to the start that recorded it (phase_rule_just_started_pk), so it
+       sits where an SE on a phone just tapped; after a reload the chip stands alone
+       (ruling Q9). Presentation only: nothing here writes or refuses.{% endcomment %}
+    {% if task.started_early %}
+      <div class="mt-1">
+        <a href="{% url 'task_detail' project.project_id task.pk %}#taskStatusBlock"
+           class="badge rounded-pill bg-warning-subtle text-warning-emphasis border border-warning-subtle text-decoration-none started-early-chip"
+           style="font-size:.62rem;font-weight:500;"
+           title="{% if task.started_early_awaiting %}Started out of sequence — awaiting the PM's reason{% else %}Started out of sequence — reason recorded{% endif %}">Started early{% if task.started_early_awaiting %} · awaiting reason{% endif %}</a>
+      </div>
+      {% if phase_rule_just_started_pk == task.pk %}
+        <div class="small text-warning-emphasis mt-1 phase-rule-wording" style="font-size:.72rem;white-space:normal;">
+          {% for text in phase_rule_just_started_rules %}{{ text }}{% if not forloop.last %}; {% endif %}{% endfor %}
+        </div>
+      {% endif %}
+    {% endif %}
   </td>
   <td>
     {% if is_assigned_pm %}

@@ -5044,6 +5044,33 @@ guessing pks, which breaks D-4 ("PM: projects they manage"). Fix: add the projec
 (the 0.2 shape — 404 for a site the user cannot see) and decide whether a coordinator
 should be admitted as the PM is.
 
+### G84 — `user_can_manage_project()` ignores whether a coordinator is active; `project_managers()` does not
+
+Recorded 20 Oct 2026 by the phase-rule build (pre-flight Q12; ruled: helper unchanged,
+defect recorded here, no TODO in the new code). A defect in the helper, not in phase rules.
+`permissions.user_can_manage_project()` grants a coordinator authority on
+`project.coordinators.filter(pk=profile.pk).exists()` — no `is_active` term on the profile
+or the user. `permissions.project_managers()`, the notification audience, takes
+`project.coordinators.filter(is_active=True)` (UserProfile.is_active only). The two
+encodings of "the site's PM side" therefore disagree in both directions:
+
+- A coordinator whose `UserProfile.is_active` is False while `User.is_active` is True can
+  still sign in and passes every `user_can_manage_project()` gate — status changes as PM,
+  the phase-rule reason (inline and from the Started early card), punch-point waivers —
+  but receives none of the notices `project_managers()` sends.
+- `admin_user_management`'s deactivate action sets `User.is_active = False` only and leaves
+  `UserProfile.is_active` True, so a coordinator deactivated there cannot sign in (Django
+  refuses the login) yet is still a `project_managers()` recipient: in-app notices,
+  including the phase-rule "awaiting reason" notice, keep landing in an inbox nobody reads.
+  `user_edit` writes both flags together and does not cause either case.
+- The assigned PM has no active check in either helper.
+
+Fix: one definition of an active manager, used by both helpers (the pair
+`managed_project_ids_by_profile()` already uses: `UserProfile.is_active` AND
+`User.is_active`), and make the deactivate action write both flags — decide whether an
+inactive assigned PM should keep authority until reassigned (PM-1 makes reassignment the
+answer there).
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

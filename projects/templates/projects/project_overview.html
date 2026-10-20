@@ -898,6 +898,12 @@ label (get_status_display) — never a two-state branch.
 </div>
 {% endif %}
 
+{% comment %}Phase rules (OPEX v1) — the Started early card, after the QA/QC visits card
+   (ruling Q11). Drawn only when the site has an override; see the partial.{% endcomment %}
+{% if show_started_early_card %}
+  {% include 'projects/partials/_started_early_card.html' %}
+{% endif %}
+
 {# ── 5. Project Documents ─────────────────────────────────────────────────── #}
 <div class="card shadow-sm mb-4">
   <div class="card-header d-flex justify-content-between align-items-center">
@@ -1265,6 +1271,35 @@ label (get_status_display) — never a two-state branch.
 </div>
 {% endif %}
 
+{% comment %}Phase rules (OPEX v1) — the start dialog for the site's PM side. Opened by
+   handleTaskStatusChange() when a row carries data-phase-rules, which
+   views._attach_phase_rule_flags() sets only for the site's PM and coordinators on a Not
+   Started row. The reason is OPTIONAL (ruling Q5): Start with it blank still starts the
+   task and leaves the row awaiting a reason on the Started early card. Cancel puts the
+   select back. Nothing here refuses; the server records the start either way.{% endcomment %}
+{% if is_assigned_pm and project.project_type == 'OPEX' %}
+<div class="modal fade" id="phaseRuleStartModal" tabindex="-1" aria-hidden="true" aria-labelledby="phaseRuleStartTitle">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h6 class="modal-title fw-semibold" id="phaseRuleStartTitle">Starting out of sequence</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cancel"></button>
+      </div>
+      <div class="modal-body small">
+        <p class="mb-2"><span class="fw-semibold" id="phaseRuleStartTask"></span> can start now. It is ahead of:</p>
+        <p class="text-warning-emphasis fw-semibold mb-3" id="phaseRuleStartRules"></p>
+        <label class="form-label mb-1" for="phaseRuleStartReason">Reason for starting early <span class="text-muted">(optional — you can add it later from the Started early card)</span></label>
+        <textarea id="phaseRuleStartReason" rows="3" class="form-control form-control-sm"></textarea>
+      </div>
+      <div class="modal-footer py-2 gap-2">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-brand btn-sm flex-grow-1" id="phaseRuleStartBtn">Start</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
 {% if issue_draft %}
 {% comment %}A refused issue (due date out of range) comes back here with what was typed —
 views._stash_issue_draft. Reopen the modal so the user fixes the date, not the text.{% endcomment %}
@@ -1527,6 +1562,8 @@ at the top of this page unmodified, exactly as it does on task_detail.
   var _paymentPendingSelect   = null;
   var bsMilestoneModal        = null;
   var _milestonePendingSelect = null;
+  var bsPhaseRuleModal        = null;
+  var _phaseRulePendingSelect = null;
   var _FINANCE_CONF_TASKS     = ['Advance Payment Confirmation', 'Pre Dispatch Payment Confirmation', '100% Payment Confirmation'];
 
   /* candidates keyed by Task.ROLE_CHOICES value — loaded in DOMContentLoaded */
@@ -1585,6 +1622,18 @@ at the top of this page unmodified, exactly as it does on task_detail.
         }
         return;
       }
+    }
+
+    /* 2.2 Phase rules (OPEX v1) — the site's PM side may give a reason at the start.
+       data-phase-rules is only ever drawn for them; an SE's select has none and goes
+       straight through, seeing the rules in the redrawn row afterwards. */
+    if (newStatus === 'In Progress' && select.dataset.phaseRules && bsPhaseRuleModal) {
+      _phaseRulePendingSelect = select;
+      document.getElementById('phaseRuleStartTask').textContent = select.dataset.taskName || 'This task';
+      document.getElementById('phaseRuleStartRules').textContent = select.dataset.phaseRules;
+      document.getElementById('phaseRuleStartReason').value = '';
+      bsPhaseRuleModal.show();
+      return;
     }
 
     /* 2.5 Finance confirmation tasks — capture payment info before marking Done */
@@ -1862,6 +1911,39 @@ at the top of this page unmodified, exactly as it does on task_detail.
         });
       });
       paymentCaptureEl.addEventListener('hidden.bs.modal', function () { _paymentPendingSelect = null; });
+    }
+
+    /* Phase-rule start dialog (OPEX v1). The select and reason are captured BEFORE
+       .hide(): hide.bs.modal fires synchronously and the hidden handler below clears
+       the pending select. Closing any other way puts the select back. */
+    var phaseRuleEl = document.getElementById('phaseRuleStartModal');
+    if (phaseRuleEl) {
+      bsPhaseRuleModal = bootstrap.Modal.getOrCreateInstance(phaseRuleEl);
+      var _phaseRuleConfirmed = false;
+      document.getElementById('phaseRuleStartBtn').addEventListener('click', function () {
+        var sel    = _phaseRulePendingSelect;
+        var reason = document.getElementById('phaseRuleStartReason').value;
+        _phaseRuleConfirmed = true;
+        bsPhaseRuleModal.hide();
+        if (!sel) return;
+        var form  = sel.form;
+        var input = form.querySelector('input[name="phase_rule_reason"]');
+        if (!input) {
+          input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'phase_rule_reason';
+          form.appendChild(input);
+        }
+        input.value = reason;
+        form.requestSubmit();
+      });
+      phaseRuleEl.addEventListener('hidden.bs.modal', function () {
+        if (!_phaseRuleConfirmed && _phaseRulePendingSelect) {
+          _phaseRulePendingSelect.value = _phaseRulePendingSelect.dataset.originalStatus || 'Not Started';
+        }
+        _phaseRuleConfirmed = false;
+        _phaseRulePendingSelect = null;
+      });
     }
 
     /* Milestone amount gate modal (BD Phase 1 Task 1) */

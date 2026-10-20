@@ -37,6 +37,19 @@ permission check, and deleting this branch would change no refusal.
         <option value="{{ val }}" {% if task.status == val %}selected{% endif %}>{{ label }}</option>
       {% endfor %}
     </select>
+    {% comment %}PHASE RULES, the start-side half (OPEX v1). phase_rule_preview is filled
+       only for the site's PM side on a Not Started task (views._phase_rule_task_context),
+       because only they may give the reason at the start; an SE sees the rules after
+       starting, below, and is never asked. The reason is OPTIONAL (ruling Q5): blank
+       starts the task and leaves the row awaiting a reason. Nothing here refuses.{% endcomment %}
+    {% if phase_rule_preview %}
+      <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">
+        Starting this now is out of sequence:
+        {% for text in phase_rule_preview %}{{ text }}{% if not forloop.last %}; {% endif %}{% endfor %}.
+        <label class="form-label mt-2 mb-1 d-block" for="phaseRuleReason{{ task.pk }}">Reason for starting early (optional — you can add it later from the site page)</label>
+        <textarea name="phase_rule_reason" id="phaseRuleReason{{ task.pk }}" rows="2" class="form-control form-control-sm"></textarea>
+      </div>
+    {% endif %}
   </form>
 {% else %}
   {% comment %}N/A first — the chain below ends in a bare else that prints "Not Started",
@@ -61,4 +74,31 @@ permission check, and deleting this branch would change no refusal.
       <i data-lucide="link" style="width:9px;height:9px;vertical-align:-1px;"></i> Derived
     </span>
   {% endif %}
+{% endif %}
+{% comment %}PHASE-RULE OVERRIDES ON THIS TASK (OPEX v1), for every viewer of the task page:
+   each rule the start bypassed, with the PM side's reason or "Awaiting PM reason". The
+   wording of a start this request just recorded is printed first, where the person who
+   tapped the control is looking (ruling Q9). Inside this partial so the HTMX swap of the
+   status block keeps it current.{% endcomment %}
+{% if task_phase_rule_overrides %}
+  <div class="mt-2 small" id="taskStartedEarly">
+    <span class="badge rounded-pill bg-warning-subtle text-warning-emphasis border border-warning-subtle" style="font-size:.68rem;font-weight:500;">Started early</span>
+    {% if phase_rule_just_started %}
+      <span class="text-warning-emphasis phase-rule-wording">{% for text in phase_rule_just_started %}{{ text }}{% if not forloop.last %}; {% endif %}{% endfor %}</span>
+    {% endif %}
+    <ul class="list-unstyled mb-0 mt-1">
+      {% for o in task_phase_rule_overrides %}
+        <li class="mb-1">
+          <span class="fw-semibold">{{ o.rule_text }}</span>
+          <span class="text-muted">— started by {{ o.started_by.user.get_full_name|default:o.started_by.user.username }}, {{ o.started_at|date:"d M Y, H:i" }}.</span>
+          {% if o.explained_at %}
+            <div>Reason: <span style="white-space:pre-line;">{{ o.reason }}</span>
+              <span class="text-muted">({{ o.explained_by.user.get_full_name|default:o.explained_by.user.username }}, {{ o.explained_at|date:"d M Y" }})</span></div>
+          {% else %}
+            <div><em class="text-warning-emphasis">Awaiting PM reason</em></div>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
 {% endif %}

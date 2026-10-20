@@ -225,6 +225,8 @@ urlpatterns = [
     # coordinator (Open or Rectified). The id is a PunchPoint pk, scoped to the project
     # in the URL by the view.
     path('projects/<str:project_id>/punch-points/<int:punch_point_id>/waive/', views.punch_point_waive, name='punch_point_waive'), # PM only, NOT is_qaqc
+    # Phase-rule override reason (OPEX v1) — the site's PM and coordinators only, POST only
+    path('projects/<str:project_id>/started-early/<int:override_id>/explain/', views.phase_rule_override_explain, name='phase_rule_override_explain'),
     # Not Applicable — one endpoint for BOTH directions; the form posts
     # not_applicable=1 to mark and anything else to un-mark, and a reason is
     # required either way. Assigned PM only; the status is never touched.

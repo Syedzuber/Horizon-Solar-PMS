@@ -1776,6 +1776,28 @@ DC_CATEGORY_TO_MIRROR_CODE = {
 }
 
 
+def first_component_received(project):
+    """True once any material in the DC_CATEGORY_TO_MIRROR_CODE categories has
+    physically reached `project` — phase rule R3 (phase_rules.py) asks this before an
+    installation task starts.
+
+    ANY CHALLAN STATUS, REJECTED INCLUDED (ruling Q2, 20 Oct 2026). `Rejected` is
+    repurposed by recalculate_dc_status() to mean "shortfall AND damage", so a challan
+    that delivered 10 of 40 modules with one damaged reads Rejected while ten modules
+    sit on site. The question here is whether anything arrived, not whether the
+    consignment was acceptable. Damaged units count for the same reason:
+    `damaged_quantity` is a part of `received_quantity`, never in addition to it.
+
+    One DC = one consignment, so a single line with received_quantity > 0 is enough.
+    Lives here, beside the map, so a category added to the map widens this too.
+    """
+    return DCLineItem.objects.filter(
+        challan__project=project,
+        boq_category__in=list(DC_CATEGORY_TO_MIRROR_CODE),
+        received_quantity__gt=0,
+    ).exists()
+
+
 def _dc_item_severity(received_qty, ordered_qty, damaged_qty):
     """
     Compute per-line-item severity for the DC status rollup.
@@ -7454,3 +7476,101 @@ class ContractorBillTask(models.Model):
 
     def __str__(self):
         return f"{self.detail} — {self.task}"
+
+
+class PhaseRuleOverride(models.Model):
+    """One phase rule bypassed by one out-of-sequence start (phase_rules.py, OPEX
+    template v1 only). The start itself always proceeds — B-08: nothing here refuses.
+
+    THE ROW EXISTS SO THE START IS EXPLAINED. It is written in the same transaction as
+    the start (a task leaving Not Started, or a delivery challan being created for R1),
+    with the reason EMPTY: the person who started the work is not asked for one. The
+    site's PM side (user_can_manage_project) writes the reason later, from the project
+    overview, or inline at the start when they are the one starting it. This is the
+    20 Oct 2026 amendment of B-08 for phase rules (docs/execution-model.md §12).
+
+    WRITTEN ONLY BY phase_rules.record_phase_rule_overrides(); EXPLAINED ONLY BY
+    phase_rules.explain_phase_rule_override(), which writes reason, explained_by and
+    explained_at together, once, by a conditional update. save() refuses to touch an
+    existing row and delete() refuses always, so after that one update the row is
+    append-only.
+    """
+
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name='phase_rule_overrides',
+    )
+    # Exactly one of task / delivery_challan is set (CHECK below): R1 is about the
+    # challan's creation, every other rule about a task's start.
+    task = models.ForeignKey(
+        'Task', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='phase_rule_overrides',
+    )
+    delivery_challan = models.ForeignKey(
+        DeliveryChallan, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='phase_rule_overrides',
+    )
+    rule_code = models.CharField(max_length=2)   # R1..R6, phase_rules.RULES
+    rule_set = models.CharField(max_length=40)   # the template rules were read from, e.g. 'OPEX v1'
+    rule_text = models.CharField(max_length=200)  # the wording shown at the start, kept as shown
+    started_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='phase_rule_overrides_started',
+    )
+    started_at = models.DateTimeField(default=timezone.now)
+    # The three explanation columns are one fact: all NULL (awaiting the PM's reason)
+    # or all set. NULL rather than '' so "not yet explained" is not a blank string.
+    reason = models.TextField(null=True, blank=True)
+    explained_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='phase_rule_overrides_explained',
+    )
+    explained_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-started_at', '-pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(rule_code__in=['R1', 'R2', 'R3', 'R4', 'R5', 'R6']),
+                name='phaseruleoverride_rule_code_valid'),
+            # R1 hangs off the challan; every other rule off a task. Never both.
+            models.CheckConstraint(
+                condition=(models.Q(rule_code='R1', task__isnull=True,
+                                    delivery_challan__isnull=False)
+                           | (~models.Q(rule_code='R1') & models.Q(
+                               task__isnull=False, delivery_challan__isnull=True))),
+                name='phaseruleoverride_one_subject'),
+            # Explained all at once or not at all, and never with a blank reason.
+            models.CheckConstraint(
+                condition=(models.Q(reason__isnull=True, explained_by__isnull=True,
+                                    explained_at__isnull=True)
+                           | (models.Q(reason__isnull=False, explained_by__isnull=False,
+                                       explained_at__isnull=False)
+                              & ~models.Q(reason=''))),
+                name='phaseruleoverride_explanation_together'),
+            # A task leaves Not Started once, and a challan is created once, so each
+            # rule is bypassed at most once per subject.
+            models.UniqueConstraint(
+                fields=['task', 'rule_code'], condition=models.Q(task__isnull=False),
+                name='uniq_phaseruleoverride_task_rule'),
+            models.UniqueConstraint(
+                fields=['delivery_challan', 'rule_code'],
+                condition=models.Q(delivery_challan__isnull=False),
+                name='uniq_phaseruleoverride_challan_rule'),
+        ]
+
+    def __str__(self):
+        return f"{self.rule_code} — {self.rule_text} ({self.project_id})"
+
+    @property
+    def is_awaiting_reason(self):
+        return self.explained_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'PhaseRuleOverride is append-only — the reason is written once, by '
+                'phase_rules.explain_phase_rule_override().')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'PhaseRuleOverride is append-only — an out-of-sequence start stays recorded.')

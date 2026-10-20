@@ -1,0 +1,7 @@
+{% comment %}
+HTMX response for phase_rule_override_explain: the Started early card redrawn in place
+of #started-early, and the flash out of band. The card is always present here — the
+row just explained is still an override, so show_started_early_card is True.
+{% endcomment %}
+{% include 'projects/partials/_started_early_card.html' %}
+{% include 'projects/partials/_hx_messages.html' %}
