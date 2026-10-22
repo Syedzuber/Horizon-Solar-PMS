@@ -3,6 +3,7 @@ import re
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -32,8 +33,10 @@ ASSIGN_COOLDOWN_MAX_MESSAGES = 2
 ASSIGN_CIRCUIT_BREAKER_ROWS = 20
 
 # Fallback origin for absolute links when no request is available (management
-# commands, shell). Mirrors the hardcoded host already used in the email bodies.
-SITE_BASE_URL = 'https://horizon-solar-pms-production.up.railway.app'
+# commands, shell). settings.APP_BASE_URL since T1, whose default is the host this
+# constant used to spell out, so the value is unchanged. Read once at import, as the
+# literal was: override_settings in a test does not reach it.
+SITE_BASE_URL = settings.APP_BASE_URL
 
 
 def _abs_url(path, request):

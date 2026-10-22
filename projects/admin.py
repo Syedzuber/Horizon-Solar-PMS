@@ -16,6 +16,7 @@ from .models import (
     SiteQaqcAssignment,
     CodRecord,
     QaqcVisit, QaqcVisitAnswer,
+    NotificationTemplate, NotificationEventSetting, NotificationEventSettingChange,
 )
 from .forms import check_typed_date
 from .permissions import qaqc_engineer_assignment_refusal
@@ -964,3 +965,28 @@ class QaqcVisitAnswerAdmin(_ApprovalRecordAdmin):
                      'punch_point']
     list_filter   = ['answer']
     search_fields = ['visit__project__project_id', 'item_text_snapshot']
+
+
+# T1 — notification templates and switches. Read-only: notify_admin.py is the only
+# writer of all three (the T2 screens call it), so an admin edit here would skip the
+# draft-only rule, the validation before activation and the history row a switch needs.
+@admin.register(NotificationTemplate)
+class NotificationTemplateAdmin(_ApprovalRecordAdmin):
+    list_display  = ['event_code', 'channel', 'version_no', 'status', 'created_by',
+                     'created_at']
+    list_filter   = ['channel', 'status']
+    search_fields = ['event_code', 'subject', 'change_note']
+
+
+@admin.register(NotificationEventSetting)
+class NotificationEventSettingAdmin(_ApprovalRecordAdmin):
+    list_display  = ['event_code', 'channel', 'is_active', 'changed_by', 'changed_at']
+    list_filter   = ['channel', 'is_active']
+
+
+@admin.register(NotificationEventSettingChange)
+class NotificationEventSettingChangeAdmin(_ApprovalRecordAdmin):
+    list_display  = ['event_code', 'channel', 'from_state', 'to_state', 'changed_by',
+                     'changed_at']
+    list_filter   = ['channel', 'to_state']
+    search_fields = ['event_code', 'reason']

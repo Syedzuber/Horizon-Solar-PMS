@@ -2256,6 +2256,14 @@ class NotificationLog(models.Model):
     )
     interakt_message_id  = models.CharField(max_length=100, blank=True, default='')
     created_at           = models.DateTimeField(auto_now_add=True)
+    # T1 (notification templates). Both are written only for sends made through
+    # notify.notify(); every other send leaves them at '' and NULL. template_name keeps
+    # its old meaning (Interakt template name or a free label) and is not touched.
+    event_code           = models.CharField(max_length=100, blank=True, default='')  # notify_registry event code; '' for sends made outside notify()
+    template_version     = models.ForeignKey(
+        'NotificationTemplate', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='notification_logs',
+    )  # The ACTIVE version the email was rendered from; NULL = the code default or not an email
 
     class Meta:
         ordering = ['-created_at']
@@ -7574,3 +7582,227 @@ class PhaseRuleOverride(models.Model):
     def delete(self, *args, **kwargs):
         raise AppendOnlyViolation(
             'PhaseRuleOverride is append-only — an out-of-sequence start stays recorded.')
+
+
+# ---------------------------------------------------------------------------
+# Notification templates (T1, spec v0.1, rulings T-1 to T-22)
+#
+# The events themselves are code (notify_registry.NOTIFICATION_EVENTS); these rows
+# hold what Admin may change about them: the wording of an email, and whether an
+# event's channel is switched on. notify.notify() reads both; notify_admin.py is
+# their only writer.
+# ---------------------------------------------------------------------------
+
+NOTIFY_CHANNEL_EMAIL    = 'email'
+NOTIFY_CHANNEL_WHATSAPP = 'whatsapp'
+NOTIFY_CHANNEL_CHOICES = [
+    (NOTIFY_CHANNEL_EMAIL,    'Email'),
+    (NOTIFY_CHANNEL_WHATSAPP, 'WhatsApp'),
+]
+
+NOTIFY_STATE_ACTIVE = 'active'
+NOTIFY_STATE_PAUSED = 'paused'
+NOTIFY_STATE_CHOICES = [
+    (NOTIFY_STATE_ACTIVE, 'Active'),
+    (NOTIFY_STATE_PAUSED, 'Paused'),
+]
+
+
+class NotificationTemplate(models.Model):
+    """One numbered version of the wording of one event on one channel.
+
+    R-7, THE THIRD VERSIONED TEMPLATE FAMILY after TaskTemplate and Checklist, and built
+    the same way: content is editable only while the version is a draft, activate()
+    archives the previous active version in the same transaction, and an archived
+    version is never rewritten. A NotificationLog row points at the version it was
+    rendered from (PROTECT), so "what did that email say" stays answerable.
+
+    THE CONTENT LIVES ON THIS ROW, not on child rows as it does for the other two
+    families, so the guard is in save(): it loads the stored row and asks the shared
+    _require_draft_template() only when a content field changed. A status-only save —
+    activate(), and the archive inside it — passes.
+
+    No row for an event and channel means notify() renders the registry's code default.
+
+    ENFORCEMENT LIMIT, as for the other two families: QuerySet.update() bypasses save().
+    activate()'s archive update writes `status` only.
+    """
+
+    DRAFT    = 'draft'
+    ACTIVE   = 'active'
+    ARCHIVED = 'archived'
+    STATUS_CHOICES = [
+        (DRAFT,    'Draft'),
+        (ACTIVE,   'Active'),
+        (ARCHIVED, 'Archived'),
+    ]
+
+    WA_PENDING   = 'pending'
+    WA_SUBMITTED = 'submitted'
+    WA_APPROVED  = 'approved'
+    WA_REJECTED  = 'rejected'
+    WA_APPROVAL_CHOICES = [
+        (WA_PENDING,   'Pending'),
+        (WA_SUBMITTED, 'Submitted'),
+        (WA_APPROVED,  'Approved'),
+        (WA_REJECTED,  'Rejected'),
+    ]
+
+    # What save() treats as content: every field a rendered message, or the record of
+    # which message this is, is read from. `status` and the WhatsApp approval state are
+    # deliberately absent — they are where the version stands, not what it says.
+    CONTENT_FIELDS = ('event_code', 'channel', 'version_no', 'subject', 'body',
+                      'button_label', 'wa_template_name', 'wa_language', 'wa_slots',
+                      'change_note')
+
+    event_code   = models.CharField(max_length=100)  # notify_registry event code; not an FK because events are code
+    channel      = models.CharField(max_length=10, choices=NOTIFY_CHANNEL_CHOICES)
+    version_no   = models.PositiveIntegerField()
+    status       = models.CharField(max_length=10, choices=STATUS_CHOICES, default=DRAFT)
+    subject      = models.CharField(max_length=255, blank=True)
+    body         = models.TextField(blank=True)
+    button_label = models.CharField(max_length=60, blank=True)  # Text of the one button the layout draws when the send has a link
+
+    # WhatsApp only (reserved: no event declares the channel yet).
+    wa_template_name   = models.CharField(max_length=100, blank=True)  # Interakt/Meta template name the version is registered under
+    wa_language        = models.CharField(max_length=10, blank=True)   # Meta language code, e.g. 'en'
+    wa_approval_status = models.CharField(max_length=10, choices=WA_APPROVAL_CHOICES, blank=True)
+    wa_slots           = models.JSONField(default=list, blank=True)  # Ordered variable names, header slot first, as Interakt counts them
+
+    created_by  = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='notification_templates_created',
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    change_note = models.TextField()  # Why this version exists; required (CHECK below)
+
+    class Meta:
+        ordering = ['event_code', 'channel', '-version_no']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['event_code', 'channel', 'version_no'],
+                name='uniq_notification_template_version',
+            ),
+            # At most ONE active version per event and channel; any number of draft and
+            # archived versions beside it. Same shape as uniq_active_checklist_per_code.
+            models.UniqueConstraint(
+                fields=['event_code', 'channel'],
+                condition=models.Q(status='active'),   # literal: a nested Meta cannot see ACTIVE
+                name='uniq_active_notification_template',
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(change_note=''),
+                name='notification_template_change_note_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.event_code}/{self.channel} v{self.version_no} ({self.status})"
+
+    @property
+    def is_editable(self):
+        """Content may be changed only while the version is a draft (R-7)."""
+        return self.status == self.DRAFT
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            stored = NotificationTemplate.objects.filter(pk=self.pk).first()
+            if stored is not None and any(
+                    getattr(stored, f) != getattr(self, f) for f in self.CONTENT_FIELDS):
+                # The STORED status decides, not the in-memory one: setting status back
+                # to draft on an archived object must not unlock its content.
+                _require_draft_template(stored, 'notification template content')
+        return super().save(*args, **kwargs)
+
+    def activate(self):
+        """Make this draft the active version, archiving the current active one.
+
+        Both writes happen in ONE transaction, so there is no instant at which an event
+        and channel have two active versions or none. The same body as
+        Checklist.activate() by intent. notify_admin.activate() validates first; this
+        method does not, so it is not to be called directly by a screen.
+        """
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be activated; {self} is '{self.status}'."
+            )
+        with transaction.atomic():
+            # filter().update() rather than load-and-save: the archive and the
+            # activation must not interleave with a concurrent activate() of a third
+            # version, and the partial unique constraint is what adjudicates a race.
+            NotificationTemplate.objects.filter(
+                event_code=self.event_code, channel=self.channel, status=self.ACTIVE,
+            ).exclude(pk=self.pk).update(status=self.ARCHIVED)
+
+            self.status = self.ACTIVE
+            self.save(update_fields=['status'])
+        return self
+
+
+class NotificationEventSetting(models.Model):
+    """Whether one event's channel is switched on: the current state only.
+
+    No row means the registry's default_state for the event. Written only by
+    notify_admin.set_state(), which writes a NotificationEventSettingChange beside it
+    in the same transaction; the history is that table, not this one.
+    """
+
+    event_code = models.CharField(max_length=100)  # notify_registry event code
+    channel    = models.CharField(max_length=10, choices=NOTIFY_CHANNEL_CHOICES)
+    is_active  = models.BooleanField()
+    changed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='notification_settings_changed',
+    )
+    changed_at = models.DateTimeField(auto_now=True)
+    reason     = models.TextField()  # The reason given for the latest change; the full trail is in NotificationEventSettingChange
+
+    class Meta:
+        ordering = ['event_code', 'channel']
+        constraints = [
+            models.UniqueConstraint(fields=['event_code', 'channel'],
+                                    name='uniq_notification_event_setting'),
+        ]
+
+    def __str__(self):
+        state = NOTIFY_STATE_ACTIVE if self.is_active else NOTIFY_STATE_PAUSED
+        return f"{self.event_code}/{self.channel}: {state}"
+
+
+class NotificationEventSettingChange(models.Model):
+    """One switch of an event's channel on or off, with its reason. APPEND-ONLY.
+
+    save() on an existing row and delete() both raise, as ApprovalRoundSnapshot's do.
+    Written only by notify_admin.set_state().
+    """
+
+    event_code = models.CharField(max_length=100)  # notify_registry event code
+    channel    = models.CharField(max_length=10, choices=NOTIFY_CHANNEL_CHOICES)
+    from_state = models.CharField(max_length=10, choices=NOTIFY_STATE_CHOICES)  # Effective state before: the setting row, or the registry default when there was none
+    to_state   = models.CharField(max_length=10, choices=NOTIFY_STATE_CHOICES)
+    changed_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='notification_setting_changes',
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+    reason     = models.TextField()
+
+    class Meta:
+        ordering = ['-changed_at', '-pk']
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(reason=''),
+                name='notification_setting_change_reason_required',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.event_code}/{self.channel}: {self.from_state} -> {self.to_state}"
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'NotificationEventSettingChange is append-only — a switch made stays '
+                'recorded; a correction is another change.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'NotificationEventSettingChange is append-only — rows are never deleted.')

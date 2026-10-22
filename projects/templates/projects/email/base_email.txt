@@ -1,0 +1,8 @@
+{% autoescape off %}{% comment %}
+  Plain-text part of base_email.html (T1). Autoescape is OFF: this is not HTML, and an
+  escaped "&amp;" would reach the reader as those five characters. Every value here is
+  plain text from notify.render_email(): body_text has had its **bold** markers removed.
+{% endcomment %}{{ body_text }}{% if link %}
+
+{{ button_label }}: {{ link }}{% endif %}
+{% endautoescape %}

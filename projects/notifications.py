@@ -32,6 +32,8 @@ def send_notification(
     related_project=None,
     actor=None,
     html_message=None,
+    event_code=None,
+    template_version=None,
 ):
     """
     Send a notification to recipient on one or more channels.
@@ -51,6 +53,10 @@ def send_notification(
                           Header and body variables are counted separately.
         related_project : Project FK stored on the log row.
         actor           : UserProfile who triggered the send (stored on log row).
+        event_code      : notify_registry event code, stored on every log row. Passed
+                          only by notify.notify(); None for every other caller.
+        template_version: NotificationTemplate the email was rendered from, stored on
+                          every log row. Passed only by notify.notify().
     """
     from .models import Notification, NotificationLog, SystemSettings
 
@@ -73,6 +79,12 @@ def send_notification(
         message=message,
         template_name=template or '',
     )
+    # Added to the row only when given, so a caller that passes neither creates its log
+    # rows with exactly the keyword arguments it always did (T1).
+    if event_code is not None:
+        _base['event_code'] = event_code
+    if template_version is not None:
+        _base['template_version'] = template_version
 
     for channel in channels:
         if channel == 'in_app':
@@ -323,8 +335,17 @@ def send_aggregate_email(to_email, subject, text_body, html_body=None,
     _record('sent' if ok else 'failed', '' if ok else detail)
 
 
-def _log(base, channel, status, error_detail='', interakt_message_id=''):
+def _log(base, channel, status, error_detail='', interakt_message_id='',
+         event_code=None, template_version=None):
     from .models import NotificationLog
+    # event_code / template_version are for the rows notify.notify() writes itself
+    # (a paused event, a failed render), whose base it builds without them. Rows from
+    # send_notification() carry them in `base` instead; no caller passes both.
+    extra = {}
+    if event_code is not None:
+        extra['event_code'] = event_code
+    if template_version is not None:
+        extra['template_version'] = template_version
     try:
         NotificationLog.objects.create(
             **base,
@@ -332,6 +353,7 @@ def _log(base, channel, status, error_detail='', interakt_message_id=''):
             status=status,
             error_detail=error_detail,
             interakt_message_id=interakt_message_id,
+            **extra,
         )
     except Exception as e:
         logger.error('_log: NotificationLog.create failed — %s', e)

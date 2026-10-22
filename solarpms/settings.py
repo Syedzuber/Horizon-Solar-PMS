@@ -153,6 +153,13 @@ INTERAKT_API_KEY = config('INTERAKT_API_KEY', default='')
 ZEPTOMAIL_API_KEY    = config('ZEPTOMAIL_API_KEY', default='')
 ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonrenewablepower.com')
 
+# Origin of every absolute link in a message (T1; closes DEFERRED G2). Read by
+# notify.absolute_url(), utils.SITE_BASE_URL, and the getattr() in send_eod_digest and
+# send_morning_task_report. The default is the host those links have always used. Before
+# setting it to another domain, that domain must be in ALLOWED_HOSTS and
+# CSRF_TRUSTED_ORIGINS, or its links answer 400 and its forms fail the CSRF check.
+APP_BASE_URL = config('APP_BASE_URL', default='https://horizon-solar-pms-production.up.railway.app')
+
 # EOD aggregate (company-wide) digest recipients — fixed addresses, not UserProfiles.
 # Mirrors the Santosh-for-Finance hardcoding pattern. Zuber MUST replace both
 # placeholders (env vars ADMIN_DIGEST_EMAIL / HR_DIGEST_EMAIL, or edit here) with real

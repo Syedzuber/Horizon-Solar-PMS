@@ -3022,3 +3022,54 @@ def user_can_link_approval_order(user, request):
     if not user_can_raise_approval_request(user):
         return False
     return request.kind == 'material_pre_order' and request.status == 'approved'
+
+
+# ---------------------------------------------------------------------------
+# T1 — notification recipients. Who a role-addressed notification goes to: the people
+# who hold the role or flag today and can still log in. Both active checks, because
+# UserProfile.is_active is this app's soft deactivation and User.is_active is Django's;
+# either one off means the person no longer works here. notify() drops inactive people
+# again, so a call site that builds its list another way is still safe. No existing
+# send uses these yet; call sites move onto them one at a time in later sessions.
+# ---------------------------------------------------------------------------
+
+
+def _active_profiles():
+    """UserProfiles whose profile and login are both active."""
+    # Imported at call time, not at the top: this module keeps its single `Q` import so
+    # it never imports models (see the note at the top), which is what keeps it free of
+    # circular imports. Same precedent as managed_project_ids_by_profile().
+    from .models import UserProfile
+    return UserProfile.objects.filter(is_active=True, user__is_active=True)
+
+
+def active_design_heads():
+    """Active holders of the Design Head flag, whatever their role (a flag, not a role:
+    see UserProfile.is_design_head)."""
+    return _active_profiles().filter(is_design_head=True)
+
+
+def active_design_qc():
+    """Active holders of the Design QC flag, whatever their role."""
+    return _active_profiles().filter(is_design_qc=True)
+
+
+def active_scm_users():
+    """Active users with the SCM role."""
+    return _active_profiles().filter(role='SCM')
+
+
+def active_finance_users():
+    """Active users with the Finance role."""
+    return _active_profiles().filter(role='Finance')
+
+
+def active_ceos():
+    """Active users with the CEO role."""
+    return _active_profiles().filter(role='CEO')
+
+
+def active_admins():
+    """Active users with the Admin role. System Admin is deliberately left out (ruling
+    T-1, confirmed at the T1 go-ahead)."""
+    return _active_profiles().filter(role='Admin')

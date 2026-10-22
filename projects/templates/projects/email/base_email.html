@@ -1,0 +1,47 @@
+{% autoescape on %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ subject }}</title>
+</head>
+{% comment %}
+  Shared layout for every email notify.notify() sends (T1). Rendered by
+  notify.render_email(); the four older email templates beside this one are not built on it.
+  Table layout and inline styles only, because email clients strip <style> and ignore
+  flex and grid; 600px wide at most, shrinking on a phone.
+  AUTOESCAPED. `body_html` is the one value marked safe: notify.render_body_html() escapes
+  the Admin-typed wording and every value before it adds its own <p> and <strong> tags.
+  `subject` and `button_label` are escaped here like any other value.
+  The button is drawn only when the send has a link; `link` is absolute, built by
+  notify.absolute_url() from settings.APP_BASE_URL.
+  No reply-to line and no footer yet: T3 adds both together.
+{% endcomment %}
+<body style="margin:0; padding:0; background-color:#f4f6f8;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:24px 12px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px; max-width:600px; background-color:#ffffff; border-radius:10px; overflow:hidden; border:1px solid #e5e9ee;">
+          <tr>
+            <td style="background-color:#1a7a4a; padding:24px 28px;">
+              <div style="font-family:Arial,Helvetica,sans-serif; font-size:20px; font-weight:bold; color:#ffffff;">Horizon Solar</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:24px 28px 8px 28px; font-family:Arial,Helvetica,sans-serif; font-size:15px; line-height:1.5; color:#22303c;">
+              {{ body_html }}
+            </td>
+          </tr>
+          {% if link %}
+          <tr>
+            <td style="padding:8px 28px 28px 28px;">
+              <a href="{{ link }}" style="display:inline-block; background-color:#1a7a4a; color:#ffffff; font-family:Arial,Helvetica,sans-serif; font-size:14px; text-decoration:none; padding:11px 22px; border-radius:6px;">{{ button_label }}</a>
+            </td>
+          </tr>
+          {% endif %}
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>{% endautoescape %}
