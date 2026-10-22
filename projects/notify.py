@@ -104,17 +104,20 @@ def render_body_text(body, values, allowed):
 
 
 def render_body_html(body, values, allowed):
-    """The HTML body: one <p> per paragraph, **text** as <strong>, nothing else.
+    """The HTML body: one <p> per paragraph, a single line break as <br>, **text** as
+    <strong>, nothing else (T2, A8 added the <br>; the text body keeps the break as is).
 
     The ORDER is what makes it safe. The Admin-typed paragraph is escaped first (escape()
-    leaves { } and * alone, so placeholders and bold markers survive it); bold is applied
-    to that, before any value is in it, so a value holding ** cannot become markup; each
-    value is escaped as it is substituted. Every character in the result is therefore
-    either escaped input or a tag written here, which is what justifies mark_safe.
+    leaves { } and * alone, so placeholders and bold markers survive it); bold and line
+    breaks are applied to that, before any value is in it, so a value holding ** or a
+    newline cannot become markup; each value is escaped as it is substituted. Every
+    character in the result is therefore either escaped input or a tag written here,
+    which is what justifies mark_safe.
     """
     out = []
     for paragraph in _paragraphs(body):
         marked = _BOLD_RE.sub(r'<strong>\1</strong>', str(escape(paragraph)))
+        marked = marked.replace('\n', '<br>\n')
         filled = _substitute(marked, values, allowed, lambda v: str(escape(str(v))))
         out.append(f'<p style="{_PARAGRAPH_STYLE}">{filled}</p>')
     return mark_safe(''.join(out))

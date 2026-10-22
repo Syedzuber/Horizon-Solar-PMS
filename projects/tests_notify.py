@@ -110,6 +110,7 @@ class Base(TestCase):
         switches.save()
 
         self.mail = []
+        self.log_mark = 0
 
         def record(to_email, to_name, subject, text_body, html_body=None):
             self.mail.append({'to': to_email, 'subject': subject, 'text': text_body,
@@ -146,23 +147,33 @@ class Base(TestCase):
         return callbacks
 
     def rows(self, **filters):
-        return list(NotificationLog.objects.filter(**filters).order_by('pk'))
+        return list(NotificationLog.objects.filter(pk__gt=self.log_mark, **filters)
+                    .order_by('pk'))
+
+    def go_live(self, template):
+        """Test-send, then activate: T2 (A6) refuses activation without a test. The
+        test's email and log row are then set aside, so a test reads only what follows."""
+        A.send_test(EVENT, 'email', self.admin, template=template)
+        A.activate(template, self.admin)
+        self.mail.clear()
+        self.log_mark = (NotificationLog.objects.order_by('-pk')
+                         .values_list('pk', flat=True).first() or 0)
 
 
 class VersioningTests(Base):
 
     def test_activate_archives_the_previous_active_version(self):
         v1 = self.draft()
-        A.activate(v1, self.admin)
+        self.go_live(v1)
         v2 = self.draft(subject='Second')
-        A.activate(v2, self.admin)
+        self.go_live(v2)
         v1.refresh_from_db()
         self.assertEqual((v1.status, v2.status), ('archived', 'active'))
         self.assertEqual(NotificationTemplate.objects.filter(
             event_code=EVENT, channel='email', status='active').count(), 1)
 
     def test_the_database_allows_one_active_version_per_event_and_channel(self):
-        A.activate(self.draft(), self.admin)
+        self.go_live(self.draft())
         with self.assertRaises(IntegrityError), transaction.atomic():
             NotificationTemplate.objects.create(
                 event_code=EVENT, channel='email', version_no=9, status='active',
@@ -170,7 +181,7 @@ class VersioningTests(Base):
 
     def test_a_non_draft_cannot_be_edited(self):
         template = self.draft()
-        A.activate(template, self.admin)
+        self.go_live(template)
         template.subject = 'Changed live'
         with self.assertRaises(TemplateVersionLocked):
             template.save()
@@ -180,7 +191,7 @@ class VersioningTests(Base):
 
     def test_setting_status_back_to_draft_does_not_unlock_content(self):
         template = self.draft()
-        A.activate(template, self.admin)
+        self.go_live(template)
         template.status = 'draft'
         template.body = 'Rewritten'
         with self.assertRaises(TemplateVersionLocked):
@@ -188,7 +199,7 @@ class VersioningTests(Base):
 
     def test_a_status_only_save_passes(self):
         template = self.draft()
-        A.activate(template, self.admin)
+        self.go_live(template)
         template.status = 'archived'
         template.save()
         template.refresh_from_db()
@@ -196,8 +207,8 @@ class VersioningTests(Base):
 
     def test_rollback_is_a_new_draft_equal_to_the_old_version(self):
         v1 = self.draft(subject='First {{ sender_name }}', body='Old body')
-        A.activate(v1, self.admin)
-        A.activate(self.draft(subject='Second', body='New body'), self.admin)
+        self.go_live(v1)
+        self.go_live(self.draft(subject='Second', body='New body'))
         v1.refresh_from_db()
         v3 = A.create_draft(EVENT, 'email', self.admin, from_version=v1)
         self.assertEqual((v3.version_no, v3.status), (3, 'draft'))
@@ -351,7 +362,7 @@ class NotifyTests(Base):
 
     def test_the_active_template_is_used_and_recorded(self):
         template = self.draft(subject='Custom for {{ recipient_name }}')
-        A.activate(template, self.admin)
+        self.go_live(template)
         self.send([self.alice])
         self.assertEqual(self.mail[0]['subject'], 'Custom for Nt_Alice')
         email = self.rows(channel='email')[0]
@@ -448,6 +459,7 @@ class SwitchTests(Base):
 
     def test_each_switch_writes_one_history_row(self):
         A.set_state(EVENT, 'email', False, self.admin, 'Pause it')
+        A.send_test(EVENT, 'email', self.admin)   # T2 (A7): switching on needs a test
         A.set_state(EVENT, 'email', True, self.admin, 'Back on')
         setting = NotificationEventSetting.objects.get()
         self.assertEqual((setting.is_active, setting.reason), (True, 'Back on'))

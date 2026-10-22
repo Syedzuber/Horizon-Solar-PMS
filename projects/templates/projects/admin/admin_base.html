@@ -110,6 +110,12 @@
           Notification prefs
         </a>
 
+        <a href="{% url 'admin_notification_events' %}"
+           class="nav-item {% block nav_notif_templates %}{% endblock %}">
+          <i data-lucide="mail" class="w-4 h-4 shrink-0"></i>
+          Notification templates
+        </a>
+
         <a href="/portal-admin/task-durations/"
            class="nav-item {% block nav_task_durations %}{% endblock %}">
           <i data-lucide="clock" class="w-4 h-4 shrink-0"></i>

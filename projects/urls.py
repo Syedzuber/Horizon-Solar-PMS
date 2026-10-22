@@ -9,6 +9,7 @@ from . import purchases_views  # O8a purchases & payments workspace — separate
 from . import approval_views  # Approvals S2a material approval screens — separate module, same pattern
 from . import qaqc_views     # Closeout step 3 site QA/QC engineer screen — separate module, same pattern
 from . import cod_views      # Closeout step 4 COD record screens — separate module, same pattern
+from . import notify_views   # T2 notification template Admin screens — separate module, same pattern
 
 urlpatterns = [
     # ---------------------------------------------------------------------------
@@ -491,6 +492,34 @@ urlpatterns = [
     path('portal-admin/boq-items/add/',                    views.admin_boq_item_create, name='admin_boq_item_create'),
     path('portal-admin/boq-items/<int:item_id>/edit/',     views.admin_boq_item_edit,   name='admin_boq_item_edit'),
     path('portal-admin/boq-items/<int:item_id>/toggle/',   views.admin_boq_item_toggle, name='admin_boq_item_toggle'),
+
+    # Notification templates (T2) — Admin only (T-1). Events list, one event, and per
+    # channel its switch, live test, draft editor and version history. Every POST action
+    # redirects back with a message.
+    path('portal-admin/notifications/',
+         notify_views.admin_notification_events, name='admin_notification_events'),
+    path('portal-admin/notifications/<str:event_code>/',
+         notify_views.admin_notification_event, name='admin_notification_event'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/state/',
+         notify_views.admin_notification_set_state, name='admin_notification_set_state'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/test/',
+         notify_views.admin_notification_test_live, name='admin_notification_test_live'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/create/',
+         notify_views.admin_notification_draft_create, name='admin_notification_draft_create'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/<int:pk>/',
+         notify_views.admin_notification_draft, name='admin_notification_draft'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/<int:pk>/save/',
+         notify_views.admin_notification_draft_save, name='admin_notification_draft_save'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/<int:pk>/test/',
+         notify_views.admin_notification_draft_test, name='admin_notification_draft_test'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/<int:pk>/activate/',
+         notify_views.admin_notification_draft_activate, name='admin_notification_draft_activate'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/draft/<int:pk>/discard/',
+         notify_views.admin_notification_draft_discard, name='admin_notification_draft_discard'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/versions/<int:pk>/',
+         notify_views.admin_notification_version, name='admin_notification_version'),
+    path('portal-admin/notifications/<str:event_code>/<str:channel>/versions/<int:pk>/restore/',
+         notify_views.admin_notification_version_restore, name='admin_notification_version_restore'),
 
     # Warehouses (StockLocation). Deactivate only, no delete. Admin / System Admin / SCM
     # via permissions.user_can_manage_stock_locations — hence portal/, not portal-admin/.

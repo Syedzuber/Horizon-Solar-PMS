@@ -2267,6 +2267,11 @@ class NotificationLog(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            # T2: the notification-template screens read one event's rows, newest first,
+            # and its seven-day counts.
+            models.Index(fields=['event_code', 'created_at'], name='notiflog_event_created_idx'),
+        ]
 
     def __str__(self):
         return f"{self.channel}/{self.status} → {self.recipient} at {self.created_at:%Y-%m-%d %H:%M}"
@@ -7626,15 +7631,25 @@ class NotificationTemplate(models.Model):
 
     ENFORCEMENT LIMIT, as for the other two families: QuerySet.update() bypasses save().
     activate()'s archive update writes `status` only.
+
+    T2: AT MOST ONE OPEN DRAFT per event and channel (uniq_draft_notification_template).
+    A draft is left by activating it or discarding it. DISCARDED is a fourth status the
+    other two families do not have: a draft that was test-sent cannot be deleted, because
+    the test's NotificationLog row points at it (PROTECT), so notify_admin.discard_draft()
+    marks it discarded instead and it stays as the record of what was test-sent. It is
+    frozen like an archived version and never served. delete() refuses anything but a
+    draft.
     """
 
-    DRAFT    = 'draft'
-    ACTIVE   = 'active'
-    ARCHIVED = 'archived'
+    DRAFT     = 'draft'
+    ACTIVE    = 'active'
+    ARCHIVED  = 'archived'
+    DISCARDED = 'discarded'
     STATUS_CHOICES = [
-        (DRAFT,    'Draft'),
-        (ACTIVE,   'Active'),
-        (ARCHIVED, 'Archived'),
+        (DRAFT,     'Draft'),
+        (ACTIVE,    'Active'),
+        (ARCHIVED,  'Archived'),
+        (DISCARDED, 'Discarded'),
     ]
 
     WA_PENDING   = 'pending'
@@ -7651,6 +7666,10 @@ class NotificationTemplate(models.Model):
     # What save() treats as content: every field a rendered message, or the record of
     # which message this is, is read from. `status` and the WhatsApp approval state are
     # deliberately absent — they are where the version stands, not what it says.
+    # wa_approval_status IS THE ONE DELIBERATE EXCEPTION to "frozen outside draft": Meta
+    # reviews a WhatsApp template in Interakt after it has been submitted, so its approval
+    # state changes on a version whose wording is already fixed (T2, A4). The stamps
+    # (updated_*, activated_at) are absent too; they record the version's history.
     CONTENT_FIELDS = ('event_code', 'channel', 'version_no', 'subject', 'body',
                       'button_label', 'wa_template_name', 'wa_language', 'wa_slots',
                       'change_note')
@@ -7674,6 +7693,15 @@ class NotificationTemplate(models.Model):
     )
     created_at  = models.DateTimeField(auto_now_add=True)
     change_note = models.TextField()  # Why this version exists; required (CHECK below)
+    # T2. Set by notify_admin.update_draft() on every save of a draft's wording. A test
+    # send counts towards activation only if it was sent after the later of created_at
+    # and updated_at, so wording changed after its test cannot go live untested (P3).
+    updated_by  = models.ForeignKey(
+        'UserProfile', null=True, blank=True, on_delete=models.PROTECT,
+        related_name='notification_templates_updated',
+    )
+    updated_at   = models.DateTimeField(null=True, blank=True)  # Last save of the draft's wording; NULL = never edited since created
+    activated_at = models.DateTimeField(null=True, blank=True)  # Stamped by activate(); switching the event on needs a test sent after it (A7)
 
     class Meta:
         ordering = ['event_code', 'channel', '-version_no']
@@ -7681,6 +7709,13 @@ class NotificationTemplate(models.Model):
             models.UniqueConstraint(
                 fields=['event_code', 'channel', 'version_no'],
                 name='uniq_notification_template_version',
+            ),
+            # At most ONE open draft per event and channel (T2, A1). Discarded drafts are
+            # not 'draft', so they never block a new one.
+            models.UniqueConstraint(
+                fields=['event_code', 'channel'],
+                condition=models.Q(status='draft'),   # literal: a nested Meta cannot see DRAFT
+                name='uniq_draft_notification_template',
             ),
             # At most ONE active version per event and channel; any number of draft and
             # archived versions beside it. Same shape as uniq_active_checklist_per_code.
@@ -7734,8 +7769,20 @@ class NotificationTemplate(models.Model):
             ).exclude(pk=self.pk).update(status=self.ARCHIVED)
 
             self.status = self.ACTIVE
-            self.save(update_fields=['status'])
+            self.activated_at = timezone.now()
+            self.save(update_fields=['status', 'activated_at'])
         return self
+
+    def delete(self, *args, **kwargs):
+        # Only a draft may be deleted: an active version is live, and an archived or
+        # discarded one is the record of what was sent or test-sent. A draft that was
+        # test-sent still fails, on the log row's PROTECT, which is why
+        # notify_admin.discard_draft() falls back to marking it discarded.
+        if self.status != self.DRAFT:
+            raise TemplateVersionLocked(
+                f"Only a draft version can be deleted; {self} is '{self.status}'."
+            )
+        return super().delete(*args, **kwargs)
 
 
 class NotificationEventSetting(models.Model):

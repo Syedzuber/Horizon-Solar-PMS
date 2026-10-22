@@ -1,0 +1,227 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}{{ event.label }} — Notification{% endblock %}
+
+{% block nav_notif_templates %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{% url 'admin_notification_events' %}" class="text-sm text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i> All notification templates
+  </a>
+</div>
+
+<div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
+  <div class="flex items-center gap-3 flex-wrap">
+    <h1 class="text-xl font-semibold text-gray-800">{{ event.label }}</h1>
+    <span class="text-xs font-medium text-gray-600 bg-gray-100 rounded px-2 py-0.5">{{ event.tier }}</span>
+    <span class="text-xs text-gray-400">{{ event.module }} · {{ event.code }}</span>
+  </div>
+  <p class="text-sm text-gray-600 mt-3"><span class="font-medium text-gray-700">Who receives it:</span> {{ event.recipients_rule }}</p>
+  <p class="text-sm text-gray-600 mt-1"><span class="font-medium text-gray-700">In-app text:</span> {{ event.in_app_text }}</p>
+
+  <h2 class="text-sm font-semibold text-gray-700 mt-5 mb-2">Variables</h2>
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+        <th class="py-2 pr-4">Placeholder</th><th class="py-2 pr-4">Meaning</th><th class="py-2">Sample</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for v in event.variables %}
+      <tr>
+        <td class="py-2 pr-4 font-mono text-xs text-gray-800">{% templatetag openvariable %} {{ v.name }} {% templatetag closevariable %}</td>
+        <td class="py-2 pr-4 text-gray-600">{{ v.meaning }}</td>
+        <td class="py-2 text-gray-600">{{ v.sample }}</td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <td class="py-2 pr-4 font-mono text-xs text-gray-800">{% templatetag openvariable %} recipient_name {% templatetag closevariable %}</td>
+        <td class="py-2 pr-4 text-gray-600">The person receiving the message (always available)</td>
+        <td class="py-2 text-gray-600">Priya Sharma</td>
+      </tr>
+      <tr>
+        <td class="py-2 pr-4 font-mono text-xs text-gray-800">{% templatetag openvariable %} link {% templatetag closevariable %}</td>
+        <td class="py-2 pr-4 text-gray-600">The page the message is about (always available; the button links to it)</td>
+        <td class="py-2 text-gray-600">the site's home page</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+{% comment %}
+  One card per declared channel. The preview is rendered on the server with sample values
+  and shown in <iframe sandbox srcdoc>: an empty sandbox attribute grants nothing, so no
+  script in it could run and it has no access to this page. force_escape, not the
+  ordinary autoescape: the rendered email is a SafeString and would otherwise be written
+  into the attribute unescaped.
+{% endcomment %}
+{% for ch in channels %}
+<div class="bg-white border border-gray-200 rounded-lg p-5 mb-6">
+  <div class="flex items-center gap-3 mb-4">
+    <h2 class="text-lg font-semibold text-gray-800">{{ ch.channel|title }}</h2>
+    {% if ch.active %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+    {% else %}
+      <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Paused</span>
+    {% endif %}
+    {% if ch.is_default_state %}<span class="text-xs text-gray-400">default — never switched</span>{% endif %}
+  </div>
+
+  {# Switch #}
+  <form method="POST" action="{% url 'admin_notification_set_state' event.code ch.channel %}" class="flex items-end gap-3 flex-wrap mb-6">
+    {% csrf_token %}
+    <input type="hidden" name="state" value="{% if ch.active %}paused{% else %}active{% endif %}">
+    <div class="flex-1 min-w-[16rem]">
+      <label class="block text-xs font-medium text-gray-500 mb-1">Reason (required)</label>
+      <input type="text" name="reason" required maxlength="500"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+    </div>
+    {% if ch.active %}
+      <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">
+        <i data-lucide="pause" class="w-4 h-4"></i> Pause
+      </button>
+    {% else %}
+      <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+        <i data-lucide="play" class="w-4 h-4"></i> Activate
+      </button>
+    {% endif %}
+  </form>
+  {% if not ch.active and not ch.live_tested %}
+    <p class="text-xs text-amber-700 -mt-4 mb-6">Send a test of the live content to yourself before switching it on.</p>
+  {% endif %}
+
+  {# Live content #}
+  <div class="mb-6">
+    <div class="flex items-center gap-3 mb-2 flex-wrap">
+      <h3 class="text-sm font-semibold text-gray-700">Live content:</h3>
+      {% if ch.live %}
+        <a href="{% url 'admin_notification_version' event.code ch.channel ch.live.pk %}" class="text-sm text-green-700 hover:underline">Version {{ ch.live.version_no }}</a>
+      {% else %}
+        <span class="text-sm text-gray-700">Built-in default</span>
+      {% endif %}
+      {% if ch.live_tested %}
+        <span class="text-xs text-green-700">tested</span>
+      {% else %}
+        <span class="text-xs text-gray-400">no counting test yet</span>
+      {% endif %}
+      <form method="POST" action="{% url 'admin_notification_test_live' event.code ch.channel %}">
+        {% csrf_token %}
+        <button type="submit" class="inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">
+          <i data-lucide="send" class="w-4 h-4"></i> Send test of live content to me
+        </button>
+      </form>
+    </div>
+    {% if ch.preview_error %}
+      <p class="text-sm text-red-700">The live content does not render: {{ ch.preview_error }}</p>
+    {% else %}
+      <p class="text-sm text-gray-600 mb-2"><span class="text-gray-500">Subject:</span> {{ ch.preview_subject }}</p>
+      <iframe sandbox="" srcdoc="{{ ch.preview_html|force_escape }}" title="Preview of the live content"
+              class="w-full border border-gray-200 rounded" style="height:480px;"></iframe>
+    {% endif %}
+  </div>
+
+  {# Draft #}
+  <div class="mb-6 flex items-center gap-3">
+    <h3 class="text-sm font-semibold text-gray-700">Draft:</h3>
+    {% if ch.draft %}
+      <a href="{% url 'admin_notification_draft' event.code ch.channel ch.draft.pk %}" class="text-sm text-green-700 hover:underline">Open draft version {{ ch.draft.version_no }}</a>
+    {% else %}
+      <form method="POST" action="{% url 'admin_notification_draft_create' event.code ch.channel %}">
+        {% csrf_token %}
+        <button type="submit" class="inline-flex items-center gap-2 px-3 py-1.5 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+          <i data-lucide="file-plus" class="w-4 h-4"></i> Create draft
+        </button>
+      </form>
+      <span class="text-xs text-gray-400">Starts from the live content.</span>
+    {% endif %}
+  </div>
+
+  {# Version history #}
+  <h3 class="text-sm font-semibold text-gray-700 mb-2">Version history</h3>
+  {% if ch.versions %}
+  <table class="w-full text-sm mb-6">
+    <thead>
+      <tr class="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+        <th class="py-2 pr-3">Version</th><th class="py-2 pr-3">Status</th><th class="py-2 pr-3">Created</th>
+        <th class="py-2 pr-3">Last saved</th><th class="py-2 pr-3">Change note</th><th class="py-2"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for v in ch.versions %}
+      <tr>
+        <td class="py-2 pr-3 text-gray-800">v{{ v.version_no }}</td>
+        <td class="py-2 pr-3 text-gray-600">{{ v.get_status_display }}</td>
+        <td class="py-2 pr-3 text-xs text-gray-500">{{ v.created_by.user.get_full_name|default:v.created_by.user.username }}<br>{{ v.created_at|date:"d M Y H:i" }}</td>
+        <td class="py-2 pr-3 text-xs text-gray-500">{% if v.updated_at %}{{ v.updated_by.user.get_full_name|default:v.updated_by.user.username }}<br>{{ v.updated_at|date:"d M Y H:i" }}{% else %}—{% endif %}</td>
+        <td class="py-2 pr-3 text-gray-600">{{ v.change_note }}</td>
+        <td class="py-2 text-right whitespace-nowrap">
+          <a href="{% url 'admin_notification_version' event.code ch.channel v.pk %}" class="text-xs text-green-700 hover:underline mr-2">View</a>
+          {% if v.status != 'draft' %}
+          <form method="POST" action="{% url 'admin_notification_version_restore' event.code ch.channel v.pk %}" class="inline">
+            {% csrf_token %}
+            <button type="submit" class="text-xs text-gray-600 hover:text-gray-900 underline">Restore as new draft</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-sm text-gray-500 mb-6">No versions yet: the built-in default is live.</p>
+  {% endif %}
+
+  {# Switch history #}
+  <h3 class="text-sm font-semibold text-gray-700 mb-2">Switch history</h3>
+  {% if ch.changes %}
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+        <th class="py-2 pr-3">From</th><th class="py-2 pr-3">To</th><th class="py-2 pr-3">By</th><th class="py-2 pr-3">When</th><th class="py-2">Reason</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for c in ch.changes %}
+      <tr>
+        <td class="py-2 pr-3 text-gray-600">{{ c.get_from_state_display }}</td>
+        <td class="py-2 pr-3 text-gray-800">{{ c.get_to_state_display }}</td>
+        <td class="py-2 pr-3 text-gray-600">{{ c.changed_by.user.get_full_name|default:c.changed_by.user.username }}</td>
+        <td class="py-2 pr-3 text-xs text-gray-500">{{ c.changed_at|date:"d M Y H:i" }}</td>
+        <td class="py-2 text-gray-600">{{ c.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="text-sm text-gray-500">Never switched.</p>
+  {% endif %}
+</div>
+{% endfor %}
+
+<div class="bg-white border border-gray-200 rounded-lg overflow-hidden">
+  <div class="px-5 py-3 border-b border-gray-200 bg-gray-50 text-sm font-semibold text-gray-700">Last {{ logs|length }} sends of this event</div>
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+        <th class="px-5 py-2">Time</th><th class="px-3 py-2">Recipient</th><th class="px-3 py-2">Channel</th>
+        <th class="px-3 py-2">Status</th><th class="px-5 py-2">Error detail</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for log in logs %}
+      <tr>
+        <td class="px-5 py-2 text-xs text-gray-500 whitespace-nowrap">{{ log.created_at|date:"d M Y H:i" }}</td>
+        <td class="px-3 py-2 text-gray-700">{{ log.recipient.user.get_full_name|default:log.recipient.user.username }}
+          {% if log.template_name == test_template_name %}<span class="text-xs text-gray-400 ml-1">test</span>{% endif %}</td>
+        <td class="px-3 py-2 text-gray-600">{{ log.get_channel_display }}</td>
+        <td class="px-3 py-2 {% if log.status == 'failed' %}text-red-600{% else %}text-gray-700{% endif %}">{{ log.get_status_display }}</td>
+        <td class="px-5 py-2 text-xs text-gray-500">{{ log.error_detail|truncatechars:120 }}</td>
+      </tr>
+      {% empty %}
+      <tr><td colspan="5" class="px-5 py-6 text-center text-sm text-gray-400">Nothing sent yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

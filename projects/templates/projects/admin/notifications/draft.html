@@ -1,0 +1,145 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}Draft v{{ template.version_no }} — {{ event.label }}{% endblock %}
+
+{% block nav_notif_templates %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <a href="{% url 'admin_notification_event' event.code %}" class="text-sm text-gray-500 hover:text-gray-800 inline-flex items-center gap-1">
+    <i data-lucide="arrow-left" class="w-4 h-4"></i> {{ event.label }}
+  </a>
+</div>
+
+<div class="flex items-center gap-3 mb-4 flex-wrap">
+  <h1 class="text-xl font-semibold text-gray-800">{{ event.label }} — {{ template.channel|title }}</h1>
+  <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Draft v{{ template.version_no }}</span>
+  {% if tested %}
+    <span class="text-xs text-green-700">Tested since the last save — ready to activate</span>
+  {% else %}
+    <span class="text-xs text-gray-500">Not tested since the last save — send a test before activating</span>
+  {% endif %}
+</div>
+
+{% if errors %}
+<div class="mb-4 px-4 py-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200">
+  <p class="font-medium mb-1">Nothing was saved:</p>
+  <ul class="list-disc ml-5">
+    {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% comment %}
+  The placeholder inserter is local Alpine state only: clicking a variable writes
+  "{{ name }}" into whichever of subject or body last had focus, at the cursor. No request
+  is made. The braces are built in JavaScript ('{'.repeat(2)) because a literal pair here
+  would be read by Django's template engine.
+{% endcomment %}
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6"
+     x-data="{
+       target: 'body',
+       insert(name) {
+         const field = this.$refs[this.target];
+         const token = '{'.repeat(2) + ' ' + name + ' ' + '}'.repeat(2);
+         field.setRangeText(token, field.selectionStart, field.selectionEnd, 'end');
+         field.focus();
+       }
+     }">
+  <form method="POST" action="{% url 'admin_notification_draft_save' event.code template.channel template.pk %}"
+        class="lg:col-span-2 bg-white border border-gray-200 rounded-lg p-5">
+    {% csrf_token %}
+    <label class="block text-xs font-medium text-gray-500 mb-1" for="id_subject">Subject</label>
+    <input type="text" id="id_subject" name="subject" value="{{ values.subject }}" maxlength="255"
+           x-ref="subject" @focus="target = 'subject'"
+           class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+
+    <label class="block text-xs font-medium text-gray-500 mb-1" for="id_body">Body</label>
+    <textarea id="id_body" name="body" rows="14" x-ref="body" @focus="target = 'body'"
+              class="w-full border border-gray-300 rounded px-3 py-2 text-sm font-mono mb-1 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">{{ values.body }}</textarea>
+    <p class="text-xs text-gray-400 mb-4">A blank line starts a new paragraph; a single line break stays a line break; **text** is bold. Nothing else is formatting. At most {{ body_max }} characters.</p>
+
+    <label class="block text-xs font-medium text-gray-500 mb-1" for="id_button_label">Button label</label>
+    <input type="text" id="id_button_label" name="button_label" value="{{ values.button_label }}" maxlength="60"
+           class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+
+    <label class="block text-xs font-medium text-gray-500 mb-1" for="id_change_note">Change note (required)</label>
+    <input type="text" id="id_change_note" name="change_note" value="{{ values.change_note }}" required
+           placeholder="Why this edit is being made"
+           class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-1 focus:outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent">
+    <p class="text-xs text-gray-400 mb-4">Current note: {{ template.change_note }}</p>
+
+    <div class="flex items-center gap-3">
+      <button type="submit" name="action" value="save"
+              class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+        <i data-lucide="save" class="w-4 h-4"></i> Save
+      </button>
+      <button type="submit" name="action" value="preview"
+              class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">
+        <i data-lucide="eye" class="w-4 h-4"></i> Save and preview
+      </button>
+    </div>
+  </form>
+
+  <div class="bg-white border border-gray-200 rounded-lg p-5">
+    <h2 class="text-sm font-semibold text-gray-700 mb-1">Variables</h2>
+    <p class="text-xs text-gray-400 mb-3">Click to insert at the cursor.</p>
+    <ul class="space-y-2">
+      {% for v in event.variables %}
+      <li>
+        <button type="button" @click="insert('{{ v.name }}')" class="font-mono text-xs text-green-700 hover:underline">{% templatetag openvariable %} {{ v.name }} {% templatetag closevariable %}</button>
+        <p class="text-xs text-gray-500">{{ v.meaning }} — e.g. {{ v.sample }}</p>
+      </li>
+      {% endfor %}
+      <li>
+        <button type="button" @click="insert('recipient_name')" class="font-mono text-xs text-green-700 hover:underline">{% templatetag openvariable %} recipient_name {% templatetag closevariable %}</button>
+        <p class="text-xs text-gray-500">The person receiving the message</p>
+      </li>
+      <li>
+        <button type="button" @click="insert('link')" class="font-mono text-xs text-green-700 hover:underline">{% templatetag openvariable %} link {% templatetag closevariable %}</button>
+        <p class="text-xs text-gray-500">The page the message is about</p>
+      </li>
+    </ul>
+  </div>
+</div>
+
+{# Actions on the SAVED draft. Unsaved typing is not part of a test or an activation. #}
+<div class="bg-white border border-gray-200 rounded-lg p-5 mt-6 flex items-center gap-3 flex-wrap">
+  <form method="POST" action="{% url 'admin_notification_draft_test' event.code template.channel template.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-gray-700 border border-gray-300 hover:bg-gray-50">
+      <i data-lucide="send" class="w-4 h-4"></i> Send test to me
+    </button>
+  </form>
+  <form method="POST" action="{% url 'admin_notification_draft_activate' event.code template.channel template.pk %}"
+        onsubmit="return confirm('Activate version {{ template.version_no }}? It becomes the live wording at once and the current live version is archived.');">
+    {% csrf_token %}
+    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-white" style="background:#1a7a4a;">
+      <i data-lucide="check" class="w-4 h-4"></i> Activate
+    </button>
+  </form>
+  <form method="POST" action="{% url 'admin_notification_draft_discard' event.code template.channel template.pk %}"
+        onsubmit="return confirm('Discard draft version {{ template.version_no }}?');">
+    {% csrf_token %}
+    <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-medium text-red-700 border border-red-200 hover:bg-red-50">
+      <i data-lucide="trash-2" class="w-4 h-4"></i> Discard draft
+    </button>
+  </form>
+  <p class="text-xs text-gray-400">Tests and activation use the saved draft. Activation needs a test sent after the last save.</p>
+</div>
+
+{% if preview_error %}
+<p class="mt-6 text-sm text-red-700">The saved draft does not render: {{ preview_error }}</p>
+{% elif preview_html %}
+{% comment %}
+  Sandboxed preview: an empty sandbox attribute grants nothing (no scripts, no same
+  origin). force_escape because the rendered email is a SafeString.
+{% endcomment %}
+<div class="bg-white border border-gray-200 rounded-lg p-5 mt-6">
+  <h2 class="text-sm font-semibold text-gray-700 mb-2">Preview (sample values)</h2>
+  <p class="text-sm text-gray-600 mb-2"><span class="text-gray-500">Subject:</span> {{ preview_subject }}</p>
+  <iframe sandbox="" srcdoc="{{ preview_html|force_escape }}" title="Preview of the draft"
+          class="w-full border border-gray-200 rounded" style="height:520px;"></iframe>
+</div>
+{% endif %}
+{% endblock %}

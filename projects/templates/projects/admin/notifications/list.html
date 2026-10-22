@@ -1,0 +1,74 @@
+{% extends "projects/admin/admin_base.html" %}
+
+{% block page_title %}Notification templates{% endblock %}
+
+{% block nav_notif_templates %}nav-active{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-xl font-semibold text-gray-800">Notification templates</h1>
+  <p class="text-sm text-gray-500 mt-1">
+    Every message the system can send, by module. Open an event to change its email wording,
+    send yourself a test, or switch it on or off. Counts cover the last 7 days and leave out
+    test sends.
+  </p>
+</div>
+
+{% comment %}
+  One row per event and declared channel; the event's label and tier are drawn on its
+  first channel's row only. "default" marks a state that comes from the registry because
+  no Admin has switched the event yet. Built by notify_views.admin_notification_events in
+  three queries, whatever the number of events.
+{% endcomment %}
+{% for module, rows in groups %}
+<div class="bg-white border border-gray-200 rounded-lg mb-6 overflow-hidden">
+  <div class="px-5 py-3 border-b border-gray-200 bg-gray-50 text-sm font-semibold text-gray-700">{{ module }}</div>
+  <table class="w-full text-sm">
+    <thead>
+      <tr class="text-left text-xs font-semibold text-gray-500 uppercase tracking-wider border-b border-gray-100">
+        <th class="px-5 py-2">Event</th>
+        <th class="px-3 py-2">Tier</th>
+        <th class="px-3 py-2">Channel</th>
+        <th class="px-3 py-2">State</th>
+        <th class="px-3 py-2">Live content</th>
+        <th class="px-3 py-2">Last sent</th>
+        <th class="px-3 py-2 text-right">Sent</th>
+        <th class="px-3 py-2 text-right">Failed</th>
+        <th class="px-5 py-2 text-right">Skipped</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+      {% for row in rows %}
+        {% for ch in row.channels %}
+        <tr class="hover:bg-gray-50">
+          <td class="px-5 py-3">
+            {% if forloop.first %}
+              <a href="{% url 'admin_notification_event' row.event.code %}" class="font-medium text-gray-800 hover:text-green-700">{{ row.event.label }}</a>
+              <p class="text-xs text-gray-400">{{ row.event.code }}</p>
+            {% endif %}
+          </td>
+          <td class="px-3 py-3">{% if forloop.first %}<span class="text-xs font-medium text-gray-600">{{ row.event.tier }}</span>{% endif %}</td>
+          <td class="px-3 py-3 text-gray-600">{{ ch.channel|title }}</td>
+          <td class="px-3 py-3">
+            {% if ch.active %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">Active</span>
+            {% else %}
+              <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">Paused</span>
+            {% endif %}
+            {% if ch.is_default_state %}<span class="text-xs text-gray-400 ml-1">default</span>{% endif %}
+          </td>
+          <td class="px-3 py-3 text-gray-700">{% if ch.live_version %}v{{ ch.live_version }}{% else %}Built-in default{% endif %}</td>
+          <td class="px-3 py-3 text-xs text-gray-500 whitespace-nowrap">{{ ch.last_sent|date:"d M Y H:i"|default:"—" }}</td>
+          <td class="px-3 py-3 text-right text-gray-700">{{ ch.sent }}</td>
+          <td class="px-3 py-3 text-right {% if ch.failed %}text-red-600 font-medium{% else %}text-gray-700{% endif %}">{{ ch.failed }}</td>
+          <td class="px-5 py-3 text-right text-gray-700">{{ ch.skipped }}</td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% empty %}
+<p class="text-sm text-gray-500">No notification events are registered.</p>
+{% endfor %}
+{% endblock %}

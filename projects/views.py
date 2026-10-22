@@ -103,6 +103,7 @@ from .site_pm import (
     returning_bills_for, with_outgoing_pm_bill_step_count, with_outgoing_pm_task_count,
 )
 from .forms import UserCreateForm, UserEditForm, AdminUserEditForm, ProjectCreateForm, ProjectEditForm, PostActivationFieldEditForm, TaskAddForm, VendorForm, ProgramForm, OpexSiteForm, BOQItemMasterForm, StockLocationForm, normalize_program_code, check_typed_date, TYPED_DATE_FLOOR
+from .notify_registry import NOTIFICATION_EVENTS  # T2: the send-records Event filter's choices
 from .decorators import (
     login_required, role_required, get_user_dashboard,
     get_post_login_url, LANDING_ROLES,
@@ -14186,6 +14187,9 @@ def admin_send_records(request):
     date_from_param = request.GET.get('date_from', '').strip()
     date_to_param   = request.GET.get('date_to',   '').strip()
     export          = request.GET.get('export',    '').strip()
+    # T2: notify() events. Rows from older sends have event_code '' and only appear
+    # under "All events".
+    event_param     = request.GET.get('event',     '').strip()
 
     default_date_from = (timezone.now().date() - timedelta(days=7)).isoformat()
     date_from = date_from_param or default_date_from
@@ -14200,6 +14204,8 @@ def admin_send_records(request):
         qs = qs.filter(channel=channel_param)
     if status_param and status_param != 'all':
         qs = qs.filter(status=status_param)
+    if event_param and event_param != 'all':
+        qs = qs.filter(event_code=event_param)
     if date_from:
         try:
             qs = qs.filter(created_at__date__gte=date.fromisoformat(date_from))
@@ -14251,7 +14257,9 @@ def admin_send_records(request):
             'status':    status_param,
             'date_from': date_from,
             'date_to':   date_to_param,
+            'event':     event_param,
         },
+        'event_codes': sorted(NOTIFICATION_EVENTS),
     })
 
 
