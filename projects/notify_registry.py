@@ -141,6 +141,172 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule='The person the Admin picks on the test-send screen.',
         default_state='active',
     ),
+
+    # --- T3a: existing sends moved onto managed templates -------------------------
+    # Wording is the code's wording at T3a, pinned by tests_notify_migration_a. The
+    # "View in Horizon Solar PMS" line those emails ended with is now the button. Only
+    # 'email' is declared: these events' WhatsApp messages are still sent directly by
+    # their call sites, with resolve_recipients(), until the WhatsApp phase moves them,
+    # so no Admin switch here can appear to pause a WhatsApp it does not control.
+    NotificationEvent(
+        code='issue_raised',
+        label='Issue raised',
+        module='Issues',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('issue_title', 'Title of the issue', 'Inverter not powering on'),
+            Variable('raised_by_name', 'The person who raised the issue', 'Rahul Verma'),
+        ),
+        in_app_text=('A new issue has been raised on project {{ customer_name }}: '
+                     '"{{ issue_title }}". Please login to review and coordinate '
+                     'resolution.'),
+        default_subject='New Issue Raised — {{ customer_name }}',
+        default_body=(
+            'A new issue has been raised on project {{ customer_name }}: '
+            '"{{ issue_title }}".\n\n'
+            'Please login to review and coordinate resolution.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('The person the issue is assigned to, unless they raised it. '
+                         'The project managers get a separate in-app note only.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='issue_resolved',
+        label='Issue resolved',
+        module='Issues',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('issue_title', 'Title of the issue', 'Inverter not powering on'),
+            Variable('resolved_by_name', 'The person who marked it resolved', 'Rahul Verma'),
+        ),
+        in_app_text=('The issue "{{ issue_title }}" on project {{ customer_name }} has '
+                     'been marked as resolved by {{ resolved_by_name }}.'),
+        default_subject='Issue Resolved — {{ customer_name }}',
+        default_body=(
+            'The issue "{{ issue_title }}" on project {{ customer_name }} has been marked '
+            'as resolved by {{ resolved_by_name }}.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('The project managers (PM and coordinators), the person the issue '
+                         'is assigned to and the person who raised it, except the resolver.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='project_pm_assigned',
+        label='PM assigned to a project',
+        module='Projects',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('customer_and_city',
+                     'Customer name, with the city in brackets when the project has one',
+                     'Sharma Residence (Lucknow)'),
+        ),
+        in_app_text=('Hi {{ recipient_name }}, You have been assigned as Project Manager '
+                     'for {{ customer_and_city }}. Please review the project details and '
+                     'activate when ready.'),
+        default_subject='New Project Assigned: {{ customer_name }}',
+        default_body=(
+            'Hi {{ recipient_name }},\n\n'
+            'You have been assigned as Project Manager for {{ customer_and_city }}.\n\n'
+            'Please review the project details and activate when ready.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('The PM given a project with no PM, by an Admin or by the Zoho '
+                         'CRM deal. A change of PM sends the handover notices instead.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='project_unassigned_alert',
+        label='Zoho project with no PM',
+        module='Projects',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('city', 'City of the project, or a dash when Zoho sent none', 'Lucknow'),
+            Variable('deal_id', 'The Zoho CRM deal ID', '5725767000001234567'),
+            Variable('zoho_pm_email',
+                     'The PM email Zoho sent, or "(blank)" when it sent none',
+                     'pm.name@horizonrenewablepower.com'),
+        ),
+        in_app_text=('New Draft project {{ project_id }} created from Zoho CRM (deal '
+                     '{{ deal_id }}) — PM could not be assigned. Please assign a PM.'),
+        default_subject='[SolarPMS] Unassigned Project: {{ project_id }}',
+        default_body=(
+            'A new Draft project was created via Zoho CRM but no PM could be assigned.\n\n'
+            'Project ID : {{ project_id }}\n'
+            'Customer   : {{ customer_name }}\n'
+            'City       : {{ city }}\n'
+            'Zoho Deal  : {{ deal_id }}\n'
+            'PM email from Zoho: {{ zoho_pm_email }}\n\n'
+            'Please log in to the Admin Panel and assign a PM:'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule='Every active Admin.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='boq_acknowledged',
+        label='BOQ acknowledged by SCM',
+        module='BOQ',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('acknowledged_by_name', 'The SCM person who acknowledged the BOQ',
+                     'Anil Gupta'),
+        ),
+        in_app_text=('The Bill of Quantities for project {{ customer_name }} has been '
+                     'acknowledged by {{ acknowledged_by_name }}. Material procurement can '
+                     'now proceed.'),
+        default_subject='BOQ Acknowledged — {{ customer_name }}',
+        default_body=(
+            'The Bill of Quantities for project {{ customer_name }} has been acknowledged '
+            'by {{ acknowledged_by_name }}.\n\n'
+            'Material procurement can now proceed.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule='The project managers (PM and coordinators).',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='payment_milestone_reached',
+        label='Payment milestone reached',
+        module='Payments',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('task_name', 'The milestone task that was completed',
+                     'Plant Commissioning'),
+        ),
+        in_app_text=('Project {{ project_id }} ({{ customer_name }}) has reached payment '
+                     'milestone: "{{ task_name }}". Please initiate collection at the '
+                     'earliest.'),
+        default_subject='Payment Milestone Reached — {{ customer_name }}',
+        default_body=(
+            'Project {{ project_id }} ({{ customer_name }}) has reached payment milestone: '
+            '"{{ task_name }}".\n\n'
+            'Please initiate collection at the earliest.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('Finance, BD and CEO users and the project managers (PM and '
+                         'coordinators), except the person who completed the task.'),
+        default_state='active',
+    ),
 ])
 
 

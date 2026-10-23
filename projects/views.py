@@ -62,7 +62,11 @@ from .models import (
     REASON_RESUBMITTED, REASON_ZOHO_WEBHOOK, REASON_EXECUTION_STARTED,
 )
 from .number_input import decimal_field_max, parse_decimal_input
-from .notifications import send_notification, send_raw_email
+from .notifications import send_notification
+# T3a: issue, PM-assigned, unassigned-project, BOQ and payment-milestone emails go
+# through notify(); their WhatsApp legs use resolve_recipients() so every channel
+# reaches the same people.
+from .notify import notify, resolve_recipients
 from .payments import ceo_payment_strip, payment_counts
 # The one overdue rule. Every overdue count, list and flag in this module takes it from
 # here and adds only its own scope (type, mirror, assignee, project).
@@ -111,6 +115,8 @@ from .decorators import (
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
     project_managers, user_can_manage_program,
+    # T3a (ruling T-16): the recipients of the Zoho unassigned-project alert.
+    active_admins,
     user_can_access_program, program_ids_handed_over_by,
     user_can_view_project_boq, user_can_edit_project_boq,
     project_boq_is_group_locked, project_boq_is_design_locked,
@@ -6528,35 +6534,45 @@ def _apply_task_status_change(task, new_status, profile, request, project):
     # Payment milestone notification: task.is_payment_milestone is read from the pre-update
     # object — the flag never changes during a status update, so this is safe.
     if new_status == Task.DONE and task.is_payment_milestone:
-        seen_pks = set()
         milestone_recipients = list(UserProfile.objects.filter(role='Finance', is_active=True))
         milestone_recipients += project_managers(project)
         milestone_recipients += list(UserProfile.objects.filter(role__in=['BD', 'CEO'], is_active=True))
-        for recipient in milestone_recipients:
-            if recipient.pk in seen_pks:
-                continue
-            seen_pks.add(recipient.pk)
-            _pm_link = f'/projects/{project.project_id}/'
-            _pm_message = (
-                f'Project {project.project_id} ({project.customer_name}) has reached '
-                f'payment milestone: "{task.task_name}".\n\n'
-                f'Please initiate collection at the earliest.'
-            )
-            _pm_email_message = (
-                f'{_pm_message}\n\nView in Horizon Solar PMS:\n'
-                f'https://horizon-solar-pms-production.up.railway.app{_pm_link}'
-            )
-            send_notification(
-                recipient=recipient,
-                message=_pm_email_message,
-                channels=['in_app', 'whatsapp', 'email'],
-                link=_pm_link,
-                subject=f'Payment Milestone Reached — {project.customer_name}',
-                template='payment_notification',
-                template_params=[project.customer_name, task.task_name, project.customer_name],
-                related_project=project,
-                actor=profile,
-            )
+        _pm_link = f'/projects/{project.project_id}/'
+        # AFTER COMMIT on every channel (ruling T-15). task_approve and the self-certify
+        # path call this helper inside their own atomic block and roll it back when a
+        # later step refuses; before T3a the milestone message had already gone out by
+        # then. resolve_recipients() (inside notify(), and for WhatsApp below) removes
+        # duplicates, the person who completed the task and anyone deactivated.
+        notify(
+            'payment_milestone_reached', recipients=milestone_recipients, actor=profile,
+            related_project=project, link=_pm_link, log_label='payment_notification',
+            values={'project_id': project.project_id,
+                    'customer_name': project.customer_name,
+                    'task_name': task.task_name},
+        )
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase.
+        _pm_whatsapp = resolve_recipients(milestone_recipients, profile)
+        _pm_message = (
+            f'Project {project.project_id} ({project.customer_name}) has reached '
+            f'payment milestone: "{task.task_name}". Please initiate collection at the '
+            f'earliest.'
+        )
+        _pm_params = [project.customer_name, task.task_name, project.customer_name]
+
+        def _send_milestone_whatsapp():
+            for _wa in _pm_whatsapp:
+                send_notification(
+                    recipient=_wa,
+                    message=_pm_message,
+                    channels=['whatsapp'],
+                    link=_pm_link,
+                    template='payment_notification',
+                    template_params=_pm_params,
+                    related_project=project,
+                    actor=profile,
+                )
+        transaction.on_commit(_send_milestone_whatsapp, robust=True)
 
     return _TASK_STATUS_APPLIED
 
@@ -7987,7 +8003,9 @@ def _boq_snapshot(boq):
 
 
 def _notify_boq_acknowledged(boq, acknowledging_profile, request):
-    """Notify PM and the acknowledging SCM user that the BOQ has been acknowledged."""
+    """Notify the project managers (PM and coordinators) that SCM acknowledged the BOQ:
+    in-app and email through notify() (event boq_acknowledged), WhatsApp directly.
+    The acknowledging SCM user is no longer sent a copy (T3a: the actor is dropped)."""
     items = boq.items.all()
     has_changes = any(
         item.ordered_quantity is not None and item.boq_quantity is not None
@@ -8002,34 +8020,44 @@ def _notify_boq_acknowledged(boq, acknowledging_profile, request):
     design_user_name = boq.submitted_by.user.get_full_name() or boq.submitted_by.user.username
     boq_link = f'/projects/{boq.project.project_id}/boq/'
     boq_link_abs = request.build_absolute_uri(boq_link)
+    # The acknowledging SCM user is still listed, but as the actor resolve_recipients()
+    # drops them on every channel (T3a, P2 and ruling Q3): nobody is told about their own
+    # act. Before T3a they received a copy of their own acknowledgement.
     recipients = list(project_managers(boq.project))
     if acknowledging_profile not in recipients:
         recipients.append(acknowledging_profile)
     scm_name = request.user.get_full_name() or request.user.username
     _boq_message = (
         f'The Bill of Quantities for project {boq.project.customer_name} has been acknowledged '
-        f'by {scm_name}.\n\n'
-        f'Material procurement can now proceed.'
+        f'by {scm_name}. Material procurement can now proceed.'
     )
-    _boq_email_message = (
-        f'{_boq_message}\n\nView in Horizon Solar PMS:\n'
-        f'https://horizon-solar-pms-production.up.railway.app{boq_link}'
+    notify(
+        'boq_acknowledged', recipients=recipients, actor=acknowledging_profile,
+        related_project=boq.project, link=boq_link, log_label='boq_acknowledged',
+        values={'customer_name': boq.project.customer_name,
+                'project_id': boq.project.project_id,
+                'acknowledged_by_name': scm_name},
     )
-    for recipient in recipients:
-        send_notification(
-            recipient=recipient,
-            message=_boq_email_message,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=boq_link,
-            subject=f'BOQ Acknowledged — {boq.project.customer_name}',
-            template='boq_acknowledged',
-            template_params=[
-                boq.project.customer_name,   # [0] header
-                scm_name,                    # [1] body[0] — scm_name
-            ],
-            related_project=boq.project,
-            actor=acknowledging_profile,
-        )
+    # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+    # phase; resolve_recipients() and on_commit match notify().
+    _boq_whatsapp = resolve_recipients(recipients, acknowledging_profile)
+
+    def _send_boq_whatsapp():
+        for _wa in _boq_whatsapp:
+            send_notification(
+                recipient=_wa,
+                message=_boq_message,
+                channels=['whatsapp'],
+                link=boq_link,
+                template='boq_acknowledged',
+                template_params=[
+                    boq.project.customer_name,   # [0] header
+                    scm_name,                    # [1] body[0] — scm_name
+                ],
+                related_project=boq.project,
+                actor=acknowledging_profile,
+            )
+    transaction.on_commit(_send_boq_whatsapp, robust=True)
 
 
 def _apply_boq_acknowledgement(boq, profile, request):
@@ -11283,71 +11311,66 @@ def zoho_deal_closed_webhook(request):
                 project.assigned_pm.user.email if project.assigned_pm else 'unassigned')
 
     if project.assigned_pm is None:
-        # Notify Admin in-app: PM could not be assigned
+        # Every active Admin is told, in-app and by email (ruling T-16). This replaces an
+        # in-app note to the first Admin row, active or not, and an email to a personal
+        # address that skipped the master switch and NotificationLog. No actor: no human
+        # acted. No log_label (ruling Q7): the in-app row never had one, and the email
+        # never had a log row; event_code identifies both.
         try:
-            admin_profile = UserProfile.objects.filter(role='Admin').first()
-            if admin_profile:
-                send_notification(
-                    recipient=admin_profile,
-                    message=(
-                        f'New Draft project {project.project_id} created from Zoho CRM '
-                        f'(deal {record_id}) — PM could not be assigned. Please assign a PM.'
-                    ),
-                    channels=['in_app'],
-                    link=f'/projects/{project.project_id}/overview/',
-                    related_project=project,
-                )
-        except Exception as exc:
-            logger.error('Webhook: in-app notification failed for project %s — %s', project.project_id, exc)
-        # Also email a fixed admin address so the alert lands even if no Admin is logged in
-        try:
-            send_raw_email(
-                to_email='smzk07@gmail.com',
-                subject=f'[SolarPMS] Unassigned Project: {project.project_id}',
-                body=(
-                    f'A new Draft project was created via Zoho CRM but no PM could be assigned.\n\n'
-                    f'Project ID : {project.project_id}\n'
-                    f'Customer   : {project.customer_name}\n'
-                    f'City       : {project.city or "—"}\n'
-                    f'Zoho Deal  : {record_id}\n'
-                    f'PM email from Zoho: {pm_email or "(blank)"}\n\n'
-                    f'Please log in to the Admin Panel and assign a PM:\n'
-                    f'https://horizon-solar-pms-production.up.railway.app/projects/{project.project_id}/overview/'
-                ),
+            notify(
+                'project_unassigned_alert', recipients=active_admins(),
+                related_project=project,
+                link=f'/projects/{project.project_id}/overview/',
+                values={'project_id': project.project_id,
+                        'customer_name': project.customer_name,
+                        'city': project.city or '—',
+                        'deal_id': record_id,
+                        'zoho_pm_email': pm_email or '(blank)'},
             )
         except Exception as exc:
-            logger.error('Webhook: admin alert email failed for project %s — %s', project.project_id, exc)
+            logger.error('Webhook: admin alert failed for project %s — %s', project.project_id, exc)
     else:
         # Notify the assigned PM about their new project
         try:
             pm_display_name = project.assigned_pm.user.get_full_name() or project.assigned_pm.user.username
+            # TODO: built from the integer pk, so this URL is /projects/<pk>/overview/ and
+            # 404s; it should be project.project_id. Deferred: it is a WhatsApp parameter,
+            # and those change only in the WhatsApp phase (SECONDARY_FINDINGS).
             project_link = reverse('project_overview', args=[project.pk])
             project_url_abs = request.build_absolute_uri(project_link)
-            _ap_link = f'/projects/{project.project_id}/'
-            _ap_message = (
-                f'Hi {pm_display_name},\n\n'
-                f'You have been assigned as Project Manager for {project.customer_name} '
-                f'({project.city}).\n\n'
-                f'Please review the project details and begin onboarding.'
+            # The same event, wording and /overview/ link as admin_assign_pm (ruling Q2),
+            # replacing this path's own "begin onboarding" text and /projects/<id>/ link.
+            # No actor (ruling Q8).
+            _ap_link = f'/projects/{project.project_id}/overview/'
+            notify(
+                'project_pm_assigned', recipients=[project.assigned_pm],
+                related_project=project, link=_ap_link, log_label='assign_project',
+                values={'customer_name': project.customer_name,
+                        'project_id': project.project_id,
+                        'customer_and_city': project.customer_name
+                        + (f' ({project.city})' if project.city else '')},
             )
-            _ap_email_message = (
-                f'{_ap_message}\n\nView in Horizon Solar PMS:\n'
-                f'https://horizon-solar-pms-production.up.railway.app{_ap_link}'
-            )
-            send_notification(
-                recipient=project.assigned_pm,
-                message=_ap_email_message,
-                channels=['in_app', 'whatsapp', 'email'],
-                link=_ap_link,
-                subject=f'New Project Assigned: {project.customer_name}',
-                template='assign_project',
-                template_params=[
-                    project.customer_name,    # [0] header
-                    pm_display_name,          # [1] body[0] — user_name
-                    project_url_abs,          # [2] body[1] — project_url
-                ],
-                related_project=project,
-            )
+            # WhatsApp is still sent here, template and params unchanged, until the
+            # WhatsApp phase; resolve_recipients() and on_commit match notify() (Q3).
+            _ap_whatsapp = resolve_recipients([project.assigned_pm], None)
+
+            def _send_zoho_assigned_whatsapp():
+                for _wa in _ap_whatsapp:
+                    send_notification(
+                        recipient=_wa,
+                        message=f'You have been assigned as Project Manager for '
+                                f'{project.customer_name}.',
+                        channels=['whatsapp'],
+                        link=_ap_link,
+                        template='assign_project',
+                        template_params=[
+                            project.customer_name,    # [0] header
+                            pm_display_name,          # [1] body[0] — user_name
+                            project_url_abs,          # [2] body[1] — project_url
+                        ],
+                        related_project=project,
+                    )
+            transaction.on_commit(_send_zoho_assigned_whatsapp, robust=True)
         except Exception as exc:
             logger.error('Webhook: PM notification failed for project %s — %s', project.project_id, exc)
 
@@ -12184,28 +12207,39 @@ def create_project_issue(request, project_id):
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
-        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         _ic_link = f'/issues/{issue.pk}/'
-        _ic_message = (
-            f'A new issue has been raised on project {project.customer_name}: '
-            f'"{title}".\n\n'
-            f'Please login to review and coordinate resolution.'
+        # In-app and email through notify() (T3a): wording from the issue_raised event or
+        # Admin's active version, sent after commit, raiser and deactivated people dropped.
+        # log_label keeps the template_name these rows always carried.
+        notify(
+            'issue_raised', recipients=[assigned_to], actor=profile,
+            related_project=project, link=_ic_link, log_label='issue_created',
+            values={'customer_name': project.customer_name,
+                    'project_id': project.project_id,
+                    'issue_title': title, 'raised_by_name': raiser_name},
         )
-        _ic_email_message = (
-            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
-            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
-        )
-        send_notification(
-            recipient=assigned_to,
-            message=_ic_email_message,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=_ic_link,
-            subject=f'New Issue Raised — {project.customer_name}',
-            template='issue_created',
-            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
-            related_project=project,
-            actor=profile,
-        )
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase. resolve_recipients() gives it exactly notify()'s recipients (ruling Q3)
+        # and on_commit gives it notify()'s timing, so a rolled-back issue sends nothing.
+        _ic_whatsapp = resolve_recipients([assigned_to], profile)
+
+        def _send_issue_whatsapp():
+            for _wa in _ic_whatsapp:
+                send_notification(
+                    recipient=_wa,
+                    message=(f'A new issue has been raised on project '
+                             f'{project.customer_name}: "{title}". Please login to '
+                             f'review and coordinate resolution.'),
+                    channels=['whatsapp'],
+                    link=_ic_link,
+                    template='issue_created',
+                    template_params=[project.customer_name,
+                                     _wa.user.get_full_name() or _wa.user.username,
+                                     project.customer_name, raiser_name],
+                    related_project=project,
+                    actor=profile,
+                )
+        transaction.on_commit(_send_issue_whatsapp, robust=True)
     # Notify every project manager (PM + coordinators), skipping the raiser and the
     # assignee (who are notified through other paths). project_managers() dedupes.
     for _mgr in project_managers(project):
@@ -12287,28 +12321,39 @@ def create_task_issue(request, project_id, task_id):
     log_activity(project, profile, f"Raised issue: {title} ({severity})", entity_type='Issue', entity_id=issue.pk, action_code='issue_created')
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
-        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         _ic_link = f'/issues/{issue.pk}/'
-        _ic_message = (
-            f'A new issue has been raised on project {project.customer_name}: '
-            f'"{title}".\n\n'
-            f'Please login to review and coordinate resolution.'
+        # In-app and email through notify() (T3a): wording from the issue_raised event or
+        # Admin's active version, sent after commit, raiser and deactivated people dropped.
+        # log_label keeps the template_name these rows always carried.
+        notify(
+            'issue_raised', recipients=[assigned_to], actor=profile,
+            related_project=project, link=_ic_link, log_label='issue_created',
+            values={'customer_name': project.customer_name,
+                    'project_id': project.project_id,
+                    'issue_title': title, 'raised_by_name': raiser_name},
         )
-        _ic_email_message = (
-            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
-            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
-        )
-        send_notification(
-            recipient=assigned_to,
-            message=_ic_email_message,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=_ic_link,
-            subject=f'New Issue Raised — {project.customer_name}',
-            template='issue_created',
-            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
-            related_project=project,
-            actor=profile,
-        )
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase. resolve_recipients() gives it exactly notify()'s recipients (ruling Q3)
+        # and on_commit gives it notify()'s timing, so a rolled-back issue sends nothing.
+        _ic_whatsapp = resolve_recipients([assigned_to], profile)
+
+        def _send_issue_whatsapp():
+            for _wa in _ic_whatsapp:
+                send_notification(
+                    recipient=_wa,
+                    message=(f'A new issue has been raised on project '
+                             f'{project.customer_name}: "{title}". Please login to '
+                             f'review and coordinate resolution.'),
+                    channels=['whatsapp'],
+                    link=_ic_link,
+                    template='issue_created',
+                    template_params=[project.customer_name,
+                                     _wa.user.get_full_name() or _wa.user.username,
+                                     project.customer_name, raiser_name],
+                    related_project=project,
+                    actor=profile,
+                )
+        transaction.on_commit(_send_issue_whatsapp, robust=True)
     # Notify every project manager (PM + coordinators), skipping the raiser and the
     # assignee (who are notified through other paths). project_managers() dedupes.
     for _mgr in project_managers(project):
@@ -12400,28 +12445,39 @@ def create_delivery_issue(request, project_id, dc_id):
     )
     if assigned_to and assigned_to != profile:
         raiser_name = profile.user.get_full_name() or profile.user.username
-        recipient_name = assigned_to.user.get_full_name() or assigned_to.user.username
         _ic_link = f'/issues/{issue.pk}/'
-        _ic_message = (
-            f'A new issue has been raised on project {project.customer_name}: '
-            f'"{title}".\n\n'
-            f'Please login to review and coordinate resolution.'
+        # In-app and email through notify() (T3a): wording from the issue_raised event or
+        # Admin's active version, sent after commit, raiser and deactivated people dropped.
+        # log_label keeps the template_name these rows always carried.
+        notify(
+            'issue_raised', recipients=[assigned_to], actor=profile,
+            related_project=project, link=_ic_link, log_label='issue_created',
+            values={'customer_name': project.customer_name,
+                    'project_id': project.project_id,
+                    'issue_title': title, 'raised_by_name': raiser_name},
         )
-        _ic_email_message = (
-            f'{_ic_message}\n\nView in Horizon Solar PMS:\n'
-            f'https://horizon-solar-pms-production.up.railway.app{_ic_link}'
-        )
-        send_notification(
-            recipient=assigned_to,
-            message=_ic_email_message,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=_ic_link,
-            subject=f'New Issue Raised — {project.customer_name}',
-            template='issue_created',
-            template_params=[project.customer_name, recipient_name, project.customer_name, raiser_name],
-            related_project=project,
-            actor=profile,
-        )
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase. resolve_recipients() gives it exactly notify()'s recipients (ruling Q3)
+        # and on_commit gives it notify()'s timing, so a rolled-back issue sends nothing.
+        _ic_whatsapp = resolve_recipients([assigned_to], profile)
+
+        def _send_issue_whatsapp():
+            for _wa in _ic_whatsapp:
+                send_notification(
+                    recipient=_wa,
+                    message=(f'A new issue has been raised on project '
+                             f'{project.customer_name}: "{title}". Please login to '
+                             f'review and coordinate resolution.'),
+                    channels=['whatsapp'],
+                    link=_ic_link,
+                    template='issue_created',
+                    template_params=[project.customer_name,
+                                     _wa.user.get_full_name() or _wa.user.username,
+                                     project.customer_name, raiser_name],
+                    related_project=project,
+                    actor=profile,
+                )
+        transaction.on_commit(_send_issue_whatsapp, robust=True)
     # Notify every project manager (PM + coordinators), skipping the raiser and the
     # assignee (who are notified through other paths). project_managers() dedupes.
     for _mgr in project_managers(project):
@@ -12595,25 +12651,34 @@ def resolve_issue(request, issue_id):
             f'The issue "{issue.title}" on project {project.customer_name} '
             f'has been marked as resolved by {resolver_name}.'
         )
-        _ir_email_message = (
-            f'{_ir_message}\n\nView in Horizon Solar PMS:\n'
-            f'https://horizon-solar-pms-production.up.railway.app{issue_link}'
+        # Managers, assignee and raiser. resolve_recipients() (inside notify(), and for
+        # WhatsApp below) de-duplicates, drops the resolver as actor and drops anyone
+        # deactivated, so one list serves every channel (T3a, ruling Q3).
+        _ir_recipients = project_managers(project) + [issue.assigned_to, issue.raised_by]
+        notify(
+            'issue_resolved', recipients=_ir_recipients, actor=profile,
+            related_project=project, link=issue_link, log_label='issue_resolved',
+            values={'customer_name': project.customer_name,
+                    'project_id': project.project_id,
+                    'issue_title': issue.title, 'resolved_by_name': resolver_name},
         )
-        notified_pks = {profile.pk}
-        for notify_recipient in project_managers(project) + [issue.assigned_to, issue.raised_by]:
-            if notify_recipient and notify_recipient.pk not in notified_pks:
-                notified_pks.add(notify_recipient.pk)
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase; after commit, like notify().
+        _ir_whatsapp = resolve_recipients(_ir_recipients, profile)
+
+        def _send_resolved_whatsapp():
+            for _wa in _ir_whatsapp:
                 send_notification(
-                    recipient=notify_recipient,
-                    message=_ir_email_message,
-                    channels=['in_app', 'whatsapp', 'email'],
+                    recipient=_wa,
+                    message=_ir_message,
+                    channels=['whatsapp'],
                     link=issue_link,
-                    subject=f'Issue Resolved — {project.customer_name}',
                     template='issue_resolved',
                     template_params=resolved_params,
                     related_project=project,
                     actor=profile,
                 )
+        transaction.on_commit(_send_resolved_whatsapp, robust=True)
         messages.success(request, 'Issue marked as Resolved. PM has been notified.')
     return redirect('issue_detail', issue_id=issue_id)
 
@@ -14487,27 +14552,38 @@ def admin_assign_pm(request, project_id):
         pm_display_name = pm_profile.user.get_full_name() or pm_profile.user.username
         _link = f'/projects/{project.project_id}/overview/'
         _abs_link = request.build_absolute_uri(_link)
-        _body = (
-            f'Hi {pm_display_name},\n\n'
-            f'You have been assigned as Project Manager for {project.customer_name}'
-            + (f' ({project.city})' if project.city else '') + '.\n\n'
-            f'Please review the project details and activate when ready.'
-            f'\n\nView in Horizon Solar PMS:\nhttps://horizon-solar-pms-production.up.railway.app{_link}'
+        # In-app and email through notify() (T3a). The same event and values as the Zoho
+        # path (ruling Q2). No actor, as before: the Admin is not the one being told, and
+        # the rows have never named one (ruling Q8).
+        notify(
+            'project_pm_assigned', recipients=[pm_profile],
+            related_project=project, link=_link, log_label='assign_project',
+            values={'customer_name': project.customer_name,
+                    'project_id': project.project_id,
+                    'customer_and_city': project.customer_name
+                    + (f' ({project.city})' if project.city else '')},
         )
-        send_notification(
-            recipient=pm_profile,
-            message=_body,
-            channels=['in_app', 'whatsapp', 'email'],
-            link=_link,
-            subject=f'New Project Assigned: {project.customer_name}',
-            template='assign_project',
-            template_params=[
-                project.customer_name,
-                pm_display_name,
-                _abs_link,
-            ],
-            related_project=project,
-        )
+        # WhatsApp is still sent here, template and params unchanged, until the WhatsApp
+        # phase; resolve_recipients() and on_commit match notify() (ruling Q3).
+        _ap_whatsapp = resolve_recipients([pm_profile], None)
+
+        def _send_assigned_whatsapp():
+            for _wa in _ap_whatsapp:
+                send_notification(
+                    recipient=_wa,
+                    message=f'You have been assigned as Project Manager for '
+                            f'{project.customer_name}.',
+                    channels=['whatsapp'],
+                    link=_link,
+                    template='assign_project',
+                    template_params=[
+                        project.customer_name,
+                        pm_display_name,
+                        _abs_link,
+                    ],
+                    related_project=project,
+                )
+        transaction.on_commit(_send_assigned_whatsapp, robust=True)
     except Exception as exc:
         logger.error('admin_assign_pm: notification failed for project %s — %s', project.project_id, exc)
 

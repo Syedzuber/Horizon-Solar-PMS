@@ -82,7 +82,7 @@
   </form>
 
   <div class="bg-white border border-gray-200 rounded-lg p-5">
-    <h2 class="text-sm font-semibold text-gray-700 mb-1">Variables</h2>
+    <h2 class="text-sm font-semibold text-gray-700 mb-1">Filled in automatically for each email</h2>
     <p class="text-xs text-gray-400 mb-3">Click to insert at the cursor.</p>
     <ul class="space-y-2">
       {% for v in event.variables %}
@@ -136,7 +136,7 @@
   origin). force_escape because the rendered email is a SafeString.
 {% endcomment %}
 <div class="bg-white border border-gray-200 rounded-lg p-5 mt-6">
-  <h2 class="text-sm font-semibold text-gray-700 mb-2">Preview (sample values)</h2>
+  <h2 class="text-sm font-semibold text-gray-700 mb-2">Preview with sample values</h2>
   <p class="text-sm text-gray-600 mb-2"><span class="text-gray-500">Subject:</span> {{ preview_subject }}</p>
   <iframe sandbox="" srcdoc="{{ preview_html|force_escape }}" title="Preview of the draft"
           class="w-full border border-gray-200 rounded" style="height:520px;"></iframe>

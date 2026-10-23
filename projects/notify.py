@@ -109,16 +109,21 @@ def render_body_html(body, values, allowed):
 
     The ORDER is what makes it safe. The Admin-typed paragraph is escaped first (escape()
     leaves { } and * alone, so placeholders and bold markers survive it); bold and line
-    breaks are applied to that, before any value is in it, so a value holding ** or a
-    newline cannot become markup; each value is escaped as it is substituted. Every
-    character in the result is therefore either escaped input or a tag written here,
-    which is what justifies mark_safe.
+    breaks are applied to that, before any value is in it, so a value holding ** cannot
+    become markup; each value is escaped as it is substituted, and only then are its own
+    line breaks turned into <br> (T3a, P3: a multi-line value such as an address reads as
+    lines, as it does in the text body). Every character in the result is therefore either
+    escaped input or a tag written here, which is what justifies mark_safe.
     """
+    def fill(value):
+        text = str(escape(str(value))).replace('\r\n', '\n')
+        return text.replace('\n', '<br>\n')
+
     out = []
     for paragraph in _paragraphs(body):
         marked = _BOLD_RE.sub(r'<strong>\1</strong>', str(escape(paragraph)))
         marked = marked.replace('\n', '<br>\n')
-        filled = _substitute(marked, values, allowed, lambda v: str(escape(str(v))))
+        filled = _substitute(marked, values, allowed, fill)
         out.append(f'<p style="{_PARAGRAPH_STYLE}">{filled}</p>')
     return mark_safe(''.join(out))
 
@@ -144,6 +149,9 @@ def render_email(event, template, values, link):
         'body_text': render_body_text(body_src, values, allowed),
         'link': values['link'],
         'button_label': button or DEFAULT_BUTTON_LABEL,
+        # The footer names the address _zeptomail_post sets as reply-to (T3a, P4); both
+        # read the one setting, so the footer cannot name a different inbox.
+        'reply_to': settings.NOTIFY_REPLY_TO,
     }
     html = render_to_string('projects/email/base_email.html', context)
     text = render_to_string('projects/email/base_email.txt', context)
@@ -165,11 +173,15 @@ def active_template(event_code, channel):
         event_code=event_code, channel=channel, status=NotificationTemplate.ACTIVE).first()
 
 
-def _eligible(recipients, actor):
+def resolve_recipients(recipients, actor):
     """`recipients` de-duplicated by pk, without the actor or anyone deactivated.
 
     Both active flags count: UserProfile.is_active is this app's soft deactivation, and
     User.is_active is Django's; either one off means the person no longer works here.
+
+    PUBLIC because a call site that still sends WhatsApp itself (T3a: WhatsApp moves in
+    its own phase) must use this for that leg too (ruling Q3), so in-app, email and
+    WhatsApp always reach the same people and cannot drift apart.
     """
     actor_pk = getattr(actor, 'pk', None)
     seen, out = set(), []
@@ -185,11 +197,11 @@ def _eligible(recipients, actor):
     return out
 
 
-def _log_base(event, recipient, actor, related_project):
+def _log_base(event, recipient, actor, related_project, log_label):
     """The fixed fields of a row notify() writes itself. `message` is the event's label:
     a paused or failed send has no rendered text to record."""
     return dict(recipient=recipient, related_project=related_project, actor=actor,
-                message=event.label, template_name='')
+                message=event.label, template_name=log_label or '')
 
 
 def _email_plan(event):
@@ -204,12 +216,18 @@ def _email_plan(event):
         return 'error', exc
 
 
-def _send_to_one(event, recipient, values, actor, related_project, link, plan):
+def _send_to_one(event, recipient, values, actor, related_project, link, plan, log_label):
     """In-app, then email, for one person. The channels are independent (ruling Q4): a
-    failure on one is logged and the other is still attempted."""
+    failure on one is logged and the other is still attempted.
+
+    `log_label` reaches send_notification() as `template`. On the in_app and email
+    channels that argument is used for one thing only, NotificationLog.template_name, so
+    this is how the label lands on the rows without a change to send_notification().
+    """
     name = recipient.user.get_full_name() or recipient.user.username
     values = dict(values, recipient_name=name, link=absolute_url(link))
     allowed = event.variable_names
+    base = _log_base(event, recipient, actor, related_project, log_label)
 
     try:
         send_notification(
@@ -217,19 +235,19 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan):
             message=render_plain(event.in_app_text, values, allowed),
             channels=['in_app'],
             link=link,
+            template=log_label,
             related_project=related_project,
             actor=actor,
             event_code=event.code,
         )
     except Exception as exc:
         logger.exception('notify: in-app %s to %s failed', event.code, recipient.pk)
-        _log(_log_base(event, recipient, actor, related_project), 'in_app', 'failed',
-             f'{type(exc).__name__}: {exc}', event_code=event.code)
+        _log(base, 'in_app', 'failed', f'{type(exc).__name__}: {exc}',
+             event_code=event.code)
 
     if plan is None:
         return
     state, payload = plan
-    base = _log_base(event, recipient, actor, related_project)
     if state == 'paused':
         _log(base, 'email', 'skipped', 'event paused', event_code=event.code)
         return
@@ -245,6 +263,7 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan):
             channels=['email'],
             subject=subject,
             html_message=html,
+            template=log_label,
             related_project=related_project,
             actor=actor,
             event_code=event.code,
@@ -256,11 +275,12 @@ def _send_to_one(event, recipient, values, actor, related_project, link, plan):
              event_code=event.code, template_version=payload)
 
 
-def _send(event, recipients, values, actor, related_project, link):
+def _send(event, recipients, values, actor, related_project, link, log_label):
     plan = _email_plan(event) if 'email' in event.channels else None
     for recipient in recipients:
         try:
-            _send_to_one(event, recipient, values, actor, related_project, link, plan)
+            _send_to_one(event, recipient, values, actor, related_project, link, plan,
+                         log_label)
         except Exception:
             # _send_to_one already catches per channel; this is the backstop for
             # anything outside those (reading the recipient's name, say), so one
@@ -268,24 +288,30 @@ def _send(event, recipients, values, actor, related_project, link):
             logger.exception('notify: %s to %s failed', event.code, recipient.pk)
 
 
-def notify(event_code, *, recipients, values, actor=None, related_project=None, link=''):
+def notify(event_code, *, recipients, values, actor=None, related_project=None, link='',
+           log_label=None):
     """Send `event_code` to `recipients` after the current transaction commits.
 
     recipients      : iterable of UserProfile. De-duplicated; the actor and anyone
-                      deactivated are dropped.
+                      deactivated are dropped (resolve_recipients).
     values          : {variable name: value} for the event's declared variables.
                       recipient_name and link are supplied here and override any given.
     actor           : UserProfile who caused the event; never told about their own act.
     related_project : stored on every log row.
     link            : relative path for the in-app click-through; the email's button
                       links to absolute_url(link). '' means no button.
+    log_label       : written to NotificationLog.template_name on every row this send
+                      causes, in-app and email, sent or not (T3a, P1). A send moved onto
+                      notify() passes the label it logged before, so the readers and
+                      filters keyed on that column keep working; event_code is recorded
+                      beside it either way. None leaves the column blank.
 
     Raises KeyError for an unknown event code (a programmer error, caught by any test
     that fires the event). Nothing after that raises.
     """
     event = get_event(event_code)
     try:
-        targets = _eligible(recipients, actor)
+        targets = resolve_recipients(recipients, actor)
         if not targets:
             return
         frozen = dict(values or {})
@@ -294,7 +320,7 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
         # the committed action. A lambda, not functools.partial: robust on_commit names
         # the callback in its log line, which needs a __qualname__.
         transaction.on_commit(
-            lambda: _send(event, targets, frozen, actor, related_project, link),
+            lambda: _send(event, targets, frozen, actor, related_project, link, log_label),
             robust=True)
     except Exception:
         logger.exception('notify: could not schedule %s', event_code)

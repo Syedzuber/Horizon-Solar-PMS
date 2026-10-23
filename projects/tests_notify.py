@@ -86,7 +86,10 @@ class RegistryTests(TestCase):
             _build_registry([_event(variables=(Variable('link', 'm', 's'),))])
 
     def test_the_shipped_registry_holds_the_admin_test_message(self):
-        self.assertEqual(list(NOTIFICATION_EVENTS), [EVENT])
+        # T3a added the first moved sends after it; the admin test message stays first.
+        self.assertEqual(list(NOTIFICATION_EVENTS), [
+            EVENT, 'issue_raised', 'issue_resolved', 'project_pm_assigned',
+            'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached'])
         event = get_event(EVENT)
         self.assertEqual((event.tier, event.default_state, event.channels),
                          ('KNOW', 'active', ('email',)))

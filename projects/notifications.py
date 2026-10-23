@@ -208,6 +208,13 @@ def _zeptomail_post(to_email, to_name, subject, text_body, html_body=None):
         'subject': subject or 'Horizon Solar — Notification',
         'textbody': text_body,
     }
+    # Reply-to on every email this sends, per-user and digest alike (T3a, P4): From is
+    # a no-reply mailbox, so a reply would otherwise go nowhere. Read at call time so
+    # override_settings reaches it. send_raw_email builds its own payload and is
+    # deliberately left without one.
+    reply_to = getattr(settings, 'NOTIFY_REPLY_TO', '')
+    if reply_to:
+        payload['reply_to'] = [{'address': reply_to, 'name': 'Horizon Solar PMS'}]
     # ZeptoMail accepts htmlbody + textbody together (multipart alternative). Clients
     # that can render HTML use htmlbody; the rest fall back to the plain-text message.
     if html_body:

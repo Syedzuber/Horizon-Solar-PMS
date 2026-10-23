@@ -1481,7 +1481,8 @@ class ExistingIsolationTests(ResidentialBaselineBase):
 class NotificationTests(ResidentialBaselineBase):
     """Who gets told, and on which channels.
 
-    `send_notification()` is patched at its import site in `projects.views` — nothing
+    `send_notification()` is patched at its import site in `projects.views` (and, for
+    the sends T3a moved onto notify(), in `projects.notify` too; see _sends) — nothing
     is sent, and the recipient set is asserted directly. `resolve_issue` matters most:
     0.2 changes who can reach it, and the notification is the part that escapes the
     system.
@@ -1491,6 +1492,31 @@ class NotificationTests(ResidentialBaselineBase):
     def _recipients(mock):
         return {call.kwargs['recipient'] for call in mock.call_args_list}
 
+    def _sends(self, act):
+        """Every send_notification() call `act` causes, after commit.
+
+        T3a moved the issue and payment-milestone sends: in-app and email now go through
+        notify(), which calls send_notification() from projects.notify, one channel per
+        call, after commit; WhatsApp is still called from projects.views, also after
+        commit. So both import sites are patched and the on-commit callbacks are run, and
+        the relationship asserted below is unchanged: who is told, on which channels.
+        notify() passes its log label as `template`, so `template` is the same label on
+        every call, WhatsApp or not.
+        """
+        with patch('projects.views.send_notification') as direct, \
+                patch('projects.notify.send_notification') as via_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                act()
+        return direct.call_args_list + via_notify.call_args_list
+
+    @staticmethod
+    def _channels(calls):
+        """{recipient: set of channels} across `calls`."""
+        out = {}
+        for call in calls:
+            out.setdefault(call.kwargs['recipient'], set()).update(call.kwargs['channels'])
+        return out
+
     def test_resolving_an_issue_notifies_managers_assignee_and_raiser_but_not_the_resolver(self):
         client = _client_for(self.pm_a)
         client.post(reverse('create_project_issue', args=[self.project_a.project_id]),
@@ -1499,19 +1525,19 @@ class NotificationTests(ResidentialBaselineBase):
         issue = Issue.objects.get(title='Notify me')
         client.post(reverse('update_issue_status', args=[issue.pk]))
 
-        with patch('projects.views.send_notification') as sender:
-            client.post(reverse('resolve_issue', args=[issue.pk]),
-                        {'resolution_note': 'Sorted on site.'})
+        calls = self._sends(lambda: client.post(reverse('resolve_issue', args=[issue.pk]),
+                                                {'resolution_note': 'Sorted on site.'}))
 
         issue.refresh_from_db()
         self.assertEqual(issue.status, Issue.RESOLVED)
 
-        recipients = self._recipients(sender)
+        channels = self._channels(calls)
         # PM is the resolver and is excluded; the coordinator is a project manager.
-        self.assertEqual(recipients, {self.coord_a, self.se_a})
-        self.assertNotIn(self.pm_a, recipients)
-        for call in sender.call_args_list:
-            self.assertEqual(call.kwargs['channels'], ['in_app', 'whatsapp', 'email'])
+        self.assertEqual(set(channels), {self.coord_a, self.se_a})
+        self.assertNotIn(self.pm_a, channels)
+        for person in channels:
+            self.assertEqual(channels[person], {'in_app', 'whatsapp', 'email'})
+        for call in calls:
             self.assertEqual(call.kwargs['template'], 'issue_resolved')
             self.assertEqual(call.kwargs['related_project'], self.project_a)
             self.assertEqual(call.kwargs['actor'], self.pm_a)
@@ -1525,63 +1551,62 @@ class NotificationTests(ResidentialBaselineBase):
         issue = Issue.objects.get(title='Scoped notify')
         client.post(reverse('update_issue_status', args=[issue.pk]))
 
-        with patch('projects.views.send_notification') as sender:
-            client.post(reverse('resolve_issue', args=[issue.pk]),
-                        {'resolution_note': 'done'})
+        calls = self._sends(lambda: client.post(reverse('resolve_issue', args=[issue.pk]),
+                                                {'resolution_note': 'done'}))
 
-        recipients = self._recipients(sender)
+        recipients = set(self._channels(calls))
+        self.assertTrue(recipients)
         self.assertNotIn(self.pm_b, recipients)
         self.assertNotIn(self.se_b, recipients)
 
     def test_raising_an_assigned_issue_notifies_the_assignee_and_the_managers(self):
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.pm_a).post(
-                reverse('create_project_issue', args=[self.project_a.project_id]),
-                {'title': 'New issue', 'severity': Issue.HIGH,
-                 'assigned_to': str(self.se_a.pk)},
-            )
-        recipients = self._recipients(sender)
-        self.assertEqual(recipients, {self.se_a, self.coord_a})
+        calls = self._sends(lambda: _client_for(self.pm_a).post(
+            reverse('create_project_issue', args=[self.project_a.project_id]),
+            {'title': 'New issue', 'severity': Issue.HIGH,
+             'assigned_to': str(self.se_a.pk)},
+        ))
+        channels = self._channels(calls)
+        self.assertEqual(set(channels), {self.se_a, self.coord_a})
 
-        by_recipient = {c.kwargs['recipient']: c.kwargs for c in sender.call_args_list}
-        self.assertEqual(by_recipient[self.se_a]['template'], 'issue_created')
-        self.assertEqual(by_recipient[self.se_a]['channels'],
-                         ['in_app', 'whatsapp', 'email'])
+        for call in calls:
+            if call.kwargs['recipient'] == self.se_a:
+                self.assertEqual(call.kwargs['template'], 'issue_created')
+        self.assertEqual(channels[self.se_a], {'in_app', 'whatsapp', 'email'})
         # Managers get an in-app nudge only — never WhatsApp or email.
-        self.assertEqual(by_recipient[self.coord_a]['channels'], ['in_app'])
+        self.assertEqual(channels[self.coord_a], {'in_app'})
 
-    def test_completing_a_payment_milestone_task_notifies_finance_managers_bd_and_ceo(self):
+    def test_completing_a_payment_milestone_task_notifies_managers_bd_and_ceo(self):
         task = self._task(self.project_a, 'Advance Payment Confirmation')
         self.assertTrue(task.is_payment_milestone)
         self.assertEqual(task.assigned_to, self.finance)
         Task.objects.filter(pk=task.pk).update(due_date=date.today())
 
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.finance).post(
-                reverse('task_status_update',
-                        args=[self.project_a.project_id, task.pk]),
-                {'status': Task.DONE},
-            )
+        calls = self._sends(lambda: _client_for(self.finance).post(
+            reverse('task_status_update',
+                    args=[self.project_a.project_id, task.pk]),
+            {'status': Task.DONE},
+        ))
         task.refresh_from_db()
         self.assertEqual(task.status, Task.DONE)
 
-        recipients = self._recipients(sender)
-        self.assertEqual(recipients,
-                         {self.finance, self.pm_a, self.coord_a, self.bd, self.ceo})
-        for call in sender.call_args_list:
+        channels = self._channels(calls)
+        # T3a: the Finance user completed the task, so as the actor they are no longer
+        # told about their own act, on any channel (P2, ruling Q3).
+        self.assertEqual(set(channels), {self.pm_a, self.coord_a, self.bd, self.ceo})
+        for person in channels:
+            self.assertEqual(channels[person], {'in_app', 'whatsapp', 'email'})
+        for call in calls:
             self.assertEqual(call.kwargs['template'], 'payment_notification')
-            self.assertEqual(call.kwargs['channels'], ['in_app', 'whatsapp', 'email'])
 
     def test_an_ordinary_task_completion_notifies_nobody(self):
         task = self._task(self.project_a, 'Earthing Work')
         Task.objects.filter(pk=task.pk).update(due_date=date.today())
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.se_a).post(
-                reverse('task_status_update',
-                        args=[self.project_a.project_id, task.pk]),
-                {'status': Task.DONE},
-            )
-        sender.assert_not_called()
+        calls = self._sends(lambda: _client_for(self.se_a).post(
+            reverse('task_status_update',
+                    args=[self.project_a.project_id, task.pk]),
+            {'status': Task.DONE},
+        ))
+        self.assertEqual(calls, [])
 
     def test_confirming_a_payment_request_notifies_the_requester_in_app_only(self):
         """O5 REPLACED THIS RELATIONSHIP, it did not lose it. Confirming used to send

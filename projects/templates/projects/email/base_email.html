@@ -15,7 +15,8 @@
   `subject` and `button_label` are escaped here like any other value.
   The button is drawn only when the send has a link; `link` is absolute, built by
   notify.absolute_url() from settings.APP_BASE_URL.
-  No reply-to line and no footer yet: T3 adds both together.
+  The footer names `reply_to`, settings.NOTIFY_REPLY_TO, the same setting
+  notifications._zeptomail_post sends as the reply-to address (T3a).
 {% endcomment %}
 <body style="margin:0; padding:0; background-color:#f4f6f8;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f6f8; padding:24px 12px;">
@@ -36,6 +37,13 @@
           <tr>
             <td style="padding:8px 28px 28px 28px;">
               <a href="{{ link }}" style="display:inline-block; background-color:#1a7a4a; color:#ffffff; font-family:Arial,Helvetica,sans-serif; font-size:14px; text-decoration:none; padding:11px 22px; border-radius:6px;">{{ button_label }}</a>
+            </td>
+          </tr>
+          {% endif %}
+          {% if reply_to %}
+          <tr>
+            <td style="padding:14px 28px 18px 28px; border-top:1px solid #e5e9ee; font-family:Arial,Helvetica,sans-serif; font-size:12px; line-height:1.5; color:#6b7785;">
+              Replies to this email reach the PMS team at {{ reply_to }}.
             </td>
           </tr>
           {% endif %}

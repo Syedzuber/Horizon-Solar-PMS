@@ -325,6 +325,44 @@ def activate(template, by):
     return template
 
 
+SEED_CHANGE_NOTE = 'Version 1 from the wording in code at T3'
+
+
+def seed_initial_version(event_code, channel, by):
+    """Create version 1 of the event's wording from the code default, already ACTIVE.
+
+    THE ONE EXCEPTION TO TEST-BEFORE-ACTIVATE (T3a, Q9). activate() refuses a version
+    that was never test-sent; this does not ask, because the content is the registry's
+    code default, which notify() was already sending and which tests_notify_migration_a
+    proves word for word. Nothing else may create an active version without a test.
+
+    Refused once the event and channel have ANY version, of any status, so a run after
+    Admin has started editing can never put the code default back over their work. The
+    content is still validated, as activate() would. Two seeds at the same moment would
+    both pass the check and collide on uniq_notification_template_version; the second
+    fails with an IntegrityError rather than producing a second version 1.
+    """
+    event = _event_for(event_code, channel)
+    with transaction.atomic():
+        if NotificationTemplate.objects.filter(event_code=event_code,
+                                               channel=channel).exists():
+            raise NotificationAdminRefused(
+                f'{event.label} already has a {channel} version; version 1 is only '
+                f'seeded for an event that has none.')
+        template = NotificationTemplate.objects.create(
+            event_code=event_code, channel=channel, version_no=1,
+            status=NotificationTemplate.DRAFT, created_by=by,
+            change_note=SEED_CHANGE_NOTE, subject=event.default_subject,
+            body=event.default_body, button_label=event.button_label)
+        errors = validate_template(template)
+        if errors:
+            # Rolls the draft back with the transaction: a code default that does not
+            # validate is a code fault, and no half-seeded version is left behind.
+            raise NotificationAdminRefused(' '.join(errors))
+        template.activate()
+    return template
+
+
 def set_state(event_code, channel, is_active, by, reason):
     """Switch an event's channel on or off, with a reason, and record the change.
 

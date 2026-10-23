@@ -403,26 +403,35 @@ class WebhookTests(TestCase):
             reverse('zoho_webhook'), data=json.dumps(payload),
             content_type='application/json', HTTP_X_WEBHOOK_TOKEN='spmsecret123')
 
-    @mock.patch('projects.views.send_raw_email')
+    # T3a: the no-PM alert is the project_unassigned_alert event through notify(), to
+    # every active Admin, instead of an in-app send_notification() to one Admin plus
+    # send_raw_email() to a fixed address. These tests patch notify() and ask which
+    # event the webhook raised; the relationship they pin is unchanged.
+    @staticmethod
+    def _events(notify):
+        return [call.args[0] for call in notify.call_args_list]
+
+    @mock.patch('projects.views.notify')
     @mock.patch('projects.views.send_notification')
-    def test_matched_pm_is_assigned_through_the_chokepoint(self, _notify, _email):
+    def test_matched_pm_is_assigned_through_the_chokepoint(self, _notify, _event):
         self.assertEqual(self._post('SPM-Z1').status_code, 200)
         project = Project.objects.get(zoho_deal_id='SPM-Z1')
         self.assertEqual(project.assigned_pm_id, self.pm.pk)
         row = SitePmAssignment.objects.get(site=project)
         self.assertEqual((row.pm_id, row.assigned_by_id), (self.pm.pk, None))
-        _email.assert_not_called()
+        self.assertEqual(self._events(_event), ['project_pm_assigned'])
 
-    @mock.patch('projects.views.send_raw_email')
+    @mock.patch('projects.views.notify')
     @mock.patch('projects.views.send_notification')
-    def test_a_failed_pm_step_keeps_the_project_and_alerts_admin(self, _notify, _email):
+    def test_a_failed_pm_step_keeps_the_project_and_alerts_admin(self, _notify, _event):
         with mock.patch('projects.views.change_site_pm', side_effect=RuntimeError('boom')):
             self.assertEqual(self._post('SPM-Z2').status_code, 200)
         project = Project.objects.get(zoho_deal_id='SPM-Z2')
         self.assertIsNone(project.assigned_pm_id)
         self.assertFalse(SitePmAssignment.objects.filter(site=project).exists())
-        _email.assert_called_once()                    # the existing no-PM path ran
-        self.assertEqual(_notify.call_args.kwargs['channels'], ['in_app'])
+        # the existing no-PM path ran
+        self.assertEqual(self._events(_event), ['project_unassigned_alert'])
+        _notify.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

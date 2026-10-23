@@ -221,6 +221,24 @@ class SoftDeleteBase(TestCase):
                          'fixture issue is not In Progress; resolve would no-op anyway')
         return issue
 
+    def _resolve_sends(self, issue):
+        """(response, every send_notification() call) for the PM resolving `issue`.
+
+        T3a moved resolve_issue's in-app and email onto notify(), which calls
+        send_notification() from projects.notify, after commit; its WhatsApp is still
+        called from projects.views, also after commit. So both import sites are patched
+        and on-commit callbacks are run, or a send would be missed and the "no
+        notification" assertion would pass without checking anything.
+        """
+        with patch('projects.views.send_notification') as direct, \
+                patch('projects.notify.send_notification') as via_notify:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = _client_for(self.pm).post(
+                    reverse('resolve_issue', args=[issue.pk]),
+                    {'resolution_note': 'Sorted on site.'},
+                )
+        return response, direct.call_args_list + via_notify.call_args_list
+
 
 # ---------------------------------------------------------------------------
 # 1 — deletion does not change status. Everything else follows from this.
@@ -392,12 +410,8 @@ class DeletedProjectChildRefusalTests(SoftDeleteBase):
         issue = self._issue_in_progress(self.project)
         self._delete(self.project)
 
-        with patch('projects.views.send_notification') as sender:
-            _client_for(self.pm).post(
-                reverse('resolve_issue', args=[issue.pk]),
-                {'resolution_note': 'Sorted on site.'},
-            )
-        sender.assert_not_called()
+        _response, calls = self._resolve_sends(issue)
+        self.assertEqual(calls, [])
 
     def test_the_other_issue_write_endpoints_refuse_a_deleted_project(self):
         """All six bare Issue resolutions now route through _issue_base_qs()."""
@@ -563,17 +577,12 @@ class LiveProjectStillWorksTests(SoftDeleteBase):
         were inverted this would silently stop notifying and no other test would notice.
         """
         issue = self._issue_in_progress(self.project)
-        with patch('projects.views.send_notification') as sender:
-            response = _client_for(self.pm).post(
-                reverse('resolve_issue', args=[issue.pk]),
-                {'resolution_note': 'Sorted on site.'},
-            )
+        response, calls = self._resolve_sends(issue)
         self.assertEqual(response.status_code, 302)
         issue.refresh_from_db()
         self.assertEqual(issue.status, Issue.RESOLVED)
         self.assertEqual(issue.resolution_note, 'Sorted on site.')
-        self.assertTrue(sender.call_args_list,
-                        'resolving a live issue stopped notifying anyone')
+        self.assertTrue(calls, 'resolving a live issue stopped notifying anyone')
 
     def test_a_live_challan_still_takes_a_grn(self):
         challan = self._make_dc(self.project)

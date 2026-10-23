@@ -160,6 +160,11 @@ ZEPTOMAIL_FROM_EMAIL = config('ZEPTOMAIL_FROM_EMAIL', default='noreply@horizonre
 # CSRF_TRUSTED_ORIGINS, or its links answer 400 and its forms fail the CSRF check.
 APP_BASE_URL = config('APP_BASE_URL', default='https://horizon-solar-pms-production.up.railway.app')
 
+# Reply-to on every ZeptoMail email, digests included (T3a), and the address the
+# base_email footer names. The From address is a no-reply mailbox, so without this a
+# reply is lost. Must be on a domain verified in ZeptoMail (horizonrenewablepower.com).
+NOTIFY_REPLY_TO = config('NOTIFY_REPLY_TO', default='pms@horizonrenewablepower.com')
+
 # EOD aggregate (company-wide) digest recipients — fixed addresses, not UserProfiles.
 # Mirrors the Santosh-for-Finance hardcoding pattern. Zuber MUST replace both
 # placeholders (env vars ADMIN_DIGEST_EMAIL / HR_DIGEST_EMAIL, or edit here) with real

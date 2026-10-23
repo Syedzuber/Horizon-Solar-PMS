@@ -457,12 +457,13 @@ class RenderingTests(ScreenBase):
         self.assertIn('>Next</p>', html)
         self.assertIn('Line one\nLine two\n\nNext', text)
 
-    def test_a_newline_in_a_value_is_not_a_br(self):
+    def test_a_newline_in_a_value_is_a_br(self):
+        # T3a (P3) reversed this: a line break inside a value is now a <br> as well.
         template = NotificationTemplate(event_code=EVENT, channel=CH, subject='S',
                                         body='{{ sender_name }}', button_label='Go')
         _, _, html = render_email(get_event(EVENT), template,
                                   {'sender_name': 'A\nB', 'recipient_name': 'B'}, '')
-        self.assertNotIn('A<br>', html)
+        self.assertIn('A<br>\nB', html)
 
 
 def _events(n):
