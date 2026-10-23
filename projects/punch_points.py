@@ -38,15 +38,15 @@ from django.utils import timezone
 from .models import (
     Project, PunchPoint, PunchPointEvent, SiteQaqcAssignment, UserProfile, log_activity,
 )
-from .notifications import send_notification
+from .notify import notify_now, render_plain
+from .notify_registry import get_event
 from .permissions import (
     QAQC_ENGINEER_ROLES, project_managers, site_has_effective_qaqc, site_qaqc_engineer_id,
     user_can_rectify_punch_point, user_can_reverify_punch_point,
 )
 
-IN_APP_AND_EMAIL = ['in_app', 'email']
-
-# NotificationLog.template_name labels. Not Interakt templates: no WhatsApp channel.
+# NotificationLog.template_name labels, and since T3c the notify_registry event codes of
+# the same name. Not Interakt templates: no WhatsApp channel.
 T_RAISED_BY_VISIT  = 'punch_point_raised_by_visit'
 T_RECTIFIED        = 'punch_point_rectified'
 T_REVERIFY_REJECTED = 'punch_point_reverify_rejected'
@@ -660,29 +660,33 @@ def _point_link(project_id, task_pk, point_pk=None):
     return f'{link}#punch-point-{point_pk}' if point_pk else f'{link}#punchPointsBlock'
 
 
-def _send_point_notices(recipient_pks, message, project_pk, actor_pk, task_pk, point_pk,
+def _send_point_notices(recipient_pks, values, project_pk, actor_pk, task_pk, point_pk,
                         template):
-    """One notice per recipient. A person deactivated on either model is not told: they
-    cannot sign in to act on it."""
+    """One notice per recipient through notify_now() (T3c): `template` is both the
+    registry event and the NotificationLog label, `values` the event's values as the queue
+    function composed them. notify_now(), not notify(): this already runs on commit. A
+    person deactivated on either model is not told: they cannot sign in to act on it."""
     project = Project.objects.filter(pk=project_pk).first()
     actor = UserProfile.objects.filter(pk=actor_pk).first()
-    link = _point_link(project.project_id, task_pk, point_pk) if project else ''
-    for recipient in (UserProfile.objects.select_related('user')
-                      .filter(pk__in=recipient_pks, is_active=True, user__is_active=True)):
-        send_notification(
-            recipient, message, channels=IN_APP_AND_EMAIL, link=link, subject=message,
-            template=template, related_project=project, actor=actor,
-        )
+    if project is None:
+        return
+    # The people the queue function named, still active on both models.
+    recipients = (UserProfile.objects.select_related('user')
+                  .filter(pk__in=recipient_pks, is_active=True, user__is_active=True))
+    notify_now(template, recipients=recipients, values=values, actor=actor,
+               related_project=project,
+               link=_point_link(project.project_id, task_pk, point_pk),
+               log_label=template)
 
 
-def _on_commit_notice(recipient_pks, message, project_pk, actor_pk, task_pk, point_pk,
+def _on_commit_notice(recipient_pks, values, project_pk, actor_pk, task_pk, point_pk,
                       template):
     recipient_pks = [pk for pk in recipient_pks if pk is not None and pk != actor_pk]
     if not recipient_pks:
         return
     # A lambda, not functools.partial, as in approval_notices.py.
     transaction.on_commit(
-        lambda: _send_point_notices(recipient_pks, message, project_pk, actor_pk,
+        lambda: _send_point_notices(recipient_pks, values, project_pk, actor_pk,
                                     task_pk, point_pk, template),
         robust=True)
 
@@ -705,10 +709,10 @@ def queue_visit_raise_notices(points, visit, project, actor):
         if task.assigned_to_id is None:
             continue
         count = len(task_points)
-        message = (f"QA/QC visit {visit.visit_date:%d %b %Y} raised {count} punch "
-                   f"point{'s' if count != 1 else ''} on your task '{task.task_name}' at "
-                   f"{_site_label(project)}. Rectify each with a remark and a photo.")
-        _on_commit_notice([task.assigned_to_id], message, project.pk, actor.pk, task.pk,
+        values = {'visit_date': f'{visit.visit_date:%d %b %Y}',
+                  'points': f"{count} punch point{'s' if count != 1 else ''}",
+                  'task_name': task.task_name, 'site_label': _site_label(project)}
+        _on_commit_notice([task.assigned_to_id], values, project.pk, actor.pk, task.pk,
                           task_points[0].pk if count == 1 else None, T_RAISED_BY_VISIT)
 
 
@@ -719,14 +723,21 @@ def _queue_rectified_notice(point, task, project, actor):
         recipients = [site_qaqc_engineer_id(project)]
     else:
         recipients = [p.pk for p in project_managers(project)]
-    message = (f"Punch point on '{task.task_name}' at {_site_label(project)} was marked "
-               f"rectified and is awaiting re-verification.")
-    _on_commit_notice(recipients, message, project.pk, actor.pk, task.pk, point.pk,
+    values = {'task_name': task.task_name, 'site_label': _site_label(project)}
+    _on_commit_notice(recipients, values, project.pk, actor.pk, task.pk, point.pk,
                       T_RECTIFIED)
 
 
 def _queue_reverify_rejected_notice(point, task, project, actor, reason):
-    message = (f"The rectification of a punch point on '{task.task_name}' at "
-               f"{_site_label(project)} was not accepted: {reason}")[:500]
-    _on_commit_notice([task.assigned_to_id], message, project.pk, actor.pk, task.pk,
+    values = {'task_name': task.task_name, 'site_label': _site_label(project)}
+    # Before T3c the whole message was cut at 500 characters. Now the reason is cut (T3c,
+    # Q4) so the in-app text stays within 500: the same cut for any reason without runs of
+    # whitespace, which the in-app text now collapses. The frame is measured around a
+    # one-character reason: rendered with '' it would lose its trailing space to
+    # render_plain's whitespace collapse.
+    event = get_event(T_REVERIFY_REJECTED)
+    frame = len(render_plain(event.in_app_text, dict(values, reason='x'),
+                             event.variable_names)) - 1
+    values['reason'] = reason[:max(500 - frame, 0)]
+    _on_commit_notice([task.assigned_to_id], values, project.pk, actor.pk, task.pk,
                       point.pk, T_REVERIFY_REJECTED)

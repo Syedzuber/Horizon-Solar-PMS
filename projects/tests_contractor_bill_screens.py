@@ -634,8 +634,10 @@ class BillEmailTests(NoticeBase):
 
     def assert_carries_summary(self, mail, approval):
         summary = self.summary(approval)
-        self.assertTrue(mail['text'].endswith(f'\n\nBill: {summary}'), mail['text'])
-        self.assertIn(f'Bill:</span> {summary}', mail['html'])
+        # T3c: the summary is the body's last paragraph, followed by the button's link
+        # line and the footer; in the HTML part (base_email) a paragraph of its own.
+        self.assertIn(f'\n\nBill: {summary}\n\n', mail['text'])
+        self.assertIn(f'>Bill: {summary}</p>', mail['html'])
         for secret in ('fixture-bills', 'bill/fixture.pdf', 'bill.pdf', 'token'):
             self.assertNotIn(secret, mail['text'])
             self.assertNotIn(secret, mail['html'])
@@ -644,8 +646,9 @@ class BillEmailTests(NoticeBase):
         """4a-3 (D-A53): a Site Engineer's email carries the work — contractor, site,
         tasks — and never the bill number, the amount or the PDF."""
         site = approval.bill_detail.project.project_id
-        self.assertTrue(mail['text'].endswith(
-            f'\n\nWork: Approval Contractor · {site} · Foundation'), mail['text'])
+        # T3c: the body's last paragraph, then the button's link line and the footer.
+        self.assertIn(f'\n\nWork: Approval Contractor · {site} · Foundation\n\n',
+                      mail['text'])
         for secret in ('CB-001', '₹', 'fixture-bills', 'bill/fixture.pdf', 'bill.pdf',
                        'token'):
             self.assertNotIn(secret, mail['text'])
@@ -681,7 +684,7 @@ class BillEmailTests(NoticeBase):
         self.create_material(design=False)
         mail = [m for m in self.mail if m['to'] == 'ap_pm@example.com']
         self.assertIn('\n\nMaterial: ', mail[0]['text'])
-        self.assertIn('Material:</span>', mail[0]['html'])
+        self.assertIn('>Material: ', mail[0]['html'])   # T3c: a base_email paragraph
         self.assertNotIn('Bill:', mail[0]['html'])
 
     def test_the_summary_function_names_no_file(self):

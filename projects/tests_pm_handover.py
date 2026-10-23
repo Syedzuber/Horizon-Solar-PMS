@@ -78,6 +78,19 @@ def _name(profile):
     return profile.user.get_full_name()
 
 
+def _pm_pair(notify_send):
+    """T3c: the PM-6 pair as a mock of projects.notify.send_notification saw it.
+    notify_now() calls it by keyword, once with ['in_app'] and once with ['email'] per
+    PM. {recipient pk: [(channel, message, link)]}, handover labels only."""
+    out = {}
+    for call in notify_send.call_args_list:
+        kwargs = call.kwargs
+        if kwargs.get('template') in ('pm_handover_incoming', 'pm_handover_outgoing'):
+            out.setdefault(kwargs['recipient'].pk, []).append(
+                (kwargs['channels'][0], kwargs['message'], kwargs.get('link', '')))
+    return out
+
+
 def _db_error_on_call(n):
     """A change_site_pm stand-in that does the real work, then on its n-th call hits a
     real database error: an INSERT violating NOT NULL. The site's writes are already
@@ -258,21 +271,21 @@ class BulkHandoverTests(HandoverFixture):
                          (self.pm_a.pk, self.admin.pk, REASON))
 
     def test_one_notice_to_each_pm_and_none_per_step(self, summary, per_step):
-        self._hand_over_all()
+        with mock.patch('projects.notify.send_notification') as pair:
+            self._hand_over_all()
         per_step.assert_not_called()
-        by_recipient = {}
-        for call in summary.call_args_list:
-            by_recipient.setdefault(call.args[0].pk, []).append(call)
-        self.assertEqual(len(by_recipient[self.pm_b.pk]), 1)
-        self.assertEqual(len(by_recipient[self.pm_a.pk]), 1)
-        incoming = by_recipient[self.pm_b.pk][0]
-        self.assertEqual(incoming.kwargs['channels'], ['in_app', 'email'])
-        self.assertIn('3 sites in MPUVNL Test', incoming.args[1])
-        self.assertIn('6 open tasks and 2 bill approval steps moved to you', incoming.args[1])
-        outgoing = by_recipient[self.pm_a.pk][0]
-        self.assertEqual(outgoing.kwargs['channels'], ['in_app', 'email'])
-        self.assertIn('4 material approval steps still name you', outgoing.args[1])
-        self.assertNotIn(self.admin.pk, by_recipient)
+        # T3c: the PM pair goes through notify_now() — one in-app and one email call per
+        # PM — so it is read from notify's send_notification; `summary` sees SCM only.
+        by_recipient = _pm_pair(pair)
+        self.assertEqual(set(by_recipient), {self.pm_a.pk, self.pm_b.pk})
+        incoming = by_recipient[self.pm_b.pk]
+        self.assertEqual([c[0] for c in incoming], ['in_app', 'email'])
+        self.assertIn('3 sites in MPUVNL Test', incoming[0][1])
+        self.assertIn('6 open tasks and 2 bill approval steps moved to you', incoming[0][1])
+        outgoing = by_recipient[self.pm_a.pk]
+        self.assertEqual([c[0] for c in outgoing], ['in_app', 'email'])
+        self.assertIn('4 material approval steps still name you', outgoing[0][1])
+        self.assertNotIn(self.admin.pk, {c.args[0].pk for c in summary.call_args_list})
 
     def test_scm_gets_one_in_app_notice_each_when_material_steps_remain(self, summary, _ps):
         self._hand_over_all()
@@ -286,11 +299,13 @@ class BulkHandoverTests(HandoverFixture):
 
     def test_no_scm_notice_when_no_material_step_remains(self, summary, _per_step):
         # pm_c holds HOS010 and no material step.
-        with self.captureOnCommitCallbacks(execute=True):
-            response = self._post_bulk([self.other], from_pm=self.pm_c)
+        with mock.patch('projects.notify.send_notification') as pair:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self._post_bulk([self.other], from_pm=self.pm_c)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self._pm(self.other), self.pm_b.pk)
-        recipients = {c.args[0].pk for c in summary.call_args_list}
+        # T3c: the PM pair is read from notify's send_notification, SCM from `summary`.
+        recipients = set(_pm_pair(pair)) | {c.args[0].pk for c in summary.call_args_list}
         self.assertEqual(recipients, {self.pm_b.pk, self.pm_c.pk})
 
     def test_material_steps_are_listed_tagged_and_not_moved(self, _summary, _per_step):
@@ -354,19 +369,21 @@ class SingleSiteTests(HandoverFixture):
 
     def test_bill_steps_move_and_the_pm6_pair_replaces_assign_project(
             self, summary, per_step, assign_project):
-        response = self._change(self.s1, self.pm_a)
+        with mock.patch('projects.notify.send_notification') as pair:
+            response = self._change(self.s1, self.pm_a)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self._pm(self.s1), self.pm_b.pk)
         self.assertEqual(self._live_pm_step(self.bill_active).assignee_id, self.pm_b.pk)
         assign_project.assert_not_called()
         per_step.assert_not_called()
-        recipients = sorted(c.args[0].pk for c in summary.call_args_list
-                            if c.kwargs['channels'] == ['in_app', 'email'])
-        self.assertEqual(recipients, sorted([self.pm_a.pk, self.pm_b.pk]))
-        incoming = next(c for c in summary.call_args_list if c.args[0].pk == self.pm_b.pk)
-        self.assertIn('handed over HOS001 to you', incoming.args[1])
-        self.assertEqual(incoming.kwargs['link'],
-                         reverse('project_overview', args=['HOS001']))
+        # T3c: the PM pair goes through notify_now(), in-app then email per PM.
+        by_recipient = _pm_pair(pair)
+        self.assertEqual({pk: [c[0] for c in calls] for pk, calls in by_recipient.items()},
+                         {self.pm_a.pk: ['in_app', 'email'],
+                          self.pm_b.pk: ['in_app', 'email']})
+        _channel, message, link = by_recipient[self.pm_b.pk][0]
+        self.assertIn('handed over HOS001 to you', message)
+        self.assertEqual(link, reverse('project_overview', args=['HOS001']))
 
     def test_the_message_lists_what_did_not_move(self, _summary, _per_step, _assign):
         response = self._change(self.s1, self.pm_a)
@@ -382,11 +399,13 @@ class SingleSiteTests(HandoverFixture):
             customer_name='Empty', project_id='HOS020', customer_phone='9876543210',
             site_address='1 Sun Road', city='Bhopal', state='Madhya Pradesh',
             project_type='OPEX', dc_capacity_kw=Decimal('5.00'), status='Draft')
-        response = self._change(empty, None)
+        with mock.patch('projects.notify.send_notification') as pair:
+            response = self._change(empty, None)
         self.assertEqual(response.status_code, 302)
         self.assertEqual(self._pm(empty), self.pm_b.pk)
         self.assertEqual(assign_project.call_args.kwargs['template'], 'assign_project')
         summary.assert_not_called()
+        self.assertEqual(_pm_pair(pair), {})   # T3c: nor through notify
 
     def test_the_modal_carries_the_shown_pm_and_the_bill_step_count(self, *_mocks):
         response = _client(self.admin).get(reverse('admin_project_list'))
@@ -618,12 +637,21 @@ class LogFailureTests(HandoverFixture):
 class WaitingStepTests(HandoverFixture):
 
     def test_moved_silently_then_announced_when_the_site_engineer_approves(self, _summary):
-        with mock.patch('projects.approval_notices.send_notification') as notices:
+        # T3c: the approval E1 is emailed, so it goes through notify_now() and is read
+        # from notify's send_notification, filtered to its label (the handover's own PM
+        # pair goes through the same function).
+        def asked(calls):
+            return {c.kwargs['recipient'].pk for c in calls.call_args_list
+                    if c.kwargs.get('template') == 'approval_step_activated'}
+
+        with mock.patch('projects.approval_notices.send_notification') as notices, \
+                mock.patch('projects.notify.send_notification') as via_notify:
             with self.captureOnCommitCallbacks(execute=True):
                 handover = hand_over_sites([self.s2], self.pm_a, self.pm_b, self.admin,
                                            REASON, program=self.program)
             self.assertEqual((handover.bill_steps_moved, handover.bill_steps_waiting), (1, 1))
             notices.assert_not_called()
+            self.assertEqual(asked(via_notify), set())
             step = self._live_pm_step(self.bill_waiting)
             self.assertEqual(step.assignee_id, self.pm_b.pk)
             self.assertIsNone(step.activated_at)
@@ -634,7 +662,7 @@ class WaitingStepTests(HandoverFixture):
                     'approved', self.se, files=[dict(SE_PHOTO)])
         step = self._live_pm_step(self.bill_waiting)
         self.assertIsNotNone(step.activated_at)
-        recipients = {c.kwargs['recipient'].pk for c in notices.call_args_list}
+        recipients = asked(via_notify)
         self.assertIn(self.pm_b.pk, recipients)
         self.assertNotIn(self.pm_a.pk, recipients)
 

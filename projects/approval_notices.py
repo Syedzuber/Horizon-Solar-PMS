@@ -58,36 +58,40 @@ who can act on it. The deputy is `assignee.design_head_deputy`, the FK the Head'
 profile holds; the assignee of a design step is always a Head
 (profile_can_be_approval_assignee).
 
-LINKS. The in-app link is relative (/approvals/<pk>/). The email's absolute link is
-built with utils._abs_url(link, None): there is no HTTP request in approvals.py, so the
-host is SITE_BASE_URL, production's, even for a send from a local database (ruling 1).
-`message` is both the bell text and the email's plain-text part, so it carries no URL;
-the absolute URL appears only in the HTML part, rendered from
-projects/email/approval_notice.html (autoescaped).
+EMAIL (T3c). Every emailed notice is a notify_registry event sent with notify_now(): the
+bell text is the event's in_app_text, the email its template in the shared layout, under
+the same NotificationLog label as before. The in-app-only notices (E2b, R5, E4, E5, E6)
+still call send_notification() directly. related_project stays None on every row.
+
+LINKS. The in-app link is relative (/approvals/<pk>/). notify builds the email's absolute
+link with absolute_url() on APP_BASE_URL, production's host even for a send from a local
+database (ruling 1); it is the "Open the approval" button and the text part's last line.
 
 MATERIAL LINES (28 Sep 2026). Every approval email of a material request carries one line
 saying what it is about — "120 Nos — Solar module 540W, +2 more" (lines_summary): the
-first line, and how many others. In BOTH email parts: the HTML part draws it as a row
-(approval_notice.html), and the plain-text part is `message` plus a "Material: ..." line.
-The bell text stays `message` alone, one sentence — so an email that carries a summary is
-sent in a call of its own (_send), and the in-app notice in another.
+first line, and how many others. It is the event's summary_line, "Material: ...", a
+paragraph of its own in both email parts, dropped when there is nothing to say. The bell
+text stays one sentence.
 
 CONTRACTOR BILLS (4a-2). A bill's emails carry a one-line bill summary in the same place
 and the same way — "Civil Co · HRP-RES-2026-001 · bill CB-7 · ₹12,500.00" (bill_summary):
 the contractor, the site, the contractor's bill number and the amount — labelled "Bill"
-instead of "Material". Every bill email carries it (E1, E2 and E3, ruling 4). NO EMAIL AND
-NO IN-APP NOTICE EVER CARRIES THE BILL PDF, A LINK TO IT, OR WHERE IT IS STORED: the summary
-is built from those four values only, and this module does not import bill_storage.
+instead of "Material". The PM's E1, the raiser's E2 and a PM's E3 carry it (ruling 4). NO
+EMAIL AND NO IN-APP NOTICE EVER CARRIES THE BILL PDF, A LINK TO IT, OR WHERE IT IS STORED:
+the summary is built from those four values only, and this module does not import
+bill_storage.
 
 THE SITE ENGINEER CONFIRMS THE WORK, NEVER THE BILL (4a-3, D-A53). A notice to a Site
 Engineer — asked to confirm (E1), or told the bill was withdrawn (E3) — carries no amount,
 bill number or PDF: its email summary is the work — contractor · site · tasks
 ("Foundation, +1 more", work_summary), labelled "Work". It asks them "to confirm the
-work", never to approve. The PM, SCM and the raiser keep the full bill summary.
+work", never to approve. Their two events (approval_work_to_confirm,
+approval_withdrawn_work) declare work_summary and no variable that can hold an amount
+(T3c, Q1 and M4). The PM, SCM and the raiser keep the full bill summary, including the
+raiser's approval_work_not_done.
 """
 import logging
 
-from django.template.loader import render_to_string
 from django.urls import reverse
 
 from .bill_rules import format_bill_amount
@@ -102,13 +106,12 @@ from .models import (
     APPROVAL_STEP_SUPERSEDED,
 )
 from .notifications import send_notification
+from .notify import notify_now
 from .units import format_quantity
-from .utils import _abs_url
 
 logger = logging.getLogger(__name__)
 
 IN_APP = ['in_app']
-IN_APP_AND_EMAIL = ['in_app', 'email']
 
 _KIND_LABELS = dict(APPROVAL_KIND_CHOICES)
 _PARTY_LABELS = dict(APPROVAL_PARTY_CHOICES)
@@ -151,22 +154,21 @@ _SITE_ENGINEER_VERDICT_NOUNS = {
 
 
 class _Notice:
-    """One message to one person. `html` is None for an in-app-only notice.
+    """One message to one person. An emailed notice names its registry `event` and that
+    event's `values` and goes through notify_now() (T3c); an in-app-only notice carries
+    its `message` and goes through send_notification() as before (M5).
 
-    `work_only` (4a-3): the recipient is told as the bill's Site Engineer, so an email
-    carries the work summary, never the bill's (D-A53)."""
+    `work_only` (4a-3, T3c Q1): the event carries the bill's work summary, never the
+    bill's (D-A53). Every other emailed event carries summary_line."""
 
-    def __init__(self, recipient, message, channels, template, subject='',
-                 body='', quote_label='', quote='', work_only=False):
-        self.work_only = work_only
+    def __init__(self, recipient, template, *, event=None, values=None, message='',
+                 work_only=False):
         self.recipient = recipient
-        self.message = message
-        self.channels = channels
         self.template = template
-        self.subject = subject
-        self.body = body
-        self.quote_label = quote_label
-        self.quote = quote
+        self.event = event
+        self.values = values or {}
+        self.message = message
+        self.work_only = work_only
 
 
 # ---------------------------------------------------------------------------
@@ -268,34 +270,19 @@ def email_summary(approval, work_only=False):
     return lines_summary(approval), 'Material'
 
 
-def email_html(approval, subject, body, quote_label='', quote='', summary=None,
-               summary_label=None):
-    """The HTML part of an approval email. Autoescaped, so text a user typed arrives as
-    text; the one place the absolute URL appears. Carries the request's one-line summary
-    — its material lines, or a contractor bill's (4a-2): `summary` and `summary_label` if
-    the caller already read them, otherwise email_summary()."""
-    if summary is None:
-        summary, summary_label = email_summary(approval)
-    return render_to_string('projects/email/approval_notice.html', {
-        'subject': subject, 'body': body, 'quote_label': quote_label, 'quote': quote,
-        'lines_summary': summary, 'summary_label': summary_label or 'Material',
-        'url': _abs_url(_link(approval), None),
-    })
-
-
 def _send(approval, notices, excluded, actor):
     """Send `notices` in order: the actor and anyone already told in this action are
     skipped, as is anyone inactive. One failing send is logged and the rest still go.
 
-    A material request's email carries its line summary — a contractor bill's, its bill
-    summary (4a-2) — in the plain-text part as well as the HTML part. send_notification() sends one `message` as both the bell text and
-    the email's text part, so such an email goes in a second call with the summary
-    appended, and the bell keeps `message` alone. Same channels, same log rows, same
-    template name; only the email row's message differs."""
+    An emailed notice goes through notify_now() (T3c): in-app from the event's text and
+    the email from its template, both logged under the notice's label. notify_now(), not
+    notify(): every caller here already runs on commit (approvals.py registers it), and a
+    notify() would queue a second callback behind this one. The request's one-line summary
+    is read once per action per kind of reader — the request's own (summary_line), or a
+    bill's work-only line (work_summary, 4a-3) — and only if someone of that kind is
+    emailed. related_project stays None, as it was before T3c."""
     told = set(excluded)
     link = _link(approval)
-    # Read once per action per kind of reader — the bill's own, or its Site Engineer's
-    # work-only line (4a-3) — and only if someone of that kind is emailed.
     summaries = {}
     for notice in notices:
         person = notice.recipient
@@ -303,65 +290,55 @@ def _send(approval, notices, excluded, actor):
             continue
         told.add(person.pk)
         try:
-            html = None
-            channels, email_text = notice.channels, notice.message
-            if 'email' in notice.channels:
-                if notice.work_only not in summaries:
-                    summaries[notice.work_only] = email_summary(approval, notice.work_only)
-                summary, label = summaries[notice.work_only]
-                html = email_html(approval, notice.subject, notice.body,
-                                  notice.quote_label, notice.quote, summary=summary,
-                                  summary_label=label)
-                if summary:
-                    channels = [c for c in notice.channels if c != 'email']
-                    email_text = f'{notice.message}\n\n{label}: {summary}'
-            if channels:
+            if notice.event is None:
                 send_notification(
-                    recipient=person, message=notice.message, channels=channels,
-                    link=link, subject=notice.subject, html_message=html,
+                    recipient=person, message=notice.message, channels=IN_APP, link=link,
                     template=notice.template, related_project=None, actor=actor)
-            if channels != notice.channels:
-                send_notification(
-                    recipient=person, message=email_text, channels=['email'],
-                    link=link, subject=notice.subject, html_message=html,
-                    template=notice.template, related_project=None, actor=actor)
+                continue
+            if notice.work_only not in summaries:
+                summaries[notice.work_only] = email_summary(approval, notice.work_only)
+            summary, label = summaries[notice.work_only]
+            values = dict(notice.values)
+            if notice.work_only:
+                values['work_summary'] = summary
+            else:
+                # A paragraph of its own in the email; '' drops it (notify, T3c Q3).
+                values['summary_line'] = f'{label}: {summary}' if summary else ''
+            notify_now(notice.event, recipients=[person], values=values, actor=actor,
+                       related_project=None, link=link, log_label=notice.template)
         except Exception:
             logger.exception('approval_notices: the %s notice on approval #%s to %s '
                              'failed; the approval action stands.',
                              notice.template, approval.pk, person.pk)
 
 
-def _about(approval):
-    """'"<title>" (<kind>)' — how every notice names the request."""
-    return f'"{approval.title}" ({_KIND_LABELS.get(approval.kind, approval.kind)})'
+def _kind(approval):
+    """The request's kind as every notice names it, e.g. 'Material — before order'."""
+    return _KIND_LABELS.get(approval.kind, approval.kind)
 
 
 def _activated_notices(approval, steps, asked_by):
     """E1 for `steps`: each assignee first, then each design step's deputy. `asked_by`
-    is the sentence start saying who is asking, e.g. 'Sana asks you'."""
-    subject = f'Approval needed: {approval.title}'
+    is the sentence start saying who is asking, e.g. 'Sana asks you': one value for the
+    four ways a step is activated (T3c, Q2)."""
+    about = dict(approval_title=approval.title, kind_label=_kind(approval))
     notices, deputies = [], []
     for step in steps:
         party = _PARTY_LABELS.get(step.party, step.party)
         if step.party == APPROVAL_PARTY_SITE_ENGINEER:
             # The Site Engineer confirms the work, never the bill (D-A53, Q4).
-            body = (f'{asked_by} to confirm the work on {_about(approval)}. Open it to '
-                    f'confirm the work done, or say it is not done.')
-            notices.append(_Notice(step.assignee, body, IN_APP_AND_EMAIL, T_ACTIVATED,
-                                   subject=f'Work to confirm: {approval.title}', body=body,
-                                   work_only=True))
+            notices.append(_Notice(step.assignee, T_ACTIVATED,
+                                   event='approval_work_to_confirm',
+                                   values=dict(about, asked_by=asked_by), work_only=True))
             continue
-        body = (f'{asked_by} to approve {_about(approval)} as the {party}. '
-                f'Open it to approve, request changes or reject.')
-        notices.append(_Notice(step.assignee, body, IN_APP_AND_EMAIL, T_ACTIVATED,
-                               subject=subject, body=body))
+        notices.append(_Notice(step.assignee, T_ACTIVATED, event='approval_step_activated',
+                               values=dict(about, asked_by=asked_by, party_label=party)))
         deputy = step.assignee.design_head_deputy if step.party == APPROVAL_PARTY_DESIGN \
             else None
         if deputy is not None and deputy.pk != approval.raised_by_id:
-            body = (f'{_about(approval)} needs a Design Head decision. It is with '
-                    f'{_name(step.assignee)}; as their named deputy you may decide it.')
-            deputies.append(_Notice(deputy, body, IN_APP_AND_EMAIL, T_ACTIVATED_DEPUTY,
-                                    subject=subject, body=body))
+            deputies.append(_Notice(deputy, T_ACTIVATED_DEPUTY,
+                                    event='approval_step_activated_deputy',
+                                    values=dict(about, head_name=_name(step.assignee))))
     return notices + deputies
 
 
@@ -402,28 +379,22 @@ def after_decision(step_pk, actor_pk, closed_as=None):
         f'{_name(decider)} {did} as the {party}; you are now asked')
 
     if closed_as in T_CLOSED:
+        values = dict(approval_title=approval.title, kind_label=_kind(approval),
+                      decided_by_name=_name(decider), party_label=party,
+                      note_clause=f' Note: "{step.note}"' if step.note else '')
         if closed_as == APPROVAL_APPROVED:
-            subject = f'Approved: {approval.title}'
-            body = (f'{_about(approval)} is approved. {_name(decider)} gave the last '
-                    f'approval, as the {party}.')
-        elif closed_as == APPROVAL_CHANGES_REQUESTED                 and step.party == APPROVAL_PARTY_SITE_ENGINEER:
+            event = 'approval_approved'
+        elif closed_as == APPROVAL_CHANGES_REQUESTED \
+                and step.party == APPROVAL_PARTY_SITE_ENGINEER:
             # "Work not done" (D-A53): the Site Engineer's changes request, as History
-            # words it.
-            subject = f'Changes requested: {approval.title}'
-            body = (f'{_name(decider)} said the work on {_about(approval)} is not done, as '
-                    f'the {party}. Revise and resubmit it, or withdraw it.')
+            # words it. It goes to the raiser, so it keeps the bill summary.
+            event = 'approval_work_not_done'
         elif closed_as == APPROVAL_CHANGES_REQUESTED:
-            subject = f'Changes requested: {approval.title}'
-            body = (f'{_name(decider)} requested changes to {_about(approval)} as the '
-                    f'{party}. Revise and resubmit it, or withdraw it.')
+            event = 'approval_changes_requested'
         else:
-            subject = f'Rejected: {approval.title}'
-            body = f'{_name(decider)} rejected {_about(approval)} as the {party}.'
-        message = f'{body} Note: "{step.note}"' if step.note else body
-        notices.append(_Notice(approval.raised_by, message, IN_APP_AND_EMAIL,
-                               T_CLOSED[closed_as], subject=subject, body=body,
-                               quote_label='Note' if step.note else '',
-                               quote=step.note))
+            event = 'approval_rejected'
+        notices.append(_Notice(approval.raised_by, T_CLOSED[closed_as], event=event,
+                               values=values))
 
     if closed_as in (APPROVAL_CHANGES_REQUESTED, APPROVAL_REJECTED):
         what = 'requested changes' if closed_as == APPROVAL_CHANGES_REQUESTED \
@@ -433,7 +404,7 @@ def after_decision(step_pk, actor_pk, closed_as=None):
                             superseded_at=step.decided_at, activated_at__isnull=False):
             message = (f'You no longer need to decide "{approval.title}". '
                        f'{_name(decider)} {what} as the {party}.')
-            notices.append(_Notice(other.assignee, message, IN_APP, T_SUPERSEDED))
+            notices.append(_Notice(other.assignee, T_SUPERSEDED, message=message))
 
     # E1, E2 and E2b never go to the decider; E6 goes to nobody else.
     excluded = {actor_pk, decider.pk}
@@ -448,7 +419,7 @@ def after_decision(step_pk, actor_pk, closed_as=None):
                    f'"{approval.title}" from '
                    f'{_CHANNEL_PHRASES.get(step.proxy_channel, step.proxy_channel)}.')
         # Told nothing else in this action: E1 and E2 above excluded the decider.
-        _send(approval, [_Notice(decider, message, IN_APP, T_PROXY)], {actor_pk},
+        _send(approval, [_Notice(decider, T_PROXY, message=message)], {actor_pk},
               recorder)
 
 
@@ -473,13 +444,13 @@ def after_resubmit(approval_pk, round_no, actor_pk, replaced_step_pks=()):
         message = (f'You are no longer asked to approve "{approval.title}". '
                    f'{_name(actor)} named a different {party} for round {round_no}.'
                    f'{successor}')
-        notices.append(_Notice(old.assignee, message, IN_APP, T_REPLACED))
+        notices.append(_Notice(old.assignee, T_REPLACED, message=message))
 
     for kept in (s for s in steps if s.carried_from_id is not None):
         message = (f'{_name(actor)} kept your approval of "{approval.title}" for round '
                    f'{round_no}, so you are not asked again. '
                    f'Reason: "{kept.carry_reason}"')
-        notices.append(_Notice(kept.decided_by, message, IN_APP, T_KEPT))
+        notices.append(_Notice(kept.decided_by, T_KEPT, message=message))
 
     _send(approval, notices, {actor_pk}, actor)
 
@@ -493,14 +464,15 @@ def after_withdraw(approval_pk, actor_pk):
     if not steps:
         return
     actor = steps[0].superseded_by
-    subject = f'Withdrawn: {approval.title}'
-    body = f'{_name(actor)} withdrew {_about(approval)}. You no longer need to decide it.'
-    note = approval.withdrawal_note
-    # A Site Engineer's E3 email carries the work summary, not the bill's (4a-3).
-    notices = [_Notice(s.assignee, f'{body} Reason: "{note}"', IN_APP_AND_EMAIL,
-                       T_WITHDRAWN, subject=subject, body=body,
-                       quote_label='Reason', quote=note,
-                       work_only=s.party == APPROVAL_PARTY_SITE_ENGINEER)
+    values = dict(withdrawn_by_name=_name(actor), approval_title=approval.title,
+                  kind_label=_kind(approval), reason=approval.withdrawal_note)
+    # A Site Engineer's E3 is its own event, carrying the work summary, not the bill's
+    # (4a-3, T3c Q1).
+    notices = [_Notice(s.assignee, T_WITHDRAWN,
+                       event=('approval_withdrawn_work'
+                              if s.party == APPROVAL_PARTY_SITE_ENGINEER
+                              else 'approval_withdrawn'),
+                       values=values, work_only=s.party == APPROVAL_PARTY_SITE_ENGINEER)
                for s in steps]
     _send(approval, notices, {actor_pk}, actor)
 
@@ -521,5 +493,5 @@ def after_reassign(old_step_pk, new_step_pk, actor_pk):
         message = (f'You are no longer asked to approve "{approval.title}". '
                    f'{_name(actor)} reassigned it to {_name(new.assignee)}. '
                    f'Reason: "{old.note}"')
-        notices.append(_Notice(old.assignee, message, IN_APP, T_REASSIGNED_AWAY))
+        notices.append(_Notice(old.assignee, T_REASSIGNED_AWAY, message=message))
     _send(approval, notices, {actor_pk}, actor)

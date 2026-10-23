@@ -686,6 +686,526 @@ NOTIFICATION_EVENTS = _build_registry([
                          'Not the decider.'),
         default_state='active',
     ),
+
+    # --- T3c: approvals and contractor bills -------------------------------------------
+    # Wording pinned by tests_notify_migration_c. approval_notices.py sends these from its
+    # after-commit callbacks with notify_now(); its in-app-only notices (superseded,
+    # replaced, kept, proxy, reassigned away) stay outside the registry. One event per
+    # wording (ruling Q1): the two sent to a Site Engineer (approval_work_to_confirm,
+    # approval_withdrawn_work) carry the WORK summary only and declare no variable that
+    # can hold a bill amount (D-A53, M4). Every other approval event, approval_work_not_done
+    # to the raiser included, carries summary_line, which on a bill names its amount.
+    # `asked_by` is the sentence start saying who asks and why now (ruling Q2). note_clause
+    # is empty or a phrase starting with a space. Email only: none of these sends WhatsApp.
+    NotificationEvent(
+        code='approval_step_activated',
+        label='Approval needed, to the approver',
+        module='Approvals',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('asked_by', 'Who asks, and why now: "<name> asks you", or the resubmit, '
+                     'reassign or earlier-approval form', 'Anil Gupta asks you'),
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('party_label', 'The capacity asked: PM or Design Head', 'PM'),
+            Variable('summary_line',
+                     'Empty, or "Material: <first line>, +N more", or for a contractor bill '
+                     '"Bill: <contractor> · <site> · bill <number> · <amount>"',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('{{ asked_by }} to approve "{{ approval_title }}" ({{ kind_label }}) as '
+                     'the {{ party_label }}. Open it to approve, request changes or reject.'),
+        default_subject='Approval needed: {{ approval_title }}',
+        default_body=(
+            '{{ asked_by }} to approve "{{ approval_title }}" ({{ kind_label }}) as the '
+            '{{ party_label }}. Open it to approve, request changes or reject.\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule=('Each assignee whose step this action activated (create, resubmit, '
+                         'reassign, or an earlier sequence approving). Not the actor.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_work_to_confirm',
+        label='Work to confirm, to the Site Engineer',
+        module='Approvals',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('asked_by', 'Who asks, and why now: "<name> asks you", or the resubmit '
+                     'or reassign form', 'Anil Gupta asks you'),
+            Variable('approval_title', 'Title of the contractor bill, as the raiser typed it',
+                     'Civil works bill'),
+            Variable('kind_label', 'Kind of request', 'Contractor bill'),
+            Variable('work_summary', 'The contractor, the site and the first task, then a '
+                     'count. Never the amount or bill number',
+                     'Civil Co · HRP-RES-2026-001 · Foundation, +1 more'),
+        ),
+        in_app_text=('{{ asked_by }} to confirm the work on "{{ approval_title }}" '
+                     '({{ kind_label }}). Open it to confirm the work done, or say it is not '
+                     'done.'),
+        default_subject='Work to confirm: {{ approval_title }}',
+        default_body=(
+            '{{ asked_by }} to confirm the work on "{{ approval_title }}" ({{ kind_label }}). '
+            'Open it to confirm the work done, or say it is not done.\n\n'
+            'Work: {{ work_summary }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule=('The contractor bill\'s Site Engineer, when their step is activated '
+                         '(create, resubmit, reassign). Not the actor.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_step_activated_deputy',
+        label='Approval needs a Design Head decision, to the Head\'s deputy',
+        module='Approvals',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('head_name', 'The Design Head the step is with', 'Meera Iyer'),
+            Variable('summary_line', 'Empty, or "Material: <first line>, +N more"',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('"{{ approval_title }}" ({{ kind_label }}) needs a Design Head decision. '
+                     'It is with {{ head_name }}; as their named deputy you may decide it.'),
+        default_subject='Approval needed: {{ approval_title }}',
+        default_body=(
+            '"{{ approval_title }}" ({{ kind_label }}) needs a Design Head decision. It is '
+            'with {{ head_name }}; as their named deputy you may decide it.\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule=('The named deputy of the Design Head whose step was activated, '
+                         'unless the deputy raised the request or is also an assignee.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_approved',
+        label='Approval request approved, to the raiser',
+        module='Approvals',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('decided_by_name', 'Who gave the last approval', 'Rahul Verma'),
+            Variable('party_label', 'The capacity they approved in', 'PM'),
+            Variable('note_clause', 'Empty, or \' Note: "<their note>"\'',
+                     ' Note: "Go with Waaree."'),
+            Variable('summary_line', 'Empty, or the Material or Bill line',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('"{{ approval_title }}" ({{ kind_label }}) is approved. '
+                     '{{ decided_by_name }} gave the last approval, as the {{ party_label }}.'
+                     '{{ note_clause }}'),
+        default_subject='Approved: {{ approval_title }}',
+        default_body=(
+            '"{{ approval_title }}" ({{ kind_label }}) is approved. {{ decided_by_name }} gave '
+            'the last approval, as the {{ party_label }}.{{ note_clause }}\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule='The person who raised the request, unless they recorded the decision.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_changes_requested',
+        label='Approval request: changes requested, to the raiser',
+        module='Approvals',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('decided_by_name', 'Who requested changes', 'Rahul Verma'),
+            Variable('party_label', 'The capacity they decided in', 'PM'),
+            Variable('note_clause', 'Empty, or \' Note: "<their note>"\'',
+                     ' Note: "Quote the 550 Wp variant."'),
+            Variable('summary_line', 'Empty, or the Material or Bill line',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('{{ decided_by_name }} requested changes to "{{ approval_title }}" '
+                     '({{ kind_label }}) as the {{ party_label }}. Revise and resubmit it, or '
+                     'withdraw it.{{ note_clause }}'),
+        default_subject='Changes requested: {{ approval_title }}',
+        default_body=(
+            '{{ decided_by_name }} requested changes to "{{ approval_title }}" '
+            '({{ kind_label }}) as the {{ party_label }}. Revise and resubmit it, or withdraw '
+            'it.{{ note_clause }}\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule='The person who raised the request, unless they recorded the decision.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_work_not_done',
+        label='Contractor bill: work not done, to the raiser',
+        module='Approvals',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('approval_title', 'Title of the contractor bill, as the raiser typed it',
+                     'Civil works bill'),
+            Variable('kind_label', 'Kind of request', 'Contractor bill'),
+            Variable('decided_by_name', 'The Site Engineer', 'Suresh Kumar'),
+            Variable('party_label', 'The capacity they decided in', 'Site Engineer'),
+            Variable('note_clause', 'Empty, or \' Note: "<their note>"\'',
+                     ' Note: "Block B not finished."'),
+            Variable('summary_line', 'Empty, or "Bill: <contractor> · <site> · bill <number> '
+                     '· <amount>"',
+                     'Bill: Civil Co · HRP-RES-2026-001 · bill CB-7 · ₹12,500.00'),
+        ),
+        in_app_text=('{{ decided_by_name }} said the work on "{{ approval_title }}" '
+                     '({{ kind_label }}) is not done, as the {{ party_label }}. Revise and '
+                     'resubmit it, or withdraw it.{{ note_clause }}'),
+        default_subject='Changes requested: {{ approval_title }}',
+        default_body=(
+            '{{ decided_by_name }} said the work on "{{ approval_title }}" ({{ kind_label }}) '
+            'is not done, as the {{ party_label }}. Revise and resubmit it, or withdraw it.'
+            '{{ note_clause }}\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule='The person who raised the bill, unless they recorded the decision.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_rejected',
+        label='Approval request rejected, to the raiser',
+        module='Approvals',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('decided_by_name', 'Who rejected it', 'Rahul Verma'),
+            Variable('party_label', 'The capacity they decided in', 'PM'),
+            Variable('note_clause', 'Empty, or \' Note: "<their note>"\'',
+                     ' Note: "Vendor blacklisted."'),
+            Variable('summary_line', 'Empty, or the Material or Bill line',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('{{ decided_by_name }} rejected "{{ approval_title }}" ({{ kind_label }}) '
+                     'as the {{ party_label }}.{{ note_clause }}'),
+        default_subject='Rejected: {{ approval_title }}',
+        default_body=(
+            '{{ decided_by_name }} rejected "{{ approval_title }}" ({{ kind_label }}) as the '
+            '{{ party_label }}.{{ note_clause }}\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule='The person who raised the request, unless they recorded the decision.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_withdrawn',
+        label='Approval request withdrawn, to the approvers',
+        module='Approvals',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('withdrawn_by_name', 'Who withdrew it', 'Anil Gupta'),
+            Variable('approval_title', 'Title of the approval request', 'Module make'),
+            Variable('kind_label', 'Kind of request', 'Material — before order'),
+            Variable('reason', 'Why it was withdrawn', 'Vendor dropped.'),
+            Variable('summary_line', 'Empty, or the Material or Bill line',
+                     'Material: 120 Nos — Solar module 545 Wp, +2 more'),
+        ),
+        in_app_text=('{{ withdrawn_by_name }} withdrew "{{ approval_title }}" ({{ kind_label }}). '
+                     'You no longer need to decide it. Reason: "{{ reason }}"'),
+        default_subject='Withdrawn: {{ approval_title }}',
+        default_body=(
+            '{{ withdrawn_by_name }} withdrew "{{ approval_title }}" ({{ kind_label }}). You '
+            'no longer need to decide it. Reason: "{{ reason }}"\n\n'
+            '{{ summary_line }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule=('Each assignee whose activated, pending step the withdrawal '
+                         'superseded, except a contractor bill\'s Site Engineer. Not the actor.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='approval_withdrawn_work',
+        label='Contractor bill withdrawn, to the Site Engineer',
+        module='Approvals',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('withdrawn_by_name', 'Who withdrew it', 'Anil Gupta'),
+            Variable('approval_title', 'Title of the contractor bill, as the raiser typed it',
+                     'Civil works bill'),
+            Variable('kind_label', 'Kind of request', 'Contractor bill'),
+            Variable('reason', 'Why it was withdrawn', 'Bill resent.'),
+            Variable('work_summary', 'The contractor, the site and the first task, then a '
+                     'count. Never the amount or bill number',
+                     'Civil Co · HRP-RES-2026-001 · Foundation, +1 more'),
+        ),
+        in_app_text=('{{ withdrawn_by_name }} withdrew "{{ approval_title }}" ({{ kind_label }}). '
+                     'You no longer need to decide it. Reason: "{{ reason }}"'),
+        default_subject='Withdrawn: {{ approval_title }}',
+        default_body=(
+            '{{ withdrawn_by_name }} withdrew "{{ approval_title }}" ({{ kind_label }}). You '
+            'no longer need to decide it. Reason: "{{ reason }}"\n\n'
+            'Work: {{ work_summary }}'
+        ),
+        button_label='Open the approval',
+        recipients_rule=('The contractor bill\'s Site Engineer, if their step was activated '
+                         'and still pending. Not the actor.'),
+        default_state='active',
+    ),
+
+    # --- T3c: COD, punch points, QA/QC, PM handover ------------------------------------
+    # Wording pinned by tests_notify_migration_c. Before T3c each of these emailed its
+    # one-sentence in-app text as both subject and text body, with no link; the subject
+    # is kept whole (M2) and listed in SECONDARY_FINDINGS.md for Admin to shorten. Each
+    # call site already runs on commit and sends with notify_now(). Email only.
+    NotificationEvent(
+        code='cod_recorded',
+        label='COD recorded',
+        module='Closeout',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+            Variable('cod_date', 'The COD date', '14 Oct 2026'),
+            Variable('evidence', 'The evidence recorded', 'DISCOM letter'),
+            Variable('recorded_by_name', 'Who recorded it', 'Rahul Verma'),
+        ),
+        in_app_text=('COD recorded for {{ site_label }}: {{ cod_date }}, evidence '
+                     '{{ evidence }}. Recorded by {{ recorded_by_name }}.'),
+        default_subject=('COD recorded for {{ site_label }}: {{ cod_date }}, evidence '
+                         '{{ evidence }}. Recorded by {{ recorded_by_name }}.'),
+        default_body=('COD recorded for {{ site_label }}: {{ cod_date }}, evidence '
+                      '{{ evidence }}. Recorded by {{ recorded_by_name }}.'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The site\'s PM, its active coordinators and every active CEO, '
+                         'except the person who recorded it.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='cod_withdrawn',
+        label='COD withdrawn',
+        module='Closeout',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+            Variable('withdrawn_by_name', 'Who withdrew it', 'Rahul Verma'),
+            Variable('reason', 'Why it was withdrawn', 'The letter was for the wrong meter.'),
+        ),
+        in_app_text='COD withdrawn for {{ site_label }} by {{ withdrawn_by_name }}: {{ reason }}',
+        default_subject=('COD withdrawn for {{ site_label }} by {{ withdrawn_by_name }}: '
+                         '{{ reason }}'),
+        default_body='COD withdrawn for {{ site_label }} by {{ withdrawn_by_name }}: {{ reason }}',
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The site\'s PM, its active coordinators and every active CEO, '
+                         'except the person who withdrew it.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='punch_point_raised_by_visit',
+        label='Punch points raised by a QA/QC visit, to the task\'s assignee',
+        module='Closeout',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('visit_date', 'The visit\'s date', '14 Oct 2026'),
+            Variable('points', 'How many it raised on the task: "1 punch point", '
+                     '"3 punch points"', '2 punch points'),
+            Variable('task_name', 'The task', 'Module Installation'),
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+        ),
+        in_app_text=('QA/QC visit {{ visit_date }} raised {{ points }} on your task '
+                     '\'{{ task_name }}\' at {{ site_label }}. Rectify each with a remark and '
+                     'a photo.'),
+        default_subject=('QA/QC visit {{ visit_date }} raised {{ points }} on your task '
+                         '\'{{ task_name }}\' at {{ site_label }}. Rectify each with a remark '
+                         'and a photo.'),
+        default_body=('QA/QC visit {{ visit_date }} raised {{ points }} on your task '
+                      '\'{{ task_name }}\' at {{ site_label }}. Rectify each with a remark and '
+                      'a photo.'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The assignee of each task the visit raised points on, once per '
+                         'task. An unassigned task tells nobody.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='punch_point_rectified',
+        label='Punch point rectified, awaiting re-verification',
+        module='Closeout',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('task_name', 'The task', 'Module Installation'),
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+        ),
+        in_app_text=('Punch point on \'{{ task_name }}\' at {{ site_label }} was marked '
+                     'rectified and is awaiting re-verification.'),
+        default_subject=('Punch point on \'{{ task_name }}\' at {{ site_label }} was marked '
+                         'rectified and is awaiting re-verification.'),
+        default_body=('Punch point on \'{{ task_name }}\' at {{ site_label }} was marked '
+                      'rectified and is awaiting re-verification.'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The site\'s QA/QC engineer; when none can act, the PM and active '
+                         'coordinators. Not the person who rectified it.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='punch_point_reverify_rejected',
+        label='Punch point rectification not accepted, to the task\'s assignee',
+        module='Closeout',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('task_name', 'The task', 'Module Installation'),
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+            Variable('reason', 'Why it was not accepted, cut so the in-app text stays within '
+                     '500 characters', 'Clamps still loose on string 3.'),
+        ),
+        in_app_text=('The rectification of a punch point on \'{{ task_name }}\' at '
+                     '{{ site_label }} was not accepted: {{ reason }}'),
+        default_subject=('The rectification of a punch point on \'{{ task_name }}\' at '
+                         '{{ site_label }} was not accepted: {{ reason }}'),
+        default_body=('The rectification of a punch point on \'{{ task_name }}\' at '
+                      '{{ site_label }} was not accepted: {{ reason }}'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The task\'s assignee, unless they re-verified it themselves.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='site_qaqc_assigned',
+        label='QA/QC engineer assigned, to the engineer',
+        module='Closeout',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+        ),
+        in_app_text=('You are now the QA/QC engineer for {{ site_label }}. You can view the '
+                     'site and approve or reject its submitted tasks.'),
+        default_subject=('You are now the QA/QC engineer for {{ site_label }}. You can view '
+                         'the site and approve or reject its submitted tasks.'),
+        default_body=('You are now the QA/QC engineer for {{ site_label }}. You can view the '
+                      'site and approve or reject its submitted tasks.'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The engineer named, unless they named themselves.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='site_qaqc_removed',
+        label='QA/QC engineer removed, to the engineer',
+        module='Closeout',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+        ),
+        in_app_text='You are no longer the QA/QC engineer for {{ site_label }}.',
+        default_subject='You are no longer the QA/QC engineer for {{ site_label }}.',
+        default_body='You are no longer the QA/QC engineer for {{ site_label }}.',
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The outgoing engineer, when replaced or ended, unless they made the '
+                         'change themselves.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='qaqc_visit_submitted',
+        label='QA/QC visit submitted, to the site\'s managers',
+        module='Closeout',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('site_label', 'The site code, and the customer name when there is one',
+                     'MB0001 (Ram Prasad)'),
+            Variable('engineer_name', 'The QA/QC engineer who submitted it', 'Suresh Kumar'),
+            Variable('points_checked', 'How many points were checked: "12 points"',
+                     '12 points'),
+            Variable('no_count', 'How many were answered No', '2'),
+            Variable('points_raised', 'How many punch points it raised: "2 punch points"',
+                     '2 punch points'),
+        ),
+        in_app_text=('QA/QC visit submitted for {{ site_label }} by {{ engineer_name }}: '
+                     '{{ points_checked }} checked, {{ no_count }} No, {{ points_raised }} '
+                     'raised.'),
+        default_subject=('QA/QC visit submitted for {{ site_label }} by {{ engineer_name }}: '
+                         '{{ points_checked }} checked, {{ no_count }} No, {{ points_raised }} '
+                         'raised.'),
+        default_body=('QA/QC visit submitted for {{ site_label }} by {{ engineer_name }}: '
+                      '{{ points_checked }} checked, {{ no_count }} No, {{ points_raised }} '
+                      'raised.'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The site\'s PM and active coordinators, never the engineer.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='pm_handover_incoming',
+        label='Sites handed over, to the incoming PM',
+        module='Sites',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('actor_name', 'The Admin who made the handover', 'Asha Rao'),
+            Variable('sites', 'The site, or "N sites in <tender> (codes)"',
+                     '3 sites in MPUVNL (MB0001, MB0002, MB0003)'),
+            Variable('outgoing_pm_name', 'The PM the sites came from', 'Rahul Verma'),
+            Variable('moved', 'What moved: "N open tasks and N bill approval steps"',
+                     '6 open tasks and 2 bill approval steps'),
+            Variable('reason', 'Why the sites were handed over', 'Rahul moves to IPGCL.'),
+        ),
+        in_app_text=('{{ actor_name }} handed over {{ sites }} to you from '
+                     '{{ outgoing_pm_name }}: {{ moved }} moved to you. Reason: {{ reason }}'),
+        default_subject=('{{ actor_name }} handed over {{ sites }} to you from '
+                         '{{ outgoing_pm_name }}: {{ moved }} moved to you. Reason: '
+                         '{{ reason }}'),
+        default_body=('{{ actor_name }} handed over {{ sites }} to you from '
+                      '{{ outgoing_pm_name }}: {{ moved }} moved to you. Reason: {{ reason }}'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The incoming PM, once per handover (never once per site).',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='pm_handover_outgoing',
+        label='Sites handed over, to the outgoing PM',
+        module='Sites',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('actor_name', 'The Admin who made the handover', 'Asha Rao'),
+            Variable('sites', 'The site, or "N sites in <tender> (codes)"',
+                     '3 sites in MPUVNL (MB0001, MB0002, MB0003)'),
+            Variable('incoming_pm_name', 'The PM the sites went to', 'Priya Nair'),
+            Variable('moved', 'What moved: "N open tasks and N bill approval steps"',
+                     '6 open tasks and 2 bill approval steps'),
+            Variable('material_note', 'Empty, or the sentence saying how many material '
+                     'approval steps still name them and that SCM will reassign them',
+                     ' 2 material approval steps still name you; SCM will reassign them.'),
+            Variable('reason', 'Why the sites were handed over', 'Rahul moves to IPGCL.'),
+        ),
+        in_app_text=('{{ actor_name }} handed over {{ sites }} from you to '
+                     '{{ incoming_pm_name }}: {{ moved }} moved to {{ incoming_pm_name }}.'
+                     '{{ material_note }} Reason: {{ reason }}'),
+        default_subject=('{{ actor_name }} handed over {{ sites }} from you to '
+                         '{{ incoming_pm_name }}: {{ moved }} moved to {{ incoming_pm_name }}.'
+                         '{{ material_note }} Reason: {{ reason }}'),
+        default_body=('{{ actor_name }} handed over {{ sites }} from you to '
+                      '{{ incoming_pm_name }}: {{ moved }} moved to {{ incoming_pm_name }}.'
+                      '{{ material_note }} Reason: {{ reason }}'),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The outgoing PM, once per handover (never once per site).',
+        default_state='active',
+    ),
 ])
 
 

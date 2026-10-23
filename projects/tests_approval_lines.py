@@ -588,15 +588,14 @@ class EmailAndAdminTests(LinesFixture):
             _line(description='Clamp')])
         self.assertEqual(approval_notices.lines_summary(approval),
                          '120 Nos — Solar module 540W, +2 more')
-        html = approval_notices.email_html(approval, 'Approval needed', 'Please decide.')
-        self.assertIn('Material:</span> 120 Nos — Solar module 540W, +2 more', html)
+        # T3c (ruling Q5): email_html is gone; the email's HTML part is base_email, checked
+        # in EmailTextPartTests and tests_notify_migration_c.
 
         single = self.raise_material(lines=[_line(quantity='2.5', unit='KWp')])
         self.assertEqual(approval_notices.lines_summary(single),
                          '2.50 KWp — Solar module 545 Wp')
         bill = self.raise_bill()
         self.assertEqual(approval_notices.lines_summary(bill), '')
-        self.assertNotIn('Material:', approval_notices.email_html(bill, 's', 'b'))
 
     def test_the_admin_shows_lines_read_only(self):
         request = RequestFactory().get('/')
@@ -622,7 +621,8 @@ class EmailTextPartTests(NoticeBase):
         mail = [m for m in self.mail if m['to'] == 'ap_pm@example.com']
         self.assertEqual(len(mail), 1)
         self.assertIn(f'\n\nMaterial: {summary}', mail[0]['text'])
-        self.assertIn(f'Material:</span> {summary}', mail[0]['html'])
+        # T3c: the HTML part is base_email, where the line is a paragraph of its own.
+        self.assertIn(f'>Material: {summary}</p>', mail[0]['html'])
         # The bell is the notice alone, and the PM still hears once, on both channels.
         self.assertNotIn('Material:', self.note_for(self.pm))
         self.assertEqual(sent['ap_pm'], (approval_notices.T_ACTIVATED, ('email', 'in_app')))

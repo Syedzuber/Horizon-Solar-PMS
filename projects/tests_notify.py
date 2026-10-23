@@ -87,7 +87,8 @@ class RegistryTests(TestCase):
 
     def test_the_shipped_registry_holds_the_admin_test_message(self):
         # T3a added the first moved sends after it; the admin test message stays first.
-        # T3b added task assignment and the change requests after those.
+        # T3b added task assignment and the change requests after those; T3c the
+        # approvals, then COD, punch points, QA/QC and the PM handover.
         self.assertEqual(list(NOTIFICATION_EVENTS), [
             EVENT, 'issue_raised', 'issue_resolved', 'project_pm_assigned',
             'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached',
@@ -95,7 +96,14 @@ class RegistryTests(TestCase):
             'change_request_raised_with_pm', 'change_request_forwarded_head',
             'change_request_forwarded_requester', 'change_request_pm_rejected',
             'change_request_withdrawn', 'change_request_accepted', 'change_request_rejected',
-            'change_request_corrected'])
+            'change_request_corrected',
+            'approval_step_activated', 'approval_work_to_confirm',
+            'approval_step_activated_deputy', 'approval_approved',
+            'approval_changes_requested', 'approval_work_not_done', 'approval_rejected',
+            'approval_withdrawn', 'approval_withdrawn_work', 'cod_recorded', 'cod_withdrawn',
+            'punch_point_raised_by_visit', 'punch_point_rectified',
+            'punch_point_reverify_rejected', 'site_qaqc_assigned', 'site_qaqc_removed',
+            'qaqc_visit_submitted', 'pm_handover_incoming', 'pm_handover_outgoing'])
         event = get_event(EVENT)
         self.assertEqual((event.tier, event.default_state, event.channels),
                          ('KNOW', 'active', ('email',)))

@@ -49,15 +49,13 @@ from projects.models import (
     log_activity,
 )
 from projects.notifications import send_notification
+from projects.notify import notify_now
 from projects.permissions import (
     can_change_site_pm, qaqc_engineer_manager_refusal, user_can_view_project,
 )
 from projects.utils import assign_tasks_to
 
 logger = logging.getLogger(__name__)
-
-IN_APP_AND_EMAIL = ['in_app', 'email']
-
 
 # A Cancelled site keeps whoever was PM when it was cancelled. Giving it a new one would
 # hand a closed site's open tasks to someone who never worked it (PM-1, Q6).
@@ -522,13 +520,14 @@ def send_handover_notices(handover):
     registers this with transaction.on_commit(robust=True), so a rolled-back handover
     tells nobody and a failed send never undoes one.
 
-      incoming PM  in-app + email: what they now hold, and why
-      outgoing PM  in-app + email: what left them, and how many material steps still
-                   name them
+      incoming PM  in-app + email (pm_handover_incoming): what they now hold, and why
+      outgoing PM  in-app + email (pm_handover_outgoing): what left them, and how many
+                   material steps still name them
       SCM          in-app only, every active SCM user, only when material steps > 0
 
-    Never the actor; nobody inactive. No WhatsApp (PM-6). The message is both the bell
-    text and the email's text part, the closeout notices' pattern (cod_views).
+    Never the actor; nobody inactive. No WhatsApp (PM-6). The PM pair are notify registry
+    events sent with notify_now() (T3c), not notify(): this already runs on commit. The
+    SCM notice keeps its direct in-app call.
     """
     h = handover
     what = _site_list(h.sites, h.program)
@@ -544,41 +543,43 @@ def send_handover_notices(handover):
     else:
         incoming_link = get_user_dashboard(h.to_pm.user)
 
-    notices = [
-        (h.to_pm, IN_APP_AND_EMAIL, 'pm_handover_incoming', incoming_link,
-         f'{_name(h.actor)} handed over {what} to you from {_name(h.from_pm)}: '
-         f'{moved} moved to you. Reason: {h.reason}'),
+    common = dict(actor_name=_name(h.actor), sites=what, moved=moved, reason=h.reason)
+    pair = [
+        (h.to_pm, 'pm_handover_incoming', incoming_link,
+         dict(common, outgoing_pm_name=_name(h.from_pm))),
         # The outgoing PM's link is their dashboard: they can no longer open the sites.
-        (h.from_pm, IN_APP_AND_EMAIL, 'pm_handover_outgoing',
-         get_user_dashboard(h.from_pm.user),
-         f'{_name(h.actor)} handed over {what} from you to {_name(h.to_pm)}: '
-         f'{moved} moved to {_name(h.to_pm)}.'
-         + (f" {_count(material, 'material approval step')} still name you; "
-            f"SCM will reassign {'it' if material == 1 else 'them'}." if material else '')
-         + f' Reason: {h.reason}'),
+        (h.from_pm, 'pm_handover_outgoing', get_user_dashboard(h.from_pm.user),
+         dict(common, incoming_pm_name=_name(h.to_pm),
+              material_note=(
+                  f" {_count(material, 'material approval step')} still name you; "
+                  f"SCM will reassign {'it' if material == 1 else 'them'}."
+                  if material else ''))),
     ]
-    if material:
-        scm_message = (
-            f'PM handover: {what} moved from {_name(h.from_pm)} to {_name(h.to_pm)}. '
-            f"{_count(material, 'material approval step')} still name {_name(h.from_pm)} "
-            f"as PM and did not move — reassign {'it' if material == 1 else 'them'}.")
-        for scm in (UserProfile.objects.select_related('user')
-                    .filter(role='SCM', is_active=True, user__is_active=True)):
-            notices.append((scm, ['in_app'], 'pm_handover_scm', reverse('approval_list'),
-                            scm_message))
+    for recipient, event, link, values in pair:
+        # notify_now() drops the actor and anyone inactive itself, and never raises.
+        notify_now(event, recipients=[recipient], values=values, actor=h.actor,
+                   related_project=single, link=link, log_label=event)
 
+    if not material:
+        return
+    scm_message = (
+        f'PM handover: {what} moved from {_name(h.from_pm)} to {_name(h.to_pm)}. '
+        f"{_count(material, 'material approval step')} still name {_name(h.from_pm)} "
+        f"as PM and did not move — reassign {'it' if material == 1 else 'them'}.")
     actor_pk = h.actor.pk if h.actor is not None else None
-    for recipient, channels, template, link, message in notices:
-        if recipient.pk == actor_pk or not recipient.is_active or not recipient.user.is_active:
+    for scm in (UserProfile.objects.select_related('user')
+                .filter(role='SCM', is_active=True, user__is_active=True)):
+        if scm.pk == actor_pk:
             continue
         try:
             send_notification(
-                recipient, message, channels=channels, link=link, subject=message,
-                template=template, related_project=single, actor=h.actor,
+                scm, scm_message, channels=['in_app'], link=reverse('approval_list'),
+                subject=scm_message, template='pm_handover_scm', related_project=single,
+                actor=h.actor,
             )
         except Exception:
-            logger.exception('send_handover_notices: the %s notice to %s failed; the '
-                             'handover stands.', template, recipient.pk)
+            logger.exception('send_handover_notices: the pm_handover_scm notice to %s '
+                             'failed; the handover stands.', scm.pk)
 
 
 def _count(n, noun):

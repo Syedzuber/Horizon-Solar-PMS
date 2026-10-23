@@ -43,7 +43,7 @@ from .design_storage import DesignStorageError, _client, build_design_path
 from .design_views import cod_mirror_task, sync_cod_mirror
 from .forms import check_typed_date
 from .models import CodRecord, Project, Task, UserProfile, log_activity
-from .notifications import send_notification
+from .notify import notify_now
 from .permissions import project_managers, user_can_record_cod, user_can_view_project
 from .site_pm import refuse_site_view_404
 from .punch_points import (
@@ -54,10 +54,8 @@ from .views import _active_project
 
 logger = logging.getLogger(__name__)
 
-IN_APP_AND_EMAIL = ['in_app', 'email']
-
-# NotificationLog.template_name labels. Not Interakt templates: WhatsApp is not among
-# the channels, so these only name the event on the log row.
+# NotificationLog.template_name labels, and since T3c the notify_registry event codes of
+# the same name. Email and in-app only: these events send no WhatsApp.
 T_RECORDED = 'cod_recorded'
 T_WITHDRAWN = 'cod_withdrawn'
 
@@ -320,25 +318,30 @@ def _recipient_pks(project, actor_pk):
     return ordered
 
 
-def _send(recipient_pks, message, project_pk, actor_pk, template):
-    """One in-app + email notice per recipient, after commit. Re-reads by pk so the
-    callback holds no ORM objects from the writer's transaction. A person deactivated
-    on either model is not told: they cannot sign in to see it."""
+def _send(recipient_pks, values, project_pk, actor_pk, template):
+    """One in-app + email notice per recipient, after commit, through notify_now() (T3c):
+    `template` is both the registry event and the NotificationLog label, `values` the
+    event's values as the writer composed them. notify_now(), not notify(): this already
+    runs on commit. Re-reads by pk so the callback holds no ORM objects from the writer's
+    transaction. A person deactivated on either model is not told: they cannot sign in
+    to see it."""
     project = Project.objects.filter(pk=project_pk).first()
     actor = UserProfile.objects.filter(pk=actor_pk).first()
-    link = reverse('project_overview', args=[project.project_id]) if project else ''
+    if project is None:
+        return
+    # The site's managers and the CEOs the writer named, still active on both models.
     recipients = (UserProfile.objects.select_related('user')
                   .filter(pk__in=recipient_pks, is_active=True, user__is_active=True))
-    for recipient in recipients:
-        send_notification(
-            recipient, message, channels=IN_APP_AND_EMAIL, link=link, subject=message,
-            template=template, related_project=project, actor=actor,
-        )
+    notify_now(template, recipients=recipients, values=values, actor=actor,
+               related_project=project,
+               link=reverse('project_overview', args=[project.project_id]),
+               log_label=template)
 
 
-def _after_commit(project, actor, action, record_pk, action_code, message, template):
+def _after_commit(project, actor, action, record_pk, action_code, values, template):
     """Register the ActivityLog line and the notices to run once the writer commits.
-    A refused or rolled-back write therefore logs nothing and tells nobody."""
+    A refused or rolled-back write therefore logs nothing and tells nobody. `values` are
+    the notify event's values (T3c), composed by the writer."""
     project_pk, actor_pk = project.pk, actor.pk
     recipient_pks = _recipient_pks(project, actor_pk)
 
@@ -353,7 +356,7 @@ def _after_commit(project, actor, action, record_pk, action_code, message, templ
     # log line and the approval notices settled on this form (approval_notices.py).
     transaction.on_commit(log, robust=True)
     transaction.on_commit(
-        lambda: _send(recipient_pks, message, project_pk, actor_pk, template),
+        lambda: _send(recipient_pks, values, project_pk, actor_pk, template),
         robust=True)
 
 
@@ -402,13 +405,13 @@ def record_cod(project, user, *, cod_date, evidence_type, note, stored_pdf):
             # uniq_cod_record_active: only reachable if the lock above was bypassed.
             raise CodRefused(COD_ALREADY_RECORDED)
         sync_cod_mirror(locked, actor)
-        message = (f"COD recorded for {_site_label(locked)}: "
-                   f"{cod_date:%d %b %Y}, evidence {row.get_evidence_type_display()}. "
-                   f"Recorded by {_person(actor)}.")
+        values = {'site_label': _site_label(locked), 'cod_date': f'{cod_date:%d %b %Y}',
+                  'evidence': row.get_evidence_type_display(),
+                  'recorded_by_name': _person(actor)}
         _after_commit(
             locked, actor,
             f"Recorded COD {cod_date:%d %b %Y} ({row.get_evidence_type_display()}): {note}",
-            row.pk, 'cod_recorded', message, T_RECORDED)
+            row.pk, 'cod_recorded', values, T_RECORDED)
     return row
 
 
@@ -439,12 +442,12 @@ def withdraw_cod(project, user, record_pk, reason):
                              'withdrawn. Reload the page.')
         row = CodRecord.objects.get(pk=record_pk)
         sync_cod_mirror(locked, actor)
-        message = (f"COD withdrawn for {_site_label(locked)} by {_person(actor)}: "
-                   f"{reason}")
+        values = {'site_label': _site_label(locked), 'withdrawn_by_name': _person(actor),
+                  'reason': reason}
         _after_commit(
             locked, actor,
             f"Withdrew COD {row.cod_date:%d %b %Y}: {reason}",
-            row.pk, 'cod_withdrawn', message, T_WITHDRAWN)
+            row.pk, 'cod_withdrawn', values, T_WITHDRAWN)
     return row
 
 

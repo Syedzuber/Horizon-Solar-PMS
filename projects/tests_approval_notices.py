@@ -605,7 +605,10 @@ class EmailTests(NoticeBase):
         match = resolve(urlparse(hrefs[0]).path)
         self.assertEqual(match.url_name, 'approval_detail')
         self.assertEqual(match.kwargs, {'approval_pk': approval.pk})
-        self.assertNotIn('http', mail['text'])
+        # T3c: the text part now ends with the button's line, the same one link (accepted);
+        # before, the text part carried no URL.
+        self.assertEqual(re.findall(r'https?://\S+', mail['text']),
+                         [f'{SITE_BASE_URL}/approvals/{approval.pk}/'])
         self.assertEqual(Notification.objects.get(recipient=self.pm).link,
                          reverse('approval_detail', args=[approval.pk]))
 
@@ -631,9 +634,11 @@ class RobustTests(NoticeBase):
 
     def test_a_send_that_raises_does_not_undo_the_decision(self):
         approval, _ = self.create_material(design=False)
-        with mock.patch('projects.approval_notices.send_notification',
+        # T3c: the emailed notices send through notify_now(), which logs a failed send
+        # under projects.notify and goes on.
+        with mock.patch('projects.notify.send_notification',
                         side_effect=RuntimeError('mail down')):
-            with self.assertLogs('projects.approval_notices', 'ERROR'):
+            with self.assertLogs('projects.notify', 'ERROR'):
                 self.decide(approval, APPROVAL_PARTY_PM, APPROVE, self.pm)
         approval.refresh_from_db()
         self.assertEqual(approval.status, APPROVAL_APPROVED)

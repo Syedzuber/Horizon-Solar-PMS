@@ -97,15 +97,26 @@ def render_plain(text, values, allowed):
     return ' '.join(_substitute(text, values, allowed, str).split())
 
 
+def _renders_empty(paragraph, values, allowed):
+    """Whether `paragraph` is blank once filled: a paragraph that is only an optional
+    value, such as an approval's summary line, when that value is ''. Such a paragraph is
+    dropped from both parts (T3c, Q3), so an empty value leaves no blank gap and no empty
+    <p>. Raises RenderError as the renderers do."""
+    return not _substitute(_BOLD_RE.sub(r'\1', paragraph), values, allowed, str).strip()
+
+
 def render_body_text(body, values, allowed):
-    """The plain-text body: paragraphs separated by one blank line, **markers** dropped."""
+    """The plain-text body: paragraphs separated by one blank line, **markers** dropped,
+    a paragraph that fills to nothing left out."""
     return '\n\n'.join(
-        _substitute(_BOLD_RE.sub(r'\1', p), values, allowed, str) for p in _paragraphs(body))
+        _substitute(_BOLD_RE.sub(r'\1', p), values, allowed, str) for p in _paragraphs(body)
+        if not _renders_empty(p, values, allowed))
 
 
 def render_body_html(body, values, allowed):
     """The HTML body: one <p> per paragraph, a single line break as <br>, **text** as
-    <strong>, nothing else (T2, A8 added the <br>; the text body keeps the break as is).
+    <strong>, nothing else (T2, A8 added the <br>; the text body keeps the break as is). A
+    paragraph that fills to nothing is left out, as in the text body (T3c, Q3).
 
     The ORDER is what makes it safe. The Admin-typed paragraph is escaped first (escape()
     leaves { } and * alone, so placeholders and bold markers survive it); bold and line
@@ -121,6 +132,8 @@ def render_body_html(body, values, allowed):
 
     out = []
     for paragraph in _paragraphs(body):
+        if _renders_empty(paragraph, values, allowed):
+            continue
         marked = _BOLD_RE.sub(r'<strong>\1</strong>', str(escape(paragraph)))
         marked = marked.replace('\n', '<br>\n')
         filled = _substitute(marked, values, allowed, fill)

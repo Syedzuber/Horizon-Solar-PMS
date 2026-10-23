@@ -54,7 +54,7 @@ from .models import (
     PunchPoint, PunchPointEvent, QaqcVisit, QaqcVisitAnswer, SiteQaqcAssignment, Task,
     UserProfile, log_activity,
 )
-from .notifications import send_notification
+from .notify import notify_now
 from .permissions import (
     QAQC_ENGINEER_ROLES, project_managers, user_can_conduct_qaqc_visit,
     user_can_manage_project, user_can_rectify_punch_point, user_can_reverify_punch_point,
@@ -74,10 +74,8 @@ from .views import (
 
 logger = logging.getLogger(__name__)
 
-IN_APP_AND_EMAIL = ['in_app', 'email']
-
-# NotificationLog.template_name labels. Not Interakt templates: WhatsApp is not among
-# the channels, so these only name the event on the log row.
+# NotificationLog.template_name labels, and since T3c the notify_registry event codes of
+# the same name. Not Interakt templates: WhatsApp is not among the channels.
 T_ASSIGNED = 'site_qaqc_assigned'
 T_REMOVED = 'site_qaqc_removed'
 
@@ -293,41 +291,40 @@ def _refuse_ineligible(project, engineer):
             f"the site they check — reassign those tasks or choose someone else.")
 
 
-def _notify(recipient_pk, message, project_pk, actor_pk, template):
-    """One in-app + email notice, sent after the assignment commits. Re-reads by pk so
-    the callback holds no ORM objects from the request's transaction. A person
-    deactivated on either model is not told: they cannot sign in to act on it."""
+def _notify(recipient_pk, project_pk, actor_pk, template):
+    """One in-app + email notice through notify_now() (T3c), sent after the assignment
+    commits: `template` is both the registry event and the NotificationLog label.
+    notify_now(), not notify(): this already runs on commit. Re-reads by pk so the
+    callback holds no ORM objects from the request's transaction. A person deactivated on
+    either model is not told: they cannot sign in to act on it. notify_now() also drops
+    the actor, which these notices did not before T3c; CL-A and CL-H keep the site's
+    managers (the only people who assign) from being its engineer."""
     recipient = (UserProfile.objects.select_related('user')
                  .filter(pk=recipient_pk, is_active=True, user__is_active=True).first())
-    if recipient is None:
-        return
     project = Project.objects.filter(pk=project_pk).first()
+    if recipient is None or project is None:
+        return
     actor = UserProfile.objects.filter(pk=actor_pk).first()
-    send_notification(
-        recipient, message, channels=IN_APP_AND_EMAIL,
-        link=reverse('project_overview', args=[project.project_id]) if project else '',
-        subject=message, template=template, related_project=project, actor=actor,
-    )
+    notify_now(template, recipients=[recipient], values={'site_label': _site_label(project)},
+               actor=actor, related_project=project,
+               link=reverse('project_overview', args=[project.project_id]),
+               log_label=template)
 
 
 def _notify_assigned(row):
-    project = row.project
-    message = (f"You are now the QA/QC engineer for {_site_label(project)}. You can "
-               f"view the site and approve or reject its submitted tasks.")
-    engineer_pk, project_pk, actor_pk = row.engineer_id, project.pk, row.assigned_by_id
+    engineer_pk, project_pk, actor_pk = row.engineer_id, row.project_id, row.assigned_by_id
     # Lambdas, not functools.partial: on_commit(robust=True) names the callback in its
     # log line and the approval notices settled on this form (approval_notices.py).
     transaction.on_commit(
-        lambda: _notify(engineer_pk, message, project_pk, actor_pk, T_ASSIGNED),
+        lambda: _notify(engineer_pk, project_pk, actor_pk, T_ASSIGNED),
         robust=True)
 
 
 def _notify_removed(project, engineer_pk, actor_pk):
     # Q-D: someone losing access to a site without notice will think the system broke.
-    message = f"You are no longer the QA/QC engineer for {_site_label(project)}."
     project_pk = project.pk
     transaction.on_commit(
-        lambda: _notify(engineer_pk, message, project_pk, actor_pk, T_REMOVED),
+        lambda: _notify(engineer_pk, project_pk, actor_pk, T_REMOVED),
         robust=True)
 
 
@@ -499,7 +496,8 @@ VISIT_PHOTO_KIND = 'qaqc-visit'
 # discard helper can only ever reach its own kind of object.
 PUNCH_PHOTO_KIND = 'punch-point'
 
-# NotificationLog.template_name label (not an Interakt template: no WhatsApp channel).
+# NotificationLog.template_name label and, since T3c, the notify_registry event code (not
+# an Interakt template: no WhatsApp channel).
 T_VISIT_SUBMITTED = 'qaqc_visit_submitted'
 
 VISIT_STORAGE_NOT_READY = ('QA/QC visits cannot be started yet: the private store for '
@@ -1091,19 +1089,22 @@ def _plural(count, word):
     return f"{count} {word}{'' if count == 1 else 's'}"
 
 
-def _send_visit_notices(recipient_pks, message, project_pk, actor_pk, visit_pk):
-    """One in-app + email notice per recipient, after commit. Re-reads by pk; a person
+def _send_visit_notices(recipient_pks, values, project_pk, actor_pk, visit_pk):
+    """One in-app + email notice per recipient through notify_now() (T3c), after commit:
+    T_VISIT_SUBMITTED is both the registry event and the NotificationLog label, `values`
+    the event's values as submit_qaqc_visit() composed them. Re-reads by pk; a person
     deactivated on either model is not told — they cannot sign in to read the visit."""
     project = Project.objects.filter(pk=project_pk).first()
     actor = UserProfile.objects.filter(pk=actor_pk).first()
-    link = (reverse('qaqc_visit_detail', args=[project.project_id, visit_pk])
-            if project else '')
-    for recipient in (UserProfile.objects.select_related('user')
-                      .filter(pk__in=recipient_pks, is_active=True, user__is_active=True)):
-        send_notification(
-            recipient, message, channels=IN_APP_AND_EMAIL, link=link, subject=message,
-            template=T_VISIT_SUBMITTED, related_project=project, actor=actor,
-        )
+    if project is None:
+        return
+    # The site's PM and coordinators submit_qaqc_visit named, still active on both models.
+    recipients = (UserProfile.objects.select_related('user')
+                  .filter(pk__in=recipient_pks, is_active=True, user__is_active=True))
+    notify_now(T_VISIT_SUBMITTED, recipients=recipients, values=values, actor=actor,
+               related_project=project,
+               link=reverse('qaqc_visit_detail', args=[project.project_id, visit_pk]),
+               log_label=T_VISIT_SUBMITTED)
 
 
 def submit_qaqc_visit(visit, user, project):
@@ -1150,15 +1151,15 @@ def submit_qaqc_visit(visit, user, project):
             f"Submitted QA/QC visit {locked.visit_date:%d %b %Y}: "
             f"{_plural(checked, 'point')} checked, {_plural(raised, 'punch point')} raised",
             locked.pk, 'qaqc_visit_submitted')
-        message = (f"QA/QC visit submitted for {_site_label(locked_project)} by "
-                   f"{_person(profile)}: {_plural(checked, 'point')} checked, {raised} No, "
-                   f"{_plural(raised, 'punch point')} raised.")
+        values = {'site_label': _site_label(locked_project), 'engineer_name': _person(profile),
+                  'points_checked': _plural(checked, 'point'), 'no_count': raised,
+                  'points_raised': _plural(raised, 'punch point')}
         # V-8: the site's PM and active coordinators, never the engineer who submitted.
         recipient_pks = [p.pk for p in project_managers(locked_project) if p.pk != profile.pk]
         project_pk, actor_pk, visit_pk = locked_project.pk, profile.pk, locked.pk
         # A lambda, not functools.partial, as in approval_notices.py.
         transaction.on_commit(
-            lambda: _send_visit_notices(recipient_pks, message, project_pk, actor_pk,
+            lambda: _send_visit_notices(recipient_pks, values, project_pk, actor_pk,
                                         visit_pk),
             robust=True)
         # PP-6 / go-ahead Q8: each task's assignee, once per task, after commit.

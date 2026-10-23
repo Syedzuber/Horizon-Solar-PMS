@@ -321,9 +321,11 @@ class SiteEngineerNoticeTests(NoticeBase):
         self.assertEqual(len(mail), 1)
         site = approval.bill_detail.project.project_id
         self.assertEqual(mail[0]['subject'], 'Work to confirm: Civil works bill')
-        self.assertTrue(mail[0]['text'].endswith(
-            f'\n\nWork: Approval Contractor · {site} · Foundation'), mail[0]['text'])
-        self.assertIn(f'Work:</span> Approval Contractor · {site} · Foundation',
+        # T3c: the body's last paragraph, then the button's link line and the footer; in
+        # the HTML part (base_email) a paragraph of its own.
+        self.assertIn(f'\n\nWork: Approval Contractor · {site} · Foundation\n\n',
+                      mail[0]['text'])
+        self.assertIn(f'>Work: Approval Contractor · {site} · Foundation</p>',
                       mail[0]['html'])
         self.assert_no_bill(mail[0])
         self.assertIn('asks you to confirm the work on "Civil works bill"',
