@@ -288,6 +288,32 @@ def _send(event, recipients, values, actor, related_project, link, log_label):
             logger.exception('notify: %s to %s failed', event.code, recipient.pk)
 
 
+def notify_now(event_code, *, recipients, values, actor=None, related_project=None, link='',
+               log_label=None):
+    """notify(), sent NOW rather than after commit: the same recipients rule, rendering,
+    channels and log rows.
+
+    FOR A CALLER THAT IS ALREADY RUNNING ON COMMIT (T3b, ruling Q3). The assignment
+    cooldown has to count, decide and send inside ONE after-commit callback. Had it called
+    notify() there, the send would be registered as a second callback: Django runs that at
+    once in production, but captureOnCommitCallbacks queues it behind the outer callbacks,
+    so a second assignment in the same transaction would count zero rows and send
+    assign_task twice in tests while production sent assign_tasks_bulk. Called inside an
+    open transaction, this sends before that transaction's outcome is known, which is
+    exactly what notify() exists to prevent; use notify() everywhere else.
+
+    Raises KeyError for an unknown event code. Nothing after that raises.
+    """
+    event = get_event(event_code)
+    try:
+        targets = resolve_recipients(recipients, actor)
+        if targets:
+            _send(event, targets, dict(values or {}), actor, related_project, link,
+                  log_label)
+    except Exception:
+        logger.exception('notify_now: %s failed', event_code)
+
+
 def notify(event_code, *, recipients, values, actor=None, related_project=None, link='',
            log_label=None):
     """Send `event_code` to `recipients` after the current transaction commits.
@@ -308,8 +334,13 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
 
     Raises KeyError for an unknown event code (a programmer error, caught by any test
     that fires the event). Nothing after that raises.
+
+    The body is notify_now(), registered on commit (T3b). The recipients are resolved
+    HERE, before the callback, as before T3b, so who is told is decided by the state at
+    the time of the act. notify_now() resolves the same profile objects again, which reads
+    the flags already loaded and drops nobody new.
     """
-    event = get_event(event_code)
+    get_event(event_code)
     try:
         targets = resolve_recipients(recipients, actor)
         if not targets:
@@ -320,7 +351,9 @@ def notify(event_code, *, recipients, values, actor=None, related_project=None, 
         # the committed action. A lambda, not functools.partial: robust on_commit names
         # the callback in its log line, which needs a __qualname__.
         transaction.on_commit(
-            lambda: _send(event, targets, frozen, actor, related_project, link, log_label),
+            lambda: notify_now(event_code, recipients=targets, values=frozen, actor=actor,
+                               related_project=related_project, link=link,
+                               log_label=log_label),
             robust=True)
     except Exception:
         logger.exception('notify: could not schedule %s', event_code)

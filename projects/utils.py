@@ -78,71 +78,93 @@ def _notify_assignment(task, user, actor=None, request=None):
     Apply the per-recipient, per-project, 1-hour cooldown and send at most one
     message. Scope is per project on purpose: somebody assigned work on two
     projects inside the hour must hear about both.
+
+    THE WHOLE DECISION RUNS AFTER COMMIT, in one callback (T3b, A2): the count, the
+    choice of message (single, bulk or none) and every channel's send. A rolled-back
+    assignment therefore sends nothing on any channel and leaves no row to count, and two
+    assignments to one person and project committed together run their callbacks one
+    after the other, so the second counts the first's in-app row and sends
+    assign_tasks_bulk. Robust, so a failure is logged and never reaches the assignment.
+
+    Email and in-app go through notify_now() (task_assigned / tasks_assigned_bulk), whose
+    log_label keeps template_name 'assign_task' / 'assign_tasks_bulk', so the cooldown and
+    the breaker count the same rows as before. The WhatsApp leg is still sent here, with
+    the same template, params and request-built links, until the WhatsApp phase.
     """
+    # Lazy, like every models import in this module: notify and notifications load models
+    # at import time, and models imports utils inside its methods, so importing them at
+    # the top would make loading utils load models (circular through the app registry).
     from .notifications import send_notification
+    from .notify import notify_now, resolve_recipients
+
+    # notify()'s recipient rule, decided now (T3b, rulings Q1/Q2): the assigner giving
+    # themself a task, or an assignee whose login is off, is told nothing on any channel
+    # and so is not counted by the cooldown either.
+    if not resolve_recipients([user], actor):
+        return
 
     project        = task.phase.project
     recipient_name = user.user.get_full_name() or user.user.username
+    assigner_name  = (actor.user.get_full_name() or actor.user.username) if actor else ''
+    task_name      = task.task_name
+    task_url       = f'/projects/{project.project_id}/tasks/{task.pk}/'
+    list_url       = f'/projects/{project.project_id}/overview/'
+    # Built now, while the request is in hand: the WhatsApp params keep the request's host.
+    task_url_abs   = _abs_url(task_url, request)
+    list_url_abs   = _abs_url(list_url, request)
 
-    sends, breaker_tripped = _assign_notification_state(user, project)
+    def decide_and_send():
+        sends, breaker_tripped = _assign_notification_state(user, project)
 
-    if breaker_tripped:
-        logger.error(
-            'assign_task_to: circuit breaker tripped — %s assignment notification rows '
-            'for %s on %s inside the window; sending nothing.',
-            ASSIGN_CIRCUIT_BREAKER_ROWS, recipient_name, project.project_id,
-        )
-        return
+        if breaker_tripped:
+            logger.error(
+                'assign_task_to: circuit breaker tripped — %s assignment notification rows '
+                'for %s on %s inside the window; sending nothing.',
+                ASSIGN_CIRCUIT_BREAKER_ROWS, recipient_name, project.project_id,
+            )
+            return
 
-    if sends >= ASSIGN_COOLDOWN_MAX_MESSAGES:
-        return
+        if sends >= ASSIGN_COOLDOWN_MAX_MESSAGES:
+            return
 
-    if sends == 0:
-        # First of the window — the existing message, unchanged.
-        task_url     = f'/projects/{project.project_id}/tasks/{task.pk}/'
-        task_url_abs = _abs_url(task_url, request)
-        message = (
-            f'Hi {recipient_name},\n\n'
-            f'The task "{task.task_name}" on project {project.customer_name} has been assigned to you.\n\n'
-            f'Please login to review details and update progress.'
-        )
+        values = {'customer_name': project.customer_name,
+                  'project_id': project.project_id, 'assigner_name': assigner_name}
+        if sends == 0:
+            # First of the window — the per-task message.
+            event_code, label, link = 'task_assigned', 'assign_task', task_url
+            values['task_name'] = task_name
+            params = [project.customer_name, recipient_name, task_name,
+                      project.customer_name, task_url_abs]
+            wa_message = (f'The task "{task_name}" on project {project.customer_name} has '
+                          f'been assigned to you.')
+        else:
+            # Second of the window — one summary instead of a second per-task message.
+            # It links to the project's task list rather than any single task: the count
+            # goes stale the moment a third assignment lands, the list does not.
+            task_count = sends + 1
+            event_code, label, link = 'tasks_assigned_bulk', 'assign_tasks_bulk', list_url
+            values['task_count'] = task_count
+            params = [project.customer_name, recipient_name, task_count,
+                      project.customer_name, list_url_abs]
+            wa_message = (f'{task_count} tasks on project {project.customer_name} have been '
+                          f'assigned to you.')
+
+        notify_now(event_code, recipients=[user], values=values, actor=actor,
+                   related_project=project, link=link, log_label=label)
+        # `message` is only the WhatsApp row's NotificationLog text; Interakt sends the
+        # template with `params`.
         send_notification(
             recipient=user,
-            message=f'{message}\n\nView in Horizon Solar PMS:\n{SITE_BASE_URL}{task_url}',
-            channels=['in_app', 'whatsapp', 'email'],
-            link=task_url,
-            subject=f'Task Assigned: {task.task_name} — {project.customer_name}',
-            template='assign_task',
-            template_params=[project.customer_name, recipient_name, task.task_name,
-                             project.customer_name, task_url_abs],
+            message=wa_message,
+            channels=['whatsapp'],
+            link=link,
+            template=label,
+            template_params=params,
             related_project=project,
             actor=actor,
         )
-        return
 
-    # Second of the window — one summary instead of a second per-task message.
-    # It links to the project's task list rather than any single task: the count
-    # goes stale the moment a third assignment lands, the list does not.
-    task_count   = sends + 1
-    list_url     = f'/projects/{project.project_id}/overview/'
-    list_url_abs = _abs_url(list_url, request)
-    message = (
-        f'Hi {recipient_name},\n\n'
-        f'{task_count} tasks on project {project.customer_name} have been assigned to you.\n\n'
-        f'Please login to review details and update progress.'
-    )
-    send_notification(
-        recipient=user,
-        message=f'{message}\n\nView in Horizon Solar PMS:\n{SITE_BASE_URL}{list_url}',
-        channels=['in_app', 'whatsapp', 'email'],
-        link=list_url,
-        subject=f'{task_count} Tasks Assigned — {project.customer_name}',
-        template='assign_tasks_bulk',
-        template_params=[project.customer_name, recipient_name, task_count,
-                         project.customer_name, list_url_abs],
-        related_project=project,
-        actor=actor,
-    )
+    transaction.on_commit(decide_and_send, robust=True)
 
 
 def assign_task_to(task, user, notify=False, actor=None, request=None):

@@ -204,7 +204,7 @@ class CallSiteParseTests(GateNotificationBase):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'design_views.py')
         with open(path, encoding='utf-8-sig') as fh:
             tree = ast.parse(fh.read())
-        cls.calls = {'send_notification': [], 'design_gate_next_actors': []}
+        cls.calls = {'send_notification': [], 'design_gate_next_actors': [], 'notify': []}
 
         def visit(node, fn, ancestors):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -245,9 +245,19 @@ class CallSiteParseTests(GateNotificationBase):
         return False
 
     def test_a2_every_send_names_in_app_as_a_literal_after_the_block_inside_a_try(self):
+        # CHANGED AT T3b: the change-request views call notify() now, so the module's
+        # send_notification() calls are the four gate sends (was 11, gate and change
+        # request). The notify() calls get the same after-the-block, inside-a-try check.
         sends = self.calls['send_notification']
-        self.assertEqual({fn for fn, _, _ in sends}, self.INTENDED | self.CHANGE_REQUEST)
-        self.assertEqual(len(sends), 11, [fn for fn, _, _ in sends])
+        self.assertEqual({fn for fn, _, _ in sends}, self.INTENDED)
+        self.assertEqual(len(sends), 4, [fn for fn, _, _ in sends])
+        notifies = self.calls['notify']
+        self.assertEqual({fn for fn, _, _ in notifies}, self.CHANGE_REQUEST)
+        for fn, node, ancestors in notifies:
+            with self.subTest(view=fn, call='notify'):
+                self.assertFalse(self._inside_atomic(ancestors),
+                                 f'{fn}: notify() is inside a transaction.atomic() block')
+                self.assertTrue(self._inside_try(ancestors), f'{fn}: notify() is not guarded')
         for fn, node, ancestors in sends:
             with self.subTest(view=fn):
                 channels = next((k.value for k in node.keywords if k.arg == 'channels'), None)

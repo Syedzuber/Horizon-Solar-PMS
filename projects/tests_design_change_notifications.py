@@ -7,12 +7,14 @@ WHAT IS PINNED, AND THE DECISION EACH TEST CITES
   N-b  An accept reaches the requester, the PM, the coordinators and the designer; a reject
        reaches the requester alone, with the Head's reason.
   N-c  The actor is never told of their own act, and nobody is told twice.
-  N-d  In-app links are relative. The email link is absolute, https, and its host is the
-       request's own, never a literal.
+  N-d  In-app links are relative. The email link is absolute; CHANGED AT T3b (C3): its
+       host is settings.APP_BASE_URL, no longer the request's own.
   N-e  A send that raises does not unwind the request, and is logged with its traceback.
-  D1   One call per recipient, channels ['in_app', 'email']. The URL is in the HTML part
-       only; `message` (the bell text and the email's plain-text part) carries none. The
-       HTML part escapes the user's text; the plain text carries it as typed.
+  D1   One call per recipient. The bell text carries no URL. The HTML part escapes the
+       user's text; the plain text carries it as typed. CHANGED AT T3b: the views call
+       notify() (in-app always, email per the change_request_* events), and the email's
+       plain-text part now carries the link once, on the button's line (ruling Q5).
+  T3b  Sends run after commit; ChangeNotificationBase runs each POST's on-commit callbacks.
   D4   A raise does not reach a Design Head's deputy.
   D5   Anyone whose UserProfile OR auth.User is inactive is dropped.
   D6   An accept that took the site out of a draft procurement group tells that group's
@@ -47,6 +49,7 @@ from .models import (
     CHANGE_REQUEST_ACCEPTED, CHANGE_REQUEST_PENDING, CHANGE_REQUEST_REJECTED,
     DESIGN_IN_DESIGN,
 )
+from .notify_registry import NOTIFICATION_EVENTS, get_event
 from .tests_design_change_window import ChangeWindowBase, _profile
 
 VIEW_LOGGER = 'projects.design_views'
@@ -87,6 +90,16 @@ class ChangeNotificationBase(ChangeWindowBase):
         self.addCleanup(mail_patch.stop)
         self.addCleanup(http_patch.stop)
         self.addCleanup(lambda: self.http.assert_not_called())
+
+        # T3b: the change-request notifications go through notify(), after commit. Every
+        # POST runs its on-commit callbacks, so a test reads what that request sent, as it
+        # did when the views sent at once.
+        post = self.client.post
+
+        def post_and_commit(*args, **kwargs):
+            with self.captureOnCommitCallbacks(execute=True):
+                return post(*args, **kwargs)
+        self.client.post = post_and_commit
 
     # ── helpers ─────────────────────────────────────────────────────────────
 
@@ -232,19 +245,23 @@ class ChannelAndLinkTests(ChangeNotificationBase):
                            .values_list('channel', 'status')),
                     [('email', 'sent'), ('in_app', 'sent')])
                 html = self._mail_for(profile)['html']
-                self.assertIn(f'href="https://testserver{link}"', html)
+                # CHANGED AT T3b (C3): was https://testserver, the request's own host.
+                self.assertIn(f'href="{settings.APP_BASE_URL}{link}"', html)
                 # One link, one scheme separator: no other absolute URL, no http://.
                 self.assertEqual(html.count('href="'), 1)
                 self.assertEqual(html.count('://'), 1)
 
-    def test_d2_the_email_host_is_the_requests_own(self):
-        """The same raise from another host puts THAT host in the link, so no host is
-        written anywhere in the path."""
+    def test_d2_the_email_host_is_app_base_url_whatever_the_requests_host(self):
+        """CHANGED AT T3b (C3). Was test_d2_the_email_host_is_the_requests_own: the link
+        carried the actor's host. notify() builds it from settings.APP_BASE_URL, so a raise
+        from another host carries the same link."""
         site, assignment = self._released('CN-D2')
         self.client.defaults['HTTP_HOST'] = 'localhost'
         self._raise(self.pm, site)
         link = reverse('design_qc_review', kwargs={'project_id': site.project_id})
-        self.assertIn(f'href="https://localhost{link}"', self._mail_for(self.head)['html'])
+        html = self._mail_for(self.head)['html']
+        self.assertIn(f'href="{settings.APP_BASE_URL}{link}"', html)
+        self.assertNotIn('localhost', html)
 
     def test_d3_markup_in_a_reason_is_escaped_in_html_and_as_typed_in_plain_text(self):
         reason = '<script>alert("x")</script> & move the inverter'
@@ -255,7 +272,9 @@ class ChannelAndLinkTests(ChangeNotificationBase):
         self.assertNotIn('<script>', mail['html'])
         self.assertIn('&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; move the '
                       'inverter', mail['html'])
-        self.assertTrue(mail['text'].endswith(f'Reason: "{reason}"'))
+        # CHANGED AT T3b (ruling Q5): the text part ended with the quote inline,
+        # `Reason: "…"`; the quote is now its own paragraph under "Reason:".
+        self.assertIn(f'\n\nReason:\n{reason}\n\n', mail['text'])
         self.assertTrue(self._note_for(mark, self.head).message.endswith(f'Reason: "{reason}"'))
 
     def test_d4_no_message_carries_a_url_for_any_event(self):
@@ -280,8 +299,14 @@ class ChannelAndLinkTests(ChangeNotificationBase):
                 wording = note.message.split(' Reason: "')[0].split(' Request: "')[0]
                 self.assertNotIn('http', wording.lower())
         for mail in self.mail:
-            wording = mail['text'].split(' Reason: "')[0].split(' Request: "')[0]
+            # CHANGED AT T3b (ruling Q5): the email's text part now carries the link, once,
+            # on the button's line, as every notify() email does. Its sentences, the first
+            # paragraph, still carry none; the quote (user text) follows them.
+            wording = mail['text'].split('\n\n')[0]
             self.assertNotIn('http', wording.lower())
+            self.assertEqual(mail['text'].count('Open in Horizon Solar PMS: '), 1)
+            self.assertIn(f'Open in Horizon Solar PMS: {settings.APP_BASE_URL}/',
+                          mail['text'])
 
     def test_d5_with_the_email_switch_off_in_app_is_delivered_and_email_is_skipped(self):
         switches = SystemSettings.get()
@@ -410,7 +435,8 @@ class TriageRecipientTests(ChangeNotificationBase):
 class RaisingSendTests(ChangeNotificationBase):
 
     def _raising(self):
-        return patch('projects.design_views.send_notification',
+        # CHANGED AT T3b: the views send through notify(), not send_notification().
+        return patch('projects.design_views.notify',
                      side_effect=RuntimeError('notification outage'))
 
     def _assert_logged(self, logs, view, site):
@@ -504,16 +530,21 @@ class CallSitePinTests(ChangeNotificationBase):
                       'design_change_request_withdraw', 'design_change_request_correct'}
 
     def test_p1_channels_at_every_send(self):
+        """CHANGED AT T3b. send_notification() is now called by the four gate views only,
+        naming ['in_app']; the seven change-request views call notify(), whose events
+        declare the email channel only (in-app is always sent), and nothing else."""
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'design_views.py')
         with open(path, encoding='utf-8-sig') as fh:
             tree = ast.parse(fh.read())
-        sites = []
+        sites, notify_sites = [], set()
         for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
             for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
                 if getattr(call.func, 'id', None) == 'send_notification':
                     channels = next(k.value for k in call.keywords if k.arg == 'channels')
                     sites.append((fn.name, [e.value for e in channels.elts]))
-        self.assertEqual(sorted(sites), sorted(
-            [(fn, ['in_app']) for fn in self.GATE]
-            + [(fn, ['in_app', 'email']) for fn in self.CHANGE_REQUEST]))
-        self.assertTrue(all(set(channels) <= {'in_app', 'email'} for _, channels in sites))
+                elif getattr(call.func, 'id', None) == 'notify':
+                    notify_sites.add(fn.name)
+        self.assertEqual(sorted(sites), sorted((fn, ['in_app']) for fn in self.GATE))
+        self.assertEqual(notify_sites, self.CHANGE_REQUEST)
+        self.assertTrue(all(get_event(code).channels == ('email',)
+                            for code in NOTIFICATION_EVENTS if code.startswith('change_request_')))

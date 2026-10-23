@@ -174,8 +174,13 @@ class SeededWalkthroughTests(_TempManifestMixin, TestCase):
         # Every area but `fresh` first, snapshotted — then `fresh` on top, so the suite
         # itself proves the fresh area leaves every other area exactly as it was (R4).
         cls.existing_areas = [a for a in AREAS if a != 'fresh']
-        cls.first_output = _run('seed_walkthrough', only=cls.existing_areas,
-                                manifest=cls.manifest)
+        # T3b: the assignment and change-request notifications the seed's views fire are
+        # sent on commit, which setUpTestData never reaches. Run them, so the seed
+        # exercises the real sends with the external switches off. Before the snapshot
+        # below, so the fresh-area comparison (R4) starts from the same rows.
+        with cls.captureOnCommitCallbacks(execute=True):
+            cls.first_output = _run('seed_walkthrough', only=cls.existing_areas,
+                                    manifest=cls.manifest)
         cls.before_fresh = json.loads(cls.manifest.read_text(encoding='utf-8'))['areas']
         cls.before_fresh_counts = _row_counts()
         _run('seed_walkthrough', only=['fresh'], manifest=cls.manifest)

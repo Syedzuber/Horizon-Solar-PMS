@@ -27,6 +27,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import requests
+from django.conf import settings
 from django.urls import reverse
 from django.utils import dateformat, timezone
 
@@ -487,7 +488,8 @@ class AudienceTests(ScreensBase):
         for note in Notification.objects.all():
             self.assertTrue(note.link.startswith('/') and not note.link.startswith('//'))
         for mail in self.mail:
-            self.assertIn('href="https://testserver/', mail['html'])
+            # CHANGED AT T3b (C3): was the request's host, https://testserver.
+            self.assertIn(f'href="{settings.APP_BASE_URL}/', mail['html'])
 
 
 # ===========================================================================
@@ -497,7 +499,8 @@ class AudienceTests(ScreensBase):
 class FailedSendTests(ScreensBase):
 
     def _failing(self):
-        return patch('projects.design_views.send_notification',
+        # CHANGED AT T3b: the views send through notify(), not send_notification().
+        return patch('projects.design_views.notify',
                      side_effect=RuntimeError('notification outage'))
 
     def test_f1_forward_stands(self):

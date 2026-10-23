@@ -620,7 +620,9 @@ class LoggingAndNotificationTests(DuplicateFixture):
 
     def test_only_the_first_new_task_notifies(self):
         NotificationLog.objects.all().delete()
-        self._create(new='Block A\nBlock B\nBlock C')
+        # T3b: the assignment notification is decided and sent on commit.
+        with self.captureOnCommitCallbacks(execute=True):
+            self._create(new='Block A\nBlock B\nBlock C')
         in_app = NotificationLog.objects.filter(recipient=self.se, channel='in_app')
         self.assertEqual(in_app.filter(template_name='assign_task').count(), 1)
         self.assertFalse(in_app.filter(template_name='assign_tasks_bulk').exists())

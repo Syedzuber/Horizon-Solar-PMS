@@ -65,6 +65,10 @@ class NotificationEvent:
     button_label: str
     recipients_rule: str
     default_state: str
+    # True when the call site also sends a WhatsApp message itself, outside notify(), so
+    # pausing the event here pauses its email and not that WhatsApp (T3b, P2). The Admin
+    # screens say so on the event. Goes when the WhatsApp phase moves those sends.
+    whatsapp_sent_separately: bool = False
 
     @property
     def variable_names(self):
@@ -148,6 +152,8 @@ NOTIFICATION_EVENTS = _build_registry([
     # 'email' is declared: these events' WhatsApp messages are still sent directly by
     # their call sites, with resolve_recipients(), until the WhatsApp phase moves them,
     # so no Admin switch here can appear to pause a WhatsApp it does not control.
+    # whatsapp_sent_separately (T3b, P2) marks the five whose call site does send one;
+    # project_unassigned_alert has no WhatsApp leg.
     NotificationEvent(
         code='issue_raised',
         label='Issue raised',
@@ -173,6 +179,7 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule=('The person the issue is assigned to, unless they raised it. '
                          'The project managers get a separate in-app note only.'),
         default_state='active',
+        whatsapp_sent_separately=True,
     ),
     NotificationEvent(
         code='issue_resolved',
@@ -197,6 +204,7 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule=('The project managers (PM and coordinators), the person the issue '
                          'is assigned to and the person who raised it, except the resolver.'),
         default_state='active',
+        whatsapp_sent_separately=True,
     ),
     NotificationEvent(
         code='project_pm_assigned',
@@ -224,6 +232,7 @@ NOTIFICATION_EVENTS = _build_registry([
         recipients_rule=('The PM given a project with no PM, by an Admin or by the Zoho '
                          'CRM deal. A change of PM sends the handover notices instead.'),
         default_state='active',
+        whatsapp_sent_separately=True,
     ),
     NotificationEvent(
         code='project_unassigned_alert',
@@ -280,6 +289,7 @@ NOTIFICATION_EVENTS = _build_registry([
         button_label='View in Horizon Solar PMS',
         recipients_rule='The project managers (PM and coordinators).',
         default_state='active',
+        whatsapp_sent_separately=True,
     ),
     NotificationEvent(
         code='payment_milestone_reached',
@@ -305,6 +315,375 @@ NOTIFICATION_EVENTS = _build_registry([
         button_label='View in Horizon Solar PMS',
         recipients_rule=('Finance, BD and CEO users and the project managers (PM and '
                          'coordinators), except the person who completed the task.'),
+        default_state='active',
+        whatsapp_sent_separately=True,
+    ),
+
+    # --- T3b: task assignment --------------------------------------------------------
+    # Wording pinned by tests_notify_migration_b. utils._notify_assignment chooses between
+    # the two per recipient and project inside one after-commit callback (the cooldown),
+    # and sends the WhatsApp leg itself, so both carry whatsapp_sent_separately.
+    NotificationEvent(
+        code='task_assigned',
+        label='Task assigned',
+        module='Tasks',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('task_name', 'Name of the task', 'Site Survey'),
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('assigner_name', 'The person who assigned the task', 'Rahul Verma'),
+        ),
+        in_app_text=('Hi {{ recipient_name }}, The task "{{ task_name }}" on project '
+                     '{{ customer_name }} has been assigned to you. Please login to review '
+                     'details and update progress.'),
+        default_subject='Task Assigned: {{ task_name }} — {{ customer_name }}',
+        default_body=(
+            'Hi {{ recipient_name }},\n\n'
+            'The task "{{ task_name }}" on project {{ customer_name }} has been assigned '
+            'to you.\n\n'
+            'Please login to review details and update progress.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('The person given a task on the assignment screens, or when a PM '
+                         'adds a task, unless they assigned it to themself. Only their '
+                         'first assignment on a project within an hour; the second sends '
+                         '"Several tasks assigned" and later ones send nothing.'),
+        default_state='active',
+        whatsapp_sent_separately=True,
+    ),
+    NotificationEvent(
+        code='tasks_assigned_bulk',
+        label='Several tasks assigned',
+        module='Tasks',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('task_count', 'How many tasks were assigned within the hour', '2'),
+            Variable('customer_name', 'Customer name of the project', 'Sharma Residence'),
+            Variable('project_id', 'Project ID', 'HRP-RES-2026-014'),
+            Variable('assigner_name', 'The person who made the latest assignment',
+                     'Rahul Verma'),
+        ),
+        in_app_text=('Hi {{ recipient_name }}, {{ task_count }} tasks on project '
+                     '{{ customer_name }} have been assigned to you. Please login to review '
+                     'details and update progress.'),
+        default_subject='{{ task_count }} Tasks Assigned — {{ customer_name }}',
+        default_body=(
+            'Hi {{ recipient_name }},\n\n'
+            '{{ task_count }} tasks on project {{ customer_name }} have been assigned to '
+            'you.\n\n'
+            'Please login to review details and update progress.'
+        ),
+        button_label='View in Horizon Solar PMS',
+        recipients_rule=('Sent instead of "Task assigned" for a person\'s second '
+                         'assignment on the same project within an hour. The link opens '
+                         'the project, not a task.'),
+        default_state='active',
+        whatsapp_sent_separately=True,
+    ),
+
+    # --- T3b: design and BOQ change requests --------------------------------------------
+    # One event per log label, except the forward, which has two wordings (ruling Q4).
+    # `noun` is "design change request" (raised by a PM or coordinator) or "BOQ change
+    # request" (raised by SCM). The *_note variables and `whose` are short phrases the
+    # view composes; a note is empty, or a sentence starting with a space. The quoted
+    # text may span lines. Email only: these events never send WhatsApp.
+    NotificationEvent(
+        code='change_request_raised',
+        label='Change request raised, to the Design Head',
+        module='Design',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"design change request" or "BOQ change request"',
+                     'design change request'),
+            Variable('raised_by_name', 'The person who raised it', 'Rahul Verma'),
+            Variable('raised_by_capacity', 'PM, Project Coordinator or SCM', 'PM'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('suspended_note',
+                     'Empty, or the sentence saying the review in progress is suspended',
+                     ' The review in progress is suspended until it is decided.'),
+            Variable('fallback_note',
+                     'Empty, or the sentence saying it skipped the PM stage and why', ''),
+            Variable('reason', 'What the raiser says must change', 'Move the array north.'),
+        ),
+        in_app_text=('{{ project_id }}: a {{ noun }} is waiting for the Design Head. '
+                     '{{ raised_by_name }} ({{ raised_by_capacity }}) raised it on attempt '
+                     '{{ attempt_number }}.{{ suspended_note }}{{ fallback_note }} '
+                     'Reason: "{{ reason }}"'),
+        default_subject='{{ project_id }}: {{ noun }} raised',
+        default_body=(
+            '{{ project_id }}: a {{ noun }} is waiting for the Design Head. '
+            '{{ raised_by_name }} ({{ raised_by_capacity }}) raised it on attempt '
+            '{{ attempt_number }}.{{ suspended_note }}{{ fallback_note }}\n\n'
+            '**Reason:**\n{{ reason }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The site\'s PM, its active coordinators and every active Design '
+                         'Head (not their deputies), except the raiser. Also an SCM request '
+                         'on a site with no active PM or coordinator, which skips the PM.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_raised_with_pm',
+        label='BOQ change request raised, to the PM',
+        module='Design',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"BOQ change request"', 'BOQ change request'),
+            Variable('raised_by_name', 'The SCM person who raised it', 'Anil Gupta'),
+            Variable('raised_by_capacity', 'SCM', 'SCM'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('reason', 'What the raiser says must change', 'Wrong cable size.'),
+        ),
+        in_app_text=('{{ project_id }}: a {{ noun }} is waiting for the site\'s PM. '
+                     '{{ raised_by_name }} ({{ raised_by_capacity }}) raised it on attempt '
+                     '{{ attempt_number }}. Forward it to the Design Head or reject it. '
+                     'Reason: "{{ reason }}"'),
+        default_subject='{{ project_id }}: {{ noun }} raised',
+        default_body=(
+            '{{ project_id }}: a {{ noun }} is waiting for the site\'s PM. '
+            '{{ raised_by_name }} ({{ raised_by_capacity }}) raised it on attempt '
+            '{{ attempt_number }}. Forward it to the Design Head or reject it.\n\n'
+            '**Reason:**\n{{ reason }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The site\'s active PM and active coordinators, except the raiser.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_forwarded_head',
+        label='BOQ change request forwarded, to the Design Head',
+        module='Design',
+        tier=TIER_ACT,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"BOQ change request"', 'BOQ change request'),
+            Variable('requester_name', 'The SCM person who raised it', 'Anil Gupta'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('forwarded_by_name', 'The PM or coordinator who forwarded it',
+                     'Rahul Verma'),
+            Variable('forwarded_by_capacity', 'PM or Project Coordinator', 'PM'),
+            Variable('request', 'What the raiser said must change', 'Wrong cable size.'),
+        ),
+        in_app_text=('{{ project_id }}: a {{ noun }} is waiting for the Design Head. '
+                     '{{ requester_name }} (SCM) raised it on attempt {{ attempt_number }} '
+                     'and {{ forwarded_by_name }} ({{ forwarded_by_capacity }}) forwarded '
+                     'it. Request: "{{ request }}"'),
+        default_subject='{{ project_id }}: {{ noun }} forwarded to the Design Head',
+        default_body=(
+            '{{ project_id }}: a {{ noun }} is waiting for the Design Head. '
+            '{{ requester_name }} (SCM) raised it on attempt {{ attempt_number }} and '
+            '{{ forwarded_by_name }} ({{ forwarded_by_capacity }}) forwarded it.\n\n'
+            '**Request:**\n{{ request }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='Every active Design Head, except the person who forwarded it.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_forwarded_requester',
+        label='BOQ change request forwarded, to the requester',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"BOQ change request"', 'BOQ change request'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('forwarded_by_name', 'The PM or coordinator who forwarded it',
+                     'Rahul Verma'),
+            Variable('forwarded_by_capacity', 'PM or Project Coordinator', 'PM'),
+            Variable('pm_note', 'The note the PM wrote when forwarding',
+                     'Quantities need the Head.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ forwarded_by_name }} ({{ forwarded_by_capacity }}) '
+                     'forwarded your {{ noun }} on attempt {{ attempt_number }} to the '
+                     'Design Head. No new attempt has been opened. PM note: '
+                     '"{{ pm_note }}"'),
+        default_subject='{{ project_id }}: {{ noun }} forwarded to the Design Head',
+        default_body=(
+            '{{ project_id }}: {{ forwarded_by_name }} ({{ forwarded_by_capacity }}) '
+            'forwarded your {{ noun }} on attempt {{ attempt_number }} to the Design Head. '
+            'No new attempt has been opened.\n\n'
+            '**PM note:**\n{{ pm_note }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The SCM person who raised the request.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_pm_rejected',
+        label='BOQ change request rejected by the PM',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"BOQ change request"', 'BOQ change request'),
+            Variable('rejected_by_name', 'The PM or coordinator who rejected it',
+                     'Rahul Verma'),
+            Variable('rejected_by_capacity', 'PM or Project Coordinator', 'PM'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('pm_note', 'Why the PM rejected it', 'The BOQ matches the survey.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ rejected_by_name }} ({{ rejected_by_capacity }}) '
+                     'rejected your {{ noun }} on attempt {{ attempt_number }}. It did not '
+                     'reach the Design Head and nothing was reopened. PM note: '
+                     '"{{ pm_note }}"'),
+        default_subject='{{ project_id }}: {{ noun }} rejected by the PM',
+        default_body=(
+            '{{ project_id }}: {{ rejected_by_name }} ({{ rejected_by_capacity }}) rejected '
+            'your {{ noun }} on attempt {{ attempt_number }}. It did not reach the Design '
+            'Head and nothing was reopened.\n\n'
+            '**PM note:**\n{{ pm_note }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The SCM person who raised the request.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_withdrawn',
+        label='BOQ change request withdrawn',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"BOQ change request"', 'BOQ change request'),
+            Variable('withdrawn_by_name', 'The SCM person who withdrew it', 'Anil Gupta'),
+            Variable('whose', '"the BOQ change request they raised", or naming the raiser',
+                     'the BOQ change request they raised'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('withdrawal_note', 'Why it was withdrawn', 'Raised in error.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ withdrawn_by_name }} (SCM) withdrew {{ whose }} '
+                     'on attempt {{ attempt_number }}. It is no longer waiting for you. '
+                     'Withdrawal note: "{{ withdrawal_note }}"'),
+        default_subject='{{ project_id }}: {{ noun }} withdrawn',
+        default_body=(
+            '{{ project_id }}: {{ withdrawn_by_name }} (SCM) withdrew {{ whose }} on '
+            'attempt {{ attempt_number }}. It is no longer waiting for you.\n\n'
+            '**Withdrawal note:**\n{{ withdrawal_note }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule='The site\'s active PM and active coordinators, except the person '
+                        'who withdrew it.',
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_accepted',
+        label='Change request accepted',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"design change request" or "BOQ change request"',
+                     'design change request'),
+            Variable('decided_by_name', 'The Design Head, or the deputy, who accepted it',
+                     'Meera Iyer'),
+            Variable('decided_by_capacity', '"Design Head" or "Design Head\'s deputy"',
+                     'Design Head'),
+            Variable('whose', '"your design change request", or naming the raiser',
+                     'your design change request'),
+            Variable('attempt_number', 'The new attempt the acceptance opened', '2'),
+            Variable('group_note',
+                     'Empty, or the sentence naming the procurement group the site left',
+                     ' The site left procurement group "Batch 3".'),
+            Variable('request', 'What the raiser said must change', 'Move the array north.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) '
+                     'accepted {{ whose }}. Attempt {{ attempt_number }} is open and the site '
+                     'is back with the designer.{{ group_note }} Request: "{{ request }}"'),
+        default_subject='{{ project_id }}: {{ noun }} accepted — attempt {{ attempt_number }} '
+                        'opened',
+        default_body=(
+            '{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) accepted '
+            '{{ whose }}. Attempt {{ attempt_number }} is open and the site is back with '
+            'the designer.{{ group_note }}\n\n'
+            '**Request:**\n{{ request }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The raiser, the site\'s PM and active coordinators and the '
+                         'designer; and the SCM person who put the site in a draft '
+                         'procurement group, if the site left it. Not the decider.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_rejected',
+        label='Change request rejected by the Design Head',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"design change request" or "BOQ change request"',
+                     'design change request'),
+            Variable('decided_by_name', 'The Design Head, or the deputy, who rejected it',
+                     'Meera Iyer'),
+            Variable('decided_by_capacity', '"Design Head" or "Design Head\'s deputy"',
+                     'Design Head'),
+            Variable('whose', '"your design change request", or naming the raiser',
+                     'your design change request'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('reason', 'Why the Head rejected it', 'The tender fixes the make.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) '
+                     'rejected {{ whose }} on attempt {{ attempt_number }}. The current '
+                     'design stands and no new attempt was opened. Reason: "{{ reason }}"'),
+        default_subject='{{ project_id }}: {{ noun }} rejected',
+        default_body=(
+            '{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) rejected '
+            '{{ whose }} on attempt {{ attempt_number }}. The current design stands and no '
+            'new attempt was opened.\n\n'
+            '**Reason:**\n{{ reason }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The raiser; for a BOQ change request, also the site\'s active PM '
+                         'and active coordinators. Not the decider.'),
+        default_state='active',
+    ),
+    NotificationEvent(
+        code='change_request_corrected',
+        label='Change request recorded as corrected in the BOQ',
+        module='Design',
+        tier=TIER_KNOW,
+        channels=('email',),
+        variables=(
+            Variable('project_id', 'Site ID', 'TND-SITE-007'),
+            Variable('noun', '"design change request" or "BOQ change request"',
+                     'BOQ change request'),
+            Variable('decided_by_name', 'The Design Head, or the deputy', 'Meera Iyer'),
+            Variable('decided_by_capacity', '"Design Head" or "Design Head\'s deputy"',
+                     'Design Head'),
+            Variable('whose', '"your BOQ change request", or naming the raiser',
+                     'your BOQ change request'),
+            Variable('attempt_number', 'The design attempt it was raised on', '1'),
+            Variable('changes', 'The BOQ corrections it cites, up to three, then a count',
+                     'CW-001 10 → 12'),
+            Variable('note', 'The Head\'s note', 'Raised the module count to 12.'),
+        ),
+        in_app_text=('{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) '
+                     'recorded {{ whose }} on attempt {{ attempt_number }} as corrected in '
+                     'the BOQ. No new attempt was opened and the design did not move. '
+                     'Changed: {{ changes }}. Note: "{{ note }}"'),
+        default_subject='{{ project_id }}: {{ noun }} recorded as corrected in the BOQ',
+        default_body=(
+            '{{ project_id }}: {{ decided_by_name }} ({{ decided_by_capacity }}) recorded '
+            '{{ whose }} on attempt {{ attempt_number }} as corrected in the BOQ. No new '
+            'attempt was opened and the design did not move. Changed: {{ changes }}.\n\n'
+            '**Note:**\n{{ note }}'
+        ),
+        button_label='Open in Horizon Solar PMS',
+        recipients_rule=('The raiser and the site\'s active PM and active coordinators. '
+                         'Not the decider.'),
         default_state='active',
     ),
 ])

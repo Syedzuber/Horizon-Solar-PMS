@@ -29,7 +29,6 @@ from django.db import IntegrityError, transaction
 from django.db.models import Count, Max, OuterRef, Prefetch, Q, Subquery, Sum
 from django.http import Http404, HttpResponseForbidden
 from django.shortcuts import get_object_or_404, redirect, render
-from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils import timezone
 
@@ -46,6 +45,8 @@ from .utils import design_due_date, record_transition
 # Prompt 3.1b-3 — the PM gate's four in-app notifications. See the block above
 # design_gate_next_actors() before adding a fifth.
 from .notifications import send_notification
+# Session T3b — the change-request notifications, worded by the notify_registry events.
+from .notify import notify
 from .design_storage import (
     DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
     validate_cad_zip,
@@ -4651,14 +4652,13 @@ _PM_GATE_FORBIDDEN = ('Design release approval is for the site\'s Project Manage
 #
 # SCM IS NOT TOLD WHEN A DESIGN IS RELEASED. Deliberately: a new audience (§D39).
 #
-# DESIGN CHANGE REQUESTS EMAIL AS WELL (session 3.1c-ii, decisions N-a to N-e). The three
-# change-request call sites name channels=['in_app', 'email']; the four gate sites above
-# are unchanged and stay in-app only (§D44 records the asymmetry). Each is still one call
-# per recipient, after the atomic block, inside a try/except. send_notification() uses ONE
-# `message` as both the bell text and the email's plain-text part, so that message carries
-# no URL. The email's absolute link lives only in `html_message`, rendered from
-# projects/email/design_change_request.html (autoescaped) with request.build_absolute_uri(),
-# so the host is whichever host the ACTOR is on (§D44).
+# DESIGN CHANGE REQUESTS EMAIL AS WELL (session 3.1c-ii, decisions N-a to N-e); the four
+# gate sites above are unchanged and stay in-app only (§D44 records the asymmetry).
+# SINCE T3b the seven change-request views send through notify() with the notify_registry
+# change_request_* events: in-app always, email unless Admin pauses it, both after commit,
+# still after the atomic block and inside a try/except. The email is the shared
+# base_email layout and its link is built from APP_BASE_URL, no longer from the actor's
+# request host; projects/email/design_change_request.html is no longer rendered.
 # ---------------------------------------------------------------------------
 
 GATE_HEAD_PASSED   = 'head_passed'     # design_head_qc_pass      -> the site's PM
@@ -5546,16 +5546,6 @@ def _change_request_decider_label(user):
     return 'Design Head' if user_is_design_head(user) else "Design Head's deputy"
 
 
-def _change_request_email(request, subject, body, quote_label, quote, link):
-    """The HTML part: autoescaped, so a reason typed as markup arrives as text, and the one
-    place the absolute URL appears. `link` is the relative in-app link; the host is the
-    request's own, never a literal."""
-    return render_to_string('projects/email/design_change_request.html', {
-        'subject': subject, 'body': body, 'quote_label': quote_label, 'quote': quote,
-        'url': request.build_absolute_uri(link),
-    })
-
-
 def _change_request_group_owner(membership):
     """D6. The SCM user to tell that an accepted request took a site out of their draft
     procurement group: whoever added the site, if active, else whoever created the group,
@@ -5731,24 +5721,28 @@ def design_change_request(request, project_id):
     # coordinators ONLY, under GATE_CHANGE_RAISED_WITH_PM: it is not the Heads' until it is
     # forwarded. A PM raise and a Q5 fallback stay on GATE_CHANGE_RAISED; the fallback's
     # message adds why the PM stage was skipped.
+    #
+    # SESSION T3b — the wording is the registry's (change_request_raised /
+    # change_request_raised_with_pm), sent by notify() after commit, one call per
+    # recipient because the link differs. log_label keeps the old template_name.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        capacity = _change_request_raiser_label(request.user, project)
-        subject = f'{project.project_id}: {change_request_noun(change.origin)} raised'
+        values = {
+            'project_id': project.project_id,
+            'noun': change_request_noun(change.origin),
+            'raised_by_name': profile.user.get_full_name() or profile.user.username,
+            'raised_by_capacity': _change_request_raiser_label(request.user, project),
+            'attempt_number': attempt.attempt_number,
+            'reason': reason,
+        }
         if to_pm:
-            transition = GATE_CHANGE_RAISED_WITH_PM
-            body = (f'{project.project_id}: a BOQ change request is waiting for the '
-                    f'site\'s PM. {who} ({capacity}) raised it on attempt '
-                    f'{attempt.attempt_number}. Forward it to the Design Head or reject it.')
+            transition, event_code = GATE_CHANGE_RAISED_WITH_PM, 'change_request_raised_with_pm'
         else:
-            transition = GATE_CHANGE_RAISED
-            body = (f'{project.project_id}: a {change_request_noun(change.origin)} is '
-                    f'waiting for the Design '
-                    f'Head. {who} ({capacity}) raised it on attempt {attempt.attempt_number}.'
-                    + (' The review in progress is suspended until it is decided.'
-                       if was_in_qc else ''))
-            if no_pm_fallback:
-                body += (f' It skipped the PM stage: {NO_PM_FALLBACK_TEXT}.')
+            transition, event_code = GATE_CHANGE_RAISED, 'change_request_raised'
+            # Optional sentences, each empty or starting with a space (see the registry).
+            values['suspended_note'] = (' The review in progress is suspended until it is '
+                                        'decided.' if was_in_qc else '')
+            values['fallback_note'] = (f' It skipped the PM stage: {NO_PM_FALLBACK_TEXT}.'
+                                       if no_pm_fallback else '')
         for recipient in design_gate_next_actors(assignment, transition,
                                                  change=change, actor=profile):
             # The triage buttons are on the QC review screen, which the PM, a coordinator
@@ -5759,18 +5753,10 @@ def design_change_request(request, project_id):
             else:
                 link = reverse('design_change_request_form',
                                kwargs={'project_id': project.project_id})
-            send_notification(
-                recipient=recipient,
-                message=f'{body} Reason: "{reason}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, 'Reason',
-                                                   reason, link),
-                # a NotificationLog label
-                template=('design_change_request_raised_with_pm' if to_pm
-                          else 'design_change_request_raised'),
-                related_project=project, actor=profile)
+            notify(event_code, recipients=[recipient], values=values, actor=profile,
+                   related_project=project, link=link,
+                   log_label=('design_change_request_raised_with_pm' if to_pm
+                              else 'design_change_request_raised'))
     except Exception:
         logger.exception('design_change_request: the notification for %s failed; the '
                          'change request stands.', project.project_id)
@@ -5989,13 +5975,23 @@ def design_change_request_accept(request, pk):
     # SESSION 3.1c-ii — the requester, the site's PM and coordinators, the designer and, if
     # the site left a draft group here, that group's SCM owner. In-app AND email, after
     # the atomic block. The Design Heads are not told: one of them made the decision.
+    #
+    # SESSION T3b — change_request_accepted through notify(), after commit, one call per
+    # recipient: `whose` and the link differ.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        label = _change_request_decider_label(request.user)
+        noun = change_request_noun(change.origin)
         requester = change.requested_by
         requester_name = requester.user.get_full_name() or requester.user.username
-        subject = (f'{project.project_id}: {change_request_noun(change.origin)} accepted — '
-                   f'attempt {new_attempt.attempt_number} opened')
+        values = {
+            'project_id': project.project_id,
+            'noun': noun,
+            'decided_by_name': profile.user.get_full_name() or profile.user.username,
+            'decided_by_capacity': _change_request_decider_label(request.user),
+            'attempt_number': new_attempt.attempt_number,
+            'group_note': (f' The site left procurement group "{left_group}".'
+                           if left_group is not None else ''),
+            'request': change.reason,
+        }
         recipients = design_gate_next_actors(assignment, GATE_CHANGE_ACCEPTED,
                                              change=change, actor=profile)
         owner = _change_request_group_owner(left_membership)
@@ -6003,30 +5999,17 @@ def design_change_request_accept(request, pk):
                 and all(person.pk != owner.pk for person in recipients)):
             recipients.append(owner)
         for recipient in recipients:
-            whose = (f'your {change_request_noun(change.origin)}'
-                     if recipient.pk == requester.pk
-                     else f'the {change_request_noun(change.origin)} {requester_name} raised')
-            body = (f'{project.project_id}: {who} ({label}) accepted {whose}. Attempt '
-                    f'{new_attempt.attempt_number} is open and the site is back with the '
-                    f'designer.'
-                    + (f' The site left procurement group "{left_group}".'
-                       if left_group is not None else ''))
+            whose = (f'your {noun}' if recipient.pk == requester.pk
+                     else f'the {noun} {requester_name} raised')
             if recipient.pk == assignment.assigned_to_id:
                 link = reverse('design_site_workspace',
                                kwargs={'project_id': project.project_id})
             else:
                 link = reverse('design_change_request_form',
                                kwargs={'project_id': project.project_id})
-            send_notification(
-                recipient=recipient,
-                message=f'{body} Request: "{change.reason}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, 'Request',
-                                                   change.reason, link),
-                template='design_change_request_accepted',  # a NotificationLog label
-                related_project=project, actor=profile)
+            notify('change_request_accepted', recipients=[recipient],
+                   values=dict(values, whose=whose), actor=profile, related_project=project,
+                   link=link, log_label='design_change_request_accepted')
     except Exception:
         logger.exception('design_change_request_accept: the notification for %s failed; '
                          'the acceptance stands.', project.project_id)
@@ -6094,33 +6077,31 @@ def design_change_request_reject(request, pk):
     # SESSION B2b (D-12) — an SCM-origin request also tells the site's active PM and
     # coordinators, who forwarded it (or would have). The requester's wording is unchanged;
     # everyone else reads whose request it was.
+    #
+    # SESSION T3b — change_request_rejected through notify(), after commit, one call per
+    # recipient: `whose` differs.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        label = _change_request_decider_label(request.user)
-        subject = f'{project.project_id}: {change_request_noun(change.origin)} rejected'
+        noun = change_request_noun(change.origin)
         requester = change.requested_by
         requester_name = requester.user.get_full_name() or requester.user.username
+        values = {
+            'project_id': project.project_id,
+            'noun': noun,
+            'decided_by_name': profile.user.get_full_name() or profile.user.username,
+            'decided_by_capacity': _change_request_decider_label(request.user),
+            'attempt_number': change.attempt.attempt_number,
+            'reason': reason,
+        }
         link = reverse('design_change_request_form', kwargs={'project_id': project.project_id})
         transition = (GATE_CHANGE_REJECTED_SCM if change.origin == CHANGE_REQUEST_ORIGIN_SCM
                       else GATE_CHANGE_REJECTED)
         for recipient in design_gate_next_actors(change.attempt.assignment, transition,
                                                  change=change, actor=profile):
-            whose = (f'your {change_request_noun(change.origin)}'
-                     if recipient.pk == requester.pk
-                     else f'the {change_request_noun(change.origin)} {requester_name} raised')
-            body = (f'{project.project_id}: {who} ({label}) rejected {whose} '
-                    f'on attempt {change.attempt.attempt_number}. The current design stands and '
-                    f'no new attempt was opened.')
-            send_notification(
-                recipient=recipient,
-                message=f'{body} Reason: "{reason}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, 'Reason',
-                                                   reason, link),
-                template='design_change_request_rejected',  # a NotificationLog label
-                related_project=project, actor=profile)
+            whose = (f'your {noun}' if recipient.pk == requester.pk
+                     else f'the {noun} {requester_name} raised')
+            notify('change_request_rejected', recipients=[recipient],
+                   values=dict(values, whose=whose), actor=profile, related_project=project,
+                   link=link, log_label='design_change_request_rejected')
     except Exception:
         logger.exception('design_change_request_reject: the notification for %s failed; '
                          'the rejection stands.', project.project_id)
@@ -6258,37 +6239,36 @@ def design_change_request_forward(request, pk):
 
     # SESSION B2b (D-12) — the Design Heads, who now owe the decision, and the SCM
     # requester. In-app AND email, after the atomic block, so no send unwinds the forward.
+    #
+    # SESSION T3b — two events, so both wordings are editable (ruling Q4): the requester
+    # gets change_request_forwarded_requester with the PM's note, everyone else
+    # change_request_forwarded_head with the request. One log label for both.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        capacity = _change_request_raiser_label(request.user, project)
         requester = change.requested_by
-        requester_name = requester.user.get_full_name() or requester.user.username
-        subject = f'{pid}: BOQ change request forwarded to the Design Head'
+        values = {
+            'project_id': pid,
+            'noun': change_request_noun(change.origin),
+            'attempt_number': change.attempt.attempt_number,
+            'forwarded_by_name': profile.user.get_full_name() or profile.user.username,
+            'forwarded_by_capacity': _change_request_raiser_label(request.user, project),
+        }
         form_link = reverse('design_change_request_form', kwargs={'project_id': pid})
         for recipient in design_gate_next_actors(assignment, GATE_CHANGE_FORWARDED,
                                                  change=change, actor=profile):
             if recipient.pk == requester.pk:
-                body = (f'{pid}: {who} ({capacity}) forwarded your BOQ change request on '
-                        f'attempt {change.attempt.attempt_number} to the Design Head. No new '
-                        f'attempt has been opened.')
-                quote_label, quote, link = 'PM note', note, form_link
+                event_code, link = 'change_request_forwarded_requester', form_link
+                recipient_values = dict(values, pm_note=note)
             else:
-                body = (f'{pid}: a BOQ change request is waiting for the Design Head. '
-                        f'{requester_name} (SCM) raised it on attempt '
-                        f'{change.attempt.attempt_number} and {who} ({capacity}) forwarded it.')
-                quote_label, quote = 'Request', change.reason
+                event_code = 'change_request_forwarded_head'
                 link = (reverse('design_qc_review', kwargs={'project_id': pid})
                         if user_has_design_head_authority(recipient.user) else form_link)
-            send_notification(
-                recipient=recipient,
-                message=f'{body} {quote_label}: "{quote}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, quote_label,
-                                                   quote, link),
-                template='design_change_request_forwarded',  # a NotificationLog label
-                related_project=project, actor=profile)
+                recipient_values = dict(
+                    values, request=change.reason,
+                    requester_name=(requester.user.get_full_name()
+                                    or requester.user.username))
+            notify(event_code, recipients=[recipient], values=recipient_values,
+                   actor=profile, related_project=project, link=link,
+                   log_label='design_change_request_forwarded')
     except Exception:
         logger.exception('design_change_request_forward: the notification for %s failed; '
                          'the forward stands.', pid)
@@ -6340,27 +6320,26 @@ def design_change_request_pm_reject(request, pk):
 
     # SESSION B2b (D-12) — the SCM requester, with the PM's note. In-app AND email, after
     # the atomic block.
+    #
+    # SESSION T3b — change_request_pm_rejected through notify(), after commit. One message
+    # for everyone, so one call.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        capacity = _change_request_raiser_label(request.user, project)
-        subject = f'{pid}: BOQ change request rejected by the PM'
-        body = (f'{pid}: {who} ({capacity}) rejected your BOQ change request on attempt '
-                f'{change.attempt.attempt_number}. It did not reach the Design Head and '
-                f'nothing was reopened.')
-        link = reverse('design_change_request_form', kwargs={'project_id': pid})
-        for recipient in design_gate_next_actors(change.attempt.assignment,
-                                                 GATE_CHANGE_PM_REJECTED,
-                                                 change=change, actor=profile):
-            send_notification(
-                recipient=recipient,
-                message=f'{body} PM note: "{note}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, 'PM note',
-                                                   note, link),
-                template='design_change_request_pm_rejected',  # a NotificationLog label
-                related_project=project, actor=profile)
+        notify(
+            'change_request_pm_rejected',
+            recipients=design_gate_next_actors(change.attempt.assignment,
+                                               GATE_CHANGE_PM_REJECTED,
+                                               change=change, actor=profile),
+            values={
+                'project_id': pid,
+                'noun': change_request_noun(change.origin),
+                'rejected_by_name': profile.user.get_full_name() or profile.user.username,
+                'rejected_by_capacity': _change_request_raiser_label(request.user, project),
+                'attempt_number': change.attempt.attempt_number,
+                'pm_note': note,
+            },
+            actor=profile, related_project=project,
+            link=reverse('design_change_request_form', kwargs={'project_id': pid}),
+            log_label='design_change_request_pm_rejected')
     except Exception:
         logger.exception('design_change_request_pm_reject: the notification for %s failed; '
                          'the rejection stands.', pid)
@@ -6412,29 +6391,31 @@ def design_change_request_withdraw(request, pk):
 
     # SESSION B2b (D-12) — the site's active PM and coordinators: it was waiting for them
     # and no longer is. In-app AND email, after the atomic block.
+    #
+    # SESSION T3b — change_request_withdrawn through notify(), after commit. `whose`
+    # depends on who withdrew it, not on the recipient, so one call.
     try:
-        who = profile.user.get_full_name() or profile.user.username
+        noun = change_request_noun(change.origin)
         requester = change.requested_by
-        whose = ('the BOQ change request they raised' if requester.pk == profile.pk
-                 else f'the BOQ change request '
+        whose = (f'the {noun} they raised' if requester.pk == profile.pk
+                 else f'the {noun} '
                       f'{requester.user.get_full_name() or requester.user.username} raised')
-        subject = f'{pid}: BOQ change request withdrawn'
-        body = (f'{pid}: {who} (SCM) withdrew {whose} on attempt '
-                f'{change.attempt.attempt_number}. It is no longer waiting for you.')
-        link = reverse('design_change_request_form', kwargs={'project_id': pid})
-        for recipient in design_gate_next_actors(change.attempt.assignment,
-                                                 GATE_CHANGE_WITHDRAWN,
-                                                 change=change, actor=profile):
-            send_notification(
-                recipient=recipient,
-                message=f'{body} Withdrawal note: "{note}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body,
-                                                   'Withdrawal note', note, link),
-                template='design_change_request_withdrawn',  # a NotificationLog label
-                related_project=project, actor=profile)
+        notify(
+            'change_request_withdrawn',
+            recipients=design_gate_next_actors(change.attempt.assignment,
+                                               GATE_CHANGE_WITHDRAWN,
+                                               change=change, actor=profile),
+            values={
+                'project_id': pid,
+                'noun': noun,
+                'withdrawn_by_name': profile.user.get_full_name() or profile.user.username,
+                'whose': whose,
+                'attempt_number': change.attempt.attempt_number,
+                'withdrawal_note': note,
+            },
+            actor=profile, related_project=project,
+            link=reverse('design_change_request_form', kwargs={'project_id': pid}),
+            log_label='design_change_request_withdrawn')
     except Exception:
         logger.exception('design_change_request_withdraw: the notification for %s failed; '
                          'the withdrawal stands.', pid)
@@ -6577,34 +6558,31 @@ def design_change_request_correct(request, pk):
     # SESSION B2b (D-12) — the requester, and the site's active PM and coordinators, told
     # WHAT changed: the corrections just linked, read from `evidence` (already in hand, so
     # no query). In-app AND email, after the atomic block.
+    #
+    # SESSION T3b — change_request_corrected through notify(), after commit, one call per
+    # recipient: `whose` differs.
     try:
-        who = profile.user.get_full_name() or profile.user.username
-        label = _change_request_decider_label(request.user)
+        noun = change_request_noun(change.origin)
         requester = change.requested_by
         requester_name = requester.user.get_full_name() or requester.user.username
-        subject = (f'{pid}: {change_request_noun(change.origin)} recorded as corrected in '
-                   f'the BOQ')
-        changed = _correction_summary(evidence)
+        values = {
+            'project_id': pid,
+            'noun': noun,
+            'decided_by_name': profile.user.get_full_name() or profile.user.username,
+            'decided_by_capacity': _change_request_decider_label(request.user),
+            'attempt_number': change.attempt.attempt_number,
+            'changes': _correction_summary(evidence),
+            'note': note,
+        }
         link = reverse('design_change_request_form', kwargs={'project_id': pid})
         for recipient in design_gate_next_actors(change.attempt.assignment,
                                                  GATE_CHANGE_CORRECTED,
                                                  change=change, actor=profile):
-            whose = (f'your {change_request_noun(change.origin)}'
-                     if recipient.pk == requester.pk
-                     else f'the {change_request_noun(change.origin)} {requester_name} raised')
-            body = (f'{pid}: {who} ({label}) recorded {whose} on attempt '
-                    f'{change.attempt.attempt_number} as corrected in the BOQ. No new attempt '
-                    f'was opened and the design did not move. Changed: {changed}.')
-            send_notification(
-                recipient=recipient,
-                message=f'{body} Note: "{note}"',
-                channels=['in_app', 'email'],
-                link=link,
-                subject=subject,
-                html_message=_change_request_email(request, subject, body, 'Note', note,
-                                                   link),
-                template='design_change_request_corrected',  # a NotificationLog label
-                related_project=project, actor=profile)
+            whose = (f'your {noun}' if recipient.pk == requester.pk
+                     else f'the {noun} {requester_name} raised')
+            notify('change_request_corrected', recipients=[recipient],
+                   values=dict(values, whose=whose), actor=profile, related_project=project,
+                   link=link, log_label='design_change_request_corrected')
     except Exception:
         logger.exception('design_change_request_correct: the notification for %s failed; '
                          'the correction stands.', pid)

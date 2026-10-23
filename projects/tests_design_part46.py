@@ -664,11 +664,20 @@ class BlastRadiusTests(Part46Base):
 
         self._into_qc()
         self._login(self.pm)
-        self._raise()
+        # T3b: the change-request notifications are sent on commit; run them, so the
+        # "no other notification" assertion below sees everything this triage sent.
+        with self.captureOnCommitCallbacks(execute=True):
+            self._raise()
         change = self._the_request()
         self.client.logout()
         self._login(self.head)
-        self._accept(change)
+        with self.captureOnCommitCallbacks(execute=True):
+            self._accept(change)
+        # Live, not vacuous: the two change-request labels were written.
+        self.assertTrue(NotificationLog.objects.filter(
+            pk__gt=before['last_log_pk'],
+            template_name__in=('design_change_request_raised',
+                               'design_change_request_accepted')).exists())
 
         self.assertEqual(model_to_dict(Project.objects.get(pk=residential.pk)),
                          before['residential_row'])

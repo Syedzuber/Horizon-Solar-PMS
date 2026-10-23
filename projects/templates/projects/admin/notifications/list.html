@@ -19,6 +19,9 @@
   first channel's row only. "default" marks a state that comes from the registry because
   no Admin has switched the event yet. Built by notify_views.admin_notification_events in
   three queries, whatever the number of events.
+  An event whose call site still sends its own WhatsApp (registry flag
+  whatsapp_sent_separately, T3b P2) says so under its name: pausing it here pauses the
+  email only.
 {% endcomment %}
 {% for module, rows in groups %}
 <div class="bg-white border border-gray-200 rounded-lg mb-6 overflow-hidden">
@@ -45,6 +48,9 @@
             {% if forloop.first %}
               <a href="{% url 'admin_notification_event' row.event.code %}" class="font-medium text-gray-800 hover:text-green-700">{{ row.event.label }}</a>
               <p class="text-xs text-gray-400">{{ row.event.code }}</p>
+              {% if row.event.whatsapp_sent_separately %}
+                <p class="text-xs text-amber-700 mt-1">Email only. This event's WhatsApp message is sent separately and is not paused here.</p>
+              {% endif %}
             {% endif %}
           </td>
           <td class="px-3 py-3">{% if forloop.first %}<span class="text-xs font-medium text-gray-600">{{ row.event.tier }}</span>{% endif %}</td>

@@ -82,6 +82,16 @@ class Base(TestCase):
         self.projA = _make_project(self.pm, 'Alpha')
         self.projB = _make_project(self.pm, 'Bravo')
 
+    def _committed(self, fn):
+        """Run `fn` and its on-commit callbacks. T3b: the cooldown decision and every
+        send now run after commit, which TestCase never reaches on its own."""
+        with self.captureOnCommitCallbacks(execute=True):
+            return fn()
+
+    def _notify_assign(self, task, user):
+        return self._committed(
+            lambda: assign_task_to(task, user, notify=True, actor=self.pm))
+
 
 # ---------------------------------------------------------------------------
 # The chokepoint itself
@@ -100,16 +110,16 @@ class ChokepointTests(Base):
 
     def test_notify_true_sends(self):
         task = _task(self.projA)
-        assign_task_to(task, self.se, notify=True, actor=self.pm)
+        self._notify_assign(task, self.se)
         self.assertEqual(_sends(self.se, 'assign_task'), 1)
 
     def test_reassigning_the_same_person_is_a_no_op(self):
         """Replaces the old 10-second double-submit guard."""
         task = _task(self.projA)
-        assign_task_to(task, self.se, notify=True, actor=self.pm)
+        self._notify_assign(task, self.se)
         before = NotificationLog.objects.count()
 
-        self.assertFalse(assign_task_to(task, self.se, notify=True, actor=self.pm))
+        self.assertFalse(self._notify_assign(task, self.se))
         self.assertEqual(NotificationLog.objects.count(), before)
 
     def test_unassign_never_notifies(self):
@@ -136,7 +146,7 @@ class CooldownTests(Base):
     def _assign(self, project, n, user=None):
         user = user or self.se
         task = _task(project, f'Task {n}', order=n)
-        assign_task_to(task, user, notify=True, actor=self.pm)
+        self._notify_assign(task, user)
         return task
 
     def test_first_second_third(self):
@@ -211,7 +221,7 @@ class CooldownTests(Base):
                 recipient=self.se, related_project=self.projA, channel='whatsapp',
                 status='sent', message='x', template_name='assign_task')
         before = NotificationLog.objects.count()
-        assign_task_to(task, self.se, notify=True, actor=self.pm)
+        self._notify_assign(task, self.se)
 
         task.refresh_from_db()
         self.assertEqual(task.assigned_to, self.se, 'assignment still happens')
@@ -227,15 +237,14 @@ class CooldownCountingTests(Base):
         self.se.save(update_fields=['whatsapp_notifications', 'email_notifications'])
 
         for n in range(1, 4):
-            assign_task_to(_task(self.projA, f'T{n}', order=n), self.se,
-                           notify=True, actor=self.pm)
+            self._notify_assign(_task(self.projA, f'T{n}', order=n), self.se)
 
         self.assertEqual(_sends(self.se, 'assign_task'), 1)
         self.assertEqual(_sends(self.se, 'assign_tasks_bulk'), 1)
 
     def test_one_send_writes_one_in_app_row_per_event(self):
         """The invariant the cooldown count rests on."""
-        assign_task_to(_task(self.projA), self.se, notify=True, actor=self.pm)
+        self._notify_assign(_task(self.projA), self.se)
         self.assertEqual(
             NotificationLog.objects.filter(channel='in_app').count(), 1)
         self.assertEqual(NotificationLog.objects.count(), 3,
@@ -286,9 +295,9 @@ class ViewTests(Base):
         self.client.force_login(self.pm.user)
 
     def _post_assign(self, project, task, profile):
-        return self.client.post(
+        return self._committed(lambda: self.client.post(
             f'/projects/{project.project_id}/tasks/{task.pk}/assign/',
-            {'assigned_to': str(profile.pk)})
+            {'assigned_to': str(profile.pk)}))
 
     def test_single_manual_assignment_still_notifies(self):
         """The regression this session is most likely to cause."""

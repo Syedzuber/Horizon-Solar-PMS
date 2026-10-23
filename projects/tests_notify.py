@@ -87,9 +87,15 @@ class RegistryTests(TestCase):
 
     def test_the_shipped_registry_holds_the_admin_test_message(self):
         # T3a added the first moved sends after it; the admin test message stays first.
+        # T3b added task assignment and the change requests after those.
         self.assertEqual(list(NOTIFICATION_EVENTS), [
             EVENT, 'issue_raised', 'issue_resolved', 'project_pm_assigned',
-            'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached'])
+            'project_unassigned_alert', 'boq_acknowledged', 'payment_milestone_reached',
+            'task_assigned', 'tasks_assigned_bulk', 'change_request_raised',
+            'change_request_raised_with_pm', 'change_request_forwarded_head',
+            'change_request_forwarded_requester', 'change_request_pm_rejected',
+            'change_request_withdrawn', 'change_request_accepted', 'change_request_rejected',
+            'change_request_corrected'])
         event = get_event(EVENT)
         self.assertEqual((event.tier, event.default_state, event.channels),
                          ('KNOW', 'active', ('email',)))
