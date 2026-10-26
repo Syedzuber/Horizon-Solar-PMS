@@ -674,13 +674,14 @@ class TaskAddForm(forms.Form):
                 ))
                 return cleaned
 
-        # CL-A, the other end: the site's QA/QC engineer may not hold a task on it.
-        # Refused, not warned — the PM ends or replaces that assignment first. Asked
-        # BEFORE the candidate check below, which leaves the engineer out and would
-        # otherwise refuse them with the generic message instead of naming the
-        # assignment to end (the order task_assign and duplicate-for-locations use).
+        # CL-A, the other end: the site's QA/QC engineer may not hold a Site Engineer
+        # task on it; any other role they may (v2.5). Refused, not warned — the PM ends
+        # or replaces that assignment first. Asked BEFORE the candidate check below,
+        # which leaves the engineer out of Site Engineer tasks and would otherwise refuse
+        # them with the generic message instead of naming the assignment to end (the
+        # order task_assign and duplicate-for-locations use).
         if self.project is not None:
-            refusal = qaqc_engineer_assignment_refusal(assignee, self.project)
+            refusal = qaqc_engineer_assignment_refusal(assignee, self.project, role)
             if refusal:
                 self.add_error('assigned_to', refusal)
                 return cleaned

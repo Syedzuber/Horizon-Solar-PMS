@@ -1491,8 +1491,16 @@ at the top of this page unmodified, exactly as it does on task_detail.
            "Complete", and the box they press OK in must not say "Submit for approval" and
            then complete the task anyway. The modal is rendered ONCE per page and the flag
            is per-viewer, not per-task, so this one conditional covers every row that opens
-           it. Two more follow: the body line and the footer's confirm button.{% endcomment %}
-        <h6 class="modal-title mb-0">{% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}</h6>
+           it. Two more follow: the body line and the footer's confirm button.
+
+           CL-A v2.5: a task held by the site's QA/QC engineer has its own approver pool,
+           so the answer can differ by row. Each of the three places renders a wording
+           only if some row on the page can use it — so a page whose rows all share one
+           answer renders exactly one wording, as before — and
+           openSubmitApprovalModal() shows the one named by the pressed button's
+           `data-self-certify`. The server render picks `can_self_certify` so the dialog
+           reads right before any script runs.{% endcomment %}
+        <h6 class="modal-title mb-0">{% if can_self_certify or can_self_certify_engineer_held %}<span class="js-self-certify-yes{% if not can_self_certify %} d-none{% endif %}">Complete (self-certified)</span>{% endif %}{% if not can_self_certify or not can_self_certify_engineer_held %}<span class="js-self-certify-no{% if can_self_certify %} d-none{% endif %}">Submit for approval</span>{% endif %}</h6>
         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
       </div>
       <form id="submitApprovalForm" method="post"
@@ -1511,11 +1519,8 @@ at the top of this page unmodified, exactly as it does on task_detail.
                     name="submission_remarks" rows="3" required
                     placeholder="Describe the completed work"></textarea>
           <p class="text-muted mb-0 mt-2" style="font-size:.72rem;">
-            {% if can_self_certify %}
-              No other approver on this project — this completes the task under your name.
-            {% else %}
-              The task stays In Progress until the project manager or QA/QC approves it.
-            {% endif %}
+            {% if can_self_certify or can_self_certify_engineer_held %}<span class="js-self-certify-yes{% if not can_self_certify %} d-none{% endif %}">No other approver on this project — this completes the task under your name.</span>{% endif %}
+            {% if not can_self_certify or not can_self_certify_engineer_held %}<span class="js-self-certify-no{% if can_self_certify %} d-none{% endif %}">The task stays In Progress until the project manager or QA/QC approves it.</span>{% endif %}
           </p>
           {% comment %}A SINK FOR AN OOB SWAP THAT BELONGS TO ANOTHER SCREEN.
              `_task_approval_response.html` also swaps `#taskStatusBlock`, which is
@@ -1528,7 +1533,7 @@ at the top of this page unmodified, exactly as it does on task_detail.
         </div>
         <div class="modal-footer py-2">
           <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
-          <button type="submit" class="btn btn-brand btn-sm">{% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}</button>
+          <button type="submit" class="btn btn-brand btn-sm">{% if can_self_certify or can_self_certify_engineer_held %}<span class="js-self-certify-yes{% if not can_self_certify %} d-none{% endif %}">Complete (self-certified)</span>{% endif %}{% if not can_self_certify or not can_self_certify_engineer_held %}<span class="js-self-certify-no{% if can_self_certify %} d-none{% endif %}">Submit for approval</span>{% endif %}</button>
         </div>
       </form>
     </div>
@@ -1773,6 +1778,17 @@ at the top of this page unmodified, exactly as it does on task_detail.
 
     document.getElementById('submitApprovalTaskName').textContent = btn.dataset.taskName || '';
     document.getElementById('submitApprovalRemarks').value = '';
+
+    /* The pressed row's own self-certify answer (CL-A v2.5: a task the site's QA/QC
+       engineer holds has a different approver pool), so the dialog's three wordings
+       match the button. */
+    var selfCertify = btn.dataset.selfCertify === '1';
+    modalEl.querySelectorAll('.js-self-certify-yes').forEach(function (el) {
+      el.classList.toggle('d-none', !selfCertify);
+    });
+    modalEl.querySelectorAll('.js-self-certify-no').forEach(function (el) {
+      el.classList.toggle('d-none', selfCertify);
+    });
 
     bootstrap.Modal.getOrCreateInstance(modalEl).show();
   };

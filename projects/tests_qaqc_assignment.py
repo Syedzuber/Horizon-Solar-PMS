@@ -14,8 +14,9 @@ and nothing else. The role-match gates (status, due date, checklist answers, GRN
 also ask user_works_on_site(), which is view minus that grant, so the engineer sees
 the site's work without being able to do it.
 
-CL-A both ends: an engineer holding a task on the site cannot be named, and the named
-engineer cannot then be given a task there.
+CL-A both ends, as revised in spec v2.5: an engineer holding a Site Engineer task on the
+site cannot be named, and the named engineer cannot then be given one there. Tasks of
+other roles they may hold; what they may then do is pinned in tests_qaqc_engineer_tasks.
 
 The NEGATIVE half — the engineer refused on a site they are not assigned to, refused
 again the moment the assignment ends, and refused on every do-the-work endpoint — is in
@@ -331,7 +332,7 @@ class ReplaceAndEndTests(QaqcFixture):
 
 
 # ---------------------------------------------------------------------------
-# 4. CL-A at assignment: an engineer holding a task is refused
+# 4. CL-A at assignment: an engineer holding a Site Engineer task is refused (v2.5)
 # ---------------------------------------------------------------------------
 
 class ClaAtAssignmentTests(QaqcFixture):
@@ -339,18 +340,42 @@ class ClaAtAssignmentTests(QaqcFixture):
     def test_an_engineer_holding_a_task_is_refused_and_the_tasks_are_named(self):
         response = self._assign(self.site_a, self.worker)
         joined = ' '.join(_messages(response))
-        self.assertIn('holds', joined)
+        self.assertIn('Site Engineer task', joined)
         self.assertIn(self._se_task(self.site_a).task_name, joined)
         self.assertFalse(SiteQaqcAssignment.objects.filter(project=self.site_a).exists())
 
     def test_a_done_task_still_disqualifies(self):
-        """'Holds a task' includes Done (and mirror and N/A) rows: the person did the work."""
-        task = self._pm_task(self.site_a)
+        """'Holds a Site Engineer task' includes Done rows: the person did the work."""
+        task = self._se_task(self.site_a)
         assign_task_to(task, self.spare)
         Task.objects.filter(pk=task.pk).update(status=Task.DONE)
         response = self._assign(self.site_a, self.spare)
-        self.assertIn('holds 1 task', ' '.join(_messages(response)))
+        self.assertIn('holds 1 Site Engineer task', ' '.join(_messages(response)))
         self.assertFalse(SiteQaqcAssignment.objects.filter(project=self.site_a).exists())
+
+    def test_a_mirror_or_not_applicable_site_engineer_task_still_disqualifies(self):
+        """Mirrors and Not Applicable rows count too: the rule is the task's role, not
+        whether the work is live (CL-A v2.5)."""
+        for flag in ('is_mirror', 'is_not_applicable'):
+            with self.subTest(flag=flag):
+                task = self._se_task(self.site_a)
+                assign_task_to(task, self.spare)
+                Task.objects.filter(pk=task.pk).update(**{flag: True})
+                response = self._assign(self.site_a, self.spare)
+                self.assertIn('holds 1 Site Engineer task', ' '.join(_messages(response)))
+                self.assertFalse(SiteQaqcAssignment.objects.filter(project=self.site_a).exists())
+                Task.objects.filter(pk=task.pk).update(**{flag: False})
+                assign_task_to(task, self.worker)
+
+    def test_a_task_of_another_role_does_not_disqualify(self):
+        """CL-A v2.5: holding a PM task (any status) leaves a person eligible."""
+        task = self._pm_task(self.site_a)
+        assign_task_to(task, self.spare)
+        Task.objects.filter(pk=task.pk).update(status=Task.DONE)
+        response = _client_for(self.pm_a).get(reverse('site_qaqc', args=[self.site_a.project_id]))
+        self.assertIn(self.spare, set(response.context['eligible']))
+        self._assign(self.site_a, self.spare)
+        self.assertEqual(site_qaqc_engineer_id(self.site_a), self.spare.pk)
 
     def test_the_eligible_list_leaves_task_holders_out(self):
         response = _client_for(self.pm_a).get(reverse('site_qaqc', args=[self.site_a.project_id]))
@@ -370,12 +395,14 @@ class ClaAtAssignmentTests(QaqcFixture):
 
 
 # ---------------------------------------------------------------------------
-# 5. CL-A, the other end: the engineer cannot then be given a task on the site
+# 5. CL-A, the other end: the engineer cannot then be given a Site Engineer task
+#    on the site (v2.5; other roles: tests_qaqc_engineer_tasks)
 # ---------------------------------------------------------------------------
 
 class ClaOtherEndTests(QaqcFixture):
 
-    MESSAGE = "is this site's QA/QC engineer. End or replace that assignment first."
+    MESSAGE = ("is this site's QA/QC engineer, so cannot hold its Site Engineer tasks. "
+               "End or replace that assignment first.")
 
     def setUp(self):
         super().setUp()
@@ -444,6 +471,33 @@ class ClaOtherEndTests(QaqcFixture):
         bound = TaskAdminForm(data, instance=self.task)
         bound.is_valid()
         self.assertIn(self.MESSAGE, ' '.join(bound.errors.get('assigned_to', [])))
+
+    def test_task_admin_form_refuses_a_role_change_to_site_engineer(self):
+        """Ruling Q6: a task the engineer already holds cannot be turned into a Site
+        Engineer task in the admin either. The engineer gets a PM task (the admin has
+        no role rule, G88), then the role edit alone is refused."""
+        pm_task = self._pm_task(self.site_a)
+        assign_task_to(pm_task, self.qaqc)
+        form = TaskAdminForm(instance=pm_task)
+        data = {name: form.initial.get(name) for name in form.fields}
+        data = {k: ('' if v is None else v) for k, v in data.items()}
+        data['assigned_role'] = Task.SITE_ENGINEER
+        bound = TaskAdminForm(data, instance=pm_task)
+        self.assertFalse(bound.is_valid())
+        self.assertIn(self.MESSAGE, ' '.join(bound.errors.get('assigned_to', [])))
+
+    def test_refusal_is_keyed_on_task_role_only(self):
+        """Every role but Site Engineer answers None, with no query; Site Engineer reads
+        the row once."""
+        from .permissions import SITE_ENGINEER_TASK_ROLE, qaqc_engineer_assignment_refusal
+        self.assertEqual(SITE_ENGINEER_TASK_ROLE, Task.SITE_ENGINEER)
+        for role, _label in Task.ROLE_CHOICES:
+            if role == Task.SITE_ENGINEER:
+                continue
+            with self.subTest(role=role), self.assertNumQueries(0):
+                self.assertIsNone(qaqc_engineer_assignment_refusal(self.qaqc, self.site_a, role))
+        self.assertIsNotNone(qaqc_engineer_assignment_refusal(
+            self.qaqc, self.site_a, Task.SITE_ENGINEER))
 
     def test_after_ending_the_engineer_is_assignable_again(self):
         self._end(self.site_a)

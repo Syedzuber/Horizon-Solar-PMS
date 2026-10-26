@@ -1,0 +1,33 @@
+{% comment %}
+The phase-list row's Submit / Complete (self-certified) button, for an In Progress task
+the viewer may submit. Included twice by `_task_row_approval.html`, once per approver
+pool (CL-A v2.5): `self_certify` is the answer for THIS row's pool, picked there from
+the two per-page answers `_phase_list_two_step()` computes.
+
+`data-self-certify` carries the same answer to the shared confirm modal in
+project_overview.html, which is rendered once per page and so cannot know which row
+opened it; its script shows the matching wording.
+
+Expected context:
+  task, project, self_certify
+{% endcomment %}
+<button type="button"
+        class="btn btn-brand btn-sm py-0 px-2"
+        style="font-size:.7rem;"
+        onclick="openSubmitApprovalModal(this)"
+        data-task-name="{{ task.task_name }}"
+        data-target-id="#task-approval-{{ task.pk }}"
+        data-submit-url="{% url 'task_submit_for_approval' project.project_id task.pk %}"
+        data-self-certify="{% if self_certify %}1{% else %}0{% endif %}"
+        {% if self_certify %}title="No other approver on this project — this completes the task under your name."{% else %}title="Submit this work for approval — a RESCO task is completed by its approver, not here."{% endif %}>
+  {% if self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}
+</button>
+{% if self_certify %}
+  {% comment %}The note is a sibling of the button and INSIDE the swap target, so
+     the badge the endpoint returns replaces it along with the button — after a
+     self-certified completion the row reads "Approved" and nothing else, rather
+     than keeping an offer that has already been taken.{% endcomment %}
+  <span class="text-muted d-block" style="font-size:.7rem;">
+    No other approver on this project — this completes the task under your name.
+  </span>
+{% endif %}

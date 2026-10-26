@@ -5,7 +5,8 @@
 {% comment %}Closeout step 3 (CL-9, CL-A). Reached only by the site's PM and coordinators
    on a RESCO (OPEX) site — qaqc_views.site_qaqc refuses everyone else. The eligible
    list is already filtered to active Site Engineers, PMs and Project Coordinators who
-   hold no task on the site and do not manage it (CL-9, CL-A as amended in spec v2.4);
+   hold no Site Engineer task on the site and do not manage it (CL-9, CL-A as revised in
+   spec v2.5);
    the writer re-checks all of it under a lock and says why if it refuses.{% endcomment %}
 <div class="mb-3">
   <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
@@ -18,8 +19,9 @@
   <div class="card-body">
     <p class="text-muted small">
       The QA/QC engineer can view this site and approve or reject its submitted tasks.
-      They cannot change task status, edit dates, answer checklists, assign tasks or waive
-      punch points, and they may not hold a task on this site or manage it.
+      They may hold this site's tasks of any role except Site Engineer, and work only
+      those; they never approve or reject a task they hold. They cannot work other tasks,
+      assign tasks or waive punch points, and they may not manage this site.
     </p>
 
     <div class="mb-3">
@@ -56,9 +58,9 @@
         </button>
       </div>
       {% if not eligible %}
-        <div class="form-text">No one is free to assign: every active site engineer, PM and project coordinator holds a task on this site or manages it.</div>
+        <div class="form-text">No one is free to assign: every active site engineer, PM and project coordinator holds a Site Engineer task on this site or manages it.</div>
       {% else %}
-        <div class="form-text">People holding a task on this site, and its own PM and coordinators, are not listed.</div>
+        <div class="form-text">People holding a Site Engineer task on this site, and its own PM and coordinators, are not listed.</div>
       {% endif %}
     </form>
 

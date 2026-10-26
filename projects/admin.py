@@ -253,18 +253,23 @@ class TaskAdminForm(forms.ModelForm):
         return value
 
     def clean_assigned_to(self):
-        """CL-A, the other end (closeout step 3): the admin may not hand a task to its
-        site's QA/QC engineer, exactly as task_assign may not. Only a CHANGE of assignee
-        is checked, so a row that already holds a value (none should) still saves when
-        another field is edited."""
+        """CL-A, the other end (closeout step 3, v2.5): the admin may not hand a Site
+        Engineer task to its site's QA/QC engineer, exactly as task_assign may not. Only
+        a CHANGE of assignee or of role is checked — a role change can turn a task the
+        engineer already holds into a Site Engineer task (ruling Q6) — so a row that
+        already holds a value (none should) still saves when another field is edited."""
         value = self.cleaned_data.get('assigned_to')
-        if value is None or value.pk == self.instance.assigned_to_id:
+        # `assigned_role` is declared before `assigned_to` on Task, so it is cleaned
+        # first; the instance's role covers a form posted without it.
+        role = self.cleaned_data.get('assigned_role') or self.instance.assigned_role
+        if value is None or (value.pk == self.instance.assigned_to_id
+                             and role == self.instance.assigned_role):
             return value
         # `phase` is declared before `assigned_to` on Task, so it is cleaned first; the
         # instance's phase covers a form posted without it.
         phase = self.cleaned_data.get('phase') or getattr(self.instance, 'phase', None)
         if phase is not None:
-            refusal = qaqc_engineer_assignment_refusal(value, phase.project)
+            refusal = qaqc_engineer_assignment_refusal(value, phase.project, role)
             if refusal:
                 raise forms.ValidationError(refusal)
         return value

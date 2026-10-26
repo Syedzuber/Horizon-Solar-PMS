@@ -371,7 +371,10 @@ class SubmitFromTheRowTests(PhaseListFixture):
         the new markup is checked for the two things that would: an unbreakable line and
         a fixed width. Every string added wraps at a space, and the widest unbreakable
         token is a single word — narrower than the 12rem column it sits in."""
-        source = _template_source('partials', '_task_row_approval.html')
+        # The row block is two files since CL-A v2.5: the button moved into its own
+        # partial, included once per approver pool. Both are held to the same rules.
+        source = (_template_source('partials', '_task_row_approval.html')
+                  + _template_source('partials', '_task_row_submit_button.html'))
         markup = re.sub(r'{% comment %}.*?{% endcomment %}', '', source, flags=re.S)
         self.assertNotIn('nowrap', markup)
         self.assertNotIn('width:', markup)

@@ -126,6 +126,14 @@ Three states, and they are mutually exclusive:
               {% endif %}
             </div>
           </form>
+        {% elif own_engineer_task %}
+          {% comment %}CL-A v2.5: the site's QA/QC engineer holds this task, so they make no
+             verdict on it; task_approve and task_reject refuse them with the same
+             reason.{% endcomment %}
+          <p class="text-muted small mb-0">
+            Waiting on the project manager or a coordinator. You hold this task and are
+            this site's QA/QC engineer, so you cannot approve or reject it.
+          </p>
         {% else %}
           <p class="text-muted small mb-0">
             Waiting on the project manager or QA/QC to approve this work.

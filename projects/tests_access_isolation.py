@@ -66,7 +66,7 @@ from .permissions import (
 # Closeout step 3: two activated OPEX sites and the QA/QC cast, shared with the positive
 # suite. The fixture class holds no test methods, so importing it here runs nothing twice.
 from .tests_qaqc_assignment import QaqcFixture
-from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_tasks_to
+from .utils import RESIDENTIAL_FINANCE_ASSIGNEE_EMAIL, assign_task_to, assign_tasks_to
 
 
 def _profile(username, role, email='', **flags):
@@ -909,6 +909,75 @@ class ViewOnlyGrantNeverOpensWorkTripwireTests(QaqcFixture):
                 page = _client_for(profile).get(
                     reverse('task_detail', args=[self.site_a.project_id, task.pk]))
                 self.assertFalse(page.context['can_complete_items'])
+
+    # -- CL-A v2.5: the engineer may hold tasks, and works only those ----------------
+
+    #: A task each engineer role may be handed on site_a, other than OWN_ROLE_TASK's.
+    #: A Site Engineer engineer may hold no Site Engineer task, so they are given a PM
+    #: task the way only the Django admin could (no role rule there, G88).
+    HELD_TASK = {
+        'Site Engineer':       'Post-Installation Approvals',
+        'PM':                  'CEIG Approval',
+        'Project Coordinator': None,   # the template has one; a second is added below
+    }
+
+    def _hold(self, profile):
+        """Hand `profile` a task on site_a (through the chokepoint, as the admin and the
+        assign views do) and return it."""
+        name = self.HELD_TASK[profile.role]
+        if name is None:
+            other = Task.objects.get(phase__project=self.site_a,
+                                     task_name=self.OWN_ROLE_TASK['Project Coordinator'])
+            held = Task.objects.create(phase=other.phase, task_name='Handover paperwork',
+                                       task_order=999, assigned_role=other.assigned_role)
+        else:
+            held = Task.objects.get(phase__project=self.site_a, task_name=name)
+        assign_task_to(held, profile)
+        return held
+
+    def test_holding_a_task_never_makes_works_on_site_true(self):
+        """Ruling Q2: user_works_on_site stays False for the site's QA/QC engineer, any
+        role, whatever tasks they hold — including a Site Engineer engineer, for whom a
+        held task is otherwise exactly the site's working relationship."""
+        for label, profile, _task in self._grants():
+            with self.subTest(grant=label):
+                self._grant(profile)
+                self._hold(profile)
+                self.assertFalse(user_works_on_site(profile.user, self.site_a))
+                self.assertTrue(user_can_view_project(profile.user, self.site_a))
+
+    def test_holding_a_task_never_opens_the_sites_other_tasks(self):
+        """Every OTHER task of the engineer's own role stays shut — status, due date and
+        checklist answering — after they are handed a task on the site."""
+        for n, (label, profile, task) in enumerate(self._grants()):
+            with self.subTest(grant=label):
+                self._grant(profile)
+                held = self._hold(profile)
+                self.assertNotEqual(held.pk, task.pk)
+                before = (task.status, task.due_date)
+                status = _client_for(profile).post(
+                    reverse('task_status_update', args=[self.site_a.project_id, task.pk]),
+                    {'status': Task.IN_PROGRESS})
+                self.assertEqual(status.status_code, 403)
+                due = _client_for(profile).post(
+                    reverse('task_set_due_date', args=[self.site_a.project_id, task.pk]),
+                    {'due_date': (date.today() + timedelta(days=9)).isoformat()})
+                self.assertEqual(due.status_code, 403)
+                task.refresh_from_db()
+                self.assertEqual((task.status, task.due_date), before)
+                checklist = Checklist.objects.create(
+                    name=f'Held tripwire {n}', code=f'qq-held-tripwire-{n}', version_no=1)
+                item = ChecklistItem.objects.create(checklist=checklist, label='Done right',
+                                                    order=1)
+                checklist.activate()
+                ChecklistTaskLink.objects.create(checklist=checklist, task_name=task.task_name,
+                                                 project_type='OPEX')
+                answer = _client_for(profile).post(
+                    reverse('checklist_item_complete',
+                            args=[self.site_a.project_id, task.pk, item.pk]),
+                    {'answer': 'yes', 'photo': _photo()})
+                self.assertEqual(answer.status_code, 403)
+                self.assertFalse(ChecklistItemCompletion.objects.filter(item=item).exists())
 
     def test_grn_stays_shut(self):
         for n, (label, profile, _task) in enumerate(self._grants()):

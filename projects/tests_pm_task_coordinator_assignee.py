@@ -5,8 +5,9 @@ WHAT IS PINNED HERE
 -------------------
 views.task_assignee_candidates(task_role, project) is the one assignee rule. On a task
 whose assigned_role is PM it offers every active PM (company-wide, unchanged) and THIS
-project's active coordinators, labelled; never another project's coordinator, an
-inactive one, or the site's QA/QC engineer. Every screen that picks an assignee asks it:
+project's active coordinators, labelled; never another project's coordinator or an
+inactive one. The site's QA/QC engineer is left out of Site Engineer tasks only (CL-A
+v2.5). Every screen that picks an assignee asks it:
 the overview's Assign modal, task_assign (list and POST), TaskAddForm and
 duplicate-for-locations, so all four agree.
 
@@ -126,9 +127,10 @@ class CandidateListTests(CoordinatorAssigneeFixture):
         self.assertEqual(names[self.coord_a.pk], 'Ca_Coord_A Test (Coordinator)')
         self.assertEqual(names[self.pm_a.pk], 'Ca_Pm_A Test')
 
-    def test_pm_list_leaves_out_other_inactive_and_qaqc(self):
-        # The site's QA/QC engineer may be a PM (QAQC_ENGINEER_ROLES); named through the
-        # real screen, they leave the PM list here while staying on site_b's.
+    def test_pm_list_leaves_out_other_and_inactive_but_offers_the_qaqc_engineer(self):
+        # The site's QA/QC engineer may be a PM (QAQC_ENGINEER_ROLES). CL-A v2.5: they may
+        # hold the site's tasks of any role but Site Engineer, so named through the real
+        # screen they STAY on the PM list here, as on site_b's.
         engineer = _profile('ca_pm_engineer', 'PM')
         with self.captureOnCommitCallbacks(execute=True):
             _client_for(self.pm_a).post(reverse('site_qaqc', args=[self.site_a.project_id]),
@@ -136,8 +138,20 @@ class CandidateListTests(CoordinatorAssigneeFixture):
         pks = [c['pk'] for c in self._pm_bucket(self.site_a)]
         self.assertNotIn(self.coord_b.pk, pks)
         self.assertNotIn(self.coord_idle.pk, pks)
-        self.assertNotIn(engineer.pk, pks)
+        self.assertIn(engineer.pk, pks)
         self.assertIn(engineer.pk, [c['pk'] for c in self._pm_bucket(self.site_b)])
+
+    def test_se_list_leaves_out_a_site_engineer_qaqc_engineer(self):
+        # The one role CL-A v2.5 still refuses: a Site Engineer engineer is not offered
+        # the site's Site Engineer tasks, and is still offered another site's.
+        engineer = _profile('ca_se_engineer', 'Site Engineer')
+        with self.captureOnCommitCallbacks(execute=True):
+            _client_for(self.pm_a).post(reverse('site_qaqc', args=[self.site_a.project_id]),
+                                        {'action': 'assign', 'engineer_id': engineer.pk})
+        self.assertNotIn(engineer.pk, {p.pk for p in task_assignee_candidates(
+            Task.SITE_ENGINEER, self.site_a)})
+        self.assertIn(engineer.pk, {p.pk for p in task_assignee_candidates(
+            Task.SITE_ENGINEER, self.site_b)})
 
     def test_other_role_lists_offer_no_coordinator(self):
         se_pks = {p.pk for p in task_assignee_candidates(Task.SITE_ENGINEER, self.site_a)}
@@ -387,11 +401,22 @@ class OverviewQueryCostTests(CoordinatorAssigneeFixture):
             self.assertNotIn(engineer.pk, [c['pk'] for c in bucket])
 
     def test_an_explicit_engineer_id_is_used_without_a_lookup(self):
+        # A Site Engineer task is the one role the engineer is left out of (CL-A v2.5).
+        with self.assertNumQueries(1):
+            pks = [p.pk for p in task_assignee_candidates(
+                Task.SITE_ENGINEER, self.site_a, qaqc_engineer_id=self.worker.pk)]
+        self.assertNotIn(self.worker.pk, pks)
+
+    def test_a_non_site_engineer_role_pays_no_engineer_lookup(self):
+        # Any other role excludes nobody, so it neither reads the engineer nor uses one
+        # it is handed: the candidate query is the only one.
+        with self.assertNumQueries(1):
+            pks = [p.pk for p in task_assignee_candidates(Task.PM, self.site_a)]
+        self.assertIn(self.coord_a.pk, pks)
         with self.assertNumQueries(1):
             pks = [p.pk for p in task_assignee_candidates(
                 Task.PM, self.site_a, qaqc_engineer_id=self.pm_b.pk)]
-        self.assertNotIn(self.pm_b.pk, pks)
-        self.assertIn(self.coord_a.pk, pks)
+        self.assertIn(self.pm_b.pk, pks)
 
 
 # ---------------------------------------------------------------------------

@@ -5142,6 +5142,63 @@ hold, which since this build can include PM-role tasks. Its send gate also reads
 `coord_open_tasks`/`coord_open_issues`, so a task they still hold on a project they were
 removed from does not make them a recipient.
 
+### G91 — task assignment and QA/QC naming do not share a lock
+
+Recorded 26 Oct 2026 by the CL-A v2.5 build (audit of 26 Oct, item 1). Pre-existing.
+`qaqc_views.assign_site_qaqc` re-checks the held Site Engineer tasks under the project row
+lock (`Project.objects.select_for_update()`), but `views.task_assign`, `views.task_add`,
+`views.task_duplicate_locations_create` and `TaskAdminForm` ask
+`qaqc_engineer_assignment_refusal()` with no lock, and `utils.assign_task_to` writes with a
+bare `filter().update()`. A PM handing a person a Site Engineer task and another manager
+naming that person the site's QA/QC engineer at the same moment can both succeed, leaving
+an engineer who holds a Site Engineer task. Fix: take the same project row lock in the four
+assignment paths around the refusal and the write. Not fixed in the build: it touches every
+assignment path and the chokepoint, which is a session of its own.
+
+### G92 — a Site Engineer QA/QC engineer on their own Site Engineer work: reason and marker
+
+Recorded 26 Oct 2026 by the CL-A v2.5 build (ruling: deferred until a real case exists).
+CL-A v2.5 still refuses the site's QA/QC engineer every Site Engineer task, so a site
+engineer cannot both execute and verify. The audit of 26 Oct 2026 proposed allowing it with
+a mandatory reason and a permanent "executed and verified by the same person" marker; that
+was not built. Production on 23 Oct had no Site Engineer among the 20 active QA/QC
+engineers (18 sites a Project Coordinator, 2 a PM). If a region runs short of engineers
+(CLOSEOUT_SPEC §7 risk), the audit's item 8 lists where the reason and marker could live
+(a field on Task, an ActivityLog row, a new append-only row, a column on
+SiteQaqcAssignment) and its QUESTIONS 1–20 are still open.
+
+### G93 — G85 and the QA/QC engineer: the assignee rule is the engineer's only
+
+Recorded 26 Oct 2026 by the CL-A v2.5 build. `views._engineer_own_task_refused()` refuses
+the site's QA/QC engineer an approve or reject on a task they hold, whoever submitted it,
+and `task_has_independent_approver(engineer_holds_task=True)` keeps them out of that task's
+pool. G85 — a manager approving a task assigned to them that someone else submitted — is
+unchanged: the new term reads `qaqc_engineer_holds_task()`, not "the approver is the
+assignee". If G85 is ruled in, the same shape applies: a term beside the `submitted_by`
+check in `task_approve`, and the assignee dropped from the pool through the same keyword,
+or a manager-held task on a coordinator-less site deadlocks.
+
+### G94 — `punch_points.next_action` can name the QA/QC engineer as the rectifier
+
+Recorded 26 Oct 2026 by the CL-A v2.5 build (ruling Q8: dropped from the build). For an
+Open visit-raised point, `next_action()` names the task's assignee as the one to rectify,
+but `user_can_rectify_punch_point()` refuses the site's QA/QC engineer first. Since v2.5
+the engineer may hold tasks, so the line could name someone who cannot act. Unreachable
+today: visit-raised points come only from checklist points, checklists exist only on Site
+Engineer tasks, which the engineer cannot hold, and tasks the engineer holds are left out of
+their visits (`site_checklist_points(holder_id=...)`). Revisit if a checklist is linked to
+another role's task AND the engineer is replaced by someone who then raises a point on it.
+
+### G95 — the QA/QC engineer's held tasks are missing from their own task lists
+
+Recorded 26 Oct 2026 by the CL-A v2.5 build (ruling Q9; beside G51 and G86). A PM or
+Project Coordinator who is a site's QA/QC engineer may now hold its PM or Coordinator task,
+but `dashboard_pm`, `tasks_drill_down` and the morning and EOD reports scope a PM or
+coordinator by the projects they MANAGE (`manageable_projects_q`), so a task held on a
+QA/QC site appears in none of them. The engineer reaches it from the dashboard's "QA/QC
+sites" section (CL-K) and the site page. Same family as G51 (task-derived counts miss QA/QC
+sites) and G86 (a PM held task on a site they do not manage). No change in the build.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

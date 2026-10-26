@@ -7,8 +7,9 @@ WHAT IS PINNED HERE
     CL-9/K  the full cycle as a PM engineer, and as a coordinator, on a
             site they do not manage: assigned, dashboard section, visit,
             "No", punch point, rectified, re-verified, task approved      FullCycleTests
-    CL-A    refused: the site's PM, a site coordinator, a task holder,
-            an inactive user, a Finance user; the eligible list agrees     EligibilityTests
+    CL-A    refused: the site's PM, a site coordinator, a Site Engineer task
+            holder, an inactive user, a Finance user; a holder of another
+            role's task is eligible (v2.5); the eligible list agrees       EligibilityTests
     CL-H    change_site_pm, hand_over_sites and assign_coordinators
             refuse the site's current QA/QC engineer                       ManagerSeatTests
     CL-I    a PM engineer is not shown the PM-only overview blocks         OverviewContentTests
@@ -155,9 +156,26 @@ class EligibilityTests(RolesFixture):
     def test_a_task_holder_is_refused(self):
         self._refused(self.worker, 'holds')
 
-    def test_a_pm_holding_a_task_is_refused_as_a_holder(self):
+    def test_a_pm_holding_a_site_engineer_task_is_refused_as_a_holder(self):
         assign_task_to(self.module, self.pm_b)
-        self._refused(self.pm_b, 'holds 1 task')
+        self._refused(self.pm_b, 'holds 1 Site Engineer task')
+
+    def test_a_pm_or_coordinator_holding_their_own_role_task_is_eligible(self):
+        """CL-A v2.5: a non-Site-Engineer task does not disqualify. pm_b holds the site's
+        Net Metering Approval and coord_b its Completion Certificates; both stay on the
+        eligible list and each is accepted by the writer."""
+        assign_task_to(Task.objects.get(phase__project=self.site,
+                                        task_name='Net Metering Approval'), self.pm_b)
+        assign_task_to(Task.objects.get(phase__project=self.site,
+                                        task_name='Completion Certificates (Paperwork)'),
+                       self.coord_b)
+        eligible = set(eligible_qaqc_engineers(self.site))
+        self.assertIn(self.pm_b, eligible)
+        self.assertIn(self.coord_b, eligible)
+        for engineer in (self.pm_b, self.coord_b):
+            with self.subTest(engineer=engineer.user.username):
+                self._assign_screen(engineer)
+                self.assertEqual(self._engineer_id(), engineer.pk)
 
     def test_an_inactive_user_is_refused(self):
         User.objects.filter(pk=self.pm_b.user.pk).update(is_active=False)

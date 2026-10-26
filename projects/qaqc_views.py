@@ -3,9 +3,11 @@ Site QA/QC engineer — closeout step 3 (docs/CLOSEOUT_SPEC.md CL-9, CL-A, CL-D)
 
 A PM or coordinator names one active Site Engineer, PM or Project Coordinator
 (permissions.QAQC_ENGINEER_ROLES, CL-9 as amended in spec v2.4) as an OPEX site's QA/QC
-engineer — never the site's own PM or coordinator, nor anyone holding a task on it
-(CL-A). The assignment grants that engineer view of the site and the right to approve
-or reject its submitted tasks (permissions.user_is_site_qaqc); nothing else.
+engineer — never the site's own PM or coordinator, nor anyone holding one of its Site
+Engineer tasks (CL-A, v2.5). The assignment grants that engineer view of the site and
+the right to approve or reject its submitted tasks (permissions.user_is_site_qaqc) —
+never one they hold; the engineer may hold the site's tasks of other roles and works
+those alone (permissions.user_works_on_task).
 
 A separate module from views.py for the same reason order_views.py is one: a
 self-contained screen with its own URL. urls.py imports it beside `views`.
@@ -56,7 +58,7 @@ from .models import (
 )
 from .notify import notify_now
 from .permissions import (
-    QAQC_ENGINEER_ROLES, project_managers, user_can_conduct_qaqc_visit,
+    QAQC_ENGINEER_ROLES, project_managers, site_qaqc_engineer_id, user_can_conduct_qaqc_visit,
     user_can_manage_project, user_can_rectify_punch_point, user_can_reverify_punch_point,
     user_can_view_project,
 )
@@ -129,12 +131,15 @@ def engineer_is_stale(profile):
 
 
 def tasks_held_on_site(profile, project):
-    """Every task on `project` assigned to `profile` — any status, mirrors and Not
-    Applicable rows included. CL-A: a person who holds (or held to completion) work on
-    a site is not independent of it, so a Done task disqualifies as much as an open one.
-    Tasks have no soft delete, so nothing else needs filtering."""
+    """Every SITE ENGINEER task on `project` assigned to `profile` — any status, mirrors
+    and Not Applicable rows included. CL-A v2.5: a person who holds (or held to
+    completion) the site's Site Engineer work is not independent of it, so a Done task
+    disqualifies as much as an open one; tasks of any other role do not disqualify,
+    because the engineer may hold those. Tasks have no soft delete, so nothing else
+    needs filtering."""
     return list(
-        Task.objects.filter(phase__project=project, assigned_to=profile)
+        Task.objects.filter(phase__project=project, assigned_to=profile,
+                            assigned_role=Task.SITE_ENGINEER)
         .order_by('phase__phase_order', 'pk')
         .values_list('task_name', flat=True)
     )
@@ -145,12 +150,14 @@ def eligible_qaqc_engineers(project):
 
     A role in QAQC_ENGINEER_ROLES (CL-9); active on both models (UserProfile.is_active
     is the portal's deactivation, User.is_active Django's login gate — a person off by
-    either can never sign anything); holding no task on the site and neither its
-    assigned PM nor one of its coordinators (CL-A — a manager checking their own site is
-    not independent of it); and not already its engineer. One query: the held-task and
-    coordinator exclusions are subqueries on the same statement.
+    either can never sign anything); holding no Site Engineer task on the site (CL-A
+    v2.5, the tasks_held_on_site() rule) and neither its assigned PM nor one of its
+    coordinators (CL-A — a manager checking their own site is not independent of it);
+    and not already its engineer. One query: the held-task and coordinator exclusions
+    are subqueries on the same statement.
     """
-    holders = (Task.objects.filter(phase__project=project, assigned_to__isnull=False)
+    holders = (Task.objects.filter(phase__project=project, assigned_to__isnull=False,
+                                   assigned_role=Task.SITE_ENGINEER)
                .values('assigned_to'))
     coordinators = project.coordinators.values('pk')
     qs = (UserProfile.objects
@@ -271,9 +278,9 @@ def _refuse_ineligible(project, engineer):
         raise QaqcAssignmentRefused(
             f"{_person(engineer)} is not an active site engineer, PM or project "
             f"coordinator.")
-    # CL-A (v2.4): the site's own managers are not independent of it. Asked before the
-    # held-task term because a PM usually holds tasks too, and "manages this site" is
-    # the reason that tells the person choosing what to do instead.
+    # CL-A (v2.4, unchanged by v2.5): the site's own managers are not independent of it.
+    # Asked before the held-task term because a PM usually holds tasks too, and "manages
+    # this site" is the reason that tells the person choosing what to do instead.
     if (project.assigned_pm_id == engineer.pk
             or project.coordinators.filter(pk=engineer.pk).exists()):
         raise QaqcAssignmentRefused(
@@ -286,9 +293,10 @@ def _refuse_ineligible(project, engineer):
         if more > 0:
             named += f' and {more} more'
         raise QaqcAssignmentRefused(
-            f"{_person(engineer)} holds {len(held)} task{'s' if len(held) != 1 else ''} "
-            f"on this site ({named}). A site's QA/QC engineer may not hold a task on "
-            f"the site they check — reassign those tasks or choose someone else.")
+            f"{_person(engineer)} holds {len(held)} Site Engineer "
+            f"task{'s' if len(held) != 1 else ''} on this site ({named}). A site's QA/QC "
+            f"engineer may not hold its Site Engineer tasks — reassign those tasks or "
+            f"choose someone else.")
 
 
 def _notify(recipient_pk, project_pk, actor_pk, template):
@@ -620,7 +628,7 @@ def resolve_checklists_for_tasks(tasks, project):
     return resolved
 
 
-def site_checklist_points(project):
+def site_checklist_points(project, *, holder_id=None):
     """The site's QA/QC points (V-2): one entry per task that has a checklist, in site
     order, as [{'task', 'checklist', 'items'}] — the items of the version that task
     resolves to (closeout 1a pinning, through resolve_checklists_for_tasks()).
@@ -631,17 +639,28 @@ def site_checklist_points(project):
     a task is pinned to it; a task whose family has no active version and no pin
     resolves to None and contributes nothing.
 
+    TASKS HELD BY `holder_id` ARE LEFT OUT TOO (CL-A v2.5): the QA/QC engineer may hold
+    the site's non-Site-Engineer tasks, and a check of their own work is not independent.
+    Checklists exist only on Site Engineer tasks today, which the engineer cannot hold,
+    so this removes nothing yet; it keeps verification independent if a checklist is ever
+    linked to another role's task. Callers pass the visit's engineer (the visit page, its
+    PDF) or the site's current engineer (the project card), so site_coverage() counts
+    over the same points the visit offers. None leaves every task in.
+
     At most five queries whatever the size of the site: the tasks, the three resolver
     queries, and the items. None at all on a non-OPEX site.
     """
     if project.project_type != 'OPEX':
         return []
-    tasks = list(
+    tasks_qs = (
         Task.objects
         .filter(phase__project=project, is_mirror=False, is_not_applicable=False)
         .select_related('template_task', 'phase')
         .order_by('phase__phase_order', 'task_order', 'pk')
     )
+    if holder_id is not None:
+        tasks_qs = tasks_qs.exclude(assigned_to_id=holder_id)
+    tasks = list(tasks_qs)
     resolved = resolve_checklists_for_tasks(tasks, project)
     checklist_pks = {c.pk for c in resolved.values() if c is not None}
     items_by_checklist = {}
@@ -754,16 +773,26 @@ def _visit_counts(visit_qs):
     )
 
 
-def qaqc_visit_card_context(project, user):
+_ENGINEER_NOT_LOOKED_UP = object()   # qaqc_visit_card_context(engineer_id=...) not supplied
+
+
+def qaqc_visit_card_context(project, user, *, engineer_id=_ENGINEER_NOT_LOOKED_UP):
     """Context for the "QA/QC visits" card on project_overview. OPEX only: on any other
     site the card is not drawn (`show_qaqc_visit_card` False) and no query is spent.
 
     Every viewer: coverage, the last submitted visit and the five most recent. The open
     visit: its engineer and the site's managers (V-7), shown "open since <date>" (Q3).
     The Start / Continue button: the assigned engineer only. About ten queries, fixed.
+
+    Coverage leaves out tasks the site's current engineer holds (CL-A v2.5), the points
+    their next visit will offer. `engineer_id`: that engineer's pk, or None for none,
+    when the caller has read the assignment already (project_overview has); omitted, it
+    is read here through site_qaqc_engineer_id().
     """
     if project.project_type != 'OPEX':
         return {'show_qaqc_visit_card': False}
+    if engineer_id is _ENGINEER_NOT_LOOKED_UP:
+        engineer_id = site_qaqc_engineer_id(project)
     profile = getattr(user, 'profile', None)
     submitted = list(_visit_counts(
         QaqcVisit.objects.filter(project=project, status=QaqcVisit.SUBMITTED)
@@ -772,7 +801,7 @@ def qaqc_visit_card_context(project, user):
                   .select_related('engineer__user').first())
     if open_visit is not None and not user_can_read_visit(user, open_visit, project):
         open_visit = None
-    points = site_checklist_points(project)
+    points = site_checklist_points(project, holder_id=engineer_id)
     today = timezone.localdate()
     return {
         'show_qaqc_visit_card':  True,
@@ -1010,19 +1039,27 @@ def _refuse_unless_answerable(visit, user, project):
         raise QaqcVisitRefused(VISIT_NOT_YOURS)
 
 
-def point_refusal(project, task, item):
-    """Raise QaqcVisitRefused unless (task, item) is a point on `project` now (V-2).
+def point_refusal(project, task, item, engineer_id):
+    """Raise QaqcVisitRefused unless (task, item) is a point on `project` now (V-2) for
+    the visit of `engineer_id`.
 
     Asks views._checklist_for_task() itself, never the batch twin, so a write is always
     checked by the resolver every other checklist write uses. A stale page posting an
     item from another version of the family is refused with the reason; an item from an
-    unrelated checklist is a forged id and is a 404. Nothing is written either way."""
+    unrelated checklist is a forged id and is a 404. Nothing is written either way.
+
+    A task the visit's engineer holds is not one of their points (CL-A v2.5), as
+    site_checklist_points(holder_id=...) leaves it off the page."""
     if task.phase.project_id != project.pk:
         raise Http404
     if task.is_mirror or task.is_not_applicable:
         raise QaqcVisitRefused(
             f"'{task.task_name}' is not checked on a QA/QC visit "
             f"({'a derived task' if task.is_mirror else 'marked Not Applicable'}).")
+    if task.assigned_to_id is not None and task.assigned_to_id == engineer_id:
+        raise QaqcVisitRefused(
+            f"'{task.task_name}' is assigned to you, so it is not checked on your QA/QC "
+            f"visit: the check must be independent of the work.")
     checklist = _checklist_for_task(task, project)
     if checklist is None:
         raise QaqcVisitRefused(f"'{task.task_name}' has no checklist to check.")
@@ -1056,7 +1093,7 @@ def answer_qaqc_point(visit, user, project, task, item, *, answer, remark, store
         # both of which update this row — after either, the re-check below refuses.
         locked = QaqcVisit.objects.select_for_update().get(pk=visit.pk)
         _refuse_unless_answerable(locked, user, project)
-        point_refusal(project, task, item)
+        point_refusal(project, task, item, locked.engineer_id)
         row = QaqcVisitAnswer.objects.filter(visit=locked, task=task, item=item).first()
         replaced = None
         if row is None:
@@ -1202,7 +1239,8 @@ def _visit_page_context(request, project, visit):
     # Every answer on this visit, keyed by point, with the punch point a "No" raised.
     answers = {(a.task_id, a.item_id): a
                for a in visit.answers.select_related('punch_point', 'task')}
-    points = site_checklist_points(project)
+    # The visit's own engineer: tasks they hold are not their points (CL-A v2.5).
+    points = site_checklist_points(project, holder_id=visit.engineer_id)
     coverage = site_coverage(project, points)
     current_keys = point_keys(points)
     groups = []
@@ -1292,6 +1330,9 @@ def _task_point_count(visit, project, task):
     count is limited to the version the task resolves to now, as the page's group is."""
     if task.is_mirror or task.is_not_applicable:
         return None
+    # A task the visit's engineer holds draws no group either (CL-A v2.5).
+    if task.assigned_to_id is not None and task.assigned_to_id == visit.engineer_id:
+        return None
     checklist = _checklist_for_task(task, project)
     if checklist is None:
         return None
@@ -1362,7 +1403,7 @@ def qaqc_visit_point(request, project_id, visit_pk, task_id, item_id):
 
     if request.method != 'POST':
         try:
-            point_refusal(project, task, item)
+            point_refusal(project, task, item, visit.engineer_id)
         except QaqcVisitRefused as exc:
             return _point_response(request, project, visit, task, item, form=False,
                                    error=str(exc))
@@ -1390,7 +1431,7 @@ def qaqc_visit_point(request, project_id, visit_pk, task_id, item_id):
     if photo is None and not has_answer:
         return refused(PHOTO_REQUIRED)
     try:
-        point_refusal(project, task, item)
+        point_refusal(project, task, item, visit.engineer_id)
         if photo is not None:
             validate_visit_photo(photo)
     except QaqcVisitRefused as exc:
@@ -1494,7 +1535,8 @@ def visit_pdf_document(project, visit, generated_at):
     module imports it), so it is passed rather than re-derived there. About seven
     queries: the five of site_checklist_points(), coverage, and the builder's two.
     """
-    points = site_checklist_points(project)
+    # The visit's own engineer, as the visit page reads it (CL-A v2.5).
+    points = site_checklist_points(project, holder_id=visit.engineer_id)
     coverage = site_coverage(project, points, as_of=visit.submitted_at)
     current_keys = point_keys(points)
     return qaqc_visit_document(

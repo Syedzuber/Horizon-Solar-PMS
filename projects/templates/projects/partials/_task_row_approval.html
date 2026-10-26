@@ -43,7 +43,8 @@ to the same endpoint; the endpoint reads the pool itself and decides. This is th
 honest label, not the rule.
 
 Expected context:
-  task, project, is_assigned_pm, two_step_completion, can_self_certify
+  task, project, is_assigned_pm, two_step_completion, can_self_certify,
+  can_self_certify_engineer_held, qaqc_engineer_pk (CL-A v2.5, _phase_list_two_step)
 {% endcomment %}
 {% if two_step_completion and not task.is_mirror %}
   {% comment %}The id is the hx-target of the submit form in project_overview.html's
@@ -66,24 +67,13 @@ Expected context:
             title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on the project manager or QA/QC.">Awaiting approval</span>
     {% elif is_assigned_pm or task.assigned_to and task.assigned_to == request.user.profile %}
       {% if task.status == 'In Progress' %}
-        <button type="button"
-                class="btn btn-brand btn-sm py-0 px-2"
-                style="font-size:.7rem;"
-                onclick="openSubmitApprovalModal(this)"
-                data-task-name="{{ task.task_name }}"
-                data-target-id="#task-approval-{{ task.pk }}"
-                data-submit-url="{% url 'task_submit_for_approval' project.project_id task.pk %}"
-                {% if can_self_certify %}title="No other approver on this project — this completes the task under your name."{% else %}title="Submit this work for approval — a RESCO task is completed by its approver, not here."{% endif %}>
-          {% if can_self_certify %}Complete (self-certified){% else %}Submit for approval{% endif %}
-        </button>
-        {% if can_self_certify %}
-          {% comment %}The note is a sibling of the button and INSIDE the swap target, so
-             the badge the endpoint returns replaces it along with the button — after a
-             self-certified completion the row reads "Approved" and nothing else, rather
-             than keeping an offer that has already been taken.{% endcomment %}
-          <span class="text-muted d-block" style="font-size:.7rem;">
-            No other approver on this project — this completes the task under your name.
-          </span>
+        {% comment %}CL-A v2.5: a task held by the site's QA/QC engineer has its own
+           approver pool (the engineer is out of it), so its row reads the second answer
+           _phase_list_two_step() computed. Both are per page; this only picks.{% endcomment %}
+        {% if qaqc_engineer_pk and task.assigned_to_id == qaqc_engineer_pk %}
+          {% include 'projects/partials/_task_row_submit_button.html' with self_certify=can_self_certify_engineer_held %}
+        {% else %}
+          {% include 'projects/partials/_task_row_submit_button.html' with self_certify=can_self_certify %}
         {% endif %}
       {% else %}
         {% comment %}`task_submit_for_approval` refuses anything that is not In Progress,
