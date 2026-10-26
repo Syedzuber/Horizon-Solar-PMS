@@ -72,7 +72,7 @@ preview_data.
         <select id="dup-assignee" name="assigned_to" class="form-select form-select-sm">
           <option value="">— Choose —</option>
           {% for p in assignees %}
-            <option value="{{ p.pk }}" {% if p.pk == selected_assignee_pk %}selected{% endif %}>{{ p.user.get_full_name|default:p.user.username }}</option>
+            <option value="{{ p.pk }}" {% if p.pk == selected_assignee_pk %}selected{% endif %}>{{ p.option_label }}</option>
           {% endfor %}
         </select>
       </div>

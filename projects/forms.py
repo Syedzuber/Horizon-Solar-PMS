@@ -5,6 +5,7 @@ from django import forms
 from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from django.utils.functional import cached_property
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
 from .permissions import (
@@ -628,13 +629,19 @@ class TaskAddForm(forms.Form):
             if not role:
                 role = self.phase_roles[0]
         self.selected_role = role if role in self.phase_roles else ''
-        # The site's QA/QC engineer is not offered (CL-A); clean() refuses them as well.
-        # `project` is always set by the add-task views; without it there is no
-        # coordinator list to read, so nobody is offered.
-        self.assignee_options = (
-            _assignee_candidates(self.selected_role, project)
-            if self.selected_role and project is not None else UserProfile.objects.none()
-        )
+
+    @cached_property
+    def assignee_options(self):
+        """The dropdown's people, each carrying `option_label` ("(Coordinator)" as in the
+        Assign modal). Read only when the template draws it, so a POST that validates
+        and redirects pays no query for it.
+
+        The site's QA/QC engineer is not offered (CL-A); clean() refuses them as well.
+        `project` is always set by the add-task views; without it there is no
+        coordinator list to read, so nobody is offered."""
+        if not self.selected_role or self.project is None:
+            return []
+        return _labelled_assignee_candidates(self.selected_role, self.project)
 
     def _raw(self, name):
         source = self.data if self.is_bound else self.initial
@@ -702,6 +709,16 @@ def _assignee_candidates(task_role, project):
     """
     from .views import task_assignee_candidates
     return task_assignee_candidates(task_role, project)
+
+
+def _labelled_assignee_candidates(task_role, project):
+    """_assignee_candidates() as a list labelled by views._assignee_option_label(), for
+    the Add Task dropdown.
+
+    Imported at call time to avoid a circular import, as above.
+    """
+    from .views import _labelled_assignees
+    return _labelled_assignees(_assignee_candidates(task_role, project))
 
 
 # ---------------------------------------------------------------------------

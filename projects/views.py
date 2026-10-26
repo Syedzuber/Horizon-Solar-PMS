@@ -4180,7 +4180,12 @@ def _locations_added_for(source):
     }
 
 
-def task_assignee_candidates(task_role, project):
+# task_assignee_candidates()'s "the caller did not resolve the QA/QC engineer" marker.
+# A sentinel, not None: None is a real answer (the site has no engineer).
+_QAQC_NOT_LOOKED_UP = object()
+
+
+def task_assignee_candidates(task_role, project, *, qaqc_engineer_id=_QAQC_NOT_LOOKED_UP):
     """Who may hold a task of `task_role` on `project` — THE assignee rule, asked by
     every screen where a person picks one: project_overview's Assign modal, task_assign
     (its list and its POST), TaskAddForm, and duplicate-for-locations.
@@ -4195,6 +4200,11 @@ def task_assignee_candidates(task_role, project):
     task on the site they check. Callers that take a POST ask
     qaqc_engineer_assignment_refusal() BEFORE this, so the PM is told that reason
     rather than refused generically.
+
+    `qaqc_engineer_id`: a caller asking for several roles on one page passes the
+    engineer's pk (or None for no engineer) it has already read, so the lookup is paid
+    once per page rather than once per role — project_overview builds seven lists.
+    Omitted, it is read here through site_qaqc_engineer_id().
 
     Each row carries `is_coordinator_candidate`: True for a coordinator offered on a PM
     task, False for a role match, so the list labels them. Role matches come first,
@@ -4215,7 +4225,8 @@ def task_assignee_candidates(task_role, project):
         .order_by('is_coordinator_candidate', 'user__first_name', 'user__last_name',
                   'user__username')
     )
-    qaqc_engineer_id = site_qaqc_engineer_id(project)
+    if qaqc_engineer_id is _QAQC_NOT_LOOKED_UP:
+        qaqc_engineer_id = site_qaqc_engineer_id(project)
     if qaqc_engineer_id is not None:
         candidates = candidates.exclude(pk=qaqc_engineer_id)
     return candidates
@@ -4228,6 +4239,16 @@ def _assignee_option_label(profile):
     if getattr(profile, 'is_coordinator_candidate', False):
         return f'{name} (Coordinator)'
     return name
+
+
+def _labelled_assignees(candidates):
+    """`candidates` as a list, each profile carrying `option_label` from
+    _assignee_option_label(), for a template dropdown that cannot call it: the Add Task
+    form and the duplicate-for-locations panel label coordinators as the modal does."""
+    labelled = list(candidates)
+    for profile in labelled:
+        profile.option_label = _assignee_option_label(profile)
+    return labelled
 
 
 def _location_assignee_candidates(source):
@@ -4294,7 +4315,7 @@ def _location_panel_context(project, source, error='', selected=(), new_text='',
             label.casefold() in added for label in site_labels),
         'checklist':            checklist,
         'checklist_item_count': checklist.items.count() if checklist else 0,
-        'assignees':            _location_assignee_candidates(source),
+        'assignees':            _labelled_assignees(_location_assignee_candidates(source)),
         'selected_assignee_pk': assignee_pk if assignee_pk is not None else source.assigned_to_id,
         'new_locations_text':   new_text,
         'error':                error,
@@ -7759,8 +7780,9 @@ def assign_coordinators(request, project_id):
     A REMOVED COORDINATOR'S OPEN TASKS on this project are dealt with in the same
     transaction, because removal also ends their sight of the site and they could no
     longer open them. PM-role tasks go back to the assigned PM, notified, and are named
-    in the success message; with no assigned PM the whole edit is refused and nothing
-    changes. Coordinator-role tasks stay where they are and are named in a warning.
+    in the success message; with no assigned PM, or an inactive one, the whole edit is
+    refused and nothing changes. Tasks in every other role stay where they are and are
+    named in a warning.
     """
     project = _active_project(project_id)
 
@@ -7811,22 +7833,32 @@ def assign_coordinators(request, project_id):
                 .select_related('assigned_to__user', 'phase')
                 .order_by('phase__phase_order', 'task_order', 'pk')
             ) if to_remove else []
-            pm_tasks    = [t for t in leaving_tasks if t.assigned_role == Task.PM]
-            coord_tasks = [t for t in leaving_tasks
-                           if t.assigned_role == Task.PROJECT_COORDINATOR]
+            pm_tasks   = [t for t in leaving_tasks if t.assigned_role == Task.PM]
+            # Every other role stays with the departing coordinator and is named in the
+            # warning: Coordinator tasks are theirs by role, and any other role can only
+            # have reached them through the admin (EXECUTION_MODULE_DEFERRED.md G88).
+            kept_tasks = [t for t in leaving_tasks if t.assigned_role != Task.PM]
 
             def _held(tasks):
                 return ', '.join(
                     f"{t.task_name} ({t.assigned_to.user.get_full_name() or t.assigned_to.user.username})"
                     for t in tasks)
 
-            # A PM task must go back to someone; with no assigned PM there is nobody, so
-            # the whole edit is refused before any write rather than left half-applied.
-            if pm_tasks and locked.assigned_pm is None:
+            # A PM task must go back to someone who can take it. With no assigned PM, or
+            # an inactive one (UserProfile.is_active False — offered on no list, and the
+            # task would sit with nobody working it), the whole edit is refused before
+            # any write rather than left half-applied.
+            receiving_pm = locked.assigned_pm
+            if pm_tasks and (receiving_pm is None or not receiving_pm.is_active):
+                if receiving_pm is None:
+                    reason = "This project has no assigned PM to take back these PM tasks"
+                else:
+                    reason = (f"This project's assigned PM, "
+                              f"{receiving_pm.user.get_full_name() or receiving_pm.user.username}, "
+                              f"is inactive and cannot take back these PM tasks")
                 messages.error(request, (
-                    f"This project has no assigned PM to take back these PM tasks: "
-                    f"{_held(pm_tasks)}. Assign a PM or reassign the tasks first. "
-                    f"Nothing was changed."))
+                    f"{reason}: {_held(pm_tasks)}. Assign a PM or reassign the tasks "
+                    f"first. Nothing was changed."))
                 return redirect('assign_coordinators', project_id=project.project_id)
 
             actor = request.user.profile
@@ -7848,10 +7880,10 @@ def assign_coordinators(request, project_id):
             messages.success(request, (
                 f"PM tasks moved to {pm_name}: "
                 f"{', '.join(t.task_name for t in pm_tasks)}."))
-        if coord_tasks:
+        if kept_tasks:
             messages.warning(request, (
-                f"Coordinator tasks still held by a removed coordinator, who can no longer "
-                f"open them: {_held(coord_tasks)}. Reassign them."))
+                f"Tasks still held by a removed coordinator, who can no longer "
+                f"open them: {_held(kept_tasks)}. Reassign them."))
 
         if to_add or to_remove:
             actor = request.user.profile
@@ -11099,11 +11131,16 @@ def project_overview(request, project_id):
         # One bucket per task role, each the same list task_assign offers and accepts:
         # the PM bucket carries this project's coordinators, labelled, after the PMs.
         # The site's QA/QC engineer is never offered (CL-A); task_assign refuses them on
-        # POST as well.
+        # POST as well. Their pk comes from the card's assignment row, already read above
+        # (current_site_qaqc: the same active, OPEX-only row site_qaqc_engineer_id reads),
+        # so the seven lists cost no QA/QC query of their own.
+        qaqc_assignment = qaqc_context['qaqc_assignment']
+        qaqc_engineer_id = qaqc_assignment.engineer_id if qaqc_assignment is not None else None
         for role_key, _ in Task.ROLE_CHOICES:
             candidates_by_role[role_key] = [
                 {'pk': p.pk, 'name': _assignee_option_label(p)}
-                for p in task_assignee_candidates(role_key, project)
+                for p in task_assignee_candidates(role_key, project,
+                                                  qaqc_engineer_id=qaqc_engineer_id)
             ]
         design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
 

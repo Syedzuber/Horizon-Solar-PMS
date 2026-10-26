@@ -62,7 +62,7 @@ non-field errors + the five fields with inline Bootstrap validation.
     {% for p in form.assignee_options %}
       <option value="{{ p.pk }}"
         {% if form.assigned_to.value|stringformat:"s" == p.pk|stringformat:"s" %}selected{% endif %}>
-        {{ p.user.get_full_name|default:p.user.username }}
+        {{ p.option_label }}
       </option>
     {% endfor %}
   </select>

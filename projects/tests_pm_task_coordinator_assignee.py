@@ -20,9 +20,11 @@ Run with:
 from unittest import mock
 
 from django.contrib.messages import get_messages
+from django.db import connection
 from django.urls import reverse
 from django.utils import timezone
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 
 from .forms import TaskAddForm
 from .models import NotificationLog, Project, Task
@@ -347,3 +349,129 @@ class UserStatusReportTests(CoordinatorAssigneeFixture):
         self._assign(self.site_a, self._pm_task(self.site_a), self.coord_a)
         self.assertEqual(self._tasks_assigned(self.coord_a), 1)
         self.assertEqual(self._tasks_assigned(self.pm_a), pm_before - 1)
+
+
+# ---------------------------------------------------------------------------
+# Follow-up F1 — the overview reads the QA/QC engineer once, not once per role
+# ---------------------------------------------------------------------------
+
+class OverviewQueryCostTests(CoordinatorAssigneeFixture):
+
+    def _overview_queries(self, role_choices):
+        client = _client_for(self.pm_a)
+        url = reverse('project_overview', args=[self.site_a.project_id])
+        client.get(url)                                    # warm per-session lookups
+        with mock.patch.object(Task, 'ROLE_CHOICES', role_choices):
+            with CaptureQueriesContext(connection) as ctx:
+                self.assertEqual(client.get(url).status_code, 200)
+        qaqc = [q for q in ctx.captured_queries if 'siteqaqcassignment' in q['sql'].lower()]
+        return len(ctx.captured_queries), len(qaqc)
+
+    def test_qaqc_lookups_do_not_grow_with_the_number_of_task_roles(self):
+        # A QA/QC engineer on the site, so the exclusion has something to exclude.
+        engineer = _profile('ca_engineer', 'Site Engineer')
+        with self.captureOnCommitCallbacks(execute=True):
+            _client_for(self.pm_a).post(reverse('site_qaqc', args=[self.site_a.project_id]),
+                                        {'action': 'assign', 'engineer_id': engineer.pk})
+        all_roles = list(Task.ROLE_CHOICES)
+        two_roles = all_roles[:2]
+        total_all, qaqc_all = self._overview_queries(all_roles)
+        total_two, qaqc_two = self._overview_queries(two_roles)
+        # Each extra role costs its one candidate query and nothing else.
+        self.assertEqual(qaqc_all, qaqc_two)
+        self.assertEqual(total_all - total_two, len(all_roles) - len(two_roles))
+        # And the engineer is still left out of every bucket.
+        response = _client_for(self.pm_a).get(
+            reverse('project_overview', args=[self.site_a.project_id]))
+        for bucket in response.context['candidates_by_role'].values():
+            self.assertNotIn(engineer.pk, [c['pk'] for c in bucket])
+
+    def test_an_explicit_engineer_id_is_used_without_a_lookup(self):
+        with self.assertNumQueries(1):
+            pks = [p.pk for p in task_assignee_candidates(
+                Task.PM, self.site_a, qaqc_engineer_id=self.pm_b.pk)]
+        self.assertNotIn(self.pm_b.pk, pks)
+        self.assertIn(self.coord_a.pk, pks)
+
+
+# ---------------------------------------------------------------------------
+# Follow-up F2 — Add Task and duplicate-for-locations label coordinators too
+# ---------------------------------------------------------------------------
+
+class OtherPickerLabelTests(CoordinatorAssigneeFixture):
+
+    def test_add_task_dropdown_labels_the_coordinator(self):
+        phase = self._pm_task(self.site_a).phase
+        response = _client_for(self.pm_a).get(
+            reverse('task_add', args=[self.site_a.project_id]),
+            {'phase': phase.pk, 'assigned_role': Task.PM})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Ca_Coord_A Test (Coordinator)')
+        self.assertNotContains(response, 'Ca_Pm_A Test (Coordinator)')
+        self.assertContains(response, 'Ca_Pm_A Test')
+
+    def test_duplicate_panel_labels_the_coordinator(self):
+        response = _client_for(self.pm_a).get(
+            reverse('task_duplicate_locations',
+                    args=[self.site_a.project_id, self._pm_task(self.site_a).pk]),
+            HTTP_HX_REQUEST='true')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'Ca_Coord_A Test (Coordinator)')
+        self.assertNotContains(response, 'Ca_Pm_A Test (Coordinator)')
+
+
+# ---------------------------------------------------------------------------
+# Follow-up F3 / F4 — removal with an inactive PM; tasks in other roles
+# ---------------------------------------------------------------------------
+
+class CoordinatorRemovalFollowUpTests(CoordinatorAssigneeFixture):
+
+    def _remove_coord_a(self, by, keep):
+        with self.captureOnCommitCallbacks(execute=True):
+            return _client_for(by).post(
+                reverse('assign_coordinators', args=[self.site_a.project_id]),
+                {'coordinator_ids': [str(p.pk) for p in keep]})
+
+    def test_refused_whole_when_the_assigned_pm_is_inactive(self):
+        second = _profile('ca_coord_a3', 'Project Coordinator')
+        self.site_a.coordinators.add(second)
+        task = self._pm_task(self.site_a)
+        assign_task_to(task, self.coord_a)
+        self.pm_a.is_active = False
+        self.pm_a.save(update_fields=['is_active'])
+
+        response = self._remove_coord_a(by=second, keep=(second,))
+
+        task.refresh_from_db()
+        self.assertEqual(task.assigned_to, self.coord_a)
+        self.assertTrue(self.site_a.coordinators.filter(pk=self.coord_a.pk).exists())
+        [(level, text)] = _messages_with_level(response)
+        self.assertEqual(level, 'danger')
+        self.assertIn('Ca_Pm_A Test, is inactive', text)
+        self.assertIn('Net Metering Approval (Ca_Coord_A Test)', text)
+        self.assertIn('Nothing was changed.', text)
+
+    def test_inactive_pm_does_not_block_a_removal_with_no_pm_tasks(self):
+        second = _profile('ca_coord_a4', 'Project Coordinator')
+        self.site_a.coordinators.add(second)
+        self.pm_a.is_active = False
+        self.pm_a.save(update_fields=['is_active'])
+        self._remove_coord_a(by=second, keep=(second,))
+        self.assertFalse(self.site_a.coordinators.filter(pk=self.coord_a.pk).exists())
+
+    def test_tasks_in_other_roles_stay_and_are_warned_about(self):
+        se_task = self._se_task(self.site_a)
+        coord_task = self._coord_role_task(self.site_a)
+        assign_task_to(se_task, self.coord_a)      # only the admin can do this (G88)
+        assign_task_to(coord_task, self.coord_a)
+
+        response = self._remove_coord_a(by=self.pm_a, keep=())
+
+        se_task.refresh_from_db()
+        coord_task.refresh_from_db()
+        self.assertEqual(se_task.assigned_to, self.coord_a)
+        self.assertEqual(coord_task.assigned_to, self.coord_a)
+        warnings = [text for level, text in _messages_with_level(response) if level == 'warning']
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(f'{se_task.task_name} (Ca_Coord_A Test)', warnings[0])
+        self.assertIn(f'{coord_task.task_name} (Ca_Coord_A Test)', warnings[0])
