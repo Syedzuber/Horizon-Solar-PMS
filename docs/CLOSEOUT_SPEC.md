@@ -1,7 +1,7 @@
-# Closeout Spec v2.4 — COD, As-Built, HOTO, QA/QC verification
+# Closeout Spec v2.5 — COD, As-Built, HOTO, QA/QC verification
 
 Horizon Solar PMS · OPEX/RESCO sites · 7 Oct 2026
-Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.4, 19 Oct 2026: the QA/QC engineer may be a PM or Project Coordinator on a site they do not manage — CL-9 and CL-A amended, CL-H to CL-K added (audit of 19 Oct 2026). v2.3, 12 Oct 2026: step 7b decisions PP-1 to PP-6, CL-1 amended. v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
+Status: **decisions closed with the product owner, Nirankar Mishra and the PMs.** v2.5, 26 Oct 2026: CL-A revised — the QA/QC engineer may hold the site's tasks of any role except Site Engineer, and works, approves and is pooled per task (audit of 26 Oct 2026). v2.4, 19 Oct 2026: the QA/QC engineer may be a PM or Project Coordinator on a site they do not manage — CL-9 and CL-A amended, CL-H to CL-K added (audit of 19 Oct 2026). v2.3, 12 Oct 2026: step 7b decisions PP-1 to PP-6, CL-1 amended. v2.2, 8 Oct 2026: steps 1–4b built (§3); CL-F and CL-G added; step 7 decisions V-1 to V-10 (§4 step 7); step 8 now also decides project status.
 Supersedes: §4 of `docs/OPEX_task_template_spec.md` (stale: it says no mirror derives; Design and the four deliveries do).
 Evidence base: `docs/CLOSEOUT_MIRROR_AUDIT.md` (6 Oct 2026, HEAD `203ab65`). Every factual claim about the code below comes from that audit and must be re-verified by each build session before it is built on.
 
@@ -30,7 +30,7 @@ No mirror converts to an entered task. No template version change is required fo
 | CL-7 | **Client signature on Final Acceptance**: the client representative's name plus an uploaded signed sheet. No client login. |
 | CL-8 | **HOTO override**: PM **or** coordinator may release HOTO without As-Built, with a mandatory reason. Recorded with who, role, when and why; counted on a report. The override skips As-Built only — never punch points, never the Final Acceptance verdict. As-Built stays open and owed afterwards. |
 | CL-9 | **QA/QC engineer per site**: the PM assigns one from the active site engineers. Dated assignment; history kept. *Amended 19 Oct 2026 (v2.4): the QA/QC engineer may be an active Site Engineer, PM or Project Coordinator.* |
-| CL-A | The QA/QC engineer **may not** be a site engineer holding a task on that same site. Refused, not warned. *Amended 19 Oct 2026 (v2.4): refused if the person holds a task on the site, is the site's assigned PM, or is one of its coordinators.* |
+| CL-A | The QA/QC engineer **may not** be a site engineer holding a task on that same site. Refused, not warned. *Amended 19 Oct 2026 (v2.4): refused if the person holds a task on the site, is the site's assigned PM, or is one of its coordinators.* *Revised 26 Oct 2026 (v2.5, Nirankar Mishra / product owner): a site's QA/QC engineer may hold that site's tasks of any role except Site Engineer. Site Engineer tasks stay refused, in any status, mirrors included. The rule is keyed on task role because checklists exist only on Site Engineer tasks (178 of 178 in production, 23 Oct). If a checklist is ever linked to another role's task, visits still leave out tasks the engineer holds, so verification stays independent. The engineer works only the tasks they hold, never the site; makes no approval or rejection decision on a task they hold; is not in the approver pool for a task they hold. The manager exclusions (the site's PM and coordinators) and CL-H are unchanged.* |
 | CL-B | A **"No" on a spot check raises a punch point** on the task that checklist point belongs to. It then blocks COD and HOTO through CL-2. |
 | CL-C | **At least one QA/QC visit** before HOTO. Coverage % shown; no coverage threshold. |
 | CL-D | The assigned QA/QC engineer **approves tasks on their assigned sites only**. Authority comes from the assignment, not from a flag. `is_qaqc` is left unchanged until audited (Prompt Q-0). |
@@ -95,7 +95,7 @@ Fix, zero schema: if a task already has completions, serve the checklist version
 ### Step 3 — QA/QC engineer assignment
 
 - New dated assignment: site, engineer, assigned by, from, to. One active per site.
-- PM-facing screen to assign and replace. Eligible: active site engineers not holding a task on the site (CL-A). *v2.4: active Site Engineers, PMs and Project Coordinators who hold no task on the site and are neither its assigned PM nor one of its coordinators (CL-9, CL-A amended).*
+- PM-facing screen to assign and replace. Eligible: active site engineers not holding a task on the site (CL-A). *v2.4: active Site Engineers, PMs and Project Coordinators who hold no task on the site and are neither its assigned PM nor one of its coordinators (CL-9, CL-A amended).* *v2.5: "hold no task" becomes "hold no Site Engineer task" (CL-A revised).*
 - Access: the assignment grants view of that site through a `permissions.py` helper. Update `tests_access_isolation` and the access matrix.
 - Approval: `user_can_approve_task` admits the site's assigned QA/QC engineer (CL-D). Precedence written in one helper.
 - **`task_has_independent_approver` must count the site's assigned QA/QC engineer** in its candidate pool (today it reads only `is_qaqc=True` holders). Without this, self-certification (`user_may_self_certify`, migration 0088) fires on sites that do have an independent approver.
