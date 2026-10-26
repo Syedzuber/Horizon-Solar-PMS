@@ -13,8 +13,8 @@ from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.models import User
 from django.db import transaction, IntegrityError
 from django.db.models import (
-    Count, DecimalField, Exists, F, IntegerField, Max, Min, OuterRef,
-    Prefetch, Q, Subquery, Sum, Value,
+    BooleanField, Case, Count, DecimalField, Exists, F, IntegerField, Max, Min, OuterRef,
+    Prefetch, Q, Subquery, Sum, Value, When,
 )
 from django.db.models.functions import Coalesce
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -4180,20 +4180,60 @@ def _locations_added_for(source):
     }
 
 
-def _location_assignee_candidates(source):
-    """task_assign's rule, which TaskAddForm.clean() also enforces: an active profile
-    whose role is the task's role. Through the one _TASK_TO_PROFILE_ROLE mapping.
+def task_assignee_candidates(task_role, project):
+    """Who may hold a task of `task_role` on `project` — THE assignee rule, asked by
+    every screen where a person picks one: project_overview's Assign modal, task_assign
+    (its list and its POST), TaskAddForm, and duplicate-for-locations.
+
+    Active profiles whose role is the task's role (through the one
+    _TASK_TO_PROFILE_ROLE mapping), company-wide; PLUS, on a PM task only, THIS
+    project's active coordinators. They share the PM's authority on this site and on no
+    other (user_can_manage_project), so a coordinator of another project is not offered.
+    The PM half stays company-wide on purpose (EXECUTION_MODULE_DEFERRED.md G86).
 
     The site's QA/QC engineer is left out (CL-A, closeout step 3): they may not hold a
-    task on the site they check. task_duplicate_locations_create names the reason when
-    a POST names them anyway."""
-    profile_role = _TASK_TO_PROFILE_ROLE.get(source.assigned_role, source.assigned_role)
-    candidates = (UserProfile.objects.filter(role=profile_role, is_active=True)
-                  .select_related('user').order_by('user__first_name', 'user__username'))
-    qaqc_engineer_id = site_qaqc_engineer_id(source.phase.project)
+    task on the site they check. Callers that take a POST ask
+    qaqc_engineer_assignment_refusal() BEFORE this, so the PM is told that reason
+    rather than refused generically.
+
+    Each row carries `is_coordinator_candidate`: True for a coordinator offered on a PM
+    task, False for a role match, so the list labels them. Role matches come first,
+    then coordinators, each by name. No join to the M2M (a pk subquery), so a profile
+    that is both a role match and a coordinator appears once, as a role match.
+    """
+    profile_role = _TASK_TO_PROFILE_ROLE.get(task_role, task_role)
+    eligible = Q(role=profile_role)
+    if task_role == Task.PM:
+        eligible |= Q(pk__in=project.coordinators.values('pk'))
+    candidates = (
+        UserProfile.objects.filter(eligible, is_active=True)
+        .annotate(is_coordinator_candidate=Case(
+            When(role=profile_role, then=Value(False)),
+            default=Value(True), output_field=BooleanField(),
+        ))
+        .select_related('user')
+        .order_by('is_coordinator_candidate', 'user__first_name', 'user__last_name',
+                  'user__username')
+    )
+    qaqc_engineer_id = site_qaqc_engineer_id(project)
     if qaqc_engineer_id is not None:
         candidates = candidates.exclude(pk=qaqc_engineer_id)
     return candidates
+
+
+def _assignee_option_label(profile):
+    """A candidate's name as the assign dropdowns show it: a coordinator offered on a PM
+    task says so, so the PM can tell them from the PM list beside them."""
+    name = profile.user.get_full_name() or profile.user.username
+    if getattr(profile, 'is_coordinator_candidate', False):
+        return f'{name} (Coordinator)'
+    return name
+
+
+def _location_assignee_candidates(source):
+    """The source task's assignee candidates: task_assignee_candidates() for its role
+    and site, so the copies may be given to whoever the source could be given to."""
+    return task_assignee_candidates(source.assigned_role, source.phase.project)
 
 
 def _resolve_location_labels(selected, free_text, site_labels, added):
@@ -7482,41 +7522,38 @@ def _log_task_assignment(project, actor, task, prev_assignee, new_assignee):
 @role_required(['PM', 'Project Coordinator'])
 def task_assign(request, project_id, task_id):
     """
-    Assign (or clear) the individual user on a task. Candidate list is filtered
-    to the task's assigned_role so a PM-role task can only be given to a PM user.
+    Assign (or clear) the individual user on a task. Candidates come from
+    task_assignee_candidates(): the task's role, plus this project's coordinators on a
+    PM task — so a Finance user can never be given a PM task.
     filter().update() used to avoid overwriting other task fields via .save().
     Access: assigned PM only.
     """
     project = _active_project(project_id)
 
+    # Only the site's PM or one of its coordinators assigns its tasks; everyone else is
+    # refused with a 404 so the site's existence is not confirmed to them.
     if not _pm_owns_project(request, project):
         raise Http404
 
     task = get_object_or_404(Task, pk=task_id, phase__project=project)
 
-    # Task.ROLE_CHOICES uses 'BD / Sales' but UserProfile stores 'BD' — module-level
-    # constant since K5; was a local copy of the same dict here and in project_overview
-    profile_role = _TASK_TO_PROFILE_ROLE.get(task.assigned_role, task.assigned_role)
-
-    # Candidates scoped to the task's role — prevents assigning a Finance user to a PM task.
-    # The site's QA/QC engineer is left out (CL-A): they may not hold a task on the site
-    # they check, so they are not offered as a choice; the POST below refuses them too.
-    candidates = UserProfile.objects.filter(role=profile_role, is_active=True)
-    qaqc_engineer_id = site_qaqc_engineer_id(project)
-    if qaqc_engineer_id is not None:
-        candidates = candidates.exclude(pk=qaqc_engineer_id)
+    # The site's QA/QC engineer is not in this list (CL-A); the POST below refuses them
+    # by name too.
+    candidates = task_assignee_candidates(task.assigned_role, project)
 
     if request.method == 'POST':
         prev_assignee = task.assigned_to  # captured before the update, for assignment logging
         assigned_to_id = request.POST.get('assigned_to', '').strip()
         if assigned_to_id:
-            assignee = get_object_or_404(UserProfile, pk=assigned_to_id, role=profile_role, is_active=True)
             # CL-A, the other end: the site's QA/QC engineer may not be given a task here.
-            # Refused with a message rather than the 404 above, because the person and the
-            # role are both valid — it is the site's assignment that stands in the way,
-            # and the PM needs to be told which one to end. HTMX: the row is redrawn with
-            # the message and the shared modal is closed, as on success.
-            refusal = qaqc_engineer_assignment_refusal(assignee, project)
+            # Asked BEFORE the candidate lookup, which leaves the engineer out and would
+            # 404 them: the person may be valid — it is the site's assignment that stands
+            # in the way, and the PM needs to be told which one to end. Same order as
+            # task_duplicate_locations_create. HTMX: the row is redrawn with the message
+            # and the shared modal is closed, as on success.
+            named = (UserProfile.objects.select_related('user').filter(pk=assigned_to_id).first()
+                     if assigned_to_id.isdigit() else None)
+            refusal = qaqc_engineer_assignment_refusal(named, project)
             if refusal:
                 messages.error(request, refusal)
                 if _is_hx(request):
@@ -7524,6 +7561,9 @@ def task_assign(request, project_id, task_id):
                     resp['HX-Trigger'] = 'taskAssigned'
                     return resp
                 return redirect('project_overview', project_id=project.project_id)
+            # Anyone the list would not offer — wrong role, inactive, another project's
+            # coordinator — is a 404, exactly as a role mismatch always was.
+            assignee = get_object_or_404(candidates, pk=assigned_to_id)
             # The chokepoint owns the write and the notification decision, including
             # the per-recipient/per-project 1-hour cooldown. Its no-op-when-unchanged
             # rule replaces the old 10-second double-submit guard: a resubmitted form
@@ -7715,6 +7755,12 @@ def assign_coordinators(request, project_id):
     (the Overwrite bug the invariant warns against is impossible here by construction).
 
     Refuses to add the site's current QA/QC engineer (CL-H, closeout spec v2.4).
+
+    A REMOVED COORDINATOR'S OPEN TASKS on this project are dealt with in the same
+    transaction, because removal also ends their sight of the site and they could no
+    longer open them. PM-role tasks go back to the assigned PM, notified, and are named
+    in the success message; with no assigned PM the whole edit is refused and nothing
+    changes. Coordinator-role tasks stay where they are and are named in a warning.
     """
     project = _active_project(project_id)
 
@@ -7754,11 +7800,58 @@ def assign_coordinators(request, project_id):
                                qaqc_engineer_manager_refusal(engineer, locked, 'coordinator'))
                 return redirect('assign_coordinators', project_id=project.project_id)
 
+            # The open (not Done) tasks the departing coordinators hold on this project.
+            # Race: the task rows are locked (of='self' — the joins are only read) so a
+            # concurrent task_assign waits, and its write then lands after ours rather
+            # than being overwritten by it.
+            leaving_tasks = list(
+                Task.objects.select_for_update(of=('self',))
+                .filter(phase__project=locked, assigned_to_id__in=to_remove)
+                .exclude(status=Task.DONE)
+                .select_related('assigned_to__user', 'phase')
+                .order_by('phase__phase_order', 'task_order', 'pk')
+            ) if to_remove else []
+            pm_tasks    = [t for t in leaving_tasks if t.assigned_role == Task.PM]
+            coord_tasks = [t for t in leaving_tasks
+                           if t.assigned_role == Task.PROJECT_COORDINATOR]
+
+            def _held(tasks):
+                return ', '.join(
+                    f"{t.task_name} ({t.assigned_to.user.get_full_name() or t.assigned_to.user.username})"
+                    for t in tasks)
+
+            # A PM task must go back to someone; with no assigned PM there is nobody, so
+            # the whole edit is refused before any write rather than left half-applied.
+            if pm_tasks and locked.assigned_pm is None:
+                messages.error(request, (
+                    f"This project has no assigned PM to take back these PM tasks: "
+                    f"{_held(pm_tasks)}. Assign a PM or reassign the tasks first. "
+                    f"Nothing was changed."))
+                return redirect('assign_coordinators', project_id=project.project_id)
+
+            actor = request.user.profile
+            for task in pm_tasks:
+                prev_assignee = task.assigned_to  # captured before the update, for assignment logging
+                assign_task_to(task, locked.assigned_pm, notify=True,
+                               actor=actor, request=request)
+                _log_task_assignment(locked, actor, task, prev_assignee, locked.assigned_pm)
+
             # M2M operations ONLY — assigned_pm is never touched.
             if to_add:
                 locked.coordinators.add(*to_add)
             if to_remove:
                 locked.coordinators.remove(*to_remove)
+
+        if pm_tasks:
+            pm_name = (locked.assigned_pm.user.get_full_name()
+                       or locked.assigned_pm.user.username)
+            messages.success(request, (
+                f"PM tasks moved to {pm_name}: "
+                f"{', '.join(t.task_name for t in pm_tasks)}."))
+        if coord_tasks:
+            messages.warning(request, (
+                f"Coordinator tasks still held by a removed coordinator, who can no longer "
+                f"open them: {_held(coord_tasks)}. Reassign them."))
 
         if to_add or to_remove:
             actor = request.user.profile
@@ -10990,7 +11083,6 @@ def project_overview(request, project_id):
     # module for _active_project.
     from .qaqc_views import site_qaqc_card_context
     qaqc_context = site_qaqc_card_context(project, is_assigned_pm)
-    qaqc_assignment = qaqc_context['qaqc_assignment']
     # Closeout step 4 — the COD card (OPEX only; no query elsewhere).
     # Import inside the function to avoid a circular import: cod_views imports this
     # module for _active_project.
@@ -11004,16 +11096,14 @@ def project_overview(request, project_id):
     candidates_by_role = {}
     design_candidates  = UserProfile.objects.none()
     if is_assigned_pm:
+        # One bucket per task role, each the same list task_assign offers and accepts:
+        # the PM bucket carries this project's coordinators, labelled, after the PMs.
+        # The site's QA/QC engineer is never offered (CL-A); task_assign refuses them on
+        # POST as well.
         for role_key, _ in Task.ROLE_CHOICES:
-            profile_role = _TASK_TO_PROFILE_ROLE.get(role_key, role_key)
-            qs = UserProfile.objects.filter(role=profile_role, is_active=True).select_related('user')
-            # CL-A: the site's QA/QC engineer is never offered as a task assignee here;
-            # task_assign refuses them on POST as well.
-            if qaqc_assignment is not None:
-                qs = qs.exclude(pk=qaqc_assignment.engineer_id)
             candidates_by_role[role_key] = [
-                {'pk': p.pk, 'name': p.user.get_full_name() or p.user.username}
-                for p in qs
+                {'pk': p.pk, 'name': _assignee_option_label(p)}
+                for p in task_assignee_candidates(role_key, project)
             ]
         design_candidates = UserProfile.objects.filter(role='Design', is_active=True).select_related('user')
 

@@ -3,6 +3,9 @@ Assign-Task form fields — shared by the standalone page (task_assign_form.html
 used by both #3 task_assign and #4 task_assign_design_head as the no-JS fallback)
 and the #4 modal (task_assign_design_head_modal.html). Expects `task` and
 `candidates` in context. Identical markup to the original standalone body.
+A candidate carrying is_coordinator_candidate (task_assignee_candidates: a project
+coordinator offered on a PM task) is labelled "(Coordinator)"; the Design Head's list
+has no such attribute and renders unlabelled.
 {% endcomment %}
 <dl class="row mb-3">
   <dt class="col-sm-4">Task</dt>
@@ -26,7 +29,7 @@ and the #4 modal (task_assign_design_head_modal.html). Expects `task` and
     {% for person in candidates %}
       <option value="{{ person.pk }}"
         {% if task.assigned_to and task.assigned_to.pk == person.pk %}selected{% endif %}>
-        {{ person.user.get_full_name|default:person.user.username }}
+        {{ person.user.get_full_name|default:person.user.username }}{% if person.is_coordinator_candidate %} (Coordinator){% endif %}
       </option>
     {% empty %}
       <option disabled>No active {{ task.assigned_role }} users found</option>

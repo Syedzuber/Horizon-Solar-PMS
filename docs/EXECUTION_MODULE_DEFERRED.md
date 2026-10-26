@@ -5071,6 +5071,77 @@ Fix: one definition of an active manager, used by both helpers (the pair
 inactive assigned PM should keep authority until reassigned (PM-1 makes reassignment the
 answer there).
 
+### G85 — a manager can approve a task assigned to them when someone else submitted it
+
+Recorded 26 Oct 2026 by the coordinators-as-PM-task-assignees build (pre-flight item 4;
+ruled: record, do not fix). `views.task_approve` refuses only
+`task.submitted_by == profile`; it never compares `task.assigned_to`. A PM may submit any
+task on their site (`permissions.user_can_submit_task_for_approval` admits PM-level
+authority), so the PM can submit a task a coordinator holds and the coordinator, who holds
+approval authority through `user_can_manage_project()`, can then approve the task assigned
+to them. The reverse already existed before this build: a coordinator submits a PM-held
+task and the PM approves their own assigned task. Applies to PMs and coordinators alike.
+Not fixed because the two-signature rule was written about the SUBMISSION, and widening it
+to the assignee changes who may approve on every OPEX site with one manager — a product
+decision. If ruled in, the term belongs beside the `submitted_by` check in `task_approve`,
+and `user_may_self_certify` / `task_has_independent_approver` would need the same person
+excluded from the pool, or a PM-held task on a coordinator-less site deadlocks.
+
+### G86 — the PM-task candidate list is company-wide; the coordinator half is project-scoped
+
+Recorded 26 Oct 2026 by the same build (ruling R1: the PM half stays company-wide).
+`views.task_assignee_candidates` offers every active PM in the company on a PM task, plus
+only THIS project's active coordinators. The asymmetry is deliberate for now: coordinators
+are offered because they share the PM's authority on this site, while any PM may today be
+given any site's PM task, which is how cover between PMs works. It means a PM with no
+relationship to a site can be assigned its PM task, and then cannot open it
+(`user_can_view_project` has no "holds a task" branch for the PM role). Narrowing it is a
+product decision about cover, not a defect fix.
+
+### G87 — assignee candidate lists read `UserProfile.is_active` but not `User.is_active`
+
+Recorded 26 Oct 2026 by the same build. `views.task_assignee_candidates` (and so every
+assign screen: the overview modal, `task_assign`, `TaskAddForm`, duplicate-for-locations)
+and `views.task_assign_design_head` filter `is_active=True` on the profile only. A user
+deactivated through `admin_user_management`, which sets `User.is_active = False` alone
+(see G84), is still offered and can be given a task they cannot log in to see; the
+assignment notice is then suppressed by `resolve_recipients`, so nobody is told. Same
+root as G84: one definition of an active person, used everywhere.
+
+### G88 — `TaskAdminForm` has no assignee role rule and writes no assignment log
+
+Recorded 26 Oct 2026 by the same build (ruling R6: do not touch). `admin.TaskAdminForm`
+checks only the QA/QC refusal (`clean_assigned_to`); any active profile of any role can be
+put on any task through the Django admin, and `TaskAdmin.save_model` calls
+`assign_task_to(..., notify=False)` with no `_log_task_assignment` call, so no ActivityLog
+line is written (only Django's own admin LogEntry). The likely origin
+of Sudhir Kumar (Project Coordinator) holding 2 PM-role tasks on HRP-RES-2026-018 in
+`solarpms_local` — "DEV Schedule" and "Net Metering Application Submission" — with no
+`task_assigned` ActivityLog row. Since this build a coordinator may hold a PM task on
+their own project through the screens; the admin still allows any role on any project.
+Fix: make `clean_assigned_to` ask `views.task_assignee_candidates` (lazy import), and log
+the change.
+
+### G89 — the stuck-site "Waiting on" names the PM even when someone else holds the task
+
+Recorded 26 Oct 2026 by the same build (ruling R6: `stuck_sites` not touched).
+`tender_stages._stuck_entry`, S7 branch, builds the text from
+`_one(people, row['assigned_pm_id'], 'PM', 'No PM assigned')` for the worst
+blocked/overdue task, whoever holds it. A task held by a coordinator (now possible on PM
+tasks) or by a Site Engineer reads as waiting on the PM. `reads['people']` already holds
+every assignee, so naming the holder needs no extra query; the question is whether the
+CEO wants the holder or the accountable PM named.
+
+### G90 — the coordinator EOD digest has no "assigned to you" line
+
+Recorded 26 Oct 2026 by the same build (ruling R6: `send_eod_digest` not touched).
+`send_eod_digest` computes `metrics['assigned']` for every recipient, but
+`eod_digest.html` / `.txt` show it only in the non-coordinator branch. A coordinator's
+digest shows project-wide counts (`coord_open_tasks`) and never the tasks they personally
+hold, which since this build can include PM-role tasks. Its send gate also reads only
+`coord_open_tasks`/`coord_open_issues`, so a task they still hold on a project they were
+removed from does not make them a recipient.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

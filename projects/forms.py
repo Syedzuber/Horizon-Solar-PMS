@@ -8,7 +8,7 @@ from django.utils.dateparse import parse_date
 from .models import UserProfile, Project, ProjectPhase, Task, Vendor, VendorCategory, Program, BOQItemMaster, StockLocation, VENDOR_KIND_SUPPLIER
 from .utils import roles_for_phase
 from .permissions import (
-    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal, site_qaqc_engineer_id,
+    PAYMENT_APPROVER_ROLES, qaqc_engineer_assignment_refusal,
 )
 
 
@@ -590,9 +590,10 @@ class TaskAddForm(forms.Form):
     enforced. The narrowed selects are convenience; both add-task templates are
     `novalidate` and a hand-made POST skips them entirely.
 
-    THE ASSIGNEE RULE IS task_assign's RULE: an active profile whose role matches the
-    task's role. A form that could create a task that endpoint would refuse to assign
-    has created a task nobody can move.
+    THE ASSIGNEE RULE IS task_assign's RULE, from the same helper
+    (views.task_assignee_candidates): an active profile whose role matches the task's
+    role, plus this project's coordinators on a PM task. A form that could create a
+    task that endpoint would refuse to assign has created a task nobody can move.
     """
 
     phase         = forms.ModelChoiceField(queryset=ProjectPhase.objects.none())
@@ -627,15 +628,13 @@ class TaskAddForm(forms.Form):
             if not role:
                 role = self.phase_roles[0]
         self.selected_role = role if role in self.phase_roles else ''
+        # The site's QA/QC engineer is not offered (CL-A); clean() refuses them as well.
+        # `project` is always set by the add-task views; without it there is no
+        # coordinator list to read, so nobody is offered.
         self.assignee_options = (
-            UserProfile.objects.filter(role=_profile_role_for(self.selected_role), is_active=True)
-            .select_related('user')
-            if self.selected_role else UserProfile.objects.none()
+            _assignee_candidates(self.selected_role, project)
+            if self.selected_role and project is not None else UserProfile.objects.none()
         )
-        # CL-A: the site's QA/QC engineer is not offered; clean() refuses them as well.
-        qaqc_engineer_id = site_qaqc_engineer_id(project) if self.selected_role else None
-        if qaqc_engineer_id is not None:
-            self.assignee_options = self.assignee_options.exclude(pk=qaqc_engineer_id)
 
     def _raw(self, name):
         source = self.data if self.is_bound else self.initial
@@ -668,31 +667,41 @@ class TaskAddForm(forms.Form):
                 ))
                 return cleaned
 
-        if role and assignee is not None and assignee.role != _profile_role_for(role):
-            self.add_error('assigned_to', (
-                f"{assignee.user.get_full_name() or assignee.user.username} is "
-                f"{assignee.role}, not {dict(Task.ROLE_CHOICES).get(role, role)}. "
-                f"Choose someone in the task's role."
-            ))
-            return cleaned
-
         # CL-A, the other end: the site's QA/QC engineer may not hold a task on it.
-        # Refused, not warned — the PM ends or replaces that assignment first.
+        # Refused, not warned — the PM ends or replaces that assignment first. Asked
+        # BEFORE the candidate check below, which leaves the engineer out and would
+        # otherwise refuse them with the generic message instead of naming the
+        # assignment to end (the order task_assign and duplicate-for-locations use).
         if self.project is not None:
             refusal = qaqc_engineer_assignment_refusal(assignee, self.project)
             if refusal:
                 self.add_error('assigned_to', refusal)
+                return cleaned
+
+        # The assignee must be someone task_assign would accept for this role on this
+        # project. No project, no candidate list (the views always pass one).
+        if role and assignee is not None and (
+                self.project is None
+                or not _assignee_candidates(role, self.project).filter(pk=assignee.pk).exists()):
+            choose = ("Choose a PM or one of this project's coordinators."
+                      if role == Task.PM else "Choose someone in the task's role.")
+            self.add_error('assigned_to', (
+                f"{assignee.user.get_full_name() or assignee.user.username} is "
+                f"{assignee.role}, not {dict(Task.ROLE_CHOICES).get(role, role)}. "
+                f"{choose}"
+            ))
         return cleaned
 
 
-def _profile_role_for(task_role):
-    """Task.assigned_role -> UserProfile.role, through views' one mapping.
+def _assignee_candidates(task_role, project):
+    """views.task_assignee_candidates(): the one assignee rule, not restated here — two
+    copies drift.
 
-    Imported at call time: views imports this module, so a module-level import would
-    be a cycle. The mapping is not restated here — two copies drift.
+    Imported at call time to avoid a circular import: views imports this module, so a
+    module-level import would be a cycle.
     """
-    from .views import _TASK_TO_PROFILE_ROLE
-    return _TASK_TO_PROFILE_ROLE.get(task_role, task_role)
+    from .views import task_assignee_candidates
+    return task_assignee_candidates(task_role, project)
 
 
 # ---------------------------------------------------------------------------
