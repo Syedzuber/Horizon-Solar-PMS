@@ -491,3 +491,59 @@ class QueryCountTests(SiteDrawingsBase):
         large = self._page_queries() - self._page_queries(card=False)
         self.assertLessEqual(small, 5)
         self.assertEqual(small, large)
+
+
+class FollowUpTests(SiteDrawingsBase):
+    """DR-2 follow-up: the Make column only when a make exists; drawing opens kept out of
+    the Recent activity card (in the query, before the 8-row slice)."""
+
+    def _card(self):
+        return render_to_string('projects/_site_drawings_card.html',
+                                {'site_drawings': site_drawings_context(self.site)})
+
+    def test_make_column_present_when_a_row_has_a_label(self):
+        ctx = site_drawings_context(self.site)
+        self.assertTrue(ctx['show_make'])
+        card = self._card()
+        self.assertIn('<th>Make</th>', card)
+        self.assertIn('SunPeak', card)
+
+    def test_make_column_absent_when_no_row_has_a_label(self):
+        VendorBrand.objects.all().delete()
+        ctx = site_drawings_context(self.site)
+        self.assertFalse(ctx['show_make'])
+        self.assertEqual({row['make'] for row in ctx['boq_rows']}, {''})
+        for row in ctx['boq_rows']:
+            self.assertEqual(set(row), DR3_KEYS)   # the allowlist is unchanged
+        card = self._card()
+        self.assertNotIn('Make', card)
+        self.assertIn('Panel line 1', card)
+
+    def _feed_row(self, action, code, at):
+        row = ActivityLog.objects.create(project=self.site, actor=self.pm, action=action,
+                                         action_code=code)
+        # auto_now_add cannot be set on create; the order is what the test is about.
+        ActivityLog.objects.filter(pk=row.pk).update(timestamp=at)
+
+    def test_feed_shows_eight_other_rows_when_the_latest_are_opens(self):
+        ActivityLog.objects.filter(project=self.site).delete()
+        now = timezone.now()
+        for i in range(8):
+            self._feed_row(f'Other event {i}', 'task_status_changed',
+                           now - timedelta(hours=1, minutes=i))
+        for i in range(10):
+            self._feed_row(f'Opened drawing Sheet-{i}.pdf', 'site_drawing_opened',
+                           now - timedelta(minutes=i))
+        feed = self._overview(self.se).context['recent_activity']
+        self.assertEqual(len(feed), 8)
+        self.assertEqual([row.action for row in feed],
+                         [f'Other event {i}' for i in range(8)])
+        self.assertFalse(any(row.action_code == 'site_drawing_opened' for row in feed))
+
+    def test_an_open_still_writes_its_row_and_stays_out_of_the_card(self):
+        self.assertEqual(self._open(self.se, self.layout).status_code, 302)
+        self.assertTrue(ActivityLog.objects.filter(
+            project=self.site, action_code='site_drawing_opened',
+            entity_id=self.layout.pk).exists())
+        feed = self._overview(self.se).context['recent_activity']
+        self.assertNotIn('site_drawing_opened', [row.action_code for row in feed])

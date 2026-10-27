@@ -226,7 +226,12 @@ def site_drawings_context(project):
       not_released    {'state'}
       under_revision  {'state', 'since'}                — no drawings, no BOQ (DR-2)
       released        {'state', 'pending_change', 'drawings', 'hidden_count',
-                       'unavailable', 'boq_rows', 'corrected_on'}
+                       'unavailable', 'boq_rows', 'show_make', 'corrected_on'}
+
+    `show_make` is True when at least one BOQ row has a brand label. No OPEX screen can
+    set a make today (DESIGN_MODULE_DEFERRED T5), so an always-drawn Make column would be
+    a column of dashes on every site; it appears by itself once makes exist. Read from the
+    rows already built, so it costs no query.
     """
     state, assignment = _design_state(project)
     if state == STATE_UNDER_REVISION:
@@ -234,13 +239,15 @@ def site_drawings_context(project):
     if state != STATE_RELEASED:
         return {'state': state}
     drawings, hidden_count, unavailable = _released_drawings(assignment)
+    boq_rows = _boq_rows(project)
     return {
         'state':          state,
         'pending_change': assignment.open_change,
         'drawings':       drawings,
         'hidden_count':   hidden_count,
         'unavailable':    unavailable,
-        'boq_rows':       _boq_rows(project),
+        'boq_rows':       boq_rows,
+        'show_make':      any(row['make'] for row in boq_rows),
         'corrected_on':   _local_date(assignment.corrected_at),
     }
 

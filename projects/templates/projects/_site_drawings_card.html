@@ -6,7 +6,8 @@ Residential / CAPEX (state not_opex, DR-6).
 
 Each drawing links to site_drawing_open, which signs the link at the click — nothing is
 signed on this page. The BOQ is the six allowlisted columns (DR-3) and nothing else: no
-price, no ordered quantity, no vendor. The table scrolls inside its own container so the
+price, no ordered quantity, no vendor. Make is drawn only when some row has a brand label
+(show_make), because no OPEX screen can set one yet. The table scrolls inside its own container so the
 page never scrolls sideways at phone width.
 {% endcomment %}
 {% if site_drawings and site_drawings.state != 'not_opex' %}
@@ -59,7 +60,7 @@ page never scrolls sideways at phone width.
               <thead class="table-light">
                 <tr>
                   <th>Code</th><th>Description</th><th>Category</th><th>Unit</th>
-                  <th class="text-end">Qty</th><th>Make</th>
+                  <th class="text-end">Qty</th>{% if site_drawings.show_make %}<th>Make</th>{% endif %}
                 </tr>
               </thead>
               <tbody>
@@ -70,7 +71,7 @@ page never scrolls sideways at phone width.
                     <td class="text-nowrap">{{ r.category|default:"—" }}</td>
                     <td class="text-nowrap">{{ r.unit|default:"—" }}</td>
                     <td class="text-end text-nowrap">{% if r.quantity is not None %}{{ r.quantity|floatformat:"-2" }}{% else %}—{% endif %}</td>
-                    <td class="text-nowrap">{{ r.make|default:"—" }}</td>
+                    {% if site_drawings.show_make %}<td class="text-nowrap">{{ r.make|default:"—" }}</td>{% endif %}
                   </tr>
                 {% endfor %}
               </tbody>

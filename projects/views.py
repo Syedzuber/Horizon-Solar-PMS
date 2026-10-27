@@ -11271,9 +11271,13 @@ def project_overview(request, project_id):
     # Exclude task_unassigned — the lowest-signal of the new assignment events — so it
     # doesn't crowd status/issue activity out of this 8-item feed. The full trail
     # (including unassigns) is still visible in the per-project timeline and audit log.
+    # DR-2 follow-up: site_drawing_opened is excluded on the same grounds — a crew opening
+    # drawings on a morning would otherwise fill all 8 rows. Excluded in the query, before
+    # the slice, so the card still shows 8 other events; the rows are still written and
+    # the full trail still lists them.
     recent_activity = list(
         ActivityLog.objects.filter(project=project)
-        .exclude(action_code='task_unassigned')
+        .exclude(action_code__in=('task_unassigned', 'site_drawing_opened'))
         .select_related('actor__user')
         .order_by('-timestamp')[:8]
     )
