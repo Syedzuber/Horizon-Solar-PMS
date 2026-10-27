@@ -5472,6 +5472,84 @@ class DesignFile(models.Model):
         return f"{self.kind} v{self.version} — attempt {self.attempt_id}"
 
 
+# DR-1 — what happened to one `.pdf` entry of a CAD zip when its PDFs were extracted.
+# Only `extracted` has a storage object; every other value records why there is none, so
+# the entry is not attempted again. A storage outage is NOT one of these: it writes no row
+# at all, so the next run retries it (see design_storage.extract_cad_pdfs).
+CAD_PDF_EXTRACTED = 'extracted'
+CAD_PDF_NOT_A_PDF = 'not_a_pdf'   # named .pdf, but the bytes do not start with %PDF-
+CAD_PDF_ENCRYPTED = 'encrypted'   # the ZIP entry is password-protected; never opened
+CAD_PDF_TOO_LARGE = 'too_large'   # over the 25 MB per-file design limit
+CAD_PDF_FAILED    = 'failed'      # the entry itself is unreadable (corrupt, CRC error)
+
+CAD_PDF_OUTCOME_CHOICES = [
+    (CAD_PDF_EXTRACTED, 'Extracted'),
+    (CAD_PDF_NOT_A_PDF, 'Not a PDF'),
+    (CAD_PDF_ENCRYPTED, 'Encrypted'),
+    (CAD_PDF_TOO_LARGE, 'Too large'),
+    (CAD_PDF_FAILED,    'Failed'),
+]
+
+
+class DesignFilePdf(models.Model):
+    """One `.pdf` entry of a CAD zip, extracted into its own private storage object (DR-1).
+
+    A zip hides its drawings: the archive listing names them, but opening one means
+    downloading the whole archive. Each PDF is extracted once, at upload or by the
+    `extract_cad_pdfs` command, so a later screen can sign a link to one drawing.
+
+    ATTACHED TO THE ORIGINAL ZIP, NEVER TO A CARRIED COPY. A carried-forward DesignFile
+    shares its original's stored object (_carry_forward_artifacts copies bucket and path
+    verbatim), so the PDFs belong to that object, not to the row. `design_file` is always
+    the end of the `carried_forward_from` chain, and every reader resolves a row through
+    design_storage.cad_pdf_source() first — otherwise each carry would extract and upload
+    the same PDFs again.
+
+    THE ZIP'S EXTRACTION STATE IS DERIVED, NOT STORED. Nothing is added to DesignFile:
+    "none found" is an archive_listing with no `.pdf` entry, "done" is a row here for every
+    `.pdf` entry it lists, and anything else is still to do.
+
+    CASCADE, not PROTECT: teardown_opex_test_data deletes DesignFile rows and must keep
+    working. The storage objects those rows name are not deleted with them — recorded in
+    docs/DESIGN_MODULE_DEFERRED.md.
+    """
+
+    design_file = models.ForeignKey(
+        DesignFile, on_delete=models.CASCADE, related_name='extracted_pdfs',
+    )
+    entry_name   = models.CharField(max_length=1000)  # Full path inside the zip, verbatim — the idempotency key
+    display_name = models.CharField(max_length=1000)  # Basename of entry_name, verbatim (may hold a non-breaking space)
+    bucket       = models.CharField(max_length=100, blank=True, default='')  # Set only when outcome is extracted
+    path         = models.CharField(max_length=500, blank=True, default='')  # Set only when outcome is extracted
+    size_bytes   = models.PositiveBigIntegerField(null=True, blank=True)  # Uncompressed size declared in the zip
+    outcome      = models.CharField(max_length=20, choices=CAD_PDF_OUTCOME_CHOICES)
+    created_at   = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['design_file', 'entry_name']
+        constraints = [
+            # One row per entry per zip: what makes extraction safe to run twice.
+            models.UniqueConstraint(
+                fields=['design_file', 'entry_name'],
+                name='uniq_design_file_pdf_entry',
+            ),
+            # A storage object exists exactly when the outcome says it was extracted, so
+            # a reader can never sign a link for a row that has nothing behind it.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(outcome=CAD_PDF_EXTRACTED)
+                     & ~models.Q(bucket='') & ~models.Q(path=''))
+                    | (~models.Q(outcome=CAD_PDF_EXTRACTED)
+                       & models.Q(bucket='') & models.Q(path=''))
+                ),
+                name='design_file_pdf_object_iff_extracted',
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.display_name} ({self.outcome}) — design file {self.design_file_id}"
+
+
 # PART 4.6 — A CHANGE REQUEST IS TRIAGED, NOT OBEYED.
 #
 # Part 4 let a raised request open a new attempt immediately. That gave any assigned PM

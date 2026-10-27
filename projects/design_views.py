@@ -48,8 +48,8 @@ from .notifications import send_notification
 # Session T3b — the change-request notifications, worded by the notify_registry events.
 from .notify import notify
 from .design_storage import (
-    DesignStorageError, build_design_path, get_design_file_url, upload_design_file,
-    validate_cad_zip,
+    DesignStorageError, build_design_path, extract_cad_pdfs, get_design_file_url,
+    upload_design_file, validate_cad_zip,
 )
 # Part 12 — the catalogue screen reuses the Admin screen's form class unchanged rather
 # than declaring a second one. forms.py imports only from .models, so this adds no cycle.
@@ -3741,6 +3741,25 @@ def design_artifact_upload(request, project_id):
                      action_code='design_artifact_uploaded')
 
         advanced = _maybe_advance_to_artifacts_uploaded(assignment, attempt, profile)
+
+    # DR-1 — the zip's PDFs become their own private objects, for a later screen to link
+    # one drawing. AFTER the atomic block, so the DesignFile row is committed whatever
+    # happens here, and BEST-EFFORT (DR-9): any failure is logged and recorded on the
+    # site's activity, the upload stands, and the designer's message is unchanged. The
+    # extract_cad_pdfs command picks up whatever this leaves undone.
+    if kind == DESIGN_FILE_CAD_ZIP:
+        try:
+            extract_cad_pdfs(design_file, upload)
+        except Exception as exc:
+            logger.warning('design_artifact_upload: PDF extraction failed for %s '
+                           'DesignFile %s; the upload stands. %s',
+                           project.project_id, design_file.pk, exc,
+                           exc_info=not isinstance(exc, DesignStorageError))
+            log_activity(project, profile,
+                         f'{KIND_LABELS[kind]} v{next_version}: PDFs could not be '
+                         f'extracted from the archive',
+                         entity_type='DesignFile', entity_id=design_file.pk,
+                         action_code='cad_pdf_extraction_failed')
 
     msg = (f'{project.project_id}: {KIND_LABELS[kind]} v{next_version} uploaded '
            f'(derived from Arka v{arka.version}).')

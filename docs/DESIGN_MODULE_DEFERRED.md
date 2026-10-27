@@ -1631,3 +1631,70 @@ did. When it is fixed, change the 3.0 in that test to the new slope.
 
 **Location:** `projects/design_views.py` — `design_head_sites`, `_effective_commitment`,
 `_pending_extension`
+
+---
+
+## S. Found while building DR-1 (CAD zip PDFs extracted into their own objects)
+
+DR-1 copies every `.pdf` entry of a CAD zip into its own private object and records it as
+a `DesignFilePdf` row (migration 0120), at upload and through the `extract_cad_pdfs`
+command. Nothing user-visible reads the rows yet; DR-2 will. These are what that build
+leaves open, by decision or by scope.
+
+### S1 — a crash between an object's upload and its row leaves an orphan, never deleted
+
+`extract_cad_pdfs()` uploads each PDF and only then writes its row, one entry at a time,
+and holds no row lock across the network call. If the process dies between the two, or
+another run records the same entry first (the unique constraint refuses the second row and
+`_record_cad_pdf()` logs it), the object just uploaded has no row. Nothing lists the bucket
+and nothing deletes design objects, so it stays forever. Accepted for DR-1 (uuid paths,
+option a): an orphan is a wasted object, never a wrong link, because no row points at it.
+
+**Location:** `projects/design_storage.py` — `extract_cad_pdfs`, `_record_cad_pdf`
+
+### S2 — `display_name` keeps the zip's basename verbatim, non-breaking space included
+
+DR-2 must handle this when it sets a download filename. MB0191's drawing is
+`MB0191THE SR.SUPERITENDENT OF POLICE RADIO\xa0BHADBHADA ROAD BHOPAL BHOPAL BHOPAL.pdf` —
+U+00A0 between RADIO and BHADBHADA. Put through a plain `Content-Disposition: filename="…"`
+it is not ASCII, so it needs the RFC 5987 `filename*=UTF-8''…` form (or a sanitised
+fallback beside it). The stored name is deliberately not cleaned: it is what the designer
+named the file, and DR-2 decides how to present it.
+
+**Location:** `projects/models.py` — `DesignFilePdf.display_name`
+
+### S3 — teardown removes the rows but not the extracted objects
+
+`DesignFilePdf.design_file` is CASCADE so that `teardown_opex_test_data` keeps working when
+it deletes `DesignFile` rows. Its `_storage_targets()` lists the zip, the survey and the BOQ
+files it owns, and knows nothing of the PDFs under `{zip}/pdf/`, so tearing down a site
+that had PDFs extracted leaves those objects behind. Not changed in DR-1: the command was
+outside the permitted files.
+
+**Location:** `projects/management/commands/teardown_opex_test_data.py` — `_storage_targets`
+
+### S4 — the local storage project no longer exists, so DR-1 was not exercised against a bucket
+
+On 27 Oct 2026 the local `SUPABASE_URL` host, `tvsbedlxapovitpaekyx.supabase.co`, returned
+"Non-existent domain" from DNS while `supabase.co` resolved. `extract_cad_pdfs --apply`
+therefore failed on all three local zips at the download (`ConnectError`), wrote no
+`DesignFilePdf` row and three `cad_pdf_extraction_failed` activity rows, exactly as
+designed. The real-screen upload could not be run either: the zip upload itself needs the
+bucket. Both were verified with storage mocked instead. Until a reachable non-production
+project is configured locally, no session can test any design upload, survey upload or
+signed link against real storage.
+
+### S5 — only CURRENT zips are backfilled
+
+The command extracts the current `cad_zip` of each live site (resolved to its original
+and de-duplicated). A superseded version uploaded before DR-1 is never extracted; one
+uploaded after DR-1 was extracted at upload anyway. Revisit only if a screen ever offers
+an old version's drawings.
+
+### S6 — an entry name longer than 1,000 characters is left alone
+
+`entry_name` is `CharField(max_length=1000)`, the idempotency key. A longer name cannot be
+recorded, so it is logged and skipped rather than uploaded with no row (S1), and the
+command will list it as "to extract" on every run. No real archive has come near it.
+
+**Location:** `projects/design_storage.py` — `_ENTRY_NAME_MAX`
