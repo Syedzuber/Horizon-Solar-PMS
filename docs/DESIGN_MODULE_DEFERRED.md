@@ -1673,16 +1673,21 @@ outside the permitted files.
 
 **Location:** `projects/management/commands/teardown_opex_test_data.py` — `_storage_targets`
 
-### S4 — the local storage project no longer exists, so DR-1 was not exercised against a bucket
+### S4 — CORRECTED: the local storage project was paused, not gone
 
-On 27 Oct 2026 the local `SUPABASE_URL` host, `tvsbedlxapovitpaekyx.supabase.co`, returned
-"Non-existent domain" from DNS while `supabase.co` resolved. `extract_cad_pdfs --apply`
-therefore failed on all three local zips at the download (`ConnectError`), wrote no
+First recorded as "the local storage project no longer exists". That was wrong. On 27 Oct
+2026 the local `SUPABASE_URL` host, `tvsbedlxapovitpaekyx.supabase.co`, returned
+"Non-existent domain" from DNS because the dev project was PAUSED; `extract_cad_pdfs
+--apply` failed on all three local zips at the download (`ConnectError`), wrote no
 `DesignFilePdf` row and three `cad_pdf_extraction_failed` activity rows, exactly as
-designed. The real-screen upload could not be run either: the zip upload itself needs the
-bucket. Both were verified with storage mocked instead. Until a reachable non-production
-project is configured locally, no session can test any design upload, survey upload or
-signed link against real storage.
+designed. The same day the project was RESUMED (buckets solarpms-files-dev,
+Horizon-PMS-Bills, Horizon-PMS-Design) and DR-1 was then verified against the real dev
+bucket on SCMPILOT06: the real upload extracted the zip's PDF, a signed link returned 200
+`application/pdf`, and a second `--apply` uploaded nothing. Design rows written before the
+design bucket was created that day point at objects that never existed there (400).
+
+If the host stops resolving again, check whether the dev project is paused before
+concluding anything else. Never point local at production `wqpxtjelsfgwhhyyafus`.
 
 ### S5 — only CURRENT zips are backfilled
 
@@ -1698,3 +1703,81 @@ recorded, so it is logged and skipped rather than uploaded with no row (S1), and
 command will list it as "to extract" on every run. No real archive has come near it.
 
 **Location:** `projects/design_storage.py` — `_ENTRY_NAME_MAX`
+
+### S7 — any project viewer can fetch any design file by URL, BOQ files included
+
+`design_file_download` admits whoever `user_can_view_design()` admits, which starts from
+`user_can_view_project()`. So every viewer of an OPEX site — a site engineer holding one
+task, Finance, SCM — can open any of its `DesignFile` rows by URL, including the
+`boq_pdf` and `boq_excel` kinds, although no screen they reach links to them. DR-2 does
+not change this and does not use that view: the site drawings card never reads those two
+kinds and links only to `site_drawing_open`.
+
+Not a price leak today: design BOQs carry quantities and no rates (checked 27 Oct 2026).
+Revisit if a design BOQ file ever carries a rate, a price or a vendor — the gate would then
+need a kind term (BOQ files to BOQ readers only), which belongs to `design_file_download`,
+outside DR-2's permitted files.
+
+**Location:** `projects/design_views.py` — `design_file_download`;
+`projects/permissions.py` — `user_can_view_design`
+
+## T. Found while building DR-2 (site drawings card on project_overview)
+
+DR-2 shows the released design's drawing PDFs and the BOQ quantities to every viewer of an
+OPEX site (`projects/site_drawings_views.py`, `_site_drawings_card.html`). These are what
+it leaves open.
+
+### T1 — the Recent activity card shows rupee amounts to every viewer of the site
+
+Found by DR-2's pre-flight (Q7), not changed. `project_overview`'s Recent activity card
+renders the site's last 8 `ActivityLog.action` strings to everyone who can see the site,
+site engineers included. Several writers put money in that string against the site:
+`order_views` ("Recorded order … ₹total", "Raised payment request … ₹", the approve / hold
+/ reject lines), `payments.py` ("Marked paid: ₹…") and `approval_views` (contractor bill
+payment requests). Locally 10 OPEX and 7 Residential activity rows carry "₹". Every other
+money block on the page is gated away from the site engineer (vendor orders, payment
+milestones, the BOQ card). Deferred: the fix is either a feed filter by action_code or
+money-free feed wording, both outside DR-2's permitted files.
+
+**Location:** `projects/views.py` — `project_overview` (`recent_activity`); the writers above
+
+### T2 — each drawing open adds a line to the 8-row activity feed
+
+DR-5 asks for one `log_activity()` row per open (`action_code='site_drawing_opened'`).
+`project_overview`'s feed excludes only `task_unassigned`, so a crew opening drawings on a
+morning will push status and issue events off the 8-row card. The full trail is unaffected.
+Deferred: excluding the code from the card is a one-line change to the feed query, but it
+is a product decision and outside DR-2's permitted change to `project_overview`.
+
+**Location:** `projects/views.py` — `project_overview` (`recent_activity`)
+
+### T3 — an opened drawing saves as `{uuid}.pdf`
+
+DR-5 opens the drawing inline with no download name, which is what keeps S2's non-ASCII
+`display_name` out of every header. The cost: the browser's "save" offers the object's
+storage name, a uuid. `get_design_file_url()` takes no options, and storage3 2.31.0's
+`create_signed_url(path, expires_in, options={'download': name})` is where a name would
+go, with an RFC 5987 encoding for S2. Revisit if site engineers ask for named downloads.
+
+**Location:** `projects/design_storage.py` — `get_design_file_url`
+
+### T4 — a carry chain longer than two hops costs a query per extra hop
+
+`_released_drawings()` preloads two hops of `carried_forward_from`, so `cad_pdf_source()`
+walks every real chain (one carry per QC rework loop) without a query. A third consecutive
+CAD carry adds one query per hop; DR-5's "constant" is in PDFs and BOQ lines, which it is.
+
+**Location:** `projects/site_drawings_views.py` — `_released_drawings`
+
+### T5 — no screen can set a make on an OPEX BOQ, so the card's Make column is blank
+
+Found driving SCMPILOT06 to release for the DR-2 walk (27 Oct 2026). `BOQItem.make_preference`
+has two writers, both in `boq_detail`, and neither reaches an OPEX row: the designer's
+`save_design` branch is never hit because `boq_detail` redirects the OPEX author to
+`opex_boq_entry`, which has no make field; SCM's `save_scm` branch needs `BOQ.status` of
+Submitted or Acknowledged, and an OPEX BOQ marked complete through `opex_boq_entry` stays
+Draft. Locally 0 of 344 OPEX BOQ rows carry a make, and there are no `VendorBrand` rows at
+all. DR-3's Make column (brand label only) is therefore blank on every OPEX site until a
+make can be entered; the card is correct, the input does not exist.
+
+**Location:** `projects/views.py` — `boq_detail`, `opex_boq_entry`

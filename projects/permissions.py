@@ -1084,6 +1084,25 @@ def user_can_view_design(user, project):
             or user_is_assigned_qc_reviewer(user, project))
 
 
+def user_can_view_site_drawings(user, project):
+    """Return True if `user` may SEE the site drawings card on `project` and open its
+    released drawing PDFs (DR-2, DR-4).
+
+    READ-ONLY, AND NEVER A WORK GATE (CL-G). It confers no authority to change anything,
+    and no work path may ask it: a QA/QC engineer passes it on their site and still works
+    only the tasks they hold (user_works_on_task()).
+
+    Exactly user_can_view_project() AND the site is OPEX. Everyone who can see an OPEX
+    site may read what is being built there — the site engineer above all, who is why the
+    card exists. Residential and CAPEX have no design module behind them, so no one sees
+    the card there. user_can_view_design() is deliberately NOT used: its deputy and QC
+    branches are review authority over design work, not a reason to read a site page.
+    user_can_view_project_boq() is not widened either (DR-4): the card shows its own
+    allowlisted BOQ columns, so the BOQ screen keeps its own gate.
+    """
+    return user_can_view_project(user, project) and project.project_type == 'OPEX'
+
+
 # ---------------------------------------------------------------------------
 # OPEX site groups (Part 6)
 #

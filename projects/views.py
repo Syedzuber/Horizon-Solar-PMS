@@ -11461,6 +11461,15 @@ def project_overview(request, project_id):
         request.user, project)
     show_payment_queue_link = user_can_view_payment_queue(request.user)
 
+    # DR-2 — the site drawings card: the released design's PDFs and BOQ quantities, for
+    # every viewer of an OPEX site. This page's user_can_view_project() gate above is the
+    # first half of user_can_view_site_drawings(); the context's `not_opex` state is the
+    # second, so the gate is not asked again (its queries would repeat the page's own).
+    # Imported here, not at the top, only to keep this change inside project_overview —
+    # there is no circular import: site_drawings_views imports nothing from this module.
+    from .site_drawings_views import site_drawings_context
+    site_drawings = site_drawings_context(project)
+
     # ── Gantt (Residential only; computed live from activated_at + duration_days) ──
     # Internal view: every role that can see this project. Client (buffered/friendly)
     # view: PM / Project Coordinator / CEO only — computed and passed ONLY for them so
@@ -11524,6 +11533,7 @@ def project_overview(request, project_id):
         'manages_as_pm':               manages_as_pm,
         'show_order_list_link':        show_order_list_link,
         'show_payment_queue_link':     show_payment_queue_link,
+        'site_drawings':               site_drawings,
         'user_dashboard_url':          get_user_dashboard(request.user),
         'show_cascade_option':         show_cascade_option,
         'gantt_available':             gantt_available,

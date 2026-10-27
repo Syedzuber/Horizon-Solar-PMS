@@ -1,0 +1,88 @@
+{% comment %}
+DR-2 — the site drawings card: the released design's drawing PDFs and its BOQ quantities,
+for the people building an OPEX site. Read-only for every viewer of the site. Context is
+`site_drawings`, built by site_drawings_views.site_drawings_context(); not drawn at all on
+Residential / CAPEX (state not_opex, DR-6).
+
+Each drawing links to site_drawing_open, which signs the link at the click — nothing is
+signed on this page. The BOQ is the six allowlisted columns (DR-3) and nothing else: no
+price, no ordered quantity, no vendor. The table scrolls inside its own container so the
+page never scrolls sideways at phone width.
+{% endcomment %}
+{% if site_drawings and site_drawings.state != 'not_opex' %}
+<div class="card shadow-sm mb-3" id="site-drawings-card">
+  <div class="card-header py-2 d-flex justify-content-between align-items-center">
+    <span class="fw-semibold small"><i data-lucide="file-text" class="lucide-icon me-1"></i>Drawings &amp; BOQ</span>
+    <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+            type="button" data-bs-toggle="collapse"
+            data-bs-target="#siteDrawingsCollapse" aria-expanded="true">
+      <i class="bi bi-chevron-down collapse-chevron"></i>
+    </button>
+  </div>
+  <div class="collapse show" id="siteDrawingsCollapse">
+    <div class="card-body small px-3 py-3">
+      {% if site_drawings.state == 'under_revision' %}
+        <div class="alert alert-danger py-2 mb-0" role="alert">
+          Design under revision since {{ site_drawings.since|date:"d M Y" }}. Check with your PM before continuing.
+        </div>
+      {% elif site_drawings.state == 'released' %}
+        {% if site_drawings.pending_change %}
+          <div class="alert alert-warning py-2 mb-3" role="alert">
+            A design change has been requested. Check with your PM before starting affected work.
+          </div>
+        {% endif %}
+
+        <div class="fw-semibold mb-1">Drawings</div>
+        {% if site_drawings.drawings %}
+          <ul class="list-unstyled mb-2">
+            {% for d in site_drawings.drawings %}
+              <li class="d-flex justify-content-between align-items-start gap-2 py-1{% if not forloop.last %} border-bottom{% endif %}">
+                <a href="{% url 'site_drawing_open' d.pk %}" target="_blank" rel="noopener" class="text-break">{{ d.display_name }}</a>
+                {% if d.size_bytes %}<span class="text-muted text-nowrap">{{ d.size_bytes|filesizeformat }}</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        {% if site_drawings.hidden_count %}
+          <div class="text-muted mb-1">{{ site_drawings.hidden_count }} file(s) not shown.</div>
+        {% endif %}
+        {% if site_drawings.unavailable %}
+          <div class="text-muted mb-1">Drawing PDFs not available — contact Design.</div>
+        {% endif %}
+
+        <div class="fw-semibold mt-3 mb-1">
+          BOQ{% if site_drawings.corrected_on %} <span class="fw-normal text-muted">· Corrected on {{ site_drawings.corrected_on|date:"d M Y" }}</span>{% endif %}
+        </div>
+        {% if site_drawings.boq_rows %}
+          <div class="table-responsive">
+            <table class="table table-sm mb-0 align-middle">
+              <thead class="table-light">
+                <tr>
+                  <th>Code</th><th>Description</th><th>Category</th><th>Unit</th>
+                  <th class="text-end">Qty</th><th>Make</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for r in site_drawings.boq_rows %}
+                  <tr>
+                    <td class="text-nowrap">{{ r.code|default:"—" }}</td>
+                    <td style="min-width:12rem;">{{ r.description }}</td>
+                    <td class="text-nowrap">{{ r.category|default:"—" }}</td>
+                    <td class="text-nowrap">{{ r.unit|default:"—" }}</td>
+                    <td class="text-end text-nowrap">{% if r.quantity is not None %}{{ r.quantity|floatformat:"-2" }}{% else %}—{% endif %}</td>
+                    <td class="text-nowrap">{{ r.make|default:"—" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <div class="text-muted">No BOQ lines.</div>
+        {% endif %}
+      {% else %}
+        <div class="text-muted">Design not yet released.</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
