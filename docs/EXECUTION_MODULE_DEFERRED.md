@@ -5302,6 +5302,46 @@ QA/QC site appears in none of them. The engineer reaches it from the dashboard's
 sites" section (CL-K) and the site page. Same family as G51 (task-derived counts miss QA/QC
 sites) and G86 (a PM held task on a site they do not manage). No change in the build.
 
+**Closed 27 Oct 2026 (G95 build).** Correction to the entry above: the morning report
+already counted these tasks. Its manager scope is a union (`task_report._in_scope`:
+managed project OR own task), so both cases were in it. The EOD digest counted them for a
+PM (`assigned_map` has no project term) but not for a coordinator (G100). What the build
+changed:
+- `permissions.qaqc_engineer_projects_q(profile, prefix='')` is the queryset form of
+  `user_is_site_qaqc()`. `tests_g95_held_tasks.QaqcEngineerProjectsQTests` pins the two
+  case for case. The assignment is a subquery, so two historical rows never double a
+  count inside an OR.
+- `dashboard_pm`'s three stat blocks and `tasks_drill_down`'s PM/Coordinator branch add
+  `assigned_to=user AND qaqc_engineer_projects_q` with an OR on the row. A task held on a
+  managed site counts once, in the managed part. Drill-down groups for a QA/QC site read
+  "QA/QC site · your tasks only".
+- The new "Your tasks on other sites" card lists open tasks held on live (Active /
+  In Progress) sites the user does not manage but can open. Each row shows the site, the
+  task, its status, its due date and a Delayed / Due Today flag. Tasks held on sites
+  they cannot open (G86) are only counted, in a muted line: "N more tasks assigned to you
+  on sites you cannot open" (G97 is next). The card is hidden when both are empty.
+- Query cost: the PM dashboard is +1 (the card's list). It is pinned at 44 + 1 on the
+  test fixture, and the same with one held task or two.
+- Production on 23 Oct had 0 such tasks in either case. CL-A v2.5 postdates the dump.
+  `solarpms_local` has 4 of case (b) (siddharth 3 on HRP-RES-2026-013, sudhir 1 on
+  SCMPILOT01), and all 4 now show in the muted count.
+- Unchanged by ruling: the morning report (Q3), the EOD digest (Q4 → G100) and the bell
+  (Q5). A case (b) assignment notice still links to a task page its holder cannot open.
+
+### G100 — the coordinator EOD digest leaves out tasks they hold on QA/QC sites
+
+Recorded 27 Oct 2026 by the G95 build (ruling Q4: record, no change). G90 has the same
+root. A coordinator's `send_eod_digest` shows `coord_open_tasks`. That is read from
+`phase__project__coordinators__in`, so it counts their coordinated projects only. Their
+personal `assigned` count is computed but not drawn (G90). A task a coordinator holds as
+a site's QA/QC engineer (CL-A v2.5) is therefore missing from their digest. It also does
+not count toward sending, because the coordinator send gate reads only
+`coord_open_tasks` / `coord_open_issues`. A coordinator whose only open work is a held
+paperwork task on a QA/QC site gets no digest. A PM's digest is not affected: its
+`assigned` line has no project term. The same fix would close G90 too: draw the
+`assigned` line for coordinators, and let it count toward sending. The morning report and
+the dashboard already include these tasks.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

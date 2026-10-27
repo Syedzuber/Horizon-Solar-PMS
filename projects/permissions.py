@@ -1544,7 +1544,8 @@ def project_managers(project):
 # code that reads "the site's active assignment"; user_is_site_qaqc() is the only code
 # that turns it into authority. Its readers are user_can_view_project() (view),
 # user_can_approve_task() (approve / reject) and task_has_independent_approver() (the
-# approver pool). The CL-A refusals in the task-assignment paths go through
+# approver pool). qaqc_engineer_projects_q() is the queryset form of the same rule, for
+# list views (G95), pinned to user_is_site_qaqc() case for case. The CL-A refusals in the task-assignment paths go through
 # qaqc_engineer_assignment_refusal(), which reads site_qaqc_engineer_id() directly,
 # because they ask about a person being GIVEN work, not about the person asking.
 # ---------------------------------------------------------------------------
@@ -1611,6 +1612,41 @@ def user_is_site_qaqc(user, project):
     if profile.role not in QAQC_ENGINEER_ROLES or not profile.is_active:
         return False
     return site_qaqc_engineer_id(project) == profile.pk
+
+
+def qaqc_engineer_projects_q(profile, prefix=''):
+    """Return the Q() selecting the projects where `profile` is the QA/QC engineer and may
+    act as one: the QUERYSET form of user_is_site_qaqc(), as manageable_projects_q() is of
+    user_can_manage_project().
+
+    `prefix` is the ORM path from the model being filtered to Project, including its
+    trailing '__': '' for Project, 'phase__project__' for Task.
+
+    WHY THIS EXISTS (G95). A PM or coordinator who is a site's QA/QC engineer may hold its
+    tasks (CL-A v2.5), and their dashboard and drill-down must list those tasks without
+    loading every project to ask user_is_site_qaqc() one at a time.
+
+    INVARIANT: for every profile and project, a project matches here exactly when
+    user_is_site_qaqc() is True for it: an active assignment naming the profile, an OPEX
+    project, a role in QAQC_ENGINEER_ROLES and an active profile.
+    tests_g95_held_tasks.QaqcEngineerProjectsQTests pins the two case for case. If one
+    changes, change the other in the same edit.
+
+    THE ASSIGNMENT IS A SUBQUERY, NOT A JOIN, so the Q is safe inside an OR. A join on
+    `qaqc_assignments` returns one row per assignment, ended ones included, so a task on a
+    site with two historical rows would count twice beside a managed-project leg.
+
+    The role and active terms are decided in Python, as user_is_site_qaqc() decides them:
+    an ineligible profile gets a Q that matches nothing.
+    """
+    if profile is None or profile.role not in QAQC_ENGINEER_ROLES or not profile.is_active:
+        return Q(**{f'{prefix}pk__in': []})
+    return Q(**{
+        f'{prefix}project_type': 'OPEX',
+        f'{prefix}pk__in': (profile.qaqc_site_assignments
+                            .filter(ended_at__isnull=True)
+                            .values('project_id')),
+    })
 
 
 def qaqc_engineer_assignment_refusal(assignee_profile, project, task_role):

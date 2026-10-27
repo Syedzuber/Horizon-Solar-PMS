@@ -43,6 +43,11 @@
     <div class="d-flex align-items-baseline gap-2 mb-2">
       <span class="fw-bold" style="color:#1a7a4a;">{{ group.project.customer_name }}</span>
       <span class="text-muted small">{{ group.project.project_id }}</span>
+      {% comment %}G95: a site where this PM or coordinator is the QA/QC engineer and does
+         not manage it; only the tasks they hold there are in this list.{% endcomment %}
+      {% if group.held_elsewhere %}
+        <span class="badge bg-light text-muted border">QA/QC site · your tasks only</span>
+      {% endif %}
     </div>
 
     {# Task rows #}

@@ -147,6 +147,47 @@
 
 {% include 'dashboard/_qaqc_engineer_sections.html' %}
 
+{% comment %}G95: open tasks this user holds on live sites they do not manage
+   (views.dashboard_pm, one query). Listed only where they can open the site, which for a
+   PM or coordinator means they are its QA/QC engineer; tasks held on any other site are
+   counted in the muted line, because their links would not open (G86 / G97). Drawn when
+   either the list or that count is non-zero. The three stat blocks above count the listed
+   tasks; the uncounted ones are on no other part of this page.{% endcomment %}
+{% if held_elsewhere_tasks or held_elsewhere_hidden %}
+<div class="card shadow-sm border-0 mb-4" id="held-elsewhere">
+  <div class="card-header bg-white fw-semibold d-flex align-items-center gap-2">
+    <i class="bi bi-person-check"></i> Your tasks on other sites
+    {% if held_elsewhere_tasks %}<span class="badge bg-secondary">{{ held_elsewhere_tasks|length }}</span>{% endif %}
+  </div>
+  {% if held_elsewhere_tasks %}
+  <ul class="list-group list-group-flush">
+    {% for task in held_elsewhere_tasks %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between align-items-center gap-2 small">
+      <div class="flex-grow-1" style="min-width:12rem;">
+        <a href="{% url 'task_detail' task.phase.project.project_id task.pk %}" class="fw-semibold text-decoration-none">{{ task.task_name }}</a>
+        <div class="text-muted">{{ task.phase.project.project_id }}{% if task.phase.project.customer_name and task.phase.project.customer_name != task.phase.project.project_id %} · {{ task.phase.project.customer_name }}{% endif %}</div>
+      </div>
+      <div class="d-flex align-items-center gap-2 flex-shrink-0">
+        <span class="badge bg-light text-dark border">{{ task.status }}</span>
+        {% if task.due_date %}<span class="text-muted">{{ task.due_date|date:"j M Y" }}</span>{% else %}<span class="text-muted">No due date</span>{% endif %}
+        {% if task.overdue_days %}
+          <span class="badge bg-danger">Delayed · {{ task.overdue_label }}</span>
+        {% elif task.due_today %}
+          <span class="badge bg-warning text-dark">Due Today</span>
+        {% endif %}
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  {% if held_elsewhere_hidden %}
+  <div class="card-body py-2 small text-muted" id="held-elsewhere-hidden">
+    {{ held_elsewhere_hidden }} more task{{ held_elsewhere_hidden|pluralize }} assigned to you on sites you cannot open
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h5 class="mb-0 fw-semibold">My Projects</h5>
   {% comment %}

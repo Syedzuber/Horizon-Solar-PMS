@@ -237,6 +237,13 @@ WALKL01, activated; two SE tasks held by `walk.se`.
 The four Delivery mirror tasks on WALKL01 are derived from these (Inverters Done; the
 others In Progress).
 
+`walk.coord` is WALKL01's QA/QC engineer and does not manage it. The G95 walk (27 Oct 2026)
+added "Paperwork follow-up (walk G95)" (Project Coordinator, Not Started, due 27 Oct 2026)
+through `task_add` as `walk.pm`, assigned to `walk.coord`. That task is on `walk.coord`'s
+dashboard card "Your tasks on other sites", in the stat blocks and in the drill-down,
+where its group is marked "QA/QC site · your tasks only". The paperwork task from the
+template, Completion Certificates, is Done.
+
 ### Tender WALKEXE — site execution (area `execution`)
 
 WALKE01, activated; coordinator `walk.coord`; SE tasks held by `walk.se`.

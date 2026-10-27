@@ -114,6 +114,8 @@ from .decorators import (
 )
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
+    # G95: the QA/QC engineer's sites as a queryset, for the PM dashboard and drill-down.
+    qaqc_engineer_projects_q,
     project_managers, user_can_manage_program,
     # T3a (ruling T-16): the recipients of the Zoho unassigned-project alert.
     active_admins,
@@ -627,6 +629,8 @@ def tasks_drill_down(request, filter_type):
     today   = timezone.localdate()
     profile = request.user.profile
     role    = profile.role
+    # Set only by the PM / coordinator branch (G95); None means no group is marked.
+    managed_ids = None
 
     # Grouped task lists + a total_count, per due-date window. This is a LIST, but it
     # is the drill-through for the four dashboard stat blocks (_pm/_se/_design/_scm
@@ -657,9 +661,21 @@ def tasks_drill_down(request, filter_type):
         # `Q(assigned_pm=...) | Q(coordinators=...)` here for a second time — it is the
         # queryset form of the same canonical rule user_can_manage_project() applies to a
         # single project, and the two are pinned to each other by that helper's invariant.
+        #
+        # G95: PLUS the tasks they hold on a site where they are the QA/QC engineer (CL-A
+        # v2.5), which the dashboard's stat blocks count too. For these two roles that
+        # site is the only one user_can_view_project() opens beyond the managed ones, so a
+        # task they hold anywhere else (G86) stays out: its link would not open (G97). One
+        # OR on the row, so a held task on a managed site is listed once.
         base_qs = base_qs.filter(
             manageable_projects_q(profile, 'phase__project__')
+            | (Q(assigned_to=profile) & qaqc_engineer_projects_q(profile, 'phase__project__'))
         ).distinct()
+        # Which groups are someone else's site, so the page can say so. One query, paid by
+        # these two roles only.
+        managed_ids = set(
+            Project.objects.filter(manageable_projects_q(profile)).values_list('pk', flat=True)
+        )
     elif role == 'Design':
         # Union: FK-owned projects (assigned_design) plus projects where this
         # Design user has been given a task by the Design lead — task-driven
@@ -698,7 +714,12 @@ def tasks_drill_down(request, filter_type):
     for task in tasks_qs.order_by('phase__project__project_id', 'due_date'):
         proj = task.phase.project
         if proj.project_id not in project_map:
-            project_map[proj.project_id] = {'project': proj, 'tasks': []}
+            project_map[proj.project_id] = {
+                'project': proj, 'tasks': [],
+                # G95: a QA/QC site this PM or coordinator does not manage; only their
+                # own tasks there are listed.
+                'held_elsewhere': managed_ids is not None and proj.pk not in managed_ids,
+            }
         project_map[proj.project_id]['tasks'].append(task)
 
     groups       = list(project_map.values())
@@ -722,7 +743,9 @@ def dashboard_pm(request):
     """
     PM dashboard: summary cards + per-project progress + task lists.
     Scoped to the projects the user manages — projects they are assigned PM of,
-    plus (for a Project Coordinator) projects they coordinate.
+    plus (for a Project Coordinator) projects they coordinate. G95 adds the tasks
+    they hold on sites where they are the QA/QC engineer: to the three stat blocks,
+    and as the "Your tasks on other sites" card.
     Access: PM and Project Coordinator.
     TODO: the per-project loop runs multiple queries per project — consider
     annotating with Subquery or moving to prefetch_related before scaling.
@@ -1051,10 +1074,19 @@ def dashboard_pm(request):
         changed_at__date__gte=seven_days_ago,
     ).select_related('task__phase__project', 'changed_by__user').order_by('-changed_at')[:30]
 
+    # G95: a task this user holds on a site where they are the QA/QC engineer (CL-A v2.5).
+    # They do not manage that site, so nothing else on this page reaches the task. For a
+    # PM or coordinator, user_can_view_project() opens no other unmanaged site, so this is
+    # "held, viewable, not managed" (see tasks_drill_down, which reads the same Q).
+    held_on_qaqc_site = (Q(assigned_to=pm_profile)
+                         & qaqc_engineer_projects_q(pm_profile, 'phase__project__'))
+
     # Due-today / due-soon / overdue stat block. Drills through to tasks_drill_down,
-    # which carries the same exclusion so the card and the list agree.
+    # which carries the same exclusion so the card and the list agree. G95 adds the held
+    # tasks above with an OR on the row, so a task held on a site they also manage counts
+    # once; the drill-down's PM branch reads the same OR.
     _pm_task_base = Task.objects.filter(
-        phase__project_id__in=managed_project_ids,
+        Q(phase__project_id__in=managed_project_ids) | held_on_qaqc_site,
         phase__project__is_deleted=False,
         phase__project__status__in=['Active', 'In Progress'],
         due_date__isnull=False,
@@ -1064,6 +1096,31 @@ def dashboard_pm(request):
     tasks_due_today_count = _pm_task_base.filter(due_date=today, status__in=_active).count()
     tasks_due_soon_count  = _pm_task_base.filter(due_date__gt=today, due_date__lte=_soon, status__in=_active).count()
     tasks_overdue_count   = _pm_task_base.filter(overdue_q(today)).count()
+
+    # G95 "Your tasks on other sites": every open task this user holds on a live project
+    # they do not manage, in ONE query. Each row is flagged with whether they can open its
+    # site (the QA/QC grant above); rows they can open are listed, the rest only counted,
+    # because their links would not open (G86 / G97). Mirrors and N/A tasks are out, as on
+    # the stat blocks. A task on a managed site is never here: it is on that site's card.
+    _held_elsewhere = list(
+        Task.objects.filter(
+            assigned_to=pm_profile,
+            status__in=OPEN_STATUSES,
+            phase__project__is_deleted=False,
+            phase__project__status__in=['Active', 'In Progress'],
+        )
+        .exclude(phase__project_id__in=managed_project_ids)
+        .filter(human_owned_tasks_q()).filter(applicable_tasks_q())
+        .annotate(on_viewable_site=Case(
+            When(held_on_qaqc_site, then=Value(True)),
+            default=Value(False), output_field=BooleanField()))
+        .select_related('phase__project')
+        .order_by(F('due_date').asc(nulls_last=True), 'phase__project__project_id',
+                  'task_order', 'pk')
+    )
+    held_elsewhere_tasks = [t for t in _held_elsewhere if t.on_viewable_site]
+    held_elsewhere_hidden = len(_held_elsewhere) - len(held_elsewhere_tasks)
+    _attach_due_health(held_elsewhere_tasks, today)
 
     return render(request, 'dashboard/pm.html', {
         'summary': {
@@ -1093,6 +1150,9 @@ def dashboard_pm(request):
         'approvals_waiting':      pending_approvals_card(request.user),
         # Closeout 7b (PP-6): Rectified punch points waiting for re-verification.
         'awaiting_reverification': awaiting_points,
+        # G95: open tasks held on QA/QC sites, and the count held where they cannot look.
+        'held_elsewhere_tasks':   held_elsewhere_tasks,
+        'held_elsewhere_hidden':  held_elsewhere_hidden,
         # CL-K: the sites this PM or coordinator checks as QA/QC engineer (never one they
         # manage, CL-A), and the points there awaiting their re-verification - the Site
         # Engineer dashboard's computation and partial. One query when they check none.
