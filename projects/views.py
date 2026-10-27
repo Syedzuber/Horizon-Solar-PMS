@@ -10911,6 +10911,10 @@ def set_milestone_amounts(request, project_id):
             project, request.user.profile,
             'Set milestone amounts: ' + ', '.join(f'{n}=₹{a}' for n, a in amounts.items()),
             entity_type='Milestone',
+            # AF-1: a money line. Its code is in activity_codes.MONEY_ACTIVITY_CODES, so
+            # project pages hide it from viewers outside the project's money audience;
+            # migration 0121 stamped the rows written before it had one.
+            action_code='milestone_amounts_set',
         )
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)})
@@ -11275,9 +11279,23 @@ def project_overview(request, project_id):
     # drawings on a morning would otherwise fill all 8 rows. Excluded in the query, before
     # the slice, so the card still shows 8 other events; the rows are still written and
     # the full trail still lists them.
+    #
+    # AF-1: a viewer outside the project's money audience sees no money line either —
+    # order totals, payment requests and their outcomes, contractor bill payments
+    # (D-A53), milestone amounts. Same place and same reason as the two codes above: in
+    # the query, before the slice, so the card still fills to 8. `sees_money` is computed
+    # once here and also gates the vendor-orders card below, so the card and the feed
+    # cannot disagree. Imported here, not at the top, only to keep this change inside
+    # project_overview — there is no circular import: neither module imports this one.
+    from .activity_codes import MONEY_ACTIVITY_CODES
+    from .permissions import user_can_see_project_money
+    sees_money = user_can_see_project_money(request.user, project)
+    hidden_codes = {'task_unassigned', 'site_drawing_opened'}
+    if not sees_money:
+        hidden_codes |= MONEY_ACTIVITY_CODES
     recent_activity = list(
         ActivityLog.objects.filter(project=project)
-        .exclude(action_code__in=('task_unassigned', 'site_drawing_opened'))
+        .exclude(action_code__in=hidden_codes)
         .select_related('actor__user')
         .order_by('-timestamp')[:8]
     )
@@ -11435,13 +11453,15 @@ def project_overview(request, project_id):
     # every role; Finance pays from the payments queue, the one path to pay. Two
     # prefetches carry every figure, so ten orders cost what one does.
     #
-    # CL-I (closeout spec v2.4): the PM role reads this card on a site the PM manages, not
-    # on one they only see as its QA/QC engineer — the assignment grants a PM no more than
-    # it grants a Site Engineer. Finance, SCM and Admin read it portfolio-wide as before.
-    # `manages_as_pm` is the same rule for the template's PM / coordinator blocks.
+    # AF-1: the card's audience is user_can_see_project_money() — the money portfolio roles
+    # (CEO, Admin, System Admin, Finance, SCM) or whoever manages the site, the same
+    # `sees_money` that filters the Recent activity card above. It replaced an inline
+    # rule that left out CEO, System Admin and a managing coordinator. CL-I still holds:
+    # a PM who sees the site only as its QA/QC engineer does not manage it, so is not
+    # admitted. `manages_as_pm` is unchanged and still drives the template's PM /
+    # coordinator blocks.
     manages_as_pm = role in ('PM', 'Project Coordinator') and is_assigned_pm
-    show_vendor_orders = (role in ('Finance', 'SCM', 'Admin')
-                          or (role == 'PM' and is_assigned_pm))
+    show_vendor_orders = sees_money
     site_orders = []
     if show_vendor_orders:
         from .order_views import _order_money   # order_views imports views: no top-level import
@@ -13398,12 +13418,20 @@ def project_timeline(request, project_id):
     if not user_can_view_project(request.user, project):
         return refuse_site_view_404(request, project)
 
-    # All activity logs for this project, newest first, with actor data
+    # All activity logs for this project, newest first, with actor data — except, for a
+    # viewer outside the project's money audience (AF-1), the money lines: excluded in the
+    # query, so the paginator's count and every page are built without them and page 1
+    # is full whenever enough other rows exist. Imported here, not at the top, only to
+    # keep this change inside project_timeline — there is no circular import.
+    from .activity_codes import MONEY_ACTIVITY_CODES
+    from .permissions import user_can_see_project_money
     logs = (
         project.activity_logs
         .select_related('actor__user')
         .order_by('-timestamp')
     )
+    if not user_can_see_project_money(request.user, project):
+        logs = logs.exclude(action_code__in=MONEY_ACTIVITY_CODES)
 
     paginator   = Paginator(logs, 20)
     page_number = request.GET.get('page')

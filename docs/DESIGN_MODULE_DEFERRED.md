@@ -1727,7 +1727,19 @@ DR-2 shows the released design's drawing PDFs and the BOQ quantities to every vi
 OPEX site (`projects/site_drawings_views.py`, `_site_drawings_card.html`). These are what
 it leaves open.
 
-### T1 — the Recent activity card shows rupee amounts to every viewer of the site
+### T1 — CLOSED by AF-1: the Recent activity card shows rupee amounts to every viewer of the site
+
+**Closed 27 Oct 2026 (AF-1).** One money audience, `permissions.user_can_see_project_money()`
+— CEO, Admin, System Admin, Finance, SCM, or whoever manages the site. Anyone else gets no
+row whose code is in `activity_codes.MONEY_ACTIVITY_CODES` on the Recent activity card or on
+`project_timeline` (which had the same exposure, paginated), excluded in the query before
+the slice and before pagination. The vendor-orders card uses the same helper. The
+milestone-amount line, which had no code, now writes `milestone_amounts_set`, and migration
+0121 stamped the old rows. `tests_activity_money` scans every `log_activity()` call and fails
+if a money description is written under a code missing from the set. The order pages are
+a separate exposure: T8.
+
+The original record follows.
 
 Found by DR-2's pre-flight (Q7), not changed. `project_overview`'s Recent activity card
 renders the site's last 8 `ActivityLog.action` strings to everyone who can see the site,
@@ -1741,7 +1753,13 @@ money-free feed wording, both outside DR-2's permitted files.
 
 **Location:** `projects/views.py` — `project_overview` (`recent_activity`); the writers above
 
-### T2 — each drawing open adds a line to the 8-row activity feed
+### T2 — CLOSED by the DR-2 follow-up: each drawing open adds a line to the 8-row activity feed
+
+**Closed 27 Oct 2026.** `project_overview`'s Recent activity query excludes
+`site_drawing_opened` in the query, before the 8-row slice, the same way it excludes
+`task_unassigned`. The rows are still written and `project_timeline` still lists them.
+
+The original record follows.
 
 DR-5 asks for one `log_activity()` row per open (`action_code='site_drawing_opened'`).
 `project_overview`'s feed excludes only `task_unassigned`, so a crew opening drawings on a
@@ -1781,3 +1799,20 @@ all. DR-3's Make column (brand label only) is therefore blank on every OPEX site
 make can be entered; the card is correct, the input does not exist.
 
 **Location:** `projects/views.py` — `boq_detail`, `opex_boq_entry`
+
+### T8 — the order pages show money to anyone who can see a site on the order (for AF-2)
+
+Found by AF-1's pre-flight, deliberately not changed (ruling Q2: a separate audit session,
+AF-2). `vendor_order_list` is gated by `user_can_view_project_vendor_orders()` and
+`vendor_order_detail` by `user_can_view_vendor_order()`. Both read `_user_reads_orders_on()`:
+a role in `VENDOR_ORDER_PORTFOLIO_ROLES`, OR anyone who can see ANY site on the order. So a
+site engineer holding one task on a site — or the site's QA/QC engineer, Design or BD —
+can open the site's order list (order totals, paid, committed, balance) and every order on
+it (lines, prices, documents, payments) by URL. No link on `project_overview` leads there
+for them: the vendor-orders card and its "All orders for this site" link are behind
+`user_can_see_project_money()` since AF-1. The two rules now disagree, and AF-1's money
+audience is the narrower one; AF-2 decides whether the order pages adopt it.
+
+**Location:** `projects/permissions.py` — `user_can_view_vendor_order`,
+`user_can_view_project_vendor_orders`, `_user_reads_orders_on`; `projects/order_views.py` —
+`vendor_order_list`, `vendor_order_detail`

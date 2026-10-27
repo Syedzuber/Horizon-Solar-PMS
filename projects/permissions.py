@@ -2495,6 +2495,46 @@ VENDOR_ORDER_RAISE_ROLES = frozenset({'SCM'})
 # silently widens access to vendor prices (the BOQ_PORTFOLIO_READ_ROLES precedent).
 VENDOR_ORDER_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'SCM'})
 
+# AF-1 — the roles that see money on EVERY project they can see. Equal to the order
+# portfolio set today, and deliberately its own set: this one decides what a project page
+# shows (the vendor-orders card, money lines in the activity feed), the one above decides
+# who reads the order pages, and AF-2 audits those pages separately.
+MONEY_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'SCM'})
+
+
+def user_can_see_project_money(user, project):
+    """Return True if `user` may see money on `project`'s own pages (AF-1).
+
+    THE ONE MONEY AUDIENCE for a project page: a role in MONEY_PORTFOLIO_ROLES, or anyone
+    with management authority on the project (user_can_manage_project() — the assigned PM
+    and the coordinators, whatever their role string). Read by project_overview's
+    vendor-orders card and its Recent activity card, and by project_timeline: whoever
+    fails it sees no row whose code is in activity_codes.MONEY_ACTIVITY_CODES. One
+    predicate for the card and the feeds, so what a page shows in a table and what it
+    shows in a sentence cannot disagree.
+
+    Everyone else who can see the site — a site engineer holding a task (D-A53: never a
+    contractor bill's amount), the site's QA/QC engineer, Design, BD — is blocked: they
+    work on the site, not on its purchasing, and a PM who sees a site only as its QA/QC
+    engineer gets no more than a site engineer does (CL-I), because QA/QC grants view and
+    never management.
+
+    Visibility of the project itself is NOT asked: every caller has already refused anyone
+    who cannot see the site. The role term is checked first, so a portfolio role costs no
+    query; anyone else costs user_can_manage_project()'s coordinator lookup unless they
+    are the assigned PM.
+
+    NOT the order pages' rule. user_can_view_project_vendor_orders() and
+    user_can_view_vendor_order() admit anyone who can see a site on the order;
+    DESIGN_MODULE_DEFERRED T8 records that, for the AF-2 audit.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None:
+        return False
+    if profile.role in MONEY_PORTFOLIO_ROLES:
+        return True
+    return user_can_manage_project(user, project)
+
 
 def user_can_raise_vendor_order(user, project):
     """Return True if `user` may record a new vendor order for `project`.
