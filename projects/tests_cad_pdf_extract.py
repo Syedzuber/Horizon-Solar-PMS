@@ -308,6 +308,20 @@ class UploadViewTests(ExtractBase):
         self.assertFalse(ActivityLog.objects.filter(
             action_code='cad_pdf_extraction_failed').exists())
 
+    def test_storage_failure_during_upload_extraction_records_an_activity_row(self):
+        """The upload path's half of the split the command does not share: a real storage
+        failure inside extract_cad_pdfs() (not a patched-out call) leaves the zip uploaded,
+        no DesignFilePdf row, and ONE cad_pdf_extraction_failed row naming the designer."""
+        with patch(UPLOAD, side_effect=DesignStorageError(
+                'Upload to storage failed: ConnectError')):
+            response = self._post(_zip([('p.pdf', PDF), ('p.dwg', b'AC1027')]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('CAD (zip) v1 uploaded', self._message(response))
+        design_file = DesignFile.objects.get(kind=DESIGN_FILE_CAD_ZIP)
+        self.assertFalse(design_file.extracted_pdfs.exists())
+        log = ActivityLog.objects.get(action_code='cad_pdf_extraction_failed')
+        self.assertEqual((log.entity_id, log.actor_id), (design_file.pk, self.designer.pk))
+
     def test_dr9_upload_stands_when_extraction_raises(self):
         for error in (RuntimeError('boom'), DesignStorageError('storage down')):
             with self.subTest(error=type(error).__name__):
@@ -376,13 +390,37 @@ class CommandTests(ExtractBase):
             self.assertIn('done, 1 recorded', out_again)
             self.assertEqual(DesignFilePdf.objects.count(), 1)
 
-    def test_apply_failure_is_logged_and_writes_no_rows(self):
+    def test_download_failure_goes_to_stderr_and_writes_nothing(self):
+        """A command run records a storage failure on stderr ONLY: no DesignFilePdf row
+        and no ActivityLog row (the upload path's DR-9 row is pinned in UploadViewTests)."""
         self._zip_row(listing=self.LISTING)
         target = 'projects.management.commands.extract_cad_pdfs.download_design_file'
         with patch(target, side_effect=DesignStorageError('Download from storage failed')):
             out, err = self._run('--apply')
         self.assertIn('FAILED', err)
+        self.assertIn('Download from storage failed', err)
         self.assertIn('failed: 1', out)
         self.assertFalse(DesignFilePdf.objects.exists())
-        self.assertTrue(ActivityLog.objects.filter(
-            action_code='cad_pdf_extraction_failed', actor=None).exists())
+        self.assertFalse(ActivityLog.objects.exists())
+
+    def test_upload_failure_mid_zip_keeps_earlier_rows_and_logs_no_activity(self):
+        listing = [{'name': 'z/a.pdf', 'size': len(PDF)}, {'name': 'z/b.pdf', 'size': len(PDF)}]
+        self._zip_row(listing=listing)
+        archive = _zip([('z/a.pdf', PDF), ('z/b.pdf', PDF)])
+        upload, _calls = _fake_upload()
+        steps = [upload, DesignStorageError('Upload to storage failed: ConnectError')]
+
+        def flaky(file_obj, path):
+            step = steps.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step(file_obj, path)
+
+        target = 'projects.management.commands.extract_cad_pdfs.download_design_file'
+        with patch(target, return_value=archive), patch(UPLOAD, side_effect=flaky):
+            out, err = self._run('--apply')
+        self.assertIn('Upload to storage failed', err)
+        self.assertIn('failed: 1', out)
+        self.assertEqual(list(DesignFilePdf.objects.values_list('entry_name', flat=True)),
+                         ['z/a.pdf'])
+        self.assertFalse(ActivityLog.objects.exists())

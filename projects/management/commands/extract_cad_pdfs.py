@@ -18,6 +18,11 @@ once, and the PDFs attach to the original.
 
 NEVER DELETES ANYTHING, rows or objects. Prints the database host and the storage host
 first, never a password or key.
+
+A FAILURE GOES TO STDERR AND NOWHERE ELSE — no ActivityLog row. The upload path records
+one (DR-9) because a designer acted and the site's feed should say the extraction did
+not happen. A command run is an operator retrying a backfill: run against unreachable
+storage it would add a row per zip per run to every site's feed, saying the same thing.
 """
 import io
 from urllib.parse import urlparse
@@ -29,7 +34,7 @@ from projects.design_storage import (
     DesignStorageError, cad_pdf_source, cad_zip_pdf_entries, download_design_file,
     extract_cad_pdfs, unrecorded_cad_pdf_entries,
 )
-from projects.models import DESIGN_FILE_CAD_ZIP, DesignFile, log_activity
+from projects.models import DESIGN_FILE_CAD_ZIP, DesignFile
 
 
 class Command(BaseCommand):
@@ -93,14 +98,10 @@ class Command(BaseCommand):
                 data = download_design_file(source.bucket, source.path)
                 rows = extract_cad_pdfs(source, io.BytesIO(data))
             except Exception as exc:
-                # The same record the upload path writes, with no actor: nobody acted.
+                # Stderr only, no ActivityLog row: see the module docstring. Rows already
+                # written for this zip stay, and the next run retries the rest.
                 failed += 1
-                self.stderr.write(f'    FAILED: {exc}')
-                log_activity(project, None,
-                             f'CAD zip v{source.version}: PDFs could not be extracted '
-                             f'by extract_cad_pdfs',
-                             entity_type='DesignFile', entity_id=source.pk,
-                             action_code='cad_pdf_extraction_failed')
+                self.stderr.write(f'    FAILED: {label}: {exc}')
                 continue
             for row in rows:
                 written += 1
