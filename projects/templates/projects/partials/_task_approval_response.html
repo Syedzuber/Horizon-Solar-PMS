@@ -16,8 +16,16 @@ reject. `swap_punch_points` is True only when the swap target is task_detail's
 modal gets this same response and selects its badge with
 hx-select=".card-header .badge", which relies on the approval card being the only
 card here. So the punch-points card is left out of that response.
+
+THE ROW'S SELF-CERTIFIED MARKER (G85 follow-up, F2) is drawn only when the swap target
+is a phase-list row (`swap_row_marker`) and the submission self-certified. The modal's
+hx-select takes it beside the badge, so the row reads as it does on a full reload. On
+task_detail it is never drawn: the panel already names the approver.
 {% endcomment %}
 {% include 'projects/partials/_task_approval.html' %}
+{% if swap_row_marker and task.approval_self_certified %}
+  {% include 'projects/partials/_task_row_self_certified.html' %}
+{% endif %}
 <div id="taskStatusBlock" hx-swap-oob="true">
   {% include 'projects/partials/_task_detail_status.html' %}
 </div>

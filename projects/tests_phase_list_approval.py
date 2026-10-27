@@ -394,7 +394,9 @@ class SubmitFromTheRowTests(PhaseListFixture):
         self.assertIn('data-target-id="#task-approval-%d"' % self.task.pk, html)
         self.assertIn('id="task-approval-%d"' % self.task.pk, html)
         self.assertIn('id="submitApprovalForm"', html)
-        self.assertIn('hx-select=".card-header .badge"', html)
+        # G85 follow-up F2: the badge, then the self-certified marker the response draws
+        # for a row target.
+        self.assertIn('hx-select=".card-header .badge, .js-row-approval-marker"', html)
 
 
 # ---------------------------------------------------------------------------

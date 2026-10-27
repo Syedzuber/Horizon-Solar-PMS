@@ -5117,7 +5117,27 @@ coordinator's submission of a PM-held task waits leaves no one who may approve i
 out is the coordinator withdrawing (Reject) and resubmitting, which then self-certifies.
 Nothing re-routes the waiting submission on its own. The same shape existed before R-c
 whenever the pool shrank after a submission (a coordinator removed while the PM's
-submission waited).
+submission waited). Recorded as G98 (declined for now); the G85 follow-up's panel wording
+is the mitigation.
+
+### G98 — no automatic completion when a waiting task's approver pool empties (declined for now)
+
+Recorded 27 Oct 2026 by the G85 follow-up (F4; ruled: decline, mitigate). When the pool
+empties while a submission waits — a QA/QC assignment ends, or a coordinator is removed —
+nobody may approve the task, and nothing completes it on its own. Declined: completing
+it automatically would take a self-certification under the submitter's name without
+their pressing anything, and the pool change that would trigger it (`end_site_qaqc`,
+coordinator removal, reassignment) happens in several writers that know nothing of
+waiting submissions. **Mitigation (F1):** the task page panel tells the submitter "No one
+else can approve this now. Withdraw and resubmit to complete it as self-certified." It
+shows when `_task_approval_context`'s `can_self_certify`, which is the endpoint's own
+`user_may_self_certify(…, assignee_id=task.assigned_to_id)` already read for that
+submitter, says a resubmission would complete it. Nothing new is queried, and nothing is
+queried on the overview. The overview row still reads "Awaiting approval" to everyone, and
+nobody else is told; revisit if a waiting task is found stuck in production. One case is
+left as it was: with a QA/QC punch point outstanding, the panel lists it as the blocker,
+but the line still offers the withdraw. PP-2 then refuses the self-certified resubmission
+until the point is cleared.
 
 ### G86 — the PM-task candidate list is company-wide; the coordinator half is project-scoped
 
@@ -5247,7 +5267,19 @@ folded in, because `tests_qaqc_engineer_tasks` would have needed editing:
 approve or reject it") on both verdicts, asked before the submission-state checks — and the
 engineer may not withdraw their own submission, which the general rule allows. So
 `_engineer_own_task_refused()` and the `engineer_holds_task` keyword remain, the keyword now
-redundant for the views.
+redundant for the views. Its removal is G99.
+
+### G99 — the unused `engineer_holds_task` keyword
+
+Recorded 27 Oct 2026 by the G85 follow-up (F4). After G85 no view passes
+`engineer_holds_task=` to `permissions.task_has_independent_approver` or
+`user_may_self_certify`. Every caller passes `assignee_id=task.assigned_to_id`, which
+already drops the QA/QC engineer from the pool of a task they hold. The keyword is kept
+only because `tests_qaqc_engineer_tasks.OwnTaskApprovalTests` calls it by name in two
+tests. To remove it: rewrite those two tests to pass `assignee_id=<engineer pk>`, then drop
+the keyword and its branch in `_approver_candidates`. `_engineer_own_task_refused()` is a
+separate matter and stays: its wording, and its refusal of the engineer's withdraw, differ
+from the general assignee rule (see G93).
 
 ### G94 — `punch_points.next_action` can name the QA/QC engineer as the rectifier
 

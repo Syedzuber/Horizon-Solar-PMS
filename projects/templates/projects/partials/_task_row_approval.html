@@ -44,7 +44,8 @@ itself and decides. This is the honest label, not the rule.
 
 A SELF-CERTIFIED COMPLETION SAYS SO (G85 build, B5): the row names the approver and
 the marker, where an ordinary approval keeps the badge alone. The name is read off the
-same `approved_by` the badge's title already loads, so it adds no query.
+same `approved_by` the badge's title already loads, so it adds no query. The marker is
+its own partial because the in-place self-certification swap draws it too (F2).
 
 Expected context:
   task, project, is_assigned_pm, two_step_completion, self_certify_by_assignee
@@ -64,7 +65,7 @@ Expected context:
       <span class="badge bg-success"
             title="Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}">Approved</span>
       {% if task.approval_self_certified %}
-        <span class="text-muted d-block" style="font-size:.7rem;">Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %} (self-certified)</span>
+        {% include 'projects/partials/_task_row_self_certified.html' %}
       {% endif %}
     {% elif task.submitted_at %}
       {% comment %}THE POINT OF THE WHOLE PARTIAL. Before this, a submitted task sat

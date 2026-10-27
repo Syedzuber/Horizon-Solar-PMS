@@ -241,6 +241,8 @@ others In Progress).
 
 WALKE01, activated; coordinator `walk.coord`; SE tasks held by `walk.se`.
 
+WALKE01 has no QA/QC engineer, but `walk.qaqc`'s legacy `is_qaqc` flag, with the task it holds there, makes it an approver, so a coordinator's submission of a PM-held task waits for `walk.qaqc` and does not self-certify.
+
 | Task | State |
 |---|---|
 | Net Metering Approval | Done — submitted by the PM, approved by the coordinator |

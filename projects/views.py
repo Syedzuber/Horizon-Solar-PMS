@@ -5943,7 +5943,9 @@ def _task_approval_context(request, project, task):
         # PREDICATE, called here rather than restated, so the button and the act
         # behind it cannot disagree. Gated on `can_submit` so it costs its queries
         # only for someone actually being offered the button it relabels. The
-        # assignee is passed as task_submit_for_approval passes it (G85).
+        # assignee is passed as task_submit_for_approval passes it (G85). On a queued
+        # task the same answer tells its submitter that withdrawing and resubmitting
+        # would complete it, because nobody else can approve it now (G85 follow-up F1).
         'can_self_certify': can_submit and user_may_self_certify(
             request.user, project, assignee_id=task.assigned_to_id),
         # PP-2: the QA/QC-raised points that would refuse an approval right now. The
@@ -6046,6 +6048,9 @@ def _render_task_approval_hx(request, project, task):
                                and task.assigned_to == getattr(request.user, 'profile', None),
         'task_status_choices': Task.STATUS_CHOICES,
         'swap_punch_points':   request.headers.get('HX-Target') == 'taskApprovalBlock',
+        # G85 follow-up, F2: the overview's submit modal targets the row's
+        # `#task-approval-<pk>`; only there is the row's self-certified marker drawn.
+        'swap_row_marker':     (request.headers.get('HX-Target') or '').startswith('task-approval-'),
     }
     ctx.update(_task_approval_context(request, project, task))
     # The out-of-band status block lists the task's phase-rule overrides; without this

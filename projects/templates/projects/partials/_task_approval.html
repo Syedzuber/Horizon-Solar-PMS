@@ -7,7 +7,8 @@ Expected context, all of it built by _task_approval_context() in views.py:
   approval_blockers (closeout 7b, PP-2: the QA/QC punch points that refuse approval
   now - while any is listed there is no Approve and no self-certified Complete),
   own_engineer_task and own_task_submitted_by_other (the two reason lines shown in
-  place of the verdict form: CL-A v2.5 and G85)
+  place of the verdict form: CL-A v2.5 and G85), can_self_certify (also read on a
+  queued task, for its submitter's line: G85 follow-up F1)
 
 THE PANEL DECIDES NOTHING. Every question it asks has already been answered by
 the view — `show_approval_panel` carries the OPEX-and-not-a-mirror scope,
@@ -124,8 +125,17 @@ Three states, and they are mutually exclusive:
                       hx-post="{% url 'task_reject' project.project_id task.pk %}"
                       hx-target="#taskApprovalBlock" hx-swap="innerHTML">Reject</button>
               {% if task.submitted_by == request.user.profile %}
+                {% comment %}G85 follow-up, F1: the pool can empty while the task waits (a
+                   QA/QC assignment ends, say), and then nobody can approve it.
+                   `can_self_certify` is the endpoint's own answer to "would resubmitting
+                   complete it", already read for this submitter, so the line is honest
+                   about the way out without a second reading of the pool.{% endcomment %}
                 <span class="text-muted small">
-                  You submitted this — someone else must approve it.
+                  {% if can_self_certify %}
+                    No one else can approve this now. Withdraw and resubmit to complete it as self-certified.
+                  {% else %}
+                    You submitted this — someone else must approve it.
+                  {% endif %}
                 </span>
               {% endif %}
             </div>

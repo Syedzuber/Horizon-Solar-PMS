@@ -1476,6 +1476,11 @@ processes it in: `_task_detail_status.html` also renders a `.badge`, but always 
 direct child of the `#taskStatusBlock` div and never inside a `.card-header`, and the
 approval card is the only card in the fragment.
 
+The second selector (G85 follow-up, F2) takes the row's self-certified marker, which the
+response draws after the card only for a row target and a self-certified completion, so
+the row then reads "Approved by <name> (self-certified)" as it does on a full reload.
+htmx keeps document order, so the badge comes first.
+
 The response also carries `_hx_messages.html`, which is a genuine out-of-band swap
 into base.html's `#hxMessages` — so the view's own success or error wording appears
 at the top of this page unmodified, exactly as it does on task_detail.
@@ -1505,7 +1510,7 @@ at the top of this page unmodified, exactly as it does on task_detail.
       </div>
       <form id="submitApprovalForm" method="post"
             hx-swap="innerHTML"
-            hx-select=".card-header .badge"
+            hx-select=".card-header .badge, .js-row-approval-marker"
             hx-on::after-request="window.closeSubmitApprovalModal()">
         {% csrf_token %}
         <div class="modal-body">

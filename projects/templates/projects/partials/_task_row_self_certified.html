@@ -1,0 +1,12 @@
+{% comment %}
+The phase-list row's self-certified marker (G85 build, B5), for an approved task with
+`approval_self_certified` set. ONE COPY OF THE WORDING, included in two places: by
+`_task_row_approval.html` on a full render, and by `_task_approval_response.html` when
+the response is swapped into a row after an in-place self-certification (G85 follow-up,
+F2). The `js-row-approval-marker` class is what the overview's submit form selects
+beside the state badge; display only.
+
+Expected context:
+  task
+{% endcomment %}
+<span class="js-row-approval-marker text-muted d-block" style="font-size:.7rem;">Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %} (self-certified)</span>

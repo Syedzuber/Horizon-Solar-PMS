@@ -19,6 +19,10 @@ WHAT IS PINNED HERE
     batch    the phase list's one-read form agrees with the predicate      PerPageFormTests
     marker   a self-certified completion reads "Approved by <name>
              (self-certified)" on the task page and its overview row        SelfCertifiedMarkerTests
+    way out  follow-up F1: a queued task nobody else can now approve tells its
+             submitter to withdraw and resubmit                            EmptiedPoolWordingTests
+    swap     follow-up F2: the row swapped in after an in-place
+             self-certification carries the marker a full reload shows      RowSwapMarkerTests
 
 Unchanged and pinned elsewhere: a sole approver submitting their own task self-certifies
 (tests_approval_pool.SelfCertifiesWhenPoolIsEmptyTests); the submitter refusal's message
@@ -314,3 +318,108 @@ class SelfCertifiedMarkerTests(AssigneeFixture):
             reverse('task_detail', args=[self.site.project_id, self.pm_task.pk]))
         self.assertNotContains(page, '(self-certified)')
         self.assertNotIn('(self-certified)', self._row(self._overview(self.pm), self.pm_task))
+
+
+# ---------------------------------------------------------------------------
+# Follow-up F1: the submitter's line when the pool has emptied
+# ---------------------------------------------------------------------------
+
+WAY_OUT = 'No one else can approve this now. Withdraw and resubmit to complete it as self-certified.'
+WAIT_LINE = 'You submitted this — someone else must approve it.'
+
+
+class EmptiedPoolWordingTests(AssigneeFixture):
+    """The coordinator submits the PM's task while the engineer is still a signature;
+    the engineer's assignment then ends, and nobody but the two of them is left."""
+
+    def _page(self, task, by):
+        return _client_for(by).get(reverse('task_detail', args=[self.site.project_id, task.pk]))
+
+    def test_the_submitter_is_told_the_way_out_once_nobody_else_can_approve(self):
+        self._submit(self.pm_task, self.coord)
+        self._no_engineer()
+        page = self._page(self.pm_task, self.coord)
+        self.assertContains(page, WAY_OUT)
+        self.assertNotContains(page, WAIT_LINE)
+
+    def test_the_wording_follows_the_endpoint(self):
+        """The line promises what the endpoint then does: the withdraw-and-resubmit it
+        names completes the task as self-certified."""
+        self._submit(self.pm_task, self.coord)
+        self._no_engineer()
+        self.assertContains(self._page(self.pm_task, self.coord), WAY_OUT)
+        self._verdict(self.pm_task, 'task_reject', self.coord)
+        self._submit(self.pm_task, self.coord)
+        self.assertTrue(self.pm_task.approval_self_certified)
+
+    def test_the_submitter_still_waits_while_someone_else_can_approve(self):
+        self._submit(self.pm_task, self.coord)
+        page = self._page(self.pm_task, self.coord)
+        self.assertContains(page, WAIT_LINE)
+        self.assertNotContains(page, WAY_OUT)
+
+    def test_a_task_someone_else_can_sign_keeps_the_wait_line(self):
+        """No engineer, but the coordinator's submission of the worker's task still has
+        the PM as its signature."""
+        self._no_engineer()
+        self._submit(self.civil, self.coord)
+        page = self._page(self.civil, self.coord)
+        self.assertContains(page, WAIT_LINE)
+        self.assertNotContains(page, WAY_OUT)
+
+    def test_the_assignee_sees_their_own_line_not_the_way_out(self):
+        self._submit(self.pm_task, self.coord)
+        self._no_engineer()
+        page = self._page(self.pm_task, self.pm)
+        self.assertContains(page, 'someone else submitted it, so you cannot')
+        self.assertNotContains(page, WAY_OUT)
+
+
+# ---------------------------------------------------------------------------
+# Follow-up F2: the swapped row carries the marker
+# ---------------------------------------------------------------------------
+
+MARKER_SPAN = re.compile(r'<span class="js-row-approval-marker[^"]*"[^>]*>.*?</span>', re.S)
+
+
+class RowSwapMarkerTests(AssigneeFixture):
+    """The overview's submit modal posts with hx-target `#task-approval-<pk>` and
+    hx-select ".card-header .badge, .js-row-approval-marker"; htmx sends the target's id
+    as HX-Target."""
+
+    def _hx_submit(self, task, by, target):
+        with self.captureOnCommitCallbacks(execute=True):
+            response = _client_for(by).post(
+                reverse('task_submit_for_approval', args=[self.site.project_id, task.pk]),
+                {'submission_remarks': 'Work done.'},
+                HTTP_HX_REQUEST='true', HTTP_HX_TARGET=target)
+        task.refresh_from_db()
+        return response.content.decode()
+
+    def test_the_swapped_row_reads_as_a_full_reload(self):
+        self._no_engineer()
+        body = self._hx_submit(self.pm_task, self.coord, f'task-approval-{self.pm_task.pk}')
+        self.assertTrue(self.pm_task.approval_self_certified)
+        swapped = MARKER_SPAN.findall(body)
+        self.assertEqual(len(swapped), 1, 'the response must carry exactly one marker')
+        self.assertIn(f'Approved by {_name(self.coord)} (self-certified)', swapped[0])
+        # The same markup, character for character, the row draws on a full reload.
+        reloaded = MARKER_SPAN.findall(self._row(self._overview(self.coord), self.pm_task))
+        self.assertEqual(swapped, reloaded)
+        # The approval card is still the only card, so the badge selector stays honest.
+        self.assertEqual(body.count('card-header'), 1)
+
+    def test_no_marker_on_the_task_page_swap(self):
+        """task_detail's panel already names the approver; the row's marker is not drawn
+        into #taskApprovalBlock."""
+        self._no_engineer()
+        body = self._hx_submit(self.pm_task, self.coord, 'taskApprovalBlock')
+        self.assertTrue(self.pm_task.approval_self_certified)
+        self.assertNotIn('js-row-approval-marker', body)
+        self.assertIn(f'{_name(self.coord)} (self-certified)', body)
+
+    def test_no_marker_on_a_queued_submission(self):
+        body = self._hx_submit(self.pm_task, self.coord, f'task-approval-{self.pm_task.pk}')
+        self.assertTrue(self.pm_task.is_awaiting_approval)
+        self.assertNotIn('js-row-approval-marker', body)
+        self.assertIn('Awaiting approval', body)
