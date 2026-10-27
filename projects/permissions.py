@@ -1693,10 +1693,12 @@ def qaqc_engineer_manager_refusal(profile, project, seat):
 # widen the other.
 #
 # THE PM IS IN BOTH SETS, BUT NOT FOR THE SAME TASK. A PM may submit a task and a
-# PM may approve one; the same PM may not do both to the same task. That refusal
-# is NOT here — it lives in `task_approve`, because it is a fact about one task's
-# current submission (which changes as the task is rejected and resubmitted by
-# different people) rather than about who holds authority on the project. See the
+# PM may approve one; the same PM may not do both to the same task, nor give a
+# verdict on a task assigned to them that somebody else submitted (G85). Those
+# refusals are NOT here — they live in `task_approve` and `task_reject`, because
+# each is a fact about one task's current submission (which changes as the task is
+# rejected and resubmitted by different people) rather than about who holds
+# authority on the project. See the
 # note at the check itself for why keeping the two apart matters: this predicate
 # is also what the screen asks to decide whether to offer a verdict at all, and it
 # is shared with REJECT, where withdrawing your own submission is legitimate.
@@ -1757,8 +1759,9 @@ def user_can_approve_task(user, project):
 
     No `task` argument: approval authority is a property of the project and the
     person, identical for every task on it. The per-task questions — is this thing
-    actually submitted, and is the person asking the one who submitted it — are
-    state, not permission, and are asked by `task_approve`.
+    actually submitted, and is the person asking the one who submitted it or the one
+    it is assigned to (G85) — are state, not permission, and are asked by
+    `task_approve` and `task_reject`.
     """
     profile = getattr(user, 'profile', None)
     if profile is None:
@@ -1773,16 +1776,29 @@ def user_can_approve_task(user, project):
     return bool(profile.is_qaqc) and user_can_view_project(user, project)
 
 
-def task_has_independent_approver(project, submitter_profile, *, engineer_holds_task=False):
+def task_has_independent_approver(project, submitter_profile, *, engineer_holds_task=False,
+                                  assignee_id=None):
     """
-    Return True if at least one ACTIVE user OTHER THAN `submitter_profile` passes
-    `user_can_approve_task()` for `project`.
+    Return True if at least one ACTIVE user OTHER THAN `submitter_profile` and the task's
+    assignee passes `user_can_approve_task()` for `project`.
+
+    `assignee_id`: the UserProfile pk the task is assigned to, or None (G85, rule R-c).
+    The assignee is left out of the pool because task_approve and task_reject refuse them
+    a verdict on a task somebody else submitted; counting them would queue that
+    submission for a signature that can never come. So a coordinator submitting a
+    PM-held task on a site with no other approver self-certifies, and a PM submitting a
+    coordinator-held one likewise, instead of deadlocking. When the assignee IS the
+    submitter, dropping them changes nothing, which is why a sole approver submitting
+    their own task still self-certifies.
 
     `engineer_holds_task`: the task being submitted is held by the site's QA/QC engineer
     (qaqc_engineer_holds_task()). That engineer is then left out of the pool (CL-A v2.5):
     task_approve and task_reject refuse them on a task they hold, so counting them would
     queue a PM's submission for a signature that can never come. With them out, a PM
     submitting such a task on a site with no coordinator self-certifies (ruling Q3).
+    `assignee_id` covers this case too (the engineer is then the assignee), and the views
+    pass that instead; the keyword stays because tests_qaqc_engineer_tasks asks it by
+    name (G85 build, B3: the engineer path is kept separate).
 
     This is the question `task_approve`'s self-approval guard creates and never
     answers: that guard refuses the submitter, and on a project whose only approver
@@ -1830,8 +1846,24 @@ def task_has_independent_approver(project, submitter_profile, *, engineer_holds_
     of the relation, so this module stays free of the circular imports that the
     no-model-imports rule exists to prevent.
     """
-    if project is None:
+    candidates = _approver_candidates(project, submitter_profile, engineer_holds_task,
+                                      assignee_id)
+    if candidates is None:
         return False
+    for candidate in candidates:
+        if user_can_approve_task(candidate.user, project):
+            return True
+    return False
+
+
+def _approver_candidates(project, submitter_profile, engineer_holds_task, assignee_id):
+    """The CANDIDATE set behind task_has_independent_approver() and
+    _independent_approver_pks(): active profiles that might pass user_can_approve_task(),
+    minus the submitter and the assignee. None (no query beyond the reads below) when
+    nobody is left. One copy, so the early-exit answer and the full set read the same
+    people; the docstring above says what each term is for."""
+    if project is None:
+        return None
 
     user_profile_model = project.coordinators.model
 
@@ -1858,22 +1890,33 @@ def task_has_independent_approver(project, submitter_profile, *, engineer_holds_
     # predicate.
     if submitter_profile is not None:
         candidate_pks.discard(submitter_profile.pk)
+    # Nor is the assignee a second signature on their own task (G85): the verdict
+    # endpoints refuse them, so they are dropped here by the same token.
+    if assignee_id is not None:
+        candidate_pks.discard(assignee_id)
 
     if not candidate_pks:
-        return False
+        return None
 
-    candidates = (
+    return (
         user_profile_model.objects
         .filter(pk__in=candidate_pks, is_active=True, user__is_active=True)
         .select_related('user')
     )
-    for candidate in candidates:
-        if user_can_approve_task(candidate.user, project):
-            return True
-    return False
 
 
-def user_may_self_certify(user, project, *, engineer_holds_task=False):
+def _independent_approver_pks(project, submitter_profile):
+    """Every active profile other than `submitter_profile` that passes
+    user_can_approve_task() on `project`, as a set of pks: task_has_independent_approver()
+    without its early exit, so one read answers it for any assignee by set difference
+    (user_may_self_certify_by_assignee). Same candidates, same predicate."""
+    candidates = _approver_candidates(project, submitter_profile, False, None)
+    if candidates is None:
+        return set()
+    return {c.pk for c in candidates if user_can_approve_task(c.user, project)}
+
+
+def user_may_self_certify(user, project, *, engineer_holds_task=False, assignee_id=None):
     """
     Return True if `user` submitting a task on `project` would COMPLETE it under
     their own name rather than queue it for someone else's signature.
@@ -1907,10 +1950,11 @@ def user_may_self_certify(user, project, *, engineer_holds_task=False):
     pressed said it was asking for review. Reassembling the two terms at each site
     is exactly how that drift starts, so they are assembled once, here.
 
-    `engineer_holds_task` is passed straight to task_has_independent_approver(): for a
-    task the site's QA/QC engineer holds, they are not in its pool (CL-A v2.5). The two
-    per-task callers compute it with qaqc_engineer_holds_task(); the per-page builder asks
-    both ways and the row picks.
+    `assignee_id` and `engineer_holds_task` are passed straight to
+    task_has_independent_approver(): the task's assignee is not in its pool (G85), and
+    nor is the site's QA/QC engineer on a task they hold (CL-A v2.5). The views pass the
+    assignee, which covers the engineer too; the answer is therefore per assignee, and
+    the per-page builder asks once per distinct assignee among its rows.
 
     THE SITE'S QA/QC ENGINEER NEVER SELF-CERTIFIES (CL-A v2.5, ruling Q4). Every task
     they can submit is one they hold — they are never the site's manager (CL-A, CL-H), so
@@ -1919,18 +1963,46 @@ def user_may_self_certify(user, project, *, engineer_holds_task=False):
     signature.
     """
     profile = getattr(user, 'profile', None)
-    if profile is None:
+    if profile is None or not _holds_self_certifying_signature(user, project):
         return False
+    return not task_has_independent_approver(project, profile,
+                                             engineer_holds_task=engineer_holds_task,
+                                             assignee_id=assignee_id)
+
+
+def _holds_self_certifying_signature(user, project):
+    """The person half of user_may_self_certify(), shared with its per-page form so the
+    two cannot assemble it differently."""
     # Cheap term first, and it is also the one that refuses most callers: every site
     # engineer on a healthy project fails here without the pool ever being built.
     if not user_can_approve_task(user, project):
         return False
     # Only an approver who is not the site's QA/QC engineer may sign their own
     # submission off; the engineer's own work always goes to a second person (Q4).
-    if user_is_site_qaqc(user, project):
-        return False
-    return not task_has_independent_approver(project, profile,
-                                             engineer_holds_task=engineer_holds_task)
+    return not user_is_site_qaqc(user, project)
+
+
+def user_may_self_certify_by_assignee(user, project, assignee_ids):
+    """user_may_self_certify() for several assignees at once: {assignee pk: answer}.
+
+    THE PER-PAGE FORM (G85). The answer depends on the task's assignee, and a phase list
+    has several. Asking user_may_self_certify() once per assignee rebuilds the pool each
+    time, so a page grew by a pool read for every new assignee on it. Here the person
+    half is asked once and the pool is read once, in full (_independent_approver_pks),
+    and each assignee's answer is whether anybody is left once they are taken out: the
+    same candidates and the same predicate, without the early exit. None as an assignee
+    (an unassigned task) takes nobody out.
+
+    The pool is read even for an empty `assignee_ids`, as the per-page call before G85
+    always was: the page's cost stays the same whether or not a row offers the button,
+    rather than stepping up when the first task goes In Progress.
+    """
+    assignee_ids = list(assignee_ids)
+    profile = getattr(user, 'profile', None)
+    if profile is None or not _holds_self_certifying_signature(user, project):
+        return dict.fromkeys(assignee_ids, False)
+    pool = _independent_approver_pks(project, profile)
+    return {assignee_id: not (pool - {assignee_id}) for assignee_id in assignee_ids}
 
 
 def user_can_waive_punch_point(user, project):

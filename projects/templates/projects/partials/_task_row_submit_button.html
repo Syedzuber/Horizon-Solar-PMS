@@ -1,8 +1,8 @@
 {% comment %}
 The phase-list row's Submit / Complete (self-certified) button, for an In Progress task
-the viewer may submit. Included twice by `_task_row_approval.html`, once per approver
-pool (CL-A v2.5): `self_certify` is the answer for THIS row's pool, picked there from
-the two per-page answers `_phase_list_two_step()` computes.
+the viewer may submit. Included by `_task_row_approval.html`: `self_certify` is the
+answer for THIS row's approver pool, which depends on the row's assignee (G85), read
+there from the per-assignee answers `_phase_list_two_step()` computes.
 
 `data-self-certify` carries the same answer to the shared confirm modal in
 project_overview.html, which is rendered once per page and so cannot know which row

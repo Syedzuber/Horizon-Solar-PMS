@@ -5087,6 +5087,38 @@ decision. If ruled in, the term belongs beside the `submitted_by` check in `task
 and `user_may_self_certify` / `task_has_independent_approver` would need the same person
 excluded from the pool, or a PM-held task on a coordinator-less site deadlocks.
 
+**Closed 27 Oct 2026 (the G85 build, rule R-c; audit of 27 Oct).** Nobody approves or
+rejects a task assigned to them when someone else submitted it; a sole approver who submits
+a task they hold still self-certifies.
+- `views._assignee_verdict_refused()` — one message for both verdicts and every role. In
+  `task_approve` it is asked after the submitter refusal, so a person who both holds and
+  submitted the task still hears "You submitted … yourself". In `task_reject` it refuses the
+  assignee only when `submitted_by` is someone else (a null submitter counts as someone
+  else); an assignee withdrawing their own submission is unchanged.
+- `permissions.task_has_independent_approver(…, assignee_id=)` drops the assignee from the
+  candidates; `user_may_self_certify` passes it, and `task_submit_for_approval` and
+  `_task_approval_context` pass `task.assigned_to_id`. So a coordinator submitting a PM-held
+  task on a site with no other approver self-certifies, and a PM submitting a
+  coordinator-held one likewise, instead of deadlocking.
+- The phase-list label is per row's assignee: `_phase_list_two_step` reads the distinct
+  assignees of its Submit-button rows and answers them from one pool read
+  (`permissions.user_may_self_certify_by_assignee`); rows read theirs through the
+  `approval_tags.self_certify_for` filter. Overview query count unchanged (SCMPILOT06: PM
+  109 → 109, Site Engineer 104 → 104); `CostPerRowTests` passes unchanged.
+- The task page panel offers the assignee no verdict form once someone else has submitted,
+  and says why (`own_task_submitted_by_other`).
+- Self-certified completions now read "Approved by <name> (self-certified)" on the task page
+  panel and the overview row (display only).
+- Production on 23 Oct had no G85-shaped approval (0 of 17); exposure was 60 open tasks on
+  the 20 sites with a PM, a coordinator and a QA/QC engineer.
+
+Pinned by `tests_g85_assignee_approval.py`. **Left open:** a QA/QC assignment ending while a
+coordinator's submission of a PM-held task waits leaves no one who may approve it; the way
+out is the coordinator withdrawing (Reject) and resubmitting, which then self-certifies.
+Nothing re-routes the waiting submission on its own. The same shape existed before R-c
+whenever the pool shrank after a submission (a coordinator removed while the PM's
+submission waited).
+
 ### G86 — the PM-task candidate list is company-wide; the coordinator half is project-scoped
 
 Recorded 26 Oct 2026 by the same build (ruling R1: the PM half stays company-wide).
@@ -5097,6 +5129,20 @@ given any site's PM task, which is how cover between PMs works. It means a PM wi
 relationship to a site can be assigned its PM task, and then cannot open it
 (`user_can_view_project` has no "holds a task" branch for the PM role). Narrowing it is a
 product decision about cover, not a defect fix.
+
+### G97 — `task_detail_status_update` has no project-view check (B12, confirmed for G86) — NEXT SESSION
+
+Recorded 27 Oct 2026 by the G85 build, from the G85 audit; **marked for the next session**.
+The gap itself is B12 (30 Aug 2026, "preserve and rectify later"); this entry records that
+G86 now makes it reachable through the screens. Verified on `solarpms_local` in a
+rolled-back transaction: a PM with no seat on SCMPILOT06, holding its PM task, gets 404 on
+`task_detail`, `project_overview`, `task_status_update` and `task_submit_for_approval`, but
+`task_detail_status_update` moved the task Not Started → In Progress (302, redirecting to a
+page that 404s for them). They can start the task blind and never submit it. Production on
+23 Oct had no such OPEX task (35 Residential, all Done). Fix: the `user_can_view_project`
+gate beside the assignee check, plus the opposite of
+`DecidedDifferenceTests.test_the_detail_path_has_no_project_scope_gate_and_lets_the_same_user_through`;
+decide with G86 whether a task-holding PM is admitted instead of refused.
 
 ### G87 — assignee candidate lists read `UserProfile.is_active` but not `User.is_active`
 
@@ -5121,6 +5167,19 @@ of Sudhir Kumar (Project Coordinator) holding 2 PM-role tasks on HRP-RES-2026-01
 their own project through the screens; the admin still allows any role on any project.
 Fix: make `clean_assigned_to` ask `views.task_assignee_candidates` (lazy import), and log
 the change.
+
+### G96 — the Django admin edits the Task approval columns with no rule
+
+Recorded 27 Oct 2026 by the G85 build, from the G85 audit (admin.py was forbidden to it).
+`admin.TaskAdminForm` uses `fields = '__all__'` and `TaskAdmin.readonly_fields` is
+`['status', 'is_mirror']`, so `submitted_by`, `submitted_at`, `submission_remarks`,
+`approved_by`, `approved_at`, `approval_remarks` and `approval_self_certified` are all
+editable there (confirmed on a live form). An admin edit can set `approved_at` with any
+`approved_by` — the assignee, the submitter, anybody — and rung 1 of
+`_apply_task_status_change()` then lets the task go to Done: the two-signature rule and
+G85's assignee rule are both bypassed, with no ActivityLog line. Same family as G88 (no rule
+and no log on the admin form). Fix: add the seven columns to `readonly_fields`, with the
+R-10 comment's reasoning; decide whether an admin repair path is wanted at all.
 
 ### G89 — the stuck-site "Waiting on" names the PM even when someone else holds the task
 
@@ -5177,6 +5236,18 @@ unchanged: the new term reads `qaqc_engineer_holds_task()`, not "the approver is
 assignee". If G85 is ruled in, the same shape applies: a term beside the `submitted_by`
 check in `task_approve`, and the assignee dropped from the pool through the same keyword,
 or a manager-held task on a coordinator-less site deadlocks.
+
+**Closed 27 Oct 2026 with G85.** The general assignee rule now stands beside the engineer's:
+`_assignee_verdict_refused()` after the submitter check, and `assignee_id=` on
+`task_has_independent_approver` / `user_may_self_certify`, which the views pass (it covers
+the engineer holding the task, since they are then its assignee). The engineer path was NOT
+folded in, because `tests_qaqc_engineer_tasks` would have needed editing:
+`OwnTaskApprovalTests` calls `engineer_holds_task=True` by name (two tests), asserts the
+`own_engineer_task` panel flag, and asserts the engineer's own wording ("so you cannot
+approve or reject it") on both verdicts, asked before the submission-state checks — and the
+engineer may not withdraw their own submission, which the general rule allows. So
+`_engineer_own_task_refused()` and the `engineer_holds_task` keyword remain, the keyword now
+redundant for the views.
 
 ### G94 — `punch_points.next_action` can name the QA/QC engineer as the rectifier
 

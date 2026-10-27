@@ -137,7 +137,8 @@ from .permissions import (
     # "would this person's submission complete the task under their own name" - the
     # question the self-approval guard in task_approve creates and does not answer.
     # One predicate for the endpoint and for both button labels; see its docstring.
-    user_may_self_certify,
+    # The _by_assignee form is the phase list's: one pool read for every row (G85).
+    user_may_self_certify, user_may_self_certify_by_assignee,
     # 2.3a - waiving a punch point is PM-only and NARROWER than approving a task;
     # the docstring on the predicate says why is_qaqc is not enough.
     user_can_waive_punch_point,
@@ -5498,7 +5499,7 @@ def _gate_task_pk(project):
     return first_task.pk if first_task else None
 
 
-def _phase_list_two_step(project, request):
+def _phase_list_two_step(project, request, is_manager):
     """Is the two-step completion rule (2.1) in force for this project's task rows,
     and would this viewer's submission complete a task outright?
 
@@ -5519,38 +5520,73 @@ def _phase_list_two_step(project, request):
     that rung would refuse -- delete it and the refusal is unchanged, the user simply
     meets it after clicking instead of before.
 
-    `can_self_certify` IS PER-PAGE, NOT PER-ROW, and that is why it is computed in
-    this builder rather than in the row partial. `user_may_self_certify()` asks about
-    the project and the viewer only -- it takes no task -- so the answer is the same
-    for all 23 rows of a stock OPEX site, and asking it once here keeps the promise
-    `_task_row_approval.html` makes in its own header about not putting a query on a
-    row. It is scoped to OPEX for the same reason as `two_step_completion`: on a
-    Residential site nothing reads it and the query would be pure waste.
+    THE SELF-CERTIFY LABEL IS PER ASSIGNEE (G85, rule R-c). A task's assignee is out of
+    its approver pool (task_has_independent_approver), so whether the viewer's
+    submission completes a task depends on who holds it: a coordinator submitting a
+    PM-held task on a site with no other approver completes it, the same coordinator
+    submitting a Site Engineer's task there does not. The site's QA/QC engineer holding
+    a task (CL-A v2.5) is one case of this. So the builder reads the DISTINCT assignees
+    of the rows that draw a Submit button -- In Progress, not submitted, not approved,
+    not a mirror, and (for a viewer who does not manage the site) their own -- and
+    answers them all from one pool read (permissions.user_may_self_certify_by_assignee):
+    a constant cost per page, never one per row or per assignee
+    (tests_phase_list_approval.CostPerRowTests). `self_certify_by_assignee` holds the
+    answers; the row reads its own through the `self_certify_for` filter. It is scoped
+    to OPEX for the same reason as `two_step_completion`: on a Residential site nothing
+    reads it.
 
     IT IS THE ENDPOINT'S OWN PREDICATE, not a restatement of it. Both this and
-    `task_submit_for_approval` call `user_may_self_certify()`, so the label on the
-    button and the act behind it cannot disagree. It also feeds the confirm modal in
-    project_overview.html, which is the dialog the person actually presses OK in.
+    `task_submit_for_approval` call `user_may_self_certify()` with the task's assignee,
+    so the label on the button and the act behind it cannot disagree. It also feeds the
+    confirm modal in project_overview.html, which is the dialog the person actually
+    presses OK in: `self_certify_any` / `self_certify_all` say which wordings some row
+    on the page can use, so a page whose rows share one answer renders exactly one.
 
-    TWO ANSWERS SINCE CL-A v2.5. A task held by the site's QA/QC engineer has a smaller
-    approver pool — the engineer is out of it (task_has_independent_approver) — so a PM
-    submitting it may self-certify where the same PM submitting any other task would
-    not. `can_self_certify_engineer_held` is that answer and `qaqc_engineer_pk` tells the
-    row which of the two is its own; still two predicate calls per page, never per row.
-    No engineer (or not OPEX): the second answer is the first and costs nothing more.
+    `is_manager` is user_can_manage_project() for the viewer, which both callers have
+    already asked; it narrows the rows read to the viewer's own when it is False,
+    exactly as `_task_row_approval.html` draws the button.
     """
     two_step = project.project_type == 'OPEX'
-    can_self = two_step and user_may_self_certify(request.user, project)
-    engineer_pk = site_qaqc_engineer_id(project) if two_step else None
-    can_self_held = can_self
-    if engineer_pk is not None:
-        can_self_held = user_may_self_certify(request.user, project, engineer_holds_task=True)
+    answers = {}
+    if two_step:
+        profile = getattr(request.user, 'profile', None)
+        # The rows _task_row_approval.html draws a Submit button on; one query for their
+        # distinct assignees (None for an unassigned row, which the PM may submit).
+        button_rows = Task.objects.filter(
+            phase__project=project, is_mirror=False, status=Task.IN_PROGRESS,
+            submitted_at__isnull=True, approved_at__isnull=True,
+        )
+        if not is_manager:
+            button_rows = button_rows.filter(assigned_to=profile) if profile else button_rows.none()
+        answers = user_may_self_certify_by_assignee(
+            request.user, project, set(button_rows.values_list('assigned_to_id', flat=True)))
+    seen = set(answers.values())
     return {
         'two_step_completion': two_step,
-        'can_self_certify': can_self,
-        'can_self_certify_engineer_held': can_self_held,
-        'qaqc_engineer_pk': engineer_pk,
+        'self_certify_by_assignee': _SelfCertifyByAssignee(request.user, project, answers),
+        'self_certify_any': True in seen,
+        'self_certify_all': seen == {True},
     }
+
+
+class _SelfCertifyByAssignee(dict):
+    """{assignee UserProfile pk (or None): user_may_self_certify() answer} for one viewer
+    on one project, filled by _phase_list_two_step().
+
+    A row whose assignee the builder did not read -- its state changed between that
+    query and the render -- is asked on demand rather than defaulting to False, because
+    a wrong "Submit for approval" label on a submission that would complete the task is
+    the one failure the label exists to prevent. Cached like the others."""
+
+    def __init__(self, user, project, answers):
+        super().__init__(answers)
+        self.user = user
+        self.project = project
+
+    def __missing__(self, assignee_id):
+        answer = user_may_self_certify(self.user, self.project, assignee_id=assignee_id)
+        self[assignee_id] = answer
+        return answer
 
 
 def _row_viewer_context(request):
@@ -5591,7 +5627,7 @@ def _task_row_context(request, project):
         'is_assigned_pm':      is_pm,
         'task_status_choices': Task.STATUS_CHOICES,
         'gate_task_pk':        _gate_task_pk(project),
-        **_phase_list_two_step(project, request),
+        **_phase_list_two_step(project, request, is_pm),
         **_row_viewer_context(request),
     }
 
@@ -5883,22 +5919,33 @@ def _task_approval_context(request, project, task):
     own_engineer_task = (eligible and profile is not None
                          and task.assigned_to_id == profile.pk
                          and qaqc_engineer_holds_task(project, task))
+    # G85 (rule R-c): the assignee gives no verdict on their own task once somebody else
+    # has submitted it. The same two column terms _assignee_verdict_refused() refuses
+    # on, read here so the panel offers no form whose every button would be refused.
+    # The engineer's own line wins where both apply (asked first in the template).
+    own_task_submitted_by_other = (eligible and profile is not None
+                                   and task.submitted_at is not None
+                                   and task.assigned_to_id == profile.pk
+                                   and task.submitted_by_id != profile.pk)
     return {
         'show_approval_panel': eligible,
         # Both are False for an ineligible task, so a stray include renders nothing
         # actionable rather than an unguarded form.
         'can_submit_task':  can_submit,
         'can_approve_task': eligible and profile is not None and not own_engineer_task
+                            and not own_task_submitted_by_other
                             and user_can_approve_task(request.user, project),
         # The panel's reason line for that engineer, in place of the verdict form.
         'own_engineer_task': own_engineer_task,
+        # The panel's reason line for any other assignee, likewise.
+        'own_task_submitted_by_other': own_task_submitted_by_other,
         # Would pressing Submit complete the task outright? THE ENDPOINT'S OWN
         # PREDICATE, called here rather than restated, so the button and the act
         # behind it cannot disagree. Gated on `can_submit` so it costs its queries
-        # only for someone actually being offered the button it relabels.
+        # only for someone actually being offered the button it relabels. The
+        # assignee is passed as task_submit_for_approval passes it (G85).
         'can_self_certify': can_submit and user_may_self_certify(
-            request.user, project,
-            engineer_holds_task=qaqc_engineer_holds_task(project, task)),
+            request.user, project, assignee_id=task.assigned_to_id),
         # PP-2: the QA/QC-raised points that would refuse an approval right now. The
         # panel names them and offers no Approve button while any is outstanding; the
         # endpoints ask approval_blockers() again under the project lock. One query, on
@@ -6904,6 +6951,29 @@ def _engineer_own_task_refused(request, task, project, profile):
     return True
 
 
+def _assignee_verdict_refused(request, task, profile):
+    """True, with the user-facing message emitted, if `profile` holds `task` and somebody
+    else submitted it (G85, rule R-c): nobody approves or rejects the work assigned to
+    them. ONE MESSAGE for both verdicts and every role, so task_approve and task_reject
+    cannot word the rule differently.
+
+    A submission by the assignee themselves is NOT refused here. Approving it is the
+    submitter refusal's case, asked first so its message stands; rejecting it is
+    withdrawing it, which task_reject allows. A null `submitted_by` (the submitter's
+    account removed) counts as somebody else: the assignee still did not submit it.
+
+    Column reads only; no query.
+    """
+    if task.assigned_to_id != profile.pk or task.submitted_by_id == profile.pk:
+        return False
+    messages.error(
+        request,
+        f"'{task.task_name}' is assigned to you and someone else submitted it, so you "
+        f"cannot approve or reject it. Another approver on this project signs it off."
+    )
+    return True
+
+
 def _approval_response(request, project, task):
     """The shared tail of all three approval views: the HTMX partial or a redirect.
 
@@ -7008,11 +7078,14 @@ def task_submit_for_approval(request, project_id, task_id):
     # inside the branch would be unreachable code asserting a rule that has already
     # held.
     #
-    # CL-A v2.5: a task the site's QA/QC engineer holds has a pool without them, so a PM
-    # submitting it on a site with no coordinator self-certifies (ruling Q3), and the
-    # engineer submitting it never does (Q4) - both inside user_may_self_certify().
-    if not user_may_self_certify(request.user, project,
-                                 engineer_holds_task=qaqc_engineer_holds_task(project, task)):
+    # G85 (rule R-c): the task's assignee is out of its pool, because task_approve and
+    # task_reject refuse them a verdict on work somebody else submitted. So a coordinator
+    # submitting a PM-held task on a site with no other approver self-certifies rather
+    # than queueing for a signature that can never come, and a sole approver submitting
+    # their own task still does. The site's QA/QC engineer holding the task is one case
+    # of this (CL-A v2.5, ruling Q3); the engineer submitting it never self-certifies
+    # (Q4) - both inside user_may_self_certify().
+    if not user_may_self_certify(request.user, project, assignee_id=task.assigned_to_id):
         Task.objects.filter(pk=task.pk).update(
             submitted_by=profile,
             submitted_at=timezone.now(),
@@ -7139,8 +7212,9 @@ def task_approve(request, project_id, task_id):
     or waived. Rejection-raised points do not block; this approval closes them (PP-1).
 
     Access: PM-level authority on the project, the site's assigned QA/QC engineer, or
-    the legacy QA/QC flag with sight of it (user_can_approve_task) — the engineer never
-    on a task they hold (CL-A v2.5). POST only.
+    the legacy QA/QC flag with sight of it (user_can_approve_task) — never the person
+    who submitted the task, never its assignee (G85), and the engineer never on a task
+    they hold (CL-A v2.5). POST only.
     """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
@@ -7164,7 +7238,8 @@ def task_approve(request, project_id, task_id):
     # CL-A v2.5: the site's QA/QC engineer may not approve a task they hold, whoever
     # submitted it. Asked before the submission state, so they hear the rule that
     # applies to them rather than a state message about a verdict they cannot give.
-    # Distinct from G85, which is about managers and stays recorded, not fixed.
+    # Kept apart from the general assignee refusal below (G85) because its wording and
+    # its place before the state checks are pinned by tests_qaqc_engineer_tasks.
     if _engineer_own_task_refused(request, task, project, profile):
         return _approval_response(request, project, task)
 
@@ -7212,6 +7287,16 @@ def task_approve(request, project_id, task_id):
             f"approved by someone other than the person who submitted it. Ask "
             f"another project manager or a QA/QC reviewer to sign it off."
         )
+        return _approval_response(request, project, task)
+
+    # NOBODY APPROVES THE WORK ASSIGNED TO THEM, whoever submitted it (G85, rule R-c).
+    # Without this a coordinator could submit a PM-held task and the PM approve their
+    # own work, or the reverse: two names on the row, one person behind the work and
+    # the sign-off. Asked AFTER the submitter refusal, so a person who both holds and
+    # submitted the task still hears that message. The approver pool drops the
+    # assignee by the same rule (task_has_independent_approver), so a site with no
+    # other approver self-certifies at submission instead of queueing for this refusal.
+    if _assignee_verdict_refused(request, task, profile):
         return _approval_response(request, project, task)
 
     remarks = request.POST.get('approval_remarks', '').strip()
@@ -7299,7 +7384,8 @@ def task_reject(request, project_id, task_id):
     Access: PM-level authority on the project, the site's assigned QA/QC engineer, or
     the legacy QA/QC flag with sight of it - the same people who may approve
     (user_can_approve_task), and like approval never the engineer on a task they hold
-    (CL-A v2.5). POST only.
+    (CL-A v2.5), nor the assignee on a task somebody else submitted (G85). The submitter
+    may reject, which withdraws their own submission. POST only.
     """
     if request.method != 'POST':
         return redirect('task_detail', project_id=project_id, task_id=task_id)
@@ -7341,6 +7427,13 @@ def task_reject(request, project_id, task_id):
             request,
             f"'{task.task_name}' has already been approved and cannot be rejected."
         )
+        return _approval_response(request, project, task)
+
+    # G85 (rule R-c): the assignee gives no verdict on their own work when somebody
+    # else submitted it - sending it back is a verdict on it, just as approving is.
+    # When they submitted it themselves, rejecting withdraws it and is allowed as
+    # before; the helper answers that case False.
+    if _assignee_verdict_refused(request, task, profile):
         return _approval_response(request, project, task)
 
     remarks = request.POST.get('approval_remarks', '').strip()
@@ -11373,7 +11466,7 @@ def project_overview(request, project_id):
         'gantt_can_view_client':       gantt_can_view_client,
         'gantt_internal':              gantt_internal,
         'gantt_client':                gantt_client,
-        **_phase_list_two_step(project, request),
+        **_phase_list_two_step(project, request, is_assigned_pm),
         **_row_viewer_context(request),
     })
 

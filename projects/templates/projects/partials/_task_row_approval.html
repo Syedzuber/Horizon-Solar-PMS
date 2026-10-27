@@ -35,17 +35,22 @@ status (2.1 §3), so the badge is the only thing on the row that changes and the
 swap below can keep it honest. The approver's controls stay on task_detail, and
 this row tells them the task is waiting.
 
-`can_self_certify` IS NOT A PER-ROW QUERY, for the same reason the rest of this
-file exists. `permissions.task_has_independent_approver()` takes no task — it asks
-about the project and the viewer — so `_phase_list_two_step()` computes it once per
-page render and every row reads the same value. The button it relabels still POSTs
-to the same endpoint; the endpoint reads the pool itself and decides. This is the
-honest label, not the rule.
+THE SELF-CERTIFY LABEL IS NOT A PER-ROW QUERY, for the same reason the rest of this
+file exists. The answer depends on the row's assignee (G85: the assignee is out of
+their own task's approver pool), so `_phase_list_two_step()` asks it once per DISTINCT
+assignee on the page and this row reads its own from `self_certify_by_assignee`. The
+button it relabels still POSTs to the same endpoint; the endpoint reads the pool
+itself and decides. This is the honest label, not the rule.
+
+A SELF-CERTIFIED COMPLETION SAYS SO (G85 build, B5): the row names the approver and
+the marker, where an ordinary approval keeps the badge alone. The name is read off the
+same `approved_by` the badge's title already loads, so it adds no query.
 
 Expected context:
-  task, project, is_assigned_pm, two_step_completion, can_self_certify,
-  can_self_certify_engineer_held, qaqc_engineer_pk (CL-A v2.5, _phase_list_two_step)
+  task, project, is_assigned_pm, two_step_completion, self_certify_by_assignee
+  (_phase_list_two_step)
 {% endcomment %}
+{% load approval_tags %}
 {% if two_step_completion and not task.is_mirror %}
   {% comment %}The id is the hx-target of the submit form in project_overview.html's
      modal, which uses hx-select to pull the state badge out of the approval panel
@@ -58,6 +63,9 @@ Expected context:
     {% if task.approved_at %}
       <span class="badge bg-success"
             title="Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}">Approved</span>
+      {% if task.approval_self_certified %}
+        <span class="text-muted d-block" style="font-size:.7rem;">Approved by {% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %} (self-certified)</span>
+      {% endif %}
     {% elif task.submitted_at %}
       {% comment %}THE POINT OF THE WHOLE PARTIAL. Before this, a submitted task sat
          in the list reading "In Progress" and nothing else — indistinguishable from
@@ -67,14 +75,10 @@ Expected context:
             title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on the project manager or QA/QC.">Awaiting approval</span>
     {% elif is_assigned_pm or task.assigned_to and task.assigned_to == request.user.profile %}
       {% if task.status == 'In Progress' %}
-        {% comment %}CL-A v2.5: a task held by the site's QA/QC engineer has its own
-           approver pool (the engineer is out of it), so its row reads the second answer
-           _phase_list_two_step() computed. Both are per page; this only picks.{% endcomment %}
-        {% if qaqc_engineer_pk and task.assigned_to_id == qaqc_engineer_pk %}
-          {% include 'projects/partials/_task_row_submit_button.html' with self_certify=can_self_certify_engineer_held %}
-        {% else %}
-          {% include 'projects/partials/_task_row_submit_button.html' with self_certify=can_self_certify %}
-        {% endif %}
+        {% comment %}The answer for this row's assignee (G85; the QA/QC engineer holding
+           the task is one case, CL-A v2.5), computed once per distinct assignee by
+           _phase_list_two_step(); this only reads it.{% endcomment %}
+        {% include 'projects/partials/_task_row_submit_button.html' with self_certify=self_certify_by_assignee|self_certify_for:task %}
       {% else %}
         {% comment %}`task_submit_for_approval` refuses anything that is not In Progress,
            so the button is not drawn and the reason is given instead — the row never

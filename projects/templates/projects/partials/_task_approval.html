@@ -5,7 +5,9 @@ HTMX; also included on the initial full-page render of task_detail.
 Expected context, all of it built by _task_approval_context() in views.py:
   show_approval_panel, can_submit_task, can_approve_task, task, project,
   approval_blockers (closeout 7b, PP-2: the QA/QC punch points that refuse approval
-  now - while any is listed there is no Approve and no self-certified Complete)
+  now - while any is listed there is no Approve and no self-certified Complete),
+  own_engineer_task and own_task_submitted_by_other (the two reason lines shown in
+  place of the verdict form: CL-A v2.5 and G85)
 
 THE PANEL DECIDES NOTHING. Every question it asks has already been answered by
 the view — `show_approval_panel` carries the OPEX-and-not-a-mirror scope,
@@ -49,7 +51,9 @@ Three states, and they are mutually exclusive:
           </div>
           <div class="col-md-6">
             <small class="text-muted d-block">Approved by</small>
-            <span>{% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}</span>
+            {% comment %}G85 build, B5: a self-certified completion says so beside the
+               name, as the checklist PDF already does. Display only.{% endcomment %}
+            <span>{% if task.approved_by %}{{ task.approved_by.user.get_full_name|default:task.approved_by.user.username }}{% else %}—{% endif %}{% if task.approval_self_certified %} (self-certified){% endif %}</span>
             <div class="text-muted small">{{ task.approved_at }}</div>
             {% if task.approval_remarks %}
               <div class="mt-1">{{ task.approval_remarks|linebreaksbr }}</div>
@@ -133,6 +137,14 @@ Three states, and they are mutually exclusive:
           <p class="text-muted small mb-0">
             Waiting on the project manager or a coordinator. You hold this task and are
             this site's QA/QC engineer, so you cannot approve or reject it.
+          </p>
+        {% elif own_task_submitted_by_other %}
+          {% comment %}G85: the task is assigned to the viewer and somebody else submitted
+             it, so task_approve and task_reject refuse them; no form is offered whose
+             every button would be refused.{% endcomment %}
+          <p class="text-muted small mb-0">
+            This task is assigned to you and someone else submitted it, so you cannot
+            approve or reject it. Another approver on this project signs it off.
           </p>
         {% else %}
           <p class="text-muted small mb-0">
