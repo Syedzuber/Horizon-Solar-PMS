@@ -1733,13 +1733,34 @@ def qaqc_engineer_on_site_engineer_task(user, task, project):
     qaqc_engineer_assignment_refusal(): a refusal fails closed, so a stale engineer
     keeps the bar until the PM ends the row. No query for any other task role or a user
     with no profile; one (none off OPEX) for a Site Engineer task.
+
+    The answer is qaqc_engineer_refused_task_role() compared with the task's role, so a
+    page that already holds the engineer id draws its rows from the same rule (G103).
     """
     if task is None or task.assigned_role != SITE_ENGINEER_TASK_ROLE:
         return False
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
-    return site_qaqc_engineer_id(project) == profile.pk
+    return (qaqc_engineer_refused_task_role(profile, site_qaqc_engineer_id(project))
+            == task.assigned_role)
+
+
+def qaqc_engineer_refused_task_role(profile, engineer_id):
+    """The task role whose work `profile` is refused as the site's QA/QC engineer
+    (CL-L, F1): SITE_ENGINEER_TASK_ROLE when `profile` is the engineer named by
+    `engineer_id` (site_qaqc_engineer_id(), or the same active row read another way),
+    else None. No query: the caller has the engineer id.
+
+    THE PURE HALF OF qaqc_engineer_on_site_engineer_task(), which asks it. It exists so
+    project_overview can hide the row controls that predicate refuses (G103) from the
+    engineer id it has already read, without a query per row: the row compares its
+    task's role with this. tests_qaqc_coordinator_engineer.RowControlTests pins the page
+    against the predicate, viewer by viewer.
+    """
+    if profile is None or engineer_id is None or engineer_id != profile.pk:
+        return None
+    return SITE_ENGINEER_TASK_ROLE
 
 
 def qaqc_engineer_manager_refusal(profile, project, seat):

@@ -49,7 +49,7 @@ its own partial because the in-place self-certification swap draws it too (F2).
 
 Expected context:
   task, project, is_assigned_pm, two_step_completion, self_certify_by_assignee
-  (_phase_list_two_step)
+  (_phase_list_two_step), qaqc_refused_task_role (project_overview only, G103)
 {% endcomment %}
 {% load approval_tags %}
 {% if two_step_completion and not task.is_mirror %}
@@ -74,7 +74,10 @@ Expected context:
          re-opened it to check and the PM never learned it was waiting.{% endcomment %}
       <span class="badge bg-warning text-dark"
             title="Submitted{% if task.submitted_by %} by {{ task.submitted_by.user.get_full_name|default:task.submitted_by.user.username }}{% endif %} — waiting on the project manager or QA/QC.">Awaiting approval</span>
-    {% elif is_assigned_pm or task.assigned_to and task.assigned_to == request.user.profile %}
+    {% comment %}G103 (CL-L, F1): no Submit for this site's QA/QC engineer on a Site
+       Engineer row — user_can_submit_task_for_approval refuses it first. On both arms
+       because `and` binds tighter than `or`; see _task_row.html.{% endcomment %}
+    {% elif is_assigned_pm and task.assigned_role != qaqc_refused_task_role or task.assigned_to and task.assigned_to == request.user.profile and task.assigned_role != qaqc_refused_task_role %}
       {% if task.status == 'In Progress' %}
         {% comment %}The answer for this row's assignee (G85; the QA/QC engineer holding
            the task is one case, CL-A v2.5), computed once per distinct assignee by

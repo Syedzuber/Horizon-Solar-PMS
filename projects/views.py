@@ -181,7 +181,7 @@ from .permissions import (
     user_works_on_task, qaqc_engineer_holds_task,
     # CL-L (v2.6): a coordinator may be the site's engineer; the manager arm of the
     # status and checklist gates then still refuses them on Site Engineer tasks.
-    qaqc_engineer_on_site_engineer_task,
+    qaqc_engineer_on_site_engineer_task, qaqc_engineer_refused_task_role,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -11595,6 +11595,15 @@ def project_overview(request, project_id):
         'gantt_client':                gantt_client,
         **_phase_list_two_step(project, request, is_assigned_pm),
         **_row_viewer_context(request),
+        # G103 (CL-L, F1): the task role whose status control and Submit button the
+        # rows leave out, because the viewer is this site's QA/QC engineer — the rule
+        # qaqc_engineer_on_site_engineer_task() refuses on. The engineer id is the QA/QC
+        # card's active row, read above (the same active, OPEX-only row
+        # site_qaqc_engineer_id reads), so it costs no query. None for everyone else,
+        # and absent on the HTMX row redraws (_task_row_context), which keep drawing the
+        # controls: the endpoints still refuse them (EXECUTION_MODULE_DEFERRED.md G103).
+        'qaqc_refused_task_role': qaqc_engineer_refused_task_role(
+            profile, _qaqc_row.engineer_id if _qaqc_row is not None else None),
     })
 
 

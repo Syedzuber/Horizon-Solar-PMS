@@ -18,6 +18,8 @@ WHAT IS PINNED HERE
     approve cannot approve a task they hold; can approve an SE's task;
             out of the pool on the keyword path too (F2)                ApprovalTests
     B3      the double-role line on site_qaqc and the approval panel    DoubleRoleLineTests
+    G103    project_overview rows draw no status select or Submit on a
+            Site Engineer task exactly where the predicate refuses      RowControlTests
 
 Built on tests_qaqc_engineer_tasks.EngineerTaskFixture: `site` (pm + coord, `worker`
 holding every Site Engineer task), `other_site` (pm_b + coord_b). Here `coord`, the
@@ -35,12 +37,13 @@ from django.utils import timezone
 
 from .models import ChecklistItemCompletion, PunchPoint, QaqcVisitAnswer, Task
 from .permissions import (
-    task_has_independent_approver, user_can_waive_punch_point, user_works_on_site,
+    qaqc_engineer_on_site_engineer_task, task_has_independent_approver,
+    user_can_waive_punch_point, user_works_on_site,
 )
 from .qaqc_views import eligible_qaqc_engineers, end_site_qaqc, site_checklist_points
 from .site_pm import SitePmChangeRefused, change_site_pm
 from .tests_qaqc_assignment import _client_for, _messages, _profile
-from .tests_qaqc_engineer_tasks import NET_METERING, EngineerTaskFixture
+from .tests_qaqc_engineer_tasks import CEIG, NET_METERING, EngineerTaskFixture
 
 OWN_ANSWER_REFUSAL = 'You recorded the answer to this point'
 DOUBLE_ROLE_PAGE = 'Also a coordinator of this site.'
@@ -340,3 +343,62 @@ class DoubleRoleLineTests(CoordinatorEngineerFixture):
         end_site_qaqc(self.site, self.pm)
         self._assign_screen(self.pm_b)
         self.assertNotContains(self._panel(self.pm), DOUBLE_ROLE_PANEL)
+
+
+# ---------------------------------------------------------------------------
+# G103 — the overview rows follow qaqc_engineer_on_site_engineer_task
+# ---------------------------------------------------------------------------
+
+STATUS_CONTROL = 'name="status"'
+SUBMIT_BUTTON = 'openSubmitApprovalModal(this)'
+
+
+class RowControlTests(CoordinatorEngineerFixture):
+    """The page against the predicate, viewer by viewer: the row's status select and
+    Submit button on a Site Engineer task are absent exactly where
+    qaqc_engineer_on_site_engineer_task() is True. Every viewer here who is not refused
+    is offered both (a manager, or the task's assignee of its role), so absence can only
+    come from the rule."""
+
+    def setUp(self):
+        super().setUp()
+        # In Progress, not submitted: the state the row draws Submit for.
+        Task.objects.filter(pk=self.civil.pk).update(status=Task.IN_PROGRESS)
+        self.civil.refresh_from_db()
+
+    def _check(self, viewer, label):
+        refused = qaqc_engineer_on_site_engineer_task(viewer.user, self.civil, self.site)
+        page = _client_for(viewer).get(reverse('project_overview',
+                                               args=[self.site.project_id]))
+        row = self._row(page.content.decode(), self.civil)
+        with self.subTest(viewer=label):
+            self.assertEqual(page.context['qaqc_refused_task_role'] == self.civil.assigned_role,
+                             refused)
+            self.assertEqual(STATUS_CONTROL in row, not refused, 'status select')
+            self.assertEqual(SUBMIT_BUTTON in row, not refused, 'Submit button')
+        return refused
+
+    def test_page_matches_the_predicate_for_every_viewer(self):
+        self.site.coordinators.add(self.coord_b)
+        cases = [(self.coord, 'engineer with a coordinator seat', True),
+                 (self.coord_b, 'ordinary coordinator', False),
+                 (self.pm, 'PM', False),
+                 (self.worker, 'Site Engineer holding the task', False)]
+        # The engineer without a seat: pm_b replaces coord, who becomes an ordinary
+        # coordinator again. pm_b manages nothing here and holds nothing, so they are
+        # offered neither control anyway; the rule and the page still agree.
+        for viewer, label, expected in cases:
+            self.assertEqual(self._check(viewer, label), expected, label)
+        self._assign_screen(self.pm_b)
+        for viewer, label, expected in [(self.pm_b, 'engineer without a seat', True),
+                                        (self.coord, 'former engineer, coordinator', False)]:
+            self.assertEqual(self._check(viewer, label), expected, label)
+
+    def test_other_roles_rows_keep_their_controls(self):
+        # CEIG Approval is a PM task the site's PM holds: the coordinator-engineer still
+        # manages it, so its row keeps the select.
+        ceig = self._task(CEIG)
+        self.assertFalse(qaqc_engineer_on_site_engineer_task(self.coord.user, ceig, self.site))
+        page = _client_for(self.coord).get(reverse('project_overview',
+                                                   args=[self.site.project_id]))
+        self.assertIn(STATUS_CONTROL, self._row(page.content.decode(), ceig))

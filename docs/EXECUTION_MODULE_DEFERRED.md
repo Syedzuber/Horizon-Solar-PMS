@@ -5376,6 +5376,31 @@ likewise drawn from the manager flag, and the endpoint answers it 403. A fix nee
 both row builders (`project_overview` and `_task_row_context`), which is one more query on
 every OPEX page a manager opens, against the pinned query counts.
 
+**Narrowed 28 Oct 2026 (G103 follow-up): the full page is fixed; the HTMX redraws are
+left.** `project_overview` passes `qaqc_refused_task_role` from
+`permissions.qaqc_engineer_refused_task_role(profile, engineer_id)`. The engineer id is
+the QA/QC card's active row, which the view had already read, so this adds no query and
+the pinned overview counts are unchanged. `qaqc_engineer_on_site_engineer_task()` now
+answers through the same helper. `_task_row.html` (status select) and
+`_task_row_approval.html` (Submit) leave a row's controls out where its role equals that
+value. `tests_qaqc_coordinator_engineer.RowControlTests` pins the page against the
+predicate for five viewers: the engineer with a coordinator seat, the engineer without one,
+an ordinary coordinator, the PM, and the Site Engineer holding the task.
+
+Still drawn, because no engineer id is loaded there and these keys are absent, so the
+term is true. Each is an HTMX redraw through `_task_row_context()`:
+- `_render_task_row_hx` (one row): `task_status_update`, `task_set_due_date`,
+  `task_assign`, `task_rename_save`. A coordinator-engineer setting a due date on, or
+  assigning, a Site Engineer task gets that row back with the select.
+- `_render_phase_tasks_hx` (a whole phase's rows): `phase_tasks_reorder`.
+- `_render_task_add_success_hx`: `task_add`, `task_duplicate_locations_create`.
+- `_render_task_assign_design_success_hx`: `task_assign_design_head` (the Design Head's
+  modal; reached by a coordinator-engineer only if they also carry the Design Head flag).
+Each endpoint behind those controls still refuses. A page reload removes the controls.
+No other page draws this row: the drill-down has its own markup with no status control,
+and `project_detail.html` is unreachable (the `project_detail` view only redirects to
+`project_overview`).
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

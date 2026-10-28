@@ -12,6 +12,8 @@ Expected context:
   task, project, is_assigned_pm, user_task_role, role, task_status_choices
   viewer_profile_pk, viewer_task_role — from _row_viewer_context(); the own-task arm
                                   of the status and due-date controls (CL-A v2.5)
+  qaqc_refused_task_role       — project_overview only (G103): 'Site Engineer' when
+                                  the viewer is the site's QA/QC engineer, else None
   is_milestone_gate_candidate  — True only for the first task of the first phase
                                   (replaces the old forloop.first check; the BD
                                   milestone gate still only fires for BD users)
@@ -177,7 +179,13 @@ Expected context:
        their own task of their own role draws the select — task_status_update's two
        terms. `task.assigned_to_id and` keeps an unassigned row from matching a missing
        viewer pk.{% endcomment %}
-    {% if not task.is_mirror and not task.is_not_applicable and is_assigned_pm or not task.is_mirror and not task.is_not_applicable and user_task_role == task.assigned_role or not task.is_mirror and not task.is_not_applicable and task.assigned_to_id and task.assigned_to_id == viewer_profile_pk and task.assigned_role == viewer_task_role %}
+    {% comment %}G103 (CL-L, F1): `task.assigned_role != qaqc_refused_task_role` on every
+       arm, because `and` binds tighter than `or` here. qaqc_refused_task_role is 'Site
+       Engineer' when the viewer is this site's QA/QC engineer and None otherwise, so a
+       coordinator-engineer gets no status select on a Site Engineer row — the rule
+       task_status_update refuses on. Absent on the HTMX redraws (None, so the term is
+       true and nothing changes there).{% endcomment %}
+    {% if not task.is_mirror and not task.is_not_applicable and is_assigned_pm and task.assigned_role != qaqc_refused_task_role or not task.is_mirror and not task.is_not_applicable and user_task_role == task.assigned_role and task.assigned_role != qaqc_refused_task_role or not task.is_mirror and not task.is_not_applicable and task.assigned_to_id and task.assigned_to_id == viewer_profile_pk and task.assigned_role == viewer_task_role and task.assigned_role != qaqc_refused_task_role %}
       <form method="post" action="{% url 'task_status_update' project.project_id task.pk %}" class="d-inline"
             hx-post="{% url 'task_status_update' project.project_id task.pk %}"
             hx-target="#task-row-{{ task.pk }}" hx-swap="outerHTML">
