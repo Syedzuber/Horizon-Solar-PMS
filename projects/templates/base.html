@@ -55,7 +55,8 @@
   <div class="d-flex align-items-center gap-2">
     <img src="{% static 'images/horizon-logo.png' %}" alt="Horizon Renewable Power"
          style="height:28px; width:auto; filter:brightness(0) invert(1); opacity:.9;">
-    <span class="navbar-brand mb-0">Horizon Solar — PMS</span>
+    {# Hidden below 576px: logo + text needed 405px of a 312px navbar and made every page scroll sideways on phones. #}
+    <span class="navbar-brand mb-0 d-none d-sm-inline">Horizon Solar — PMS</span>
   </div>
   {# flex-wrap (Approvals S2a walkthrough, 27 Sep): links wrap at phone width instead of pushing the page sideways. #}
   <div class="d-flex flex-wrap align-items-center justify-content-end row-gap-1 column-gap-3">
