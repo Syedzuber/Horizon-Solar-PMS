@@ -799,6 +799,11 @@ def vendor_order_detail(request, order_pk):
         'payments':        [_payment_row(request.user, p) for p in payments],
         **money,
         'orders_project':  project,
+        # U2: "Back to orders" leads to the ANCHOR site's list, and reading the order is
+        # not reading that list — a manager of a non-anchor site reads the whole order
+        # (AF-2) but manages, and so may list, only their own site. Drawn only where the
+        # list's own predicate passes; it is False for a site-less order (anchor None).
+        'can_open_order_list': user_can_view_project_vendor_orders(request.user, project),
         # Each button only where its predicate passes; payment also only while some of
         # the total is still uncommitted. The view re-checks both on POST.
         'can_request_payment': (money['available'] > 0

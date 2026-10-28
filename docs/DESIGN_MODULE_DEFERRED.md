@@ -1800,7 +1800,22 @@ make can be entered; the card is correct, the input does not exist.
 
 **Location:** `projects/views.py` — `boq_detail`, `opex_boq_entry`
 
-### T8 — the order pages show money to anyone who can see a site on the order (for AF-2)
+### T8 — CLOSED by AF-2: the order pages show money to anyone who can see a site on the order
+
+**Closed 28 Oct 2026 (AF-2).** The order pages follow AF-1's money audience. Clause 2 of
+`_user_reads_orders_on()` now asks `user_can_see_project_money()` of each site on the order
+instead of `user_can_view_project()`. A manager of ANY site on an order reads the whole
+order, and the tender list (`program_vendor_order_list`) narrows with it.
+`VENDOR_ORDER_PORTFOLIO_ROLES` is now an alias of `MONEY_PORTFOLIO_ROLES`, so there is one
+set, and `PURCHASES_WORKSPACE_VIEW_ROLES` still points at it. A site engineer holding a
+task, BD, a Design Head flag holder, the assigned designer and the site's QA/QC engineer
+are refused all three pages. The Design Head loses "Open the PO/PI record" on a pre-dispatch
+request, which is drawn from the same predicate, and keeps the PO/PI numbers from the
+snapshot. `payment_request_detail` still has no check of its own, and the order page it
+redirects to refuses. `tests_order_money_access` pins all of this. U1 (the documents) is
+still open. U2 (the "Back to orders" link) is closed.
+
+The original record follows.
 
 Found by AF-1's pre-flight, deliberately not changed (ruling Q2: a separate audit session,
 AF-2). `vendor_order_list` is gated by `user_can_view_project_vendor_orders()` and
@@ -1816,3 +1831,54 @@ audience is the narrower one; AF-2 decides whether the order pages adopt it.
 **Location:** `projects/permissions.py` — `user_can_view_vendor_order`,
 `user_can_view_project_vendor_orders`, `_user_reads_orders_on`; `projects/order_views.py` —
 `vendor_order_list`, `vendor_order_detail`
+
+---
+
+## U. Found while building AF-2 (order pages follow the money audience)
+
+AF-2 narrowed `vendor_order_list`, `vendor_order_detail` and `program_vendor_order_list` to
+`user_can_see_project_money()` (T8). These are what it leaves open.
+
+### U1 — AF-3: PO, PI and invoice documents are permanent public URLs
+
+Found by the AF-2 audit, not changed. `vendor_order_document_url()` builds
+`{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}`, and `_upload_and_record_documents()`
+stores every order document in `settings.SUPABASE_BUCKET`, which is public (settings.py:
+"SUPABASE_BUCKET above stays public"). The URL needs no login and never expires. The path
+includes a uuid4, so it cannot be guessed, but anyone who has the URL keeps it. Narrowing
+the pages that draw these links (the order page, the payments queue) cannot revoke a URL
+already seen by someone AF-2 now refuses.
+
+AF-3 is to move these documents to a private bucket served by short-lived signed links,
+following the contractor-bill PDF pattern (D-A40, `bill_storage.py`).
+`vendor_order_document_url()` is already the single place that builds the link. The
+existing objects have to be moved, and the stored `bucket` and `path` rewritten.
+
+**Location:** `projects/supabase_storage.py` — `vendor_order_document_url`;
+`projects/order_views.py` — `_upload_and_record_documents`; `solarpms/settings.py` —
+`SUPABASE_BUCKET`
+
+### U2 — CLOSED: "Back to orders" is drawn for a reader who cannot open that list
+
+**Closed 28 Oct 2026.** `vendor_order_detail` computes
+`can_open_order_list = user_can_view_project_vendor_orders(user, orders_project)` once,
+and the template draws the link only inside `{% if can_open_order_list %}`. It does not
+repeat the rule. A site-less order has no anchor, and the predicate is False for None, so
+the old `{% if orders_project %}` guard is covered.
+`tests_order_money_access.BackLinkTests` checks two things. The link is absent for the
+managers of the non-anchor site (its PM and a coordinator), who read the order but get a
+403 on the anchor's list. It is present for the anchor's PM, SCM and Finance. The original
+record follows.
+
+Ruled in AF-2, not built. `vendor_order_detail.html` draws "← Back to orders" whenever the
+order has an anchor (`orders_project`, the site with the lowest pk). It does not ask
+whether this reader may open that site's list. Since AF-2, a manager of a non-anchor site
+on a multi-site order opens the order, but `user_can_view_project_vendor_orders()` refuses
+them the anchor's list, so the link leads to a 403. The ruling is to draw the link only
+when that predicate passes for `orders_project`. That needs a flag in the view's context
+(`order_views.vendor_order_detail`) or a template tag. AF-2's permitted files were
+permissions.py and the template only, so it was not built.
+`tests_order_money_access.BackLinkTests` carries a TODO for the "absent" test.
+
+**Location:** `projects/order_views.py` — `vendor_order_detail`;
+`projects/templates/projects/vendor_order_detail.html` — the back link

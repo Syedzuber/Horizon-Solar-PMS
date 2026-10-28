@@ -15,7 +15,7 @@
     {% if can_add_documents %}
     <a href="{% url 'vendor_order_add_documents' order.pk %}" class="btn btn-outline-primary btn-sm"><i class="bi bi-paperclip me-1"></i>Add documents</a>
     {% endif %}
-    {% if orders_project %}
+    {% if can_open_order_list %}
     <a href="{% url 'vendor_order_list' orders_project.pk %}" class="btn btn-outline-secondary btn-sm">← Back to orders</a>
     {% endif %}
   </div>

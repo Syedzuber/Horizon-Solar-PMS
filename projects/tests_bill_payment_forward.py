@@ -774,7 +774,7 @@ class PoPiActionPinTests(QueueFixture):
         'add_payment_get':   (6, 302, '{order}payments/new/?key=', []),
         'mark_paid':         (11, 302, '/payments/?tab=OPEX',
                               ['Payment of ₹20000.00 to Kiran Cables marked paid.']),
-        'order_page':        (13, 200, '', []),
+        'order_page':        (14, 200, '', []),  # AF-2b: back-link permission check (can_open_order_list)
     }
 
     def test_every_po_pi_action_is_as_measured_on_head(self):

@@ -2487,19 +2487,22 @@ def can_reorder_phase(user, phase, project_cache=None):
 
 VENDOR_ORDER_RAISE_ROLES = frozenset({'SCM'})
 
-# Portfolio-wide readers of any order. Finance and SCM are here because D-4's
-# assignment-based scoping for them does not exist yet — there is no ProgramAssignment,
-# and neither role holds tasks on most sites — so they are portfolio-wide exactly as
-# user_can_view_project() already makes them. When D-4 lands, this set narrows with it.
-# Its own set rather than PORTFOLIO_VIEW_ROLES so that widening project VISIBILITY never
-# silently widens access to vendor prices (the BOQ_PORTFOLIO_READ_ROLES precedent).
-VENDOR_ORDER_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'SCM'})
-
-# AF-1 — the roles that see money on EVERY project they can see. Equal to the order
-# portfolio set today, and deliberately its own set: this one decides what a project page
-# shows (the vendor-orders card, money lines in the activity feed), the one above decides
-# who reads the order pages, and AF-2 audits those pages separately.
+# AF-1 — the roles that see money on EVERY project they can see: a project page's
+# vendor-orders card and money lines in its activity feed, and (AF-2) the order pages.
+# Finance and SCM are here because D-4's assignment-based scoping for them does not
+# exist yet — there is no ProgramAssignment, and neither role holds tasks on most sites —
+# so they are portfolio-wide exactly as user_can_view_project() already makes them. When
+# D-4 lands, this set narrows with it. Its own set rather than PORTFOLIO_VIEW_ROLES so
+# that widening project VISIBILITY never silently widens access to vendor prices (the
+# BOQ_PORTFOLIO_READ_ROLES precedent).
 MONEY_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'SCM'})
+
+# Portfolio-wide readers of any order. AN ALIAS, NOT A SECOND SET (AF-2): who reads every
+# order is deliberately identical to who sees money on every project (AF-1), so a project
+# page and the order pages it links to can never disagree about the portfolio roles. The
+# name stays because the order predicates, the payments queue note and
+# PURCHASES_WORKSPACE_VIEW_ROLES read it.
+VENDOR_ORDER_PORTFOLIO_ROLES = MONEY_PORTFOLIO_ROLES
 
 
 def user_can_see_project_money(user, project):
@@ -2524,9 +2527,10 @@ def user_can_see_project_money(user, project):
     query; anyone else costs user_can_manage_project()'s coordinator lookup unless they
     are the assigned PM.
 
-    NOT the order pages' rule. user_can_view_project_vendor_orders() and
-    user_can_view_vendor_order() admit anyone who can see a site on the order;
-    DESIGN_MODULE_DEFERRED T8 records that, for the AF-2 audit.
+    THE ORDER PAGES' RULE TOO, SINCE AF-2: _user_reads_orders_on() asks this of each site
+    on an order, so user_can_view_vendor_order(), user_can_view_project_vendor_orders()
+    and user_can_view_program_vendor_orders() admit exactly this audience (DESIGN_MODULE_
+    DEFERRED T8, closed).
     """
     profile = getattr(user, 'profile', None)
     if profile is None or project is None:
@@ -2560,10 +2564,16 @@ def user_can_view_vendor_order(user, order):
 
       1. a portfolio role (VENDOR_ORDER_PORTFOLIO_ROLES) — CEO, Admin, System Admin,
          Finance, SCM — reads EVERY order, whatever sites it names and whether it names
-         any. See the note on the set for why Finance and SCM are in it;
-      2. ANYONE ELSE reads an order if they can see ANY site on it: a PM whose site
-         shares a consolidated order is entitled to the order the material for their
-         site was bought on.
+         any. See the note on MONEY_PORTFOLIO_ROLES for why Finance and SCM are in it;
+      2. ANYONE ELSE reads an order if they MANAGE ANY site on it (AF-2 —
+         user_can_see_project_money(), the assigned PM or a coordinator): a PM whose site
+         shares a consolidated order is entitled to the WHOLE order the material for
+         their site was bought on, other sites' lines and payments included.
+
+    Seeing a site is no longer enough (AF-2). A site engineer holding a task, the site's
+    QA/QC engineer, Design (assigned or holding a task), the Design Head and BD all see
+    the site and are refused: they work on the site, not on its purchasing — the same
+    line AF-1 drew on the project page, so the page and the order it links to agree.
 
     Since O2d an order may have NO sites — a central purchase sized against a tender.
     Clause 2 then admits nobody, which is correct: there is no site through which a PM
@@ -2580,29 +2590,35 @@ def user_can_view_vendor_order(user, order):
 
 
 def _user_reads_orders_on(user, projects):
-    """The single reader rule behind both order predicates: a portfolio role, OR anyone
-    who can see ANY of `projects`. The two are independent — an empty `projects` leaves
-    the portfolio arm untouched, which is what lets a site-less order (O2d) still be read
-    by CEO, Admin, System Admin, Finance and SCM.
+    """The single reader rule behind the three order predicates: a portfolio role, OR
+    anyone who sees money on ANY of `projects` (user_can_see_project_money(), AF-2). The
+    two are independent — an empty `projects` leaves the portfolio arm untouched, which
+    is what lets a site-less order (O2d) still be read by CEO, Admin, System Admin,
+    Finance and SCM.
 
     `projects` may be a generator; it is walked lazily and only when the role alone does
-    not decide."""
+    not decide. Past the role arm, user_can_see_project_money() is user_can_manage_project():
+    free for the assigned PM, one coordinator lookup per site for anyone else, stopping
+    at the first site that admits."""
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
     if profile.role in VENDOR_ORDER_PORTFOLIO_ROLES:
         return True   # clause 1 — decided without looking at any site
-    return any(user_can_view_project(user, project) for project in projects)  # clause 2
+    # Clause 2 (AF-2): seeing a site is not enough — only the money audience reads its
+    # orders. Visibility is not asked here: a manager of a site can always see it.
+    return any(user_can_see_project_money(user, project) for project in projects)
 
 
 def user_can_view_project_vendor_orders(user, project):
     """Return True if `user` may read the list of orders placed for `project`.
 
-    The same reader rule as user_can_view_vendor_order(), applied to this one site, AND
-    user_can_view_project(): the list is a project page, so it never admits someone who
-    cannot see the project. Today the second term adds nothing (every portfolio order
-    role is also portfolio-wide on projects); it is there so a future narrowing of either
-    rule narrows this page with it.
+    The same reader rule as user_can_view_vendor_order(), applied to this one site — so,
+    since AF-2, the money audience of this site — AND user_can_view_project(): the list
+    is a project page, so it never admits someone who cannot see the project. Today the
+    second term adds nothing (every portfolio order role is also portfolio-wide on
+    projects, and a manager sees what they manage); it is there so a future narrowing of
+    either rule narrows this page with it.
     """
     if project is None:
         return False
@@ -2669,9 +2685,10 @@ def user_can_view_program_vendor_orders(user, program):
 
     THE EXISTING ORDER-READER RULE, ASKED OF A TENDER — _user_reads_orders_on(), the same
     function behind user_can_view_vendor_order() and user_can_view_project_vendor_orders().
-    A portfolio role reads every tender's orders; anyone else reads the list if they can
-    see ANY site in the tender, which is the tender-shaped form of "a PM whose site shares
-    a consolidated order is entitled to that order".
+    A portfolio role reads every tender's orders; anyone else reads the list if they
+    MANAGE ANY site in the tender (AF-2 — seeing one is not enough), which is the
+    tender-shaped form of "a PM whose site shares a consolidated order is entitled to
+    that order".
 
     An EMPTY tender admits only the portfolio roles, exactly as a site-less order does.
 
@@ -2873,7 +2890,7 @@ def user_can_view_payment_queue(user):
     Finance, CEO, Admin or System Admin by role, OR anyone holding the payment-approver
     flag — an approver who is none of those four still needs the one screen that lists
     what is waiting for them. PORTFOLIO-WIDE, per D-4: the queue carries no site or
-    tender scope, for the reason VENDOR_ORDER_PORTFOLIO_ROLES gives.
+    tender scope, for the reason MONEY_PORTFOLIO_ROLES gives (AF-1).
     """
     profile = getattr(user, 'profile', None)
     if profile is None:
