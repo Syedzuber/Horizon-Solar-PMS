@@ -7,11 +7,12 @@ WHAT IS PINNED HERE
     CL-9/K  the full cycle as a PM engineer, and as a coordinator, on a
             site they do not manage: assigned, dashboard section, visit,
             "No", punch point, rectified, re-verified, task approved      FullCycleTests
-    CL-A    refused: the site's PM, a site coordinator, a Site Engineer task
-            holder, an inactive user, a Finance user; a holder of another
-            role's task is eligible (v2.5); the eligible list agrees       EligibilityTests
-    CL-H    change_site_pm, hand_over_sites and assign_coordinators
-            refuse the site's current QA/QC engineer                       ManagerSeatTests
+    CL-A    refused: the site's PM, a Site Engineer task holder, an
+            inactive user, a Finance user; a holder of another role's task
+            is eligible (v2.5), and so is a site coordinator (CL-L, v2.6);
+            the eligible list agrees                                       EligibilityTests
+    CL-H    change_site_pm and hand_over_sites refuse the site's current
+            QA/QC engineer; assign_coordinators adds them (CL-L, v2.6)     ManagerSeatTests
     CL-I    a PM engineer is not shown the PM-only overview blocks         OverviewContentTests
     CL-D    a PM engineer counts as the site's independent approver        SelfCertificationTests
     CL-J    a move between the three roles keeps the row live              StaleRuleTests
@@ -150,8 +151,11 @@ class EligibilityTests(RolesFixture):
     def test_the_sites_pm_is_refused(self):
         self._refused(self.pm, 'manages this site, so cannot be its independent QA/QC engineer')
 
-    def test_a_site_coordinator_is_refused(self):
-        self._refused(self.coord, 'manages this site, so cannot be its independent QA/QC engineer')
+    def test_a_site_coordinator_is_accepted(self):
+        """CL-L (v2.6): a coordinator of the site may be named its QA/QC engineer."""
+        self._assign_screen(self.coord)
+        self.assertEqual(self._engineer_id(), self.coord.pk)
+        self.assertTrue(self.site.coordinators.filter(pk=self.coord.pk).exists())
 
     def test_a_task_holder_is_refused(self):
         self._refused(self.worker, 'holds')
@@ -189,10 +193,11 @@ class EligibilityTests(RolesFixture):
     def test_the_eligible_list_agrees(self):
         finance = _profile('qr_finance_list', 'Finance')
         eligible = set(eligible_qaqc_engineers(self.site))
-        for profile in (self.pm_b, self.coord_b, self.spare):
+        # CL-L (v2.6): the site's coordinator is eligible; its PM is not.
+        for profile in (self.pm_b, self.coord_b, self.spare, self.coord):
             with self.subTest(eligible=profile.user.username):
                 self.assertIn(profile, eligible)
-        for profile in (self.pm, self.coord, self.worker, self.qaqc, finance):
+        for profile in (self.pm, self.worker, self.qaqc, finance):
             with self.subTest(refused=profile.user.username):
                 self.assertNotIn(profile, eligible)
         screen = _client_for(self.pm).get(reverse('site_qaqc', args=[self.site.project_id]))
@@ -233,15 +238,18 @@ class ManagerSeatTests(RolesFixture):
         self.site.refresh_from_db()
         self.assertEqual(self.site.assigned_pm, other_pm)
 
-    def test_assign_coordinators_refuses_the_engineer_and_saves_nothing(self):
+    def test_assign_coordinators_adds_the_engineer(self):
+        """CL-L (v2.6): the coordinator half of CL-H is lifted; the engineer is added and
+        stays the site's engineer."""
         end_site_qaqc(self.site, self.pm)
         assign_site_qaqc(self.site, self.coord_c, self.pm)
         response = _client_for(self.pm).post(
             reverse('assign_coordinators', args=[self.site.project_id]),
             {'coordinator_ids': [self.coord.pk, self.coord_c.pk, self.coord_b.pk]})
-        self.assertIn('End the QA/QC assignment first', ' '.join(_messages(response)))
-        self.assertEqual(set(self.site.coordinators.all()), {self.coord},
-                         'a refused edit must save none of its changes')
+        self.assertNotIn('End the QA/QC assignment first', ' '.join(_messages(response)))
+        self.assertEqual(set(self.site.coordinators.all()),
+                         {self.coord, self.coord_c, self.coord_b})
+        self.assertEqual(self._engineer_id(), self.coord_c.pk)
 
     def test_assign_coordinators_still_adds_anyone_else(self):
         _client_for(self.pm).post(

@@ -5,8 +5,9 @@
 {% comment %}Closeout step 3 (CL-9, CL-A). Reached only by the site's PM and coordinators
    on a RESCO (OPEX) site — qaqc_views.site_qaqc refuses everyone else. The eligible
    list is already filtered to active Site Engineers, PMs and Project Coordinators who
-   hold no Site Engineer task on the site and do not manage it (CL-9, CL-A as revised in
-   spec v2.5);
+   hold no Site Engineer task on the site and are not its assigned PM (CL-9, CL-A as
+   revised in spec v2.5; a coordinator of the site may be named, CL-L, v2.6), and leaves
+   out the person choosing (F4);
    the writer re-checks all of it under a lock and says why if it refuses.{% endcomment %}
 <div class="mb-3">
   <a href="{% url 'project_overview' project.project_id %}" class="text-decoration-none text-muted">&larr; Back to {{ project.project_id }}</a>
@@ -20,8 +21,10 @@
     <p class="text-muted small">
       The QA/QC engineer can view this site and approve or reject its submitted tasks.
       They may hold this site's tasks of any role except Site Engineer, and work only
-      those; they never approve or reject a task they hold. They cannot work other tasks,
-      assign tasks or waive punch points, and they may not manage this site.
+      those; they never approve or reject a task they hold. They cannot waive punch
+      points. One of this site's coordinators may be named, and keeps the coordinator's
+      other work; its PM may not be named. Anyone else cannot work other tasks or assign
+      tasks.
     </p>
 
     <div class="mb-3">
@@ -31,6 +34,13 @@
           {{ current.engineer.user.get_full_name|default:current.engineer.user.username }}
           <span class="text-muted fw-normal small">since {{ current.assigned_at|date:"d M Y, H:i" }}</span>
         </div>
+        {% comment %}CL-L (v2.6): the double role is said where the engineer is named.{% endcomment %}
+        {% if current_is_coordinator %}
+          <div class="small text-muted mt-1">
+            Also a coordinator of this site. As QA/QC engineer they cannot work or hold its
+            Site Engineer tasks, waive its punch points, or approve tasks they hold.
+          </div>
+        {% endif %}
         {% if stale %}
           <div class="alert alert-warning py-2 small mt-2 mb-0">
             This engineer is no longer an active site engineer, PM or project coordinator
@@ -58,9 +68,9 @@
         </button>
       </div>
       {% if not eligible %}
-        <div class="form-text">No one is free to assign: every active site engineer, PM and project coordinator holds a Site Engineer task on this site or manages it.</div>
+        <div class="form-text">No one is free to assign: every active site engineer, PM and project coordinator holds a Site Engineer task on this site or is its PM.</div>
       {% else %}
-        <div class="form-text">People holding a Site Engineer task on this site, and its own PM and coordinators, are not listed.</div>
+        <div class="form-text">People holding a Site Engineer task on this site, its PM, and you, are not listed.</div>
       {% endif %}
     </form>
 

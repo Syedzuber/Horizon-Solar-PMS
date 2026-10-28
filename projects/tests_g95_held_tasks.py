@@ -278,8 +278,8 @@ class HeldElsewhereCountTests(HeldTaskFixture):
         self.assertEqual(response.context['summary']['tasks_due_today'], len(listed))
 
     def test_engineer_who_also_manages_the_site_counts_once_in_the_managed_part(self):
-        # The screens refuse a manager as engineer (CL-A, CL-H); the ORM shape is the one
-        # left after a direct edit, and the OR must still count the task once.
+        # A coordinator may be the site's engineer since CL-L (v2.6), so this shape is now
+        # reachable through the screens; the OR must still count the task once.
         paper = self._give(self.site_a, self._paperwork(self.site_a), self.coord_b, self.today)
         self.site_a.coordinators.add(self.coord_b)
         response = self._dashboard(self.coord_b)

@@ -145,29 +145,34 @@ def tasks_held_on_site(profile, project):
     )
 
 
-def eligible_qaqc_engineers(project):
+def eligible_qaqc_engineers(project, actor=None):
     """The people who may be named QA/QC engineer on `project` now.
 
     A role in QAQC_ENGINEER_ROLES (CL-9); active on both models (UserProfile.is_active
     is the portal's deactivation, User.is_active Django's login gate — a person off by
     either can never sign anything); holding no Site Engineer task on the site (CL-A
-    v2.5, the tasks_held_on_site() rule) and neither its assigned PM nor one of its
-    coordinators (CL-A — a manager checking their own site is not independent of it);
-    and not already its engineer. One query: the held-task and coordinator exclusions
-    are subqueries on the same statement.
+    v2.5, the tasks_held_on_site() rule); not its assigned PM (CL-A — the site's owner
+    checking their own site is not independent of it); and not already its engineer.
+    One of the site's coordinators may be named (CL-L, v2.6): the coordinator half of
+    the exclusion was lifted for manpower, and what keeps the check independent is
+    instead refused per act (Site Engineer work, waiver, own answers on a visit).
+
+    `actor`: the person choosing, left off the list because nobody names themselves
+    (F4, the writer refuses it too); None leaves everyone in. One query: the held-task
+    exclusion is a subquery on the same statement.
     """
     holders = (Task.objects.filter(phase__project=project, assigned_to__isnull=False,
                                    assigned_role=Task.SITE_ENGINEER)
                .values('assigned_to'))
-    coordinators = project.coordinators.values('pk')
     qs = (UserProfile.objects
           .filter(role__in=QAQC_ENGINEER_ROLES, is_active=True, user__is_active=True)
           .exclude(pk__in=holders)
-          .exclude(pk__in=coordinators)
           .select_related('user')
           .order_by('user__first_name', 'user__last_name', 'user__username'))
     if project.assigned_pm_id is not None:
         qs = qs.exclude(pk=project.assigned_pm_id)
+    if actor is not None:
+        qs = qs.exclude(pk=actor.pk)
     current = current_site_qaqc(project)
     if current is not None:
         qs = qs.exclude(pk=current.engineer_id)
@@ -278,11 +283,11 @@ def _refuse_ineligible(project, engineer):
         raise QaqcAssignmentRefused(
             f"{_person(engineer)} is not an active site engineer, PM or project "
             f"coordinator.")
-    # CL-A (v2.4, unchanged by v2.5): the site's own managers are not independent of it.
-    # Asked before the held-task term because a PM usually holds tasks too, and "manages
-    # this site" is the reason that tells the person choosing what to do instead.
-    if (project.assigned_pm_id == engineer.pk
-            or project.coordinators.filter(pk=engineer.pk).exists()):
+    # CL-A: the site's assigned PM owns it and is not independent of it. Its coordinators
+    # are no longer refused (CL-L, v2.6). Asked before the held-task term because a PM
+    # usually holds tasks too, and "manages this site" is the reason that tells the
+    # person choosing what to do instead.
+    if project.assigned_pm_id == engineer.pk:
         raise QaqcAssignmentRefused(
             f"{_person(engineer)} manages this site, so cannot be its independent QA/QC "
             f"engineer.")
@@ -305,8 +310,9 @@ def _notify(recipient_pk, project_pk, actor_pk, template):
     notify_now(), not notify(): this already runs on commit. Re-reads by pk so the
     callback holds no ORM objects from the request's transaction. A person deactivated on
     either model is not told: they cannot sign in to act on it. notify_now() also drops
-    the actor, which these notices did not before T3c; CL-A and CL-H keep the site's
-    managers (the only people who assign) from being its engineer."""
+    the actor, which these notices did not before T3c; nobody names themselves (F4,
+    assign_site_qaqc), so the actor is never the new engineer. Ending one's own
+    assignment is allowed, and that person is then not told of their own act."""
     recipient = (UserProfile.objects.select_related('user')
                  .filter(pk=recipient_pk, is_active=True, user__is_active=True).first())
     project = Project.objects.filter(pk=project_pk).first()
@@ -368,6 +374,14 @@ def assign_site_qaqc(project, engineer, actor):
             raise QaqcAssignmentRefused(
                 f"{_person(engineer)} is already this site's QA/QC engineer.")
         _refuse_ineligible(locked, engineer)
+        # F4 (v2.6): only someone else names the checker. Since CL-L a coordinator is
+        # eligible, and without this they could appoint themselves; the PM or another
+        # coordinator does it instead. Ending one's own assignment stays allowed. Asked
+        # after the eligibility rules, so a PM naming themselves still hears CL-A's reason.
+        if actor is not None and actor.pk == engineer.pk:
+            raise QaqcAssignmentRefused(
+                "You cannot name yourself this site's QA/QC engineer. The PM or another "
+                "coordinator names them.")
         now = timezone.now()
         lapsed = 0
         if current is not None:
@@ -488,7 +502,11 @@ def site_qaqc(request, project_id):
         'project':    project,
         'current':    current,
         'stale':      current is not None and engineer_is_stale(current.engineer),
-        'eligible':   eligible_qaqc_engineers(project),
+        'eligible':   eligible_qaqc_engineers(project, actor=actor),
+        # CL-L: the double-role line under the current engineer's name. One query, only
+        # when there is an engineer.
+        'current_is_coordinator': (current is not None and project.coordinators
+                                   .filter(pk=current.engineer_id).exists()),
         'history':    history,
     })
 
@@ -647,8 +665,17 @@ def site_checklist_points(project, *, holder_id=None):
     PDF) or the site's current engineer (the project card), so site_coverage() counts
     over the same points the visit offers. None leaves every task in.
 
-    At most five queries whatever the size of the site: the tasks, the three resolver
-    queries, and the items. None at all on a non-OPEX site.
+    SO ARE THE ITEMS `holder_id` ANSWERED ON A TASK (CL-L, ruling F1). A coordinator may
+    be the site's engineer, and a manager could answer a task's execution checklist
+    before the v2.6 refusal or before being named; checking their own answer would not
+    be independent. "At any time": an answer is written once and never re-answered
+    (task_checklist_complete returns early on an answered row), so `checked_by` is the
+    permanent record of who gave it. A task left with no items drops out like one with
+    no checklist.
+
+    At most six queries whatever the size of the site: the tasks, the three resolver
+    queries, the items, and — only with `holder_id` and at least one item — the
+    holder's own answers. None at all on a non-OPEX site.
     """
     if project.project_type != 'OPEX':
         return []
@@ -668,10 +695,22 @@ def site_checklist_points(project, *, holder_id=None):
         # ChecklistItem's Meta ordering (order, pk) is the checklist's own numbering.
         for item in ChecklistItem.objects.filter(checklist_id__in=checklist_pks):
             items_by_checklist.setdefault(item.checklist_id, []).append(item)
+    # The (task, item) pairs the holder answered on this site's tasks. checked_by is the
+    # User, the holder a UserProfile, hence the join through `profile`.
+    own_answers = set()
+    if holder_id is not None and items_by_checklist:
+        own_answers = set(
+            ChecklistItemCompletion.objects
+            .filter(task__in=[t.pk for t in tasks], checked_by__profile__pk=holder_id,
+                    item__isnull=False)
+            .values_list('task_id', 'item_id')
+        )
     entries = []
     for task in tasks:
         checklist = resolved.get(task.pk)
         items = items_by_checklist.get(checklist.pk, []) if checklist else []
+        if own_answers:
+            items = [i for i in items if (task.pk, i.pk) not in own_answers]
         if items:
             entries.append({'task': task, 'checklist': checklist, 'items': items})
     return entries
@@ -1048,8 +1087,9 @@ def point_refusal(project, task, item, engineer_id):
     item from another version of the family is refused with the reason; an item from an
     unrelated checklist is a forged id and is a 404. Nothing is written either way.
 
-    A task the visit's engineer holds is not one of their points (CL-A v2.5), as
-    site_checklist_points(holder_id=...) leaves it off the page."""
+    A task the visit's engineer holds is not one of their points (CL-A v2.5), nor is an
+    item whose execution answer they recorded (CL-L, F1), as
+    site_checklist_points(holder_id=...) leaves both off the page."""
     if task.phase.project_id != project.pk:
         raise Http404
     if task.is_mirror or task.is_not_applicable:
@@ -1070,6 +1110,12 @@ def point_refusal(project, task, item, engineer_id):
                 f"but this task is now answering version {checklist.version_no}. Nothing "
                 f"was recorded; reload the visit.")
         raise Http404
+    # Asked after the item is known to be this task's, so a forged id stays a 404.
+    if ChecklistItemCompletion.objects.filter(
+            task=task, item=item, checked_by__profile__pk=engineer_id).exists():
+        raise QaqcVisitRefused(
+            f"You recorded the answer to this point on '{task.task_name}', so it is not "
+            f"checked on your QA/QC visit: the check must be independent of the work.")
 
 
 def answer_qaqc_point(visit, user, project, task, item, *, answer, remark, stored_photo,

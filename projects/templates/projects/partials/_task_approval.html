@@ -8,7 +8,9 @@ Expected context, all of it built by _task_approval_context() in views.py:
   now - while any is listed there is no Approve and no self-certified Complete),
   own_engineer_task and own_task_submitted_by_other (the two reason lines shown in
   place of the verdict form: CL-A v2.5 and G85), can_self_certify (also read on a
-  queued task, for its submitter's line: G85 follow-up F1)
+  queued task, for its submitter's line: G85 follow-up F1), qaqc_engineer_coordinator
+  (CL-L: the engineer's profile when they are also a coordinator, for the site's
+  managers and the engineer; else None)
 
 THE PANEL DECIDES NOTHING. Every question it asks has already been answered by
 the view — `show_approval_panel` carries the OPEX-and-not-a-mirror scope,
@@ -38,6 +40,15 @@ Three states, and they are mutually exclusive:
       {% endif %}
     </div>
     <div class="card-body">
+
+      {% comment %}CL-L (v2.6): the site's QA/QC engineer is also one of its coordinators.
+         Shown to the site's PM, its coordinators and the engineer; who signs what is
+         unchanged by it and is still decided by the flags above.{% endcomment %}
+      {% if qaqc_engineer_coordinator %}
+        <p class="text-muted small mb-3">
+          This site's QA/QC engineer, {{ qaqc_engineer_coordinator.user.get_full_name|default:qaqc_engineer_coordinator.user.username }}, is also one of its coordinators.
+        </p>
+      {% endif %}
 
       {% if task.approved_at %}
         {# ── Signed off. Read-only from here; reopening a Done task is not in 2.1. ── #}

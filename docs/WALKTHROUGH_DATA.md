@@ -125,7 +125,7 @@ file and `seed_walkthrough.py` are the only places it appears.
 | `walk.admin` | Admin | — | `/dashboard/admin/` | Admin Panel: users, flags, master switches, preferences, checklists, catalogue. The only Admin (the product allows one) |
 | `walk.sysadmin` | System Admin | — | `/sub-admin/projects/` | Sub-admin shell, warehouse screens |
 | `walk.pm` | PM | — | `/dashboard/pm/` | Assigned PM on every site and project: PM approval queue, PM change requests, SCM-request triage, Not Applicable, punch-point waiver, issue close/reopen |
-| `walk.coord` | Project Coordinator | — | `/dashboard/pm/` | Coordinator on WALKE01; approved the Net Metering task; holds Completion Certificates |
+| `walk.coord` | Project Coordinator | — | `/dashboard/pm/` | Coordinator on WALKE01; approved the Net Metering task; holds Completion Certificates. Also WALKL01's QA/QC engineer and, since the CL-L walk, one of its coordinators |
 | `walk.se` | Site Engineer | — | `/dashboard/site-engineer/` | Holds the SE tasks on WALKE01 and two on WALKL01; confirmed the GRNs; submits tasks for approval. Area `approvals`: holds every SE task on WALKB01 and is the Site Engineer on every contractor bill (WALK-15 … WALK-22); three wait on their "Work to confirm" card |
 | `walk.qaqc` | Site Engineer | `is_qaqc` | `/dashboard/site-engineer/` | Approves / rejects submitted OPEX tasks (raises punch points). Holds Net Meter Installation so it can see WALKE01 |
 | `walk.design` | Design | — | `/dashboard/design/` | The designer on every design site and the Residential BOQs |
@@ -237,7 +237,15 @@ WALKL01, activated; two SE tasks held by `walk.se`.
 The four Delivery mirror tasks on WALKL01 are derived from these (Inverters Done; the
 others In Progress).
 
-`walk.coord` is WALKL01's QA/QC engineer and does not manage it. The G95 walk (27 Oct 2026)
+`walk.coord` is WALKL01's QA/QC engineer. Until the CL-L walk (28 Oct 2026, closeout spec
+v2.6) they did not manage it. That walk made them a coordinator of WALKL01 as well
+(`assign_coordinators` as `walk.pm`; `site_qaqc` and the task approval panel now say so).
+`walk.pm` gave them the PM task Net Metering Approval; they worked and submitted it, and
+`walk.pm` approved it (Done). As the coordinator-engineer they were refused a status change
+and a checklist answer on Civil Work and MMS Installation (a Site Engineer task). Their
+QA/QC visit that day raised a punch point on Civil ("Base plate grout cracked"). They were
+refused the waiver, and `walk.pm` waived it. The visit photo is a stub path in
+`walkthrough-stub`; no file exists behind it. The G95 walk (27 Oct 2026)
 added "Paperwork follow-up (walk G95)" (Project Coordinator, Not Started, due 27 Oct 2026)
 through `task_add` as `walk.pm`, assigned to `walk.coord`. That task is on `walk.coord`'s
 dashboard card "Your tasks on other sites", in the stat blocks and in the drill-down,

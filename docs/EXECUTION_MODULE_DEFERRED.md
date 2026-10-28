@@ -5342,6 +5342,40 @@ paperwork task on a QA/QC site gets no digest. A PM's digest is not affected: it
 `assigned` line for coordinators, and let it count toward sending. The morning report and
 the dashboard already include these tasks.
 
+### G101 — a coordinator-engineer's submission can wait for a signature that never comes
+
+Recorded 28 Oct 2026 by the CL-L build (closeout spec v2.6, ruling F3: keep Q4, record).
+Since CL-L a site's coordinator may be its QA/QC engineer, and as a coordinator they may
+submit tasks they do not hold (never a Site Engineer task: ruling F1). The site's QA/QC
+engineer never self-certifies (`_holds_self_certifying_signature`, ruling Q4), so the
+submission always queues. If every other approver is gone (the PM deactivated, no other
+coordinator, no `is_qaqc` holder), it waits at "Awaiting approval" with nobody able to
+sign: they are its submitter. The way out is the departed-PM path: seat an active PM.
+Same family as the departed-PM entry `user_may_self_certify` cites.
+
+### G102 — a coordinator-engineer sees their site's re-verification points twice
+
+Recorded 28 Oct 2026 by the CL-L build (ruling F6: record). `dashboard_pm` lists
+"awaiting re-verification" for the sites the user manages (`awaiting_reverification`
+over `managed_project_ids`), and the QA/QC engineer section (CL-K,
+`qaqc_engineer_dashboard_context`) lists the points the user may re-verify. For a
+coordinator who is also that site's engineer, the same Rectified points are in both.
+Display only: both lists link to the same task page and the writer decides who may act.
+
+### G103 — the task row still draws its controls for a coordinator-engineer on a Site Engineer task
+
+Recorded 28 Oct 2026 by the CL-L build (outside the F1 ruling's three gates). Ruling F1
+refuses the site's QA/QC engineer on Site Engineer tasks in `task_status_update`,
+`_user_can_complete_checklist_item` and `user_can_submit_task_for_approval`. The task
+detail page follows those predicates, so its checklist answer controls and Submit form
+are not offered. `_task_row.html` draws the status select from `is_assigned_pm`, which
+is the manager flag, so a coordinator-engineer still sees the select on a Site Engineer
+row. Choosing a status redraws the row unchanged with "You do not have permission to
+change this task." The row's Submit for approval button (`_task_row_approval.html`) is
+likewise drawn from the manager flag, and the endpoint answers it 403. A fix needs a per-page "viewer is this site's QA/QC engineer" flag in
+both row builders (`project_overview` and `_task_row_context`), which is one more query on
+every OPEX page a manager opens, against the pinned query counts.
+
 ---
 
 ## H. Open product decisions — for Zuber / Sudhir, not for a session

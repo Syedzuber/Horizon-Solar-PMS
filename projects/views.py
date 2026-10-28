@@ -175,12 +175,13 @@ from .permissions import (
     # never becomes a right to do the site's work. The refusal names the CL-A rule for
     # the task-assignment paths; the engineer id excludes them from candidate lists.
     user_works_on_site, qaqc_engineer_assignment_refusal, site_qaqc_engineer_id,
-    # CL-H (spec v2.4): the site's QA/QC engineer may not be made one of its coordinators.
-    qaqc_engineer_manager_refusal,
     # CL-A v2.5: the engineer may hold the site's non-Site-Engineer tasks and works only
     # those (user_works_on_task); they make no approval or rejection decision on a task
     # they hold and are out of its approver pool (qaqc_engineer_holds_task).
     user_works_on_task, qaqc_engineer_holds_task,
+    # CL-L (v2.6): a coordinator may be the site's engineer; the manager arm of the
+    # status and checklist gates then still refuses them on Site Engineer tasks.
+    qaqc_engineer_on_site_engineer_task,
 )
 from .utils import (
     attach_residential_template, attach_opex_template,
@@ -3585,6 +3586,11 @@ def _user_can_complete_checklist_item(user, task, project):
     profile = getattr(user, 'profile', None)
     if profile is None:
         return False
+    # CL-L (F1): the site's QA/QC engineer never answers a Site Engineer task's execution
+    # checklist, even from a coordinator seat — they check that work on a visit. Asked
+    # before the manager arm so the seat cannot readmit them.
+    if qaqc_engineer_on_site_engineer_task(user, task, project):
+        return False
     if user_can_manage_project(user, project):
         return True
     # Task.BD = 'BD / Sales' but UserProfile stores 'BD' — normalise before comparison
@@ -6013,7 +6019,30 @@ def _task_approval_context(request, project, task):
         # endpoints ask approval_blockers() again under the project lock. One query, on
         # OPEX non-mirror tasks only; two more only when there is a blocker (7c).
         'approval_blockers': _blockers_with_next_action(task, project) if eligible else [],
+        'qaqc_engineer_coordinator': (_qaqc_engineer_coordinator(request, project, profile)
+                                      if eligible else None),
     }
+
+
+def _qaqc_engineer_coordinator(request, project, profile):
+    """The site's active QA/QC engineer when they are also one of its coordinators
+    (CL-L), for the approval panel's double-role line; None otherwise, and None for a
+    viewer who is neither that engineer nor a manager of the site — the line is for the
+    people who route the site's work. One query (the coordinator seat and the active
+    assignment in one statement), plus one for a viewer other than the engineer."""
+    if profile is None:
+        return None
+    # The coordinators of this site who hold its active QA/QC assignment: at most one
+    # row (uniq_site_qaqc_active), with the user joined for the name.
+    engineer = (project.coordinators
+                .filter(pk__in=project.qaqc_assignments.filter(ended_at__isnull=True)
+                        .values('engineer_id'))
+                .select_related('user').first())
+    if engineer is None:
+        return None
+    if engineer.pk == profile.pk or user_can_manage_project(request.user, project):
+        return engineer
+    return None
 
 
 def _blockers_with_next_action(task, project):
@@ -6864,8 +6893,11 @@ def task_status_update(request, project_id, task_id):
     # the view gate above minus the QA/QC engineer's grant, plus this task's assignee: it
     # changes nothing for anyone who passed before, refuses the site's QA/QC engineer on
     # every task they do not hold, and admits them to the ones they do.
-    if not is_pm and (normalised_user_role != task.assigned_role
-                      or not user_works_on_task(request.user, task, project)):
+    # CL-L (F1): and the site's QA/QC engineer never moves a Site Engineer task, even as
+    # a coordinator (is_pm) — asked first so the manager arm cannot readmit them.
+    if (qaqc_engineer_on_site_engineer_task(request.user, task, project)
+            or (not is_pm and (normalised_user_role != task.assigned_role
+                               or not user_works_on_task(request.user, task, project)))):
         if _is_hx(request):
             messages.error(request, 'You do not have permission to change this task.')
             return _render_task_row_hx(request, project, task)
@@ -7566,7 +7598,8 @@ def punch_point_waive(request, project_id, punch_point_id):
     than re-waived, so `waived_by` and `waived_at` keep naming the person and moment
     the decision was actually taken, and a Closed point is never relabelled Waived.
 
-    Access: PM-level authority on the project. POST only.
+    Access: PM-level authority on the project, except the site's QA/QC engineer even
+    when also a coordinator (CL-L). POST only.
     """
     if request.method != 'POST':
         return redirect('project_overview', project_id=project_id)
@@ -7587,6 +7620,9 @@ def punch_point_waive(request, project_id, punch_point_id):
     except Exception:
         return HttpResponseForbidden()
 
+    # Only the site's PM and coordinators may waive; the raiser of the finding (the
+    # QA/QC flag holder, and since CL-L the site's engineer in a coordinator seat) may
+    # not switch it off.
     if not user_can_waive_punch_point(request.user, project):
         return HttpResponseForbidden()
 
@@ -8030,7 +8066,9 @@ def assign_coordinators(request, project_id):
     assigned_pm, so PM ownership can never be transferred or lost through it
     (the Overwrite bug the invariant warns against is impossible here by construction).
 
-    Refuses to add the site's current QA/QC engineer (CL-H, closeout spec v2.4).
+    The site's current QA/QC engineer may be added (CL-L, closeout spec v2.6, which
+    lifted CL-H's coordinator half); what they may not do as a coordinator is refused
+    per act (Site Engineer work, waiver).
 
     A REMOVED COORDINATOR'S OPEN TASKS on this project are dealt with in the same
     transaction, because removal also ends their sight of the site and they could no
@@ -8058,24 +8096,14 @@ def assign_coordinators(request, project_id):
         desired      = selected_ids & valid_ids   # ignore anything not an active PC candidate
 
         with transaction.atomic():
-            # Race: the project row lock is the one qaqc_views.assign_site_qaqc() takes, so
-            # a QA/QC assignment and this edit serialise and the CL-H check below reads the
-            # assignment as it stands — neither can make one person both checker and
-            # coordinator. Two coordinator edits also serialise, each diffing from the
-            # coordinator set the other left.
+            # Race: two coordinator edits serialise on the project row lock, each diffing
+            # from the coordinator set the other left. (It is also the lock
+            # qaqc_views.assign_site_qaqc() takes; since CL-L nothing here reads the QA/QC
+            # assignment, so that serialisation no longer decides an answer.)
             locked = Project.objects.select_for_update().get(pk=project.pk)
             current   = set(locked.coordinators.values_list('pk', flat=True))
             to_add    = desired - current
             to_remove = current - desired
-
-            # CL-H: the site's QA/QC engineer cannot be added; nothing is saved, so the
-            # PM ends that assignment first rather than finding half an edit applied.
-            engineer_id = site_qaqc_engineer_id(locked)
-            if engineer_id in to_add:
-                engineer = UserProfile.objects.select_related('user').get(pk=engineer_id)
-                messages.error(request,
-                               qaqc_engineer_manager_refusal(engineer, locked, 'coordinator'))
-                return redirect('assign_coordinators', project_id=project.project_id)
 
             # The open (not Done) tasks the departing coordinators hold on this project.
             # Race: the task rows are locked (of='self' — the joins are only read) so a

@@ -1717,15 +1717,43 @@ def qaqc_engineer_holds_task(project, task):
     return site_qaqc_engineer_id(project) == task.assigned_to_id
 
 
-def qaqc_engineer_manager_refusal(profile, project, seat):
-    """Return the refusal message if `profile` may not take `seat` ('PM' or
-    'coordinator') on `project` because they are its QA/QC engineer, else None (CL-H).
+def qaqc_engineer_on_site_engineer_task(user, task, project):
+    """True if `task` is a Site Engineer task and `user` is `project`'s QA/QC engineer
+    (CL-L, ruling F1): they may not change its status, answer its checklist or submit it
+    for approval, whatever seat they hold.
 
-    CL-A keeps a site's manager from being named its QA/QC engineer; this is the other
-    end — the engineer being made a manager afterwards, which would let one person check
-    the site's work and also waive what they found. Asked by change_site_pm() (and so by
-    hand_over_sites()) and assign_coordinators(), each under the project row lock that
-    qaqc_views.assign_site_qaqc() also takes, so neither order can slip past the other.
+    WHY THIS EXISTS. Since v2.6 a coordinator may be the site's engineer, and every
+    manager gate admits a coordinator to every task on the site before any role match.
+    Without this the person checking the Site Engineer work on a visit could have
+    recorded it. Asked BEFORE the manager arm by each gate, the pattern of
+    user_can_rectify_punch_point(). Due date and assignment are planning, not doing the
+    work, and stay open to them.
+
+    Keyed on the task's role, as CL-A v2.5 is. The row is read as stored, any role, like
+    qaqc_engineer_assignment_refusal(): a refusal fails closed, so a stale engineer
+    keeps the bar until the PM ends the row. No query for any other task role or a user
+    with no profile; one (none off OPEX) for a Site Engineer task.
+    """
+    if task is None or task.assigned_role != SITE_ENGINEER_TASK_ROLE:
+        return False
+    profile = getattr(user, 'profile', None)
+    if profile is None:
+        return False
+    return site_qaqc_engineer_id(project) == profile.pk
+
+
+def qaqc_engineer_manager_refusal(profile, project, seat):
+    """Return the refusal message if `profile` may not take `seat` on `project` because
+    they are its QA/QC engineer, else None (CL-H).
+
+    ONLY THE PM SEAT IS ASKED NOW (CL-L, v2.6): a coordinator may be the site's
+    engineer, in either order, so assign_coordinators() no longer calls this. `seat`
+    stays a parameter because it is the word in the message.
+
+    CL-A keeps the site's PM from being named its QA/QC engineer; this is the other end
+    — the engineer being made its PM afterwards. Asked by change_site_pm() (and so by
+    hand_over_sites()) under the project row lock that qaqc_views.assign_site_qaqc()
+    also takes, so neither order can slip past the other.
 
     Reads the row as stored, any role, like qaqc_engineer_assignment_refusal(): a stale
     row is still refused until the PM ends it. None, with no query, for a non-OPEX site.
@@ -1777,9 +1805,15 @@ def user_can_submit_task_for_approval(user, task, project):
 
     PM authority comes through user_can_manage_project(), so a Project Coordinator
     is admitted alongside the assigned PM exactly as everywhere else in this module.
+
+    Except the site's QA/QC engineer on a Site Engineer task (CL-L, F1), refused first.
     """
     profile = getattr(user, 'profile', None)
     if profile is None:
+        return False
+    # Only the people who did or own the work may offer it; the site's checker may not
+    # offer Site Engineer work for approval, even from a coordinator seat (CL-L).
+    if qaqc_engineer_on_site_engineer_task(user, task, project):
         return False
     if task.assigned_to is not None and task.assigned_to == profile:
         return True
@@ -1930,11 +1964,12 @@ def _approver_candidates(project, submitter_profile, engineer_holds_task, assign
     # The site's assigned QA/QC engineer (arm 2). Read through the same row reader
     # user_is_site_qaqc() uses; the predicate below still decides whether they count
     # (an engineer whose role has since changed is a candidate and is refused there).
-    # Not read at all for a task the engineer holds: they are out of its pool (CL-A v2.5).
-    if not engineer_holds_task:
-        qaqc_engineer_id = site_qaqc_engineer_id(project)
-        if qaqc_engineer_id is not None:
-            candidate_pks.add(qaqc_engineer_id)
+    # For a task the engineer holds they are out of its pool (CL-A v2.5): dropped below,
+    # after every source that could add them, because since CL-L the coordinators read
+    # above can (F2).
+    qaqc_engineer_id = site_qaqc_engineer_id(project)
+    if qaqc_engineer_id is not None and not engineer_holds_task:
+        candidate_pks.add(qaqc_engineer_id)
     candidate_pks.update(
         user_profile_model.objects.filter(is_qaqc=True).values_list('pk', flat=True)
     )
@@ -1945,6 +1980,8 @@ def _approver_candidates(project, submitter_profile, engineer_holds_task, assign
     # predicate.
     if submitter_profile is not None:
         candidate_pks.discard(submitter_profile.pk)
+    if engineer_holds_task and qaqc_engineer_id is not None:
+        candidate_pks.discard(qaqc_engineer_id)
     # Nor is the assignee a second signature on their own task (G85): the verdict
     # endpoints refuse them, so they are dropped here by the same token.
     if assignee_id is not None:
@@ -2011,11 +2048,11 @@ def user_may_self_certify(user, project, *, engineer_holds_task=False, assignee_
     assignee, which covers the engineer too; the answer is therefore per assignee, and
     the per-page builder asks once per distinct assignee among its rows.
 
-    THE SITE'S QA/QC ENGINEER NEVER SELF-CERTIFIES (CL-A v2.5, ruling Q4). Every task
-    they can submit is one they hold — they are never the site's manager (CL-A, CL-H), so
-    user_can_submit_task_for_approval() admits them only as its assignee — and they make
-    no approval decision on a task they hold. Their submission always waits for another
-    signature.
+    THE SITE'S QA/QC ENGINEER NEVER SELF-CERTIFIES (CL-A v2.5, ruling Q4). They make no
+    approval decision on a task they hold, so their own work waits for another
+    signature. Since CL-L they may also be a coordinator and so submit tasks they do not
+    hold (never a Site Engineer task, F1); those wait too, kept by ruling F3 even where
+    nobody else can sign (EXECUTION_MODULE_DEFERRED.md G101).
     """
     profile = getattr(user, 'profile', None)
     if profile is None or not _holds_self_certifying_signature(user, project):
@@ -2083,9 +2120,19 @@ def user_can_waive_punch_point(user, project):
     both admitted — coordinator authority is additive PM authority everywhere else
     in the portal and inventing a second, narrower notion of "PM" here would be the
     only place it means something different.
+
+    EXCEPT THE SITE'S QA/QC ENGINEER (CL-L, v2.6). Since a coordinator may be the site's
+    engineer, the manager arm alone would hand the checker the waiver of their own
+    findings — the self-cancelling record B-12 refuses. Asked first, so the coordinator
+    seat cannot readmit them. The row is read as stored (site_qaqc_engineer_id), any
+    role: a refusal fails closed. One query on an OPEX site, none elsewhere.
     """
     profile = getattr(user, 'profile', None)
     if profile is None:
+        return False
+    # Only the site's PM-level managers may waive; its QA/QC engineer recorded the
+    # finding and may not switch it off, even from a coordinator seat (CL-L).
+    if site_qaqc_engineer_id(project) == profile.pk:
         return False
     return user_can_manage_project(user, project)
 
