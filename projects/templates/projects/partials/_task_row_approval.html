@@ -49,7 +49,8 @@ its own partial because the in-place self-certification swap draws it too (F2).
 
 Expected context:
   task, project, is_assigned_pm, two_step_completion, self_certify_by_assignee
-  (_phase_list_two_step), qaqc_refused_task_role (project_overview only, G103)
+  (_phase_list_two_step), qaqc_refused_task_role (project_overview and
+  _task_row_context, G103)
 {% endcomment %}
 {% load approval_tags %}
 {% if two_step_completion and not task.is_mirror %}

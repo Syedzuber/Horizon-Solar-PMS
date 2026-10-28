@@ -5683,7 +5683,13 @@ def _task_row_context(request, project):
 
     The flags still come from `_phase_list_two_step()`, the only place they are
     decided; this only gathers them. project_overview keeps its own context (it needs
-    these values for more than the rows) but spreads the same flag builder."""
+    these values for more than the rows) but spreads the same flag builder.
+
+    `qaqc_refused_task_role` (G103, CL-L F1): the same key, from the same helper,
+    project_overview passes, so a redrawn row leaves out the status select and Submit
+    on a Site Engineer task for the site's QA/QC engineer exactly as the full page does.
+    No responder already holds the engineer id, so it is read here: one query on an
+    OPEX project (site_qaqc_engineer_id), none on any other."""
     profile = getattr(request.user, 'profile', None)
     role    = getattr(profile, 'role', None)
     is_pm   = _pm_owns_project(request, project)
@@ -5695,6 +5701,8 @@ def _task_row_context(request, project):
         'gate_task_pk':        _gate_task_pk(project),
         **_phase_list_two_step(project, request, is_pm),
         **_row_viewer_context(request),
+        'qaqc_refused_task_role': qaqc_engineer_refused_task_role(
+            profile, site_qaqc_engineer_id(project)),
     }
 
 
@@ -11599,9 +11607,8 @@ def project_overview(request, project_id):
         # rows leave out, because the viewer is this site's QA/QC engineer — the rule
         # qaqc_engineer_on_site_engineer_task() refuses on. The engineer id is the QA/QC
         # card's active row, read above (the same active, OPEX-only row
-        # site_qaqc_engineer_id reads), so it costs no query. None for everyone else,
-        # and absent on the HTMX row redraws (_task_row_context), which keep drawing the
-        # controls: the endpoints still refuse them (EXECUTION_MODULE_DEFERRED.md G103).
+        # site_qaqc_engineer_id reads), so it costs no query. None for everyone else.
+        # The HTMX row redraws get the same key from _task_row_context().
         'qaqc_refused_task_role': qaqc_engineer_refused_task_role(
             profile, _qaqc_row.engineer_id if _qaqc_row is not None else None),
     })

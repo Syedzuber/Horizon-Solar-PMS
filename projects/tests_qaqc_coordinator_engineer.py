@@ -18,8 +18,9 @@ WHAT IS PINNED HERE
     approve cannot approve a task they hold; can approve an SE's task;
             out of the pool on the keyword path too (F2)                ApprovalTests
     B3      the double-role line on site_qaqc and the approval panel    DoubleRoleLineTests
-    G103    project_overview rows draw no status select or Submit on a
-            Site Engineer task exactly where the predicate refuses      RowControlTests
+    G103    project_overview rows, and the HTMX redraws (due date, phase
+            reorder), draw no status select or Submit on a Site
+            Engineer task exactly where the predicate refuses           RowControlTests
 
 Built on tests_qaqc_engineer_tasks.EngineerTaskFixture: `site` (pm + coord, `worker`
 holding every Site Engineer task), `other_site` (pm_b + coord_b). Here `coord`, the
@@ -402,3 +403,48 @@ class RowControlTests(CoordinatorEngineerFixture):
         page = _client_for(self.coord).get(reverse('project_overview',
                                                    args=[self.site.project_id]))
         self.assertIn(STATUS_CONTROL, self._row(page.content.decode(), ceig))
+
+    # -- the HTMX redraws (_task_row_context) ----------------------------------------
+
+    def _due_redraw(self, by):
+        """Set a due date on the Site Engineer task through the HTMX endpoint; the
+        redrawn row's markup."""
+        response = _client_for(by).post(
+            reverse('task_set_due_date', args=[self.site.project_id, self.civil.pk]),
+            {'due_date': (date.today() + timedelta(days=12)).isoformat()},
+            HTTP_HX_REQUEST='true')
+        self.assertEqual(response.status_code, 200)
+        self.civil.refresh_from_db()
+        self.assertEqual(self.civil.due_date, date.today() + timedelta(days=12),
+                         'fixture: the due date was not set')
+        return self._row(response.content.decode(), self.civil)
+
+    def _reorder_redraw(self, by):
+        """Reverse the Site Engineer task's phase through the HTMX endpoint; the civil
+        row's markup in the redrawn phase."""
+        phase = self.civil.phase
+        ids = list(Task.objects.filter(phase=phase).order_by('task_order', 'pk')
+                   .values_list('pk', flat=True))
+        response = _client_for(by).post(
+            reverse('phase_tasks_reorder', args=[self.site.project_id, phase.pk]),
+            {'order': ','.join(str(pk) for pk in reversed(ids))}, HTTP_HX_REQUEST='true')
+        self.assertEqual(response.status_code, 200)
+        return self._row(response.content.decode(), self.civil)
+
+    def test_a_due_date_redraw_follows_the_rule(self):
+        self.assertTrue(qaqc_engineer_on_site_engineer_task(self.coord.user, self.civil,
+                                                            self.site))
+        row = self._due_redraw(self.coord)
+        self.assertNotIn(STATUS_CONTROL, row)
+        self.assertNotIn(SUBMIT_BUTTON, row)
+        row = self._due_redraw(self.pm)
+        self.assertIn(STATUS_CONTROL, row)
+        self.assertIn(SUBMIT_BUTTON, row)
+
+    def test_a_phase_reorder_redraw_follows_the_rule(self):
+        row = self._reorder_redraw(self.coord)
+        self.assertNotIn(STATUS_CONTROL, row)
+        self.assertNotIn(SUBMIT_BUTTON, row)
+        row = self._reorder_redraw(self.pm)
+        self.assertIn(STATUS_CONTROL, row)
+        self.assertIn(SUBMIT_BUTTON, row)

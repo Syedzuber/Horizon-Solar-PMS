@@ -5362,7 +5362,7 @@ over `managed_project_ids`), and the QA/QC engineer section (CL-K,
 coordinator who is also that site's engineer, the same Rectified points are in both.
 Display only: both lists link to the same task page and the writer decides who may act.
 
-### G103 — the task row still draws its controls for a coordinator-engineer on a Site Engineer task
+### G103 — the task row still draws its controls for a coordinator-engineer on a Site Engineer task — CLOSED 28 Oct 2026
 
 Recorded 28 Oct 2026 by the CL-L build (outside the F1 ruling's three gates). Ruling F1
 refuses the site's QA/QC engineer on Site Engineer tasks in `task_status_update`,
@@ -5400,6 +5400,15 @@ Each endpoint behind those controls still refuses. A page reload removes the con
 No other page draws this row: the drill-down has its own markup with no status control,
 and `project_detail.html` is unreachable (the `project_detail` view only redirects to
 `project_overview`).
+
+**Closed 28 Oct 2026.** `_task_row_context()` now passes `qaqc_refused_task_role` from
+the same helper, `qaqc_engineer_refused_task_role(profile, site_qaqc_engineer_id(project))`.
+That covers all four redraw responders listed above. None of their callers already held
+the engineer id, so it is read there. Cost: +1 query per redraw on an OPEX project and
+0 on any other (`site_qaqc_engineer_id` returns before querying off OPEX). No test pins an
+absolute redraw count, so none changed. The full-page overview does not use this builder,
+and its counts did not move. `RowControlTests` adds a due-date redraw and a phase-reorder
+redraw: the coordinator-engineer gets neither control, and the PM gets both.
 
 ---
 

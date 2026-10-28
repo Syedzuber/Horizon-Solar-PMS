@@ -1753,10 +1753,11 @@ def qaqc_engineer_refused_task_role(profile, engineer_id):
     else None. No query: the caller has the engineer id.
 
     THE PURE HALF OF qaqc_engineer_on_site_engineer_task(), which asks it. It exists so
-    project_overview can hide the row controls that predicate refuses (G103) from the
-    engineer id it has already read, without a query per row: the row compares its
-    task's role with this. tests_qaqc_coordinator_engineer.RowControlTests pins the page
-    against the predicate, viewer by viewer.
+    project_overview (from the engineer id it has already read) and the HTMX row redraws
+    (views._task_row_context, one read) can hide the row controls that predicate
+    refuses (G103) without a query per row: the row compares its task's role with this.
+    tests_qaqc_coordinator_engineer.RowControlTests pins the page and the redraws against
+    the predicate.
     """
     if profile is None or engineer_id is None or engineer_id != profile.pk:
         return None
