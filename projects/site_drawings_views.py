@@ -71,6 +71,10 @@ DRAWING_LINK_SECONDS = 300
 #: rates, so it is never shown; the card shows the allowlisted BOQ columns instead.
 HIDDEN_NAME_MARKER = 'boq'
 
+#: DR-2c-3. Above this many BOQ lines the table scrolls inside its own box, sized to about
+#: this many single-line rows, so a long BOQ does not push the rest of the page down.
+BOQ_SCROLL_ROWS = 11
+
 
 def _is_hidden(pdf):
     """DR-10: an extracted PDF whose display_name contains 'boq', in any case."""
@@ -226,12 +230,17 @@ def site_drawings_context(project):
       not_released    {'state'}
       under_revision  {'state', 'since'}                — no drawings, no BOQ (DR-2)
       released        {'state', 'pending_change', 'drawings', 'hidden_count',
-                       'unavailable', 'boq_rows', 'show_make', 'corrected_on'}
+                       'unavailable', 'boq_rows', 'show_make', 'corrected_on',
+                       'drawing_count', 'boq_line_count', 'boq_scrolls'}
 
     `show_make` is True when at least one BOQ row has a brand label. No OPEX screen can
     set a make today (DESIGN_MODULE_DEFERRED T5), so an always-drawn Make column would be
     a column of dashes on every site; it appears by itself once makes exist. Read from the
     rows already built, so it costs no query.
+
+    `drawing_count` and `boq_line_count` are the closed card's header summary (DR-2c-2),
+    and `boq_scrolls` turns on the table's inner scroll (DR-2c-3). All three are lengths
+    of the lists above — no query.
     """
     state, assignment = _design_state(project)
     if state == STATE_UNDER_REVISION:
@@ -249,6 +258,9 @@ def site_drawings_context(project):
         'boq_rows':       boq_rows,
         'show_make':      any(row['make'] for row in boq_rows),
         'corrected_on':   _local_date(assignment.corrected_at),
+        'drawing_count':  len(drawings),
+        'boq_line_count': len(boq_rows),
+        'boq_scrolls':    len(boq_rows) > BOQ_SCROLL_ROWS,
     }
 
 

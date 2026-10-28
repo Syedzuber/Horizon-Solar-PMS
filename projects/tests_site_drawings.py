@@ -16,6 +16,9 @@ WHAT IS PINNED HERE
             vendor name; boq_pdf / boq_excel files never appear
   feed      one activity row per open
   queries   constant with 1 and with 10 PDFs and BOQ lines, at most 5 added (DR-5)
+  DR-2c     the card starts closed; both banners and the summary sit in the header; the
+            BOQ box scrolls only above BOQ_SCROLL_ROWS lines, header row sticky; the
+            context's query count per state is unchanged
 
 Storage is mocked at the signer — no test here reaches a bucket.
 
@@ -45,8 +48,8 @@ from .models import (
 )
 from .permissions import user_can_view_site_drawings
 from .site_drawings_views import (
-    DRAWING_LINK_SECONDS, STATE_NOT_RELEASED, STATE_RELEASED, STATE_UNDER_REVISION,
-    site_drawings_context,
+    BOQ_SCROLL_ROWS, DRAWING_LINK_SECONDS, STATE_NOT_RELEASED, STATE_RELEASED,
+    STATE_UNDER_REVISION, site_drawings_context,
 )
 
 SIGNED = 'https://storage.example/signed/drawing.pdf?token=abc'
@@ -547,3 +550,115 @@ class FollowUpTests(SiteDrawingsBase):
             entity_id=self.layout.pk).exists())
         feed = self._overview(self.se).context['recent_activity']
         self.assertNotIn('site_drawing_opened', [row.action_code for row in feed])
+
+
+class ClosedCardTests(SiteDrawingsBase):
+    """DR-2c: closed by default, banners and summary in the header, the BOQ's own scroll
+    box above BOQ_SCROLL_ROWS lines."""
+
+    def _card(self):
+        return render_to_string('projects/_site_drawings_card.html',
+                                {'site_drawings': site_drawings_context(self.site)})
+
+    def _header(self, card):
+        # The header is everything before the collapsed body; a card with no body (not
+        # released, under revision) is all header.
+        # Cut at the body's own div: the toggle in the header also names siteDrawingsCollapse.
+        start = card.index('class="card-header')
+        end = card.find('<div class="collapse"', start)
+        return card[start:] if end == -1 else card[start:end]
+
+    def _under_revision(self):
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(
+            status=DESIGN_IN_DESIGN, released_at=None)
+        self._left_released(self.assignment, timezone.now())
+
+    def test_card_renders_collapsed(self):
+        html = self._overview(self.se).content.decode()
+        self.assertIn('<div class="collapse" id="siteDrawingsCollapse">', html)
+        self.assertNotIn('collapse show" id="siteDrawingsCollapse"', html)
+        self.assertIn('data-bs-target="#siteDrawingsCollapse" aria-expanded="false"', html)
+        # Closed, not absent: the drawings and BOQ are in the page behind the toggle.
+        self.assertIn('Layout.pdf', html)
+        self.assertIn('Panel line 1', html)
+
+    def test_under_revision_banner_is_in_the_header(self):
+        self._under_revision()
+        header = self._header(self._card())
+        self.assertIn('alert-danger', header)
+        self.assertIn('Design under revision since', header)
+        self.assertNotIn('siteDrawingsCollapse', header)   # nothing to open
+
+    def test_change_requested_banner_is_in_the_header(self):
+        DesignChangeRequest.objects.create(attempt=self.attempt, requested_by=self.pm,
+                                           reason='Move the inverter',
+                                           origin=CHANGE_REQUEST_ORIGIN_PM)
+        card = self._card()
+        header = self._header(card)
+        self.assertIn('alert-warning', header)
+        self.assertIn('A design change has been requested.', header)
+        self.assertEqual(card.count('A design change has been requested.'), 1)
+
+    def test_no_banner_on_a_released_site_without_a_change_request(self):
+        header = self._header(self._card())
+        self.assertNotIn('alert-', header)
+
+    def test_summary_released(self):
+        self.assertIn('2 drawings · 2 BOQ lines', self._header(self._card()))
+        DesignFilePdf.objects.filter(pk=self.electrical.pk).delete()
+        BOQItem.objects.filter(boq=self.boq, serial_no=2).delete()
+        self.assertIn('1 drawing · 1 BOQ line<', self._header(self._card()))
+
+    def test_summary_not_released(self):
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(status=DESIGN_IN_QC)
+        header = self._header(self._card())
+        self.assertIn('Design not yet released.', header)
+        self.assertNotIn('data-bs-toggle', header)
+
+    def test_summary_under_revision_is_the_banner(self):
+        self._under_revision()
+        header = self._header(self._card())
+        self.assertNotIn('id="site-drawings-summary"', header)
+        self.assertIn('Check with your PM before continuing.', header)
+        self.assertNotIn('data-bs-toggle', header)
+
+    def _rows(self, total):
+        for serial in range(3, total + 1):
+            self._boq_line(self.boq, serial, self.make_vendor)
+
+    def test_no_scroll_box_at_eleven_rows(self):
+        self.assertEqual(BOQ_SCROLL_ROWS, 11)
+        self._rows(11)
+        ctx = site_drawings_context(self.site)
+        self.assertEqual(ctx['boq_line_count'], 11)
+        self.assertFalse(ctx['boq_scrolls'])
+        card = self._card()
+        self.assertNotIn('id="site-boq-scroll"', card)
+        self.assertNotIn('position:sticky', card)
+        self.assertIn('class="table-responsive"', card)   # sideways scroll stays
+
+    def test_scroll_box_with_sticky_header_above_eleven_rows(self):
+        self._rows(12)
+        self.assertTrue(site_drawings_context(self.site)['boq_scrolls'])
+        card = self._card()
+        self.assertIn('id="site-boq-scroll"', card)
+        self.assertIn('max-height:22.5rem; overflow-y:auto;', card)
+        self.assertIn('<thead class="table-light" style="position:sticky; top:0; z-index:1;">',
+                      card)
+        box = card.index('id="site-boq-scroll"')
+        self.assertIn('table-responsive', card[card.rindex('<div', 0, box):box])
+
+    def test_context_query_count_per_state_unchanged(self):
+        # Measured before DR-2c: released 4 (assignment, zip, PDF rows, BOQ rows), the
+        # other two states 1 (the assignment). The summary and scroll flag are lengths.
+        def queries():
+            with CaptureQueriesContext(connection) as ctx:
+                site_drawings_context(self.site)
+            return len(ctx.captured_queries)
+        self.assertEqual(queries(), 4)
+        self._rows(15)
+        self.assertEqual(queries(), 4)
+        DesignAssignment.objects.filter(pk=self.assignment.pk).update(status=DESIGN_IN_QC)
+        self.assertEqual(queries(), 1)
+        self._under_revision()
+        self.assertEqual(queries(), 1)

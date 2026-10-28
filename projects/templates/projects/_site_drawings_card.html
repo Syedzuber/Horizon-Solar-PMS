@@ -9,81 +9,103 @@ signed on this page. The BOQ is the six allowlisted columns (DR-3) and nothing e
 price, no ordered quantity, no vendor. Make is drawn only when some row has a brand label
 (show_make), because no OPEX screen can set one yet. The table scrolls inside its own container so the
 page never scrolls sideways at phone width.
+
+CLOSED BY DEFAULT (DR-2c-1) — a deliberate exception to "overview blocks open by default",
+using the Gantt card's mechanism: Bootstrap collapse without `show`, and aria-expanded
+"false" on the .block-toggle button, which must stay in step or the chevron points the
+wrong way on load. So everything a site needs to know without opening it lives in the
+HEADER (DR-2c-2): the red under-revision and yellow change-requested banners, and a short
+summary. Only a released site has anything behind the toggle; the other two states are
+the header alone.
+
+THE BOQ BOX (DR-2c-3): above BOQ_SCROLL_ROWS lines (boq_scrolls) the table scrolls
+vertically inside the same box that already scrolls sideways, about eleven single-line
+rows tall, with the header row sticky. At or below it there is no inner vertical scroll.
 {% endcomment %}
 {% if site_drawings and site_drawings.state != 'not_opex' %}
 <div class="card shadow-sm mb-3" id="site-drawings-card">
-  <div class="card-header py-2 d-flex justify-content-between align-items-center">
-    <span class="fw-semibold small"><i data-lucide="file-text" class="lucide-icon me-1"></i>Drawings &amp; BOQ</span>
-    <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
-            type="button" data-bs-toggle="collapse"
-            data-bs-target="#siteDrawingsCollapse" aria-expanded="true">
-      <i class="bi bi-chevron-down collapse-chevron"></i>
-    </button>
+  <div class="card-header py-2">
+    <div class="d-flex justify-content-between align-items-center gap-2">
+      <span class="small">
+        <span class="fw-semibold"><i data-lucide="file-text" class="lucide-icon me-1"></i>Drawings &amp; BOQ</span>
+        {% if site_drawings.state == 'released' %}
+          <span class="text-muted ms-1 d-inline-block" id="site-drawings-summary">{{ site_drawings.drawing_count }} drawing{{ site_drawings.drawing_count|pluralize }} · {{ site_drawings.boq_line_count }} BOQ line{{ site_drawings.boq_line_count|pluralize }}</span>
+        {% elif site_drawings.state == 'not_released' %}
+          <span class="text-muted ms-1 d-inline-block" id="site-drawings-summary">Design not yet released.</span>
+        {% endif %}
+      </span>
+      {% if site_drawings.state == 'released' %}
+      <button class="btn btn-link btn-sm p-0 text-muted block-toggle"
+              type="button" data-bs-toggle="collapse"
+              data-bs-target="#siteDrawingsCollapse" aria-expanded="false"
+              aria-controls="siteDrawingsCollapse">
+        <i class="bi bi-chevron-down collapse-chevron"></i>
+      </button>
+      {% endif %}
+    </div>
+    {% if site_drawings.state == 'under_revision' %}
+      <div class="alert alert-danger small py-2 mt-2 mb-0" role="alert">
+        Design under revision since {{ site_drawings.since|date:"d M Y" }}. Check with your PM before continuing.
+      </div>
+    {% elif site_drawings.state == 'released' and site_drawings.pending_change %}
+      <div class="alert alert-warning small py-2 mt-2 mb-0" role="alert">
+        A design change has been requested. Check with your PM before starting affected work.
+      </div>
+    {% endif %}
   </div>
-  <div class="collapse show" id="siteDrawingsCollapse">
+  {% if site_drawings.state == 'released' %}
+  <div class="collapse" id="siteDrawingsCollapse">
     <div class="card-body small px-3 py-3">
-      {% if site_drawings.state == 'under_revision' %}
-        <div class="alert alert-danger py-2 mb-0" role="alert">
-          Design under revision since {{ site_drawings.since|date:"d M Y" }}. Check with your PM before continuing.
-        </div>
-      {% elif site_drawings.state == 'released' %}
-        {% if site_drawings.pending_change %}
-          <div class="alert alert-warning py-2 mb-3" role="alert">
-            A design change has been requested. Check with your PM before starting affected work.
-          </div>
-        {% endif %}
+      <div class="fw-semibold mb-1">Drawings</div>
+      {% if site_drawings.drawings %}
+        <ul class="list-unstyled mb-2">
+          {% for d in site_drawings.drawings %}
+            <li class="d-flex justify-content-between align-items-start gap-2 py-1{% if not forloop.last %} border-bottom{% endif %}">
+              <a href="{% url 'site_drawing_open' d.pk %}" target="_blank" rel="noopener" class="text-break">{{ d.display_name }}</a>
+              {% if d.size_bytes %}<span class="text-muted text-nowrap">{{ d.size_bytes|filesizeformat }}</span>{% endif %}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% if site_drawings.hidden_count %}
+        <div class="text-muted mb-1">{{ site_drawings.hidden_count }} file(s) not shown.</div>
+      {% endif %}
+      {% if site_drawings.unavailable %}
+        <div class="text-muted mb-1">Drawing PDFs not available — contact Design.</div>
+      {% endif %}
 
-        <div class="fw-semibold mb-1">Drawings</div>
-        {% if site_drawings.drawings %}
-          <ul class="list-unstyled mb-2">
-            {% for d in site_drawings.drawings %}
-              <li class="d-flex justify-content-between align-items-start gap-2 py-1{% if not forloop.last %} border-bottom{% endif %}">
-                <a href="{% url 'site_drawing_open' d.pk %}" target="_blank" rel="noopener" class="text-break">{{ d.display_name }}</a>
-                {% if d.size_bytes %}<span class="text-muted text-nowrap">{{ d.size_bytes|filesizeformat }}</span>{% endif %}
-              </li>
-            {% endfor %}
-          </ul>
-        {% endif %}
-        {% if site_drawings.hidden_count %}
-          <div class="text-muted mb-1">{{ site_drawings.hidden_count }} file(s) not shown.</div>
-        {% endif %}
-        {% if site_drawings.unavailable %}
-          <div class="text-muted mb-1">Drawing PDFs not available — contact Design.</div>
-        {% endif %}
-
-        <div class="fw-semibold mt-3 mb-1">
-          BOQ{% if site_drawings.corrected_on %} <span class="fw-normal text-muted">· Corrected on {{ site_drawings.corrected_on|date:"d M Y" }}</span>{% endif %}
-        </div>
-        {% if site_drawings.boq_rows %}
-          <div class="table-responsive">
-            <table class="table table-sm mb-0 align-middle">
-              <thead class="table-light">
+      <div class="fw-semibold mt-3 mb-1">
+        BOQ{% if site_drawings.corrected_on %} <span class="fw-normal text-muted">· Corrected on {{ site_drawings.corrected_on|date:"d M Y" }}</span>{% endif %}
+      </div>
+      {% if site_drawings.boq_rows %}
+        <div class="table-responsive{% if site_drawings.boq_scrolls %} border rounded{% endif %}"
+             {% if site_drawings.boq_scrolls %}id="site-boq-scroll" style="max-height:22.5rem; overflow-y:auto;"{% endif %}>
+          <table class="table table-sm mb-0 align-middle">
+            <thead class="table-light"{% if site_drawings.boq_scrolls %} style="position:sticky; top:0; z-index:1;"{% endif %}>
+              <tr>
+                <th>Code</th><th>Description</th><th>Category</th><th>Unit</th>
+                <th class="text-end">Qty</th>{% if site_drawings.show_make %}<th>Make</th>{% endif %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in site_drawings.boq_rows %}
                 <tr>
-                  <th>Code</th><th>Description</th><th>Category</th><th>Unit</th>
-                  <th class="text-end">Qty</th>{% if site_drawings.show_make %}<th>Make</th>{% endif %}
+                  <td class="text-nowrap">{{ r.code|default:"—" }}</td>
+                  <td style="min-width:12rem;">{{ r.description }}</td>
+                  <td class="text-nowrap">{{ r.category|default:"—" }}</td>
+                  <td class="text-nowrap">{{ r.unit|default:"—" }}</td>
+                  <td class="text-end text-nowrap">{% if r.quantity is not None %}{{ r.quantity|floatformat:"-2" }}{% else %}—{% endif %}</td>
+                  {% if site_drawings.show_make %}<td class="text-nowrap">{{ r.make|default:"—" }}</td>{% endif %}
                 </tr>
-              </thead>
-              <tbody>
-                {% for r in site_drawings.boq_rows %}
-                  <tr>
-                    <td class="text-nowrap">{{ r.code|default:"—" }}</td>
-                    <td style="min-width:12rem;">{{ r.description }}</td>
-                    <td class="text-nowrap">{{ r.category|default:"—" }}</td>
-                    <td class="text-nowrap">{{ r.unit|default:"—" }}</td>
-                    <td class="text-end text-nowrap">{% if r.quantity is not None %}{{ r.quantity|floatformat:"-2" }}{% else %}—{% endif %}</td>
-                    {% if site_drawings.show_make %}<td class="text-nowrap">{{ r.make|default:"—" }}</td>{% endif %}
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </div>
-        {% else %}
-          <div class="text-muted">No BOQ lines.</div>
-        {% endif %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
       {% else %}
-        <div class="text-muted">Design not yet released.</div>
+        <div class="text-muted">No BOQ lines.</div>
       {% endif %}
     </div>
   </div>
+  {% endif %}
 </div>
 {% endif %}
