@@ -20,8 +20,10 @@
   {% endfor %}
 {% endif %}
 
-<form method="post" action="{% url 'create_delivery_challan' project.project_id %}" enctype="multipart/form-data">
+<form method="post" action="{% url 'create_delivery_challan' project.project_id %}" enctype="multipart/form-data" id="dcForm">
   {% csrf_token %}
+  {# DC-K: the page's ?key=. The server answers a second POST of it with the first challan. #}
+  <input type="hidden" name="client_uuid" value="{{ client_uuid|default:'' }}">
 
   {# ── Challan header ──────────────────────────────────────────────────────── #}
   <div class="card shadow-sm mb-4">
@@ -183,7 +185,7 @@
 
   <div class="d-flex gap-2 justify-content-end mb-4">
     <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary">Cancel</a>
-    <button type="submit" class="btn btn-primary">Create Delivery Challan</button>
+    <button type="submit" class="btn btn-primary" id="dcSubmit">Create Delivery Challan</button>
   </div>
 
 </form>
@@ -248,6 +250,29 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   updateRemoveButtons();
+
+  /* DC-K, copied from the vendor order form. The submit event fires only after the
+     browser's own required/min checks pass, so a refused field never leaves the button
+     disabled. The server refuses a repeat of this form's client_uuid; disabling the
+     button only spares a second wait on a slow upload. */
+  document.getElementById('dcForm').addEventListener('submit', function () {
+    var btn = document.getElementById('dcSubmit');
+    btn.dataset.label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+  });
+
+  /* Back to this page from the one it led to: the browser can restore it exactly as it
+     was left, button disabled. Re-enable it with its own label. The form keeps its
+     client_uuid, so a resubmit is still answered as a repeat by the server. */
+  window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    var btn = document.getElementById('dcSubmit');
+    if (btn && btn.disabled) {
+      btn.disabled = false;
+      if (btn.dataset.label) btn.textContent = btn.dataset.label;
+    }
+  });
 });
 </script>
 

@@ -22,6 +22,7 @@ from django.http import Http404, HttpResponse, HttpResponseForbidden, JsonRespon
 from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import format_html
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
@@ -249,6 +250,9 @@ from .delivery_storage import (
     discard_unrecorded_dc_document, dc_document_url, upload_dc_document,
     validate_dc_document, DELIVERY_STORAGE_OFF,
 )
+# DC-K — the create form's ?key= guard. Its already_submitted() answers a VendorOrder
+# only, so create_delivery_challan builds the challan's own answer from these.
+from .submission_guard import ALREADY_SUBMITTED, fresh_form_url, keyed_redirect, url_key
 
 logger = logging.getLogger(__name__)
 
@@ -13656,6 +13660,13 @@ def create_delivery_challan(request, project_id):
     file, storage off — writes nothing and uploads nothing. Uploads happen after every
     other check and before the challan is written; any failure inside the transaction
     discards them.
+
+    DC-K: double-submit safe on DeliveryChallan.client_uuid (submission_guard's ?key=).
+    A GET without a key is redirected to one; a key that already made a challan — a
+    double-tap, a resubmit after a slow upload, Back and submit — is sent to that
+    challan with the "already submitted" message, before any check or upload. A refused
+    submission keeps its key, since it wrote nothing. A POST with no key, or a malformed
+    one, still creates a challan, unkeyed (SECONDARY_FINDINGS).
     """
     project = _active_project(project_id)
     profile = request.user.profile
@@ -13682,14 +13693,60 @@ def create_delivery_challan(request, project_id):
             # chosen says they must be attached (and the confirmation ticked) again.
             'documents_dropped': bool(documents),
             'documents_max':     DC_DOCUMENTS_MAX_FILES,
+            # DC-K: the GET's ?key=, or on a refused POST the key it posted — the SAME
+            # key, because the refused attempt wrote nothing, so the corrected submit is
+            # still the first use of it. None (an empty field) only for a keyless POST.
+            'client_uuid':       key,
         }
+
+    def _challan_with_key():
+        # The challan this key already made, or None. Guarded on None because
+        # filter(client_uuid=None) is IS NULL and would match every unkeyed challan.
+        # select_related: the answer below reads the challan's project.
+        if key is None:
+            return None
+        return (DeliveryChallan.objects.select_related('project')
+                .filter(client_uuid=key).first())
+
+    def _already_submitted(challan):
+        # submission_guard.already_submitted(), for a challan: the same message and
+        # fresh-form link, then the challan's page.
+        text = format_html('{} <a href="{}">Open a fresh form</a>.',
+                           ALREADY_SUBMITTED, fresh_form_url(request))
+        # Sent to the challan only if they may see its site — the detail page's own
+        # scope gate. Anyone else gets the message and a 403 that names nothing about
+        # the challan, not even its pk, as VendorOrder's answer does. Not left to "SCM
+        # sees every site": the key may have made a challan on another project.
+        if not user_can_view_project(request.user, challan.project):
+            return HttpResponseForbidden(format_html('<p>{}</p>', text))
+        messages.warning(request, text)
+        return redirect('delivery_challan_detail',
+                        project_id=challan.project.project_id, dc_id=challan.pk)
 
     # Read before the first refusal so every re-render below can say files were dropped.
     # An empty <input type=file> posts one nameless part on some browsers; it is no file.
     documents = [f for f in request.FILES.getlist('challan_documents') if f and f.name]
 
     if request.method != 'POST':
+        # The key lives in the URL: Back and reload return this same key, so a
+        # re-fetched form cannot make a second challan.
+        key = url_key(request)
+        if key is None:
+            return keyed_redirect(request)
+        existing = _challan_with_key()
+        if existing is not None:
+            return _already_submitted(existing)
         return render(request, 'projects/delivery_challan_create.html', _form_context())
+
+    # R-14. A repeat of this form's key is answered here, before any parsing, document
+    # validation or upload, so a double-tap uploads nothing a second time.
+    try:
+        key = _uuid.UUID(request.POST.get('client_uuid', ''))
+    except ValueError:
+        key = None
+    existing = _challan_with_key()
+    if existing is not None:
+        return _already_submitted(existing)
 
     # Parse DC header fields
     vendor_id              = request.POST.get('vendor_id', '').strip()
@@ -13820,7 +13877,20 @@ def create_delivery_challan(request, project_id):
     try:
         challan, dc_rule_rows, dc_may_explain = _create_delivery_challan_rows(
             request, project, profile, vendor, warehouse, po_number, dc_number, dc_date,
-            expected_delivery_date, notes, line_items_data, stored_documents)
+            expected_delivery_date, notes, line_items_data, stored_documents,
+            client_uuid=key)
+    except IntegrityError:
+        # Two submissions with one key can both pass the check above; the loser's
+        # insert waits on the unique index for the winner's commit and fails here, its
+        # block already rolled back. Its own uploads are unrecorded, so discard them and
+        # send it to the winner. Any other IntegrityError finds no challan for the key
+        # and is re-raised as before.
+        for stored in stored_documents:
+            discard_unrecorded_dc_document(stored)
+        existing = _challan_with_key()
+        if existing is not None:
+            return _already_submitted(existing)
+        raise
     except Exception:
         # The transaction rolled back, so no attachment row records these objects and
         # discard_unrecorded_dc_document() will remove them. Re-raised: this is a
@@ -13845,12 +13915,16 @@ def create_delivery_challan(request, project_id):
 
 def _create_delivery_challan_rows(request, project, profile, vendor, warehouse, po_number,
                                   dc_number, dc_date, expected_delivery_date, notes,
-                                  line_items_data, stored_documents):
+                                  line_items_data, stored_documents, client_uuid=None):
     """create_delivery_challan's transaction, unchanged but for the attachment rows:
     split out (DC-B2) only so the view can discard already-uploaded documents when
-    anything inside it raises. Returns (challan, dc_rule_rows, dc_may_explain)."""
+    anything inside it raises. Returns (challan, dc_rule_rows, dc_may_explain).
+
+    DC-K: `client_uuid` is the form's key, None for a keyless POST. A key already used
+    raises IntegrityError from the first create() below, rolling the whole block back."""
     with transaction.atomic():
         challan = DeliveryChallan.objects.create(
+            client_uuid=client_uuid,
             project=project,
             vendor=vendor,
             issued_from_warehouse=warehouse,

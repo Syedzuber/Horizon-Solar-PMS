@@ -227,7 +227,7 @@ class DeliveryChallanWarehouseTests(StockLocationBase):
     def test_inactive_location_absent_from_dc_create_dropdown(self):
         StockLocation.objects.create(code='LIVE-1', name='Still Open')
         page = _client_for(self.scm).get(
-            reverse('create_delivery_challan', args=[self.project.project_id]))
+            reverse('create_delivery_challan', args=[self.project.project_id]), follow=True)
         self.assertEqual(page.status_code, 200)
         codes = [w.code for w in page.context['warehouses']]
         self.assertEqual(codes, ['LIVE-1'])

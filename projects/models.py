@@ -1636,6 +1636,11 @@ class DeliveryChallan(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # DC-K: the create form's ?key= (submission_guard), the R-14 idempotency key as on
+    # VendorOrder. Read only by create_delivery_challan. null (not '') so the unique
+    # index admits every keyless row: challans from before DC-K, seeds, keyless POSTs.
+    client_uuid = models.UUIDField(null=True, unique=True, editable=False)
+
     class Meta:
         ordering = ['-created_at']
 
