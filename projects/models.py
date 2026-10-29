@@ -1742,6 +1742,85 @@ class DCLineItem(models.Model):
         return f"{self.challan.dc_number} — {self.boq_category}: {self.item_description[:40]}"
 
 
+class DeliveryChallanAttachment(models.Model):
+    """The vendor's own challan document, attached by SCM when the challan is created
+    (DC-B2). Optional; up to ten per challan.
+
+    SITE ENGINEERS READ THESE, so a document may never show a price. Every row records
+    the uploader's confirmation that it does not (no_prices_confirmed, held true by a DB
+    CHECK), and a file that slipped through anyway is WITHDRAWN by SCM or Admin, never
+    deleted: the row and the stored object both stay, so what was shown and to whom can
+    still be answered. A withdrawn file is invisible to everyone outside that audience.
+
+    Append-only like CodRecord: no edit, no delete, no admin registration. Withdrawal is
+    a guarded queryset update in views.delivery_challan_attachment_withdraw().
+
+    PROTECT on the challan: a challan carrying a document cannot be deleted, which also
+    makes the teardown commands and a project hard-delete refuse it (SECONDARY_FINDINGS).
+    """
+    challan = models.ForeignKey(
+        DeliveryChallan, on_delete=models.PROTECT, related_name='attachments',
+    )
+    uploaded_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, related_name='dc_attachments_uploaded',
+    )
+    uploaded_at = models.DateTimeField(default=timezone.now)
+    original_name = models.CharField(max_length=255)   # as uploaded; never used in the path
+    bucket = models.CharField(max_length=100)          # SUPABASE_DELIVERY_BUCKET at write time
+    path = models.CharField(max_length=500, unique=True)  # within `bucket`; uuid filename
+    size = models.PositiveIntegerField()               # bytes
+    mime = models.CharField(max_length=100)            # canonical type stored on the object, not the browser's claim
+    no_prices_confirmed = models.BooleanField()        # the uploader's tick; CHECK holds it true
+
+    withdrawn_at = models.DateTimeField(null=True, blank=True)  # NULL = live
+    withdrawn_by = models.ForeignKey(
+        'UserProfile', on_delete=models.PROTECT, null=True, blank=True,
+        related_name='dc_attachments_withdrawn',
+    )
+    withdrawn_reason = models.TextField(blank=True, default='')  # mandatory once withdrawn
+
+    class Meta:
+        ordering = ['challan', 'uploaded_at', 'pk']
+        constraints = [
+            # A document is stored only with the no-prices confirmation; the view
+            # refuses the whole create without it, and this is the backstop.
+            models.CheckConstraint(
+                condition=models.Q(no_prices_confirmed=True),
+                name='dc_attachment_no_prices_confirmed'),
+            # Withdrawal is when, who and why together, or none of them.
+            models.CheckConstraint(
+                condition=((models.Q(withdrawn_at__isnull=True)
+                            & models.Q(withdrawn_by__isnull=True)
+                            & models.Q(withdrawn_reason=''))
+                           | (models.Q(withdrawn_at__isnull=False)
+                              & models.Q(withdrawn_by__isnull=False)
+                              & ~models.Q(withdrawn_reason=''))),
+                name='dc_attachment_withdraw_fields'),
+            models.CheckConstraint(
+                condition=(models.Q(withdrawn_at__isnull=True)
+                           | models.Q(withdrawn_at__gte=models.F('uploaded_at'))),
+                name='dc_attachment_withdrawn_after_uploaded'),
+        ]
+
+    def __str__(self):
+        return f"{self.challan.dc_number} — {self.original_name}"
+
+    @property
+    def is_live(self):
+        return self.withdrawn_at is None
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            raise AppendOnlyViolation(
+                'DeliveryChallanAttachment is append-only — a document is withdrawn '
+                'through delivery_challan_attachment_withdraw(), never edited.')
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise AppendOnlyViolation(
+            'DeliveryChallanAttachment is append-only — a withdrawn document stays.')
+
+
 # ---------------------------------------------------------------------------
 # The delivery-mirror join
 # ---------------------------------------------------------------------------

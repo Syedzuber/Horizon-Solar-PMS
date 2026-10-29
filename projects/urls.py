@@ -587,6 +587,13 @@ urlpatterns = [
     # Raise issue against a specific DC — all roles with project access
     path('projects/<str:project_id>/delivery-challans/<int:dc_id>/issues/create/',
          views.create_delivery_issue, name='create_delivery_issue'),
+    # DC-B2 — open a vendor challan document (detail audience; withdrawn: SCM/Admin)
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/documents/<int:attachment_id>/',
+         views.delivery_challan_attachment_open, name='delivery_challan_attachment_open'),
+    # DC-B2 — withdraw a challan document (SCM/Admin, POST only)
+    path('projects/<str:project_id>/delivery-challans/<int:dc_id>/documents/<int:attachment_id>/withdraw/',
+         views.delivery_challan_attachment_withdraw,
+         name='delivery_challan_attachment_withdraw'),
 
     # ---------------------------------------------------------------------------
     # Approvals S2a — material approval before an order (approval_views.py)

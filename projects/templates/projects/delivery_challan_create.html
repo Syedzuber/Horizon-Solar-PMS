@@ -20,7 +20,7 @@
   {% endfor %}
 {% endif %}
 
-<form method="post" action="{% url 'create_delivery_challan' project.project_id %}">
+<form method="post" action="{% url 'create_delivery_challan' project.project_id %}" enctype="multipart/form-data">
   {% csrf_token %}
 
   {# ── Challan header ──────────────────────────────────────────────────────── #}
@@ -148,6 +148,35 @@
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  {% comment %}
+  DC-B2: the vendor's challan documents. Optional. Site Engineers open these, so the
+  confirmation is required whenever a file is chosen (the view refuses the whole create
+  without it) and is NEVER pre-ticked, not even on a re-render.
+  {% endcomment %}
+  <div class="card shadow-sm mb-4" id="dc-documents">
+    <div class="card-header fw-semibold">Challan Documents <span class="text-muted fw-normal">(optional)</span></div>
+    <div class="card-body">
+      {% if documents_dropped %}
+      <div class="alert alert-warning py-2 small" role="alert">
+        The files you chose were not kept. Attach them again and tick the confirmation again.
+      </div>
+      {% endif %}
+      <p class="small text-muted mb-2">
+        Site Engineers will see these documents. Attach a price-free copy of the vendor's
+        challan, or mask the rates before scanning.
+      </p>
+      <input type="file" name="challan_documents" class="form-control" multiple
+             accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+      <div class="form-text">PDF, JPG or PNG; up to {{ documents_max }} files, 20 MB each.</div>
+      <div class="form-check mt-2">
+        <input class="form-check-input" type="checkbox" name="no_prices_confirmed" value="1" id="noPricesConfirmed">
+        <label class="form-check-label" for="noPricesConfirmed">
+          These documents show no rates, values or amounts. Site Engineers will see them.
+        </label>
       </div>
     </div>
   </div>

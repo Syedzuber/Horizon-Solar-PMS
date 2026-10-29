@@ -2574,6 +2574,52 @@ MONEY_PORTFOLIO_ROLES = frozenset({'CEO', 'Admin', 'System Admin', 'Finance', 'S
 VENDOR_ORDER_PORTFOLIO_ROLES = MONEY_PORTFOLIO_ROLES
 
 
+#: The roles delivery_challan_detail admits, before its project-scope check. A COPY of the
+#: tuple inline in that view, which DC-B2 was not permitted to change; tests_dc_attachments
+#: pins the two to the same answers role by role, so they cannot drift apart silently.
+DC_DETAIL_ROLES = ('SCM', 'PM', 'Project Coordinator', 'Site Engineer', 'Admin')
+
+#: Who sees a challan's WITHDRAWN documents and may withdraw one (DC-B2, ruling Q1).
+DC_DOCUMENT_ADMIN_ROLES = ('SCM', 'Admin')
+
+
+def user_can_open_dc_document(user, project):
+    """Return True if `user` may open `project`'s LIVE challan documents (DC-B2).
+
+    Exactly the delivery_challan_detail audience: a role in DC_DETAIL_ROLES AND
+    user_can_view_project(). Anyone who can read the challan page can read the vendor's
+    document behind it — which is why every document is uploaded with the confirmation
+    that it shows no prices, and why a Site Engineer is in this audience. CEO, System
+    Admin, Finance, Design and BD cannot open the detail page today and are not given a
+    second door to its documents here (ruling Q1: the role list is not widened).
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None:
+        return False
+    if profile.role not in DC_DETAIL_ROLES:
+        return False
+    return user_can_view_project(user, project)
+
+
+def user_can_manage_dc_documents(user, project):
+    """Return True if `user` may see and open `project`'s WITHDRAWN challan documents and
+    withdraw a live one (DC-B2, ruling Q1).
+
+    SCM and Admin only — the roles that raise and correct challans. A withdrawn document
+    is one that may show prices, so everyone else (PM, Coordinator, Site Engineer) is
+    blocked from it entirely, and is not shown that it exists.
+
+    Visibility of the project itself is NOT asked, as in user_can_see_project_money():
+    every caller (delivery_challan_detail, the open view through
+    user_can_open_dc_document, the withdraw view) has already refused anyone who cannot
+    see the site, and asking again cost the detail page a second query per load.
+    """
+    profile = getattr(user, 'profile', None)
+    if profile is None or project is None:
+        return False
+    return profile.role in DC_DOCUMENT_ADMIN_ROLES
+
+
 def user_can_see_project_money(user, project):
     """Return True if `user` may see money on `project`'s own pages (AF-1).
 

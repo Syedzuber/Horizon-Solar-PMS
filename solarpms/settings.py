@@ -34,6 +34,12 @@ SUPABASE_DESIGN_BUCKET = config('SUPABASE_DESIGN_BUCKET', default='Horizon-PMS-D
 # a bill PDF upload is refused with a message and no link is minted, and nothing else in
 # the app changes. projects/bill_storage.py reads it at call time.
 SUPABASE_BILLS_BUCKET = config('SUPABASE_BILLS_BUCKET', default='')
+# PRIVATE bucket for the vendor's challan documents attached to a delivery challan
+# (DC-B2), served only by expiring signed links. DEFAULT EMPTY, as the bills bucket:
+# empty means a challan with a document attached is refused with a message, and a
+# challan without one is created as before. projects/delivery_storage.py reads it at
+# call time.
+SUPABASE_DELIVERY_BUCKET = config('SUPABASE_DELIVERY_BUCKET', default='')
 
 # How long (days) to keep soft-deleted files before purge_deleted_files hard-deletes them
 FILE_RETENTION_DAYS        = config('FILE_RETENTION_DAYS', default=90, cast=int)

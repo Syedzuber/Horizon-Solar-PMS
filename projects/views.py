@@ -23,7 +23,7 @@ from django.shortcuts import render, redirect, get_object_or_404
 from django.urls import reverse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_GET, require_POST
 
 from .models import (
     UserProfile, Project, ProjectPhase, Task, DueDateChangeLog, ProjectFieldEditLog,
@@ -39,7 +39,8 @@ from .models import (
     # 2.3a - the durable record of what a rejection was about. Separate from Issue
     # by design; see models.PunchPoint.
     PunchPoint,
-    DeliveryChallan, DCLineItem, recalculate_dc_status, get_material_status,
+    DeliveryChallan, DCLineItem, DeliveryChallanAttachment, recalculate_dc_status,
+    get_material_status,
     # Labelled "Warehouse" on every screen; StockLocation is the model's name because
     # it is one physical place, not two concepts. See models.StockLocation.
     StockLocation,
@@ -114,6 +115,7 @@ from .decorators import (
 )
 from .permissions import (
     user_can_manage_project, user_can_view_project, manageable_projects_q,
+    user_can_open_dc_document, user_can_manage_dc_documents,
     # G95: the QA/QC engineer's sites as a queryset, for the PM dashboard and drill-down.
     qaqc_engineer_projects_q,
     project_managers, user_can_manage_program,
@@ -242,6 +244,11 @@ from .design_views import (
 # DC-B1 — a site's delivery challans counted by status, for the DC detail page and the
 # overview's Delivery Challans card. Read-only; the module imports models and nothing else.
 from .delivery_summary import site_challan_counts, site_challan_counts_for_project
+from .delivery_storage import (
+    DC_DOCUMENTS_MAX_FILES, DeliveryStorageError, delivery_bucket,
+    discard_unrecorded_dc_document, dc_document_url, upload_dc_document,
+    validate_dc_document, DELIVERY_STORAGE_OFF,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -11317,7 +11324,9 @@ def project_overview(request, project_id):
     # DR-2 follow-up: site_drawing_opened is excluded on the same grounds — a crew opening
     # drawings on a morning would otherwise fill all 8 rows. Excluded in the query, before
     # the slice, so the card still shows 8 other events; the rows are still written and
-    # the full trail still lists them.
+    # the full trail still lists them. DC-B2: dc_document_opened likewise — a challan
+    # document is opened by every crew member who checks a delivery. Withdrawals
+    # (dc_document_withdrawn) are rare and do show.
     #
     # AF-1: a viewer outside the project's money audience sees no money line either —
     # order totals, payment requests and their outcomes, contractor bill payments
@@ -11329,7 +11338,7 @@ def project_overview(request, project_id):
     from .activity_codes import MONEY_ACTIVITY_CODES
     from .permissions import user_can_see_project_money
     sees_money = user_can_see_project_money(request.user, project)
-    hidden_codes = {'task_unassigned', 'site_drawing_opened'}
+    hidden_codes = {'task_unassigned', 'site_drawing_opened', 'dc_document_opened'}
     if not sees_money:
         hidden_codes |= MONEY_ACTIVITY_CODES
     recent_activity = list(
@@ -13640,6 +13649,13 @@ def create_delivery_challan(request, project_id):
     Dynamic line items are submitted with indexed field names (line_item_*_N).
     Minimum 1 line item required — zero items rejected with a validation error.
     GET renders the form; POST creates the DC + line items in one transaction.
+
+    DC-B2: up to DC_DOCUMENTS_MAX_FILES vendor challan documents may be attached
+    (optional). Site Engineers read them, so a chosen file refuses the whole create
+    unless the no-prices confirmation is ticked, and every refusal — that one, a bad
+    file, storage off — writes nothing and uploads nothing. Uploads happen after every
+    other check and before the challan is written; any failure inside the transaction
+    discards them.
     """
     project = _active_project(project_id)
     profile = request.user.profile
@@ -13662,7 +13678,15 @@ def create_delivery_challan(request, project_id):
             'vendors':          vendors,
             'warehouses':       warehouses,
             'category_choices': DCLineItem.CATEGORY_CHOICES,
+            # DC-B2: a browser never re-sends a file, so a refused form that had files
+            # chosen says they must be attached (and the confirmation ticked) again.
+            'documents_dropped': bool(documents),
+            'documents_max':     DC_DOCUMENTS_MAX_FILES,
         }
+
+    # Read before the first refusal so every re-render below can say files were dropped.
+    # An empty <input type=file> posts one nameless part on some browsers; it is no file.
+    documents = [f for f in request.FILES.getlist('challan_documents') if f and f.name]
 
     if request.method != 'POST':
         return render(request, 'projects/delivery_challan_create.html', _form_context())
@@ -13753,6 +13777,78 @@ def create_delivery_challan(request, project_id):
         messages.error(request, 'At least one line item is required.')
         return render(request, 'projects/delivery_challan_create.html', _form_context())
 
+    # ── DC-B2: the vendor's challan documents. Last of the checks, so a refusal of any
+    # other field never reaches storage; every file is validated before any is
+    # uploaded, so one bad file leaves nothing behind. Each refusal is the whole
+    # challan, never the file alone: a document SCM chose must not vanish silently.
+    if documents:
+        document_errors = []
+        if len(documents) > DC_DOCUMENTS_MAX_FILES:
+            document_errors.append(
+                f'At most {DC_DOCUMENTS_MAX_FILES} challan documents can be attached; '
+                f'{len(documents)} were chosen. Nothing was saved.')
+        # Site Engineers open these documents, so they must carry no price. The tick is
+        # the uploader's word for that; without it nothing is stored.
+        if request.POST.get('no_prices_confirmed') != '1':
+            document_errors.append(
+                'Tick "These documents show no rates, values or amounts" to attach them — '
+                'Site Engineers will see them. Nothing was saved.')
+        if not delivery_bucket():
+            document_errors.append(DELIVERY_STORAGE_OFF)
+        for document in documents:
+            try:
+                validate_dc_document(document)
+            except DeliveryStorageError as exc:
+                document_errors.append(str(exc))
+        if document_errors:
+            for error in document_errors:
+                messages.error(request, error)
+            return render(request, 'projects/delivery_challan_create.html', _form_context())
+
+    # Uploaded before the challan is written, so a storage failure refuses the create
+    # with no row at all. A partial upload run discards what it already stored.
+    stored_documents = []
+    try:
+        for document in documents:
+            stored_documents.append(upload_dc_document(document, project))
+    except DeliveryStorageError as exc:
+        for stored in stored_documents:
+            discard_unrecorded_dc_document(stored)
+        messages.error(request, str(exc))
+        return render(request, 'projects/delivery_challan_create.html', _form_context())
+
+    try:
+        challan, dc_rule_rows, dc_may_explain = _create_delivery_challan_rows(
+            request, project, profile, vendor, warehouse, po_number, dc_number, dc_date,
+            expected_delivery_date, notes, line_items_data, stored_documents)
+    except Exception:
+        # The transaction rolled back, so no attachment row records these objects and
+        # discard_unrecorded_dc_document() will remove them. Re-raised: this is a
+        # failure, not a refusal, and the error page and logs must still see it.
+        for stored in stored_documents:
+            discard_unrecorded_dc_document(stored)
+        raise
+
+    if dc_rule_rows:
+        _announce_phase_rule_overrides(
+            request, f'Delivery Challan {dc_number}', dc_rule_rows, dc_may_explain)
+
+    vendor_name = vendor.name if vendor else 'Unknown Vendor'
+    log_activity(
+        project, profile,
+        f"SCM created Delivery Challan {dc_number} for {vendor_name}",
+        entity_type='DeliveryChallan', entity_id=challan.pk,
+    )
+    messages.success(request, f'Delivery Challan {dc_number} created successfully.')
+    return redirect('delivery_challan_detail', project_id=project_id, dc_id=challan.pk)
+
+
+def _create_delivery_challan_rows(request, project, profile, vendor, warehouse, po_number,
+                                  dc_number, dc_date, expected_delivery_date, notes,
+                                  line_items_data, stored_documents):
+    """create_delivery_challan's transaction, unchanged but for the attachment rows:
+    split out (DC-B2) only so the view can discard already-uploaded documents when
+    anything inside it raises. Returns (challan, dc_rule_rows, dc_may_explain)."""
     with transaction.atomic():
         challan = DeliveryChallan.objects.create(
             project=project,
@@ -13778,6 +13874,13 @@ def create_delivery_challan(request, project_id):
         # here because all new items have no received_quantity → status stays Expected
         for item_data in line_items_data:
             DCLineItem.objects.create(challan=challan, **item_data)
+
+        # DC-B2: one row per stored document, in this block so a challan never commits
+        # without the rows for objects already in storage. no_prices_confirmed is True
+        # only because the view refused every create with files and no tick.
+        for stored in stored_documents:
+            DeliveryChallanAttachment.objects.create(
+                challan=challan, uploaded_by=profile, no_prices_confirmed=True, **stored)
 
         # ── THE OPEX DELIVERY MIRRORS. One added call; nothing above it changed. ────
         #
@@ -13807,19 +13910,7 @@ def create_delivery_challan(request, project_id):
             project, profile, dc_rule_hits, challan=challan,
             reason=request.POST.get('phase_rule_reason', ''), may_explain=dc_may_explain,
         )
-
-    if dc_rule_rows:
-        _announce_phase_rule_overrides(
-            request, f'Delivery Challan {dc_number}', dc_rule_rows, dc_may_explain)
-
-    vendor_name = vendor.name if vendor else 'Unknown Vendor'
-    log_activity(
-        project, profile,
-        f"SCM created Delivery Challan {dc_number} for {vendor_name}",
-        entity_type='DeliveryChallan', entity_id=challan.pk,
-    )
-    messages.success(request, f'Delivery Challan {dc_number} created successfully.')
-    return redirect('delivery_challan_detail', project_id=project_id, dc_id=challan.pk)
+    return challan, dc_rule_rows, dc_may_explain
 
 
 @login_required
@@ -13861,8 +13952,22 @@ def delivery_challan_detail(request, project_id, dc_id):
         .order_by('-raised_at')
     )
 
+    # DC-B2: the vendor's challan documents, one query. Withdrawn rows are fetched only
+    # for SCM and Admin (ruling Q1) — left out in the query for everyone else, so the
+    # template cannot show a withdrawn document, or that one exists, by mistake. The
+    # gate is role-first and SCM/Admin are portfolio viewers, so it costs no query.
+    manages_dc_documents = user_can_manage_dc_documents(request.user, project)
+    dc_documents = (DeliveryChallanAttachment.objects.filter(challan=challan)
+                    .select_related('uploaded_by__user', 'withdrawn_by__user'))
+    if not manages_dc_documents:
+        dc_documents = dc_documents.filter(withdrawn_at__isnull=True)
+    dc_documents = list(dc_documents)
+
     return render(request, 'projects/delivery_challan_detail.html', {
         'project':           project,
+        'dc_documents_live':      [d for d in dc_documents if d.is_live],
+        'dc_documents_withdrawn': [d for d in dc_documents if not d.is_live],
+        'manages_dc_documents':   manages_dc_documents,
         # The GRN form is offered to a Site Engineer who works on this site — the same
         # two terms confirm_grn enforces — so the site's QA/QC engineer, who can read
         # this page, is not shown a form the endpoint would refuse (closeout step 3).
@@ -13881,6 +13986,109 @@ def delivery_challan_detail(request, project_id, dc_id):
         'condition_choices': DCLineItem.CONDITION_CHOICES,
         'all_profiles':      UserProfile.objects.select_related('user').filter(is_active=True).order_by('user__first_name'),
     })
+
+
+def _dc_document_or_404(project, dc_id, attachment_id):
+    """The attachment `attachment_id` of challan `dc_id` on `project`, or 404. Both ids
+    are asked in the one filter, so a document of another challan or another project is
+    the same bare 404 as one that does not exist."""
+    return get_object_or_404(
+        DeliveryChallanAttachment.objects.select_related('challan'),
+        pk=attachment_id, challan_id=dc_id, challan__project=project,
+    )
+
+
+@login_required
+def delivery_challan_attachment_open(request, project_id, dc_id, attachment_id):
+    """Open one challan document (DC-B2): a redirect to a link signed now, valid for
+    DC_DOCUMENT_LINK_SECONDS. One activity row per open, written after the link is
+    minted so a failed open logs nothing.
+
+    Access: a live document — the delivery_challan_detail audience
+    (user_can_open_dc_document). A withdrawn one — SCM and Admin only
+    (user_can_manage_dc_documents). Everyone else gets the bare 404 a missing id gets,
+    so a withdrawn document gives no hint it exists.
+    """
+    # _active_project 404s a soft-deleted project before anything else is asked.
+    project = _active_project(project_id)
+    # Only the challan page's own audience may open its documents; anyone else gets the
+    # site pages' 404 (or an outgoing PM's handover redirect), never a 403 that would
+    # confirm the document is there.
+    if not user_can_open_dc_document(request.user, project):
+        return refuse_site_view_404(request, project)
+    document = _dc_document_or_404(project, dc_id, attachment_id)
+    # A withdrawn document may show prices: SCM and Admin only. Same 404 as a missing
+    # id for everyone else, so the refusal says nothing about what is there.
+    if not document.is_live and not user_can_manage_dc_documents(request.user, project):
+        raise Http404
+
+    url = dc_document_url(document)
+    if not url:
+        messages.error(request, 'This challan document cannot be opened right now. Try '
+                                'again, or contact SCM if it keeps failing.')
+        return redirect(reverse('delivery_challan_detail', args=[project_id, dc_id])
+                        + '#dc-documents')
+    # No file name in the line (ruling Q3): the project timeline shows every row to
+    # everyone on the site, and an SCM/Admin open of a WITHDRAWN document would
+    # otherwise name it to a Site Engineer. The row still points at the attachment.
+    log_activity(project, request.user.profile,
+                 f'Opened a challan document on DC {document.challan.dc_number}',
+                 entity_type='DeliveryChallanAttachment', entity_id=document.pk,
+                 action_code='dc_document_opened')
+    return redirect(url)
+
+
+#: A withdrawal reason shorter than this says nothing a later reader can use.
+DC_DOCUMENT_WITHDRAW_REASON_MIN = 10
+
+
+@login_required
+@require_POST
+def delivery_challan_attachment_withdraw(request, project_id, dc_id, attachment_id):
+    """Withdraw one live challan document (DC-B2) — for a file that turned out to show
+    prices. The row is stamped (when, who, why) and the stored object is NOT deleted:
+    what was visible stays answerable. Afterwards only SCM and Admin can see or open it.
+
+    Access: SCM and Admin (user_can_manage_dc_documents). POST only.
+    """
+    project = _active_project(project_id)
+    profile = request.user.profile
+    # Someone who cannot see the site gets the site pages' 404, as on the detail page.
+    if not user_can_view_project(request.user, project):
+        return refuse_site_view_404(request, project)
+    # SCM and Admin only, the roles that raise and correct challans. A PM, Coordinator
+    # or Site Engineer can see a live document but never decide that it goes.
+    if not user_can_manage_dc_documents(request.user, project):
+        return HttpResponseForbidden()
+    document = _dc_document_or_404(project, dc_id, attachment_id)
+    back = reverse('delivery_challan_detail', args=[project_id, dc_id]) + '#dc-documents'
+
+    reason = (request.POST.get('withdrawn_reason') or '').strip()
+    if len(reason) < DC_DOCUMENT_WITHDRAW_REASON_MIN:
+        messages.error(request, f'Give a reason of at least {DC_DOCUMENT_WITHDRAW_REASON_MIN}'
+                                f' characters to withdraw {document.original_name}.')
+        return redirect(back)
+
+    # RACE: two withdrawals of the same document at once. The withdrawn_at IS NULL term
+    # makes the update conditional in SQL, so exactly one of them stamps the row and the
+    # other updates nothing and is told so — never a second stamp over the first.
+    updated = (DeliveryChallanAttachment.objects
+               .filter(pk=document.pk, withdrawn_at__isnull=True)
+               .update(withdrawn_at=timezone.now(), withdrawn_by=profile,
+                       withdrawn_reason=reason))
+    if updated != 1:
+        messages.error(request, f'{document.original_name} was already withdrawn.')
+        return redirect(back)
+
+    # The reason is not in the feed line: it is on the challan page for SCM and Admin,
+    # and the feed is read by everyone who can see the site.
+    log_activity(project, profile,
+                 f'Withdrew a challan document from DC {document.challan.dc_number}',
+                 entity_type='DeliveryChallanAttachment', entity_id=document.pk,
+                 action_code='dc_document_withdrawn')
+    messages.success(request, f'{document.original_name} was withdrawn. Only SCM and '
+                              f'Admin can see it now.')
+    return redirect(back)
 
 
 def _read_grn_lines(request, line_items):
