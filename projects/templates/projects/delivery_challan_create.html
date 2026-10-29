@@ -11,14 +11,7 @@
   <a href="{% url 'project_overview' project.project_id %}" class="btn btn-outline-secondary btn-sm">← Back</a>
 </div>
 
-{% if messages %}
-  {% for msg in messages %}
-    <div class="alert alert-{{ msg.tags|default:'info' }} alert-dismissible fade show" role="alert">
-      {{ msg }}
-      <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-    </div>
-  {% endfor %}
-{% endif %}
+{# Flash messages are rendered by base.html above this block; a loop here showed each twice. #}
 
 <form method="post" action="{% url 'create_delivery_challan' project.project_id %}" enctype="multipart/form-data" id="dcForm">
   {% csrf_token %}
