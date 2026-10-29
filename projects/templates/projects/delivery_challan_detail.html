@@ -21,6 +21,7 @@
         <p class="text-muted mb-0">
           {{ project.project_id }} — {{ project.customer_name }}
         </p>
+        <p class="small mb-0 mt-1"><a href="{% url 'project_overview' project.project_id %}#dc-card" class="text-muted">{{ dc_site_counts.total }} challan{{ dc_site_counts.total|pluralize }} for this site — {{ dc_site_counts.received }} received · {{ dc_site_counts.partially_received }} partially received · {{ dc_site_counts.expected }} expected{% if dc_site_counts.rejected %} · {{ dc_site_counts.rejected }} rejected{% endif %}</a></p>
       </div>
       <div class="d-flex gap-2 flex-wrap">
         {# Edit GRN — SCM only, no status restriction (SCM may correct mistakes) #}

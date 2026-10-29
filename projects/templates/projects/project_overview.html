@@ -557,7 +557,7 @@
 
   {% if role == 'SCM' or role == 'PM' or role == 'Project Coordinator' or role == 'Site Engineer' or role == 'Admin' %}
   <div class="col-12 col-md-4">
-    <div class="card h-100 shadow-sm">
+    <div class="card h-100 shadow-sm" id="dc-card">
       <div class="card-header py-2 d-flex justify-content-between align-items-center">
         <span class="fw-semibold small">
           <i data-lucide="truck" class="lucide-icon me-1"></i>Delivery Challans
@@ -577,6 +577,7 @@
       <div class="collapse show" id="dcCollapse">
         <div class="card-body p-0">
           {% if delivery_challans %}
+          <div class="small text-muted px-3 py-2 border-bottom">{{ dc_site_counts.total }} challan{{ dc_site_counts.total|pluralize }} for this site — {{ dc_site_counts.received }} received · {{ dc_site_counts.partially_received }} partially received · {{ dc_site_counts.expected }} expected{% if dc_site_counts.rejected %} · {{ dc_site_counts.rejected }} rejected{% endif %}</div>
           <div class="table-responsive">
             <table class="table table-sm table-hover mb-0">
               <thead class="table-light">

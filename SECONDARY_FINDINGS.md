@@ -441,3 +441,8 @@ Incidental issues noticed during audits. Logged, not fixed. Each entry: file/lin
 ## From the navbar phone-width fix (2026-10-28)
 
 - `projects/templates/base.html` — **the Site Engineer's user menu opens 11px past the left edge of the screen at 360px and 390px.** `#user-hover-dropdown` is anchored `right: 0` with `min-width: 160px` to a short name ("Pilot Se", 46px wide), so its box starts at x = −11. The items' icons and text start at x = 5, so My Documents and Change Password are still tappable; only the menu's left padding is clipped. It was there before the brand-text fix (same geometry with the text forced back on) and is unchanged by it. Deferred: fix the next time base.html is touched (e.g. keep the menu inside the viewport below 576px).
+
+## From DC-B1 — site challan count by status (2026-10-29)
+
+- **The test suite only runs on SQLite.** `manage.py test projects` under the real settings (local Postgres, migrations on) fails on seeded fixtures: tests create `BOQItemMaster` rows whose codes migrations 0047/0057 already seed (`Key (code)=(OPX-001) already exists`), and `TaskDurationTemplate` tests assert 0 rows where 0034 seeds 50. So every suite run uses `--settings=solarpms.test_settings` (in-memory SQLite, `MIGRATION_MODULES` disabled), and no ordinary test exercises Postgres or a migration; `tests_migration_chain` is the one exception. Not fixed.
+- `projects/views.py` `delivery_challan_detail` — **the challan is fetched without `select_related('project')`**, so the cross-project guard `challan.project.project_id != project_id` costs one extra query on every load. The same `get_object_or_404(DeliveryChallan, pk=dc_id, project__is_deleted=False)` shape is in `confirm_grn`, `override_grn` and `create_delivery_issue`. Not fixed.

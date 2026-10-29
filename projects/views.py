@@ -239,6 +239,9 @@ from .design_views import (
     # a delivery mirror to the two screens that show one.
     delivery_detail_for_task,
 )
+# DC-B1 — a site's delivery challans counted by status, for the DC detail page and the
+# overview's Delivery Challans card. Read-only; the module imports models and nothing else.
+from .delivery_summary import site_challan_counts, site_challan_counts_for_project
 
 logger = logging.getLogger(__name__)
 
@@ -11575,6 +11578,9 @@ def project_overview(request, project_id):
         'project_issues':              project_issues,
         'all_profiles':                all_profiles,
         'delivery_challans':           delivery_challans,
+        # DC-B1: the card's count line, from the list above — already evaluated, so
+        # counting it costs no query (site_challan_counts is pure).
+        'dc_site_counts':              site_challan_counts(delivery_challans),
         'material_status':             material_status,
         'material_status_by_category': material_status_by_category,
         'dc_vendors':                  dc_vendors,
@@ -13864,6 +13870,10 @@ def delivery_challan_detail(request, project_id, dc_id):
                               and user_works_on_site(request.user, project)),
         'issue_draft':       _pop_issue_draft(request, f'dc:{challan.pk}'),
         'challan':           challan,
+        # DC-B1: every challan on this site by status, for the header's count line. One
+        # aggregate query — this page holds only the one challan it shows. `project`,
+        # not `challan.project`: the same row, already resolved by _active_project().
+        'dc_site_counts':    site_challan_counts_for_project(project),
         'line_items':        line_items,
         'dc_issues':         dc_issues,
         'role':              profile.role,
